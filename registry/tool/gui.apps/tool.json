@@ -1,0 +1,40 @@
+{
+  "id": "gui.apps",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "apps"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "List running and recently used installed macOS application targets without launching or granting access.",
+  "args_schema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

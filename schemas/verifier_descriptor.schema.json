@@ -1,0 +1,306 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VerifierDescriptor",
+  "type": "object",
+  "required": [
+    "authority",
+    "id",
+    "package",
+    "script"
+  ],
+  "properties": {
+    "authority": {
+      "$ref": "#/definitions/ProcessAuthoritySpec"
+    },
+    "default_params": {
+      "default": null
+    },
+    "id": {
+      "type": "string"
+    },
+    "package": {
+      "type": "string"
+    },
+    "script": {
+      "type": "string"
+    },
+    "timeout_ms": {
+      "description": "VERIFIERS.md §3 — the package declares how long its own check may run, so a twenty-line shell check and an out-of-system judge live under the same contract; `params.timeout_ms` may only narrow this ceiling.",
+      "default": null,
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ProcessArgumentPathSpec": {
+      "type": "object",
+      "required": [
+        "pointer",
+        "within_root_slots"
+      ],
+      "properties": {
+        "include_parent": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "within_root_slots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessAuthoritySpec": {
+      "type": "object",
+      "required": [
+        "allow_local_ipc",
+        "allow_network",
+        "executable_commands",
+        "executable_env_paths",
+        "executable_paths",
+        "executable_root_slots",
+        "read_env_paths",
+        "read_paths",
+        "read_root_slots",
+        "write_env_paths",
+        "write_paths",
+        "write_root_slots"
+      ],
+      "properties": {
+        "allow_application_launch": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allow_local_ipc": {
+          "type": "boolean"
+        },
+        "allow_network": {
+          "type": "boolean"
+        },
+        "allow_sandbox_delegation": {
+          "default": false,
+          "type": "boolean"
+        },
+        "executable_argument_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessArgumentPathSpec"
+          }
+        },
+        "executable_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "executable_env_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "executable_env_subpaths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEnvironmentSubpathSpec"
+          }
+        },
+        "executable_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "executable_root_slots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "executable_root_subpaths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessRootSubpathSpec"
+          },
+          "uniqueItems": true
+        },
+        "optional_executable_root_slots": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "optional_read_env_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "optional_read_root_slots": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "optional_write_env_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "optional_write_root_slots": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "read_argument_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessArgumentPathSpec"
+          }
+        },
+        "read_env_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "read_env_subpaths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEnvironmentSubpathSpec"
+          }
+        },
+        "read_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "read_root_slots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "sandbox_mode": {
+          "default": "enforced",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ProcessSandboxMode"
+            }
+          ]
+        },
+        "write_argument_paths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessArgumentPathSpec"
+          }
+        },
+        "write_env_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "write_env_subpaths": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEnvironmentSubpathSpec"
+          }
+        },
+        "write_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "write_root_slots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessEnvironmentSubpathSpec": {
+      "type": "object",
+      "required": [
+        "env",
+        "relative_path"
+      ],
+      "properties": {
+        "env": {
+          "type": "string"
+        },
+        "relative_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessRootSubpathSpec": {
+      "type": "object",
+      "required": [
+        "relative_path",
+        "root_slot"
+      ],
+      "properties": {
+        "relative_path": {
+          "type": "string"
+        },
+        "root_slot": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProcessSandboxMode": {
+      "type": "string",
+      "enum": [
+        "enforced",
+        "disabled"
+      ]
+    }
+  }
+}

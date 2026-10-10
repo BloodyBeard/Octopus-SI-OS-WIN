@@ -1,0 +1,57 @@
+{
+  "id": "browser.tab_mark",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "tab_mark"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Choose the disposition of an existing native room page at the end of the current whole model turn. handoff keeps a temporary page for the user and the next turn; deliverable releases it as a persistent result. A page actually shown through an acknowledged visible client presentation becomes persistent independently of model disposition and remains usable until explicitly closed or its formation is withdrawn. Preparation or hidden attachment alone does not retain a page. Unmarked temporary pages that were never presented close when a turn that used the browser completes. This never selects, focuses, creates or navigates a page and is not an Octopus verifier mark.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "handoff",
+          "deliverable"
+        ]
+      }
+    },
+    "required": [
+      "target_id",
+      "status"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.connection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "connection_id",
+    "lifecycle_interface",
+    "subagent_interfaces",
+    "handlers"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.connection" },
+    "schema_version": { "const": 1 },
+    "connection_id": { "$ref": "#/$defs/non_empty" },
+    "lifecycle_interface": { "const": "system_lifecycle_events" },
+    "subagent_interfaces": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/non_empty" }
+    },
+    "handlers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/handler" }
+    }
+  },
+  "$defs": {
+    "non_empty": { "type": "string", "minLength": 1 },
+    "event": {
+      "enum": [
+        "pre_tool_use",
+        "permission_request",
+        "post_tool_use",
+        "pre_compact",
+        "post_compact",
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "subagent_start",
+        "subagent_stop",
+        "stop",
+        "interrupt"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "path", "trust", "handler_content_sha256"],
+      "properties": {
+        "layer": {
+          "enum": [
+            "packaged_defaults",
+            "system",
+            "user",
+            "project",
+            "session",
+            "plugin",
+            "mdm",
+            "enterprise_managed"
+          ]
+        },
+        "path": { "$ref": "#/$defs/non_empty" },
+        "trust": { "enum": ["managed", "trusted", "untrusted", "modified"] },
+        "handler_content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "handler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "event",
+        "emitter_run",
+        "owner_run",
+        "mode",
+        "order",
+        "enabled",
+        "source",
+        "handler"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "event": { "$ref": "#/$defs/event" },
+        "emitter_run": { "$ref": "#/$defs/non_empty" },
+        "owner_run": { "$ref": "#/$defs/non_empty" },
+        "mode": { "enum": ["sync", "async"] },
+        "order": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "enabled": { "type": "boolean" },
+        "matcher": { "$ref": "#/$defs/non_empty" },
+        "source": { "$ref": "#/$defs/source" },
+        "handler": { "$ref": "#/$defs/destination" }
+      }
+    },
+    "destination": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "tool", "arguments", "result_pointer"],
+          "properties": {
+            "type": { "const": "command" },
+            "tool": { "$ref": "#/$defs/non_empty" },
+            "arguments": {},
+            "result_pointer": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "interface",
+            "operation",
+            "request_label",
+            "input",
+            "result_pointer"
+          ],
+          "properties": {
+            "type": { "const": "mcp_tool" },
+            "interface": { "$ref": "#/$defs/non_empty" },
+            "operation": { "$ref": "#/$defs/non_empty" },
+            "request_label": { "$ref": "#/$defs/non_empty" },
+            "input": {},
+            "result_pointer": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "provider_interface", "prompt"],
+          "properties": {
+            "type": { "const": "prompt" },
+            "provider_interface": { "$ref": "#/$defs/non_empty" },
+            "prompt": { "$ref": "#/$defs/non_empty" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "worker_interface", "task"],
+          "properties": {
+            "type": { "const": "agent" },
+            "worker_interface": { "$ref": "#/$defs/non_empty" },
+            "task": { "$ref": "#/$defs/non_empty" }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "multi_agent",
+  "stage": {
+    "kind": "stable"
+  }
+}

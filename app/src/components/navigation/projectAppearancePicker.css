@@ -1,0 +1,124 @@
+.project-appearance-trigger {
+  display: flex;
+  width: 40px;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+}
+
+.project-appearance-trigger:enabled:hover,
+.project-appearance-trigger[data-state="open"] {
+  background: var(--color-background-primary-ghost-hover);
+}
+
+.oc-dropdown.project-appearance-picker.is-opaque {
+  width: 260px;
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border-radius: var(--radius-xl);
+  background: var(--color-surface);
+  box-shadow: 0 0 0 0.5px var(--color-border), var(--shadow-lg);
+}
+
+.project-appearance-picker__colors,
+.project-appearance-picker__icons {
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(auto-fit, minmax(36px, 1fr));
+  gap: 4px;
+}
+
+.project-appearance-picker__colors {
+  padding: 12px 12px 8px;
+}
+
+.project-appearance-picker__icons {
+  padding: 8px 12px 12px;
+}
+
+.project-appearance-picker__color,
+.project-appearance-picker__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+}
+
+.project-appearance-picker__color {
+  height: 32px;
+}
+
+.project-appearance-picker__ring {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+}
+
+.project-appearance-picker__color[aria-pressed="true"] .project-appearance-picker__ring {
+  width: 36px;
+  height: 36px;
+  box-shadow: 0 0 0 2px var(--color-text);
+}
+
+.project-appearance-picker__dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+}
+
+.project-appearance-picker__icon {
+  width: 36px;
+  height: 36px;
+  margin-inline: auto;
+}
+
+.project-appearance-picker__icon:enabled:hover,
+.project-appearance-picker__icon[aria-pressed="true"] {
+  background: var(--color-background-primary-ghost-hover);
+}
+
+.project-appearance-picker__artwork,
+.project-appearance-picker__artwork > svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.project-appearance-picker__divider {
+  flex: none;
+  margin-inline: 12px;
+  border-top: 1px solid var(--color-border);
+}
+
+.project-appearance-picker__footer {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  padding: 10px 12px;
+}
+
+.project-appearance-trigger:focus-visible,
+.project-appearance-picker__color:focus-visible,
+.project-appearance-picker__icon:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-border);
+}
+
+.project-appearance-trigger:disabled,
+.project-appearance-picker__color:disabled,
+.project-appearance-picker__icon:disabled {
+  cursor: default;
+  opacity: 0.4;
+}

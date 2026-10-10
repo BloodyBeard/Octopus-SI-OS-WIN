@@ -1,0 +1,91 @@
+.oc-menu-surface {
+  padding: var(--menu-gutter, var(--spacing));
+  border-radius: var(--radius-2xl);
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-surface-elevated-secondary) 90%, transparent);
+  box-shadow: 0 0 0 0.5px var(--color-border), 0 0 0 0.5px var(--color-token-border), var(--shadow-xl);
+  backdrop-filter: blur(var(--blur-sm));
+}
+
+.oc-menu-surface.is-opaque {
+  background: var(--color-surface-elevated-secondary);
+  box-shadow: 0 0 0 0.5px var(--color-token-border), var(--shadow-xl);
+  backdrop-filter: none;
+}
+
+.oc-menu-surface.is-wide {
+  --menu-gutter: 6px;
+}
+
+.oc-menu-surface.is-panel {
+  padding: 16px;
+  box-shadow: 0 0 0 0.5px var(--color-border), var(--shadow-2xl);
+  backdrop-filter: blur(var(--blur-lg));
+}
+
+.oc-menu-section-label {
+  padding: 4px var(--padding-row-x);
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+  color: var(--color-text-description);
+}
+
+.oc-menu-item {
+  min-height: var(--menu-item-height, 0px);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: var(--menu-item-padding, var(--padding-row-y) var(--padding-row-x));
+  border-radius: var(--radius-xl);
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+}
+
+.oc-menu-item.is-workspace {
+  padding-block: 10px;
+  font-size: var(--text-base);
+}
+
+.oc-menu-item.is-danger {
+  color: var(--color-text-danger);
+}
+
+.oc-menu-item:enabled:hover,
+.oc-menu-item:enabled:focus {
+  background: var(--color-background-primary-ghost-hover);
+}
+
+.oc-menu-item-content {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: var(--spacing-menu-item-content, calc(var(--spacing) * 1.5));
+}
+
+.oc-menu-item-icon {
+  display: inline-flex;
+  min-width: var(--icon-leading-size);
+  height: var(--icon-leading-size);
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.oc-menu-item .icon-xs {
+  width: var(--icon-size, 16px);
+  height: var(--icon-size, 16px);
+}
+
+.oc-menu-item .icon-sm {
+  width: 18px;
+  height: 18px;
+}
+
+.oc-menu-item-description {
+  font-size: var(--text-xs);
+  line-height: var(--leading-dense);
+  color: var(--color-text-tertiary);
+}

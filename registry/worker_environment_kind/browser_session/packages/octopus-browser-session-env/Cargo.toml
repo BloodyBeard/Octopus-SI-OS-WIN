@@ -1,0 +1,42 @@
+[package]
+name = "octopus-browser-session-env"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "octopus_browser_session_env"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = "0.1.44"
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.28.0", features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+base64 = "0.22.1"
+blake3 = "1"
+percent-encoding = "2"
+hmac = "0.12"
+sha2 = "0.10"
+getrandom = "0.3"
+libc = "0.2"
+
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+octopus-util-image = { path = "../../../../interface/world_provider_codex/packages/octopus-util-image" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+
+
+octopus-app-server-interface = { path = "../../../../interface/world_operator_chat/packages/octopus-app-server-interface" }
+
+[dev-dependencies]
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+tempfile = "3"
+tokio = { workspace = true, features = ["net", "macros", "rt-multi-thread"] }

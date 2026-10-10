@@ -1,0 +1,79 @@
+.octopus-panel-note {
+  padding: 8px;
+  color: var(--color-text-description);
+  font-size: var(--text-base);
+  text-align: start;
+}
+
+.octopus-file-filter {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: var(--spacing-token-button-composer);
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-background-primary-soft-alpha);
+  font-size: var(--text-base);
+  line-height: 18px;
+}
+
+.octopus-file-filter-search {
+  flex: 0 0 auto;
+  width: var(--icon-size, 16px);
+  height: var(--icon-size, 16px);
+  margin-inline-start: 8px;
+  color: var(--color-text-tertiary);
+}
+
+.octopus-file-filter-input {
+  width: 100%;
+  appearance: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  padding: 0 6px 0 0;
+  color: var(--color-text);
+  box-shadow: none;
+  user-select: text;
+}
+
+.octopus-file-filter-input:focus {
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+
+.octopus-file-filter-input::placeholder {
+  color: var(--color-text-tertiary);
+  user-select: none;
+}
+
+.octopus-file-filter-clear {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  outline: none;
+  color: var(--color-text-tertiary);
+  background: transparent;
+  cursor: var(--cursor-interaction);
+}
+
+.octopus-file-filter-clear .glyph {
+  width: var(--icon-secondary-size, 14px);
+  height: var(--icon-secondary-size, 14px);
+}
+
+.octopus-file-filter-clear:hover {
+  color: var(--color-text);
+  background: var(--color-background-primary-ghost-hover);
+}
+
+.octopus-file-filter-clear:focus-visible {
+  box-shadow: 0 0 0 2px var(--color-ring);
+}

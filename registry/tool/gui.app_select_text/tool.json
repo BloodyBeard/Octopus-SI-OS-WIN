@@ -1,0 +1,130 @@
+{
+  "id": "gui.app_select_text",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "app_select_text"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Select one unique native character range or cursor position in the exact retained Accessibility element. Search uses case-sensitive default NSString matching, including canonical equivalence, over the observed raw string value; prefix and suffix must match immediately adjacent context. The native selection is a UTF-16 range; optional native AXBoundsForRange supplies cursor geometry. No Markdown offset mapping, TextMarker or IME is implied. Requires current model control and an unconsumed gui.app_state observation from the same formed room. Observe again after any attempted action; global display references are not accepted. Use window_id:null only when the exact observed element has window_unavailable_reason=ax_window_attribute_unavailable; native window identity failures are refused.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "grant_request_id": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "app": {
+        "type": "object",
+        "properties": {
+          "host_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "app_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "host_generation",
+          "app_instance_id"
+        ],
+        "additionalProperties": false
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "window_id": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "element_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "text": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 65536
+      },
+      "prefix": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 65536
+      },
+      "suffix": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "maxLength": 65536
+      },
+      "selection_type": {
+        "type": "string",
+        "enum": [
+          "text",
+          "cursor_before",
+          "cursor_after"
+        ]
+      }
+    },
+    "required": [
+      "grant_request_id",
+      "app",
+      "observation_id",
+      "revision",
+      "control_generation",
+      "window_id",
+      "element_id",
+      "text",
+      "selection_type"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

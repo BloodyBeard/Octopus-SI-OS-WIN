@@ -1,0 +1,200 @@
+{
+  "id": "world_provider_azure_foundry_chat_entra",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "provider.azure_foundry.chat.entra"
+  ],
+  "interface_driver_ref": "openai_compatible",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 1
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": []
+      }
+    }
+  },
+  "interface_driver_config": {
+    "private_config": {
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "process_env_names": [
+        "AZURE_FOUNDRY_CHAT_ENTRA_BASE_URL",
+        "AZURE_FOUNDRY_CHAT_ENTRA_MODEL",
+        "AZURE_FEDERATED_TOKEN_FILE",
+        "IDENTITY_ENDPOINT",
+        "IDENTITY_HEADER"
+      ],
+      "model_hidden_tools": [
+        "file.write"
+      ],
+      "model_env": "AZURE_FOUNDRY_CHAT_ENTRA_MODEL",
+      "azure_entra": {
+        "authority_host": "https://login.microsoftonline.com",
+        "scope": "https://ai.azure.com/.default",
+        "credential_chain": [
+          {
+            "kind": "client_secret",
+            "tenant_id_secret_ref": "secret://world_provider_azure_foundry_chat_entra/AZURE_TENANT_ID",
+            "client_id_secret_ref": "secret://world_provider_azure_foundry_chat_entra/AZURE_CLIENT_ID",
+            "client_secret_ref": "secret://world_provider_azure_foundry_chat_entra/AZURE_CLIENT_SECRET",
+            "continue_on": [
+              "unavailable"
+            ]
+          },
+          {
+            "kind": "workload_identity",
+            "tenant_id_secret_ref": "secret://world_provider_azure_foundry_chat_entra/AZURE_TENANT_ID",
+            "client_id_secret_ref": "secret://world_provider_azure_foundry_chat_entra/AZURE_CLIENT_ID",
+            "federated_token_file_env": "AZURE_FEDERATED_TOKEN_FILE",
+            "max_assertion_bytes": 65536,
+            "continue_on": [
+              "unavailable"
+            ]
+          },
+          {
+            "kind": "managed_identity_app_service",
+            "protocol": "identity_header2019",
+            "endpoint_env": "IDENTITY_ENDPOINT",
+            "header_env": "IDENTITY_HEADER",
+            "resource": "https://ai.azure.com",
+            "allowed_paths": [
+              "/MSI/token",
+              "/MSI/token/",
+              "/msi/token",
+              "/msi/token/"
+            ],
+            "client_id_secret_ref": null,
+            "unavailable_statuses": [
+              400,
+              404
+            ],
+            "continue_on": [
+              "unavailable"
+            ]
+          },
+          {
+            "kind": "managed_identity_imds",
+            "endpoint": "http://169.254.169.254/metadata/identity/oauth2/token",
+            "resource": "https://ai.azure.com",
+            "client_id_secret_ref": null,
+            "unavailable_statuses": [
+              400,
+              404
+            ],
+            "continue_on": [
+              "unavailable"
+            ]
+          }
+        ],
+        "request_timeout_ms": 15000,
+        "max_response_bytes": 1048576,
+        "refresh_margin_seconds": 120,
+        "retryable_statuses": [
+          408,
+          425,
+          429,
+          500,
+          502,
+          503,
+          504
+        ],
+        "retry_backoff_ms": [
+          500,
+          1000
+        ]
+      },
+      "openai_compatible": {
+        "model_catalog": {
+          "request_label": "provider.models.list",
+          "output_label": "provider.models.catalog",
+          "path": "models",
+          "models_pointer": "/data",
+          "id_pointer": "/id"
+        },
+        "request": {
+          "path": "chat/completions",
+          "stream": true,
+          "require_done": true,
+          "message_content": "parts",
+          "tool_message_content": "text_only",
+          "retryable_statuses": [
+            408,
+            425,
+            429,
+            500,
+            502,
+            503,
+            504
+          ],
+          "body": {
+            "parallel_tool_calls": true,
+            "stream_options": {
+              "include_usage": true
+            }
+          }
+        },
+        "response": {
+          "reasoning_fields": [
+            "reasoning",
+            "reasoning_content"
+          ],
+          "reasoning_detail_fields": [
+            "reasoning_details"
+          ],
+          "successful_finish_reasons": [
+            "stop",
+            "tool_calls"
+          ],
+          "nonreplayable_finish_reasons": []
+        },
+        "input_modalities": [
+          "text",
+          "image_url"
+        ],
+        "header_env": {}
+      },
+      "openai_compatible_retry": {
+        "backoff_ms": [
+          1000
+        ]
+      },
+      "context_output_labels": [
+        "interface.artifact.output",
+        "tool.call",
+        "provider.tool_results.pending",
+        "turn.error",
+        "operator.approval.request",
+        "operator.elicitation.request"
+      ],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "provider.tool_results.pending",
+        "turn.error"
+      ]
+    },
+    "transport": {
+      "base_url": "",
+      "base_url_env": "AZURE_FOUNDRY_CHAT_ENTRA_BASE_URL",
+      "wire": "openai_chat_completions",
+      "auth_header": "Authorization",
+      "auth_value_prefix": "Bearer ",
+      "headers": {},
+      "request_timeout_ms": 600000,
+      "max_response_bytes": 134217728
+    }
+  }
+}

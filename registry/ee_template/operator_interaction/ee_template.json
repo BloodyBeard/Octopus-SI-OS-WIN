@@ -1,0 +1,32 @@
+{
+  "id": "operator_interaction",
+  "goal_class": "Serve this operator conversation: understand what the human at the terminal is asking for and carry it to a real result. Answer directly only when the reply itself is the finished artifact they needed; otherwise route the work through your granted interface bindings \u2014 plan, code, run, or hand off to another worker \u2014 so checkpoints can admit the mark outcomes and every side effect leaves replayable evidence. Stay on this exchange; do not inherit another run's role, and prefer fail-closed over almost-worked.",
+  "allowed_interfaces": null,
+  "allowed_worker_environment_kinds": [
+    "filesystem_workspace",
+    "git_worktree",
+    "process_session",
+    "browser_session",
+    "web_search",
+    "desktop_session",
+    "code_mode",
+    "mcp_stdio_session",
+    "remote_exec_server",
+    "container_session",
+    "system_room",
+    "audio_device_session"
+  ],
+  "allowed_root_slots": [
+    "run_records_root",
+    "repo_root",
+    "workspace_root",
+    "host_filesystem_root",
+    "git_common_root",
+    "worktree_root"
+  ],
+  "hard_blocked_tools": [],
+  "allowed_child_ee_templates": [
+    "context_maintenance"
+  ],
+  "bootstrap_root": false
+}

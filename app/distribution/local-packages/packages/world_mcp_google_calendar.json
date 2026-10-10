@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_google_calendar",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_google_calendar",
+  "release_status": "optional",
+  "display": {
+    "name": "Google Calendar",
+    "description": "Work with Google Calendar events and schedules.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "calendar"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_google_calendar",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-google-calendar-context"
+    }
+  ]
+}

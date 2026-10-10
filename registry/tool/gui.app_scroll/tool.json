@@ -1,0 +1,241 @@
+{
+  "id": "gui.app_scroll",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "app_scroll"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Scroll an exact observed native element by directional pages, or scroll at an original screenshot pixel point in its exact approved application window. Page distance uses the native element's axis extent (the owned window extent if absent), with a 100-point minimum, rounded to pixels; converted distance must be within 1..10000 pixels. An image point also accepts explicit delta_x/delta_y instead of pages. Supply exactly one target and one distance form. Native element preparation may scroll it into view; absent native click geometry requires an already retained cursor in the same window and control lease. Requires model control and an unconsumed gui.app_state; observe again after any attempted action. No global display targets.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "grant_request_id": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "app": {
+        "type": "object",
+        "properties": {
+          "host_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "app_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "host_generation",
+          "app_instance_id"
+        ],
+        "additionalProperties": false
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "window_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "image_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "x": {
+        "type": "number",
+        "minimum": 0
+      },
+      "y": {
+        "type": "number",
+        "minimum": 0
+      },
+      "delta_x": {
+        "type": "integer",
+        "minimum": -10000,
+        "maximum": 10000
+      },
+      "delta_y": {
+        "type": "integer",
+        "minimum": -10000,
+        "maximum": 10000
+      },
+      "element_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "direction": {
+        "type": "string",
+        "enum": [
+          "up",
+          "down",
+          "left",
+          "right"
+        ]
+      },
+      "pages": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      }
+    },
+    "required": [
+      "grant_request_id",
+      "app",
+      "observation_id",
+      "revision",
+      "control_generation",
+      "window_id"
+    ],
+    "additionalProperties": false,
+    "oneOf": [
+      {
+        "required": [
+          "element_id",
+          "direction",
+          "pages"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "image_id"
+              ]
+            },
+            {
+              "required": [
+                "x"
+              ]
+            },
+            {
+              "required": [
+                "y"
+              ]
+            },
+            {
+              "required": [
+                "delta_x"
+              ]
+            },
+            {
+              "required": [
+                "delta_y"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "required": [
+          "image_id",
+          "x",
+          "y",
+          "direction",
+          "pages"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "element_id"
+              ]
+            },
+            {
+              "required": [
+                "delta_x"
+              ]
+            },
+            {
+              "required": [
+                "delta_y"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "required": [
+          "image_id",
+          "x",
+          "y",
+          "delta_x",
+          "delta_y"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "element_id"
+              ]
+            },
+            {
+              "required": [
+                "direction"
+              ]
+            },
+            {
+              "required": [
+                "pages"
+              ]
+            },
+            {
+              "properties": {
+                "delta_x": {
+                  "const": 0
+                },
+                "delta_y": {
+                  "const": 0
+                }
+              },
+              "required": [
+                "delta_x",
+                "delta_y"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "is_world_effect": true
+}

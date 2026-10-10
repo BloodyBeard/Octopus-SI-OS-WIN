@@ -1,0 +1,21 @@
+[package]
+name = "octopus-model-context-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "octopus_model_context_render"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-marks = { path = "../../../../../crates/octopus-marks" }
+
+[dev-dependencies]
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }

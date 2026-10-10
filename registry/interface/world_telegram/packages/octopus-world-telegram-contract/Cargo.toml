@@ -1,0 +1,20 @@
+[package]
+name = "octopus-world-telegram-contract"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-ee = { path = "../../../../../crates/octopus-ee" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-policy = { path = "../../../../../crates/octopus-policy" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+
+[lints.rust]
+unsafe_code = "forbid"

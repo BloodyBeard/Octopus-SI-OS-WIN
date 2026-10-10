@@ -1,0 +1,7 @@
+{
+  "default_enabled": false,
+  "id": "image_detail_original",
+  "stage": {
+    "kind": "removed"
+  }
+}

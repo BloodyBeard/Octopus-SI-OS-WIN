@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "id": "world_mcp_microsoft_sharepoint",
+  "name": "SharePoint",
+  "description": "Search and work with SharePoint sites, files, lists, and pages.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "panels-top-left",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_mcp_microsoft_sharepoint"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-mcp-microsoft-sharepoint-context",
+      "label": "SharePoint capability contract"
+    }
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_mcp_microsoft_sharepoint",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Server URL",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_mcp_microsoft_sharepoint",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Access token",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

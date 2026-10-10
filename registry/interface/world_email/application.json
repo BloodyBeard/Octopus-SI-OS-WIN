@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "id": "world_email",
+  "name": "Email",
+  "description": "Read and send email from the tasks you choose.",
+  "category": "connector",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "email",
+  "logo": "application-logo.png",
+  "interfaces": ["world_email"]
+}

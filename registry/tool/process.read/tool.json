@@ -1,0 +1,55 @@
+{
+  "id": "process.read",
+  "interface": "system_exec_env",
+  "handler_config": {
+    "operation": "read"
+  },
+  "process": {
+    "bin": "target/debug/octopus-process-room-tool",
+    "inherit_env": [
+      "PATH"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [
+        "PATH"
+      ],
+      "allow_network": false,
+      "allow_local_ipc": true
+    },
+    "coordinate_root_slots": []
+  },
+  "supported_worker_environment_kinds": [
+    "process_session"
+  ],
+  "description": "Read ordered stdout and stderr chunks from the persistent process without consuming another room's cursor.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "after_seq": {
+        "type": "integer",
+        "minimum": 0
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1048576
+      },
+      "wait_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 30000
+      }
+    },
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

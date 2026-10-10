@@ -1,0 +1,109 @@
+{
+  "id": "gui.app_paste",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "app_paste"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Paste plain, Markdown or HTML content into an exact approved application with native rich representations and clipboard delivery evidence. Requires current model control and an unconsumed gui.app_state observation from the same formed room. Observe again after any attempted action; global display references are not accepted. Set window_id to null for app-level keyboard focus, or provide the exact observed window. The native target is resolved from the retained application focus, including its hosted controls.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "grant_request_id": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "app": {
+        "type": "object",
+        "properties": {
+          "host_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "app_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "host_generation",
+          "app_instance_id"
+        ],
+        "additionalProperties": false
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "window_id": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "text": {
+        "type": "string",
+        "maxLength": 1048576
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "text",
+          "md",
+          "html"
+        ]
+      }
+    },
+    "required": [
+      "grant_request_id",
+      "app",
+      "observation_id",
+      "revision",
+      "control_generation",
+      "window_id",
+      "text",
+      "format"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

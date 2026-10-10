@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "permitted_persistence": ["session", "always"],
+  "browser_origin": null,
+  "browser_history": null,
+  "bounds": {
+    "max_policy_bytes": 65536,
+    "max_binding_bytes": 65536,
+    "max_state_bytes": 1048576,
+    "max_records": 4096,
+    "max_pending": 256,
+    "ledger_batch_rows": 256,
+    "max_proof_bytes": 16777216
+  }
+}

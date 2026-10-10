@@ -1,0 +1,10 @@
+{
+  "id": "world_email",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "email"
+  ],
+  "interface_driver_ref": "email_life"
+}

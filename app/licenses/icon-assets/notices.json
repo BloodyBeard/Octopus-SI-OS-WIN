@@ -1,0 +1,107 @@
+{
+  "schema": "octopus.client_icon_notices.v1",
+  "upstreams": {
+    "lucide-2023": {
+      "repository": "https://github.com/lucide-icons/lucide",
+      "commit": "7816ed88f67d31484fcf6f18c531180c9b50b67e",
+      "license": "ISC; Feather-derived portions credited in upstream notice",
+      "notice": "lucide-2023-LICENSE.txt",
+      "notice_sha256": "1e7290b35280a048667bbf0ebabac1c7fd52a75300e8b2946ac165715997f2bc"
+    },
+    "lucide-current": {
+      "repository": "https://github.com/lucide-icons/lucide",
+      "commit": "1fae58d0a9c661a338036838caf3399b5507bab6",
+      "license": "ISC and applicable Feather MIT",
+      "notice": "lucide-LICENSE.txt",
+      "notice_sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57"
+    },
+    "apps-sdk-ui": {
+      "repository": "https://github.com/openai/apps-sdk-ui",
+      "commit": "0f00143c7a639906f1621fe58e1b6be7b5bea46d",
+      "license": "MIT",
+      "notice": "openai-apps-sdk-ui-LICENSE.txt",
+      "notice_sha256": "f26a46776c890b0d7b45d042cb8a78fdca9c4742a5c7fd97f0f53767411b1cc6"
+    }
+  },
+  "shapes": {
+    "bell": {
+      "path": "upstream/lucide-2023/bell.svg",
+      "upstream": "lucide-2023",
+      "source_url": "https://raw.githubusercontent.com/lucide-icons/lucide/7816ed88f67d31484fcf6f18c531180c9b50b67e/icons/bell.svg",
+      "sha256": "cd99105767b89241308bf5c7d0235f16b8d0eceea4865f5bc68795fc76b0baac"
+    },
+    "flask-conical": {
+      "path": "upstream/lucide-2023/flask-conical.svg",
+      "upstream": "lucide-2023",
+      "source_url": "https://raw.githubusercontent.com/lucide-icons/lucide/7816ed88f67d31484fcf6f18c531180c9b50b67e/icons/flask-conical.svg",
+      "sha256": "aeb830fc343cbfb618ed2b8b273b2fe5e9a8a29a2c42653f10cc47ea57f1311c"
+    },
+    "users": {
+      "path": "upstream/lucide-2023/users.svg",
+      "upstream": "lucide-2023",
+      "source_url": "https://raw.githubusercontent.com/lucide-icons/lucide/7816ed88f67d31484fcf6f18c531180c9b50b67e/icons/users.svg",
+      "sha256": "c94a3781b154ab2716e1696c25c50d37b4b5634f26cb80ae1cdea20cfafc49c1"
+    },
+    "hand": {
+      "path": "upstream/lucide-current/hand.svg",
+      "upstream": "lucide-current",
+      "source_url": "https://raw.githubusercontent.com/lucide-icons/lucide/1fae58d0a9c661a338036838caf3399b5507bab6/icons/hand.svg",
+      "sha256": "fe3771fa2f0a9a3c7736164c9a855beefacc02548084ac1d6fc8da8a8a9180b0"
+    },
+    "pin-filled": {
+      "path": "upstream/apps-sdk-ui/PinFilled.tsx",
+      "upstream": "apps-sdk-ui",
+      "source_url": "https://raw.githubusercontent.com/openai/apps-sdk-ui/0f00143c7a639906f1621fe58e1b6be7b5bea46d/src/components/Icon/svg/PinFilled.tsx",
+      "sha256": "812b2a7ee48de75533cc108287b10e4a522ca9d0271fda3c5af15f85dd6f7675"
+    },
+    "play-sm": {
+      "path": "upstream/apps-sdk-ui/PlaySm.tsx",
+      "upstream": "apps-sdk-ui",
+      "source_url": "https://raw.githubusercontent.com/openai/apps-sdk-ui/0f00143c7a639906f1621fe58e1b6be7b5bea46d/src/components/Icon/svg/PlaySm.tsx",
+      "sha256": "e890e070020858c2eb8c3aa14e4bd43667bee081248469e5b9de5f36e4cde649"
+    }
+  },
+  "glyphs": [
+    {
+      "name": "pin",
+      "shapes": [
+        "pin-filled"
+      ]
+    },
+    {
+      "name": "users",
+      "shapes": [
+        "users"
+      ]
+    },
+    {
+      "name": "resume",
+      "shapes": [
+        "play-sm"
+      ],
+      "translation": {
+        "dx": -2,
+        "dy": -2.00018,
+        "significant_digits": 6
+      }
+    },
+    {
+      "name": "hand",
+      "shapes": [
+        "hand"
+      ]
+    },
+    {
+      "name": "bell",
+      "shapes": [
+        "bell"
+      ]
+    },
+    {
+      "name": "flask",
+      "shapes": [
+        "flask-conical"
+      ]
+    }
+  ]
+}

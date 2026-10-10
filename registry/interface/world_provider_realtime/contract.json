@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "owner": "world_provider_realtime",
+  "inputs": {
+    "realtime.session.offer": {
+      "offer_sdp": "v=0...",
+      "correlation_id": "client-generated-stable-offer-id",
+      "delegation_interface": "exact-Home-text-provider-interface",
+      "session": {
+        "instructions": "Explicitly selected Home context and conversation instructions",
+        "initial_items": [
+          {
+            "type": "message",
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Explicit selected context"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "realtime.session.update": {
+      "call_id": "provider-call-id",
+      "correlation_id": "same-offer-id",
+      "update_id": "stable-semantic-update-id",
+      "delegation_id": "known-provider-delegation-id-or-null",
+      "channel": "context | commentary | instructions",
+      "text": "Model-selected task facts or spoken update; no hidden reasoning"
+    },
+    "realtime.session.stop": {
+      "call_id": "provider-call-id",
+      "correlation_id": "same-offer-id",
+      "stop_id": "stable-stop-id"
+    },
+    "realtime.session.recording": {
+      "schema": "octopus.voice_recording",
+      "schema_version": 1,
+      "correlation_id": "same-offer-id",
+      "started_at": "ISO-8601-client-start-time",
+      "media": {
+        "path": "absolute-client-stream-path",
+        "mime_type": "audio/webm",
+        "content_hash": "sha256-hex",
+        "size": 1
+      }
+    }
+  },
+  "outputs": {
+    "realtime.session.answer": [
+      "ok",
+      "creation_disposition",
+      "correlation_id",
+      "call_id",
+      "answer_sdp",
+      "sideband_connected",
+      "model",
+      "protocol",
+      "error"
+    ],
+    "realtime.session.state": [
+      "correlation_id",
+      "call_id",
+      "state",
+      "reason"
+    ],
+    "realtime.transcript": [
+      "id",
+      "role",
+      "text",
+      "final",
+      "boundary",
+      "correlation_id",
+      "call_id",
+      "provider_event_id"
+    ],
+    "realtime.delegation": [
+      "correlation_id",
+      "call_id",
+      "delegation_id",
+      "input_text",
+      "transcript",
+      "provider_event_id"
+    ],
+    "realtime.session.updated": [
+      "correlation_id",
+      "call_id",
+      "update_id",
+      "delegation_id",
+      "status",
+      "error"
+    ],
+    "realtime.session.closed": [
+      "correlation_id",
+      "call_id",
+      "stop_id",
+      "provider_close_sent",
+      "remote_closed",
+      "transcript",
+      "error"
+    ],
+    "realtime.session.recorded": [
+      "ok",
+      "correlation_id",
+      "call_id",
+      "started_at",
+      "media",
+      "evidence_only",
+      "media_verified_by_provider",
+      "heard_audio",
+      "error"
+    ]
+  },
+  "integration": {
+    "media": "Browser owns microphone, peer connection and playback. Provider life owns HTTP call creation and authenticated WebSocket sideband; credentials never enter artifacts or renderer. Sideband availability is not media connectivity or heard-audio proof.",
+    "semantic_delivery": "Delegations leave the exact provider interface through a provider_interface_output checkpoint to offer.delegation_interface. Other outputs use provider_artifact_output/client projection. UI never resubmits semantic events as text.",
+    "rearming": "Provider imports existing octopus-provider-run-authoring ProviderHandoffSession/ProviderOutputHandoff; configure interface_state[exact-provider].run_authoring_binding schema_version=2 and ordinary file.write tool/room/checkpoints. This includes authoring_call/result, provider_artifact_output, provider_interface_output and control independent_input/owner_input edges. Provider requires run_records_root and interface_hand_in_root handles plus app_server_control_root coordinate and local IPC for the separately activated exact authoring source.",
+    "auth": "private_config.auth={mode:codex_machine,auth_file_env:OCTOPUS_MACHINE_CODEX_AUTH_FILE} imports the existing Codex login owner over the same canonical auth.json; life must inherit and allow read/write of that declared path. No separate credential copy. Public API uses explicit bearer_env config with its own env_key; no automatic auth or protocol fallback.",
+    "wire": "transport.wire=live_webrtc. codex_live: JSON POST to declared https://chatgpt.com/backend-api/codex/realtime/calls with intent=quicksilver and architecture=avas; raw SDP + Location call identity; sideband wss://api.openai.com/v1/live/{call_id}. openai_live CURRENT public API: JSON POST to https://api.openai.com/v1/live/sessions containing session and transport={type:webrtc,sdp}; response session.id and transport.sdp; sideband declared wss://api.openai.com/v1/live/sessions/{call_id}/attach. The older Codex public /v1/live multipart path is not the current public API contract. Explicit protocol adapters only; no endpoint/protocol guessing. Codex Live explicitly requires transport.headers.OpenAI-Alpha=quicksilver=v2 on both call creation and sideband attachment.",
+    "call_errors": "Non-success call creation and sideband attachment preserve HTTP status, a bounded x-request-id and available allowlisted structured provider error fields (code, type, param, message or string detail). Raw bodies, unknown fields and authentication material are withheld. Error text is UTF-8 bounded and control characters are normalized. The existing failed answer and checked handoff carry this detail; offers are never retried automatically.",
+    "tls": "The provider constructs its WSS connector with an explicit AWS-LC Rustls CryptoProvider and native trust roots before authentication or call creation. It does not depend on process-global provider selection or login-client initialization. Empty trust stores fail closed; certificate and hostname verification remain enabled. Plain WebSocket transport is permitted only on the already validated lexical loopback endpoint.",
+    "stop": "Stop ends only provider call; browser must close local media independently. No task cancellation. Only a provider session.closed event proves remote finalization; WebSocket close alone is transport evidence. Transport uncertainty is explicit and never replays a create/update silently.",
+    "configuration": "Required private fields model,protocol,sideband_url,auth,session,reconnect_attempts,max_transcript_bytes plus run_authoring_profile,model_hidden_tools,context_output_labels,session_snapshot_labels. Model is selected only in descriptor and checked against formed models. Offer cannot replace model or client delegation. Initial textual context uses initial_items; the explicit Codex wire adapter renders assistant content as output_text and user/developer content as input_text, while the public adapter uses session.input.",
+    "transcripts": "Both protocols emit cumulative realtime.transcript artifacts with a stable id and final boolean. codex_live completes at provider turn.done. Current public Live has no turn-completed event; each speaker has an independent open display entry, finalized only at delegation or call closure, with boundary and provider_turn_complete=false. Preserve delta timestamps and repeated words; never infer turns from silence or arrival order.",
+    "recording": "The exact voice control source may forward realtime.session.recording to this provider. It accepts the bounded reference as evidence only and emits realtime.session.recorded through client projection. It never reads/sends those media bytes to the model, creates work, or claims heard-audio or provider verification. Receipt may follow call closure; correlation_id must identify a previously accepted offer.",
+    "recovery": "Each queued semantic emission has a persisted monotonic emission_id, exact source movement, immutable artifact identity and authored outbound bindings. Before retrying a prepared emission, provider calls shared recover_source_with_outcomes to finish/reconcile the original checked file-write and compares exact admitted artifact+source+route evidence. Source Completed alone does not acknowledge the streaming queue. Continuous call observations and control receipts are nonterminal within their source movement. Before advancing to a later control movement, the provider persists and admits one terminal realtime.session.state observation {state:source_completed,source_movement_seq,next_source_movement_seq}; it has no call identity and proves only the source boundary. Calls then attach subsequent evidence to that new checked source. Exact artifact, route, source and finality must agree on replay; terminal source status alone never consumes an outbox item."
+  },
+  "references": [
+    "https://developers.openai.com/api/docs/guides/live-conversations",
+    "https://developers.openai.com/api/docs/guides/voice-webrtc?api=live",
+    "https://developers.openai.com/api/docs/guides/voice-server-controls?api=live",
+    "docs/references/codex-upstream/codex-rs/codex-api/src/endpoint/realtime_call.rs",
+    "docs/references/codex-upstream/codex-rs/codex-api/src/endpoint/realtime_websocket/protocol_frameless_bidi.rs"
+  ]
+}

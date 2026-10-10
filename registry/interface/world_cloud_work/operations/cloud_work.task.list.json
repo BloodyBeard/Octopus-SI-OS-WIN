@@ -1,0 +1,35 @@
+{
+  "id": "cloud_work.task.list",
+  "request_label": "cloud_work.request",
+  "output_label": "cloud_work.status",
+  "handler_config": {
+    "operation": "task.list"
+  },
+  "description": "List current managed cloud work with environment filtering and cursor pagination. Review-only rows remain identified explicitly rather than becoming ordinary work silently.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "environment_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 20
+      },
+      "cursor": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "include_review": {
+        "type": "boolean",
+        "default": false
+      }
+    },
+    "additionalProperties": false
+  }
+}

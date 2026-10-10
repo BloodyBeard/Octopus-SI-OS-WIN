@@ -1,0 +1,68 @@
+{
+  "id": "remote.exec",
+  "interface": "system_remote_exec",
+  "process": {
+    "bin": "target/debug/octopus-remote-exec-room-tool",
+    "private_read_subpaths": [{"path": "secrets/remote-exec.auth"}],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "handler_config": { "operation": "exec" },
+  "supported_worker_environment_kinds": [
+    "remote_exec_server"
+  ],
+  "description": "Execute one argv vector in the formed remote workspace and return bounded stdout, stderr, exit status, and process evidence.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "argv": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "minItems": 1,
+        "maxItems": 256
+      },
+      "cwd": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "env": {
+        "type": "object",
+        "maxProperties": 256,
+        "additionalProperties": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "tty": {
+        "type": "boolean"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      }
+    },
+    "required": [
+      "argv"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

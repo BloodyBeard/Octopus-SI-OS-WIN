@@ -1,0 +1,97 @@
+{
+  "id": "browser.filechooser_set_files",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "filechooser_set_files"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Prepare exact currently bound file artifact bytes for one native chooser. Returns an explicit human one-shot upload approval for the observed top-level origin and selected filenames/bytes; no file input effect occurs before verified approval. A read grant alone is not upload approval. Applied/uncertain files remain charged to the room268435456-byte staging quota until context disposal.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "reservation_id": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{32}$"
+      },
+      "file_chooser_id": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{32}$"
+      },
+      "files": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "properties": {
+            "artifact_ref": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "content": {
+                  "type": "array",
+                  "minItems": 32,
+                  "maxItems": 32,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 255
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "content"
+              ],
+              "additionalProperties": false
+            },
+            "filename": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "description": "One filename basename, at most255 UTF-8 bytes; no slash, backslash, NUL, dot or dot-dot."
+            }
+          },
+          "required": [
+            "artifact_ref",
+            "filename"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": [
+      "reservation_id",
+      "file_chooser_id",
+      "files"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

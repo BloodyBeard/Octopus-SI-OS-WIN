@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "id": "world_mcp_github",
+  "name": "GitHub",
+  "description": "Work with GitHub repositories, issues, pull requests, and workflows.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "github",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_mcp_github"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-mcp-github-context",
+      "label": "GitHub capability contract"
+    }
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_mcp_github",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Server URL",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_mcp_github",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Access token",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

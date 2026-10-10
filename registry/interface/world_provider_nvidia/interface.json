@@ -1,0 +1,353 @@
+{
+  "id": "world_provider_nvidia",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "nvidia"
+  ],
+  "interface_driver_config": {
+    "private_config": {
+      "instruction_artifacts": [],
+      "worker_instruction_artifacts": [],
+      "model_tool_names": {},
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "model_hidden_tools": [
+        "file.write"
+      ],
+      "model": "nvidia/llama-3.3-70b-instruct",
+      "process_env_names": [],
+      "openai_compatible_transport_defaults": {
+        "request_timeout_ms": 120000,
+        "max_response_bytes": 8388608
+      },
+      "openai_compatible": {
+        "model_catalog": {
+          "request_label": "provider.models.list",
+          "output_label": "provider.models.catalog",
+          "path": "models"
+        },
+        "request": {
+          "path": "chat/completions",
+          "stream": true,
+          "require_done": true,
+          "message_content": "string",
+          "retryable_statuses": [
+            408,
+            425,
+            429,
+            500,
+            502,
+            503,
+            504
+          ],
+          "body": {
+            "max_tokens": 16384,
+            "parallel_tool_calls": true,
+            "stream_options": {
+              "include_usage": true
+            }
+          }
+        },
+        "response": {
+          "reasoning_fields": [
+            "reasoning",
+            "reasoning_content"
+          ],
+          "reasoning_detail_fields": [
+            "reasoning_details"
+          ],
+          "successful_finish_reasons": [
+            "stop",
+            "tool_calls"
+          ],
+          "nonreplayable_finish_reasons": [
+            "length"
+          ]
+        },
+        "input_modalities": [
+          "text"
+        ],
+        "header_env": {}
+      },
+      "openai_compatible_retry": {
+        "backoff_ms": [
+          1000,
+          2000,
+          4000,
+          8000
+        ]
+      },
+      "context_output_labels": ["interface.artifact.output", "interface.context.updated", "tool.call", "turn.control.acknowledged", "turn.interrupted.result", "turn.context.compaction", "turn.error", "operator.approval.request", "operator.elicitation.request", "turn.agent_message", "turn.reasoning", "turn.plan.update"],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "turn.interrupted.result",
+        "turn.error"
+      ],
+      "model_catalog": [
+        {
+          "model": "nvidia/llama-3.3-70b-instruct",
+          "display_name": "NVIDIA Llama 3.3 70B",
+          "max_output_tokens": 16384,
+          "show_in_picker": true
+        },
+        {
+          "model": "nvidia/llama-3.1-nemotron-70b-instruct",
+          "display_name": "NVIDIA Llama 3.1 Nemotron 70B",
+          "max_output_tokens": 16384,
+          "show_in_picker": true
+        }
+      ],
+      "native_tool_namespace": {
+        "name": "formed_interfaces",
+        "description": "Tools admitted through the formed Octopus interface grant."
+      },
+      "operator_continuity": {
+        "replay_timeout_ms": 30000,
+        "approval": {
+          "request_label": "operator.approval.request",
+          "response_label": "operator.approval.response",
+          "approved": {
+            "mark": "operator.approval",
+            "verifier": "operator_approval"
+          },
+          "denied": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        },
+        "elicitation": {
+          "request_label": "operator.elicitation.request",
+          "response_label": "operator.elicitation.response",
+          "provided": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        },
+        "user_input": {
+          "request_label": "operator.user_input.request",
+          "response_label": "operator.user_input.response",
+          "provided": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        }
+      },
+      "model_catalog_operation": {
+        "request_label": "provider.models.list",
+        "output_label": "provider.models.catalog",
+        "default_limit": 100,
+        "max_limit": 100,
+        "include_hidden": false
+      },
+      "private_thread_cold_start": "resume_compatible",
+      "model_result_projection": {
+        "max_tokens": 10000
+      },
+      "client_projection_output_labels": [
+        "interface.artifact.output",
+        "interface.context.updated",
+        "tool.call",
+        "turn.error",
+        "turn.control.acknowledged",
+        "turn.control.failed",
+        "turn.interrupted.result",
+        "operator.approval.request",
+        "operator.elicitation.request",
+        "operator.user_input.request",
+        "provider.models.catalog",
+        "provider.operation.error",
+        "provider.account.login.completed",
+        "provider.account.updated",
+        "provider.account.rate_limits.updated",
+        "provider.account.login.started",
+        "provider.account.login.cancelled",
+        "provider.account.login.status",
+        "provider.account.logged_out",
+        "provider.account.snapshot",
+        "provider.account.rate_limits",
+        "provider.account.rate_limit_reset.consumed",
+        "provider.account.usage",
+        "provider.account.workspace_messages",
+        "provider.capabilities",
+        "agent.message.delta",
+        "turn.agent_message",
+        "turn.reasoning",
+        "turn.reasoning.delta",
+        "turn.plan.update",
+        "turn.plan.delta",
+        "turn.exec.command",
+        "turn.exec.output_delta",
+        "turn.exec.terminal_interaction",
+        "turn.file.change",
+        "turn.file.change_delta",
+        "turn.diff.updated",
+        "turn.web_search",
+        "lifecycle.event",
+        "hook.catalog",
+        "hook.catalog.error",
+        "hook.result",
+        "turn.hook.prompt",
+        "turn.mcp.tool_call",
+        "turn.mcp.progress",
+        "turn.mcp.status",
+        "turn.dynamic_tool_call",
+        "turn.collaboration",
+        "turn.subagent.activity",
+        "turn.image.view",
+        "turn.sleep",
+        "turn.image.generation",
+        "turn.review.entered",
+        "turn.review.exited",
+        "turn.context.compaction",
+        "turn.started",
+        "turn.completed",
+        "turn.model.rerouted",
+        "turn.model.verification",
+        "turn.auth_recovery.started",
+        "turn.auth_recovery.completed",
+        "turn.warning",
+        "turn.auto_review.started",
+        "turn.auto_review.completed",
+        "turn.operator_request.resolved",
+        "goal.status",
+        "account.rate_limits"
+      ],
+      "opencodex": {
+        "schema_version": 1,
+        "adapter": "openai-chat",
+        "credential_owner_interface": "world_provider_nvidia",
+        "allow_private_network": false,
+        "cache_retention": "short",
+        "options": {
+          "auth_mode": "key"
+        },
+        "limits": {
+          "max_request_bytes": 33554432,
+          "max_translated_call_bytes": 2097152,
+          "max_translated_turn_bytes": 33554432
+        }
+      }
+    },
+    "transport": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "wire": "openai_chat_completions",
+      "auth_secret_ref": "secret://world_provider_nvidia/NVIDIA_API_KEY",
+      "auth_header": "Authorization",
+      "auth_value_prefix": "Bearer ",
+      "request_timeout_ms": 180000,
+      "max_response_bytes": 8388608
+    },
+    "residual_ambient": {
+      "transport": "codex_app_server_cli",
+      "status": "declared_residual_not_octopus_authority",
+      "boundary": "Codex app-server has no raw model endpoint. Octopus suppresses known path-loaded ambient and declares the remaining interface-assembled frame as ledger evidence.",
+      "spawn": {
+        "subcommand": "app-server",
+        "extra_argv": [],
+        "isolation_overrides": [
+          "project_doc_max_bytes=0",
+          "features.shell_tool=false",
+          "features.unified_exec=false",
+          "features.shell_snapshot=false",
+          "features.hooks=false",
+          "features.multi_agent=false",
+          "features.apps=false",
+          "features.plugins=false",
+          "features.memories=false",
+          "features.tool_suggest=false",
+          "features.in_app_browser=false",
+          "features.browser_use=false",
+          "features.browser_use_full_cdp_access=false",
+          "features.browser_use_external=false",
+          "features.computer_use=false",
+          "features.remote_plugin=false",
+          "features.plugin_sharing=false",
+          "features.skill_mcp_dependency_install=false",
+          "features.skill_search=false",
+          "features.mentions_v2=false",
+          "features.guardian_approval=false",
+          "features.tool_call_mcp_elicitation=false",
+          "features.auth_elicitation=false",
+          "features.personality=false",
+          "features.workspace_dependencies=false",
+          "features.code_mode_host=true",
+          "personality=none",
+          "sandbox_mode=read-only",
+          "web_search=disabled",
+          "skills.include_instructions=false",
+          "include_apps_instructions=false",
+          "features.goals=false",
+          "features.image_generation=false",
+          "features.tool_search=false",
+          "features.search_tool=false",
+          "features.request_permissions_tool=false",
+          "features.sleep_tool=false",
+          "features.current_time_reminder=false",
+          "tools.experimental_request_user_input.enabled=false"
+        ],
+        "home_env": "CODEX_HOME",
+        "isolated_cwd": "codex-cwd",
+        "connect_on_ready": false,
+        "idle_disconnect_ms": 300000
+      },
+      "residual_sources": [
+        {
+          "name": "codex_core_system_developer_tool_policy",
+          "suppressible_by_current_config": false,
+          "octopus_authority": false
+        },
+        {
+          "name": "codex_env_context_input_item",
+          "fields": [
+            "cwd",
+            "shell",
+            "current_date",
+            "timezone",
+            "filesystem",
+            "permission_profile"
+          ],
+          "suppressible_by_current_config": false,
+          "octopus_authority": false
+        },
+        {
+          "name": "codex_update_plan_tool_spec",
+          "suppressible_by_current_config": false,
+          "octopus_authority": false,
+          "execution_boundary": "interface handler fails closed on server-initiated native tool requests; Octopus tools execute only as artifacts through granted worker-environment interfaces"
+        }
+      ],
+      "suppressed_sources": [
+        "CODEX_HOME/AGENTS.md via curated CODEX_HOME",
+        "repo AGENTS.md/CLAUDE.md via project_doc_max_bytes=0 and repo-free cwd",
+        "non-Octopus product ambient instruction sources via explicit interface config pins",
+        "shell/exec/apply_patch/view_image via empty per-thread environments"
+      ]
+    }
+  },
+  "interface_driver_ref": "codex_app_server",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 5
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": [
+          "nvidia/llama-3.1-nemotron-70b-instruct",
+          "nvidia/llama-3.3-70b-instruct"
+        ]
+      }
+    }
+  }
+}

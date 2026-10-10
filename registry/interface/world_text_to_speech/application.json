@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "id": "world_text_to_speech",
+  "name": "Text to Speech",
+  "description": "Turn written responses into natural speech.",
+  "category": "connector",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "voice",
+  "logo": "application-logo.png",
+  "interfaces": ["world_text_to_speech"]
+}

@@ -1,0 +1,48 @@
+{
+  "interface": "system_browser",
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "is_world_effect": true,
+  "id": "browser.viewport_reset",
+  "handler_config": {
+    "operation": "viewport_reset"
+  },
+  "description": "Clear the explicit viewport on the selected or first controlled browser page. Before any controlled page exists, clear the pending override without creating a page. Does not change page zoom, the capture surface, or native presentation birth size. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. With no selected or explicit target, a pending viewport intent is allowed only when the owned context has no pages.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

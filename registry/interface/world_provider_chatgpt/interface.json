@@ -1,0 +1,604 @@
+{
+  "id": "world_provider_chatgpt",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "chatgpt"
+  ],
+  "interface_driver_ref": "codex_app_server",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 5
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "web_search_modes": {
+        "reduce": "intersection",
+        "default": [
+          "disabled",
+          "cached",
+          "indexed",
+          "live"
+        ]
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": [
+          "gpt-5.3-codex-spark",
+          "gpt-5.4-mini",
+          "gpt-5.5",
+          "gpt-5.6-luna",
+          "gpt-5.6-sol",
+          "gpt-5.6-terra",
+          "gpt-6-astra"
+        ]
+      }
+    }
+  },
+  "interface_driver_config": {
+    "supported_reasoning_efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra"
+    ],
+    "private_config": {
+      "instruction_artifacts": [],
+      "worker_instruction_artifacts": [],
+      "model_tool_names": {},
+      "web_search": "live",
+      "input_intake": {
+        "template_interface_id": "system_service_input"
+      },
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "model_hidden_tools": [
+        "file.write",
+        "web.search",
+        "web.extract",
+        "gui.app_resume",
+        "browser.filechooser_resume",
+        "code_mode.resume"
+      ],
+      "native_tool_namespace": {
+        "name": "formed_interfaces",
+        "description": "Tools admitted through exact Octopus interface grants. Use their advertised methods and schemas. A native Code Mode result is a string: first line compact JSON, then optional image data URLs. Split at the first newline before JSON.parse; forward subsequent image URLs with image(). Tool result JSON carries tool, correlation_id, ok, body and error; interface operations use their declared schema. Inspect the complete returned value in JavaScript and emit selected evidence with text(). Transport failures are errors, never partial success. A model_projection head_tail preview lacks omitted fields. Artifact references do not grant reads, and payload paths are not an access shortcut. Code Mode store/load retain serializable values within the live session; no app/browser SDK is installed here."
+      },
+      "operator_continuity": {
+        "replay_timeout_ms": 30000,
+        "approval": {
+          "request_label": "operator.approval.request",
+          "response_label": "operator.approval.response",
+          "approved": {
+            "mark": "operator.approval",
+            "verifier": "operator_approval"
+          },
+          "denied": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        },
+        "elicitation": {
+          "request_label": "operator.elicitation.request",
+          "response_label": "operator.elicitation.response",
+          "provided": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        },
+        "user_input": {
+          "request_label": "operator.user_input.request",
+          "response_label": "operator.user_input.response",
+          "provided": {
+            "mark": "operator.input.provided",
+            "verifier": "operator_input"
+          }
+        }
+      },
+      "model_catalog": [
+        {
+          "model": "gpt-6-astra",
+          "display_name": "GPT-6-Astra",
+          "description": "Our most capable model for complex, demanding work.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            },
+            {
+              "effort": "max",
+              "description": "Maximum reasoning depth for the hardest problems"
+            },
+            {
+              "effort": "ultra",
+              "description": "Maximum reasoning with automatic task delegation"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.6-sol",
+          "display_name": "GPT-5.6-Sol",
+          "description": "Reliable agentic workhorse for everyday tasks.",
+          "default_reasoning_effort": "low",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            },
+            {
+              "effort": "max",
+              "description": "Maximum reasoning depth for the hardest problems"
+            },
+            {
+              "effort": "ultra",
+              "description": "Maximum reasoning with automatic task delegation"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.6-terra",
+          "display_name": "GPT-5.6-Terra",
+          "description": "Balanced agentic coding model for everyday work.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            },
+            {
+              "effort": "max",
+              "description": "Maximum reasoning depth for the hardest problems"
+            },
+            {
+              "effort": "ultra",
+              "description": "Maximum reasoning with automatic task delegation"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.6-luna",
+          "display_name": "GPT-5.6-Luna",
+          "description": "Fast and affordable agentic coding model.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            },
+            {
+              "effort": "max",
+              "description": "Maximum reasoning depth for the hardest problems"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.5",
+          "display_name": "GPT-5.5",
+          "description": "Proven previous-generation model for coding and general work.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.4-mini",
+          "display_name": "GPT-5.4-Mini",
+          "description": "Small, fast, and cost-efficient model for simpler coding tasks.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            }
+          ],
+          "show_in_picker": true
+        },
+        {
+          "model": "gpt-5.3-codex-spark",
+          "display_name": "GPT-5.3-Codex-Spark",
+          "description": "Ultra-fast coding model.",
+          "default_reasoning_effort": "high",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "low",
+              "description": "Fast responses with lighter reasoning"
+            },
+            {
+              "effort": "medium",
+              "description": "Balances speed and reasoning depth for everyday tasks"
+            },
+            {
+              "effort": "high",
+              "description": "Greater reasoning depth for complex problems"
+            },
+            {
+              "effort": "xhigh",
+              "description": "Extra high reasoning depth for complex problems"
+            }
+          ],
+          "show_in_picker": true
+        }
+      ],
+      "model_catalog_operation": {
+        "request_label": "provider.models.list",
+        "output_label": "provider.models.catalog",
+        "default_limit": 100,
+        "max_limit": 100,
+        "include_hidden": false
+      },
+      "provider_operations": {
+        "error_output_label": "provider.operation.error",
+        "account_login_completed_output_label": "provider.account.login.completed",
+        "account_updated_output_label": "provider.account.updated",
+        "account_rate_limits_updated_output_label": "provider.account.rate_limits.updated",
+        "account_login_start": {
+          "request_label": "provider.account.login.start",
+          "output_label": "provider.account.login.started"
+        },
+        "account_login_cancel": {
+          "request_label": "provider.account.login.cancel",
+          "output_label": "provider.account.login.cancelled"
+        },
+        "account_login_status_read": {
+          "request_label": "provider.account.login.status.read",
+          "output_label": "provider.account.login.status"
+        },
+        "account_logout": {
+          "request_label": "provider.account.logout",
+          "output_label": "provider.account.logged_out"
+        },
+        "account_read": {
+          "request_label": "provider.account.read",
+          "output_label": "provider.account.snapshot"
+        },
+        "account_rate_limits_read": {
+          "request_label": "provider.account.rate_limits.read",
+          "output_label": "provider.account.rate_limits"
+        },
+        "account_rate_limit_reset_consume": {
+          "request_label": "provider.account.rate_limit_reset.consume",
+          "output_label": "provider.account.rate_limit_reset.consumed"
+        },
+        "account_usage_read": {
+          "request_label": "provider.account.usage.read",
+          "output_label": "provider.account.usage"
+        },
+        "account_workspace_messages_read": {
+          "request_label": "provider.account.workspace_messages.read",
+          "output_label": "provider.account.workspace_messages"
+        },
+        "capabilities_read": {
+          "request_label": "provider.capabilities.read",
+          "output_label": "provider.capabilities"
+        },
+        "thread_compact_start": {
+          "request_label": "provider.thread.compact.start",
+          "output_label": "turn.context.compaction"
+        }
+      },
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "reasoning_summary": "auto",
+      "private_thread_cold_start": "resume_compatible",
+      "model_result_projection": {
+        "max_tokens": 10000
+      },
+      "live_stream": {
+        "artifact_label": "turn.stream",
+        "always_stream_labels": [
+          "agent.message.delta",
+          "turn.reasoning.delta",
+          "turn.plan.delta",
+          "turn.exec.output_delta",
+          "turn.file.change_delta",
+          "turn.dynamic_tool_call",
+          "turn.started"
+        ],
+        "active_turn_stream_labels": [
+          "provider.account.rate_limits.updated",
+          "account.rate_limits"
+        ],
+        "phase_rules": [
+          {
+            "label": "turn.reasoning",
+            "field": "lifecycle",
+            "stream_values": [
+              "started"
+            ],
+            "artifact_values": [
+              "completed"
+            ]
+          }
+        ]
+      },
+      "context_output_labels": [
+        "interface.artifact.output",
+        "interface.context.updated",
+        "tool.call",
+        "turn.control.acknowledged",
+        "turn.interrupted.result",
+        "turn.context.compaction",
+        "turn.error",
+        "operator.approval.request",
+        "operator.elicitation.request",
+        "turn.agent_message",
+        "turn.reasoning",
+        "turn.plan.update"
+      ],
+      "client_projection_output_labels": [
+        "turn.input.acknowledged",
+        "interface.artifact.output",
+        "interface.context.updated",
+        "tool.call",
+        "turn.error",
+        "turn.control.acknowledged",
+        "turn.control.failed",
+        "turn.interrupted.result",
+        "operator.approval.request",
+        "operator.elicitation.request",
+        "operator.user_input.request",
+        "provider.models.catalog",
+        "provider.operation.error",
+        "provider.account.login.completed",
+        "provider.account.updated",
+        "provider.account.rate_limits.updated",
+        "provider.account.login.started",
+        "provider.account.login.cancelled",
+        "provider.account.login.status",
+        "provider.account.logged_out",
+        "provider.account.snapshot",
+        "provider.account.rate_limits",
+        "provider.account.rate_limit_reset.consumed",
+        "provider.account.usage",
+        "provider.account.workspace_messages",
+        "provider.capabilities",
+        "turn.stream",
+        "agent.message.delta",
+        "turn.agent_message",
+        "turn.reasoning",
+        "turn.reasoning.delta",
+        "turn.plan.update",
+        "turn.plan.delta",
+        "turn.exec.command",
+        "turn.exec.output_delta",
+        "turn.exec.terminal_interaction",
+        "turn.file.change",
+        "turn.file.change_delta",
+        "turn.diff.updated",
+        "turn.web_search",
+        "lifecycle.event",
+        "hook.catalog",
+        "hook.catalog.error",
+        "hook.result",
+        "turn.hook.prompt",
+        "turn.mcp.tool_call",
+        "turn.mcp.progress",
+        "turn.mcp.status",
+        "turn.dynamic_tool_call",
+        "turn.collaboration",
+        "turn.subagent.activity",
+        "turn.image.view",
+        "turn.sleep",
+        "turn.image.generation",
+        "turn.review.entered",
+        "turn.review.exited",
+        "turn.context.compaction",
+        "turn.started",
+        "turn.completed",
+        "turn.model.rerouted",
+        "turn.model.verification",
+        "turn.auth_recovery.started",
+        "turn.auth_recovery.completed",
+        "turn.warning",
+        "turn.auto_review.started",
+        "turn.auto_review.completed",
+        "turn.operator_request.resolved",
+        "goal.status",
+        "account.rate_limits"
+      ],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "turn.interrupted.result",
+        "turn.error"
+      ]
+    },
+    "residual_ambient": {
+      "transport": "codex_app_server_cli",
+      "status": "declared_residual_not_octopus_authority",
+      "boundary": "Codex app-server has no raw model endpoint. Octopus suppresses known path-loaded ambient and declares the remaining interface-assembled frame as ledger evidence.",
+      "spawn": {
+        "subcommand": "app-server",
+        "managed_cli": {
+          "executable": "interface://world_provider_codex/packages/bin/codex"
+        },
+        "compatibility": {
+          "minimum_version": "0.162.0",
+          "required_features": {
+            "code_mode_host": true,
+            "instant_interrupt": true
+          }
+        },
+        "extra_argv": [],
+        "isolation_overrides": [
+          "project_doc_max_bytes=0",
+          "suppress_unstable_features_warning=true",
+          "model_context_window=371851",
+          "model_auto_compact_token_limit=350000",
+          "features.shell_tool=false",
+          "features.unified_exec=false",
+          "features.shell_snapshot=false",
+          "features.hooks=false",
+          "features.multi_agent=false",
+          "features.multi_agent_v2=false",
+          "agents.enabled=false",
+          "features.apps=false",
+          "features.plugins=false",
+          "features.memories=false",
+          "features.tool_suggest=false",
+          "features.in_app_browser=false",
+          "features.browser_use=false",
+          "features.browser_use_full_cdp_access=false",
+          "features.browser_use_external=false",
+          "features.computer_use=false",
+          "features.remote_plugin=false",
+          "features.plugin_sharing=false",
+          "features.skill_mcp_dependency_install=false",
+          "features.skill_search=false",
+          "features.mentions_v2=false",
+          "features.guardian_approval=false",
+          "features.tool_call_mcp_elicitation=false",
+          "features.auth_elicitation=false",
+          "features.personality=false",
+          "features.workspace_dependencies=false",
+          "features.code_mode_host=true",
+          "features.instant_interrupt=true",
+          "features.unified_image_budget=true",
+          "features.image_resize_notice=true",
+          "personality=none",
+          "sandbox_mode=read-only",
+          "skills.include_instructions=false",
+          "include_apps_instructions=false",
+          "features.goals=false",
+          "features.image_generation=false",
+          "features.tool_search=false",
+          "features.search_tool=false",
+          "features.request_permissions_tool=false",
+          "features.sleep_tool=false",
+          "features.current_time_reminder=false",
+          "tools.experimental_request_user_input.enabled=false"
+        ],
+        "home_env": "CODEX_HOME",
+        "isolated_cwd": "codex-cwd",
+        "connect_on_ready": false,
+        "idle_disconnect_ms": 300000
+      },
+      "private_auth_store": {
+        "auth_file_env": "OCTOPUS_MACHINE_CODEX_AUTH_FILE"
+      },
+      "residual_sources": [
+        {
+          "name": "codex_core_system_developer_tool_policy",
+          "suppressible_by_current_config": false,
+          "octopus_authority": false
+        },
+        {
+          "name": "codex_env_context_input_item",
+          "fields": [
+            "cwd",
+            "shell",
+            "current_date",
+            "timezone",
+            "filesystem",
+            "permission_profile"
+          ],
+          "suppressible_by_current_config": false,
+          "octopus_authority": false
+        },
+        {
+          "name": "codex_update_plan_tool_spec",
+          "suppressible_by_current_config": false,
+          "octopus_authority": false,
+          "execution_boundary": "interface handler fails closed on server-initiated native tool requests; Octopus tools execute only as artifacts through granted worker-environment interfaces"
+        }
+      ],
+      "suppressed_sources": [
+        "CODEX_HOME/AGENTS.md via curated CODEX_HOME",
+        "repo AGENTS.md/CLAUDE.md via project_doc_max_bytes=0 and repo-free cwd",
+        "non-Octopus product ambient instruction sources via explicit interface config pins",
+        "shell/exec/apply_patch/view_image via empty per-thread environments"
+      ]
+    }
+  }
+}

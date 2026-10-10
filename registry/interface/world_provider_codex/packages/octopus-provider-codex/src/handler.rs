@@ -1,0 +1,20930 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use octopus_appserver_proto::{
+    AccountLoginCompletedNotification, AccountUpdatedNotification, AdditionalContextEntry,
+    AdditionalContextKind, CancelLoginAccountParams,
+    CancelLoginAccountResponse, ClientRequest, CommandExecutionSource, CommandExecutionStatus,
+    ConsumeAccountRateLimitResetCreditParams, ConsumeAccountRateLimitResetCreditResponse,
+    DynamicToolCallOutputContentItem, DynamicToolCallResponse, DynamicToolFunctionSpec,
+    DynamicToolNamespaceSpec, DynamicToolNamespaceTool, DynamicToolSpec, GetAccountParams,
+    GetAccountRateLimitsResponse, GetAccountResponse, GetAccountTokenUsageParams,
+    GetAccountTokenUsageResponse, GetWorkspaceMessagesResponse, HookHandlerMetadata, HookSource,
+    HookTrustStatus, HooksListEntry, HooksListParams, HooksListResponse, ItemCompletedNotification,
+    JSONRPCMessage, JSONRPCRequest, LoginAccountParams, LoginAccountResponse,
+    LogoutAccountResponse, ModelListParams, ModelListResponse, ModelProviderCapabilitiesReadParams,
+    ModelProviderCapabilitiesReadResponse, ModelSafetyBufferingUpdatedNotification, RequestId,
+    SandboxMode, ServerNotification, ServerRequest, SortDirection, ThreadCompactStartParams,
+    ThreadCompactStartResponse, ThreadInjectItemsParams, ThreadInjectItemsResponse, ThreadItem,
+    ThreadItemsListParams, ThreadItemsListResponse, ThreadReadParams, ThreadReadResponse,
+    ThreadResumeParams, ThreadResumeResponse, ThreadTurnsListParams, ThreadTurnsListResponse,
+    ThreadStartParams, ThreadStartResponse, ThreadTokenUsage, TokenUsageBreakdown,
+    TurnEnvironmentParams, TurnInterruptParams, TurnInterruptResponse, TurnItemsView, TurnPlanStep,
+    TurnPlanUpdatedNotification, TurnStartParams, TurnStatus, TurnSteerParams, TurnSteerResponse,
+    UserInput, WebSearchAction,
+};
+use octopus_descriptors::{InterfaceId, MarkId, VerifierId};
+use octopus_interfaces::{
+    ArtifactBindingPayload, InterfaceArtifactFile, InterfaceArtifactManifest,
+    InterfaceBoundaryError as InterfaceDriverError, InterfaceDescriptor, InterfaceDriverConfig,
+    InterfaceInvocationEnvelope, RuntimeInvocationMetadata,
+};
+use octopus_ledger::{ArtifactRef, InvocationMetadata, RequiredVerifiedArtifact};
+use octopus_login::AuthManager;
+use octopus_model_context_render::{
+    model_hidden_tool_names, model_visible_affordances, render_model_context_block,
+    resolve_instruction_context,
+};
+use octopus_protocol::config_types::{ReasoningSummary, WebSearchMode};
+use octopus_protocol::models::MessagePhase;
+use octopus_protocol::openai_models::ReasoningEffort;
+use octopus_provider_run_authoring::{
+    ProviderEmission, ProviderEmissionRoute, ProviderInvocationSessionSnapshot,
+    ProviderVerifiedInput, SessionContextArtifact,
+};
+use octopus_tool_handlers::ToolResultArtifact;
+use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, watch};
+
+use crate::auth::{ScopedSecretError, ScopedSecretStore};
+use crate::lifecycle::{
+    LIFECYCLE_CONNECTION_LABEL, LIFECYCLE_DECISION_LABEL, LIFECYCLE_EVENT_LABEL,
+    LIFECYCLE_HANDLER_OUTPUT_LABEL, LIFECYCLE_HANDLER_PROMPT_LABEL, LIFECYCLE_HANDLER_TASK_LABEL,
+    LifecycleBinding, LifecycleContinuation, LifecycleEventArtifact, LifecycleEventName,
+    LifecycleInbound, LifecyclePlannedOutput, LifecycleRoute, LifecycleTrigger,
+    LifecycleVerifiedInput, artifact_ref_for_file, decode_lifecycle_inbound, validate_held_file,
+};
+use crate::live_stream::{
+    InputRecordedObservation, InputRecordedSource, LiveStreamDisposition, LiveStreamRules,
+    LiveTurnIdentity, LiveTurnStream,
+    artifact_payload_blake3,
+};
+use crate::{AppServerClient, AppServerEvent, AppServerRequestHandle, TypedRequestError};
+use crate::run_affordances::{NativePending, NativeStep, PeerAction, PeerMessage, RunAffordances, PEER_MESSAGE_LABEL};
+
+#[path = "tool_operator_request.rs"]
+mod tool_operator_request;
+use tool_operator_request::{ToolOperatorContinuity, ToolOperatorPhase, ToolOperatorRequest};
+
+pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
+
+pub(crate) const PROVIDER_TRANSPORT_DISPATCH_LABEL: &str = "provider.transport.dispatch";
+const RECOVERY_ROLLOUT_MAX_LINE_BYTES: usize = crate::result_media::RECOVERY_ROLLOUT_MAX_LINE_BYTES;
+const SOURCE_ARTIFACT_FIELD: &str = "source_artifact";
+const OPERATOR_MESSAGE_LABEL: &str = "operator.message";
+const INTERFACE_ARTIFACT_OUTPUT_LABEL: &str = "interface.artifact.output";
+const TOOL_CALL_LABEL: &str = "tool.call";
+const INTERFACE_CONTEXT_UPDATED_LABEL: &str = "interface.context.updated";
+const OPERATOR_APPROVAL_REQUEST_LABEL: &str = "operator.approval.request";
+const OPERATOR_ELICITATION_REQUEST_LABEL: &str = "operator.elicitation.request";
+const OPERATOR_USER_INPUT_REQUEST_LABEL: &str = "operator.user_input.request";
+const OPERATOR_APPROVAL_RESPONSE_LABEL: &str = "operator.approval.response";
+const OPERATOR_ELICITATION_RESPONSE_LABEL: &str = "operator.elicitation.response";
+const OPERATOR_USER_INPUT_RESPONSE_LABEL: &str = "operator.user_input.response";
+pub(crate) const OPERATOR_TURN_CONTROL_LABEL: &str = "operator.turn.control";
+pub(crate) const TURN_CONTROL_ACKNOWLEDGED_LABEL: &str = "turn.control.acknowledged";
+pub(crate) const TURN_INPUT_ACKNOWLEDGED_LABEL: &str = "turn.input.acknowledged";
+pub(crate) const TURN_CONTROL_FAILED_LABEL: &str = "turn.control.failed";
+
+const TURN_REASONING_LABEL: &str = "turn.reasoning";
+const TURN_PLAN_UPDATE_LABEL: &str = "turn.plan.update";
+const CONTEXT_WINDOW_USAGE_FIELD: &str = "context_window_usage";
+const PROVIDER_TOKEN_USAGE_FIELD: &str = "provider_token_usage";
+const TURN_EXEC_COMMAND_LABEL: &str = "turn.exec.command";
+const HOOK_RESULT_LABEL: &str = "hook.result";
+const GOAL_STATUS_LABEL: &str = "goal.status";
+const TURN_ERROR_LABEL: &str = "turn.error";
+const PROVIDER_AUTHENTICATION_FAILURE_CODE: &str = "provider.authentication.invalid";
+const PROVIDER_CONTINUITY_INCOMPATIBLE_CODE: &str = "provider.continuity.incompatible";
+const CODEX_CONTINUITY_MALFORMED_PREFIX: &str = "Codex continuity state is malformed: ";
+const AGENT_MESSAGE_DELTA_LABEL: &str = "agent.message.delta";
+const TURN_AGENT_MESSAGE_LABEL: &str = "turn.agent_message";
+const TURN_WEB_SEARCH_LABEL: &str = "turn.web_search";
+const HOOK_CATALOG_LABEL: &str = "hook.catalog";
+const HOOK_CATALOG_ERROR_LABEL: &str = "hook.catalog.error";
+const TURN_HOOK_PROMPT_LABEL: &str = "turn.hook.prompt";
+const TURN_FILE_CHANGE_LABEL: &str = "turn.file.change";
+const TURN_MCP_TOOL_CALL_LABEL: &str = "turn.mcp.tool_call";
+const TURN_DYNAMIC_TOOL_CALL_LABEL: &str = "turn.dynamic_tool_call";
+pub(crate) const TURN_INTERRUPTED_RESULT_LABEL: &str = "turn.interrupted.result";
+const TURN_COLLABORATION_LABEL: &str = "turn.collaboration";
+const TURN_SUBAGENT_ACTIVITY_LABEL: &str = "turn.subagent.activity";
+const TURN_IMAGE_VIEW_LABEL: &str = "turn.image.view";
+const TURN_SLEEP_LABEL: &str = "turn.sleep";
+const TURN_IMAGE_GENERATION_LABEL: &str = "turn.image.generation";
+const TURN_REVIEW_ENTERED_LABEL: &str = "turn.review.entered";
+const TURN_REVIEW_EXITED_LABEL: &str = "turn.review.exited";
+const TURN_PLAN_DELTA_LABEL: &str = "turn.plan.delta";
+const TURN_REASONING_DELTA_LABEL: &str = "turn.reasoning.delta";
+const TURN_EXEC_OUTPUT_DELTA_LABEL: &str = "turn.exec.output_delta";
+const TURN_FILE_CHANGE_DELTA_LABEL: &str = "turn.file.change_delta";
+const TURN_MCP_PROGRESS_LABEL: &str = "turn.mcp.progress";
+const TURN_DIFF_UPDATED_LABEL: &str = "turn.diff.updated";
+const TURN_CONTEXT_COMPACTION_LABEL: &str = "turn.context.compaction";
+const TURN_MODEL_REROUTED_LABEL: &str = "turn.model.rerouted";
+const TURN_MODEL_VERIFICATION_LABEL: &str = "turn.model.verification";
+const TURN_AUTH_RECOVERY_STARTED_LABEL: &str = "turn.auth_recovery.started";
+const TURN_AUTH_RECOVERY_COMPLETED_LABEL: &str = "turn.auth_recovery.completed";
+const TURN_WARNING_LABEL: &str = "turn.warning";
+const TURN_STARTED_LABEL: &str = "turn.started";
+const TURN_COMPLETED_LABEL: &str = "turn.completed";
+const TURN_TERMINAL_INTERACTION_LABEL: &str = "turn.exec.terminal_interaction";
+const TURN_AUTO_REVIEW_STARTED_LABEL: &str = "turn.auto_review.started";
+const TURN_AUTO_REVIEW_COMPLETED_LABEL: &str = "turn.auto_review.completed";
+const TURN_OPERATOR_REQUEST_RESOLVED_LABEL: &str = "turn.operator_request.resolved";
+const TURN_MCP_STATUS_LABEL: &str = "turn.mcp.status";
+const ACCOUNT_RATE_LIMITS_LABEL: &str = "account.rate_limits";
+const PROVIDER_MODELS_LIST_LABEL: &str = "provider.models.list";
+const PROVIDER_MODELS_CATALOG_LABEL: &str = "provider.models.catalog";
+const PROVIDER_OPERATION_ERROR_LABEL: &str = "provider.operation.error";
+const PROVIDER_ACCOUNT_LOGIN_START_LABEL: &str = "provider.account.login.start";
+const PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL: &str = "provider.account.login.started";
+const PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL: &str = "provider.account.login.cancel";
+const PROVIDER_ACCOUNT_LOGIN_CANCELLED_LABEL: &str = "provider.account.login.cancelled";
+const PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL: &str = "provider.account.login.status.read";
+const PROVIDER_ACCOUNT_LOGIN_STATUS_LABEL: &str = "provider.account.login.status";
+const PROVIDER_ACCOUNT_LOGOUT_LABEL: &str = "provider.account.logout";
+const PROVIDER_ACCOUNT_LOGGED_OUT_LABEL: &str = "provider.account.logged_out";
+const PROVIDER_ACCOUNT_READ_LABEL: &str = "provider.account.read";
+const PROVIDER_ACCOUNT_SNAPSHOT_LABEL: &str = "provider.account.snapshot";
+const PROVIDER_ACCOUNT_RATE_LIMITS_READ_LABEL: &str = "provider.account.rate_limits.read";
+const PROVIDER_ACCOUNT_RATE_LIMITS_LABEL: &str = "provider.account.rate_limits";
+const PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL: &str =
+    "provider.account.rate_limit_reset.consume";
+const PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUMED_LABEL: &str =
+    "provider.account.rate_limit_reset.consumed";
+const PROVIDER_ACCOUNT_USAGE_READ_LABEL: &str = "provider.account.usage.read";
+const PROVIDER_ACCOUNT_USAGE_LABEL: &str = "provider.account.usage";
+const PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_READ_LABEL: &str =
+    "provider.account.workspace_messages.read";
+const PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_LABEL: &str = "provider.account.workspace_messages";
+const PROVIDER_CAPABILITIES_READ_LABEL: &str = "provider.capabilities.read";
+const PROVIDER_CAPABILITIES_LABEL: &str = "provider.capabilities";
+const PROVIDER_THREAD_COMPACT_START_LABEL: &str = "provider.thread.compact.start";
+const TURN_TRIGGER_INPUT: &str = "octopus_input";
+const TURN_TRIGGER_TOOL_RESULT_RECOVERY: &str = "octopus_tool_result_recovery";
+const TURN_TRIGGER_RESUME_INTERRUPTED_TASK: &str = "resume_interrupted_task";
+const PROVIDER_ACCOUNT_LOGIN_COMPLETED_LABEL: &str = "provider.account.login.completed";
+const PROVIDER_ACCOUNT_UPDATED_LABEL: &str = "provider.account.updated";
+const PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL: &str = "provider.account.rate_limits.updated";
+const CLIENT_ACTIVITY_OUTPUT_LABELS: &[&str] = &[
+    AGENT_MESSAGE_DELTA_LABEL,
+    TURN_AGENT_MESSAGE_LABEL,
+    TURN_REASONING_LABEL,
+    TURN_REASONING_DELTA_LABEL,
+    TURN_PLAN_UPDATE_LABEL,
+    TURN_PLAN_DELTA_LABEL,
+    TURN_EXEC_COMMAND_LABEL,
+    TURN_EXEC_OUTPUT_DELTA_LABEL,
+    TURN_TERMINAL_INTERACTION_LABEL,
+    TURN_FILE_CHANGE_LABEL,
+    TURN_FILE_CHANGE_DELTA_LABEL,
+    TURN_DIFF_UPDATED_LABEL,
+    TURN_WEB_SEARCH_LABEL,
+    HOOK_CATALOG_LABEL,
+    HOOK_CATALOG_ERROR_LABEL,
+    HOOK_RESULT_LABEL,
+    TURN_HOOK_PROMPT_LABEL,
+    TURN_MCP_TOOL_CALL_LABEL,
+    TURN_MCP_PROGRESS_LABEL,
+    TURN_MCP_STATUS_LABEL,
+    TURN_DYNAMIC_TOOL_CALL_LABEL,
+    TURN_COLLABORATION_LABEL,
+    TURN_SUBAGENT_ACTIVITY_LABEL,
+    TURN_IMAGE_VIEW_LABEL,
+    TURN_SLEEP_LABEL,
+    TURN_IMAGE_GENERATION_LABEL,
+    TURN_REVIEW_ENTERED_LABEL,
+    TURN_REVIEW_EXITED_LABEL,
+    TURN_CONTEXT_COMPACTION_LABEL,
+    TURN_STARTED_LABEL,
+    TURN_COMPLETED_LABEL,
+    TURN_MODEL_REROUTED_LABEL,
+    TURN_MODEL_VERIFICATION_LABEL,
+    TURN_AUTH_RECOVERY_STARTED_LABEL,
+    TURN_AUTH_RECOVERY_COMPLETED_LABEL,
+    TURN_WARNING_LABEL,
+    TURN_AUTO_REVIEW_STARTED_LABEL,
+    TURN_AUTO_REVIEW_COMPLETED_LABEL,
+    TURN_OPERATOR_REQUEST_RESOLVED_LABEL,
+    GOAL_STATUS_LABEL,
+    ACCOUNT_RATE_LIMITS_LABEL,
+];
+
+const REQUIRED_CLIENT_BOUNDARY_OUTPUT_LABELS: &[&str] = &[
+    OPERATOR_USER_INPUT_REQUEST_LABEL,
+    PROVIDER_MODELS_CATALOG_LABEL,
+    PROVIDER_OPERATION_ERROR_LABEL,
+    TURN_CONTROL_FAILED_LABEL,
+    LIFECYCLE_EVENT_LABEL,
+];
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderOperationBinding {
+    request_label: String,
+    output_label: String,
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderOperations {
+    error_output_label: String,
+    account_login_completed_output_label: String,
+    account_updated_output_label: String,
+    account_rate_limits_updated_output_label: String,
+    account_login_start: ProviderOperationBinding,
+    account_login_cancel: ProviderOperationBinding,
+    account_login_status_read: ProviderOperationBinding,
+    account_logout: ProviderOperationBinding,
+    account_read: ProviderOperationBinding,
+    account_rate_limits_read: ProviderOperationBinding,
+    account_rate_limit_reset_consume: ProviderOperationBinding,
+    account_usage_read: ProviderOperationBinding,
+    account_workspace_messages_read: ProviderOperationBinding,
+    capabilities_read: ProviderOperationBinding,
+    #[serde(default)]
+    thread_compact_start: Option<ProviderOperationBinding>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderOperation {
+    AccountLoginStart,
+    AccountLoginCancel,
+    AccountLoginStatusRead,
+    AccountLogout,
+    AccountRead,
+    AccountRateLimitsRead,
+    AccountRateLimitResetConsume,
+    AccountUsageRead,
+    AccountWorkspaceMessagesRead,
+    CapabilitiesRead,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+enum AccountLoginStartRequest {
+    ApiKey { secret_handle: String },
+    ChatgptBrowser { codex_streamlined_login: bool },
+    ChatgptDeviceCode,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountLoginIdRequest {
+    login_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountReadRequest {
+    refresh_token: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountRateLimitResetConsumeRequest {
+    idempotency_key: String,
+    #[serde(default)]
+    credit_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountUsageReadRequest {
+    #[serde(default)]
+    thread_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyProviderOperationRequest {}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ProviderLoginState {
+    Pending { method: &'static str },
+    Completed { success: bool },
+    Cancelled,
+}
+
+fn validate_provider_operations(
+    operations: &ProviderOperations,
+) -> Result<(), InterfaceDriverError> {
+    let mut bindings = vec![
+        (
+            "account_login_start",
+            &operations.account_login_start,
+            PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL,
+        ),
+        (
+            "account_login_cancel",
+            &operations.account_login_cancel,
+            PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_CANCELLED_LABEL,
+        ),
+        (
+            "account_login_status_read",
+            &operations.account_login_status_read,
+            PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_STATUS_LABEL,
+        ),
+        (
+            "account_logout",
+            &operations.account_logout,
+            PROVIDER_ACCOUNT_LOGOUT_LABEL,
+            PROVIDER_ACCOUNT_LOGGED_OUT_LABEL,
+        ),
+        (
+            "account_read",
+            &operations.account_read,
+            PROVIDER_ACCOUNT_READ_LABEL,
+            PROVIDER_ACCOUNT_SNAPSHOT_LABEL,
+        ),
+        (
+            "account_rate_limits_read",
+            &operations.account_rate_limits_read,
+            PROVIDER_ACCOUNT_RATE_LIMITS_READ_LABEL,
+            PROVIDER_ACCOUNT_RATE_LIMITS_LABEL,
+        ),
+        (
+            "account_rate_limit_reset_consume",
+            &operations.account_rate_limit_reset_consume,
+            PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+            PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUMED_LABEL,
+        ),
+        (
+            "account_usage_read",
+            &operations.account_usage_read,
+            PROVIDER_ACCOUNT_USAGE_READ_LABEL,
+            PROVIDER_ACCOUNT_USAGE_LABEL,
+        ),
+        (
+            "account_workspace_messages_read",
+            &operations.account_workspace_messages_read,
+            PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_READ_LABEL,
+            PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_LABEL,
+        ),
+        (
+            "capabilities_read",
+            &operations.capabilities_read,
+            PROVIDER_CAPABILITIES_READ_LABEL,
+            PROVIDER_CAPABILITIES_LABEL,
+        ),
+    ];
+    if let Some(binding) = operations.thread_compact_start.as_ref() {
+        bindings.push((
+            "thread_compact_start",
+            binding,
+            PROVIDER_THREAD_COMPACT_START_LABEL,
+            TURN_CONTEXT_COMPACTION_LABEL,
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    for (name, binding, request_label, output_label) in bindings {
+        if binding.request_label != request_label || binding.output_label != output_label {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "codex_app_server provider_operations.{name} must declare request '{request_label}' and output '{output_label}'"
+            )));
+        }
+        if !labels.insert(binding.request_label.clone())
+            || !labels.insert(binding.output_label.clone())
+        {
+            return Err(InterfaceDriverError::Protocol(
+                "codex_app_server provider operation labels must be unique".to_string(),
+            ));
+        }
+    }
+    let event_labels = [
+        (
+            operations.error_output_label.as_str(),
+            PROVIDER_OPERATION_ERROR_LABEL,
+            "error_output_label",
+        ),
+        (
+            operations.account_login_completed_output_label.as_str(),
+            PROVIDER_ACCOUNT_LOGIN_COMPLETED_LABEL,
+            "account_login_completed_output_label",
+        ),
+        (
+            operations.account_updated_output_label.as_str(),
+            PROVIDER_ACCOUNT_UPDATED_LABEL,
+            "account_updated_output_label",
+        ),
+        (
+            operations.account_rate_limits_updated_output_label.as_str(),
+            PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL,
+            "account_rate_limits_updated_output_label",
+        ),
+    ];
+    for (actual, expected, field) in event_labels {
+        if actual != expected {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "codex_app_server provider_operations.{field} must be '{expected}'"
+            )));
+        }
+        if !labels.insert(actual.to_string()) {
+            return Err(InterfaceDriverError::Protocol(
+                "codex_app_server provider operation labels must be unique".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_provider_operation_label(label: &str) -> bool {
+    label.starts_with("provider.account.")
+        || label.starts_with("provider.models.")
+        || label.starts_with("provider.capabilities")
+        || label == PROVIDER_THREAD_COMPACT_START_LABEL
+}
+
+fn is_undeclared_provider_operation(label: &str, thread_compact_requested: bool) -> bool {
+    !thread_compact_requested
+        && label != PROVIDER_MODELS_LIST_LABEL
+        && is_provider_operation_label(label)
+}
+
+fn provider_operation_error(
+    operation: &str,
+    code: &'static str,
+    category: &'static str,
+    retryable: bool,
+    detail: &'static str,
+) -> CodexTurnOutput {
+    CodexTurnOutput::client(
+        PROVIDER_OPERATION_ERROR_LABEL,
+        serde_json::json!({
+            "operation": operation,
+            "status": "error",
+            "error": {
+                "code": code,
+                "category": category,
+                "retryable": retryable,
+                "detail": detail,
+                "redacted": true,
+            },
+        }),
+    )
+}
+
+fn upstream_operation_error(
+    operation: &'static str,
+    error: &TypedRequestError,
+    detail: &'static str,
+) -> CodexTurnOutput {
+    let (code, category, retryable) = match error {
+        TypedRequestError::Transport { .. } => ("upstream_transport_failed", "upstream", true),
+        TypedRequestError::Server { .. } => ("upstream_request_rejected", "upstream", false),
+        TypedRequestError::Deserialize { .. } => ("upstream_response_malformed", "upstream", false),
+    };
+    provider_operation_error(operation, code, category, retryable, detail)
+}
+
+fn scoped_secret_operation_error(error: ScopedSecretError) -> CodexTurnOutput {
+    let (code, detail) = match error {
+        ScopedSecretError::InvalidHandle(_) => (
+            "secret_handle_invalid",
+            "API-key login requires secret://<exact-interface>/<name>",
+        ),
+        ScopedSecretError::ScopeMismatch => (
+            "secret_scope_mismatch",
+            "API-key secret handle must use the exact provider interface scope",
+        ),
+        ScopedSecretError::Unavailable => (
+            "secret_store_unavailable",
+            "the exact-scoped secret store could not be read",
+        ),
+        ScopedSecretError::Missing => (
+            "secret_not_configured",
+            "the exact-scoped API-key secret is not configured",
+        ),
+        ScopedSecretError::Empty => ("secret_empty", "the exact-scoped API-key secret is empty"),
+    };
+    provider_operation_error(
+        PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+        code,
+        "secret",
+        false,
+        detail,
+    )
+}
+
+fn parse_login_id_request(
+    payload: &[u8],
+    operation: &'static str,
+    sink: &TurnSink<'_>,
+) -> Result<Option<AccountLoginIdRequest>, InterfaceDriverError> {
+    let request: AccountLoginIdRequest = match serde_json::from_slice(payload) {
+        Ok(request) => request,
+        Err(_) => {
+            sink.send(provider_operation_error(
+                operation,
+                "operation_payload_malformed",
+                "protocol",
+                false,
+                "login operation payload must contain only a login_id string",
+            ))?;
+            return Ok(None);
+        }
+    };
+    if request.login_id.is_empty() || request.login_id.trim() != request.login_id {
+        sink.send(provider_operation_error(
+            operation,
+            "login_id_invalid",
+            "protocol",
+            false,
+            "login_id must be a non-empty trimmed string",
+        ))?;
+        return Ok(None);
+    }
+    Ok(Some(request))
+}
+
+fn parse_empty_operation(
+    payload: &[u8],
+    operation: &'static str,
+    sink: &TurnSink<'_>,
+) -> Result<bool, InterfaceDriverError> {
+    if serde_json::from_slice::<EmptyProviderOperationRequest>(payload).is_err() {
+        sink.send(provider_operation_error(
+            operation,
+            "operation_payload_malformed",
+            "protocol",
+            false,
+            "operation payload must be an empty JSON object",
+        ))?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn account_login_completed_output(
+    notification: &AccountLoginCompletedNotification,
+) -> CodexTurnOutput {
+    CodexTurnOutput::client(
+        PROVIDER_ACCOUNT_LOGIN_COMPLETED_LABEL,
+        serde_json::json!({
+            "login_id": notification.login_id,
+            "status": if notification.success { "completed" } else { "failed" },
+            "success": notification.success,
+            "failure": (!notification.success).then(|| serde_json::json!({
+                "code": "upstream_login_failed",
+                "redacted": true,
+            })),
+        }),
+    )
+}
+
+fn account_updated_output(
+    notification: &AccountUpdatedNotification,
+) -> Result<CodexTurnOutput, InterfaceDriverError> {
+    serialized_client_output(PROVIDER_ACCOUNT_UPDATED_LABEL, notification)
+}
+
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelCatalogOperation {
+    request_label: String,
+    output_label: String,
+    default_limit: u32,
+    max_limit: u32,
+    include_hidden: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelCatalogArtifactRequest {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorContinuityConfig {
+    replay_timeout_ms: u64,
+    approval: OperatorApprovalContinuity,
+    elicitation: OperatorProvidedContinuity,
+    user_input: OperatorProvidedContinuity,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorApprovalContinuity {
+    request_label: String,
+    response_label: String,
+    approved: OperatorEvidenceEdge,
+    denied: OperatorEvidenceEdge,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorProvidedContinuity {
+    request_label: String,
+    response_label: String,
+    provided: OperatorEvidenceEdge,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorEvidenceEdge {
+    mark: String,
+    verifier: String,
+}
+
+impl OperatorEvidenceEdge {
+    fn required(&self, artifact_label: &str, request_id: &str) -> RequiredVerifiedArtifact {
+        RequiredVerifiedArtifact {
+            mark: MarkId::new(&self.mark),
+            artifact_label: artifact_label.to_string(),
+            verifier: VerifierId::new(&self.verifier),
+            params: serde_json::json!({"request_id": request_id}),
+        }
+    }
+}
+
+impl OperatorContinuityConfig {
+    fn validate(self) -> Result<Self, InterfaceDriverError> {
+        if self.replay_timeout_ms == 0 {
+            return Err(InterfaceDriverError::Protocol(
+                "codex_app_server operator_continuity.replay_timeout_ms must be positive"
+                    .to_string(),
+            ));
+        }
+        let fields = [
+            (
+                "approval.request_label",
+                self.approval.request_label.as_str(),
+            ),
+            (
+                "approval.response_label",
+                self.approval.response_label.as_str(),
+            ),
+            (
+                "approval.approved.mark",
+                self.approval.approved.mark.as_str(),
+            ),
+            (
+                "approval.approved.verifier",
+                self.approval.approved.verifier.as_str(),
+            ),
+            ("approval.denied.mark", self.approval.denied.mark.as_str()),
+            (
+                "approval.denied.verifier",
+                self.approval.denied.verifier.as_str(),
+            ),
+            (
+                "elicitation.request_label",
+                self.elicitation.request_label.as_str(),
+            ),
+            (
+                "elicitation.response_label",
+                self.elicitation.response_label.as_str(),
+            ),
+            (
+                "elicitation.provided.mark",
+                self.elicitation.provided.mark.as_str(),
+            ),
+            (
+                "elicitation.provided.verifier",
+                self.elicitation.provided.verifier.as_str(),
+            ),
+            (
+                "user_input.request_label",
+                self.user_input.request_label.as_str(),
+            ),
+            (
+                "user_input.response_label",
+                self.user_input.response_label.as_str(),
+            ),
+            (
+                "user_input.provided.mark",
+                self.user_input.provided.mark.as_str(),
+            ),
+            (
+                "user_input.provided.verifier",
+                self.user_input.provided.verifier.as_str(),
+            ),
+        ];
+        for (field, value) in fields {
+            if value.trim().is_empty() || value.trim() != value {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "codex_app_server operator_continuity.{field} must be non-empty and trimmed"
+                )));
+            }
+        }
+        let exact = [
+            (
+                self.approval.request_label.as_str(),
+                OPERATOR_APPROVAL_REQUEST_LABEL,
+                "approval.request_label",
+            ),
+            (
+                self.approval.response_label.as_str(),
+                OPERATOR_APPROVAL_RESPONSE_LABEL,
+                "approval.response_label",
+            ),
+            (
+                self.approval.approved.mark.as_str(),
+                "operator.approval",
+                "approval.approved.mark",
+            ),
+            (
+                self.approval.approved.verifier.as_str(),
+                "operator_approval",
+                "approval.approved.verifier",
+            ),
+            (
+                self.approval.denied.mark.as_str(),
+                "operator.input.provided",
+                "approval.denied.mark",
+            ),
+            (
+                self.approval.denied.verifier.as_str(),
+                "operator_input",
+                "approval.denied.verifier",
+            ),
+            (
+                self.elicitation.request_label.as_str(),
+                OPERATOR_ELICITATION_REQUEST_LABEL,
+                "elicitation.request_label",
+            ),
+            (
+                self.elicitation.response_label.as_str(),
+                OPERATOR_ELICITATION_RESPONSE_LABEL,
+                "elicitation.response_label",
+            ),
+            (
+                self.elicitation.provided.mark.as_str(),
+                "operator.input.provided",
+                "elicitation.provided.mark",
+            ),
+            (
+                self.elicitation.provided.verifier.as_str(),
+                "operator_input",
+                "elicitation.provided.verifier",
+            ),
+            (
+                self.user_input.request_label.as_str(),
+                OPERATOR_USER_INPUT_REQUEST_LABEL,
+                "user_input.request_label",
+            ),
+            (
+                self.user_input.response_label.as_str(),
+                OPERATOR_USER_INPUT_RESPONSE_LABEL,
+                "user_input.response_label",
+            ),
+            (
+                self.user_input.provided.mark.as_str(),
+                "operator.input.provided",
+                "user_input.provided.mark",
+            ),
+            (
+                self.user_input.provided.verifier.as_str(),
+                "operator_input",
+                "user_input.provided.verifier",
+            ),
+        ];
+        for (actual, expected, field) in exact {
+            if actual != expected {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "codex_app_server operator_continuity.{field} must be '{expected}', found '{actual}'"
+                )));
+            }
+        }
+        Ok(self)
+    }
+
+    fn approval_inputs(&self, request_id: &str) -> Vec<ProviderVerifiedInput> {
+        [&self.approval.approved, &self.approval.denied]
+            .into_iter()
+            .map(|edge| ProviderVerifiedInput {
+                also_deliver_to_tool: None,
+                artifact_label: self.approval.response_label.clone(),
+                required_verified_artifact: edge
+                    .required(&self.approval.response_label, request_id),
+            })
+            .collect()
+    }
+
+    fn provided_input(
+        &self,
+        continuity: &OperatorProvidedContinuity,
+        request_id: &str,
+    ) -> Vec<ProviderVerifiedInput> {
+        vec![ProviderVerifiedInput {
+            also_deliver_to_tool: None,
+            artifact_label: continuity.response_label.clone(),
+            required_verified_artifact: continuity
+                .provided
+                .required(&continuity.response_label, request_id),
+        }]
+    }
+}
+
+#[cfg(test)]
+fn test_operator_continuity_config() -> OperatorContinuityConfig {
+    OperatorContinuityConfig {
+        replay_timeout_ms: 30_000,
+        approval: OperatorApprovalContinuity {
+            request_label: OPERATOR_APPROVAL_REQUEST_LABEL.to_string(),
+            response_label: OPERATOR_APPROVAL_RESPONSE_LABEL.to_string(),
+            approved: OperatorEvidenceEdge {
+                mark: "operator.approval".to_string(),
+                verifier: "operator_approval".to_string(),
+            },
+            denied: OperatorEvidenceEdge {
+                mark: "operator.input.provided".to_string(),
+                verifier: "operator_input".to_string(),
+            },
+        },
+        elicitation: OperatorProvidedContinuity {
+            request_label: OPERATOR_ELICITATION_REQUEST_LABEL.to_string(),
+            response_label: OPERATOR_ELICITATION_RESPONSE_LABEL.to_string(),
+            provided: OperatorEvidenceEdge {
+                mark: "operator.input.provided".to_string(),
+                verifier: "operator_input".to_string(),
+            },
+        },
+        user_input: OperatorProvidedContinuity {
+            request_label: OPERATOR_USER_INPUT_REQUEST_LABEL.to_string(),
+            response_label: OPERATOR_USER_INPUT_RESPONSE_LABEL.to_string(),
+            provided: OperatorEvidenceEdge {
+                mark: "operator.input.provided".to_string(),
+                verifier: "operator_input".to_string(),
+            },
+        },
+    }
+    .validate()
+    .expect("test operator continuity config")
+}
+
+struct CodexTurnOutput {
+    label: String,
+    value: serde_json::Value,
+    route: ProviderEmissionRoute,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct InterruptedTurnDrainEvidence {
+    pub(crate) disposition: &'static str,
+    pub(crate) provider_error: Option<serde_json::Value>,
+}
+
+impl InterruptedTurnDrainEvidence {
+    fn transport(disposition: &'static str, provider_error: Option<serde_json::Value>) -> Self {
+        Self {
+            disposition,
+            provider_error,
+        }
+    }
+}
+
+pub(crate) enum InterruptedDrainDecision {
+    Continue,
+    Complete(InterruptedTurnDrainEvidence),
+}
+
+pub(crate) struct InterruptedTurnDrainState {
+    thread_id: String,
+    turn_id: String,
+    provider_error: Option<serde_json::Value>,
+}
+
+impl InterruptedTurnDrainState {
+    pub(crate) fn new(thread_id: String, turn_id: String) -> Self {
+        Self {
+            thread_id,
+            turn_id,
+            provider_error: None,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, event: Option<AppServerEvent>) -> InterruptedDrainDecision {
+        match event {
+            Some(AppServerEvent::ServerNotification(notification)) => {
+                let matches = match server_notification_matches_turn(
+                    &notification,
+                    &self.thread_id,
+                    &self.turn_id,
+                ) {
+                    Ok(matches) => matches,
+                    Err(error) => {
+                        return InterruptedDrainDecision::Complete(
+                            InterruptedTurnDrainEvidence::transport(
+                                "protocol_drift",
+                                Some(serde_json::json!({"error": error.to_string()})),
+                            ),
+                        );
+                    }
+                };
+                if !matches {
+                    return InterruptedDrainDecision::Continue;
+                }
+                match notification {
+                    ServerNotification::Error(error) if error.thread_id == self.thread_id => {
+                        match serde_json::to_value(error) {
+                            Ok(error) => {
+                                self.provider_error = Some(error);
+                                InterruptedDrainDecision::Continue
+                            }
+                            Err(error) => InterruptedDrainDecision::Complete(
+                                InterruptedTurnDrainEvidence::transport(
+                                    "protocol_drift",
+                                    Some(serde_json::json!({"error": error.to_string()})),
+                                ),
+                            ),
+                        }
+                    }
+                    ServerNotification::TurnCompleted(turn)
+                        if turn.thread_id == self.thread_id && turn.turn.id == self.turn_id =>
+                    {
+                        let disposition = if self.provider_error.is_some() {
+                            "turn_completed_after_provider_error"
+                        } else {
+                            "turn_completed"
+                        };
+                        InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                            disposition,
+                            self.provider_error.take(),
+                        ))
+                    }
+                    _ => InterruptedDrainDecision::Continue,
+                }
+            }
+            Some(AppServerEvent::ServerRequest(request)) => {
+                InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                    "unexpected_server_request",
+                    Some(serde_json::json!({
+                        "method": server_request_method(&request),
+                    })),
+                ))
+            }
+            Some(AppServerEvent::UnknownServerNotification(notification)) => {
+                InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                    "unknown_server_notification",
+                    Some(serde_json::json!({"method": notification.method})),
+                ))
+            }
+            Some(AppServerEvent::Disconnected { message }) => {
+                InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                    "disconnected",
+                    Some(serde_json::json!({
+                        "message": message,
+                        "provider_error": self.provider_error.take(),
+                    })),
+                ))
+            }
+            Some(AppServerEvent::Lagged { skipped }) => {
+                InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                    "event_stream_lagged",
+                    Some(serde_json::json!({
+                        "skipped": skipped,
+                        "provider_error": self.provider_error.take(),
+                    })),
+                ))
+            }
+            None => InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                "event_stream_closed",
+                self.provider_error.take(),
+            )),
+        }
+    }
+}
+
+impl CodexTurnOutput {
+    fn client(label: impl Into<String>, value: serde_json::Value) -> Self {
+        Self {
+            label: label.into(),
+            value,
+            route: ProviderEmissionRoute::ClientProjection,
+        }
+    }
+
+    fn with_verified_inputs(mut self, inputs: Vec<ProviderVerifiedInput>) -> Self {
+        self.route = ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { inputs };
+        self
+    }
+
+    fn lifecycle(output: LifecyclePlannedOutput) -> Self {
+        Self {
+            label: output.label,
+            value: output.value,
+            route: provider_route_from_lifecycle(output.route),
+        }
+    }
+
+    fn final_message(
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        text: &str,
+        context_window_usage: Option<ContextWindowUsage>,
+    ) -> Self {
+        let mut value = serde_json::json!({
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "item_id": item_id,
+            "text": text,
+            "phase": MessagePhase::FinalAnswer,
+            "lifecycle": "completed",
+        });
+        if let Some(usage) = context_window_usage {
+            value
+                .as_object_mut()
+                .expect("terminal text output is an object")
+                .insert(
+                    CONTEXT_WINDOW_USAGE_FIELD.to_string(),
+                    serde_json::to_value(usage).expect("context window usage is serializable"),
+                );
+        }
+        Self::client(INTERFACE_ARTIFACT_OUTPUT_LABEL, value)
+    }
+
+    fn with_provider_token_usage(mut self, usage: ProviderTokenUsageEvidence) -> Self {
+        self.value
+            .as_object_mut()
+            .expect("terminal text output is an object")
+            .insert(
+                PROVIDER_TOKEN_USAGE_FIELD.to_string(),
+                serde_json::to_value(usage).expect("provider token usage is serializable"),
+            );
+        self
+    }
+
+    fn native_tool_call(
+        tool: String,
+        arguments: serde_json::Value,
+        correlation_id: String,
+    ) -> Self {
+        let route = ProviderEmissionRoute::Tool { tool: tool.clone() };
+        Self {
+            label: TOOL_CALL_LABEL.to_string(),
+            value: serde_json::json!({
+                "tool": tool,
+                "arguments": arguments,
+                "correlation_id": correlation_id,
+            }),
+            route,
+        }
+    }
+
+    fn interface_operation_call(
+        operation: &InterfaceOperationAffordance,
+        arguments: serde_json::Value,
+        correlation_id: String,
+    ) -> Self {
+        Self {
+            label: operation.request_label.clone(),
+            value: serde_json::json!({
+                "operation": operation.name,
+                "arguments": arguments,
+                "correlation_id": correlation_id,
+            }),
+            route: ProviderEmissionRoute::Interface {
+                interface: operation.interface.clone(),
+            },
+        }
+    }
+
+    fn dynamic_tool_started(
+        namespace: String,
+        tool: String,
+        arguments: serde_json::Value,
+        call_id: String,
+        thread_id: String,
+        turn_id: String,
+    ) -> Self {
+        Self::client(
+            TURN_DYNAMIC_TOOL_CALL_LABEL,
+            serde_json::json!({
+                "item_id": call_id,
+                "call_id": call_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "namespace": namespace,
+                "tool": tool,
+                "arguments": arguments,
+                "status": "started",
+                "lifecycle": "started",
+            }),
+        )
+    }
+
+    fn dynamic_tool_completed(
+        namespace: String,
+        tool: String,
+        call_id: String,
+        thread_id: String,
+        turn_id: String,
+        ok: bool,
+        body: Option<serde_json::Value>,
+        error: Option<octopus_tool_handlers::ToolResultError>,
+    ) -> Self {
+        Self::client(
+            TURN_DYNAMIC_TOOL_CALL_LABEL,
+            serde_json::json!({
+                "item_id": call_id,
+                "call_id": call_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "namespace": namespace,
+                "tool": tool,
+                "ok": ok,
+                "success": ok,
+                "body": body,
+                "error": error,
+                "status": if ok { "completed" } else { "failed" },
+                "lifecycle": "completed",
+            }),
+        )
+    }
+
+    fn dynamic_tool_completed_after_interrupt(
+        namespace: String,
+        tool: String,
+        call_id: String,
+        thread_id: String,
+        turn_id: String,
+        ok: bool,
+        body: Option<serde_json::Value>,
+        error: Option<octopus_tool_handlers::ToolResultError>,
+    ) -> Self {
+        Self::client(
+            TURN_DYNAMIC_TOOL_CALL_LABEL,
+            serde_json::json!({
+                "item_id": call_id,
+                "call_id": call_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "namespace": namespace,
+                "tool": tool,
+                "ok": ok,
+                "success": ok,
+                "body": body,
+                "error": error,
+                "status": if ok { "completed" } else { "failed" },
+                "lifecycle": "completed",
+                "turn_interrupted": true,
+                "returned_to_model": false,
+                "result_disposition": "durably_admitted_after_interrupt",
+            }),
+        )
+    }
+
+    fn interface_operation_completed(
+        operation: String,
+        call_id: String,
+        thread_id: String,
+        turn_id: String,
+        ok: bool,
+        result: serde_json::Value,
+    ) -> Self {
+        Self::client(
+            TURN_DYNAMIC_TOOL_CALL_LABEL,
+            serde_json::json!({
+                "item_id": call_id,
+                "call_id": call_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "tool": operation,
+                "ok": ok,
+                "success": ok,
+                "result": result,
+                "status": if ok { "completed" } else { "failed" },
+                "lifecycle": "completed",
+            }),
+        )
+    }
+
+    fn interface_operation_completed_after_interrupt(
+        operation: String,
+        call_id: String,
+        thread_id: String,
+        turn_id: String,
+        ok: bool,
+        result: serde_json::Value,
+    ) -> Self {
+        Self::client(
+            TURN_DYNAMIC_TOOL_CALL_LABEL,
+            serde_json::json!({
+                "item_id": call_id,
+                "call_id": call_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "tool": operation,
+                "operation": operation,
+                "ok": ok,
+                "success": ok,
+                "result": result,
+                "status": if ok { "completed" } else { "failed" },
+                "lifecycle": "completed",
+                "turn_interrupted": true,
+                "returned_to_model": false,
+                "result_disposition": "durably_admitted_after_interrupt",
+            }),
+        )
+    }
+
+    fn interrupted_result_closed(
+        result_kind: &'static str,
+        correlation_id: String,
+        thread_id: String,
+        turn_id: String,
+        ok: bool,
+        source_artifact: &ArtifactRef,
+    ) -> Self {
+        Self::client(
+            TURN_INTERRUPTED_RESULT_LABEL,
+            serde_json::json!({
+                "result_kind": result_kind,
+                "correlation_id": correlation_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "ok": ok,
+                "turn_interrupted": true,
+                "returned_to_model": false,
+                "result_disposition": "durably_admitted_after_interrupt",
+                "source_artifact": source_artifact,
+            }),
+        )
+    }
+
+    fn approval_request(
+        label: &str,
+        request_id: String,
+        kind: &'static str,
+        title: String,
+        detail: serde_json::Value,
+        method: String,
+    ) -> Self {
+        Self::client(
+            label,
+            serde_json::json!({
+                "request_id": request_id,
+                "kind": kind,
+                "title": title,
+                "detail": detail,
+                "method": method,
+            }),
+        )
+    }
+
+    fn elicitation_request(
+        label: &str,
+        request_id: String,
+        message: String,
+        requested_schema: serde_json::Value,
+        method: String,
+    ) -> Self {
+        Self::client(
+            label,
+            serde_json::json!({
+                "request_id": request_id,
+                "message": message,
+                "requested_schema": requested_schema,
+                "method": method,
+            }),
+        )
+    }
+
+    fn user_input_request(
+        label: &str,
+        request_id: String,
+        questions: serde_json::Value,
+        auto_resolution_ms: Option<u64>,
+        is_blocking: bool,
+        method: String,
+    ) -> Self {
+        let title = questions
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("header"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Input requested")
+            .to_string();
+        let message = questions
+            .as_array()
+            .and_then(|rows| rows.first())
+            .and_then(|row| row.get("question"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Self::client(
+            label,
+            serde_json::json!({
+                "request_id": request_id,
+                "title": title,
+                "message": message,
+                "questions": questions,
+                "auto_resolution_ms": auto_resolution_ms,
+                "is_blocking": is_blocking,
+                "method": method,
+            }),
+        )
+    }
+
+    fn scoped_message_delta(
+        seq: u64,
+        text: String,
+        turn_id: String,
+        item_id: String,
+        phase: Option<MessagePhase>,
+    ) -> Self {
+        Self::client(
+            AGENT_MESSAGE_DELTA_LABEL,
+            serde_json::json!({
+                "seq": seq,
+                "text": text,
+                "turn_id": turn_id,
+                "item_id": item_id,
+                "phase": phase,
+                "lifecycle": "streaming",
+            }),
+        )
+    }
+
+    fn reasoning(item_id: String, summary: Vec<String>, content: Vec<String>) -> Self {
+        Self::client(
+            TURN_REASONING_LABEL,
+            serde_json::json!({
+                "item_id": item_id,
+                "summary": summary,
+                "content": content,
+            }),
+        )
+    }
+
+    fn proposed_plan(item_id: String, text: String) -> Self {
+        Self::client(
+            TURN_PLAN_UPDATE_LABEL,
+            serde_json::json!({
+                "item_id": item_id,
+                "text": text,
+                "plan_kind": "proposed_plan",
+                "octopus_authority": "informational",
+                "model_stream_authority": "completed_item",
+                "execution_authority": "octopus_checkpoints",
+            }),
+        )
+    }
+
+    fn agent_checklist(plan: &TurnPlanUpdatedNotification, text: String) -> Self {
+        Self::client(
+            TURN_PLAN_UPDATE_LABEL,
+            serde_json::json!({
+                "item_id": plan.turn_id,
+                "thread_id": plan.thread_id,
+                "turn_id": plan.turn_id,
+                "text": text,
+                "explanation": plan.explanation,
+                "steps": plan.plan,
+                "plan_kind": "agent_checklist",
+                "octopus_authority": "informational",
+                "model_stream_authority": "tool_snapshot",
+                "execution_authority": "octopus_checkpoints",
+            }),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_command(
+        item_id: String,
+        command: String,
+        cwd: String,
+        process_id: Option<String>,
+        command_actions: Vec<serde_json::Value>,
+        source: &'static str,
+        status: &'static str,
+        exit_code: Option<i64>,
+        duration_ms: Option<i64>,
+        aggregated_output: Option<String>,
+    ) -> Self {
+        Self::client(
+            TURN_EXEC_COMMAND_LABEL,
+            serde_json::json!({
+                "item_id": item_id,
+                "command": command,
+                "cwd": cwd,
+                "process_id": process_id,
+                "command_actions": command_actions,
+                "source": source,
+                "status": status,
+                "exit_code": exit_code,
+                "duration_ms": duration_ms,
+                "aggregated_output": aggregated_output,
+            }),
+        )
+    }
+}
+
+fn provider_route_from_lifecycle(route: LifecycleRoute) -> ProviderEmissionRoute {
+    match route {
+        LifecycleRoute::ClientProjection => ProviderEmissionRoute::ClientProjection,
+        LifecycleRoute::ClientProjectionWithVerifiedInputs { inputs } => {
+            ProviderEmissionRoute::ClientProjectionWithVerifiedInputs {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| ProviderVerifiedInput {
+                        also_deliver_to_tool: None,
+                        artifact_label: input.artifact_label,
+                        required_verified_artifact: input.required_verified_artifact,
+                    })
+                    .collect(),
+            }
+        }
+        LifecycleRoute::Tool { tool } => ProviderEmissionRoute::Tool { tool },
+        LifecycleRoute::Interface { interface } => ProviderEmissionRoute::Interface { interface },
+    }
+}
+
+fn lifecycle_payload_label(label: &str) -> bool {
+    matches!(
+        label,
+        LIFECYCLE_CONNECTION_LABEL
+            | LIFECYCLE_EVENT_LABEL
+            | LIFECYCLE_DECISION_LABEL
+            | LIFECYCLE_HANDLER_PROMPT_LABEL
+            | LIFECYCLE_HANDLER_TASK_LABEL
+            | LIFECYCLE_HANDLER_OUTPUT_LABEL
+    )
+}
+
+fn lifecycle_context_payloads(
+    bound: &[ArtifactBindingPayload],
+    snapshot: Option<&ProviderInvocationSessionSnapshot>,
+) -> Result<Vec<ArtifactBindingPayload>, InterfaceDriverError> {
+    let mut payloads = bound.to_vec();
+    let Some(snapshot) = snapshot else {
+        return Ok(payloads);
+    };
+    for artifact in snapshot.artifacts.iter().filter(|artifact| {
+        matches!(
+            artifact.label.as_str(),
+            LIFECYCLE_CONNECTION_LABEL | LIFECYCLE_EVENT_LABEL
+        )
+    }) {
+        let bytes = serde_json::to_vec(&artifact.payload).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "lifecycle session artifact '{}' did not encode: {error}",
+                artifact.source_artifact.id.as_str()
+            ))
+        })?;
+        if let Some(existing) = payloads
+            .iter()
+            .find(|bound| bound.artifact == artifact.source_artifact)
+        {
+            if existing.as_bytes() != bytes {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "lifecycle artifact '{}' has conflicting bound and session bytes",
+                    artifact.source_artifact.id.as_str()
+                )));
+            }
+            continue;
+        }
+        payloads.push(ArtifactBindingPayload::new(
+            artifact.source_artifact.clone(),
+            bytes,
+        ));
+    }
+    Ok(payloads)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContextWindowUsage {
+    used_tokens: u64,
+    context_window: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct TokenUsageBreakdownEvidence {
+    total_tokens: u64,
+    input_tokens: u64,
+    cached_input_tokens: u64,
+    uncached_input_tokens: u64,
+    output_tokens: u64,
+    reasoning_output_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+struct ProviderTokenUsageEvidence {
+    cumulative: TokenUsageBreakdownEvidence,
+    current_context: TokenUsageBreakdownEvidence,
+    context_window: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelResultProjection {
+    max_tokens: usize,
+}
+
+impl ModelResultProjection {
+    fn from_private_config(
+        config: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Self, InterfaceDriverError> {
+        let value = config
+            .get("model_result_projection")
+            .cloned()
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "codex_app_server descriptor declares no model_result_projection".into(),
+                )
+            })?;
+        serde_json::from_value::<Self>(value).map_err(|error| {
+            InterfaceDriverError::Protocol(format!("interface_driver_config.private_config.model_result_projection is malformed: {error}"))
+        })?.validate()
+    }
+
+    fn validate(self) -> Result<Self, InterfaceDriverError> {
+        if self.max_tokens < 512 {
+            return Err(InterfaceDriverError::FailedClosed(
+                "interface_driver_config.private_config.model_result_projection.max_tokens must be at least 512"
+                    .to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TransportStateScope {
+    Run(String),
+}
+
+impl TransportStateScope {
+    fn from_run(run: &octopus_interfaces::RunId) -> TransportStateScope {
+        TransportStateScope::Run(run.as_str().to_string())
+    }
+}
+
+#[derive(Default)]
+struct TransportState {
+    context_generation: u64,
+    hooks_catalog_emitted: bool,
+    thread_id: Option<String>,
+    thread_shape_fingerprint: Option<String>,
+    static_context_fingerprint: Option<String>,
+    rollout_path: Option<PathBuf>,
+}
+
+const CODEX_CONTINUITY_FIELD: &str = "codex_continuity";
+const LIFECYCLE_PROVIDER_CONTINUITY_FIELD: &str = "provider_continuity";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexContinuityState {
+    schema_version: u32,
+    provider_interface: InterfaceId,
+    run: String,
+    thread_id: String,
+    thread_shape_fingerprint: String,
+    context_generation: u64,
+    static_context_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending: Option<CodexPendingContinuity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interrupted_pending: Option<CodexPendingContinuity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_operator_request: Option<ToolOperatorContinuity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum CodexPendingContinuity {
+    DynamicTool {
+        turn_id: String,
+        call_id: String,
+        tool: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native_operation: Option<serde_json::Value>,
+    },
+    InterfaceOperation {
+        turn_id: String,
+        call_id: String,
+        operation: String,
+        interface: InterfaceId,
+        output_label: String,
+    },
+    Operator {
+        turn_id: String,
+        request_key: String,
+        method: String,
+    },
+}
+
+#[derive(Clone)]
+struct PendingServerRequest {
+    request_id: RequestId,
+    thread_id: String,
+    turn_id: String,
+    key: String,
+    kind: PendingServerRequestKind,
+    effect_gate: Arc<tokio::sync::Mutex<()>>,
+    turn_interrupted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+type PendingServerRequests =
+    Arc<Mutex<BTreeMap<(TransportStateScope, String), PendingServerRequest>>>;
+
+#[derive(Clone)]
+enum PendingServerRequestKind {
+    DynamicTool {
+        call_id: String,
+        tool: String,
+    },
+    InterfaceOperation {
+        call_id: String,
+        operation: String,
+        interface: InterfaceId,
+        output_label: String,
+    },
+    Operator {
+        method: String,
+    },
+}
+
+enum TurnDrainOutcome {
+    Complete,
+    Suspended(PendingServerRequest),
+}
+
+pub(crate) enum ProviderStreamEmission {
+    Turn(ProviderEmission),
+    WithOutgoingBindings {
+        emission: ProviderEmission,
+        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+    },
+    TerminalGroup {
+        stream: ProviderEmission,
+        terminal: ProviderEmission,
+    },
+    InterruptedResult {
+        activity: Option<ProviderEmission>,
+        stream: Option<ProviderEmission>,
+        closure: ProviderEmission,
+    },
+    Control {
+        emission: ProviderEmission,
+        source_movement_seq: u64,
+        admitted: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    TransportDispatch {
+        artifact: InterfaceArtifactFile,
+        admitted: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+pub(crate) struct ProviderOutputStream {
+    sender: tokio::sync::mpsc::UnboundedSender<ProviderStreamEmission>,
+    continuity: Arc<std::sync::Mutex<ContinuityEmitterState>>,
+}
+
+pub(crate) struct ProviderHandoffBarrier {
+    outcome: std::sync::Mutex<Option<Result<(), String>>>,
+    notify: tokio::sync::Notify,
+}
+
+impl ProviderHandoffBarrier {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            outcome: std::sync::Mutex::new(None),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    pub(crate) fn finish(&self, outcome: Result<(), String>) {
+        *self.outcome.lock().expect("handoff barrier lock") = Some(outcome);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) async fn wait(&self) -> Result<(), String> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(outcome) = self.outcome.lock().expect("handoff barrier lock").clone() {
+                return outcome;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub(crate) enum ControlOutputError {
+    Closed,
+    Failed(String),
+}
+
+impl ProviderOutputStream {
+    pub(crate) fn channel() -> (
+        Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<ProviderStreamEmission>,
+    ) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (Arc::new(Self {
+            sender,
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        }), receiver)
+    }
+
+    fn continuity_snapshot(&self) -> Option<CodexContinuityState> {
+        self.continuity.lock().expect("continuity lock").continuity.clone()
+    }
+
+    fn record_control_continuity(&self, result: &CodexTurnControlResult) {
+        if let Some(continuity) = &result.continuity {
+            let mut state = self.continuity.lock().expect("continuity lock");
+            state.continuity = Some(continuity.clone());
+            state.pending_input_context = false;
+        }
+    }
+
+    fn send_turn(&self, emission: ProviderEmission) -> Result<(), InterfaceDriverError> {
+        self.sender
+            .send(ProviderStreamEmission::Turn(emission))
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "turn emission sink closed (the interface life is gone); aborting the turn"
+                        .into(),
+                )
+            })
+    }
+
+    fn send_interrupted_result(
+        &self,
+        activity: Option<ProviderEmission>,
+        stream: Option<ProviderEmission>,
+        closure: ProviderEmission,
+    ) -> Result<(), InterfaceDriverError> {
+        self.sender
+            .send(ProviderStreamEmission::InterruptedResult {
+                activity,
+                stream,
+                closure,
+            })
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "interrupted-result emission sink closed before its exact closure could be handed"
+                        .to_string(),
+                )
+            })
+    }
+
+    fn send_terminal_group(
+        &self,
+        stream: ProviderEmission,
+        terminal: ProviderEmission,
+    ) -> Result<(), InterfaceDriverError> {
+        self.sender
+            .send(ProviderStreamEmission::TerminalGroup { stream, terminal })
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "turn emission sink closed before its sealed terminal group could be handed"
+                        .to_string(),
+                )
+            })
+    }
+
+    pub(crate) async fn hand_control(
+        self: Arc<Self>,
+        emission: ProviderEmission,
+        source_movement_seq: u64,
+    ) -> Result<(), ControlOutputError> {
+        let (admitted, receipt) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(ProviderStreamEmission::Control { emission, source_movement_seq, admitted })
+            .map_err(|_| ControlOutputError::Closed)?;
+        drop(self);
+        receipt
+            .await
+            .map_err(|_| {
+                ControlOutputError::Failed(
+                    "provider output stream dropped the control-result receipt".to_string(),
+                )
+            })?
+            .map_err(ControlOutputError::Failed)
+    }
+
+    async fn hand_transport_dispatch(
+        self: Arc<Self>,
+        artifact: InterfaceArtifactFile,
+    ) -> Result<(), InterfaceDriverError> {
+        let (admitted, receipt) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(ProviderStreamEmission::TransportDispatch { artifact, admitted })
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "provider output stream closed before transport dispatch admission".to_string(),
+                )
+            })?;
+        drop(self);
+        receipt
+            .await
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "provider output stream dropped transport dispatch receipt".to_string(),
+                )
+            })?
+            .map_err(InterfaceDriverError::FailedClosed)
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodexTransportDispatch<'a> {
+    label: &'static str,
+    provider_interface: &'a InterfaceId,
+    source_movement_seq: u64,
+    attempt: u32,
+    method: &'a str,
+    transport: &'static str,
+    endpoint: CodexTransportEndpoint,
+    request: CodexTransportRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_handle_fingerprint: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodexTransportEndpoint {
+    scheme: &'static str,
+    host: &'static str,
+    port: Option<u16>,
+    path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CodexTransportRequest {
+    bytes: u64,
+    blake3: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct CodexRecoveredHandoffArtifact {
+    pub movement_seq: u64,
+    pub artifact: ArtifactRef,
+    pub payload: Vec<u8>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveredCodexTransportDispatch {
+    label: String,
+    provider_interface: InterfaceId,
+    source_movement_seq: u64,
+    attempt: u32,
+    method: String,
+    transport: String,
+    endpoint: RecoveredCodexTransportEndpoint,
+    request: RecoveredCodexTransportRequest,
+    credential_handle_fingerprint: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveredCodexTransportEndpoint {
+    scheme: String,
+    host: String,
+    port: Option<u16>,
+    path: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveredCodexTransportRequest {
+    bytes: u64,
+    blake3: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoveredTurnStartDispatch {
+    movement_seq: u64,
+    artifact: ArtifactRef,
+    attempt: u32,
+    request_blake3: String,
+}
+
+pub(crate) struct CodexProviderInvocation<'a> {
+    pub input: InterfaceInvocationEnvelope,
+    pub emit: Arc<ProviderOutputStream>,
+    pub resolved_session_snapshot: Option<ProviderInvocationSessionSnapshot>,
+    pub current_session_context: Arc<Vec<SessionContextArtifact>>,
+    pub output_root: &'a Path,
+    pub live_stream_root: &'a Path,
+    pub source_movement_seq: u64,
+    pub attempt: u32,
+    pub admitted_run_record: &'a [u8],
+    pub current_run_record: &'a [u8],
+    pub input_changes_context: bool,
+    pub interrupted_after_artifact: Option<String>,
+    pub recovered_handoff_artifacts: Arc<Vec<CodexRecoveredHandoffArtifact>>,
+    pub durable_interrupted_continuity: Option<CodexContinuityState>,
+    pub control: &'a Arc<CodexTurnControlBroker>,
+    pub handoff_barrier: Arc<ProviderHandoffBarrier>,
+}
+
+struct CodexAppServerDispatchFrame {
+    method: String,
+    bytes: Vec<u8>,
+}
+
+fn codex_app_server_request_frame(
+    request: &ClientRequest,
+) -> Result<CodexAppServerDispatchFrame, InterfaceDriverError> {
+    let value = serde_json::to_value(request).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "Codex app-server request could not be encoded for dispatch evidence: {error}"
+        ))
+    })?;
+    let request: JSONRPCRequest = serde_json::from_value(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "Codex app-server request is not a valid JSON-RPC request: {error}"
+        ))
+    })?;
+    let method = request.method.clone();
+    let mut bytes = serde_json::to_vec(&JSONRPCMessage::Request(request)).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "Codex app-server JSON-RPC frame could not be encoded: {error}"
+        ))
+    })?;
+    bytes.push(b'\n');
+    Ok(CodexAppServerDispatchFrame { method, bytes })
+}
+
+fn materialize_codex_transport_dispatch(
+    output_root: &Path,
+    provider_interface: &InterfaceId,
+    source_movement_seq: u64,
+    attempt: u32,
+    method: &str,
+    request_frame: &[u8],
+    credential_handle_fingerprint: Option<String>,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    if attempt == 0 {
+        return Err(InterfaceDriverError::Protocol(
+            "Codex transport dispatch attempt must be positive".to_string(),
+        ));
+    }
+    let payload = serde_json::to_vec(&CodexTransportDispatch {
+        label: PROVIDER_TRANSPORT_DISPATCH_LABEL,
+        provider_interface,
+        source_movement_seq,
+        attempt,
+        method,
+        transport: "process",
+        endpoint: CodexTransportEndpoint {
+            scheme: "process",
+            host: "local",
+            port: None,
+            path: format!("/{method}"),
+        },
+        request: CodexTransportRequest {
+            bytes: u64::try_from(request_frame.len()).map_err(|_| {
+                InterfaceDriverError::Protocol(
+                    "Codex transport dispatch request byte count exceeds u64".to_string(),
+                )
+            })?,
+            blake3: octopus_ledger::ContentHash::of_bytes(request_frame).to_hex(),
+        },
+        credential_handle_fingerprint,
+    })
+    .map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "Codex transport dispatch evidence could not be encoded: {error}"
+        ))
+    })?;
+    InterfaceArtifactFile::write(output_root, PROVIDER_TRANSPORT_DISPATCH_LABEL, &payload).map_err(
+        |error| {
+            InterfaceDriverError::Protocol(format!(
+                "Codex transport dispatch evidence could not be materialized: {error}"
+            ))
+        },
+    )
+}
+
+fn recovered_turn_start_dispatches(
+    artifacts: &[CodexRecoveredHandoffArtifact],
+    provider_interface: &InterfaceId,
+    source_movement_seq: u64,
+) -> Result<Vec<RecoveredTurnStartDispatch>, InterfaceDriverError> {
+    let mut seen_movements = BTreeSet::new();
+    let mut seen_artifacts = BTreeSet::new();
+    let mut turn_starts = Vec::new();
+    for recovered in artifacts {
+        if recovered.movement_seq <= source_movement_seq {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch movement {} does not follow source movement {}",
+                recovered.movement_seq, source_movement_seq
+            )));
+        }
+        if !seen_movements.insert(recovered.movement_seq) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch repeats movement {}",
+                recovered.movement_seq
+            )));
+        }
+        if !seen_artifacts.insert((
+            recovered.artifact.id.as_str().to_string(),
+            recovered.artifact.content.to_hex(),
+        )) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch repeats artifact '{}'",
+                recovered.artifact.id.as_str()
+            )));
+        }
+        let (label, content) = recovered
+            .artifact
+            .id
+            .as_str()
+            .split_once(':')
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "recovered Codex transport dispatch artifact '{}' has no content-addressed identity",
+                    recovered.artifact.id.as_str()
+                ))
+            })?;
+        if label != PROVIDER_TRANSPORT_DISPATCH_LABEL
+            || content != recovered.artifact.content.to_hex()
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch artifact '{}' conflicts with its content address",
+                recovered.artifact.id.as_str()
+            )));
+        }
+        let dispatch: RecoveredCodexTransportDispatch = serde_json::from_slice(&recovered.payload)
+            .map_err(|error| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "recovered Codex transport dispatch artifact '{}' is malformed: {error}",
+                    recovered.artifact.id.as_str()
+                ))
+            })?;
+        if dispatch.label != PROVIDER_TRANSPORT_DISPATCH_LABEL
+            || dispatch.provider_interface != *provider_interface
+            || dispatch.source_movement_seq != source_movement_seq
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch at movement {} crossed provider/source coordinates",
+                recovered.movement_seq
+            )));
+        }
+        if dispatch.attempt == 0
+            || dispatch.method.is_empty()
+            || dispatch.method.trim() != dispatch.method
+            || dispatch.transport != "process"
+            || dispatch.endpoint.scheme != "process"
+            || dispatch.endpoint.host != "local"
+            || dispatch.endpoint.port.is_some()
+            || dispatch.endpoint.path != format!("/{}", dispatch.method)
+            || dispatch.request.bytes == 0
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "recovered Codex transport dispatch at movement {} violates the local-process evidence contract",
+                recovered.movement_seq
+            )));
+        }
+        let request_hash = octopus_ledger::ContentHash::from_hex(&dispatch.request.blake3)
+            .filter(|hash| hash.to_hex() == dispatch.request.blake3)
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "recovered Codex transport dispatch at movement {} has a non-canonical request hash",
+                    recovered.movement_seq
+                ))
+            })?;
+        if dispatch.method == "turn/start" {
+            if dispatch.credential_handle_fingerprint.is_some() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "recovered Codex turn/start dispatch at movement {} unexpectedly carries credential evidence",
+                    recovered.movement_seq
+                )));
+            }
+            turn_starts.push(RecoveredTurnStartDispatch {
+                movement_seq: recovered.movement_seq,
+                artifact: recovered.artifact.clone(),
+                attempt: dispatch.attempt,
+                request_blake3: request_hash.to_hex(),
+            });
+        }
+    }
+    turn_starts.sort_by_key(|dispatch| dispatch.movement_seq);
+    Ok(turn_starts)
+}
+
+#[derive(Clone)]
+pub(crate) enum CodexTurnControl {
+    Inject {
+        control_id: String,
+        items: Vec<serde_json::Value>,
+    },
+    Steer {
+        control_id: String,
+        input: Vec<UserInput>,
+    },
+    Interrupt {
+        control_id: String,
+        action: String,
+    },
+    Unsupported {
+        control_id: String,
+        action: String,
+    },
+}
+
+#[derive(Clone)]
+enum CodexTurnControlTarget {
+    Starting,
+    Draining {
+        handle: AppServerRequestHandle,
+        request_ids: Arc<std::sync::atomic::AtomicI64>,
+        pending_requests: PendingServerRequests,
+        scope: TransportStateScope,
+        output: std::sync::Weak<ProviderOutputStream>,
+        continuity: Option<CodexContinuityState>,
+        handoff_barrier: Arc<ProviderHandoffBarrier>,
+        effect_gate: Arc<tokio::sync::Mutex<()>>,
+        turn_interrupted: Arc<std::sync::atomic::AtomicBool>,
+        thread_id: String,
+        turn_id: String,
+    },
+    Suspended {
+        handle: AppServerRequestHandle,
+        request_ids: Arc<std::sync::atomic::AtomicI64>,
+        pending_requests: PendingServerRequests,
+        scope: TransportStateScope,
+        output: std::sync::Weak<ProviderOutputStream>,
+        continuity: Option<CodexContinuityState>,
+        handoff_barrier: Arc<ProviderHandoffBarrier>,
+        effect_gate: Arc<tokio::sync::Mutex<()>>,
+        turn_interrupted: Arc<std::sync::atomic::AtomicBool>,
+        thread_id: String,
+        turn_id: String,
+    },
+    InterruptedPending {
+        output: std::sync::Weak<ProviderOutputStream>,
+        durable_handoff: Arc<ProviderHandoffBarrier>,
+        thread_id: String,
+        turn_id: String,
+    },
+    InterruptedDraining {
+        output: std::sync::Weak<ProviderOutputStream>,
+        durable_handoff: Arc<ProviderHandoffBarrier>,
+        thread_id: String,
+        turn_id: String,
+    },
+    Finished,
+}
+
+pub(crate) struct CodexTurnControlBroker {
+    state: watch::Sender<CodexTurnControlTarget>,
+    source_movement_seq: Option<u64>,
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexTurnControlResult {
+    pub control_id: String,
+    pub action: String,
+    pub acknowledged: bool,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub detail: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) continuity: Option<CodexContinuityState>,
+}
+
+pub(crate) struct CodexTurnControlApplied {
+    pub result: CodexTurnControlResult,
+    pub disposition: CodexTurnControlDisposition,
+    pub output: Option<Arc<ProviderOutputStream>>,
+    pub handoff_barrier: Option<Arc<ProviderHandoffBarrier>>,
+    pub durable_interrupt_handoff: Option<Arc<ProviderHandoffBarrier>>,
+    pub effect_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodexTurnControlDisposition {
+    Applied,
+    DeferredTurn(CodexDeferredTurnCause),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CodexDeferredTurnCause {
+    PendingSettlement,
+    TerminalTurnMoved,
+}
+
+pub(crate) enum CodexTurnControlEffectIntent {
+    Initial,
+    Retarget {
+        expected_turn_id: String,
+        actual_turn_id: String,
+    },
+}
+
+impl CodexTurnControl {
+    pub(crate) fn requires_external_effect(&self) -> bool {
+        matches!(self, Self::Inject { .. } | Self::Steer { .. } | Self::Interrupt { .. })
+    }
+
+    fn control_id(&self) -> &str {
+        match self {
+            Self::Inject { control_id, .. }
+            | Self::Steer { control_id, .. }
+            | Self::Interrupt { control_id, .. }
+            | Self::Unsupported { control_id, .. } => control_id,
+        }
+    }
+
+    fn action(&self) -> &str {
+        match self {
+            Self::Inject { .. } => "queue_message",
+            Self::Steer { .. } => "steer",
+            Self::Interrupt { action, .. } | Self::Unsupported { action, .. } => action,
+        }
+    }
+}
+
+impl CodexTurnControlBroker {
+    pub(crate) fn new(source_movement_seq: Option<u64>) -> Arc<Self> {
+        let (state, _) = watch::channel(CodexTurnControlTarget::Starting);
+        Arc::new(Self {
+            state,
+            source_movement_seq,
+        })
+    }
+
+    pub(crate) fn source_movement_seq(&self) -> Option<u64> {
+        self.source_movement_seq
+    }
+
+    pub(crate) fn publish_starting(&self) {
+        if !self.has_interrupted_pending() {
+            self.state.send_replace(CodexTurnControlTarget::Starting);
+        }
+    }
+
+    fn publish(&self, target: CodexTurnControlTarget) {
+        self.state.send_replace(target);
+    }
+
+    pub(crate) fn finish(&self) {
+        self.state.send_replace(CodexTurnControlTarget::Finished);
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        matches!(*self.state.borrow(), CodexTurnControlTarget::Finished)
+    }
+
+    pub(crate) fn is_starting(&self) -> bool {
+        matches!(*self.state.borrow(), CodexTurnControlTarget::Starting)
+    }
+
+    pub(crate) fn has_interrupted_pending(&self) -> bool {
+        matches!(
+            *self.state.borrow(),
+            CodexTurnControlTarget::InterruptedPending { .. }
+                | CodexTurnControlTarget::InterruptedDraining { .. }
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_interrupted_draining(&self) -> bool {
+        matches!(
+            *self.state.borrow(),
+            CodexTurnControlTarget::InterruptedDraining { .. }
+        )
+    }
+
+    pub(crate) async fn wait_for_durable_interrupt(&self) -> Result<(), String> {
+        let barrier = match &*self.state.borrow() {
+            CodexTurnControlTarget::InterruptedPending {
+                durable_handoff, ..
+            }
+            | CodexTurnControlTarget::InterruptedDraining {
+                durable_handoff, ..
+            } => Some(durable_handoff.clone()),
+            _ => None,
+        };
+        match barrier {
+            Some(barrier) => barrier.wait().await,
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn publish_recovered_interrupted_pending(
+        &self,
+        continuity: &CodexContinuityState,
+    ) -> Result<(), String> {
+        let pending = continuity.interrupted_pending.as_ref().ok_or_else(|| {
+            "recovered interrupted control target has no exact effect".to_string()
+        })?;
+        if !interrupted_pending_has_external_result(pending) {
+            return Err(
+                "recovered interrupted control target is not an external effect".to_string(),
+            );
+        }
+        let durable_handoff = ProviderHandoffBarrier::new();
+        durable_handoff.finish(Ok(()));
+        self.publish(CodexTurnControlTarget::InterruptedPending {
+            output: std::sync::Weak::new(),
+            durable_handoff,
+            thread_id: continuity.thread_id.clone(),
+            turn_id: pending_turn_id(pending).to_string(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn publish_interrupted_draining(&self) -> Result<(), InterfaceDriverError> {
+        let target = self.state.borrow().clone();
+        match target {
+            CodexTurnControlTarget::InterruptedPending {
+                output,
+                durable_handoff,
+                thread_id,
+                turn_id,
+            } => {
+                self.publish(CodexTurnControlTarget::InterruptedDraining {
+                    output,
+                    durable_handoff,
+                    thread_id,
+                    turn_id,
+                });
+                Ok(())
+            }
+            CodexTurnControlTarget::InterruptedDraining { .. } => Ok(()),
+            _ => Err(InterfaceDriverError::FailedClosed(
+                "interrupted exact-result drain lost its non-steerable broker target".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn output(&self) -> Option<Arc<ProviderOutputStream>> {
+        let mut state = self.state.subscribe();
+        loop {
+            let target = state.borrow_and_update().clone();
+            match target {
+                CodexTurnControlTarget::Starting => {
+                    if state.changed().await.is_err() {
+                        return None;
+                    }
+                }
+                CodexTurnControlTarget::Draining { output, .. }
+                | CodexTurnControlTarget::Suspended { output, .. }
+                | CodexTurnControlTarget::InterruptedPending { output, .. }
+                | CodexTurnControlTarget::InterruptedDraining { output, .. } => {
+                    return output.upgrade();
+                }
+                CodexTurnControlTarget::Finished => return None,
+            }
+        }
+    }
+
+    pub(crate) async fn apply(
+        &self,
+        control: CodexTurnControl,
+        mut before_external_effect: impl FnMut(CodexTurnControlEffectIntent) -> Result<(), String>,
+    ) -> Result<CodexTurnControlApplied, String> {
+        let mut state = self.state.subscribe();
+        loop {
+            let target = state.borrow_and_update().clone();
+            match target {
+                CodexTurnControlTarget::Starting => {
+                    if state.changed().await.is_err() {
+                        return Ok(CodexTurnControlApplied {
+                            result: failed_control_result(
+                                &control,
+                                None,
+                                None,
+                                "active turn control target disappeared before app-server accepted the turn",
+                            ),
+                            disposition: CodexTurnControlDisposition::Applied,
+                            output: None,
+                            handoff_barrier: None,
+                            durable_interrupt_handoff: None,
+                            effect_guard: None,
+                        });
+                    }
+                }
+                CodexTurnControlTarget::Finished => {
+                    let disposition = if matches!(&control, CodexTurnControl::Steer { .. } | CodexTurnControl::Inject { .. }) {
+                        CodexTurnControlDisposition::DeferredTurn(
+                            CodexDeferredTurnCause::TerminalTurnMoved,
+                        )
+                    } else {
+                        CodexTurnControlDisposition::Applied
+                    };
+                    return Ok(CodexTurnControlApplied {
+                        result: failed_control_result(
+                            &control,
+                            None,
+                            None,
+                            "no active provider turn accepts this control artifact",
+                        ),
+                        disposition,
+                        output: None,
+                        handoff_barrier: None,
+                        durable_interrupt_handoff: None,
+                        effect_guard: None,
+                    });
+                }
+                CodexTurnControlTarget::InterruptedPending {
+                    output,
+                    durable_handoff,
+                    thread_id,
+                    turn_id,
+                }
+                | CodexTurnControlTarget::InterruptedDraining {
+                    output,
+                    durable_handoff,
+                    thread_id,
+                    turn_id,
+                } => {
+                    let disposition = if matches!(&control, CodexTurnControl::Inject { .. }) {
+                        CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::PendingSettlement)
+                    } else { CodexTurnControlDisposition::Applied };
+                    return Ok(CodexTurnControlApplied {
+                        result: failed_control_result(
+                            &control,
+                            Some(thread_id),
+                            Some(turn_id),
+                            "the interrupted provider turn still has one unresolved exact external result",
+                        ),
+                        disposition,
+                        output: output.upgrade(),
+                        handoff_barrier: None,
+                        durable_interrupt_handoff: Some(durable_handoff),
+                        effect_guard: None,
+                    });
+                }
+                CodexTurnControlTarget::Draining {
+                    handle,
+                    request_ids,
+                    pending_requests,
+                    scope,
+                    output,
+                    continuity,
+                    handoff_barrier,
+                    effect_gate,
+                    turn_interrupted,
+                    thread_id,
+                    turn_id,
+                } => {
+                    let output = output.upgrade();
+                    let effect_guard = effect_gate.lock_owned().await;
+                    if state.has_changed().unwrap_or(true) {
+                        drop(effect_guard);
+                        continue;
+                    }
+                    let continuity = match output.as_ref() {
+                        Some(output) => output.continuity_snapshot(),
+                        None => continuity,
+                    };
+                    if steer_waits_for_pending_continuity(&control, continuity.as_ref()) {
+                        return Ok(CodexTurnControlApplied {
+                            result: failed_control_result(
+                                &control,
+                                Some(thread_id),
+                                Some(turn_id),
+                                "the active provider turn must settle its exact pending result before the operator message becomes the next turn",
+                            ),
+                            disposition: CodexTurnControlDisposition::DeferredTurn(
+                                CodexDeferredTurnCause::PendingSettlement,
+                            ),
+                            output,
+                            handoff_barrier: Some(handoff_barrier),
+                            durable_interrupt_handoff: None,
+                            effect_guard: Some(effect_guard),
+                        });
+                    }
+                    if control.requires_external_effect() {
+                        before_external_effect(CodexTurnControlEffectIntent::Initial)?;
+                    }
+                    let ControlTargetApplication {
+                        mut result,
+                        disposition,
+                    } = apply_control_to_target(
+                        control,
+                        handle,
+                        request_ids,
+                        thread_id,
+                        turn_id,
+                        continuity,
+                        &mut before_external_effect,
+                    )
+                    .await?;
+                    let mut durable_interrupt_handoff = None;
+                    if result.acknowledged && matches!(result.action.as_str(), "interrupt" | "stop")
+                    {
+                        turn_interrupted.store(true, std::sync::atomic::Ordering::Release);
+                        let retained_effect = retain_interrupted_effect_request(
+                            &pending_requests,
+                            &scope,
+                            result.thread_id.as_deref(),
+                            result.turn_id.as_deref(),
+                        )
+                        .await;
+                        if !retained_effect {
+                            self.finish();
+                        }
+                        reconcile_interrupted_control_result(&mut result, retained_effect);
+                        if let Some(output) = &output {
+                            output.record_control_continuity(&result);
+                        }
+                        if retained_effect {
+                            let durable_handoff = ProviderHandoffBarrier::new();
+                            self.publish(CodexTurnControlTarget::InterruptedPending {
+                                output: output.as_ref().map(Arc::downgrade).unwrap_or_default(),
+                                durable_handoff: durable_handoff.clone(),
+                                thread_id: result
+                                    .thread_id
+                                    .clone()
+                                    .expect("acknowledged interrupt has thread id"),
+                                turn_id: result
+                                    .turn_id
+                                    .clone()
+                                    .expect("acknowledged interrupt has turn id"),
+                            });
+                            durable_interrupt_handoff = Some(durable_handoff);
+                        }
+                    }
+                    return Ok(CodexTurnControlApplied {
+                        result,
+                        disposition,
+                        output,
+                        handoff_barrier: Some(handoff_barrier),
+                        durable_interrupt_handoff,
+                        effect_guard: Some(effect_guard),
+                    });
+                }
+                CodexTurnControlTarget::Suspended {
+                    handle,
+                    request_ids,
+                    pending_requests,
+                    scope,
+                    output,
+                    continuity,
+                    handoff_barrier,
+                    effect_gate,
+                    turn_interrupted,
+                    thread_id,
+                    turn_id,
+                } => {
+                    let output = output.upgrade();
+                    let effect_guard = effect_gate.lock_owned().await;
+                    if state.has_changed().unwrap_or(true) {
+                        drop(effect_guard);
+                        continue;
+                    }
+                    let continuity = match output.as_ref() {
+                        Some(output) => output.continuity_snapshot(),
+                        None => continuity,
+                    };
+                    if steer_waits_for_pending_continuity(&control, continuity.as_ref()) {
+                        return Ok(CodexTurnControlApplied {
+                            result: failed_control_result(
+                                &control,
+                                Some(thread_id),
+                                Some(turn_id),
+                                "the active provider turn must settle its exact pending result before the operator message becomes the next turn",
+                            ),
+                            disposition: CodexTurnControlDisposition::DeferredTurn(
+                                CodexDeferredTurnCause::PendingSettlement,
+                            ),
+                            output,
+                            handoff_barrier: Some(handoff_barrier),
+                            durable_interrupt_handoff: None,
+                            effect_guard: Some(effect_guard),
+                        });
+                    }
+                    if control.requires_external_effect() {
+                        before_external_effect(CodexTurnControlEffectIntent::Initial)?;
+                    }
+                    let ControlTargetApplication {
+                        mut result,
+                        disposition,
+                    } = apply_control_to_target(
+                        control,
+                        handle,
+                        request_ids,
+                        thread_id,
+                        turn_id,
+                        continuity,
+                        &mut before_external_effect,
+                    )
+                    .await?;
+                    let mut durable_interrupt_handoff = None;
+                    if result.acknowledged && matches!(result.action.as_str(), "interrupt" | "stop")
+                    {
+                        turn_interrupted.store(true, std::sync::atomic::Ordering::Release);
+                        let retained_effect = retain_interrupted_effect_request(
+                            &pending_requests,
+                            &scope,
+                            result.thread_id.as_deref(),
+                            result.turn_id.as_deref(),
+                        )
+                        .await;
+                        if !retained_effect {
+                            self.finish();
+                        }
+                        reconcile_interrupted_control_result(&mut result, retained_effect);
+                        if let Some(output) = &output {
+                            output.record_control_continuity(&result);
+                        }
+                        if retained_effect {
+                            let durable_handoff = ProviderHandoffBarrier::new();
+                            self.publish(CodexTurnControlTarget::InterruptedPending {
+                                output: output.as_ref().map(Arc::downgrade).unwrap_or_default(),
+                                durable_handoff: durable_handoff.clone(),
+                                thread_id: result
+                                    .thread_id
+                                    .clone()
+                                    .expect("acknowledged interrupt has thread id"),
+                                turn_id: result
+                                    .turn_id
+                                    .clone()
+                                    .expect("acknowledged interrupt has turn id"),
+                            });
+                            durable_interrupt_handoff = Some(durable_handoff);
+                        }
+                    }
+                    return Ok(CodexTurnControlApplied {
+                        result,
+                        disposition,
+                        output,
+                        handoff_barrier: Some(handoff_barrier),
+                        durable_interrupt_handoff,
+                        effect_guard: Some(effect_guard),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn steer_waits_for_pending_continuity(
+    control: &CodexTurnControl,
+    continuity: Option<&CodexContinuityState>,
+) -> bool {
+    matches!(control, CodexTurnControl::Steer { .. })
+        && continuity.is_some_and(|state| state.pending.is_some())
+}
+
+struct ControlTargetApplication {
+    result: CodexTurnControlResult,
+    disposition: CodexTurnControlDisposition,
+}
+
+async fn apply_control_to_target(
+    control: CodexTurnControl,
+    handle: AppServerRequestHandle,
+    request_ids: Arc<std::sync::atomic::AtomicI64>,
+    thread_id: String,
+    turn_id: String,
+    continuity: Option<CodexContinuityState>,
+    before_external_effect: &mut impl FnMut(CodexTurnControlEffectIntent) -> Result<(), String>,
+) -> Result<ControlTargetApplication, String> {
+    match control {
+        CodexTurnControl::Inject { control_id, items } => {
+            let request = ClientRequest::ThreadInjectItems {
+                request_id: RequestId::Integer(request_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+                params: ThreadInjectItemsParams { thread_id: thread_id.clone(), items },
+            };
+            let (acknowledged, detail) = match handle.request_typed::<ThreadInjectItemsResponse>(request).await {
+                Ok(_) => (true, serde_json::json!({"queued": true, "turn_triggered": false})),
+                Err(error) => (false, serde_json::json!({"error": error.to_string()})),
+            };
+            Ok(ControlTargetApplication {
+                result: CodexTurnControlResult {
+                    control_id, action: "queue_message".into(), acknowledged,
+                    thread_id: Some(thread_id), turn_id: Some(turn_id), detail, continuity: None,
+                },
+                disposition: CodexTurnControlDisposition::Applied,
+            })
+        }
+        CodexTurnControl::Steer { control_id, input } => {
+            let first = steer_attempt_application_with_retarget(
+                control_id.clone(),
+                thread_id.clone(),
+                turn_id.clone(),
+                handle
+                    .request_typed::<TurnSteerResponse>(turn_steer_request(
+                        &request_ids,
+                        &thread_id,
+                        &control_id,
+                        input.clone(),
+                        &turn_id,
+                    ))
+                    .await,
+                true,
+            );
+            let SteerAttemptApplication::Retarget { actual_turn_id } = first else {
+                let SteerAttemptApplication::Complete(application) = first else {
+                    unreachable!()
+                };
+                return Ok(application);
+            };
+            before_external_effect(CodexTurnControlEffectIntent::Retarget {
+                expected_turn_id: turn_id,
+                actual_turn_id: actual_turn_id.clone(),
+            })?;
+            let second = steer_attempt_application_with_retarget(
+                control_id.clone(),
+                thread_id.clone(),
+                actual_turn_id.clone(),
+                handle
+                    .request_typed::<TurnSteerResponse>(turn_steer_request(
+                        &request_ids,
+                        &thread_id,
+                        &control_id,
+                        input,
+                        &actual_turn_id,
+                    ))
+                    .await,
+                false,
+            );
+            match second {
+                SteerAttemptApplication::Complete(application) => Ok(application),
+                SteerAttemptApplication::Retarget { .. } => unreachable!(),
+            }
+        }
+        CodexTurnControl::Interrupt { control_id, action } => {
+            let request = ClientRequest::TurnInterrupt {
+                request_id: RequestId::Integer(
+                    request_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                ),
+                params: TurnInterruptParams {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                },
+            };
+            let result = match handle.request_typed::<TurnInterruptResponse>(request).await {
+                Ok(_) => match interrupted_continuity(continuity) {
+                    Ok((continuity, retained_effect)) => CodexTurnControlResult {
+                        control_id,
+                        action,
+                        acknowledged: true,
+                        thread_id: Some(thread_id),
+                        turn_id: Some(turn_id),
+                        detail: serde_json::json!({
+                            "interrupted": true,
+                            "exact_result_pending": retained_effect,
+                        }),
+                        continuity,
+                    },
+                    Err(error) => CodexTurnControlResult {
+                        control_id,
+                        action,
+                        acknowledged: false,
+                        thread_id: Some(thread_id),
+                        turn_id: Some(turn_id),
+                        detail: serde_json::json!({
+                            "error": error,
+                            "external_interrupt_acknowledged": true,
+                        }),
+                        continuity: None,
+                    },
+                },
+                Err(error) => CodexTurnControlResult {
+                    control_id,
+                    action,
+                    acknowledged: false,
+                    thread_id: Some(thread_id),
+                    turn_id: Some(turn_id),
+                    detail: serde_json::json!({ "error": error.to_string() }),
+                    continuity: None,
+                },
+            };
+            Ok(ControlTargetApplication {
+                result,
+                disposition: CodexTurnControlDisposition::Applied,
+            })
+        }
+        CodexTurnControl::Unsupported { control_id, action } => Ok(ControlTargetApplication {
+            result: CodexTurnControlResult {
+                control_id,
+                action,
+                acknowledged: false,
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id),
+                detail: serde_json::json!({
+                    "error": "Codex app-server exposes no in-flight pause/resume contract; no provider effect was claimed"
+                }),
+                continuity: None,
+            },
+            disposition: CodexTurnControlDisposition::Applied,
+        }),
+    }
+}
+
+fn turn_steer_request(
+    request_ids: &std::sync::atomic::AtomicI64,
+    thread_id: &str,
+    client_user_message_id: &str,
+    input: Vec<UserInput>,
+    expected_turn_id: &str,
+) -> ClientRequest {
+    ClientRequest::TurnSteer {
+        request_id: RequestId::Integer(
+            request_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ),
+        params: TurnSteerParams {
+            thread_id: thread_id.to_string(),
+            client_user_message_id: Some(client_user_message_id.to_string()),
+            input,
+            responsesapi_client_metadata: None,
+            additional_context: None,
+            expected_turn_id: expected_turn_id.to_string(),
+        },
+    }
+}
+
+enum SteerAttemptApplication {
+    Complete(ControlTargetApplication),
+    Retarget { actual_turn_id: String },
+}
+
+fn steer_attempt_application_with_retarget(
+    control_id: String,
+    thread_id: String,
+    turn_id: String,
+    response: Result<TurnSteerResponse, TypedRequestError>,
+    allow_retarget: bool,
+) -> SteerAttemptApplication {
+    let (result, disposition) = match response {
+        Ok(response) if response.turn_id == turn_id => (
+            CodexTurnControlResult {
+                control_id,
+                action: "steer".to_string(),
+                acknowledged: true,
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id),
+                detail: serde_json::json!({
+                    "accepted_turn_id": response.turn_id,
+                    "stage": "accepted_by_app_server",
+                    "source_event": "turn/steer",
+                    "consumption_proven": false,
+                }),
+                continuity: None,
+            },
+            CodexTurnControlDisposition::Applied,
+        ),
+        Ok(response) => (
+            CodexTurnControlResult {
+                control_id,
+                action: "steer".to_string(),
+                acknowledged: false,
+                thread_id: Some(thread_id),
+                turn_id: Some(turn_id.clone()),
+                detail: serde_json::json!({
+                    "error": "app-server acknowledged steering against a different turn",
+                    "accepted_turn_id": response.turn_id,
+                    "expected_turn_id": turn_id,
+                }),
+                continuity: None,
+            },
+            CodexTurnControlDisposition::Applied,
+        ),
+        Err(error) => {
+            if let Some(TurnSteerRace::ExpectedTurnMismatch { actual_turn_id }) =
+                turn_steer_race(&error, &turn_id)
+                && allow_retarget
+                && actual_turn_id != turn_id
+            {
+                return SteerAttemptApplication::Retarget { actual_turn_id };
+            }
+            let missing = matches!(
+                turn_steer_race(&error, &turn_id),
+                Some(TurnSteerRace::Missing)
+            );
+            let mut detail = if missing {
+                serde_json::json!({
+                    "error": error.to_string(),
+                    "deferred_to_next_turn": true,
+                    "reason": "no_active_turn",
+                })
+            } else {
+                serde_json::json!({
+                    "error": error.to_string(),
+                    "retarget_retry_exhausted": !allow_retarget,
+                })
+            };
+            if let TypedRequestError::Server { method, source } = &error {
+                detail["upstream_error"] = serde_json::json!({
+                    "method": method,
+                    "code": source.code,
+                    "message": source.message,
+                    "data": source.data,
+                });
+            }
+            (
+                CodexTurnControlResult {
+                    control_id,
+                    action: "steer".to_string(),
+                    acknowledged: false,
+                    thread_id: Some(thread_id),
+                    turn_id: Some(turn_id),
+                    detail,
+                    continuity: None,
+                },
+                if missing {
+                    CodexTurnControlDisposition::DeferredTurn(
+                        CodexDeferredTurnCause::TerminalTurnMoved,
+                    )
+                } else {
+                    CodexTurnControlDisposition::Applied
+                },
+            )
+        }
+    };
+    SteerAttemptApplication::Complete(ControlTargetApplication {
+        result,
+        disposition,
+    })
+}
+
+enum TurnSteerRace {
+    Missing,
+    ExpectedTurnMismatch { actual_turn_id: String },
+}
+
+fn turn_steer_race(error: &TypedRequestError, expected_turn_id: &str) -> Option<TurnSteerRace> {
+    let TypedRequestError::Server { method, source } = error else {
+        return None;
+    };
+    if method != "turn/steer" || source.code != -32600 {
+        return None;
+    }
+    if source.message == "no active turn to steer" {
+        return Some(TurnSteerRace::Missing);
+    }
+    let prefix = "expected active turn id `";
+    let separator = "` but found `";
+    let (expected, actual) = source.message.strip_prefix(prefix)?.split_once(separator)?;
+    let actual = actual.strip_suffix('`')?;
+    (expected == expected_turn_id
+        && !actual.is_empty()
+        && actual.trim() == actual
+        && !actual.contains(['`', '\r', '\n', '\0']))
+    .then(|| {
+        TurnSteerRace::ExpectedTurnMismatch {
+            actual_turn_id: actual.to_string(),
+        }
+    })
+}
+
+fn interrupted_continuity(
+    continuity: Option<CodexContinuityState>,
+) -> Result<(Option<CodexContinuityState>, bool), String> {
+    let Some(mut continuity) = continuity else {
+        return Ok((None, false));
+    };
+    continuity.context_generation = continuity
+        .context_generation
+        .checked_add(1)
+        .ok_or_else(|| "Codex interrupt continuity context generation overflowed".to_string())?;
+    let interrupted = continuity.pending.take();
+    let retained_effect = interrupted
+        .as_ref()
+        .is_some_and(interrupted_pending_has_external_result);
+    continuity.interrupted_pending = if retained_effect { interrupted } else { None };
+    Ok((Some(continuity), retained_effect))
+}
+
+fn interrupted_pending_has_external_result(pending: &CodexPendingContinuity) -> bool {
+    matches!(
+        pending,
+        CodexPendingContinuity::DynamicTool { .. }
+            | CodexPendingContinuity::InterfaceOperation { .. }
+    )
+}
+
+pub(crate) fn reconcile_durable_interrupted_continuity(
+    recovered: Option<CodexContinuityState>,
+    durable: Option<CodexContinuityState>,
+) -> Result<(Option<CodexContinuityState>, bool), InterfaceDriverError> {
+    let Some(durable) = durable else {
+        return Ok((recovered, false));
+    };
+    if durable.pending.is_some()
+        || durable
+            .interrupted_pending
+            .as_ref()
+            .is_none_or(|pending| !interrupted_pending_has_external_result(pending))
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "durable interrupt arbitration has no exact external result correlation".to_string(),
+        ));
+    }
+    let Some(recovered) = recovered else {
+        return Ok((Some(durable), true));
+    };
+    if recovered == durable {
+        return Ok((Some(durable), false));
+    }
+    let next_generation = recovered.context_generation.checked_add(1).ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "Codex durable interrupt arbitration context generation overflowed".to_string(),
+        )
+    })?;
+    if recovered.provider_interface != durable.provider_interface
+        || recovered.run != durable.run
+        || recovered.thread_id != durable.thread_id
+        || recovered.thread_shape_fingerprint != durable.thread_shape_fingerprint
+        || recovered.static_context_fingerprint != durable.static_context_fingerprint
+        || recovered.interrupted_pending.is_some()
+        || recovered.pending.as_ref() != durable.interrupted_pending.as_ref()
+        || durable.context_generation != next_generation
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "durable interrupt arbitration conflicts with the invocation continuity chain"
+                .to_string(),
+        ));
+    }
+    Ok((Some(durable), true))
+}
+
+fn reconcile_interrupted_control_result(
+    result: &mut CodexTurnControlResult,
+    retained_effect: bool,
+) {
+    if !result.acknowledged || !matches!(result.action.as_str(), "interrupt" | "stop") {
+        return;
+    }
+    if let Some(detail) = result.detail.as_object_mut() {
+        detail.insert(
+            "exact_result_pending".to_string(),
+            serde_json::Value::Bool(retained_effect),
+        );
+    }
+    if retained_effect {
+        return;
+    }
+    if let Some(continuity) = result.continuity.as_mut() {
+        continuity.interrupted_pending = None;
+    }
+}
+
+async fn retain_interrupted_effect_request(
+    pending_requests: &PendingServerRequests,
+    scope: &TransportStateScope,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+) -> bool {
+    let mut requests = pending_requests.lock().await;
+    let mut retained_effect = false;
+    requests.retain(|(candidate_scope, _), pending| {
+        let matches_target = candidate_scope == scope
+            && thread_id.is_none_or(|expected| pending.thread_id == expected)
+            && turn_id.is_none_or(|expected| pending.turn_id == expected);
+        if matches_target
+            && matches!(
+                pending.kind,
+                PendingServerRequestKind::DynamicTool { .. }
+                    | PendingServerRequestKind::InterfaceOperation { .. }
+            )
+        {
+            retained_effect = true;
+            return true;
+        }
+        !matches_target
+    });
+    retained_effect
+}
+
+fn failed_control_result(
+    control: &CodexTurnControl,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    error: &str,
+) -> CodexTurnControlResult {
+    CodexTurnControlResult {
+        control_id: control.control_id().to_string(),
+        action: control.action().to_string(),
+        acknowledged: false,
+        thread_id,
+        turn_id,
+        detail: serde_json::json!({ "error": error }),
+        continuity: None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InterfaceOperationAffordance {
+    name: String,
+    interface: InterfaceId,
+    request_label: String,
+    output_label: String,
+}
+
+struct NativeAffordanceCatalog {
+    specs: Vec<DynamicToolSpec>,
+    tool_names: BTreeMap<String, String>,
+    interface_operations: BTreeMap<String, InterfaceOperationAffordance>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeToolNamespace {
+    name: String,
+    description: String,
+}
+
+impl NativeToolNamespace {
+    fn validate(self) -> Result<Self, InterfaceDriverError> {
+        if self.name.trim() != self.name
+            || self.name.is_empty()
+            || !self
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(InterfaceDriverError::Protocol(
+                "interface_driver_config.private_config.native_tool_namespace.name must be a non-empty Codex namespace identifier"
+                    .to_string(),
+            ));
+        }
+        if self.description.trim() != self.description
+            || self.description.is_empty()
+            || self.description.chars().count() > 1024
+        {
+            return Err(InterfaceDriverError::Protocol(
+                "interface_driver_config.private_config.native_tool_namespace.description must be trimmed and contain 1–1024 characters"
+                    .to_string(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+struct InterfaceOperationResultArtifact {
+    label: String,
+    operation: String,
+    correlation_id: String,
+    ok: bool,
+    value: serde_json::Value,
+}
+
+struct InterfaceContextArtifact {
+    interface: InterfaceId,
+    label: String,
+    content: serde_json::Value,
+}
+
+#[derive(Clone)]
+enum OperatorResponseArtifact {
+    Approval {
+        request_id: String,
+        decision: serde_json::Value,
+    },
+    Elicitation {
+        request_id: String,
+        answer: serde_json::Value,
+    },
+    UserInput {
+        request_id: String,
+        answers: serde_json::Value,
+    },
+}
+
+enum ProviderInput {
+    Turn(Vec<UserInput>),
+    Resume { control_id: String },
+    ToolResult(ToolResultArtifact),
+    InterfaceOperationResult(InterfaceOperationResultArtifact),
+    InterfaceContext(InterfaceContextArtifact),
+    OperatorResponse(OperatorResponseArtifact),
+}
+
+struct RecoveredToolContinuation {
+    item: serde_json::Value,
+    activity: CodexTurnOutput,
+    activity_already_admitted: bool,
+}
+
+enum ThreadAction {
+    Reuse { thread_id: String },
+    Mint,
+}
+
+fn plan_thread_action(state: &TransportState, fingerprint: &str) -> ThreadAction {
+    match (&state.thread_id, &state.thread_shape_fingerprint) {
+        (Some(thread_id), Some(shape)) if shape == fingerprint => ThreadAction::Reuse {
+            thread_id: thread_id.clone(),
+        },
+        _ => ThreadAction::Mint,
+    }
+}
+
+fn thread_shape_fingerprint(
+    model: Option<&str>,
+    bound_instructions: &str,
+    native_affordances: &[DynamicToolSpec],
+    static_context_fingerprint: &str,
+) -> Result<String, InterfaceDriverError> {
+    let affordances = serde_json::to_string(native_affordances).map_err(|e| {
+        InterfaceDriverError::Protocol(format!(
+            "native affordances failed to serialize for the thread fingerprint: {e}"
+        ))
+    })?;
+    let mut bytes = Vec::with_capacity(
+        model.map(str::len).unwrap_or(0) + bound_instructions.len() + affordances.len() + 2,
+    );
+    bytes.extend_from_slice(model.unwrap_or("").as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(bound_instructions.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(affordances.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(static_context_fingerprint.as_bytes());
+    Ok(sha256_hex(&bytes))
+}
+
+fn validate_recovered_thread_coordinates(
+    recovered: &CodexContinuityState,
+    fingerprint: &str,
+    context_generation: u64,
+    static_context_fingerprint: &str,
+) -> Result<(), InterfaceDriverError> {
+    let next_context_generation = recovered.context_generation.checked_add(1).ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "Codex recovered continuity context generation overflowed".to_string(),
+        )
+    })?;
+    if recovered.thread_shape_fingerprint != fingerprint
+        || next_context_generation != context_generation
+        || recovered.static_context_fingerprint != static_context_fingerprint
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex continuity is stale for the current context coordinates".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_recovered_reseed_coordinates(
+    recovered: &CodexContinuityState,
+    context_generation: u64,
+    session_context_available: bool,
+) -> Result<(), InterfaceDriverError> {
+    if !session_context_available {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex private thread cold-start requires a descriptor-declared session context snapshot"
+                .to_string(),
+        ));
+    }
+    if recovered.context_generation > context_generation {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex recovered continuity is ahead of the admitted session context".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+struct ThreadAcquisition<'a> {
+    recovered: Option<&'a CodexContinuityState>,
+    require_exact_resume: bool,
+    context_generation: u64,
+    model: Option<String>,
+    bound_instructions: &'a str,
+    native_affordances: &'a [DynamicToolSpec],
+    static_context_fingerprint: &'a str,
+    session_context_available: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrivateThreadColdStart {
+    ResumeExact,
+    ResumeCompatible,
+    ReseedFromSessionContext,
+}
+
+pub struct CodexAppServerInterfaceDriver {
+    life_context: std::sync::OnceLock<octopus_interface_transport::InterfaceLiftContext>,
+    client: Mutex<AppServerClient>,
+    transport_state: Mutex<BTreeMap<TransportStateScope, TransportState>>,
+    login_states: Mutex<BTreeMap<String, ProviderLoginState>>,
+    pending_server_requests: PendingServerRequests,
+    next_request_id: Arc<std::sync::atomic::AtomicI64>,
+    interface_private_config: serde_json::Map<String, serde_json::Value>,
+    secret_store: Option<Arc<dyn ScopedSecretStore>>,
+    auth_manager: Option<Arc<AuthManager>>,
+    auth_store_home: Option<PathBuf>,
+    connected_auth_revision: Option<u64>,
+}
+
+fn auth_manager_revision(manager: &AuthManager) -> u64 {
+    let receiver = manager.auth_change_receiver();
+    *receiver.borrow()
+}
+
+impl CodexAppServerInterfaceDriver {
+    pub fn new(client: AppServerClient) -> Self {
+        Self::new_with_config(client, None)
+    }
+
+    pub fn new_with_config(
+        client: AppServerClient,
+        interface_driver_config: Option<&InterfaceDriverConfig>,
+    ) -> Self {
+        Self::new_with_config_and_boundaries(client, interface_driver_config, None, None, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_config_and_secret_store(
+        client: AppServerClient,
+        interface_driver_config: Option<&InterfaceDriverConfig>,
+        secret_store: Arc<dyn ScopedSecretStore>,
+    ) -> Self {
+        Self::new_with_config_and_boundaries(
+            client,
+            interface_driver_config,
+            Some(secret_store),
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_config_and_auth_boundaries(
+        client: AppServerClient,
+        interface_driver_config: Option<&InterfaceDriverConfig>,
+        secret_store: Option<Arc<dyn ScopedSecretStore>>,
+        auth_manager: Arc<AuthManager>,
+        auth_store_home: PathBuf,
+    ) -> Self {
+        Self::new_with_config_and_boundaries(
+            client,
+            interface_driver_config,
+            secret_store,
+            Some(auth_manager),
+            Some(auth_store_home),
+        )
+    }
+
+    fn new_with_config_and_boundaries(
+        client: AppServerClient,
+        interface_driver_config: Option<&InterfaceDriverConfig>,
+        secret_store: Option<Arc<dyn ScopedSecretStore>>,
+        auth_manager: Option<Arc<AuthManager>>,
+        auth_store_home: Option<PathBuf>,
+    ) -> Self {
+        let interface_private_config = interface_driver_config
+            .map(|config| config.private_config.clone())
+            .unwrap_or_default();
+        let connected_auth_revision = auth_manager
+            .as_ref()
+            .map(|manager| auth_manager_revision(manager));
+        Self {
+            life_context: std::sync::OnceLock::new(),
+            client: Mutex::new(client),
+            transport_state: Mutex::new(BTreeMap::new()),
+            login_states: Mutex::new(BTreeMap::new()),
+            pending_server_requests: Arc::new(Mutex::new(BTreeMap::new())),
+            next_request_id: Arc::new(std::sync::atomic::AtomicI64::new(1)),
+            interface_private_config,
+            secret_store,
+            auth_manager,
+            auth_store_home,
+            connected_auth_revision,
+        }
+    }
+
+    pub async fn shutdown(self) -> std::io::Result<()> {
+        self.client.into_inner().shutdown().await
+    }
+
+    pub(crate) async fn is_strictly_quiescent(&self) -> bool {
+        if !self.pending_server_requests.lock().await.is_empty() {
+            return false;
+        }
+        !self
+            .login_states
+            .lock()
+            .await
+            .values()
+            .any(|state| matches!(state, ProviderLoginState::Pending { .. }))
+    }
+
+    pub(crate) fn connected_auth_revision(&self) -> Option<u64> {
+        self.connected_auth_revision
+    }
+
+    pub(crate) fn attach_life_context(&self, ctx: octopus_interface_transport::InterfaceLiftContext) -> Result<(), String> {
+        self.life_context.set(ctx).map_err(|_| "provider life context was already attached".into())
+    }
+
+    async fn wait_for_peer_artifact(
+        &self, record: &octopus_runtime::run_record::RunRecord, call_id: &str, timeout_ms: u64,
+        interrupted: &std::sync::atomic::AtomicBool,
+    ) -> Result<crate::peer_reader::PeerWait, InterfaceDriverError> {
+        let ctx = self.life_context.get().ok_or_else(|| InterfaceDriverError::FailedClosed("peer wait has no declared interface life reader".into()))?;
+        crate::peer_reader::wait(ctx, &record.id, call_id, timeout_ms, interrupted).await.map_err(InterfaceDriverError::FailedClosed)
+    }
+
+    fn mint_request_id(&self) -> RequestId {
+        RequestId::Integer(
+            self.next_request_id
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+
+    async fn acquire_transport_thread(
+        &self,
+        scope: &TransportStateScope,
+        acquisition: ThreadAcquisition<'_>,
+    ) -> Result<(String, bool, bool), InterfaceDriverError> {
+        let ThreadAcquisition {
+            recovered,
+            require_exact_resume,
+            context_generation,
+            model,
+            bound_instructions,
+            native_affordances,
+            static_context_fingerprint,
+            session_context_available,
+        } = acquisition;
+        if require_exact_resume && recovered.is_none() {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex operation requires exact existing thread continuity".to_string(),
+            ));
+        }
+        let fingerprint = thread_shape_fingerprint(
+            model.as_deref(),
+            bound_instructions,
+            native_affordances,
+            static_context_fingerprint,
+        )?;
+        let recovered = if let Some(previous) = recovered
+            && !require_exact_resume
+            && self.private_thread_cold_start(Some(previous))? == PrivateThreadColdStart::ResumeCompatible
+            && (previous.thread_shape_fingerprint != fingerprint
+                || previous.static_context_fingerprint != static_context_fingerprint)
+        {
+            validate_recovered_thread_coordinates(previous, &previous.thread_shape_fingerprint,
+                context_generation, &previous.static_context_fingerprint)?;
+            validate_recovered_reseed_coordinates(previous, context_generation, session_context_available)?;
+            let state = self.transport_state.lock().await;
+            if let Some(cached) = state.get(scope)
+                && cached.thread_id.is_some()
+                && (cached.thread_id.as_deref() != Some(previous.thread_id.as_str())
+                    || cached.thread_shape_fingerprint.as_deref() != Some(previous.thread_shape_fingerprint.as_str())
+                    || cached.static_context_fingerprint.as_deref() != Some(previous.static_context_fingerprint.as_str())
+                    || cached.context_generation > previous.context_generation)
+            {
+                return Err(InterfaceDriverError::FailedClosed("admitted instruction/tool change conflicts with the live provider history".into()));
+            }
+            None
+        } else { recovered };
+        if let Some(recovered) = recovered {
+            {
+                let mut transport_state = self.transport_state.lock().await;
+                let state = transport_state.entry(scope.clone()).or_default();
+                match (&state.thread_id, &state.thread_shape_fingerprint) {
+                    (Some(thread_id), Some(shape)) => {
+                        validate_recovered_thread_coordinates(
+                            recovered,
+                            &fingerprint,
+                            context_generation,
+                            static_context_fingerprint,
+                        )?;
+                        if recovered.context_generation < state.context_generation {
+                            return Err(InterfaceDriverError::FailedClosed(
+                                "Codex continuity regressed behind the live transport context generation"
+                                    .to_string(),
+                            ));
+                        }
+                        if thread_id != &recovered.thread_id
+                            || shape != &fingerprint
+                            || state.static_context_fingerprint.as_deref()
+                                != Some(static_context_fingerprint)
+                        {
+                            return Err(InterfaceDriverError::FailedClosed(
+                                "Codex continuity conflicts with the live transport thread for this run"
+                                    .to_string(),
+                            ));
+                        }
+                        state.context_generation = context_generation;
+                        let first_turn_of_run = !state.hooks_catalog_emitted;
+                        state.hooks_catalog_emitted = true;
+                        return Ok((thread_id.clone(), false, first_turn_of_run));
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(InterfaceDriverError::FailedClosed(
+                            "Codex continuity conflicts with the live transport thread for this run"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            match if require_exact_resume {
+                PrivateThreadColdStart::ResumeExact
+            } else {
+                self.private_thread_cold_start(Some(recovered))?
+            } {
+                PrivateThreadColdStart::ResumeExact | PrivateThreadColdStart::ResumeCompatible => {
+                    validate_recovered_thread_coordinates(
+                        recovered,
+                        &fingerprint,
+                        context_generation,
+                        static_context_fingerprint,
+                    )?;
+                    let resume = ClientRequest::ThreadResume {
+                        request_id: self.mint_request_id(),
+                        params: ThreadResumeParams {
+                            thread_id: recovered.thread_id.clone(),
+                            model: model.clone(),
+                            config: Some(self.native_tool_thread_config()?),
+                            developer_instructions: Some(bound_instructions.to_string()),
+                            sandbox: Some(self.native_thread_sandbox()?),
+                            exclude_turns: true,
+                            ..ThreadResumeParams::default()
+                        },
+                    };
+                    let resumed: ThreadResumeResponse = {
+                        let client = self.client.lock().await;
+                        client
+                            .request_typed::<ThreadResumeResponse>(resume)
+                            .await
+                            .map_err(typed_error)?
+                    };
+                    if resumed.thread.id != recovered.thread_id {
+                        return Err(InterfaceDriverError::FailedClosed(format!(
+                            "thread/resume returned thread '{}', expected '{}'",
+                            resumed.thread.id, recovered.thread_id
+                        )));
+                    }
+                    let resumed_rollout_path = resumed.thread.path.clone();
+                    let read = ClientRequest::ThreadRead {
+                        request_id: self.mint_request_id(),
+                        params: ThreadReadParams {
+                            thread_id: recovered.thread_id.clone(),
+                            include_turns: false,
+                        },
+                    };
+                    let read: ThreadReadResponse = {
+                        let client = self.client.lock().await;
+                        client
+                            .request_typed::<ThreadReadResponse>(read)
+                            .await
+                            .map_err(typed_error)?
+                    };
+                    if read.thread.id != recovered.thread_id {
+                        return Err(InterfaceDriverError::FailedClosed(format!(
+                            "thread/read returned thread '{}', expected '{}'",
+                            read.thread.id, recovered.thread_id
+                        )));
+                    }
+                    let rollout_path = match (resumed_rollout_path, read.thread.path) {
+                        (Some(resumed), Some(read)) if resumed != read => {
+                            return Err(InterfaceDriverError::FailedClosed(format!(
+                                "thread/resume rollout path '{}' differs from thread/read path '{}'",
+                                resumed.display(),
+                                read.display()
+                            )));
+                        }
+                        (Some(path), _) | (_, Some(path)) => Some(path),
+                        (None, None) => None,
+                    };
+                    let mut transport_state = self.transport_state.lock().await;
+                    let state = transport_state.entry(scope.clone()).or_default();
+                    state.context_generation = context_generation;
+                    state.thread_id = Some(recovered.thread_id.clone());
+                    state.thread_shape_fingerprint = Some(fingerprint);
+                    state.static_context_fingerprint = Some(static_context_fingerprint.to_string());
+                    state.rollout_path = rollout_path;
+                    let first_turn_of_run = !state.hooks_catalog_emitted;
+                    state.hooks_catalog_emitted = true;
+                    return Ok((recovered.thread_id.clone(), false, first_turn_of_run));
+                }
+                PrivateThreadColdStart::ReseedFromSessionContext => {
+                    validate_recovered_reseed_coordinates(
+                        recovered,
+                        context_generation,
+                        session_context_available,
+                    )?;
+                }
+            }
+        }
+        let mut transport_state = self.transport_state.lock().await;
+        let state = transport_state.entry(scope.clone()).or_default();
+        if let ThreadAction::Reuse { thread_id } = plan_thread_action(state, &fingerprint) {
+            state.context_generation = context_generation;
+            state.static_context_fingerprint = Some(static_context_fingerprint.to_string());
+            let first_turn_of_run = !state.hooks_catalog_emitted;
+            state.hooks_catalog_emitted = true;
+            return Ok((thread_id, false, first_turn_of_run));
+        }
+        drop(transport_state);
+        let mut params = isolated_thread_start_params(
+            model,
+            bound_instructions.to_string(),
+            native_affordances.to_vec(),
+        );
+        params.sandbox = Some(self.native_thread_sandbox()?);
+        params.config = Some(self.native_tool_thread_config()?);
+        let request = ClientRequest::ThreadStart {
+            request_id: self.mint_request_id(),
+            params,
+        };
+        let response: ThreadStartResponse = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<ThreadStartResponse>(request)
+                .await
+                .map_err(typed_error)?
+        };
+        let rollout_path = response.thread.path.clone();
+        let thread_id = response.thread.id;
+        let mut transport_state = self.transport_state.lock().await;
+        let state = transport_state.entry(scope.clone()).or_default();
+        state.context_generation = context_generation;
+        state.thread_id = Some(thread_id.clone());
+        state.thread_shape_fingerprint = Some(fingerprint);
+        state.static_context_fingerprint = Some(static_context_fingerprint.to_string());
+        state.rollout_path = rollout_path;
+        let first_turn_of_run = !state.hooks_catalog_emitted;
+        state.hooks_catalog_emitted = true;
+        Ok((thread_id, true, first_turn_of_run))
+    }
+
+    fn private_thread_cold_start(
+        &self,
+        recovered: Option<&CodexContinuityState>,
+    ) -> Result<PrivateThreadColdStart, InterfaceDriverError> {
+        let configured = match self
+            .interface_private_config
+            .get("private_thread_cold_start")
+        {
+            None => PrivateThreadColdStart::ResumeExact,
+            Some(serde_json::Value::String(value)) if value == "resume_exact" => {
+                PrivateThreadColdStart::ResumeExact
+            }
+            Some(serde_json::Value::String(value)) if value == "resume_compatible" => {
+                PrivateThreadColdStart::ResumeCompatible
+            }
+            Some(serde_json::Value::String(value)) if value == "reseed_from_session_context" => {
+                PrivateThreadColdStart::ReseedFromSessionContext
+            }
+            Some(_) => {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "interface_driver_config.private_config.private_thread_cold_start must be 'resume_exact', 'resume_compatible' or 'reseed_from_session_context'"
+                        .to_string(),
+                ));
+            }
+        };
+        Ok(
+            if recovered.is_some_and(codex_continuity_waits_for_result) {
+                PrivateThreadColdStart::ResumeExact
+            } else {
+                configured
+            },
+        )
+    }
+
+    fn native_tool_namespace(&self) -> Result<NativeToolNamespace, InterfaceDriverError> {
+        let value = self
+            .interface_private_config
+            .get("native_tool_namespace")
+            .cloned()
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "codex_app_server descriptor declares no native_tool_namespace".to_string(),
+                )
+            })?;
+        serde_json::from_value::<NativeToolNamespace>(value)
+            .map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "interface_driver_config.private_config.native_tool_namespace is malformed: {error}"
+                ))
+            })?
+            .validate()
+    }
+
+    fn native_thread_sandbox(&self) -> Result<SandboxMode, InterfaceDriverError> {
+        match self.interface_private_config.get("native_thread_sandbox") {
+            None => Ok(SandboxMode::ReadOnly),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "interface_driver_config.private_config.native_thread_sandbox is malformed: {error}"
+                ))
+            }),
+        }
+    }
+
+    fn native_web_search_mode(&self) -> Result<WebSearchMode, InterfaceDriverError> {
+        match self.interface_private_config.get("web_search") {
+            None => Ok(WebSearchMode::Disabled),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "interface_driver_config.private_config.web_search is malformed: {error}"
+                ))
+            }),
+        }
+    }
+
+    fn enforce_native_web_search_policy(
+        &self,
+        input: &InterfaceInvocationEnvelope,
+    ) -> Result<(), InterfaceDriverError> {
+        let mode = self.native_web_search_mode()?;
+        if mode == WebSearchMode::Disabled {
+            return Ok(());
+        }
+        let values = input
+            .interface_policy()?
+            .and_then(|policy| policy.get("web_search_modes"))
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "Codex native web search requires formed interface policy web_search_modes"
+                        .to_string(),
+                )
+            })?;
+        let allowed: Vec<WebSearchMode> = serde_json::from_value(values.clone()).map_err(|error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex formed web_search_modes is malformed: {error}"
+            ))
+        })?;
+        if !allowed.contains(&mode) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex web_search '{mode}' is outside its freshly formed interface policy"
+            )));
+        }
+        Ok(())
+    }
+
+    fn native_tool_thread_config(
+        &self,
+    ) -> Result<HashMap<String, serde_json::Value>, InterfaceDriverError> {
+        Ok(HashMap::from([
+            ("features.view_image".to_string(), serde_json::json!(false)),
+            (
+                "features.code_mode.direct_only_tool_namespaces".to_string(),
+                serde_json::json!([]),
+            ),
+            (
+                "web_search".to_string(),
+                serde_json::json!(self.native_web_search_mode()?),
+            ),
+        ]))
+    }
+
+    fn resolve_private_config_string(
+        &self,
+        key: &str,
+    ) -> Result<Option<String>, InterfaceDriverError> {
+        non_empty_string_field(
+            self.interface_private_config.get(key),
+            &format!("interface_driver_config.private_config.{key}"),
+        )
+    }
+
+    fn context_output_labels(&self) -> Result<BTreeSet<String>, InterfaceDriverError> {
+        self.private_config_string_set("context_output_labels")
+    }
+
+    fn session_snapshot_labels(&self) -> Result<BTreeSet<String>, InterfaceDriverError> {
+        self.private_config_string_set("session_snapshot_labels")
+    }
+
+    fn model_result_projection(&self) -> Result<ModelResultProjection, InterfaceDriverError> {
+        ModelResultProjection::from_private_config(&self.interface_private_config)
+    }
+
+    fn operator_continuity(&self) -> Result<OperatorContinuityConfig, InterfaceDriverError> {
+        operator_continuity_from_private_config(&self.interface_private_config)
+    }
+
+    fn client_projection_output_labels(
+        &self,
+        context_output_labels: &BTreeSet<String>,
+        session_snapshot_labels: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, InterfaceDriverError> {
+        validated_client_projection_output_labels(
+            &self.interface_private_config,
+            context_output_labels,
+            session_snapshot_labels,
+        )
+    }
+
+    fn private_config_string_set(
+        &self,
+        key: &str,
+    ) -> Result<BTreeSet<String>, InterfaceDriverError> {
+        private_config_string_set(&self.interface_private_config, key)
+    }
+}
+
+pub(crate) fn validate_codex_projection_descriptor_contract(
+    descriptor: &InterfaceDescriptor,
+) -> Result<(), InterfaceDriverError> {
+    codex_projection_output_labels(descriptor).map(|_| ())
+}
+
+pub(crate) fn codex_projection_output_labels(
+    descriptor: &InterfaceDescriptor,
+) -> Result<BTreeSet<String>, InterfaceDriverError> {
+    if descriptor.interface_driver_ref != CODEX_APP_SERVER_INTERFACE_DRIVER_REF {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "interface '{}' declares driver '{}' instead of '{}'",
+            descriptor.id, descriptor.interface_driver_ref, CODEX_APP_SERVER_INTERFACE_DRIVER_REF
+        )));
+    }
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "codex_app_server interface '{}' declares no interface_driver_config",
+            descriptor.id
+        ))
+    })?;
+    let context_output_labels =
+        private_config_string_set(&config.private_config, "context_output_labels")?;
+    let session_snapshot_labels =
+        private_config_string_set(&config.private_config, "session_snapshot_labels")?;
+    let client_projection_output_labels = validated_client_projection_output_labels(
+        &config.private_config,
+        &context_output_labels,
+        &session_snapshot_labels,
+    )?;
+    LiveStreamRules::from_private_config_or_disabled(&config.private_config)?
+        .validate_projection_labels(
+            &context_output_labels,
+            &session_snapshot_labels,
+            &client_projection_output_labels,
+        )?;
+    operator_continuity_from_private_config(&config.private_config)?;
+    Ok(client_projection_output_labels)
+}
+
+fn operator_continuity_from_private_config(
+    private_config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<OperatorContinuityConfig, InterfaceDriverError> {
+    let value = private_config
+        .get("operator_continuity")
+        .cloned()
+        .ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "codex_app_server descriptor declares no operator_continuity".to_string(),
+            )
+        })?;
+    serde_json::from_value::<OperatorContinuityConfig>(value)
+        .map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "codex_app_server operator_continuity is malformed: {error}"
+            ))
+        })?
+        .validate()
+}
+
+fn validated_client_projection_output_labels(
+    private_config: &serde_json::Map<String, serde_json::Value>,
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, InterfaceDriverError> {
+    if !session_snapshot_labels.is_subset(context_output_labels) {
+        return Err(InterfaceDriverError::Protocol(
+            "codex_app_server session_snapshot_labels must be a subset of context_output_labels"
+                .to_string(),
+        ));
+    }
+    validate_durable_interruption_output_labels(context_output_labels, session_snapshot_labels)?;
+    let labels = private_config_string_set(private_config, "client_projection_output_labels")?;
+    let mut required = context_output_labels.clone();
+    required.extend(
+        REQUIRED_CLIENT_BOUNDARY_OUTPUT_LABELS
+            .iter()
+            .map(|label| (*label).to_string()),
+    );
+    required.extend(
+        CLIENT_ACTIVITY_OUTPUT_LABELS
+            .iter()
+            .map(|label| (*label).to_string()),
+    );
+    if let Some(operations) = provider_operations_from_private_config(private_config)? {
+        required.extend([
+            operations.error_output_label,
+            operations.account_login_completed_output_label,
+            operations.account_updated_output_label,
+            operations.account_rate_limits_updated_output_label,
+            operations.account_login_start.output_label,
+            operations.account_login_cancel.output_label,
+            operations.account_login_status_read.output_label,
+            operations.account_logout.output_label,
+            operations.account_read.output_label,
+            operations.account_rate_limits_read.output_label,
+            operations.account_rate_limit_reset_consume.output_label,
+            operations.account_usage_read.output_label,
+            operations.account_workspace_messages_read.output_label,
+            operations.capabilities_read.output_label,
+        ]);
+        if let Some(binding) = operations.thread_compact_start {
+            required.insert(binding.output_label);
+        }
+    }
+    let missing = required.difference(&labels).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex_app_server client_projection_output_labels omit required boundary outputs: {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(labels)
+}
+
+fn private_config_string_set(
+    private_config: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<BTreeSet<String>, InterfaceDriverError> {
+    let value = private_config.get(key).cloned().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!("codex_app_server descriptor declares no {key}"))
+    })?;
+    let labels: Vec<String> = serde_json::from_value(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("codex_app_server {key} are malformed: {error}"))
+    })?;
+    let mut unique = BTreeSet::new();
+    for label in labels {
+        if label.trim().is_empty() || label.trim() != label || !unique.insert(label.clone()) {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "codex_app_server {key} must be unique non-empty trimmed strings"
+            )));
+        }
+    }
+    if unique.is_empty() {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "codex_app_server {key} must not be empty"
+        )));
+    }
+    Ok(unique)
+}
+
+pub(crate) fn codex_session_snapshot_labels(
+    descriptor: &InterfaceDescriptor,
+) -> Result<BTreeSet<String>, InterfaceDriverError> {
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "provider interface '{}' has no interface_driver_config",
+            descriptor.id.as_str()
+        ))
+    })?;
+    private_config_string_set(&config.private_config, "session_snapshot_labels")
+}
+
+pub(crate) fn recover_operator_turn_continuity(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    resolved_session_snapshot: Option<&ProviderInvocationSessionSnapshot>,
+    expected_run: &octopus_descriptors::RunId,
+    pinned_run_record: &[u8],
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let manifest = input.read_artifact_manifest()?;
+    let peer = admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake")))?;
+    if manifest.label != OPERATOR_MESSAGE_LABEL && peer.as_ref().is_none_or(|message| message.action == PeerAction::Interrupt) {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "deferred provider turn source '{}' is not an operator message",
+            manifest.label
+        )));
+    }
+    let bytes = input.read_artifact_payload()?;
+    let runtime = invocation_runtime_metadata(input)?;
+    if &runtime.run != expected_run || runtime.interface != descriptor.id {
+        return Err(InterfaceDriverError::FailedClosed(
+            "deferred operator message runtime coordinates differ from its provider run"
+                .to_string(),
+        ));
+    }
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "provider interface '{}' has no interface_driver_config",
+            descriptor.id.as_str()
+        ))
+    })?;
+    let context_output_labels =
+        private_config_string_set(&config.private_config, "context_output_labels")?;
+    let session_snapshot_labels =
+        private_config_string_set(&config.private_config, "session_snapshot_labels")?;
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(pinned_run_record)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+        &record,
+        input.metadata()?,
+        &input.artifact_binding_payloads,
+    )
+    .map_err(InterfaceDriverError::FailedClosed)?;
+    let context_payloads = resolve_instruction_context(input.metadata()?, &context_payloads)
+        .map_err(InterfaceDriverError::FailedClosed)?
+        .remaining_payloads;
+    let contexts = CodexAppServerInterfaceDriver::resolve_bound_session_contexts(
+        &context_payloads,
+        &runtime.interface,
+        &session_snapshot_labels,
+        resolved_session_snapshot,
+    )?;
+    let selected_files =
+        if octopus_provider_run_authoring::payload_artifact_bindings(&record, &runtime.interface)
+            .map_err(InterfaceDriverError::FailedClosed)?
+            .is_empty()
+        {
+            None
+        } else {
+            Some(selected_file_projection(
+                &record,
+                input,
+                &input.artifact,
+                &manifest.label,
+                &bytes,
+                &contexts,
+                &[],
+                ModelResultProjection::from_private_config(&config.private_config)?,
+            )?)
+        };
+    if peer.is_none() && !matches!(
+        decode_provider_input(
+            &bytes,
+            &manifest.label,
+            None,
+            &BTreeMap::new(),
+            selected_files.as_ref()
+        )?,
+        ProviderInput::Turn(_)
+    ) {
+        return Err(InterfaceDriverError::FailedClosed(
+            "deferred operator message is not an ordinary provider turn".into(),
+        ));
+    }
+    recover_codex_continuity_resolved(
+        &context_payloads,
+        &contexts,
+        &runtime.interface,
+        runtime.run.as_str(),
+        &context_output_labels,
+        &session_snapshot_labels,
+    )
+}
+
+pub(crate) fn codex_continuity_waits_for_result(state: &CodexContinuityState) -> bool {
+    state.pending.is_some() || state.interrupted_pending.is_some()
+}
+
+pub(crate) fn codex_continuity_successor_is_settled(
+    source: Option<&CodexContinuityState>,
+    rebased: Option<&CodexContinuityState>,
+) -> Result<bool, String> {
+    let rebased = rebased.ok_or_else(|| {
+        "deferred operator turn release has no Codex continuity coordinates".to_string()
+    })?;
+    let Some(source) = source else {
+        return Ok(!codex_continuity_waits_for_result(rebased));
+    };
+    if source.provider_interface != rebased.provider_interface
+        || source.run != rebased.run
+        || source.thread_id != rebased.thread_id
+        || source.thread_shape_fingerprint != rebased.thread_shape_fingerprint
+        || source.static_context_fingerprint != rebased.static_context_fingerprint
+        || rebased.context_generation < source.context_generation
+    {
+        return Err(
+            "deferred operator turn release is not a monotonic successor of its source continuity"
+                .to_string(),
+        );
+    }
+    Ok(!codex_continuity_waits_for_result(rebased))
+}
+
+fn validate_durable_interruption_output_labels(
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<(), InterfaceDriverError> {
+    let required_context = [
+        TURN_CONTROL_ACKNOWLEDGED_LABEL,
+        TURN_INTERRUPTED_RESULT_LABEL,
+        TURN_AGENT_MESSAGE_LABEL,
+        TURN_REASONING_LABEL,
+        TURN_PLAN_UPDATE_LABEL,
+    ];
+    let missing_context = required_context
+        .into_iter()
+        .filter(|label| !context_output_labels.contains(*label))
+        .collect::<Vec<_>>();
+    if !missing_context.is_empty() {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex_app_server context_output_labels omit durable interruption outputs: {}",
+            missing_context.join(", ")
+        )));
+    }
+    if !session_snapshot_labels.contains(TURN_INTERRUPTED_RESULT_LABEL) {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex_app_server session_snapshot_labels omit durable interrupted closure '{TURN_INTERRUPTED_RESULT_LABEL}'"
+        )));
+    }
+    if !context_output_labels.contains(TURN_CONTEXT_COMPACTION_LABEL) {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex_app_server context_output_labels omit active history mutation '{TURN_CONTEXT_COMPACTION_LABEL}'"
+        )));
+    }
+    Ok(())
+}
+
+fn provider_operations_from_private_config(
+    private_config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<ProviderOperations>, InterfaceDriverError> {
+    let Some(value) = private_config.get("provider_operations").cloned() else {
+        return Ok(None);
+    };
+    let operations: ProviderOperations = serde_json::from_value(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "codex_app_server provider_operations is malformed: {error}"
+        ))
+    })?;
+    validate_provider_operations(&operations)?;
+    Ok(Some(operations))
+}
+
+impl CodexAppServerInterfaceDriver {
+    pub fn interface_driver_ref(&self) -> &str {
+        CODEX_APP_SERVER_INTERFACE_DRIVER_REF
+    }
+
+    fn provider_operations(&self) -> Result<Option<ProviderOperations>, InterfaceDriverError> {
+        provider_operations_from_private_config(&self.interface_private_config)
+    }
+
+    fn configured_provider_operation(
+        &self,
+        label: &str,
+    ) -> Result<Option<ProviderOperation>, InterfaceDriverError> {
+        let Some(operations) = self.provider_operations()? else {
+            return Ok(None);
+        };
+        Ok([
+            (
+                ProviderOperation::AccountLoginStart,
+                operations.account_login_start.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountLoginCancel,
+                operations.account_login_cancel.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountLoginStatusRead,
+                operations.account_login_status_read.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountLogout,
+                operations.account_logout.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountRead,
+                operations.account_read.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountRateLimitsRead,
+                operations.account_rate_limits_read.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountRateLimitResetConsume,
+                operations
+                    .account_rate_limit_reset_consume
+                    .request_label
+                    .as_str(),
+            ),
+            (
+                ProviderOperation::AccountUsageRead,
+                operations.account_usage_read.request_label.as_str(),
+            ),
+            (
+                ProviderOperation::AccountWorkspaceMessagesRead,
+                operations
+                    .account_workspace_messages_read
+                    .request_label
+                    .as_str(),
+            ),
+            (
+                ProviderOperation::CapabilitiesRead,
+                operations.capabilities_read.request_label.as_str(),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(operation, request_label)| (request_label == label).then_some(operation)))
+    }
+
+    fn configured_thread_compact_request(&self, label: &str) -> Result<bool, InterfaceDriverError> {
+        Ok(self
+            .provider_operations()?
+            .and_then(|operations| operations.thread_compact_start)
+            .is_some_and(|binding| binding.request_label == label))
+    }
+
+    async fn handle_provider_operation(
+        &self,
+        operation: ProviderOperation,
+        exact_interface: &InterfaceId,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        self.emit_ready_account_notifications(sink).await?;
+        match operation {
+            ProviderOperation::AccountLoginStart => {
+                self.handle_account_login_start(exact_interface, payload, sink)
+                    .await
+            }
+            ProviderOperation::AccountLoginCancel => {
+                self.handle_account_login_cancel(payload, sink).await
+            }
+            ProviderOperation::AccountLoginStatusRead => {
+                self.handle_account_login_status(payload, sink).await
+            }
+            ProviderOperation::AccountLogout => self.handle_account_logout(payload, sink).await,
+            ProviderOperation::AccountRead => self.handle_account_read(payload, sink).await,
+            ProviderOperation::AccountRateLimitsRead => {
+                self.handle_account_rate_limits(payload, sink).await
+            }
+            ProviderOperation::AccountRateLimitResetConsume => {
+                self.handle_account_rate_limit_reset_consume(payload, sink)
+                    .await
+            }
+            ProviderOperation::AccountUsageRead => self.handle_account_usage(payload, sink).await,
+            ProviderOperation::AccountWorkspaceMessagesRead => {
+                self.handle_account_workspace_messages(payload, sink).await
+            }
+            ProviderOperation::CapabilitiesRead => {
+                self.handle_provider_capabilities(payload, sink).await
+            }
+        }
+    }
+
+    async fn handle_account_login_start(
+        &self,
+        exact_interface: &InterfaceId,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let request: AccountLoginStartRequest = match serde_json::from_slice(payload) {
+            Ok(request) => request,
+            Err(_) => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                    "operation_payload_malformed",
+                    "protocol",
+                    false,
+                    "account login start payload does not match the declared provider vocabulary",
+                ));
+            }
+        };
+        let (method, secret_handle, params) = match request {
+            AccountLoginStartRequest::ApiKey { secret_handle } => {
+                let Some(secret_store) = self.secret_store.as_ref() else {
+                    return sink.send(provider_operation_error(
+                        PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                        "secret_store_unavailable",
+                        "unsupported",
+                        false,
+                        "this provider life has no scoped secret-store boundary",
+                    ));
+                };
+                let secret = match secret_store.resolve(exact_interface, &secret_handle) {
+                    Ok(secret) => secret,
+                    Err(error) => {
+                        return sink.send(scoped_secret_operation_error(error));
+                    }
+                };
+                (
+                    "api_key",
+                    Some(secret_handle),
+                    LoginAccountParams::ApiKey {
+                        api_key: secret.expose().to_string(),
+                    },
+                )
+            }
+            AccountLoginStartRequest::ChatgptBrowser {
+                codex_streamlined_login,
+            } => (
+                "chatgpt_browser",
+                None,
+                LoginAccountParams::Chatgpt {
+                    codex_streamlined_login,
+                },
+            ),
+            AccountLoginStartRequest::ChatgptDeviceCode => (
+                "chatgpt_device_code",
+                None,
+                LoginAccountParams::ChatgptDeviceCode,
+            ),
+        };
+        let request = ClientRequest::LoginAccount {
+            request_id: self.mint_request_id(),
+            params,
+        };
+        let credential_handle_fingerprint = secret_handle
+            .as_deref()
+            .map(|handle| blake3::hash(handle.as_bytes()).to_hex().to_string());
+        sink.admit_app_server_dispatch(&request, credential_handle_fingerprint)
+            .await?;
+        let response = {
+            let client = self.client.lock().await;
+            client.request_typed::<LoginAccountResponse>(request).await
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                return sink.send(upstream_operation_error(
+                    PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                    &error,
+                    "app-server account login start failed",
+                ));
+            }
+        };
+        let value = match response {
+            LoginAccountResponse::ApiKey {} => serde_json::json!({
+                "operation": PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                "method": method,
+                "status": "completed",
+                "credential": {
+                    "secret_handle": secret_handle,
+                    "redacted": true,
+                },
+            }),
+            LoginAccountResponse::Chatgpt { login_id, auth_url } => {
+                self.login_states.lock().await.insert(
+                    login_id.clone(),
+                    ProviderLoginState::Pending {
+                        method: "chatgpt_browser",
+                    },
+                );
+                serde_json::json!({
+                    "operation": PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                    "method": method,
+                    "status": "pending",
+                    "login_id": login_id,
+                    "auth_url": auth_url,
+                })
+            }
+            LoginAccountResponse::ChatgptDeviceCode {
+                login_id,
+                verification_url,
+                user_code,
+            } => {
+                self.login_states.lock().await.insert(
+                    login_id.clone(),
+                    ProviderLoginState::Pending {
+                        method: "chatgpt_device_code",
+                    },
+                );
+                serde_json::json!({
+                    "operation": PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                    "method": method,
+                    "status": "pending",
+                    "login_id": login_id,
+                    "verification_url": verification_url,
+                    "user_code": user_code,
+                })
+            }
+            LoginAccountResponse::ChatgptAuthTokens {} => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                    "upstream_response_unsupported",
+                    "unsupported",
+                    false,
+                    "external ChatGPT token login is not exposed by this provider artifact vocabulary",
+                ));
+            }
+        };
+        sink.send(CodexTurnOutput::client(
+            PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL,
+            value,
+        ))
+    }
+
+    async fn handle_account_login_cancel(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let Some(request) =
+            parse_login_id_request(payload, PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL, sink)?
+        else {
+            return Ok(());
+        };
+        let client_request = ClientRequest::CancelLoginAccount {
+            request_id: self.mint_request_id(),
+            params: CancelLoginAccountParams {
+                login_id: request.login_id.clone(),
+            },
+        };
+        sink.admit_app_server_dispatch(&client_request, None)
+            .await?;
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<CancelLoginAccountResponse>(client_request)
+                .await
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                return sink.send(upstream_operation_error(
+                    PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL,
+                    &error,
+                    "app-server account login cancel failed",
+                ));
+            }
+        };
+        let status = serde_json::to_value(&response.status)
+            .ok()
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+            .unwrap_or_else(|| "unknown".to_string());
+        if status == "canceled" {
+            self.login_states
+                .lock()
+                .await
+                .insert(request.login_id.clone(), ProviderLoginState::Cancelled);
+        }
+        sink.send(CodexTurnOutput::client(
+            PROVIDER_ACCOUNT_LOGIN_CANCELLED_LABEL,
+            serde_json::json!({
+                "operation": PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL,
+                "login_id": request.login_id,
+                "status": status,
+            }),
+        ))
+    }
+
+    async fn handle_account_login_status(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let Some(request) =
+            parse_login_id_request(payload, PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL, sink)?
+        else {
+            return Ok(());
+        };
+        let state = self
+            .login_states
+            .lock()
+            .await
+            .get(&request.login_id)
+            .cloned();
+        let Some(state) = state else {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL,
+                "login_status_unavailable",
+                "unsupported",
+                false,
+                "upstream app-server has no login-status read method and this provider life did not observe that login id",
+            ));
+        };
+        sink.send(CodexTurnOutput::client(
+            PROVIDER_ACCOUNT_LOGIN_STATUS_LABEL,
+            serde_json::json!({
+                "operation": PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL,
+                "login_id": request.login_id,
+                "state": state,
+            }),
+        ))
+    }
+
+    async fn handle_account_logout(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        if !parse_empty_operation(payload, PROVIDER_ACCOUNT_LOGOUT_LABEL, sink)? {
+            return Ok(());
+        }
+        let (auth_manager, auth_store_home) = match (&self.auth_manager, &self.auth_store_home) {
+            (Some(auth_manager), Some(auth_store_home)) => {
+                (auth_manager.clone(), auth_store_home.clone())
+            }
+            _ => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                    "auth_store_boundary_unavailable",
+                    "unsupported",
+                    false,
+                    "this provider life cannot clear and restore the current auth-store boundary",
+                ));
+            }
+        };
+        let app_server_home = {
+            let client = self.client.lock().await;
+            client.app_server_codex_home().map(PathBuf::from)
+        };
+        let Some(app_server_home) = app_server_home.filter(|path| path.is_absolute()) else {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "app_server_auth_home_unavailable",
+                "unsupported",
+                false,
+                "app-server did not expose a local absolute auth-store home",
+            ));
+        };
+        if app_server_home == auth_store_home {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "auth_store_boundary_not_isolated",
+                "unsupported",
+                false,
+                "app-server auth home is not isolated from the current provider auth store",
+            ));
+        }
+        let request = ClientRequest::LogoutAccount {
+            request_id: self.mint_request_id(),
+            params: None,
+        };
+        sink.admit_app_server_dispatch(&request, None).await?;
+        let response = {
+            let client = self.client.lock().await;
+            client.request_typed::<LogoutAccountResponse>(request).await
+        };
+        if let Err(error) = response {
+            return sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                &error,
+                "app-server account logout failed",
+            ));
+        }
+        if auth_manager.logout().await.is_err() {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "auth_store_logout_failed",
+                "auth_store",
+                false,
+                "the current provider auth store could not be cleared after app-server logout",
+            ));
+        }
+        let real_auth = auth_store_home.join("auth.json");
+        let curated_auth = app_server_home.join("auth.json");
+        let _ = std::fs::remove_file(&curated_auth);
+        if crate::config::link_auth_boundary(&real_auth, &curated_auth).is_err() {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "auth_store_boundary_restore_failed",
+                "auth_store",
+                false,
+                "the isolated app-server auth link could not be restored after logout",
+            ));
+        }
+        self.login_states.lock().await.clear();
+        sink.send(CodexTurnOutput::client(
+            PROVIDER_ACCOUNT_LOGGED_OUT_LABEL,
+            serde_json::json!({
+                "operation": PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "status": "completed",
+            }),
+        ))
+    }
+
+    async fn handle_account_read(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let request: AccountReadRequest = match serde_json::from_slice(payload) {
+            Ok(request) => request,
+            Err(_) => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_READ_LABEL,
+                    "operation_payload_malformed",
+                    "protocol",
+                    false,
+                    "account read payload must contain only a boolean refresh_token field",
+                ));
+            }
+        };
+        let refresh_token = request.refresh_token;
+        let request = ClientRequest::GetAccount {
+            request_id: self.mint_request_id(),
+            params: GetAccountParams { refresh_token },
+        };
+        if refresh_token {
+            sink.admit_app_server_dispatch(&request, None).await?;
+        }
+        let response = {
+            let client = self.client.lock().await;
+            client.request_typed::<GetAccountResponse>(request).await
+        };
+        match response {
+            Ok(response) => sink.send(serialized_client_output(
+                PROVIDER_ACCOUNT_SNAPSHOT_LABEL,
+                &response,
+            )?),
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_READ_LABEL,
+                &error,
+                "app-server account read failed",
+            )),
+        }
+    }
+
+    async fn handle_account_rate_limits(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        if !parse_empty_operation(payload, PROVIDER_ACCOUNT_RATE_LIMITS_READ_LABEL, sink)? {
+            return Ok(());
+        }
+        let request = ClientRequest::GetAccountRateLimits {
+            request_id: self.mint_request_id(),
+            params: None,
+        };
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<GetAccountRateLimitsResponse>(request)
+                .await
+        };
+        match response {
+            Ok(response) => sink.send(serialized_client_output(
+                PROVIDER_ACCOUNT_RATE_LIMITS_LABEL,
+                &response,
+            )?),
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_RATE_LIMITS_READ_LABEL,
+                &error,
+                "app-server account rate-limit read failed",
+            )),
+        }
+    }
+
+    async fn handle_account_usage(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let request: AccountUsageReadRequest = match serde_json::from_slice(payload) {
+            Ok(request) => request,
+            Err(_) => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_USAGE_READ_LABEL,
+                    "operation_payload_malformed",
+                    "protocol",
+                    false,
+                    "account usage read accepts only an optional non-empty thread_id",
+                ));
+            }
+        };
+        if request
+            .thread_id
+            .as_deref()
+            .is_some_and(|thread_id| thread_id.trim().is_empty() || thread_id.trim() != thread_id)
+        {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_USAGE_READ_LABEL,
+                "thread_id_invalid",
+                "protocol",
+                false,
+                "account usage read thread_id must be a non-empty trimmed string",
+            ));
+        }
+        let request = ClientRequest::GetAccountTokenUsage {
+            request_id: self.mint_request_id(),
+            params: GetAccountTokenUsageParams {
+                thread_id: request.thread_id,
+            },
+        };
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<GetAccountTokenUsageResponse>(request)
+                .await
+        };
+        match response {
+            Ok(response) => sink.send(serialized_client_output(
+                PROVIDER_ACCOUNT_USAGE_LABEL,
+                &response,
+            )?),
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_USAGE_READ_LABEL,
+                &error,
+                "app-server account usage read failed",
+            )),
+        }
+    }
+
+    async fn handle_account_workspace_messages(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        if !parse_empty_operation(
+            payload,
+            PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_READ_LABEL,
+            sink,
+        )? {
+            return Ok(());
+        }
+        let request = ClientRequest::GetWorkspaceMessages {
+            request_id: self.mint_request_id(),
+            params: None,
+        };
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<GetWorkspaceMessagesResponse>(request)
+                .await
+        };
+        match response {
+            Ok(response) => sink.send(serialized_client_output(
+                PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_LABEL,
+                &response,
+            )?),
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_READ_LABEL,
+                &error,
+                "app-server workspace-message read failed",
+            )),
+        }
+    }
+
+    async fn handle_account_rate_limit_reset_consume(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let request: AccountRateLimitResetConsumeRequest = match serde_json::from_slice(payload) {
+            Ok(request) => request,
+            Err(_) => {
+                return sink.send(provider_operation_error(
+                    PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+                    "operation_payload_malformed",
+                    "protocol",
+                    false,
+                    "rate-limit reset consume requires idempotency_key and optional credit_id",
+                ));
+            }
+        };
+        if request.idempotency_key.trim().is_empty()
+            || request.idempotency_key.trim() != request.idempotency_key
+            || request.credit_id.as_deref().is_some_and(|credit_id| {
+                credit_id.trim().is_empty() || credit_id.trim() != credit_id
+            })
+        {
+            return sink.send(provider_operation_error(
+                PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+                "operation_coordinates_invalid",
+                "protocol",
+                false,
+                "idempotency_key and optional credit_id must be non-empty trimmed strings",
+            ));
+        }
+        let client_request = ClientRequest::ConsumeAccountRateLimitResetCredit {
+            request_id: self.mint_request_id(),
+            params: ConsumeAccountRateLimitResetCreditParams {
+                idempotency_key: request.idempotency_key.clone(),
+                credit_id: request.credit_id.clone(),
+            },
+        };
+        sink.admit_app_server_dispatch(&client_request, None)
+            .await?;
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<ConsumeAccountRateLimitResetCreditResponse>(client_request)
+                .await
+        };
+        match response {
+            Ok(response) => sink.send(CodexTurnOutput::client(
+                PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUMED_LABEL,
+                serde_json::json!({
+                    "operation": PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+                    "idempotency_key": request.idempotency_key,
+                    "credit_id": request.credit_id,
+                    "outcome": response.outcome,
+                }),
+            )),
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+                &error,
+                "app-server rate-limit reset credit consume failed",
+            )),
+        }
+    }
+
+    async fn handle_provider_capabilities(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        if !parse_empty_operation(payload, PROVIDER_CAPABILITIES_READ_LABEL, sink)? {
+            return Ok(());
+        }
+        let request = ClientRequest::ModelProviderCapabilitiesRead {
+            request_id: self.mint_request_id(),
+            params: ModelProviderCapabilitiesReadParams {},
+        };
+        let (response, server_version, transport_kind, compatibility) = {
+            let client = self.client.lock().await;
+            let server_version = client.server_version().map(str::to_string);
+            let transport_kind = client.transport_kind();
+            let compatibility = client.compatibility().cloned();
+            let response = client
+                .request_typed::<ModelProviderCapabilitiesReadResponse>(request)
+                .await;
+            (response, server_version, transport_kind, compatibility)
+        };
+        match response {
+            Ok(response) => {
+                let mut output = serialized_client_output(PROVIDER_CAPABILITIES_LABEL, &response)?;
+                insert_client_output_field(
+                    &mut output,
+                    "app_server",
+                    serde_json::json!({
+                        "transport": transport_kind,
+                        "server_version": server_version,
+                        "version_source": "initialize.userAgent",
+                        "compatibility": compatibility,
+                    }),
+                );
+                sink.send(output)
+            }
+            Err(error) => sink.send(upstream_operation_error(
+                PROVIDER_CAPABILITIES_READ_LABEL,
+                &error,
+                "app-server provider capability read failed",
+            )),
+        }
+    }
+
+    async fn emit_ready_account_notifications(
+        &self,
+        sink: &TurnSink<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let account_events = {
+            let mut client = self.client.lock().await;
+            let mut account_events = Vec::new();
+            let mut deferred = Vec::new();
+            for event in client.take_ready_events() {
+                match event {
+                    AppServerEvent::ServerNotification(
+                        notification @ (ServerNotification::AccountLoginCompleted(_)
+                        | ServerNotification::AccountUpdated(_)
+                        | ServerNotification::AccountRateLimitsUpdated(_)),
+                    ) => account_events.push(notification),
+                    event => deferred.push(event),
+                }
+            }
+            client.restore_ready_events(deferred);
+            account_events
+        };
+        for notification in account_events {
+            if let Some(output) = self.account_notification_output(notification).await? {
+                sink.send(output)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn account_notification_output(
+        &self,
+        notification: ServerNotification,
+    ) -> Result<Option<CodexTurnOutput>, InterfaceDriverError> {
+        match notification {
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.record_login_completion(&notification).await;
+                Ok(Some(account_login_completed_output(&notification)))
+            }
+            ServerNotification::AccountUpdated(notification) => {
+                Ok(Some(account_updated_output(&notification)?))
+            }
+            ServerNotification::AccountRateLimitsUpdated(notification) => {
+                Ok(Some(serialized_client_output(
+                    PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL,
+                    &notification,
+                )?))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn record_login_completion(&self, notification: &AccountLoginCompletedNotification) {
+        if let Some(login_id) = notification.login_id.as_ref() {
+            self.login_states.lock().await.insert(
+                login_id.clone(),
+                ProviderLoginState::Completed {
+                    success: notification.success,
+                },
+            );
+        }
+    }
+
+    fn model_catalog_operation(&self) -> Result<ModelCatalogOperation, InterfaceDriverError> {
+        let value = self
+            .interface_private_config
+            .get("model_catalog_operation")
+            .cloned()
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "codex_app_server descriptor declares no model_catalog_operation".to_string(),
+                )
+            })?;
+        let operation: ModelCatalogOperation = serde_json::from_value(value).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "codex_app_server model_catalog_operation is malformed: {error}"
+            ))
+        })?;
+        if operation.request_label != PROVIDER_MODELS_LIST_LABEL
+            || operation.output_label != PROVIDER_MODELS_CATALOG_LABEL
+        {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "codex_app_server model catalog labels must be '{PROVIDER_MODELS_LIST_LABEL}' and '{PROVIDER_MODELS_CATALOG_LABEL}'"
+            )));
+        }
+        if operation.default_limit == 0
+            || operation.max_limit == 0
+            || operation.default_limit > operation.max_limit
+        {
+            return Err(InterfaceDriverError::Protocol(
+                "codex_app_server model catalog limits are invalid".to_string(),
+            ));
+        }
+        Ok(operation)
+    }
+
+    async fn emit_model_catalog(
+        &self,
+        payload: &[u8],
+        sink: &TurnSink<'_>,
+        formed_models: &BTreeSet<String>,
+    ) -> Result<(), InterfaceDriverError> {
+        let operation = self.model_catalog_operation()?;
+        let request: ModelCatalogArtifactRequest =
+            serde_json::from_slice(payload).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "provider.models.list payload is malformed: {error}"
+                ))
+            })?;
+        let cursor = match request.cursor {
+            Some(cursor) if !cursor.is_empty() && cursor.trim() == cursor => Some(cursor),
+            Some(_) => {
+                return Err(InterfaceDriverError::Protocol(
+                    "provider.models.list cursor must be non-empty and trimmed".to_string(),
+                ));
+            }
+            None => None,
+        };
+        let limit = request.limit.unwrap_or(operation.default_limit);
+        if limit == 0 || limit > operation.max_limit {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "provider.models.list limit must be within 1..={} for this interface",
+                operation.max_limit
+            )));
+        }
+        let request = ClientRequest::ModelList {
+            request_id: self.mint_request_id(),
+            params: ModelListParams {
+                cursor,
+                limit: Some(limit),
+                include_hidden: Some(operation.include_hidden),
+            },
+        };
+        let response = {
+            let client = self.client.lock().await;
+            client
+                .request_typed::<ModelListResponse>(request)
+                .await
+                .map_err(typed_error)?
+        };
+        let models = response
+            .data
+            .into_iter()
+            .filter(|model| catalog_model_allowed(&model.model, formed_models))
+            .collect::<Vec<_>>();
+        sink.send(CodexTurnOutput::client(
+            PROVIDER_MODELS_CATALOG_LABEL,
+            serde_json::json!({
+                "label": PROVIDER_MODELS_CATALOG_LABEL,
+                "models": models,
+                "next_cursor": response.next_cursor,
+            }),
+        ))
+    }
+
+    fn resolve_bound_session_contexts(
+        artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+        provider_interface: &InterfaceId,
+        session_snapshot_labels: &BTreeSet<String>,
+        resolved_session_snapshot: Option<&ProviderInvocationSessionSnapshot>,
+    ) -> Result<BoundSessionContexts, InterfaceDriverError> {
+        let mut resolved = BTreeMap::new();
+        let mut current_seen = false;
+        let mut grounded_snapshot_used = false;
+        for bound in artifact_binding_payloads {
+            let value: serde_json::Value =
+                serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+                    InterfaceDriverError::Protocol(format!(
+                        "Codex session carrier '{}' is not JSON: {error}",
+                        bound.artifact.id
+                    ))
+                })?;
+            let Some(raw) = value.get(SESSION_CONTEXT_FIELD) else {
+                continue;
+            };
+            let label = continuity_carrier_label(&value, bound.artifact.id.as_str())?;
+            if !session_snapshot_labels.contains(label) {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex session carrier '{}' is not a descriptor-declared snapshot output",
+                    bound.artifact.id
+                )));
+            }
+            let snapshot: SessionContextSnapshot =
+                serde_json::from_value(raw.clone()).map_err(|error| {
+                    InterfaceDriverError::Protocol(format!(
+                        "Codex session carrier '{}' is malformed: {error}",
+                        bound.artifact.id
+                    ))
+                })?;
+            if snapshot.schema_version != 3 {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex session carrier '{}' has unsupported schema_version {}",
+                    bound.artifact.id, snapshot.schema_version
+                )));
+            }
+            let key = continuity_source_key(&bound.artifact);
+            if snapshot.provider_interface != *provider_interface {
+                if resolved.insert(key, BoundSessionContext::Foreign).is_some() {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "Codex invocation repeats one foreign session carrier".to_string(),
+                    ));
+                }
+                continue;
+            }
+            if current_seen {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex invocation carries multiple current session snapshots".to_string(),
+                ));
+            }
+            current_seen = true;
+            let snapshot = resolved_session_snapshot.ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "Codex current session carrier has no handoff-grounded ledger view".to_string(),
+                )
+            })?;
+            if snapshot.carrier != bound.artifact {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex handoff-grounded session carrier differs from the invocation binding"
+                        .to_string(),
+                ));
+            }
+            grounded_snapshot_used = true;
+            if resolved
+                .insert(
+                    key,
+                    BoundSessionContext::Current(snapshot.artifacts.clone()),
+                )
+                .is_some()
+            {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex invocation repeats one current session carrier".to_string(),
+                ));
+            }
+        }
+        if resolved_session_snapshot.is_some() && !grounded_snapshot_used {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex handoff grounded a session carrier absent from the invocation bindings"
+                    .to_string(),
+            ));
+        }
+        Ok(resolved)
+    }
+
+    pub(crate) async fn receive_artifact_and_stream_outputs(
+        &self,
+        invocation: CodexProviderInvocation<'_>,
+    ) -> Result<(), InterfaceDriverError> {
+        let CodexProviderInvocation {
+            input,
+            emit,
+            resolved_session_snapshot,
+            current_session_context,
+            output_root,
+            live_stream_root,
+            source_movement_seq,
+            attempt,
+            admitted_run_record,
+            current_run_record,
+            input_changes_context,
+            interrupted_after_artifact,
+            recovered_handoff_artifacts,
+            durable_interrupted_continuity,
+            control,
+            handoff_barrier,
+        } = invocation;
+        let request_bytes = input.read_artifact_payload()?;
+
+        let runtime = invocation_runtime_metadata(&input)?;
+        if interrupted_after_artifact.is_none() && !recovered_handoff_artifacts.is_empty() {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex invocation carries recovered handoff artifacts without an interrupted source frontier"
+                    .to_string(),
+            ));
+        }
+        let recovered_turn_start_dispatches = recovered_turn_start_dispatches(
+            &recovered_handoff_artifacts,
+            &runtime.interface,
+            source_movement_seq,
+        )?;
+        let run_record = parse_run_record_json(current_run_record, runtime.run.as_str())?;
+        let granted_interfaces = input
+            .allowed_interfaces()
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?
+            .iter()
+            .map(|interface| InterfaceId::new(interface.clone()))
+            .collect::<BTreeSet<_>>();
+        let grant = input
+            .grant()
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        let granted_tools = grant.tools.iter().cloned().collect::<BTreeSet<_>>();
+        let granted_marks = grant.mark_outcomes.iter().cloned().collect::<BTreeSet<_>>();
+        let scope = TransportStateScope::from_run(&runtime.run);
+        let context_output_labels = self.context_output_labels()?;
+        let session_snapshot_labels = self.session_snapshot_labels()?;
+        let client_projection_output_labels =
+            self.client_projection_output_labels(&context_output_labels, &session_snapshot_labels)?;
+        let live_stream_rules =
+            LiveStreamRules::from_private_config_or_disabled(&self.interface_private_config)?;
+        live_stream_rules.validate_projection_labels(
+            &context_output_labels,
+            &session_snapshot_labels,
+            &client_projection_output_labels,
+        )?;
+        let sink = TurnSink {
+            emit: &emit,
+            output_root,
+            live_stream_root,
+            provider_interface: &runtime.interface,
+            run: runtime.run.as_str(),
+            source_movement_seq,
+            attempt,
+            context_output_labels: &context_output_labels,
+            client_projection_output_labels: &client_projection_output_labels,
+            live_stream_rules: &live_stream_rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: emit.continuity.clone(),
+        };
+        sink.continuity.lock().expect("continuity lock").pending_input_context = input_changes_context;
+        let manifest = input.read_artifact_manifest()?;
+        let peer_message = admitted_peer_message(&input, self.interface_private_config.get("input_intake"))?;
+        let lifecycle_inbound = decode_lifecycle_inbound(&manifest.label, &request_bytes)
+            .map_err(InterfaceDriverError::Protocol)?;
+        let thread_compact_requested = peer_message.is_none() && self.configured_thread_compact_request(&manifest.label)?;
+        if !thread_compact_requested
+            && peer_message.is_none()
+            && let Some(operation) = self.configured_provider_operation(&manifest.label)?
+        {
+            return self
+                .handle_provider_operation(operation, &runtime.interface, &request_bytes, &sink)
+                .await;
+        }
+        if thread_compact_requested
+            && serde_json::from_slice::<EmptyProviderOperationRequest>(&request_bytes).is_err()
+        {
+            return sink.send(provider_operation_error(
+                PROVIDER_THREAD_COMPACT_START_LABEL,
+                "operation_payload_malformed",
+                "protocol",
+                false,
+                "thread compact payload must be an empty object",
+            ));
+        }
+        if peer_message.is_none() && is_undeclared_provider_operation(&manifest.label, thread_compact_requested) {
+            return sink.send(provider_operation_error(
+                &manifest.label,
+                "operation_not_declared",
+                "unsupported",
+                false,
+                "the exact provider interface descriptor does not declare this operation artifact",
+            ));
+        }
+        let admitted_record = octopus_runtime::run_record::RunRecord::from_bytes(admitted_run_record)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        let payload_selection = octopus_provider_run_authoring::payload_artifact_bindings(&admitted_record, &runtime.interface)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+            &admitted_record, input.metadata()?, &input.artifact_binding_payloads,
+        ).map_err(InterfaceDriverError::FailedClosed)?;
+        let complete_context_payloads = context_payloads;
+        let instructions = resolve_instruction_context(input.metadata()?, &complete_context_payloads)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        let context_payloads = &instructions.remaining_payloads;
+        let bound_session_contexts = Self::resolve_bound_session_contexts(
+            &context_payloads,
+            &runtime.interface,
+            &session_snapshot_labels,
+            resolved_session_snapshot.as_ref(),
+        )?;
+        let lifecycle_payloads = lifecycle_context_payloads(
+            &context_payloads,
+            resolved_session_snapshot.as_ref(),
+        )?;
+        let lifecycle = LifecycleBinding::resolve(
+            &lifecycle_payloads,
+            &run_record,
+            runtime,
+            &granted_interfaces,
+            &granted_marks,
+        )
+        .map_err(InterfaceDriverError::FailedClosed)?;
+        if lifecycle_inbound.is_some() && lifecycle.is_none() {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "run '{}' received lifecycle artifact '{}' without an exact connected lifecycle.connection",
+                runtime.run.as_str(),
+                manifest.label
+            )));
+        }
+        let recovered = recover_codex_continuity_resolved(
+            &context_payloads,
+            &bound_session_contexts,
+            &runtime.interface,
+            runtime.run.as_str(),
+            &context_output_labels,
+            &session_snapshot_labels,
+        )?;
+        let recovered = reconcile_current_session_continuity(
+            recovered,
+            recover_codex_continuity_from_current_session(
+                &current_session_context,
+                &input.artifact,
+                &runtime.interface,
+                runtime.run.as_str(),
+                &context_output_labels,
+            )?,
+        )?;
+        let (recovered, durable_interrupt_override) =
+            reconcile_durable_interrupted_continuity(recovered, durable_interrupted_continuity)?;
+        if manifest.label == PROVIDER_MODELS_LIST_LABEL {
+            if self.has_pending_request(&scope).await
+                || recovered.as_ref().is_some_and(|state| {
+                    state.pending.is_some() || state.interrupted_pending.is_some()
+                })
+            {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex model catalog request cannot replace an unresolved app-server request"
+                        .to_string(),
+                ));
+            }
+            return self
+                .emit_model_catalog(&request_bytes, &sink, &required_formed_models(&input)?)
+                .await;
+        }
+        if let Some(state) = recovered.clone() {
+            sink.set_continuity(state);
+        }
+        self.enforce_native_web_search_policy(&input)?;
+        let hidden_tools = model_hidden_tool_names(&self.interface_private_config)
+            .map_err(InterfaceDriverError::Protocol)?;
+        let native_namespace = self.native_tool_namespace()?;
+        let run_affordances = RunAffordances::from_invocation(&input, &serde_json::Value::Object(self.interface_private_config.clone()))
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        let native_catalog =
+            extract_native_affordance_catalog(&input, &hidden_tools, &native_namespace, run_affordances.as_ref(), &self.interface_private_config)?;
+        let source_interface = if native_catalog.interface_operations.is_empty() {
+            None
+        } else {
+            Some(
+                input
+                    .metadata()?
+                    .checkpoint_binding_policy
+                    .as_ref()
+                    .ok_or_else(|| {
+                        InterfaceDriverError::FailedClosed(
+                            "provider input has no admitted checkpoint binding snapshot"
+                                .to_string(),
+                        )
+                    })?
+                    .inbound
+                    .interface
+                    .clone(),
+            )
+        };
+        let mut effective_request_bytes = request_bytes.clone();
+        let mut effective_manifest_label = manifest.label.clone();
+        let mut effective_source_artifact = input.artifact.clone();
+        let mut resumed_start_turn = None;
+        let mut resumed_additional_context = None;
+        let mut lifecycle_resumed_provider_input = false;
+        let mut lifecycle_resume_boundary = false;
+        let mut lifecycle_prompt_event = None;
+        if let Some(inbound) = lifecycle_inbound {
+            let binding = lifecycle
+                .as_ref()
+                .expect("lifecycle inbound has a connection");
+            match inbound {
+                LifecycleInbound::Event(event) => {
+                    restore_lifecycle_provider_continuity(&sink, runtime, &event)?;
+                    let dispatch = binding
+                        .dispatch_handler(
+                            runtime.run.as_str(),
+                            &event,
+                            &granted_tools,
+                            &granted_interfaces,
+                        )
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    if let Some(dispatch) = dispatch {
+                        sink.send_lifecycle(LifecyclePlannedOutput {
+                            label: dispatch.label,
+                            value: dispatch.value,
+                            route: dispatch.route,
+                        })?;
+                    }
+                    return Ok(());
+                }
+                LifecycleInbound::Decision(decision) => {
+                    let event = binding
+                        .validate_bound_event(&decision.event_artifact)
+                        .map(|_| decision.event_artifact.clone())
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    restore_lifecycle_provider_continuity(&sink, runtime, &event)?;
+                    let continuation = binding
+                        .validate_decision(runtime.run.as_str(), &decision, input.metadata()?)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    match continuation {
+                        LifecycleContinuation::HeldEmission { .. } => {
+                            sink.send_held_lifecycle(&continuation)?;
+                            return Ok(());
+                        }
+                        LifecycleContinuation::HeldEmissionAndRecoverBoundary {
+                            ref source_artifact,
+                            ..
+                        } => {
+                            sink.send_held_lifecycle(&continuation)?;
+                            lifecycle_resume_boundary = true;
+                            effective_source_artifact = source_artifact.clone();
+                        }
+                        LifecycleContinuation::StartTurn {
+                            turn_input,
+                            additional_context,
+                            source_artifact,
+                        } => {
+                            resumed_start_turn = Some(
+                                serde_json::from_value::<Vec<UserInput>>(turn_input).map_err(
+                                    |error| {
+                                        InterfaceDriverError::Protocol(format!(
+                                            "lifecycle start-turn continuation is malformed: {error}"
+                                        ))
+                                    },
+                                )?,
+                            );
+                            resumed_additional_context = Some(additional_context);
+                            effective_source_artifact = source_artifact;
+                        }
+                        LifecycleContinuation::ProviderInput {
+                            manifest_label,
+                            payload,
+                            source_artifact,
+                        } => {
+                            lifecycle_resumed_provider_input = true;
+                            effective_request_bytes = serde_json::to_vec(&payload).map_err(
+                                |error| {
+                                    InterfaceDriverError::Protocol(format!(
+                                        "lifecycle provider-input continuation did not encode: {error}"
+                                    ))
+                                },
+                            )?;
+                            effective_manifest_label = manifest_label;
+                            effective_source_artifact = source_artifact;
+                        }
+                        LifecycleContinuation::RecoverBoundary { source_artifact } => {
+                            lifecycle_resume_boundary = true;
+                            effective_source_artifact = source_artifact;
+                        }
+                    }
+                }
+                LifecycleInbound::HandlerPrompt(value) => {
+                    let event: LifecycleEventArtifact =
+                        serde_json::from_value(value.get("event").cloned().ok_or_else(|| {
+                            InterfaceDriverError::Protocol(
+                                "lifecycle handler prompt has no event".to_string(),
+                            )
+                        })?)
+                        .map_err(|error| {
+                            InterfaceDriverError::Protocol(format!(
+                                "lifecycle handler prompt event is malformed: {error}"
+                            ))
+                        })?;
+                    binding
+                        .validate_bound_event(&event)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    binding
+                        .validate_handler_invocation(&event, &value, LIFECYCLE_HANDLER_PROMPT_LABEL)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    restore_lifecycle_provider_continuity(&sink, runtime, &event)?;
+                    let prompt = value
+                        .get("prompt")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|prompt| !prompt.trim().is_empty() && prompt.trim() == *prompt)
+                        .ok_or_else(|| {
+                            InterfaceDriverError::Protocol(
+                                "lifecycle handler prompt has no non-empty prompt".to_string(),
+                            )
+                        })?;
+                    resumed_start_turn = Some(vec![UserInput::Text {
+                        text: lifecycle_handler_model_prompt(prompt, &event)?,
+                        text_elements: Vec::new(),
+                    }]);
+                    effective_source_artifact = event.subject_artifact.clone();
+                    lifecycle_prompt_event = Some(event);
+                }
+                LifecycleInbound::HandlerTask(value) => {
+                    let event: LifecycleEventArtifact =
+                        serde_json::from_value(value.get("event").cloned().ok_or_else(|| {
+                            InterfaceDriverError::Protocol(
+                                "lifecycle handler task has no event".to_string(),
+                            )
+                        })?)
+                        .map_err(|error| {
+                            InterfaceDriverError::Protocol(format!(
+                                "lifecycle handler task event is malformed: {error}"
+                            ))
+                        })?;
+                    binding
+                        .validate_bound_event(&event)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    binding
+                        .validate_handler_invocation(&event, &value, LIFECYCLE_HANDLER_TASK_LABEL)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    restore_lifecycle_provider_continuity(&sink, runtime, &event)?;
+                    let task = value
+                        .get("task")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|task| !task.trim().is_empty() && task.trim() == *task)
+                        .ok_or_else(|| {
+                            InterfaceDriverError::Protocol(
+                                "lifecycle handler task has no non-empty task".to_string(),
+                            )
+                        })?;
+                    resumed_start_turn = Some(vec![UserInput::Text {
+                        text: lifecycle_handler_model_prompt(task, &event)?,
+                        text_elements: Vec::new(),
+                    }]);
+                    effective_source_artifact = event.subject_artifact.clone();
+                    lifecycle_prompt_event = Some(event);
+                }
+                LifecycleInbound::HandlerOutput(value) => {
+                    binding
+                        .validate_handler_output(&value)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    return Ok(());
+                }
+            }
+        }
+        let lifecycle_start_resumed = resumed_start_turn.is_some();
+        let selected_files = selected_file_projection(
+            &admitted_record,
+            &input,
+            &effective_source_artifact,
+            &effective_manifest_label,
+            &effective_request_bytes,
+            &bound_session_contexts,
+            &current_session_context,
+            self.model_result_projection()?,
+        )?;
+        let mut provider_input = match resumed_start_turn {
+            Some(turn_input) => ProviderInput::Turn(turn_input),
+            None if lifecycle_resume_boundary => ProviderInput::Turn(Vec::new()),
+            None if thread_compact_requested => ProviderInput::Turn(Vec::new()),
+            None if peer_message.is_some() => {
+                let peer = peer_message.as_ref().expect("peer message selected");
+                if peer.action == PeerAction::Interrupt {
+                    return Err(InterfaceDriverError::FailedClosed("peer interrupt must enter the admitted turn-control reader".into()));
+                }
+                ProviderInput::Turn(vec![UserInput::Text { text: peer_input_text(peer, &input.artifact)?, text_elements: Vec::new() }])
+            }
+            None => decode_provider_input(
+                &effective_request_bytes,
+                &effective_manifest_label,
+                source_interface.as_ref(),
+                &native_catalog.interface_operations,
+                Some(&selected_files),
+            )?,
+        };
+        let mut assembled_context = assemble_current_context(
+            &context_payloads,
+            &bound_session_contexts,
+            &runtime.interface,
+            &session_snapshot_labels,
+            &current_session_context,
+            &effective_source_artifact,
+            self.model_result_projection()?,
+        )?;
+        let recovered_result_context = match (&provider_input, recovered.as_ref()) {
+            (ProviderInput::Turn(_), Some(state)) if !codex_continuity_waits_for_result(state) => {
+                resumed_model_context(&current_session_context, &effective_source_artifact, state, self.model_result_projection()?)?
+            }
+            _ => None,
+        };
+        let instruction_artifacts = instruction_artifact_selection(&self.interface_private_config)?;
+        let instruction_text = instructions.render(&instruction_artifacts)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        assembled_context.role = instruction_text;
+        assembled_context.static_context_bytes.clear();
+        for bound in &complete_context_payloads {
+            if instructions.source_artifacts.contains(&bound.artifact) {
+                append_static_context_source(&mut assembled_context.static_context_bytes, bound);
+            }
+        }
+        assembled_context.static_context_bytes.extend_from_slice(
+            &serde_json::to_vec(&native_catalog.tool_names).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?,
+        );
+        let authored_context_generation =
+            read_codex_context_generation(&run_record, &runtime.interface)?;
+        let context_generation = if durable_interrupt_override {
+            recovered
+                .as_ref()
+                .map(|state| state.context_generation)
+                .unwrap_or(authored_context_generation)
+        } else {
+            authored_context_generation
+        };
+        let invocation_context_generation = if input_changes_context {
+            context_generation.checked_add(1).ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "Codex invocation context generation overflowed".to_string(),
+                )
+            })?
+        } else {
+            context_generation
+        };
+        if let ProviderInput::ToolResult(result) = &provider_input
+            && let Some(request) = ToolOperatorRequest::from_result(result)?
+        {
+            let mut state = recovered.clone().ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "application request has no durable native DynamicTool".to_string(),
+                )
+            })?;
+            request.validate_pending(&state)?;
+            request.validate_original(
+                &input,
+                &run_record,
+                &current_session_context,
+                &hidden_tools,
+            )?;
+            if state.interrupted_pending.is_some() || state.tool_operator_request.is_some() {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "application request repeats or follows an interrupted native call".to_string(),
+                ));
+            }
+            let config = self.operator_continuity()?;
+            let operator_request = ToolOperatorContinuity {
+                request: request.clone(),
+                payload_artifact_bindings: payload_selection.clone(),
+                request_artifact: input.artifact.clone(),
+                operator_interface: octopus_provider_run_authoring::bound_client_interface(
+                    &run_record,
+                    &runtime.interface,
+                )
+                .map_err(InterfaceDriverError::FailedClosed)?,
+                phase: ToolOperatorPhase::AwaitingOperator,
+            };
+            let output = request.projection(&config);
+            state.tool_operator_request = Some(operator_request);
+            sink.set_continuity(state);
+            self.retain_tool_operator_wait(
+                &scope,
+                &sink,
+                control,
+                &handoff_barrier,
+                output,
+            )
+            .await?;
+            return Ok(());
+        }
+        if let Some(mut state) = recovered.clone()
+            && let Some(mut request) = state.tool_operator_request.clone()
+        {
+            request.request.validate_pending(&state)?;
+            if request.payload_artifact_bindings != payload_selection {
+                return Err(InterfaceDriverError::FailedClosed("pending operator continuation changed its exact payload selection".into()));
+            }
+            match &provider_input {
+                ProviderInput::OperatorResponse(_) => {
+                    if state.interrupted_pending.is_some() {
+                        return Err(InterfaceDriverError::FailedClosed(
+                            "application approval cannot resume an interrupted native call"
+                                .to_string(),
+                        ));
+                    }
+                    request.admit(&input, &self.operator_continuity()?)?;
+                    state.tool_operator_request = Some(request);
+                    sink.set_continuity(state);
+                    self.retain_tool_operator_wait(
+                        &scope,
+                        &sink,
+                        control,
+                        &handoff_barrier,
+                        CodexTurnOutput::client(
+                            INTERFACE_CONTEXT_UPDATED_LABEL,
+                            serde_json::json!({
+                                "operator_response_artifact": input.artifact,
+                            }),
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                ProviderInput::ToolResult(result) => {
+                    let result = request.resume_result(result, &input)?;
+                    effective_request_bytes = serde_json::to_vec(&result)
+                        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+                    effective_manifest_label = result.label.clone();
+                    provider_input = ProviderInput::ToolResult(result);
+                }
+                _ => {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "input cannot replace a native application approval continuation"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let turn_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let native_parent_record = octopus_runtime::run_record::RunRecord::from_bytes(current_run_record)
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+        let turn_context = TurnContext {
+            run_invocation: run_affordances.as_ref().map(|affordances| NativeRunInvocation {
+                affordances,
+                metadata: input.metadata().expect("validated invocation metadata"),
+                admitted_record: &admitted_record,
+                current_record: &native_parent_record,
+            }),
+            scope: &scope,
+            sink: &sink,
+            control,
+            interface_operations: &native_catalog.interface_operations,
+            tool_names: &native_catalog.tool_names,
+            source_artifact: &effective_source_artifact,
+            handoff_barrier: &handoff_barrier,
+            effect_gate: &effect_gate,
+            turn_interrupted: &turn_interrupted,
+            lifecycle: lifecycle.as_ref(),
+            lifecycle_prompt: lifecycle_prompt_event.as_ref(),
+        };
+        if durable_interrupt_override {
+            emit_lifecycle_trigger(
+                &sink,
+                lifecycle.as_ref(),
+                runtime.run.as_str(),
+                LifecycleTrigger {
+                    event: LifecycleEventName::Interrupt,
+                    trigger: "durable_interrupt_recovery".to_string(),
+                    match_values: Vec::new(),
+                    subject_artifact: effective_source_artifact.clone(),
+                    data: serde_json::json!({
+                        "interrupted_after_artifact": interrupted_after_artifact.clone(),
+                    }),
+                    continuation: None,
+                },
+            )?;
+        }
+        let mut recovered_tool_continuation = None;
+        let mut recovered_operator_continuation = None;
+        let interrupted_result_recovery = matches!(
+            (
+                &provider_input,
+                recovered
+                    .as_ref()
+                    .and_then(|state| state.interrupted_pending.as_ref())
+            ),
+            (
+                ProviderInput::ToolResult(_),
+                Some(CodexPendingContinuity::DynamicTool { .. })
+            ) | (
+                ProviderInput::InterfaceOperationResult(_),
+                Some(CodexPendingContinuity::InterfaceOperation { .. })
+            )
+        );
+        let pending_result_recovery = matches!(
+            (
+                &provider_input,
+                recovered.as_ref().and_then(|state| state.pending.as_ref())
+            ),
+            (
+                ProviderInput::ToolResult(_),
+                Some(CodexPendingContinuity::DynamicTool { .. })
+            ) | (
+                ProviderInput::InterfaceOperationResult(_),
+                Some(CodexPendingContinuity::InterfaceOperation { .. })
+            )
+        );
+        if recovered
+            .as_ref()
+            .is_some_and(|state| state.interrupted_pending.is_some())
+            && !interrupted_result_recovery
+        {
+            control.finish();
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex input '{}' cannot replace a durably interrupted exact effect before its correlated result is admitted",
+                manifest.label
+            )));
+        }
+        if let Some(last_artifact_label) = interrupted_after_artifact.as_deref() {
+            let Some(recovered) = recovered.as_ref() else {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex source recovery has no durable continuity evidence".to_string(),
+                ));
+            };
+            if !interrupted_result_recovery && !pending_result_recovery {
+                control.finish();
+                return sink.send(interrupted_transport_output(
+                    last_artifact_label,
+                    recovered.pending.as_ref(),
+                ));
+            }
+        }
+        match &provider_input {
+            ProviderInput::ToolResult(result) => {
+                if let Some(binding) = lifecycle.as_ref()
+                    && let Some(correlation_id) = result.correlation_id.as_deref()
+                    && let Some(event) = binding
+                        .bound_event_for_correlation(&lifecycle_payloads, correlation_id)
+                        .map_err(InterfaceDriverError::FailedClosed)?
+                {
+                    binding
+                        .validate_command_result(&event, &result.tool)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    let output = binding
+                        .normalize_handler_result(
+                            &event,
+                            "command_result",
+                            result.ok,
+                            &serde_json::json!({
+                                "ok": result.ok,
+                                "body": result.body,
+                                "error": result.error,
+                            }),
+                        )
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    sink.send_lifecycle(output)?;
+                    return Ok(());
+                }
+                if !lifecycle_resumed_provider_input && let Some(binding) = lifecycle.as_ref() {
+                    let post = LifecycleTrigger {
+                        event: LifecycleEventName::PostToolUse,
+                        trigger: "tool_result_arrival".to_string(),
+                        match_values: vec![result.tool.clone()],
+                        subject_artifact: effective_source_artifact.clone(),
+                        data: serde_json::json!({
+                            "tool": result.tool,
+                            "correlation_id": result.correlation_id,
+                            "ok": result.ok,
+                            "body": result.body,
+                            "error": result.error,
+                        }),
+                        continuation: Some(LifecycleContinuation::ProviderInput {
+                            manifest_label: effective_manifest_label.clone(),
+                            payload: serde_json::from_slice(&effective_request_bytes).map_err(
+                                |error| {
+                                    InterfaceDriverError::Protocol(format!(
+                                        "post_tool_use continuation input is not JSON: {error}"
+                                    ))
+                                },
+                            )?,
+                            source_artifact: effective_source_artifact.clone(),
+                        }),
+                    };
+                    if emit_lifecycle_trigger(&sink, Some(binding), runtime.run.as_str(), post)? {
+                        return Ok(());
+                    }
+                }
+                if self
+                    .resume_tool_result(
+                        turn_context,
+                        result.clone(),
+                        recovered.as_ref(),
+                        context_generation,
+                        interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                if let Some(interrupted) = recovered
+                    .as_ref()
+                    .and_then(|state| state.interrupted_pending.as_ref())
+                {
+                    validate_recovered_tool_result(result, interrupted)?;
+                    sink.set_pending(None);
+                    let CodexPendingContinuity::DynamicTool {
+                        native_operation: _,
+                        turn_id,
+                        call_id,
+                        tool,
+                    } = interrupted
+                    else {
+                        unreachable!("validated interrupted tool result has dynamic-tool state")
+                    };
+                    let native_namespace = self.native_tool_namespace()?.name;
+                    let activity = (interrupted_after_artifact.as_deref()
+                        != Some(TURN_DYNAMIC_TOOL_CALL_LABEL))
+                    .then(|| {
+                        CodexTurnOutput::dynamic_tool_completed_after_interrupt(
+                            native_namespace,
+                            tool.clone(),
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("interrupted continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            result.body.clone(),
+                            result.error.clone(),
+                        )
+                    });
+                    sink.bind_live_stream(
+                        &recovered
+                            .as_ref()
+                            .expect("interrupted continuity exists")
+                            .thread_id,
+                        turn_id,
+                    )?;
+                    return sink.send_interrupted_result(
+                        activity,
+                        interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
+                        CodexTurnOutput::interrupted_result_closed(
+                            "tool_result",
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("interrupted continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            &effective_source_artifact,
+                        ),
+                    );
+                }
+                if let Some(pending) = recovered.as_ref().and_then(|state| state.pending.as_ref()) {
+                    validate_recovered_tool_result(result, pending)?;
+                    let CodexPendingContinuity::DynamicTool {
+                        native_operation: _,
+                        turn_id,
+                        call_id,
+                        tool,
+                    } = pending
+                    else {
+                        unreachable!("validated recovered tool result has dynamic-tool state")
+                    };
+                    if let Some(operation) = native_pending_operation(pending)? {
+                        let receipt = serde_json::to_value(result).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+                        match operation.advance(&receipt).map_err(InterfaceDriverError::FailedClosed)? {
+                            NativeStep::Effect { pending: next, outgoing_bindings, .. } => {
+                                emit_native_effect(&sink, turn_id, next, outgoing_bindings)?;
+                                return Ok(());
+                            }
+                            NativeStep::Complete { result: value } => {
+                                recovered_tool_continuation = Some(RecoveredToolContinuation {
+                                    item: recovered_function_call_output(&operation.call_id, recovered_result_output(native_result_content(&value, Vec::new())?)?),
+                                    activity: CodexTurnOutput::dynamic_tool_completed(
+                                        self.native_tool_namespace()?.name, operation.operation_name, operation.call_id,
+                                        recovered.as_ref().expect("recovered continuity").thread_id.clone(), turn_id.clone(),
+                                        native_result_success(&value), Some(value), None,
+                                    ),
+                                    activity_already_admitted: interrupted_after_artifact.as_deref().is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                                });
+                            }
+                            NativeStep::Wait { .. } => return Err(InterfaceDriverError::FailedClosed("recovered effect cannot become a new wait".into())),
+                        }
+                    } else {
+                    let namespace = self.native_tool_namespace()?.name;
+                    recovered_tool_continuation = Some(RecoveredToolContinuation {
+                        item: recovered_function_call_output(
+                            call_id,
+                            recovered_result_output(dynamic_tool_response_content(
+                                result,
+                            )?)?,
+                        ),
+                        activity: CodexTurnOutput::dynamic_tool_completed(
+                            namespace,
+                            tool.clone(),
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("recovered tool continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            result.body.clone(),
+                            result.error.clone(),
+                        ),
+                        activity_already_admitted: interrupted_after_artifact
+                            .as_deref()
+                            .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                    });
+                    }
+                }
+            }
+            ProviderInput::InterfaceOperationResult(result) => {
+                if let Some(binding) = lifecycle.as_ref()
+                    && let Some(event) = binding
+                        .bound_event_for_correlation(&lifecycle_payloads, &result.correlation_id)
+                        .map_err(InterfaceDriverError::FailedClosed)?
+                {
+                    binding
+                        .validate_mcp_result(&event, source_interface.as_ref(), &result.operation)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    let output = binding
+                        .normalize_handler_result(&event, "mcp_result", result.ok, &result.value)
+                        .map_err(InterfaceDriverError::FailedClosed)?;
+                    sink.send_lifecycle(output)?;
+                    return Ok(());
+                }
+                if !lifecycle_resumed_provider_input && let Some(binding) = lifecycle.as_ref() {
+                    let pending_is_subagent = recovered
+                        .as_ref()
+                        .and_then(|state| state.pending.as_ref())
+                        .is_some_and(|pending| match pending {
+                            CodexPendingContinuity::InterfaceOperation { interface, .. } => {
+                                binding.is_subagent_interface(interface)
+                            }
+                            _ => false,
+                        });
+                    let continuation = LifecycleContinuation::ProviderInput {
+                        manifest_label: effective_manifest_label.clone(),
+                        payload: serde_json::from_slice(&effective_request_bytes).map_err(
+                            |error| {
+                                InterfaceDriverError::Protocol(format!(
+                                    "interface-result lifecycle continuation is not JSON: {error}"
+                                ))
+                            },
+                        )?,
+                        source_artifact: effective_source_artifact.clone(),
+                    };
+                    let mut triggers = vec![LifecycleTrigger {
+                        event: LifecycleEventName::PostToolUse,
+                        trigger: "interface_operation_result_arrival".to_string(),
+                        match_values: vec![result.operation.clone()],
+                        subject_artifact: effective_source_artifact.clone(),
+                        data: serde_json::json!({
+                            "operation": result.operation,
+                            "correlation_id": result.correlation_id,
+                            "ok": result.ok,
+                            "result": result.value,
+                        }),
+                        continuation: Some(continuation.clone()),
+                    }];
+                    if pending_is_subagent {
+                        triggers.push(LifecycleTrigger {
+                            event: LifecycleEventName::SubagentStop,
+                            trigger: "system_worker_result_arrival".to_string(),
+                            match_values: vec![result.operation.clone()],
+                            subject_artifact: effective_source_artifact.clone(),
+                            data: serde_json::json!({
+                                "operation": result.operation,
+                                "correlation_id": result.correlation_id,
+                                "ok": result.ok,
+                                "result": result.value,
+                            }),
+                            continuation: Some(continuation),
+                        });
+                    }
+                    if emit_lifecycle_trigger_set(
+                        &sink,
+                        Some(binding),
+                        runtime.run.as_str(),
+                        triggers,
+                    )? {
+                        return Ok(());
+                    }
+                }
+                if self
+                    .resume_interface_operation_result(
+                        turn_context,
+                        result,
+                        recovered.as_ref(),
+                        context_generation,
+                        interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                if let Some(interrupted) = recovered
+                    .as_ref()
+                    .and_then(|state| state.interrupted_pending.as_ref())
+                {
+                    validate_recovered_interface_operation_input(result, interrupted)?;
+                    sink.set_pending(None);
+                    let CodexPendingContinuity::InterfaceOperation {
+                        turn_id,
+                        call_id,
+                        operation,
+                        ..
+                    } = interrupted
+                    else {
+                        unreachable!(
+                            "validated interrupted interface result has interface-operation state"
+                        )
+                    };
+                    let activity = (interrupted_after_artifact.as_deref()
+                        != Some(TURN_DYNAMIC_TOOL_CALL_LABEL))
+                    .then(|| {
+                        CodexTurnOutput::interface_operation_completed_after_interrupt(
+                            operation.clone(),
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("interrupted continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            result.value.clone(),
+                        )
+                    });
+                    sink.bind_live_stream(
+                        &recovered
+                            .as_ref()
+                            .expect("interrupted continuity exists")
+                            .thread_id,
+                        turn_id,
+                    )?;
+                    return sink.send_interrupted_result(
+                        activity,
+                        interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
+                        CodexTurnOutput::interrupted_result_closed(
+                            "interface_operation_result",
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("interrupted continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            &effective_source_artifact,
+                        ),
+                    );
+                }
+                if let Some(pending) = recovered.as_ref().and_then(|state| state.pending.as_ref()) {
+                    validate_recovered_interface_operation_input(result, pending)?;
+                    let CodexPendingContinuity::InterfaceOperation {
+                        turn_id,
+                        call_id,
+                        operation,
+                        ..
+                    } = pending
+                    else {
+                        unreachable!(
+                            "validated recovered interface result has interface-operation state"
+                        )
+                    };
+                    recovered_tool_continuation = Some(RecoveredToolContinuation {
+                        item: recovered_function_call_output(
+                            call_id,
+                            recovered_result_output(interface_operation_response_content(
+                                result,
+                            )?)?,
+                        ),
+                        activity: CodexTurnOutput::interface_operation_completed(
+                            operation.clone(),
+                            call_id.clone(),
+                            recovered
+                                .as_ref()
+                                .expect("recovered interface continuity exists")
+                                .thread_id
+                                .clone(),
+                            turn_id.clone(),
+                            result.ok,
+                            result.value.clone(),
+                        ),
+                        activity_already_admitted: interrupted_after_artifact
+                            .as_deref()
+                            .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                    });
+                }
+                if recovered_tool_continuation.is_none() {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "interface operation result has no live structured pending request"
+                            .to_string(),
+                    ));
+                }
+            }
+            ProviderInput::InterfaceContext(context) => {
+                if self.has_pending_request(&scope).await
+                    || recovered
+                        .as_ref()
+                        .is_some_and(|state| state.pending.is_some())
+                {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "interface context artifact cannot replace an unresolved app-server request"
+                            .to_string(),
+                    ));
+                }
+                return sink.send(CodexTurnOutput::client(
+                    INTERFACE_CONTEXT_UPDATED_LABEL,
+                    serde_json::json!({
+                        "interface": context.interface,
+                        "source_label": context.label,
+                        "source_artifact": effective_source_artifact.clone(),
+                        "content": context.content,
+                    }),
+                ));
+            }
+            ProviderInput::OperatorResponse(response) => {
+                validate_operator_response_evidence(
+                    &self.operator_continuity()?,
+                    &effective_manifest_label,
+                    &response,
+                    input.metadata().map_err(|error| {
+                        InterfaceDriverError::Protocol(format!(
+                            "operator response has no invocation metadata: {error}"
+                        ))
+                    })?,
+                )?;
+                if self
+                    .resume_operator_response(
+                        turn_context,
+                        response.clone(),
+                        recovered.as_ref(),
+                        context_generation,
+                    )
+                    .await?
+                {
+                    return Ok(());
+                }
+                if let Some(pending) = recovered.as_ref().and_then(|state| state.pending.as_ref()) {
+                    validate_recovered_operator_response(response, pending)?;
+                    recovered_operator_continuation = Some((response.clone(), pending.clone()));
+                }
+            }
+            ProviderInput::Turn(_) | ProviderInput::Resume { .. } => {
+                if self.has_pending_request(&scope).await {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "run '{}' sent a new provider turn while an app-server request still awaits its artifact result",
+                        runtime.run.as_str()
+                    )));
+                }
+                if recovered
+                    .as_ref()
+                    .is_some_and(|state| state.pending.is_some())
+                {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "provider life dispatched an operator turn before its durable pending result reconciled"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        let model = self
+            .resolve_private_config_string("model")?
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "no model bound to interface '{}'; its interface_driver_config.private_config \
+                     carries no model, and the app-server may not pick a hidden default — bind the run \
+                     to an interface descriptor whose folder config declares a model (constitution §3, \
+                     fail-closed)",
+                    runtime.interface.as_str()
+                ))
+            })?;
+        let formed_models = required_formed_models(&input)?;
+        if !formed_models.contains(&model) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex interface '{}' selected model '{}' outside its freshly formed interface policy models [{}]",
+                runtime.interface.as_str(),
+                model,
+                formed_models.iter().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        let reasoning_effort = parse_reasoning_effort(
+            self.resolve_private_config_string("reasoning_effort")?
+                .as_deref(),
+        )?;
+        let reasoning_summary = parse_reasoning_summary(
+            self.resolve_private_config_string("reasoning_summary")?
+                .as_deref(),
+        )?;
+
+        let static_context_fingerprint = sha256_hex(&assembled_context.static_context_bytes);
+        let assembled_role =
+            (!assembled_context.role.is_empty()).then(|| assembled_context.role.join("\n\n"));
+        let bound_instructions = resolve_bound_instructions(assembled_role.as_deref())?;
+        let conversation_block = (!assembled_context.conversation.is_empty())
+            .then(|| assembled_context.conversation.join("\n\n"));
+
+        let obligations_grant_block = input.metadata.as_ref().and_then(render_model_context_block);
+
+        let native_affordances = &native_catalog.specs;
+
+        if let Some((response, pending)) = recovered_operator_continuation {
+            let recovered = recovered.as_ref().ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "operator response recovery lost its durable continuity".to_string(),
+                )
+            })?;
+            self.resume_replayed_operator_response(
+                turn_context,
+                response,
+                recovered,
+                &pending,
+                context_generation,
+                &model,
+                &bound_instructions,
+                native_affordances,
+                &static_context_fingerprint,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let resume_control_id = match &provider_input {
+            ProviderInput::Resume { control_id } => Some(control_id.clone()),
+            _ => None,
+        };
+        let turn_input = if recovered_tool_continuation.is_some() {
+            Vec::new()
+        } else {
+            provider_input.into_turn_input()?
+        };
+
+        let (thread_id, cold_thread, first_turn_of_run) = self
+            .acquire_transport_thread(
+                &scope,
+                ThreadAcquisition {
+                    recovered: recovered.as_ref(),
+                    require_exact_resume: thread_compact_requested || resume_control_id.is_some(),
+                    context_generation: invocation_context_generation,
+                    model: Some(model.clone()),
+                    bound_instructions: &bound_instructions,
+                    native_affordances,
+                    static_context_fingerprint: &static_context_fingerprint,
+                    session_context_available: assembled_context.session_context_available,
+                },
+            )
+            .await?;
+
+        let thread_shape_fingerprint = thread_shape_fingerprint(
+            Some(&model),
+            &bound_instructions,
+            native_affordances,
+            &static_context_fingerprint,
+        )?;
+        sink.set_continuity(CodexContinuityState {
+            schema_version: 1,
+            provider_interface: runtime.interface.clone(),
+            run: runtime.run.as_str().to_string(),
+            thread_id: thread_id.clone(),
+            thread_shape_fingerprint,
+            context_generation,
+            static_context_fingerprint,
+            pending: recovered_tool_continuation
+                .as_ref()
+                .and_then(|_| recovered.as_ref().and_then(|state| state.pending.clone())),
+            interrupted_pending: None,
+            tool_operator_request: recovered_tool_continuation.as_ref().and_then(|_| {
+                recovered
+                    .as_ref()
+                    .and_then(|state| state.tool_operator_request.clone())
+            }),
+        });
+
+        if let Some(peer) = peer_message.as_ref().filter(|peer| peer.action == PeerAction::Queue) {
+            let mut items = Vec::new();
+            if cold_thread && let Some(context) = conversation_block.as_ref() { items.push(queued_peer_item(context.clone())); }
+            items.push(queued_peer_item(peer_input_text(peer, &input.artifact)?));
+            let request = ClientRequest::ThreadInjectItems {
+                request_id: self.mint_request_id(), params: ThreadInjectItemsParams { thread_id: thread_id.clone(), items },
+            };
+            sink.admit_app_server_dispatch(&request, None).await?;
+            self.client.lock().await.request_typed::<ThreadInjectItemsResponse>(request).await.map_err(typed_error)?;
+            return sink.send(CodexTurnOutput::client(INTERFACE_CONTEXT_UPDATED_LABEL, serde_json::json!({
+                "source_artifact": input.artifact, "peer_control_id": peer.control_id,
+                "queued": true, "turn_triggered": false,
+            })));
+        }
+
+        if let Some(control_id) = resume_control_id.as_ref() {
+            sink.send(CodexTurnOutput::client(
+                TURN_CONTROL_ACKNOWLEDGED_LABEL,
+                serde_json::json!({
+                    "control_id": control_id,
+                    "action": "resume",
+                    "status": "acknowledged",
+                    "acknowledged": true,
+                    "source_movement_seq": source_movement_seq,
+                    "thread_id": thread_id,
+                    "turn_id": serde_json::Value::Null,
+                    "detail": {
+                        "turn_trigger": TURN_TRIGGER_RESUME_INTERRUPTED_TASK,
+                        "prompt_replayed": false,
+                    },
+                }),
+            ))?;
+        }
+
+        if thread_compact_requested {
+            return self.run_manual_compaction(turn_context, &thread_id).await;
+        }
+
+        let recovered_rollout_evidence = match (
+            recovered_tool_continuation.as_ref(),
+            interrupted_after_artifact.as_deref(),
+        ) {
+            (Some(continuation), last_artifact_label) => {
+                if last_artifact_label == Some(PROVIDER_TRANSPORT_DISPATCH_LABEL)
+                    && recovered_handoff_artifacts.is_empty()
+                {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "Codex interrupted result recovery lost its durable transport-dispatch artifact"
+                            .to_string(),
+                    ));
+                }
+                let rollout_path = self
+                    .transport_state
+                    .lock()
+                    .await
+                    .get(&scope)
+                    .and_then(|state| state.rollout_path.clone())
+                    .ok_or_else(|| {
+                        InterfaceDriverError::FailedClosed(
+                            "Codex interrupted result recovery has no exact rollout path"
+                                .to_string(),
+                        )
+                    })?;
+                let mut native_activity = continuation.activity.value.clone();
+                if let Some(tool) = native_activity.get("tool").and_then(serde_json::Value::as_str) {
+                    let name = native_catalog.tool_names.iter().find_map(|(name, exact)| (exact == tool).then_some(name))
+                        .ok_or_else(|| InterfaceDriverError::FailedClosed(format!("recovered tool '{tool}' has no admitted model name")))?;
+                    native_activity["tool"] = serde_json::json!(decode_tool_name(name)?);
+                }
+                let evidence = recovered_tool_result_rollout_evidence(
+                    &rollout_path,
+                    &continuation.item,
+                    Some(&native_activity),
+                )?;
+                if let Some(last_artifact_label) = last_artifact_label
+                    && !evidence.output_persisted
+                    && last_artifact_label != PROVIDER_TRANSPORT_DISPATCH_LABEL
+                {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex interrupted result recovery handed '{}' after dispatch without persisting the exact native tool result",
+                        last_artifact_label
+                    )));
+                }
+                evidence
+            }
+            _ => RecoveredToolResultRolloutEvidence::default(),
+        };
+        if recovered_tool_continuation.is_some() {
+            reconcile_recovered_successor_dispatch(
+                &recovered_rollout_evidence,
+                &recovered_turn_start_dispatches,
+            )?;
+        } else if !recovered_turn_start_dispatches.is_empty() {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex recovered turn/start dispatch evidence is detached from a tool-result continuation"
+                    .to_string(),
+            ));
+        }
+        let recovered_item_already_injected = recovered_rollout_evidence.output_persisted;
+
+        let additional_context = if let Some(context) = resumed_additional_context {
+            context
+        } else if recovered_tool_continuation.is_some() || resume_control_id.is_some() {
+            BTreeMap::new()
+        } else {
+            native_turn_context(if cold_thread { conversation_block } else { recovered_result_context }, obligations_grant_block)
+        };
+        if !thread_compact_requested
+            && recovered_tool_continuation.is_none()
+            && resume_control_id.is_none()
+            && lifecycle_prompt_event.is_none()
+            && !lifecycle_start_resumed
+        {
+            let serialized_turn_input = serde_json::to_value(&turn_input).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "lifecycle start-turn input did not encode: {error}"
+                ))
+            })?;
+            let continuation = LifecycleContinuation::StartTurn {
+                turn_input: serialized_turn_input.clone(),
+                additional_context: additional_context.clone(),
+                source_artifact: effective_source_artifact.clone(),
+            };
+            let mut triggers = Vec::new();
+            if first_turn_of_run {
+                let source = if cold_thread { "startup" } else { "resume" };
+                triggers.push(LifecycleTrigger {
+                    event: LifecycleEventName::SessionStart,
+                    trigger: "provider_thread_acquired".to_string(),
+                    match_values: vec![source.to_string()],
+                    subject_artifact: effective_source_artifact.clone(),
+                    data: serde_json::json!({
+                        "source": source,
+                        "cold_thread": cold_thread,
+                        "thread_id": thread_id.clone(),
+                    }),
+                    continuation: Some(continuation.clone()),
+                });
+            }
+            triggers.push(LifecycleTrigger {
+                event: LifecycleEventName::UserPromptSubmit,
+                trigger: "provider_turn_before_dispatch".to_string(),
+                match_values: Vec::new(),
+                subject_artifact: effective_source_artifact.clone(),
+                data: serde_json::json!({
+                    "turn_input": serialized_turn_input,
+                    "additional_context": additional_context,
+                    "thread_id": thread_id.clone(),
+                }),
+                continuation: Some(continuation),
+            });
+            if emit_lifecycle_trigger_set(
+                &sink,
+                lifecycle.as_ref(),
+                runtime.run.as_str(),
+                triggers,
+            )? {
+                return Ok(());
+            }
+        }
+        if first_turn_of_run && recovered_tool_continuation.is_none() {
+            self.emit_hooks_catalog(&sink).await?;
+        }
+        if let Some(continuation) = recovered_tool_continuation.as_ref()
+            && !recovered_item_already_injected
+        {
+            recovered_rollout_evidence.validate_injection(&continuation.item)?;
+            let inject = ClientRequest::ThreadInjectItems {
+                request_id: self.mint_request_id(),
+                params: ThreadInjectItemsParams {
+                    thread_id: thread_id.clone(),
+                    items: vec![continuation.item.clone()],
+                },
+            };
+            {
+                let client = self.client.lock().await;
+                if !matches!(&*client, AppServerClient::Spawn(_)) {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "Codex result recovery dispatch evidence only supports the exact local process transport"
+                            .to_string(),
+                    ));
+                }
+            }
+            sink.admit_app_server_dispatch(&inject, None).await?;
+            {
+                let client = self.client.lock().await;
+                client
+                    .request_typed::<ThreadInjectItemsResponse>(inject)
+                    .await
+                    .map_err(typed_error)?;
+            }
+        }
+        let turn = ClientRequest::TurnStart {
+            request_id: self.mint_request_id(),
+            params: fresh_turn_start_params(
+                thread_id.clone(),
+                turn_input,
+                model.clone(),
+                reasoning_effort.clone(),
+                reasoning_summary,
+                additional_context,
+                if resume_control_id.is_some() {
+                    TURN_TRIGGER_RESUME_INTERRUPTED_TASK
+                } else if recovered_tool_continuation.is_some() {
+                    TURN_TRIGGER_TOOL_RESULT_RECOVERY
+                } else {
+                    TURN_TRIGGER_INPUT
+                },
+            ),
+        };
+        {
+            let client = self.client.lock().await;
+            if !matches!(&*client, AppServerClient::Spawn(_)) {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex turn dispatch evidence only supports the exact local process transport"
+                    .to_string(),
+                ));
+            }
+        }
+        sink.admit_app_server_dispatch(&turn, None).await?;
+        let (turn_response, request_handle) = {
+            let client = self.client.lock().await;
+            let request_handle = client.request_handle();
+            let response = client
+                .request_typed::<octopus_appserver_proto::TurnStartResponse>(turn)
+                .await
+                .map_err(typed_error)?;
+            (response, request_handle)
+        };
+        if turn_response.turn.id.trim().is_empty()
+            || turn_response.turn.status != TurnStatus::InProgress
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "turn/start returned an invalid active turn: id='{}' status={:?}",
+                turn_response.turn.id, turn_response.turn.status
+            )));
+        }
+        let turn_id = turn_response.turn.id;
+        if let Some(continuation) = recovered_tool_continuation {
+            if !continuation.activity_already_admitted && !live_stream_rules.enabled() {
+                sink.send(continuation.activity)?;
+            }
+            if first_turn_of_run {
+                self.emit_hooks_catalog(&sink).await?;
+            }
+        }
+        control.publish(CodexTurnControlTarget::Draining {
+            handle: request_handle,
+            request_ids: self.next_request_id.clone(),
+            pending_requests: self.pending_server_requests.clone(),
+            scope: scope.clone(),
+            output: Arc::downgrade(&emit),
+            continuity: sink.continuity_snapshot(),
+            handoff_barrier: handoff_barrier.clone(),
+            effect_gate: effect_gate.clone(),
+            turn_interrupted: turn_interrupted.clone(),
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+        });
+
+        let outcome = self.drain_turn(turn_context, &thread_id, &turn_id).await?;
+        match outcome {
+            TurnDrainOutcome::Suspended(_) | TurnDrainOutcome::Complete => Ok(()),
+        }
+    }
+
+    async fn retain_tool_operator_wait(
+        &self,
+        scope: &TransportStateScope,
+        sink: &TurnSink<'_>,
+        control: &CodexTurnControlBroker,
+        handoff_barrier: &Arc<ProviderHandoffBarrier>,
+        output: CodexTurnOutput,
+    ) -> Result<(), InterfaceDriverError> {
+        let state = sink.continuity_snapshot().ok_or_else(|| {
+            InterfaceDriverError::FailedClosed("application wait lost continuity".to_string())
+        })?;
+        let request = state.tool_operator_request.as_ref().ok_or_else(|| {
+            InterfaceDriverError::FailedClosed("application wait lost its request".to_string())
+        })?;
+        let Some(pending) = self
+            .pending_request(scope, &format!("tool:{}", request.request.call_id))
+            .await?
+        else {
+            return sink.send(output);
+        };
+        self.validate_pending_continuity(scope, Some(&state), &pending, state.context_generation)
+            .await?;
+        let guard = pending.effect_gate.lock().await;
+        self.ensure_pending_request_current(scope, &pending).await?;
+        if pending
+            .turn_interrupted
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "application wait follows native interruption".to_string(),
+            ));
+        }
+        sink.send(output)?;
+        control.publish(CodexTurnControlTarget::Suspended {
+            handle: self.client.lock().await.request_handle(),
+            request_ids: self.next_request_id.clone(),
+            pending_requests: self.pending_server_requests.clone(),
+            scope: scope.clone(),
+            output: Arc::downgrade(sink.emit),
+            continuity: sink.continuity_snapshot(),
+            handoff_barrier: handoff_barrier.clone(),
+            effect_gate: pending.effect_gate.clone(),
+            turn_interrupted: pending.turn_interrupted.clone(),
+            thread_id: pending.thread_id.clone(),
+            turn_id: pending.turn_id.clone(),
+        });
+        drop(guard);
+        Ok(())
+    }
+
+    async fn has_pending_request(&self, scope: &TransportStateScope) -> bool {
+        self.pending_server_requests
+            .lock()
+            .await
+            .keys()
+            .any(|(candidate, _)| candidate == scope)
+    }
+
+    async fn validate_pending_continuity(
+        &self,
+        scope: &TransportStateScope,
+        recovered: Option<&CodexContinuityState>,
+        pending: &PendingServerRequest,
+        context_generation: u64,
+    ) -> Result<(), InterfaceDriverError> {
+        let transport_state = self.transport_state.lock().await;
+        let live = transport_state.get(scope).ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "Codex pending request has no live transport coordinates".to_string(),
+            )
+        })?;
+        validate_live_pending_continuity(recovered, pending, context_generation, live)
+    }
+
+    async fn record_drain_outcome(
+        &self,
+        scope: &TransportStateScope,
+        outcome: TurnDrainOutcome,
+    ) -> Result<(), InterfaceDriverError> {
+        let TurnDrainOutcome::Suspended(pending) = outcome else {
+            return Ok(());
+        };
+        let key = (scope.clone(), pending.key.clone());
+        let mut requests = self.pending_server_requests.lock().await;
+        if requests.insert(key, pending).is_some() {
+            return Err(InterfaceDriverError::FailedClosed(
+                "app-server repeated one unresolved request key inside the same run".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn seed_interrupted_dynamic_tool_request_for_test(
+        &self,
+        continuity: &CodexContinuityState,
+    ) -> Result<(), InterfaceDriverError> {
+        validate_durable_interrupted_continuity(
+            continuity,
+            &continuity.provider_interface,
+            &continuity.run,
+        )
+        .map_err(InterfaceDriverError::FailedClosed)?;
+        let CodexPendingContinuity::DynamicTool {
+            native_operation: _,
+            turn_id,
+            call_id,
+            tool,
+        } = continuity.interrupted_pending.as_ref().ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "test interrupted request has no exact pending effect".to_string(),
+            )
+        })?
+        else {
+            return Err(InterfaceDriverError::FailedClosed(
+                "test interrupted request is not a dynamic tool effect".to_string(),
+            ));
+        };
+        let scope = TransportStateScope::Run(continuity.run.clone());
+        let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let turn_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pending = PendingServerRequest {
+            request_id: RequestId::Integer(4_242),
+            thread_id: continuity.thread_id.clone(),
+            turn_id: turn_id.clone(),
+            key: format!("tool:{call_id}"),
+            kind: PendingServerRequestKind::DynamicTool {
+                call_id: call_id.clone(),
+                tool: tool.clone(),
+            },
+            effect_gate,
+            turn_interrupted,
+        };
+        let mut requests = self.pending_server_requests.lock().await;
+        if requests
+            .insert((scope.clone(), pending.key.clone()), pending)
+            .is_some()
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "test interrupted request replaced an existing pending effect".to_string(),
+            ));
+        }
+        drop(requests);
+        let mut transport = self.transport_state.lock().await;
+        if transport
+            .insert(
+                scope,
+                TransportState {
+                    context_generation: continuity.context_generation,
+                    hooks_catalog_emitted: true,
+                    thread_id: Some(continuity.thread_id.clone()),
+                    thread_shape_fingerprint: Some(continuity.thread_shape_fingerprint.clone()),
+                    static_context_fingerprint: Some(continuity.static_context_fingerprint.clone()),
+                    rollout_path: None,
+                },
+            )
+            .is_some()
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "test interrupted request replaced live transport state".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn resume_tool_result(
+        &self,
+        context: TurnContext<'_, '_>,
+        result: ToolResultArtifact,
+        recovered: Option<&CodexContinuityState>,
+        context_generation: u64,
+        interrupted_activity_already_admitted: bool,
+    ) -> Result<bool, InterfaceDriverError> {
+        result.validate().map_err(InterfaceDriverError::Protocol)?;
+        let Some(correlation_id) = result.correlation_id.as_deref() else {
+            if self.has_pending_request(context.scope).await {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "tool result arrived without correlation_id while this run has a pending app-server request"
+                        .to_string(),
+                ));
+            }
+            return Ok(false);
+        };
+        let key = format!("tool:{correlation_id}");
+        let Some(pending) = self.pending_request(context.scope, &key).await? else {
+            return Ok(false);
+        };
+        context
+            .sink
+            .bind_live_stream(&pending.thread_id, &pending.turn_id)?;
+        let effect_guard = pending.effect_gate.clone().lock_owned().await;
+        self.ensure_pending_request_current(context.scope, &pending)
+            .await?;
+        match &pending.kind {
+            PendingServerRequestKind::DynamicTool { call_id, tool }
+                if call_id == correlation_id && tool == &result.tool => {}
+            PendingServerRequestKind::DynamicTool { call_id, tool } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "tool result correlation resolved to call_id='{}' tool='{}', but artifact names correlation_id='{}' tool='{}'",
+                    call_id, tool, correlation_id, result.tool
+                )));
+            }
+            PendingServerRequestKind::InterfaceOperation { operation, .. } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "tool result key resolved to pending interface operation '{operation}'"
+                )));
+            }
+            PendingServerRequestKind::Operator { method } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "tool result key resolved to pending operator method '{method}'"
+                )));
+            }
+        }
+        let interrupted_by_control = pending
+            .turn_interrupted
+            .load(std::sync::atomic::Ordering::Acquire);
+        if interrupted_by_control
+            || recovered.is_some_and(|state| state.interrupted_pending.is_some())
+        {
+            let interrupted = if let Some(interrupted) =
+                recovered.and_then(|state| state.interrupted_pending.as_ref())
+            {
+                interrupted
+            } else {
+                let recovered = recovered.ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "interrupted live tool result has no durable continuity artifact"
+                            .to_string(),
+                    )
+                })?;
+                let interrupted = recovered.pending.as_ref().ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "interrupted live tool result lost its durable pending correlation"
+                            .to_string(),
+                    )
+                })?;
+                let (continuity, retained) = interrupted_continuity(Some(recovered.clone()))
+                    .map_err(InterfaceDriverError::FailedClosed)?;
+                if !retained {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "interrupted live tool result does not carry an external effect"
+                            .to_string(),
+                    ));
+                }
+                context
+                    .sink
+                    .set_continuity(continuity.expect("interrupted continuity remains durable"));
+                interrupted
+            };
+            validate_recovered_tool_result(&result, interrupted)?;
+            self.validate_pending_continuity(
+                context.scope,
+                recovered,
+                &pending,
+                context_generation,
+            )
+            .await?;
+            context.sink.set_pending(None);
+            let _drain = self
+                .drain_interrupted_result(context, pending.clone(), effect_guard)
+                .await?;
+            let native_namespace = self.native_tool_namespace()?.name;
+            let activity = (!interrupted_activity_already_admitted).then(|| {
+                CodexTurnOutput::dynamic_tool_completed_after_interrupt(
+                    native_namespace,
+                    result.tool.clone(),
+                    correlation_id.to_string(),
+                    pending.thread_id.clone(),
+                    pending.turn_id.clone(),
+                    result.ok,
+                    result.body.clone(),
+                    result.error.clone(),
+                )
+            });
+            context.sink.send_interrupted_result(
+                activity,
+                interrupted_activity_already_admitted,
+                CodexTurnOutput::interrupted_result_closed(
+                    "tool_result",
+                    correlation_id.to_string(),
+                    pending.thread_id.clone(),
+                    pending.turn_id.clone(),
+                    result.ok,
+                    context.source_artifact,
+                ),
+            )?;
+            return Ok(true);
+        }
+        self.validate_pending_continuity(context.scope, recovered, &pending, context_generation)
+            .await?;
+        if let Some(operation) = recovered.and_then(|state| state.pending.as_ref()).map(native_pending_operation).transpose()?.flatten() {
+            let receipt = serde_json::to_value(&result).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+            match operation.advance(&receipt).map_err(InterfaceDriverError::FailedClosed)? {
+                NativeStep::Effect { effect, pending: next_operation, outgoing_bindings } => {
+                    let mut next = pending.clone();
+                    next.key = format!("tool:{}", effect.correlation_id);
+                    next.kind = PendingServerRequestKind::DynamicTool { call_id: effect.correlation_id, tool: effect.tool };
+                    self.remove_pending_request(context.scope, &pending).await?;
+                    self.record_drain_outcome(context.scope, TurnDrainOutcome::Suspended(next.clone())).await?;
+                    self.publish_native_effect(context, &next, next_operation, outgoing_bindings, self.client.lock().await.request_handle())?;
+                    return Ok(true);
+                }
+                NativeStep::Complete { result } => {
+                    context.sink.set_pending(None);
+                    context.sink.send(CodexTurnOutput::dynamic_tool_completed(
+                        self.native_tool_namespace()?.name, operation.operation_name, operation.call_id,
+                        pending.thread_id.clone(), pending.turn_id.clone(), native_result_success(&result), Some(result.clone()), None,
+                    ))?;
+                    self.resolve_and_continue(context, pending, native_operation_response(&result)?, effect_guard).await?;
+                    return Ok(true);
+                }
+                NativeStep::Wait { .. } => return Err(InterfaceDriverError::FailedClosed("an admitted tool result cannot turn into an unrequested wait".into())),
+            }
+        }
+        context.sink.send(CodexTurnOutput::dynamic_tool_completed(
+            self.native_tool_namespace()?.name,
+            result.tool.clone(),
+            correlation_id.to_string(),
+            pending.thread_id.clone(),
+            pending.turn_id.clone(),
+            result.ok,
+            result.body.clone(),
+            result.error.clone(),
+        ))?;
+        let response = dynamic_tool_response_value(&result)?;
+        self.resolve_and_continue(context, pending, response, effect_guard)
+            .await?;
+        Ok(true)
+    }
+
+    fn publish_native_effect(
+        &self,
+        context: TurnContext<'_, '_>,
+        pending: &PendingServerRequest,
+        operation: NativePending,
+        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+        handle: AppServerRequestHandle,
+    ) -> Result<(), InterfaceDriverError> {
+        emit_native_effect(context.sink, &pending.turn_id, operation, bindings)?;
+        context.control.publish(CodexTurnControlTarget::Suspended {
+            handle, request_ids: self.next_request_id.clone(), pending_requests: self.pending_server_requests.clone(),
+            scope: context.scope.clone(), output: Arc::downgrade(context.sink.emit), continuity: context.sink.continuity_snapshot(),
+            handoff_barrier: context.handoff_barrier.clone(), effect_gate: pending.effect_gate.clone(),
+            turn_interrupted: pending.turn_interrupted.clone(), thread_id: pending.thread_id.clone(), turn_id: pending.turn_id.clone(),
+        });
+        Ok(())
+    }
+
+    async fn resume_interface_operation_result(
+        &self,
+        context: TurnContext<'_, '_>,
+        result: &InterfaceOperationResultArtifact,
+        recovered: Option<&CodexContinuityState>,
+        context_generation: u64,
+        interrupted_activity_already_admitted: bool,
+    ) -> Result<bool, InterfaceDriverError> {
+        let key = format!("tool:{}", result.correlation_id);
+        let Some(pending) = self.pending_request(context.scope, &key).await? else {
+            return Ok(false);
+        };
+        context
+            .sink
+            .bind_live_stream(&pending.thread_id, &pending.turn_id)?;
+        let effect_guard = pending.effect_gate.clone().lock_owned().await;
+        self.ensure_pending_request_current(context.scope, &pending)
+            .await?;
+        match &pending.kind {
+            PendingServerRequestKind::InterfaceOperation {
+                call_id,
+                operation,
+                interface,
+                output_label,
+            } if call_id == &result.correlation_id
+                && operation == &result.operation
+                && output_label == &result.label =>
+            {
+                let formed = context.interface_operations.get(operation).ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(format!(
+                        "pending interface operation '{}' disappeared from the formed catalog",
+                        operation
+                    ))
+                })?;
+                if formed.interface != *interface || formed.output_label != *output_label {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "pending interface operation '{}' no longer matches its formed exact route",
+                        operation
+                    )));
+                }
+            }
+            PendingServerRequestKind::InterfaceOperation {
+                call_id,
+                operation,
+                interface,
+                output_label,
+            } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "interface result correlation resolved to call_id='{}' operation='{}' interface='{}' output_label='{}', but artifact names correlation_id='{}' operation='{}' label='{}'",
+                    call_id,
+                    operation,
+                    interface.as_str(),
+                    output_label,
+                    result.correlation_id,
+                    result.operation,
+                    result.label
+                )));
+            }
+            PendingServerRequestKind::DynamicTool { tool, .. } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "interface operation result key resolved to pending tool '{tool}'"
+                )));
+            }
+            PendingServerRequestKind::Operator { method } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "interface operation result key resolved to pending operator method '{method}'"
+                )));
+            }
+        }
+        let interrupted_by_control = pending
+            .turn_interrupted
+            .load(std::sync::atomic::Ordering::Acquire);
+        if interrupted_by_control
+            || recovered.is_some_and(|state| state.interrupted_pending.is_some())
+        {
+            let interrupted = if let Some(interrupted) =
+                recovered.and_then(|state| state.interrupted_pending.as_ref())
+            {
+                interrupted
+            } else {
+                let recovered = recovered.ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "interrupted live interface result has no durable continuity artifact"
+                            .to_string(),
+                    )
+                })?;
+                let interrupted = recovered.pending.as_ref().ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "interrupted live interface result lost its durable pending correlation"
+                            .to_string(),
+                    )
+                })?;
+                let (continuity, retained) = interrupted_continuity(Some(recovered.clone()))
+                    .map_err(InterfaceDriverError::FailedClosed)?;
+                if !retained {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "interrupted live interface result does not carry an external effect"
+                            .to_string(),
+                    ));
+                }
+                context
+                    .sink
+                    .set_continuity(continuity.expect("interrupted continuity remains durable"));
+                interrupted
+            };
+            validate_recovered_interface_operation_input(result, interrupted)?;
+            self.validate_pending_continuity(
+                context.scope,
+                recovered,
+                &pending,
+                context_generation,
+            )
+            .await?;
+            context.sink.set_pending(None);
+            let _drain = self
+                .drain_interrupted_result(context, pending.clone(), effect_guard)
+                .await?;
+            let activity = (!interrupted_activity_already_admitted).then(|| {
+                CodexTurnOutput::interface_operation_completed_after_interrupt(
+                    result.operation.clone(),
+                    result.correlation_id.clone(),
+                    pending.thread_id.clone(),
+                    pending.turn_id.clone(),
+                    result.ok,
+                    result.value.clone(),
+                )
+            });
+            context.sink.send_interrupted_result(
+                activity,
+                interrupted_activity_already_admitted,
+                CodexTurnOutput::interrupted_result_closed(
+                    "interface_operation_result",
+                    result.correlation_id.clone(),
+                    pending.thread_id.clone(),
+                    pending.turn_id.clone(),
+                    result.ok,
+                    context.source_artifact,
+                ),
+            )?;
+            return Ok(true);
+        }
+        self.validate_pending_continuity(context.scope, recovered, &pending, context_generation)
+            .await?;
+        context
+            .sink
+            .send(CodexTurnOutput::interface_operation_completed(
+                result.operation.clone(),
+                result.correlation_id.clone(),
+                pending.thread_id.clone(),
+                pending.turn_id.clone(),
+                result.ok,
+                result.value.clone(),
+            ))?;
+        let response = interface_operation_response_value(result)?;
+        self.resolve_and_continue(context, pending, response, effect_guard)
+            .await?;
+        Ok(true)
+    }
+
+    async fn read_pending_operator_turn(
+        &self,
+        client: &AppServerClient,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<ThreadItem>, InterfaceDriverError> {
+        let mut cursor = None;
+        let mut cursors = BTreeSet::new();
+        let mut turns = BTreeSet::new();
+        loop {
+            let page = client.request_typed::<ThreadTurnsListResponse>(ClientRequest::ThreadTurnsList {
+                request_id: self.mint_request_id(),
+                params: ThreadTurnsListParams {
+                    thread_id: thread_id.to_string(), cursor,
+                    limit: Some(100), sort_direction: Some(SortDirection::Desc),
+                    items_view: Some(TurnItemsView::NotLoaded),
+                },
+            }).await.map_err(typed_error)?;
+            if page.next_cursor.as_ref().is_some_and(|next| !cursors.insert(next.clone())) {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "thread/turns/list repeated a pagination cursor".into(),
+                ));
+            }
+            for turn in &page.data {
+                if !turns.insert(turn.id.clone()) {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "thread/turns/list repeated turn '{}'", turn.id,
+                    )));
+                }
+            }
+            if let Some(turn) = page.data.iter().find(|turn| turn.id == turn_id) {
+                if turn.status != TurnStatus::InProgress {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "thread/turns/list pending operator turn '{turn_id}' is not in progress",
+                    )));
+                }
+                break;
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "thread/turns/list did not restore pending operator turn '{turn_id}' on thread '{thread_id}'",
+                )));
+            }
+        }
+        let mut cursor = None;
+        let mut cursors = BTreeSet::new();
+        let mut item_ids = BTreeSet::new();
+        let mut items = Vec::new();
+        loop {
+            let page = client.request_typed::<ThreadItemsListResponse>(ClientRequest::ThreadItemsList {
+                request_id: self.mint_request_id(),
+                params: ThreadItemsListParams {
+                    thread_id: thread_id.to_string(), turn_id: Some(turn_id.to_string()), cursor,
+                    limit: Some(100), sort_direction: Some(SortDirection::Asc),
+                },
+            }).await.map_err(typed_error)?;
+            if page.next_cursor.as_ref().is_some_and(|next| !cursors.insert(next.clone())) {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "thread/items/list repeated a pagination cursor".into(),
+                ));
+            }
+            for entry in page.data {
+                if entry.turn_id != turn_id {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "thread/items/list returned item for turn '{}', expected '{turn_id}'", entry.turn_id,
+                    )));
+                }
+                if !item_ids.insert(entry.item.id().to_string()) {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "thread/items/list repeated item '{}'", entry.item.id(),
+                    )));
+                }
+                items.push(entry.item);
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() { return Ok(items); }
+        }
+    }
+
+    async fn resume_replayed_operator_response(
+        &self,
+        context: TurnContext<'_, '_>,
+        response: OperatorResponseArtifact,
+        recovered: &CodexContinuityState,
+        durable_pending: &CodexPendingContinuity,
+        context_generation: u64,
+        model: &str,
+        bound_instructions: &str,
+        native_affordances: &[DynamicToolSpec],
+        static_context_fingerprint: &str,
+    ) -> Result<(), InterfaceDriverError> {
+        let CodexPendingContinuity::Operator {
+            turn_id,
+            request_key,
+            method,
+        } = durable_pending
+        else {
+            return Err(InterfaceDriverError::FailedClosed(
+                "operator response recovery names a non-operator pending request".to_string(),
+            ));
+        };
+        let fingerprint = thread_shape_fingerprint(
+            Some(model),
+            bound_instructions,
+            native_affordances,
+            static_context_fingerprint,
+        )?;
+        if recovered.thread_shape_fingerprint != fingerprint
+            || recovered.static_context_fingerprint != static_context_fingerprint
+            || recovered.context_generation != context_generation
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "operator response replay conflicts with its durable thread coordinates"
+                    .to_string(),
+            ));
+        }
+        let continuity = self.operator_continuity()?;
+        let resume = ClientRequest::ThreadResume {
+            request_id: self.mint_request_id(),
+            params: ThreadResumeParams {
+                thread_id: recovered.thread_id.clone(),
+                model: Some(model.to_string()),
+                config: Some(self.native_tool_thread_config()?),
+                developer_instructions: Some(bound_instructions.to_string()),
+                sandbox: Some(self.native_thread_sandbox()?),
+                exclude_turns: true,
+                ..ThreadResumeParams::default()
+            },
+        };
+        let replayed = {
+            let mut client = self.client.lock().await;
+            let resumed: ThreadResumeResponse = client
+                .request_typed::<ThreadResumeResponse>(resume)
+                .await
+                .map_err(typed_error)?;
+            if resumed.thread.id != recovered.thread_id {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "thread/resume did not restore pending operator turn '{}' on thread '{}'",
+                    turn_id, recovered.thread_id
+                )));
+            }
+            let items = self.read_pending_operator_turn(&client, &resumed.thread.id, turn_id).await?;
+            context.sink.bind_live_stream(&resumed.thread.id, turn_id)?;
+            for item in &items {
+                context.sink.record_input_item(
+                    item,
+                    &resumed.thread.id,
+                    turn_id,
+                    InputRecordedSource::ThreadResume,
+                    None,
+                )?;
+            }
+
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_millis(continuity.replay_timeout_ms);
+            let mut buffered = Vec::new();
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    client.restore_ready_events(buffered);
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "thread/resume did not replay exact operator request '{}' before the descriptor timeout",
+                        request_key
+                    )));
+                }
+                let event = match tokio::time::timeout(remaining, client.next_event()).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => {
+                        client.restore_ready_events(buffered);
+                        return Err(InterfaceDriverError::Transport(
+                            "app-server event stream closed before pending operator replay"
+                                .to_string(),
+                        ));
+                    }
+                    Err(_) => {
+                        client.restore_ready_events(buffered);
+                        return Err(InterfaceDriverError::FailedClosed(format!(
+                            "thread/resume did not replay exact operator request '{}' before the descriptor timeout",
+                            request_key
+                        )));
+                    }
+                };
+                let AppServerEvent::ServerRequest(request) = event else {
+                    buffered.push(event);
+                    continue;
+                };
+                if classify_operator_request(&request, &continuity)?.is_none() {
+                    buffered.push(AppServerEvent::ServerRequest(request));
+                    continue;
+                }
+                let candidate = pending_operator_request(
+                    &request,
+                    &recovered.thread_id,
+                    turn_id,
+                    context.effect_gate.clone(),
+                    context.turn_interrupted.clone(),
+                )?;
+                let candidate_method = match &candidate.kind {
+                    PendingServerRequestKind::Operator { method } => method,
+                    _ => unreachable!("pending_operator_request returned a non-operator kind"),
+                };
+                if candidate.key == *request_key && candidate_method == method {
+                    client.restore_ready_events(buffered);
+                    break candidate;
+                }
+                buffered.push(AppServerEvent::ServerRequest(request));
+            }
+        };
+
+        {
+            let mut transport_state = self.transport_state.lock().await;
+            let state = transport_state.entry(context.scope.clone()).or_default();
+            if state
+                .thread_id
+                .as_ref()
+                .is_some_and(|thread_id| thread_id != &recovered.thread_id)
+            {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "replayed operator response conflicts with a live transport thread".to_string(),
+                ));
+            }
+            state.context_generation = context_generation;
+            state.thread_id = Some(recovered.thread_id.clone());
+            state.thread_shape_fingerprint = Some(fingerprint);
+            state.static_context_fingerprint = Some(static_context_fingerprint.to_string());
+            state.hooks_catalog_emitted = true;
+        }
+        self.record_drain_outcome(context.scope, TurnDrainOutcome::Suspended(replayed))
+            .await?;
+        if !self
+            .resume_operator_response(context, response, Some(recovered), context_generation)
+            .await?
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "replayed operator request was not registered for exact continuation".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn resume_operator_response(
+        &self,
+        context: TurnContext<'_, '_>,
+        response: OperatorResponseArtifact,
+        recovered: Option<&CodexContinuityState>,
+        context_generation: u64,
+    ) -> Result<bool, InterfaceDriverError> {
+        let request_key = response.request_id()?;
+        let key = format!("operator:{request_key}");
+        let Some(pending) = self.pending_request(context.scope, &key).await? else {
+            return Ok(false);
+        };
+        context
+            .sink
+            .bind_live_stream(&pending.thread_id, &pending.turn_id)?;
+        let effect_guard = pending.effect_gate.clone().lock_owned().await;
+        self.ensure_pending_request_current(context.scope, &pending)
+            .await?;
+        let method = match &pending.kind {
+            PendingServerRequestKind::Operator { method } => method.clone(),
+            PendingServerRequestKind::DynamicTool { tool, .. } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "operator response key resolved to pending dynamic tool '{tool}'"
+                )));
+            }
+            PendingServerRequestKind::InterfaceOperation { operation, .. } => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "operator response key resolved to pending interface operation '{operation}'"
+                )));
+            }
+        };
+        self.validate_pending_continuity(context.scope, recovered, &pending, context_generation)
+            .await?;
+        let result = operator_response_value(&method, &response)?;
+        self.resolve_and_continue(context, pending, result, effect_guard)
+            .await?;
+        Ok(true)
+    }
+
+    async fn pending_request(
+        &self,
+        scope: &TransportStateScope,
+        key: &str,
+    ) -> Result<Option<PendingServerRequest>, InterfaceDriverError> {
+        let requests = self.pending_server_requests.lock().await;
+        let pending = requests.get(&(scope.clone(), key.to_string())).cloned();
+        if pending.is_none() && requests.keys().any(|(candidate, _)| candidate == scope) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "provider result key '{key}' does not match any pending app-server request in this run"
+            )));
+        }
+        Ok(pending)
+    }
+
+    async fn remove_pending_request(
+        &self,
+        scope: &TransportStateScope,
+        pending: &PendingServerRequest,
+    ) -> Result<(), InterfaceDriverError> {
+        let removed = self
+            .pending_server_requests
+            .lock()
+            .await
+            .remove(&(scope.clone(), pending.key.clone()));
+        if removed
+            .as_ref()
+            .is_none_or(|removed| removed.request_id != pending.request_id)
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "pending app-server request '{}' changed before its exact result was admitted",
+                pending.request_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn ensure_pending_request_current(
+        &self,
+        scope: &TransportStateScope,
+        pending: &PendingServerRequest,
+    ) -> Result<(), InterfaceDriverError> {
+        let requests = self.pending_server_requests.lock().await;
+        let current = requests.get(&(scope.clone(), pending.key.clone()));
+        if current.is_none_or(|current| {
+            current.request_id != pending.request_id
+                || !Arc::ptr_eq(&current.effect_gate, &pending.effect_gate)
+        }) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "pending app-server request '{}' changed while exact-result arbitration waited",
+                pending.request_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn drain_interrupted_result(
+        &self,
+        context: TurnContext<'_, '_>,
+        pending: PendingServerRequest,
+        _effect_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<InterruptedTurnDrainEvidence, InterfaceDriverError> {
+        self.remove_pending_request(context.scope, &pending).await?;
+        context.control.publish_interrupted_draining()?;
+        let mut state =
+            InterruptedTurnDrainState::new(pending.thread_id.clone(), pending.turn_id.clone());
+        let mut client = self.client.lock().await;
+        loop {
+            match state.observe(client.next_event().await) {
+                InterruptedDrainDecision::Continue => {}
+                InterruptedDrainDecision::Complete(evidence) => return Ok(evidence),
+            }
+        }
+    }
+
+    async fn resolve_and_continue(
+        &self,
+        context: TurnContext<'_, '_>,
+        pending: PendingServerRequest,
+        result: serde_json::Value,
+        effect_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), InterfaceDriverError> {
+        let effect_gate = pending.effect_gate.clone();
+        let turn_interrupted = pending.turn_interrupted.clone();
+        let request_handle = {
+            let client = self.client.lock().await;
+            let request_handle = client.request_handle();
+            client
+                .resolve_server_request(pending.request_id.clone(), result)
+                .await
+                .map_err(|error| {
+                    InterfaceDriverError::Transport(format!(
+                        "app-server request '{}' response transport failed: {error}",
+                        pending.request_id
+                    ))
+                })?;
+            request_handle
+        };
+        self.remove_pending_request(context.scope, &pending).await?;
+        context.sink.set_pending(None);
+        context.control.publish(CodexTurnControlTarget::Draining {
+            handle: request_handle,
+            request_ids: self.next_request_id.clone(),
+            pending_requests: self.pending_server_requests.clone(),
+            scope: context.scope.clone(),
+            output: Arc::downgrade(context.sink.emit),
+            continuity: context.sink.continuity_snapshot(),
+            handoff_barrier: context.handoff_barrier.clone(),
+            effect_gate: effect_gate.clone(),
+            turn_interrupted: turn_interrupted.clone(),
+            thread_id: pending.thread_id.clone(),
+            turn_id: pending.turn_id.clone(),
+        });
+        drop(effect_guard);
+        let resumed_context = TurnContext {
+            effect_gate: &effect_gate,
+            turn_interrupted: &turn_interrupted,
+            ..context
+        };
+        let outcome = self
+            .drain_turn(resumed_context, &pending.thread_id, &pending.turn_id)
+            .await?;
+        match outcome {
+            TurnDrainOutcome::Suspended(_) | TurnDrainOutcome::Complete => Ok(()),
+        }
+    }
+}
+
+const DELTA_FLUSH_WINDOW: std::time::Duration = std::time::Duration::from_millis(150);
+
+struct ContinuityEmitterState {
+    continuity: Option<CodexContinuityState>,
+    pending_input_context: bool,
+}
+
+impl Default for ContinuityEmitterState {
+    fn default() -> Self {
+        Self {
+            continuity: None,
+            pending_input_context: false,
+        }
+    }
+}
+
+struct TurnSink<'a> {
+    emit: &'a Arc<ProviderOutputStream>,
+    output_root: &'a Path,
+    live_stream_root: &'a Path,
+    provider_interface: &'a InterfaceId,
+    run: &'a str,
+    source_movement_seq: u64,
+    attempt: u32,
+    context_output_labels: &'a BTreeSet<String>,
+    client_projection_output_labels: &'a BTreeSet<String>,
+    live_stream_rules: &'a LiveStreamRules,
+    live_stream: std::sync::Mutex<Option<LiveTurnStream>>,
+    continuity: Arc<std::sync::Mutex<ContinuityEmitterState>>,
+}
+
+#[derive(Clone, Copy)]
+struct TurnContext<'context, 'sink> {
+    run_invocation: Option<NativeRunInvocation<'context>>,
+    scope: &'context TransportStateScope,
+    sink: &'context TurnSink<'sink>,
+    control: &'context Arc<CodexTurnControlBroker>,
+    interface_operations: &'context BTreeMap<String, InterfaceOperationAffordance>,
+    tool_names: &'context BTreeMap<String, String>,
+    source_artifact: &'context ArtifactRef,
+    handoff_barrier: &'context Arc<ProviderHandoffBarrier>,
+    effect_gate: &'context Arc<tokio::sync::Mutex<()>>,
+    turn_interrupted: &'context Arc<std::sync::atomic::AtomicBool>,
+    lifecycle: Option<&'context LifecycleBinding>,
+    lifecycle_prompt: Option<&'context LifecycleEventArtifact>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeRunInvocation<'a> {
+    affordances: &'a RunAffordances,
+    metadata: &'a InvocationMetadata,
+    admitted_record: &'a octopus_runtime::run_record::RunRecord,
+    current_record: &'a octopus_runtime::run_record::RunRecord,
+}
+
+impl TurnSink<'_> {
+    fn bind_live_stream(&self, thread_id: &str, turn_id: &str) -> Result<(), InterfaceDriverError> {
+        if !self.live_stream_rules.enabled() {
+            return Ok(());
+        }
+        let identity = LiveTurnIdentity {
+            provider_interface: self.provider_interface.as_str().to_string(),
+            run: self.run.to_string(),
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+        };
+        let mut current = self.live_stream.lock().expect("live stream lock");
+        if let Some(current) = current.as_ref() {
+            if current.identity() != &identity {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex invocation attempted to bind two native turns to one live stream sink"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        *current = Some(
+            LiveTurnStream::open(
+                self.live_stream_root,
+                self.live_stream_rules,
+                identity,
+                self.source_movement_seq,
+            )
+            .map_err(InterfaceDriverError::FailedClosed)?,
+        );
+        Ok(())
+    }
+
+    fn has_live_stream(&self) -> bool {
+        self.live_stream.lock().expect("live stream lock").is_some()
+    }
+
+    fn record_input_item(
+        &self,
+        item: &ThreadItem,
+        thread_id: &str,
+        turn_id: &str,
+        source: InputRecordedSource,
+        native_event_at_ms: Option<i64>,
+    ) -> Result<(), InterfaceDriverError> {
+        let ThreadItem::UserMessage { id, client_id: Some(client_id), .. } = item else {
+            return Ok(());
+        };
+        if !self.live_stream_rules.enabled() {
+            return Ok(());
+        }
+        self.live_stream.lock().expect("live stream lock")
+            .as_mut()
+            .ok_or_else(|| InterfaceDriverError::FailedClosed(
+                "Codex recorded input has no exact native turn stream".to_string(),
+            ))?
+            .append_input_recorded(
+                self.source_movement_seq,
+                InputRecordedObservation {
+                    thread_id, turn_id, item_id: id, client_id, source_event: source,
+                    native_event_at_ms,
+                },
+            )
+            .map(|_| ())
+            .map_err(InterfaceDriverError::FailedClosed)
+    }
+
+    async fn admit_app_server_dispatch(
+        &self,
+        request: &ClientRequest,
+        credential_handle_fingerprint: Option<String>,
+    ) -> Result<(), InterfaceDriverError> {
+        let frame = codex_app_server_request_frame(request)?;
+        let artifact = materialize_codex_transport_dispatch(
+            self.output_root,
+            self.provider_interface,
+            self.source_movement_seq,
+            self.attempt,
+            &frame.method,
+            &frame.bytes,
+            credential_handle_fingerprint,
+        )?;
+        self.emit.clone().hand_transport_dispatch(artifact).await?;
+        self.advance_continuity(false)?;
+        Ok(())
+    }
+
+    fn advance_continuity(
+        &self,
+        context_output: bool,
+    ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+        let mut state = self.continuity.lock().expect("continuity lock");
+        let advance = state.pending_input_context || context_output;
+        state.pending_input_context = false;
+        if let Some(continuity) = state.continuity.as_mut()
+            && advance
+        {
+            continuity.context_generation = continuity
+                .context_generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "Codex continuity context generation overflowed".to_string(),
+                    )
+                })?;
+        }
+        Ok(state.continuity.clone())
+    }
+
+    fn set_continuity(&self, continuity: CodexContinuityState) {
+        self.continuity.lock().expect("continuity lock").continuity = Some(continuity);
+    }
+
+    fn set_pending(&self, pending: Option<CodexPendingContinuity>) {
+        if let Some(continuity) = self
+            .continuity
+            .lock()
+            .expect("continuity lock")
+            .continuity
+            .as_mut()
+        {
+            if continuity.pending != pending {
+                continuity.tool_operator_request = None;
+            }
+            continuity.pending = pending;
+        }
+    }
+
+    fn set_interrupted_pending(&self, pending: Option<CodexPendingContinuity>) {
+        if let Some(continuity) = self
+            .continuity
+            .lock()
+            .expect("continuity lock")
+            .continuity
+            .as_mut()
+        {
+            continuity.interrupted_pending = pending;
+        }
+    }
+
+    fn continuity_snapshot(&self) -> Option<CodexContinuityState> {
+        self.continuity
+            .lock()
+            .expect("continuity lock")
+            .continuity
+            .clone()
+    }
+
+    fn projection_admits(&self, output: &CodexTurnOutput) -> bool {
+        if matches!(
+            &output.route,
+            ProviderEmissionRoute::ClientProjection
+                | ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { .. }
+        ) && !self.client_projection_output_labels.contains(&output.label)
+        {
+            return false;
+        }
+        true
+    }
+
+    fn normalize_output_label(
+        &self,
+        output: &mut CodexTurnOutput,
+    ) -> Result<(), InterfaceDriverError> {
+        let object = output.value.as_object_mut().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "Codex provider output must be a self-identifying JSON object".to_string(),
+            )
+        })?;
+        match object.get("label") {
+            Some(serde_json::Value::String(label)) if label == &output.label => {}
+            Some(_) => {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex provider output payload conflicts with manifest label '{}'",
+                    output.label
+                )));
+            }
+            None => {
+                object.insert(
+                    "label".to_string(),
+                    serde_json::Value::String(output.label.to_string()),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize_normalized(
+        &self,
+        mut output: CodexTurnOutput,
+        append_boundary: bool,
+    ) -> Result<ProviderEmission, InterfaceDriverError> {
+        let continuity = self
+            .advance_continuity(self.context_output_labels.contains(&output.label))?
+            .map(|continuity| {
+                serde_json::to_value(continuity).map_err(|error| {
+                    InterfaceDriverError::Protocol(format!(
+                        "Codex continuity state could not be encoded: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        if let Some(continuity) = continuity.filter(|_| !lifecycle_payload_label(&output.label)) {
+            output
+                .value
+                .as_object_mut()
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "Codex provider output carrying continuity must be a JSON object"
+                            .to_string(),
+                    )
+                })?
+                .insert(CODEX_CONTINUITY_FIELD.to_string(), continuity);
+        }
+        let output_bytes = serde_json::to_vec(&output.value).map_err(|e| {
+            InterfaceDriverError::Protocol(format!("failed to encode provider output: {e}"))
+        })?;
+        let file =
+            materialize_codex_emitted_artifact(self.output_root, &output.label, &output_bytes)?;
+        if append_boundary
+            && let Some(stream) = self.live_stream.lock().expect("live stream lock").as_mut()
+        {
+            let artifact_payload_blake3 =
+                artifact_payload_blake3(&file).map_err(InterfaceDriverError::FailedClosed)?;
+            stream
+                .append_boundary(
+                    self.source_movement_seq,
+                    &output.label,
+                    &artifact_payload_blake3,
+                )
+                .map_err(InterfaceDriverError::FailedClosed)?;
+        }
+        Ok(ProviderEmission {
+            artifact: file,
+            route: output.route,
+        })
+    }
+
+    fn materialize_with_boundary(
+        &self,
+        mut output: CodexTurnOutput,
+        append_boundary: bool,
+    ) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
+        if !self.projection_admits(&output) {
+            return Ok(None);
+        }
+        self.normalize_output_label(&mut output)?;
+        if self.live_stream_rules.disposition(
+            &output.label,
+            &output.value,
+            self.has_live_stream(),
+        )? == LiveStreamDisposition::Stream
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex transient output '{}' reached immutable artifact materialization",
+                output.label
+            )));
+        }
+        self.materialize_normalized(output, append_boundary)
+            .map(Some)
+    }
+
+    fn materialize(
+        &self,
+        output: CodexTurnOutput,
+    ) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
+        self.materialize_with_boundary(output, true)
+    }
+
+    fn materialize_without_boundary(
+        &self,
+        output: CodexTurnOutput,
+    ) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
+        self.materialize_with_boundary(output, false)
+    }
+
+    fn send(&self, mut output: CodexTurnOutput) -> Result<(), InterfaceDriverError> {
+        if !self.projection_admits(&output) {
+            return Ok(());
+        }
+        self.normalize_output_label(&mut output)?;
+        match self.live_stream_rules.disposition(
+            &output.label,
+            &output.value,
+            self.has_live_stream(),
+        )? {
+            LiveStreamDisposition::Stream => {
+                let mut live_stream = self.live_stream.lock().expect("live stream lock");
+                live_stream
+                    .as_mut()
+                    .ok_or_else(|| {
+                        InterfaceDriverError::FailedClosed(format!(
+                            "Codex transient output '{}' has no native turn stream",
+                            output.label
+                        ))
+                    })?
+                    .append_event(self.source_movement_seq, &output.label, &output.value)
+                    .map_err(InterfaceDriverError::FailedClosed)
+            }
+            LiveStreamDisposition::Artifact => {
+                let emission = self.materialize_normalized(output, true)?;
+                self.emit.send_turn(emission)
+            }
+        }
+    }
+
+    fn send_with_outgoing_bindings(
+        &self,
+        mut output: CodexTurnOutput,
+        bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+    ) -> Result<(), InterfaceDriverError> {
+        if !matches!(output.route, ProviderEmissionRoute::Tool { .. }) {
+            return Err(InterfaceDriverError::FailedClosed("outgoing binding authoring requires an ordinary tool emission".into()));
+        }
+        self.normalize_output_label(&mut output)?;
+        let emission = self.materialize_normalized(output, true)?;
+        self.emit.sender.send(ProviderStreamEmission::WithOutgoingBindings { emission, bindings })
+            .map_err(|_| InterfaceDriverError::Transport("provider binding emission lost its interface life".into()))
+    }
+
+    fn seal_live_stream(
+        &self,
+        terminal_label: &str,
+        terminal_artifact_payload_blake3: &str,
+    ) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
+        let mut live_stream = self.live_stream.lock().expect("live stream lock");
+        let Some(live_stream) = live_stream.as_mut() else {
+            return Ok(None);
+        };
+        let artifact = live_stream
+            .seal_terminal(
+                self.source_movement_seq,
+                terminal_label,
+                terminal_artifact_payload_blake3,
+            )
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        Ok(Some(ProviderEmission {
+            artifact,
+            route: ProviderEmissionRoute::ClientProjection,
+        }))
+    }
+
+    fn send_terminal(&self, mut output: CodexTurnOutput) -> Result<(), InterfaceDriverError> {
+        if !self.projection_admits(&output) {
+            return Err(InterfaceDriverError::FailedClosed(
+                "descriptor projection removed the native turn terminal output".to_string(),
+            ));
+        }
+        self.normalize_output_label(&mut output)?;
+        if self.live_stream_rules.disposition(
+            &output.label,
+            &output.value,
+            self.has_live_stream(),
+        )? != LiveStreamDisposition::Artifact
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "native turn terminal output cannot be stream-only".to_string(),
+            ));
+        }
+        let terminal_label = output.label.clone();
+        if self.has_live_stream() {
+            self.advance_continuity(false)?;
+        }
+        let terminal = self.materialize_normalized(output, false)?;
+        let terminal_artifact_payload_blake3 = artifact_payload_blake3(&terminal.artifact)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        match self.seal_live_stream(&terminal_label, &terminal_artifact_payload_blake3)? {
+            Some(stream) => self.emit.send_terminal_group(stream, terminal),
+            None => self.emit.send_turn(terminal),
+        }
+    }
+
+    fn send_lifecycle(&self, output: LifecyclePlannedOutput) -> Result<(), InterfaceDriverError> {
+        self.send(CodexTurnOutput::lifecycle(output))
+    }
+
+    fn send_terminal_lifecycle(
+        &self,
+        output: LifecyclePlannedOutput,
+    ) -> Result<(), InterfaceDriverError> {
+        self.send_terminal(CodexTurnOutput::lifecycle(output))
+    }
+
+    fn send_held_lifecycle(
+        &self,
+        continuation: &LifecycleContinuation,
+    ) -> Result<(), InterfaceDriverError> {
+        let (artifact, route) = validate_held_file(self.output_root, continuation)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        let manifest = artifact.read_manifest().map_err(|error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "lifecycle-held terminal manifest is unreadable: {error}"
+            ))
+        })?;
+        let emission = ProviderEmission {
+            artifact,
+            route: provider_route_from_lifecycle(route),
+        };
+        if manifest.label != INTERFACE_ARTIFACT_OUTPUT_LABEL {
+            return self.emit.send_turn(emission);
+        }
+        let terminal_artifact_payload_blake3 = artifact_payload_blake3(&emission.artifact)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        match self.seal_live_stream(&manifest.label, &terminal_artifact_payload_blake3)? {
+            Some(stream) => self.emit.send_terminal_group(stream, emission),
+            None => self.emit.send_turn(emission),
+        }
+    }
+
+    fn send_interrupted_result(
+        &self,
+        activity: Option<CodexTurnOutput>,
+        activity_already_admitted: bool,
+        closure: CodexTurnOutput,
+    ) -> Result<(), InterfaceDriverError> {
+        let activity = match (activity, activity_already_admitted) {
+            (Some(_), true) => {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "interrupted-result recovery cannot both repeat and acknowledge its activity"
+                        .to_string(),
+                ));
+            }
+            (Some(output), false) => {
+                self.send(output)?;
+                None
+            }
+            (None, true) => {
+                None
+            }
+            (None, false) => {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "interrupted-result source has neither a new nor an admitted activity"
+                        .to_string(),
+                ));
+            }
+        };
+        self.set_interrupted_pending(None);
+        let mut closure = closure;
+        if !self.projection_admits(&closure) {
+            return Err(InterfaceDriverError::FailedClosed(
+                "descriptor projection removed the required interrupted-result closure".to_string(),
+            ));
+        }
+        self.normalize_output_label(&mut closure)?;
+        let closure_label = closure.label.clone();
+        let closure = self.materialize_normalized(closure, false)?;
+        let closure_artifact_payload_blake3 = artifact_payload_blake3(&closure.artifact)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        let stream = self.seal_live_stream(&closure_label, &closure_artifact_payload_blake3)?;
+        if stream.is_none() && activity.is_none() {
+            return Err(InterfaceDriverError::FailedClosed(
+                "interrupted-result closure has neither a sealed stream nor legacy activity"
+                    .to_string(),
+            ));
+        }
+        self.emit.send_interrupted_result(activity, stream, closure)
+    }
+}
+
+fn emit_lifecycle_trigger(
+    sink: &TurnSink<'_>,
+    lifecycle: Option<&LifecycleBinding>,
+    emitter_run: &str,
+    trigger: LifecycleTrigger,
+) -> Result<bool, InterfaceDriverError> {
+    let Some(lifecycle) = lifecycle else {
+        return Ok(false);
+    };
+    let trigger = attach_lifecycle_provider_continuity(sink, emitter_run, trigger)?;
+    let plan = lifecycle
+        .plan_trigger(emitter_run, trigger)
+        .map_err(InterfaceDriverError::FailedClosed)?;
+    for output in plan.reactive {
+        sink.send_lifecycle(output)?;
+    }
+    if let Some(output) = plan.blocking {
+        sink.send_lifecycle(output)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn attach_lifecycle_provider_continuity(
+    sink: &TurnSink<'_>,
+    emitter_run: &str,
+    mut trigger: LifecycleTrigger,
+) -> Result<LifecycleTrigger, InterfaceDriverError> {
+    let continuity = sink.continuity_snapshot().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "run '{emitter_run}' cannot emit lifecycle event '{}' without durable provider continuity",
+            trigger.event.as_str()
+        ))
+    })?;
+    if continuity.schema_version != 1
+        || continuity.run != emitter_run
+        || continuity.provider_interface != *sink.provider_interface
+    {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "run '{emitter_run}' lifecycle trigger continuity conflicts with its provider invocation"
+        )));
+    }
+    let data = trigger.data.as_object_mut().ok_or_else(|| {
+        InterfaceDriverError::Protocol("lifecycle trigger data must be an object".to_string())
+    })?;
+    if data.contains_key(LIFECYCLE_PROVIDER_CONTINUITY_FIELD) {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "lifecycle trigger '{}' attempted to override provider continuity",
+            trigger.event.as_str()
+        )));
+    }
+    data.insert(
+        LIFECYCLE_PROVIDER_CONTINUITY_FIELD.to_string(),
+        serde_json::to_value(continuity).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "lifecycle provider continuity did not encode: {error}"
+            ))
+        })?,
+    );
+    Ok(trigger)
+}
+
+fn restore_lifecycle_provider_continuity(
+    sink: &TurnSink<'_>,
+    runtime: &RuntimeInvocationMetadata,
+    event: &LifecycleEventArtifact,
+) -> Result<(), InterfaceDriverError> {
+    if event.emitter_run != runtime.run.as_str() {
+        return Ok(());
+    }
+    let continuity: CodexContinuityState = serde_json::from_value(
+        event
+            .data
+            .get(LIFECYCLE_PROVIDER_CONTINUITY_FIELD)
+            .cloned()
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "lifecycle event '{}' has no provider continuity evidence",
+                    event.event_id
+                ))
+            })?,
+    )
+    .map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "lifecycle event '{}' provider continuity is malformed: {error}",
+            event.event_id
+        ))
+    })?;
+    if continuity.schema_version != 1
+        || continuity.run != runtime.run.as_str()
+        || continuity.provider_interface != runtime.interface
+    {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "lifecycle event '{}' provider continuity conflicts with its emitter invocation",
+            event.event_id
+        )));
+    }
+    sink.set_continuity(continuity);
+    Ok(())
+}
+
+fn lifecycle_handler_model_prompt(
+    instruction: &str,
+    event: &LifecycleEventArtifact,
+) -> Result<String, InterfaceDriverError> {
+    let contract = match event.event.positive_decision() {
+        Some(decision) if matches!(event.mode, crate::lifecycle::LifecycleMode::Sync) => {
+            serde_json::json!({
+                "decision": decision,
+                "reason": "optional non-empty string",
+                "additional_context_artifacts": [],
+                "replacement_artifact": null,
+            })
+        }
+        _ => serde_json::json!({
+            "result": "JSON value",
+        }),
+    };
+    let contract = serde_json::to_string(&contract).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "lifecycle handler model contract did not encode: {error}"
+        ))
+    })?;
+    Ok(format!(
+        "{instruction}\n\nReturn exactly one JSON object and no surrounding text. Output contract: {contract}"
+    ))
+}
+
+fn emit_lifecycle_trigger_set(
+    sink: &TurnSink<'_>,
+    lifecycle: Option<&LifecycleBinding>,
+    emitter_run: &str,
+    triggers: Vec<LifecycleTrigger>,
+) -> Result<bool, InterfaceDriverError> {
+    let Some(lifecycle) = lifecycle else {
+        return Ok(false);
+    };
+    let mut blocking = None;
+    for trigger in triggers {
+        let trigger = attach_lifecycle_provider_continuity(sink, emitter_run, trigger)?;
+        let plan = lifecycle
+            .plan_trigger(emitter_run, trigger)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+        for output in plan.reactive {
+            sink.send_lifecycle(output)?;
+        }
+        if let Some(output) = plan.blocking {
+            if blocking.replace(output).is_some() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "run '{emitter_run}' selected more than one sync lifecycle handler for one physical continuation; author an explicit aggregate decision edge"
+                )));
+            }
+        }
+    }
+    if let Some(output) = blocking {
+        sink.send_lifecycle(output)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn hold_lifecycle_output(
+    sink: &TurnSink<'_>,
+    output: CodexTurnOutput,
+) -> Result<LifecycleContinuation, InterfaceDriverError> {
+    let terminal = output.label == INTERFACE_ARTIFACT_OUTPUT_LABEL;
+    let emission = if terminal {
+        sink.materialize_without_boundary(output)?
+    } else {
+        sink.materialize(output)?
+    }
+    .ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "descriptor projection removed a lifecycle-held provider output".to_string(),
+        )
+    })?;
+    let artifact =
+        artifact_ref_for_file(&emission.artifact).map_err(InterfaceDriverError::FailedClosed)?;
+    Ok(LifecycleContinuation::HeldEmission {
+        artifact,
+        manifest_path: emission.artifact.manifest_path().to_path_buf(),
+        route: lifecycle_route_from_provider(emission.route)?,
+    })
+}
+
+fn lifecycle_route_from_provider(
+    route: ProviderEmissionRoute,
+) -> Result<LifecycleRoute, InterfaceDriverError> {
+    Ok(match route {
+        ProviderEmissionRoute::ClientProjection => LifecycleRoute::ClientProjection,
+        ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { inputs } => {
+            if inputs
+                .iter()
+                .any(|input| input.also_deliver_to_tool.is_some())
+            {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "lifecycle-held projection cannot discard a verified tool-door recipient"
+                        .to_string(),
+                ));
+            }
+            LifecycleRoute::ClientProjectionWithVerifiedInputs {
+                inputs: inputs
+                    .into_iter()
+                    .map(|input| LifecycleVerifiedInput {
+                        artifact_label: input.artifact_label,
+                        required_verified_artifact: input.required_verified_artifact,
+                    })
+                    .collect(),
+            }
+        }
+        ProviderEmissionRoute::Tool { tool } => LifecycleRoute::Tool { tool },
+        ProviderEmissionRoute::Interface { interface } => LifecycleRoute::Interface { interface },
+    })
+}
+
+#[derive(Default)]
+struct PendingClientDelta {
+    label: Option<String>,
+    text_field: Option<&'static str>,
+    payload: serde_json::Map<String, serde_json::Value>,
+    text: String,
+}
+
+fn flush_pending_delta(
+    sink: &TurnSink<'_>,
+    pending: &mut PendingClientDelta,
+    seq: &mut u64,
+) -> Result<(), InterfaceDriverError> {
+    if pending.text.is_empty() {
+        return Ok(());
+    }
+    let mut chunk = std::mem::take(pending);
+    let label = chunk.label.ok_or_else(|| {
+        InterfaceDriverError::Protocol("pending client delta has no output label".to_string())
+    })?;
+    let text_field = chunk.text_field.ok_or_else(|| {
+        InterfaceDriverError::Protocol("pending client delta has no text field".to_string())
+    })?;
+    chunk.payload.insert(
+        text_field.to_string(),
+        serde_json::Value::String(chunk.text),
+    );
+    chunk
+        .payload
+        .insert("seq".to_string(), serde_json::Value::Number((*seq).into()));
+    *seq += 1;
+    sink.send(CodexTurnOutput::client(
+        label,
+        serde_json::Value::Object(chunk.payload),
+    ))
+}
+
+fn queue_client_delta(
+    sink: &TurnSink<'_>,
+    pending: &mut PendingClientDelta,
+    seq: &mut u64,
+    output: CodexTurnOutput,
+    text_field: &'static str,
+) -> Result<bool, InterfaceDriverError> {
+    if output.route != ProviderEmissionRoute::ClientProjection {
+        return Err(InterfaceDriverError::Protocol(
+            "only client-projection outputs may enter the live delta coalescer".to_string(),
+        ));
+    }
+    let label = output.label;
+    let mut payload = output.value.as_object().cloned().ok_or_else(|| {
+        InterfaceDriverError::Protocol(format!(
+            "client delta '{label}' must serialize as a JSON object"
+        ))
+    })?;
+    let text = payload
+        .remove(text_field)
+        .and_then(|value| value.as_str().map(str::to_string))
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "client delta '{label}' must carry string field '{text_field}'"
+            ))
+        })?;
+    payload.remove("seq");
+    payload.insert(
+        "lifecycle".to_string(),
+        serde_json::Value::String("streaming".to_string()),
+    );
+    let same_stream = pending.label.as_deref() == Some(label.as_str())
+        && pending.text_field == Some(text_field)
+        && pending.payload == payload;
+    if !pending.text.is_empty() && !same_stream {
+        flush_pending_delta(sink, pending, seq)?;
+    }
+    let started = pending.text.is_empty();
+    if started {
+        pending.label = Some(label);
+        pending.text_field = Some(text_field);
+        pending.payload = payload;
+    }
+    pending.text.push_str(&text);
+    Ok(started && !text.is_empty())
+}
+
+fn server_notification_matches_turn(
+    notification: &ServerNotification,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<bool, InterfaceDriverError> {
+    let value = serde_json::to_value(notification).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "app-server notification could not be inspected for turn provenance: {error}"
+        ))
+    })?;
+    if let Some(value) = value.pointer("/params/threadId") {
+        let candidate = value.as_str().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "app-server notification carries a non-string threadId".to_string(),
+            )
+        })?;
+        if candidate != thread_id {
+            return Ok(false);
+        }
+    }
+    for pointer in ["/params/turnId", "/params/turn/id"] {
+        let Some(value) = value.pointer(pointer) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let candidate = value.as_str().ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "app-server notification carries a non-string turn id at '{pointer}'"
+            ))
+        })?;
+        return Ok(candidate == turn_id);
+    }
+    Ok(true)
+}
+
+fn server_notification_matches_thread(
+    notification: &ServerNotification,
+    thread_id: &str,
+) -> Result<bool, InterfaceDriverError> {
+    let value = serde_json::to_value(notification).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "app-server notification could not be inspected for thread provenance: {error}"
+        ))
+    })?;
+    let Some(value) = value.pointer("/params/threadId") else {
+        return Ok(true);
+    };
+    let candidate = value.as_str().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "app-server notification carries a non-string threadId".to_string(),
+        )
+    })?;
+    Ok(candidate == thread_id)
+}
+
+fn intentionally_unprojected_server_notification(notification: &ServerNotification) -> bool {
+    matches!(
+        notification,
+        ServerNotification::ThreadStarted(_)
+            | ServerNotification::ThreadStatusChanged(_)
+            | ServerNotification::ThreadArchived(_)
+            | ServerNotification::ThreadDeleted(_)
+            | ServerNotification::ThreadUnarchived(_)
+            | ServerNotification::ThreadClosed(_)
+            | ServerNotification::SkillsChanged(_)
+            | ServerNotification::ThreadNameUpdated(_)
+            | ServerNotification::ThreadGoalCleared(_)
+            | ServerNotification::ThreadSettingsUpdated(_)
+            | ServerNotification::RawResponseItemCompleted(_)
+            | ServerNotification::AppListUpdated(_)
+            | ServerNotification::RemoteControlStatusChanged(_)
+            | ServerNotification::ExternalAgentConfigImportProgress(_)
+            | ServerNotification::ExternalAgentConfigImportCompleted(_)
+            | ServerNotification::FsChanged(_)
+            | ServerNotification::FuzzyFileSearchSessionUpdated(_)
+            | ServerNotification::FuzzyFileSearchSessionCompleted(_)
+            | ServerNotification::AccountLoginCompleted(_)
+            | ServerNotification::AccountUpdated(_)
+    )
+}
+
+impl CodexAppServerInterfaceDriver {
+    async fn emit_hooks_catalog(&self, sink: &TurnSink<'_>) -> Result<(), InterfaceDriverError> {
+        let request = ClientRequest::HooksList {
+            request_id: self.mint_request_id(),
+            params: HooksListParams { cwds: Vec::new() },
+        };
+        let response = {
+            let client = self.client.lock().await;
+            client.request_typed::<HooksListResponse>(request).await
+        };
+        match response {
+            Ok(response) => {
+                sink.send(hook_catalog_output(&response.data))?;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "hooks/list unavailable on this provider thread"
+                );
+                sink.send(hook_catalog_error_output(&error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_manual_compaction(
+        &self,
+        context: TurnContext<'_, '_>,
+        thread_id: &str,
+    ) -> Result<(), InterfaceDriverError> {
+        let request = ClientRequest::ThreadCompactStart {
+            request_id: self.mint_request_id(),
+            params: ThreadCompactStartParams {
+                thread_id: thread_id.to_string(),
+            },
+        };
+        {
+            let client = self.client.lock().await;
+            if !matches!(&*client, AppServerClient::Spawn(_)) {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex compact dispatch evidence only supports the exact local process transport"
+                        .to_string(),
+                ));
+            }
+        }
+        context
+            .sink
+            .admit_app_server_dispatch(&request, None)
+            .await?;
+        let request_handle = {
+            let client = self.client.lock().await;
+            let request_handle = client.request_handle();
+            client
+                .request_typed::<ThreadCompactStartResponse>(request)
+                .await
+                .map_err(typed_error)?;
+            request_handle
+        };
+        let turn_id = self
+            .await_manual_compaction_turn_started(context.sink, thread_id)
+            .await?;
+        context.control.publish(CodexTurnControlTarget::Draining {
+            handle: request_handle,
+            request_ids: self.next_request_id.clone(),
+            pending_requests: self.pending_server_requests.clone(),
+            scope: context.scope.clone(),
+            output: Arc::downgrade(context.sink.emit),
+            continuity: context.sink.continuity_snapshot(),
+            handoff_barrier: context.handoff_barrier.clone(),
+            effect_gate: context.effect_gate.clone(),
+            turn_interrupted: context.turn_interrupted.clone(),
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.clone(),
+        });
+        self.drain_manual_compaction(context, thread_id, &turn_id)
+            .await
+    }
+
+    async fn await_manual_compaction_turn_started(
+        &self,
+        sink: &TurnSink<'_>,
+        thread_id: &str,
+    ) -> Result<String, InterfaceDriverError> {
+        let mut client = self.client.lock().await;
+        loop {
+            match client.next_event().await {
+                Some(AppServerEvent::ServerNotification(ServerNotification::TurnStarted(turn)))
+                    if turn.thread_id == thread_id =>
+                {
+                    if turn.turn.id.trim().is_empty() || turn.turn.status != TurnStatus::InProgress
+                    {
+                        return Err(InterfaceDriverError::FailedClosed(format!(
+                            "manual compact started an invalid turn: id='{}' status={:?}",
+                            turn.turn.id, turn.turn.status
+                        )));
+                    }
+                    sink.bind_live_stream(thread_id, &turn.turn.id)?;
+                    sink.send(serialized_client_output(TURN_STARTED_LABEL, &turn)?)?;
+                    return Ok(turn.turn.id);
+                }
+                Some(AppServerEvent::ServerNotification(notification)) => {
+                    if !server_notification_matches_thread(&notification, thread_id)?
+                        || intentionally_unprojected_server_notification(&notification)
+                    {
+                        continue;
+                    }
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex emitted '{}' before the manual compact turn started",
+                        notification
+                    )));
+                }
+                Some(AppServerEvent::ServerRequest(request)) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex issued '{}' before the manual compact turn started",
+                        server_request_method(&request)
+                    )));
+                }
+                Some(AppServerEvent::UnknownServerNotification(notification)) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex emitted unknown app-server notification '{}' before manual compact started",
+                        notification.method
+                    )));
+                }
+                Some(AppServerEvent::Disconnected { message }) => {
+                    return Err(InterfaceDriverError::Transport(format!(
+                        "app-server disconnected before manual compact started: {message}"
+                    )));
+                }
+                Some(AppServerEvent::Lagged { skipped }) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "app-server event stream lagged ({skipped} skipped) before manual compact started"
+                    )));
+                }
+                None => {
+                    return Err(InterfaceDriverError::Transport(
+                        "app-server event stream closed before manual compact started".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn drain_manual_compaction(
+        &self,
+        context: TurnContext<'_, '_>,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<(), InterfaceDriverError> {
+        context.sink.bind_live_stream(thread_id, turn_id)?;
+        let mut compaction_item_id: Option<String> = None;
+        let mut compaction_completed = false;
+        let mut compaction_output: Option<CodexTurnOutput> = None;
+        let mut terminal_error: Option<CodexTurnOutput> = None;
+        let provider_account_events_enabled = self.provider_operations()?.is_some();
+        let mut client = self.client.lock().await;
+        loop {
+            match client.next_event().await {
+                Some(AppServerEvent::ServerNotification(notification)) => {
+                    let _notification_guard = context.effect_gate.lock().await;
+                    if !server_notification_matches_turn(&notification, thread_id, turn_id)? {
+                        continue;
+                    }
+                    match notification {
+                        ServerNotification::ItemStarted(started)
+                            if started.thread_id == thread_id =>
+                        {
+                            match started.item {
+                                ThreadItem::ContextCompaction { id } => {
+                                    if compaction_item_id.replace(id).is_some() {
+                                        return Err(InterfaceDriverError::FailedClosed(
+                                            "manual compact started more than one context-compaction item"
+                                                .to_string(),
+                                        ));
+                                    }
+                                }
+                                ThreadItem::UserMessage { .. }
+                                | ThreadItem::AgentMessage { .. }
+                                | ThreadItem::Reasoning { .. } => {}
+                                item => {
+                                    return Err(InterfaceDriverError::FailedClosed(format!(
+                                        "manual compact emitted unexpected item start '{item:?}'"
+                                    )));
+                                }
+                            }
+                        }
+                        ServerNotification::ItemCompleted(ItemCompletedNotification {
+                            item,
+                            thread_id: item_thread,
+                            turn_id: item_turn,
+                            completed_at_ms,
+                        }) if item_thread == thread_id => match item {
+                            ThreadItem::ContextCompaction { id } => {
+                                if compaction_completed
+                                    || compaction_item_id.as_deref() != Some(id.as_str())
+                                {
+                                    return Err(InterfaceDriverError::FailedClosed(
+                                            "manual compact completed without one matching started context-compaction item"
+                                                .to_string(),
+                                        ));
+                                }
+                                compaction_output = Some(manual_compaction_completed_output(
+                                    id,
+                                    item_thread.as_str(),
+                                    item_turn.as_str(),
+                                    completed_at_ms,
+                                )?);
+                                compaction_completed = true;
+                            }
+                            ThreadItem::UserMessage { .. }
+                            | ThreadItem::AgentMessage { .. }
+                            | ThreadItem::Reasoning { .. } => {}
+                            item => {
+                                return Err(InterfaceDriverError::FailedClosed(format!(
+                                    "manual compact emitted unexpected item completion '{item:?}'"
+                                )));
+                            }
+                        },
+                        ServerNotification::AgentMessageDelta(_)
+                        | ServerNotification::ReasoningSummaryTextDelta(_)
+                        | ServerNotification::ReasoningSummaryPartAdded(_)
+                        | ServerNotification::ReasoningTextDelta(_)
+                        | ServerNotification::ThreadTokenUsageUpdated(_)
+                        | ServerNotification::ContextCompacted(_) => {}
+                        ServerNotification::Warning(warning)
+                            if warning
+                                .thread_id
+                                .as_deref()
+                                .map_or(true, |candidate| candidate == thread_id) =>
+                        {
+                            context
+                                .sink
+                                .send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                        }
+                        ServerNotification::GuardianWarning(warning)
+                            if warning.thread_id == thread_id =>
+                        {
+                            context
+                                .sink
+                                .send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                        }
+                        ServerNotification::DeprecationNotice(notice) => {
+                            context.sink.send(CodexTurnOutput::client(
+                                TURN_WARNING_LABEL,
+                                serde_json::json!({
+                                    "message": notice.summary,
+                                    "detail": notice.details,
+                                    "source": "deprecation"
+                                }),
+                            ))?;
+                        }
+                        ServerNotification::ConfigWarning(warning) => {
+                            context.sink.send(CodexTurnOutput::client(
+                                TURN_WARNING_LABEL,
+                                serde_json::json!({
+                                    "message": warning.summary,
+                                    "detail": warning.details,
+                                    "source": "configuration",
+                                    "path": warning.path,
+                                    "range": warning.range
+                                }),
+                            ))?;
+                        }
+                        ServerNotification::ModelRerouted(model)
+                            if model.thread_id == thread_id =>
+                        {
+                            let selected_model = self
+                                .resolve_private_config_string("model")?
+                                .ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "Codex model reroute arrived without a descriptor-bound selected model"
+                                            .to_string(),
+                                    )
+                                })?;
+                            validate_model_reroute(
+                                &selected_model,
+                                &model.from_model,
+                                &model.to_model,
+                            )?;
+                            context.sink.send(serialized_client_output(
+                                TURN_MODEL_REROUTED_LABEL,
+                                &model,
+                            )?)?;
+                        }
+                        ServerNotification::ModelVerification(model)
+                            if model.thread_id == thread_id =>
+                        {
+                            context.sink.send(serialized_client_output(
+                                TURN_MODEL_VERIFICATION_LABEL,
+                                &model,
+                            )?)?;
+                        }
+                        ServerNotification::AuthRecoveryStarted(recovery)
+                            if recovery.thread_id == thread_id && recovery.turn_id == turn_id =>
+                        {
+                            context.sink.send(serialized_client_output(
+                                TURN_AUTH_RECOVERY_STARTED_LABEL,
+                                &recovery,
+                            )?)?;
+                        }
+                        ServerNotification::AuthRecoveryCompleted(recovery)
+                            if recovery.thread_id == thread_id && recovery.turn_id == turn_id =>
+                        {
+                            context.sink.send(serialized_client_output(
+                                TURN_AUTH_RECOVERY_COMPLETED_LABEL,
+                                &recovery,
+                            )?)?;
+                        }
+                        ServerNotification::ModelSafetyBufferingUpdated(status)
+                            if status.thread_id == thread_id =>
+                        {
+                            context.sink.send(model_safety_buffering_output(&status)?)?;
+                        }
+                        ServerNotification::AccountLoginCompleted(notification)
+                            if provider_account_events_enabled =>
+                        {
+                            self.record_login_completion(&notification).await;
+                            context
+                                .sink
+                                .send(account_login_completed_output(&notification))?;
+                        }
+                        ServerNotification::AccountUpdated(notification)
+                            if provider_account_events_enabled =>
+                        {
+                            context.sink.send(account_updated_output(&notification)?)?;
+                        }
+                        ServerNotification::AccountRateLimitsUpdated(limits) => {
+                            context.sink.send(serialized_client_output(
+                                if provider_account_events_enabled {
+                                    PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL
+                                } else {
+                                    ACCOUNT_RATE_LIMITS_LABEL
+                                },
+                                &limits,
+                            )?)?;
+                        }
+                        ServerNotification::Error(error) if error.thread_id == thread_id => {
+                            let output = turn_error_output(&error);
+                            if provider_error_is_terminal(&error) {
+                                if terminal_error.replace(output).is_some() {
+                                    return Err(InterfaceDriverError::FailedClosed(
+                                        "manual compact emitted more than one terminal error"
+                                            .to_string(),
+                                    ));
+                                }
+                            } else {
+                                context.sink.send(output)?;
+                            }
+                        }
+                        ServerNotification::TurnCompleted(turn)
+                            if turn.thread_id == thread_id && turn.turn.id == turn_id =>
+                        {
+                            context.sink.set_pending(None);
+                            let completion = serialized_client_output(TURN_COMPLETED_LABEL, &turn)?;
+                            if turn.turn.status == TurnStatus::Interrupted && terminal_error.is_none() {
+                                context.sink.send_terminal(completion)?;
+                                context.control.finish();
+                                return Ok(());
+                            }
+                            context.sink.send(completion)?;
+                            context.control.finish();
+                            if terminal_turn_may_emit_reply(
+                                &turn.turn.status,
+                                turn.turn.error.as_ref(),
+                            )? {
+                                if terminal_error.is_some() || !compaction_completed {
+                                    return Err(InterfaceDriverError::FailedClosed(
+                                        "manual compact terminal state conflicts with its context-compaction item"
+                                            .to_string(),
+                                    ));
+                                }
+                                context.sink.send_terminal(
+                                    compaction_output.take().ok_or_else(|| {
+                                        InterfaceDriverError::FailedClosed(
+                                            "manual compact lost its completed semantic output"
+                                                .to_string(),
+                                        )
+                                    })?,
+                                )?;
+                            } else {
+                                context.sink.send_terminal(terminal_error.ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "manual compact failed without an exact error notification"
+                                            .to_string(),
+                                    )
+                                })?)?;
+                            }
+                            return Ok(());
+                        }
+                        ServerNotification::TurnStarted(_) => {
+                            return Err(InterfaceDriverError::FailedClosed(
+                                "manual compact received a duplicate turn start".to_string(),
+                            ));
+                        }
+                        notification
+                            if intentionally_unprojected_server_notification(&notification) => {}
+                        notification => {
+                            return Err(InterfaceDriverError::FailedClosed(format!(
+                                "Codex emitted unhandled manual compact notification '{}'",
+                                notification
+                            )));
+                        }
+                    }
+                }
+                Some(AppServerEvent::ServerRequest(request)) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "manual compact issued unexpected server request '{}'",
+                        server_request_method(&request)
+                    )));
+                }
+                Some(AppServerEvent::UnknownServerNotification(notification)) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex emitted unknown app-server notification '{}' during manual compact",
+                        notification.method
+                    )));
+                }
+                Some(AppServerEvent::Disconnected { message }) => {
+                    if let Some(error) = terminal_error.take() {
+                        context.sink.set_pending(None);
+                        context.control.finish();
+                        context.sink.send_terminal(error)?;
+                        return Ok(());
+                    }
+                    return Err(InterfaceDriverError::Transport(format!(
+                        "app-server disconnected during manual compact: {message}"
+                    )));
+                }
+                Some(AppServerEvent::Lagged { skipped }) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "app-server event stream lagged ({skipped} skipped) during manual compact"
+                    )));
+                }
+                None => {
+                    if let Some(error) = terminal_error.take() {
+                        context.sink.set_pending(None);
+                        context.control.finish();
+                        context.sink.send_terminal(error)?;
+                        return Ok(());
+                    }
+                    return Err(InterfaceDriverError::Transport(
+                        "app-server event stream closed before manual compact completed"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn drain_turn(
+        &self,
+        context: TurnContext<'_, '_>,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<TurnDrainOutcome, InterfaceDriverError> {
+        let sink = context.sink;
+        sink.bind_live_stream(thread_id, turn_id)?;
+        let control = context.control;
+        let scope = context.scope;
+        let interface_operations = context.interface_operations;
+        let mut message_phases = BTreeMap::<String, Option<MessagePhase>>::new();
+        let mut latest_context_window_usage: Option<ContextWindowUsage> = None;
+        let mut latest_provider_token_usage: Option<ProviderTokenUsageEvidence> = None;
+        let mut terminal_error: Option<CodexTurnOutput> = None;
+        let mut pending_delta = PendingClientDelta::default();
+        let mut delta_seq: u64 = 0;
+        let mut flush_deadline: Option<tokio::time::Instant> = None;
+        let provider_account_events_enabled = self.provider_operations()?.is_some();
+        let mut client = self.client.lock().await;
+        loop {
+            let event = match flush_deadline {
+                Some(deadline) => tokio::select! {
+                    event = client.next_event() => Some(event),
+                    _ = tokio::time::sleep_until(deadline) => None,
+                },
+                None => Some(client.next_event().await),
+            };
+            let Some(event) = event else {
+                flush_pending_delta(context.sink, &mut pending_delta, &mut delta_seq)?;
+                flush_deadline = None;
+                continue;
+            };
+            match event {
+                Some(AppServerEvent::ServerNotification(notification)) => {
+                    let _notification_guard = context.effect_gate.lock().await;
+                    if !server_notification_matches_turn(&notification, thread_id, turn_id)? {
+                        continue;
+                    }
+                    match notification {
+                        ServerNotification::TurnStarted(turn) if turn.thread_id == thread_id => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(TURN_STARTED_LABEL, &turn)?)?;
+                        }
+                        ServerNotification::AgentMessageDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            let phase = message_phases.get(&delta.item_id).cloned().flatten();
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                CodexTurnOutput::scoped_message_delta(
+                                    0,
+                                    delta.delta,
+                                    delta.turn_id,
+                                    delta.item_id,
+                                    phase,
+                                ),
+                                "text",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::ItemStarted(started)
+                            if started.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            reject_native_effect_item(
+                                &started.item,
+                                "started",
+                                self.native_web_search_mode()?,
+                            )?;
+                            if let ThreadItem::AgentMessage { id, phase, .. } = &started.item {
+                                message_phases.insert(id.clone(), phase.clone());
+                            }
+                            sink.record_input_item(
+                                &started.item,
+                                &started.thread_id,
+                                &started.turn_id,
+                                InputRecordedSource::ItemStarted,
+                                Some(started.started_at_ms),
+                            )?;
+                            if let Some(output) = started_item_output(
+                                started.item,
+                                &started.thread_id,
+                                &started.turn_id,
+                                started.started_at_ms,
+                            ) {
+                                sink.send(output)?;
+                            }
+                        }
+                        ServerNotification::PlanDelta(delta) if delta.thread_id == thread_id => {
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                proposed_plan_delta_output(&delta)?,
+                                "delta",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::ReasoningSummaryTextDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                serialized_client_output(TURN_REASONING_DELTA_LABEL, &delta)?,
+                                "delta",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::ReasoningSummaryPartAdded(part)
+                            if part.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            let mut output =
+                                serialized_client_output(TURN_REASONING_DELTA_LABEL, &part)?;
+                            insert_client_output_field(
+                                &mut output,
+                                "delta",
+                                serde_json::Value::String(String::new()),
+                            );
+                            insert_client_output_field(
+                                &mut output,
+                                "section_break",
+                                serde_json::Value::Bool(true),
+                            );
+                            sink.send(output)?;
+                        }
+                        ServerNotification::ReasoningTextDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                serialized_client_output(TURN_REASONING_DELTA_LABEL, &delta)?,
+                                "delta",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::CommandExecutionOutputDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                serialized_client_output(TURN_EXEC_OUTPUT_DELTA_LABEL, &delta)?,
+                                "delta",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::TerminalInteraction(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_TERMINAL_INTERACTION_LABEL,
+                                &delta,
+                            )?)?;
+                        }
+                        ServerNotification::FileChangeOutputDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            if queue_client_delta(
+                                sink,
+                                &mut pending_delta,
+                                &mut delta_seq,
+                                serialized_client_output(TURN_FILE_CHANGE_DELTA_LABEL, &delta)?,
+                                "delta",
+                            )? {
+                                flush_deadline =
+                                    Some(tokio::time::Instant::now() + DELTA_FLUSH_WINDOW);
+                            }
+                        }
+                        ServerNotification::FileChangePatchUpdated(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_FILE_CHANGE_DELTA_LABEL,
+                                &delta,
+                            )?)?;
+                        }
+                        ServerNotification::McpToolCallProgress(progress)
+                            if progress.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_MCP_PROGRESS_LABEL,
+                                &progress,
+                            )?)?;
+                        }
+                        ServerNotification::TurnDiffUpdated(diff)
+                            if diff.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(TURN_DIFF_UPDATED_LABEL, &diff)?)?;
+                        }
+                        ServerNotification::ItemCompleted(ItemCompletedNotification {
+                            item,
+                            thread_id: item_thread,
+                            turn_id,
+                            completed_at_ms,
+                        }) if item_thread == thread_id => {
+                            reject_native_effect_item(
+                                &item,
+                                "completed",
+                                self.native_web_search_mode()?,
+                            )?;
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.record_input_item(
+                                &item,
+                                &item_thread,
+                                &turn_id,
+                                InputRecordedSource::ItemCompleted,
+                                Some(completed_at_ms),
+                            )?;
+                            let completed_output = match item {
+                                ThreadItem::AgentMessage {
+                                    id,
+                                    text,
+                                    phase,
+                                } => {
+                                    message_phases.remove(&id);
+                                    Some(completed_agent_message_output(
+                                        &id,
+                                        &text,
+                                        phase,
+                                        item_thread.as_str(),
+                                        turn_id.as_str(),
+                                        completed_at_ms,
+                                    ))
+                                }
+                                item => completed_item_output(
+                                    item,
+                                    item_thread.as_str(),
+                                    turn_id.as_str(),
+                                    completed_at_ms,
+                                ),
+                            };
+                            if let Some(output) = completed_output {
+                                sink.send(output)?;
+                            }
+                        }
+                        ServerNotification::TurnPlanUpdated(plan)
+                            if plan.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(plan_update_output(&plan))?;
+                        }
+                        ServerNotification::ThreadTokenUsageUpdated(usage)
+                            if usage.thread_id == thread_id =>
+                        {
+                            let (context_window_usage, provider_token_usage) =
+                                terminal_usage_evidence(&usage.token_usage)?;
+                            latest_context_window_usage = Some(context_window_usage);
+                            latest_provider_token_usage = Some(provider_token_usage);
+                        }
+                        ServerNotification::HookStarted(hook) if hook.thread_id == thread_id => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(hook_result_output(
+                                &hook.run,
+                                "started",
+                                hook.turn_id.as_deref(),
+                            ))?;
+                        }
+                        ServerNotification::HookCompleted(hook) if hook.thread_id == thread_id => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(hook_result_output(
+                                &hook.run,
+                                "completed",
+                                hook.turn_id.as_deref(),
+                            ))?;
+                        }
+                        ServerNotification::ItemGuardianApprovalReviewStarted(review)
+                            if review.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_AUTO_REVIEW_STARTED_LABEL,
+                                &review,
+                            )?)?;
+                        }
+                        ServerNotification::ItemGuardianApprovalReviewCompleted(review)
+                            if review.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_AUTO_REVIEW_COMPLETED_LABEL,
+                                &review,
+                            )?)?;
+                        }
+                        ServerNotification::ServerRequestResolved(request)
+                            if request.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_OPERATOR_REQUEST_RESOLVED_LABEL,
+                                &request,
+                            )?)?;
+                        }
+                        ServerNotification::McpServerStatusUpdated(status)
+                            if status.thread_id.as_deref() == Some(thread_id) =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(TURN_MCP_STATUS_LABEL, &status)?)?;
+                        }
+                        ServerNotification::ThreadGoalUpdated(goal)
+                            if goal.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(goal_status_output(&goal.goal))?;
+                        }
+                        ServerNotification::ContextCompacted(compaction)
+                            if compaction.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                        }
+                        ServerNotification::ModelRerouted(model)
+                            if model.thread_id == thread_id =>
+                        {
+                            let selected_model = self
+                                .resolve_private_config_string("model")?
+                                .ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "Codex model reroute arrived without a descriptor-bound selected model"
+                                            .to_string(),
+                                    )
+                                })?;
+                            validate_model_reroute(
+                                &selected_model,
+                                &model.from_model,
+                                &model.to_model,
+                            )?;
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_MODEL_REROUTED_LABEL,
+                                &model,
+                            )?)?;
+                        }
+                        ServerNotification::ModelVerification(model)
+                            if model.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_MODEL_VERIFICATION_LABEL,
+                                &model,
+                            )?)?;
+                        }
+                        ServerNotification::AuthRecoveryStarted(recovery)
+                            if recovery.thread_id == thread_id && recovery.turn_id == turn_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_AUTH_RECOVERY_STARTED_LABEL,
+                                &recovery,
+                            )?)?;
+                        }
+                        ServerNotification::AuthRecoveryCompleted(recovery)
+                            if recovery.thread_id == thread_id && recovery.turn_id == turn_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                TURN_AUTH_RECOVERY_COMPLETED_LABEL,
+                                &recovery,
+                            )?)?;
+                        }
+                        ServerNotification::ModelSafetyBufferingUpdated(status)
+                            if status.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(model_safety_buffering_output(&status)?)?;
+                        }
+                        ServerNotification::Warning(warning)
+                            if warning
+                                .thread_id
+                                .as_deref()
+                                .map_or(true, |warning_thread| warning_thread == thread_id) =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                        }
+                        ServerNotification::GuardianWarning(warning)
+                            if warning.thread_id == thread_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(TURN_WARNING_LABEL, &warning)?)?;
+                        }
+                        ServerNotification::DeprecationNotice(notice) => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(CodexTurnOutput::client(
+                                TURN_WARNING_LABEL,
+                                serde_json::json!({
+                                    "message": notice.summary,
+                                    "detail": notice.details,
+                                    "source": "deprecation"
+                                }),
+                            ))?;
+                        }
+                        ServerNotification::ConfigWarning(warning) => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(CodexTurnOutput::client(
+                                TURN_WARNING_LABEL,
+                                serde_json::json!({
+                                    "message": warning.summary,
+                                    "detail": warning.details,
+                                    "source": "configuration",
+                                    "path": warning.path,
+                                    "range": warning.range
+                                }),
+                            ))?;
+                        }
+                        ServerNotification::AccountLoginCompleted(notification)
+                            if provider_account_events_enabled =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            self.record_login_completion(&notification).await;
+                            sink.send(account_login_completed_output(&notification))?;
+                        }
+                        ServerNotification::AccountUpdated(notification)
+                            if provider_account_events_enabled =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(account_updated_output(&notification)?)?;
+                        }
+                        ServerNotification::AccountRateLimitsUpdated(limits) => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            sink.send(serialized_client_output(
+                                if provider_account_events_enabled {
+                                    PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL
+                                } else {
+                                    ACCOUNT_RATE_LIMITS_LABEL
+                                },
+                                &limits,
+                            )?)?;
+                        }
+                        ServerNotification::Error(error) if error.thread_id == thread_id => {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            flush_deadline = None;
+                            let output = turn_error_output(&error);
+                            if provider_error_is_terminal(&error) {
+                                if terminal_error.replace(output).is_some() {
+                                    return Err(InterfaceDriverError::FailedClosed(
+                                        "Codex emitted more than one terminal error for one native turn"
+                                            .to_string(),
+                                    ));
+                                }
+                            } else {
+                                sink.send(output)?;
+                            }
+                        }
+                        ServerNotification::TurnCompleted(turn)
+                            if turn.thread_id == thread_id && turn.turn.id == turn_id =>
+                        {
+                            flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                            sink.set_pending(None);
+                            let completion = serialized_client_output(TURN_COMPLETED_LABEL, &turn)?;
+                            if turn.turn.status == TurnStatus::Interrupted && terminal_error.is_none() {
+                                sink.send_terminal(completion)?;
+                                control.finish();
+                                return Ok(TurnDrainOutcome::Complete);
+                            }
+                            sink.send(completion)?;
+                            control.finish();
+                            if !terminal_turn_may_emit_reply(
+                                &turn.turn.status,
+                                turn.turn.error.as_ref(),
+                            )? {
+                                let terminal_error = terminal_error.ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "Codex terminal turn status has no exact error notification"
+                                            .to_string(),
+                                    )
+                                })?;
+                                sink.send_terminal(terminal_error)?;
+                                return Ok(TurnDrainOutcome::Complete);
+                            }
+                            if terminal_error.is_some() {
+                                return Err(InterfaceDriverError::FailedClosed(
+                                    "Codex successful terminal status conflicts with an error notification"
+                                        .to_string(),
+                                ));
+                            }
+                            let (item_id, text) = completed_turn_final_message(&turn.turn)?;
+                            if let Some(event) = context.lifecycle_prompt {
+                                let value: serde_json::Value =
+                                    serde_json::from_str(text).map_err(|error| {
+                                        InterfaceDriverError::FailedClosed(format!(
+                                            "lifecycle prompt handler returned non-JSON output: {error}"
+                                        ))
+                                    })?;
+                                let lifecycle = context.lifecycle.ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "lifecycle prompt turn lost its exact connection"
+                                            .to_string(),
+                                    )
+                                })?;
+                                let output = lifecycle
+                                    .normalize_handler_result(
+                                        event,
+                                        "provider_prompt",
+                                        true,
+                                        &value,
+                                    )
+                                    .map_err(InterfaceDriverError::FailedClosed)?;
+                                sink.send_terminal_lifecycle(output)?;
+                                return Ok(TurnDrainOutcome::Complete);
+                            }
+                            let terminal_usage = latest_context_window_usage.ok_or_else(|| {
+                                InterfaceDriverError::FailedClosed(
+                                    "Codex turn completed without positive model-context-window telemetry"
+                                        .to_string(),
+                                )
+                            })?;
+                            let provider_token_usage = latest_provider_token_usage
+                                .ok_or_else(|| {
+                                    InterfaceDriverError::FailedClosed(
+                                        "Codex turn completed without provider token-breakdown telemetry"
+                                            .to_string(),
+                                    )
+                                })?;
+                            let output = CodexTurnOutput::final_message(
+                                &turn.thread_id,
+                                &turn.turn.id,
+                                item_id,
+                                text,
+                                Some(terminal_usage),
+                            )
+                            .with_provider_token_usage(provider_token_usage);
+                            if let Some(lifecycle) = context.lifecycle {
+                                let continuation = hold_lifecycle_output(sink, output)?;
+                                let subject_artifact = match &continuation {
+                                    LifecycleContinuation::HeldEmission {
+                                        artifact,
+                                        ..
+                                    } => artifact.clone(),
+                                    _ => unreachable!(),
+                                };
+                                let triggers = vec![LifecycleTrigger {
+                                    event: LifecycleEventName::Stop,
+                                    trigger: "provider_turn_completed".to_string(),
+                                    match_values: Vec::new(),
+                                    subject_artifact,
+                                    data: serde_json::json!({
+                                        "thread_id": thread_id,
+                                        "turn_id": turn_id,
+                                        "status": turn.turn.status,
+                                    }),
+                                    continuation: Some(continuation.clone()),
+                                }];
+                                let lifecycle_blocked = emit_lifecycle_trigger_set(
+                                    sink,
+                                    Some(lifecycle),
+                                    match scope {
+                                        TransportStateScope::Run(run) => run,
+                                    },
+                                    triggers,
+                                )?;
+                                if !lifecycle_blocked {
+                                    sink.send_held_lifecycle(&continuation)?;
+                                }
+                            } else {
+                                sink.send_terminal(output)?;
+                            }
+                            return Ok(TurnDrainOutcome::Complete);
+                        }
+                        notification
+                            if intentionally_unprojected_server_notification(&notification) => {}
+                        notification => {
+                            return Err(InterfaceDriverError::FailedClosed(format!(
+                                "Codex emitted an unhandled app-server notification '{}'; every turn-scoped activity family must be projected or rejected explicitly",
+                                notification
+                            )));
+                        }
+                    }
+                }
+                Some(AppServerEvent::ServerRequest(request)) => {
+                    flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
+                    let _effect_guard = context.effect_gate.clone().lock_owned().await;
+                    if context
+                        .turn_interrupted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        return Err(InterfaceDriverError::FailedClosed(
+                            "Codex app-server issued a server request after this turn's interrupt was acknowledged"
+                                .to_string(),
+                        ));
+                    }
+                    match request {
+                        ServerRequest::DynamicToolCall { request_id, params } => {
+                            if params.thread_id != thread_id {
+                                return Err(InterfaceDriverError::FailedClosed(format!(
+                                    "app-server dynamic tool request belongs to thread '{}', active thread is '{}'",
+                                    params.thread_id, thread_id
+                                )));
+                            }
+                            if params.turn_id != turn_id {
+                                return Err(InterfaceDriverError::FailedClosed(format!(
+                                    "app-server dynamic tool request belongs to turn '{}', active turn is '{}'",
+                                    params.turn_id, turn_id
+                                )));
+                            }
+                            let expected_namespace = self.native_tool_namespace()?;
+                            if params.namespace.as_deref() != Some(expected_namespace.name.as_str())
+                            {
+                                return Err(InterfaceDriverError::FailedClosed(format!(
+                                    "app-server dynamic tool request namespace {:?} differs from the descriptor-owned namespace '{}'",
+                                    params.namespace, expected_namespace.name
+                                )));
+                            }
+                            let tool = context.tool_names.get(&params.tool).cloned().ok_or_else(|| {
+                                InterfaceDriverError::FailedClosed(format!("model tool '{}' is not in the admitted catalog", params.tool))
+                            })?;
+                            if tool.trim().is_empty() || params.call_id.trim().is_empty() {
+                                return Err(InterfaceDriverError::Protocol(
+                                    "app-server dynamic tool request has an empty tool or call id"
+                                        .to_string(),
+                                ));
+                            }
+                            let call_id = params.call_id;
+                            let arguments = params.arguments;
+                            let lifecycle_arguments = arguments.clone();
+                            sink.send(CodexTurnOutput::dynamic_tool_started(
+                                expected_namespace.name,
+                                tool.clone(),
+                                arguments.clone(),
+                                call_id.clone(),
+                                params.thread_id.clone(),
+                                params.turn_id.clone(),
+                            ))?;
+                            if let Some(native) = context.run_invocation
+                                && native.affordances.affordances().iter().any(|row| row.name.as_str() == tool)
+                            {
+                                let step = native.affordances.plan_call(native.metadata, native.admitted_record, native.current_record, &call_id, &tool, &arguments)
+                                    .unwrap_or_else(|error| NativeStep::Complete { result: serde_json::json!({"ok": false, "error": error}) });
+                                match step {
+                                    NativeStep::Effect { effect, pending: operation, outgoing_bindings } => {
+                                        let pending = PendingServerRequest {
+                                            request_id, thread_id: thread_id.into(), turn_id: turn_id.into(),
+                                            key: format!("tool:{}", effect.correlation_id),
+                                            kind: PendingServerRequestKind::DynamicTool { call_id: effect.correlation_id.clone(), tool: effect.tool.clone() },
+                                            effect_gate: context.effect_gate.clone(), turn_interrupted: context.turn_interrupted.clone(),
+                                        };
+                                        self.record_drain_outcome(scope, TurnDrainOutcome::Suspended(pending.clone())).await?;
+                                        self.publish_native_effect(context, &pending, operation, outgoing_bindings, client.request_handle())?;
+                                        return Ok(TurnDrainOutcome::Suspended(pending));
+                                    }
+                                    NativeStep::Complete { result } => {
+                                        sink.send(CodexTurnOutput::dynamic_tool_completed(
+                                            self.native_tool_namespace()?.name, tool, call_id,
+                                            thread_id.into(), turn_id.into(), native_result_success(&result), Some(result.clone()), None,
+                                        ))?;
+                                        client.resolve_server_request(request_id, native_operation_response(&result)?).await
+                                            .map_err(|error| InterfaceDriverError::Transport(error.to_string()))?;
+                                        continue;
+                                    }
+                                    NativeStep::Wait { request } => {
+                                        drop(_effect_guard);
+                                        let wait = self.wait_for_peer_artifact(native.current_record, &call_id, request.timeout_ms, context.turn_interrupted).await?;
+                                        if context.turn_interrupted.load(std::sync::atomic::Ordering::Acquire) { continue; }
+                                        let _guard = context.effect_gate.lock().await;
+                                        if context.turn_interrupted.load(std::sync::atomic::Ordering::Acquire) { continue; }
+                                        let result = &wait.result;
+                                        sink.send(CodexTurnOutput::dynamic_tool_completed(
+                                            self.native_tool_namespace()?.name, tool, call_id,
+                                            thread_id.into(), turn_id.into(), true, Some(result.clone()), None,
+                                        ))?;
+                                        client.resolve_server_request(request_id, native_operation_response(&result)?).await
+                                            .map_err(|error| InterfaceDriverError::Transport(error.to_string()))?;
+                                        wait.commit().map_err(InterfaceDriverError::FailedClosed)?;
+                                        continue;
+                                    }
+                                }
+                            }
+                            let (kind, continuity, output) = match interface_operations.get(&tool) {
+                                Some(operation) => (
+                                    PendingServerRequestKind::InterfaceOperation {
+                                        call_id: call_id.clone(),
+                                        operation: operation.name.clone(),
+                                        interface: operation.interface.clone(),
+                                        output_label: operation.output_label.clone(),
+                                    },
+                                    CodexPendingContinuity::InterfaceOperation {
+                                        turn_id: params.turn_id.clone(),
+                                        call_id: call_id.clone(),
+                                        operation: operation.name.clone(),
+                                        interface: operation.interface.clone(),
+                                        output_label: operation.output_label.clone(),
+                                    },
+                                    CodexTurnOutput::interface_operation_call(
+                                        operation,
+                                        arguments,
+                                        call_id.clone(),
+                                    ),
+                                ),
+                                None => (
+                                    PendingServerRequestKind::DynamicTool {
+                                        call_id: call_id.clone(),
+                                        tool: tool.clone(),
+                                    },
+                                    CodexPendingContinuity::DynamicTool {
+                                        native_operation: None,
+                                        turn_id: params.turn_id.clone(),
+                                        call_id: call_id.clone(),
+                                        tool: tool.clone(),
+                                    },
+                                    CodexTurnOutput::native_tool_call(
+                                        tool.clone(),
+                                        arguments,
+                                        call_id.clone(),
+                                    ),
+                                ),
+                            };
+                            let subagent_interface = match (&kind, context.lifecycle) {
+                                (
+                                    PendingServerRequestKind::InterfaceOperation {
+                                        interface, ..
+                                    },
+                                    Some(lifecycle),
+                                ) if lifecycle.is_subagent_interface(interface) => {
+                                    Some(interface.clone())
+                                }
+                                _ => None,
+                            };
+                            let pending = PendingServerRequest {
+                                request_id,
+                                thread_id: thread_id.to_string(),
+                                turn_id: params.turn_id,
+                                key: format!("tool:{call_id}"),
+                                kind,
+                                effect_gate: context.effect_gate.clone(),
+                                turn_interrupted: context.turn_interrupted.clone(),
+                            };
+                            sink.set_pending(Some(continuity));
+                            if let Some(lifecycle) = context.lifecycle {
+                                let held = hold_lifecycle_output(sink, output)?;
+                                let subject_artifact = match &held {
+                                    LifecycleContinuation::HeldEmission { artifact, .. } => {
+                                        artifact.clone()
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                let mut triggers = vec![LifecycleTrigger {
+                                    event: LifecycleEventName::PreToolUse,
+                                    trigger: "dynamic_tool_request".to_string(),
+                                    match_values: vec![tool.clone()],
+                                    subject_artifact: subject_artifact.clone(),
+                                    data: serde_json::json!({
+                                        "tool": tool.clone(),
+                                        "arguments": lifecycle_arguments,
+                                        "call_id": call_id.clone(),
+                                        "thread_id": thread_id,
+                                        "turn_id": pending.turn_id.clone(),
+                                        "destination": match &pending.kind {
+                                            PendingServerRequestKind::DynamicTool { .. } => "tool",
+                                            PendingServerRequestKind::InterfaceOperation { .. } => "interface",
+                                            PendingServerRequestKind::Operator { .. } => unreachable!(),
+                                        }
+                                    }),
+                                    continuation: Some(held.clone()),
+                                }];
+                                if let Some(interface) = subagent_interface {
+                                    triggers.push(LifecycleTrigger {
+                                        event: LifecycleEventName::SubagentStart,
+                                        trigger: "system_worker_dispatch".to_string(),
+                                        match_values: vec![interface.as_str().to_string()],
+                                        subject_artifact,
+                                        data: serde_json::json!({
+                                            "interface": interface,
+                                            "operation": tool.clone(),
+                                            "call_id": call_id.clone(),
+                                            "thread_id": thread_id,
+                                            "turn_id": pending.turn_id.clone(),
+                                        }),
+                                        continuation: Some(held.clone()),
+                                    });
+                                }
+                                if !emit_lifecycle_trigger_set(
+                                    sink,
+                                    Some(lifecycle),
+                                    match scope {
+                                        TransportStateScope::Run(run) => run,
+                                    },
+                                    triggers,
+                                )? {
+                                    sink.send_held_lifecycle(&held)?;
+                                }
+                            } else {
+                                sink.send(output)?;
+                            }
+                            self.record_drain_outcome(
+                                scope,
+                                TurnDrainOutcome::Suspended(pending.clone()),
+                            )
+                            .await?;
+                            control.publish(CodexTurnControlTarget::Suspended {
+                                handle: client.request_handle(),
+                                request_ids: self.next_request_id.clone(),
+                                pending_requests: self.pending_server_requests.clone(),
+                                scope: scope.clone(),
+                                output: Arc::downgrade(sink.emit),
+                                continuity: sink.continuity_snapshot(),
+                                handoff_barrier: context.handoff_barrier.clone(),
+                                effect_gate: pending.effect_gate.clone(),
+                                turn_interrupted: pending.turn_interrupted.clone(),
+                                thread_id: pending.thread_id.clone(),
+                                turn_id: pending.turn_id.clone(),
+                            });
+                            return Ok(TurnDrainOutcome::Suspended(pending));
+                        }
+                        other => {
+                            match classify_operator_request(&other, &self.operator_continuity()?)? {
+                                Some(output) => {
+                                    let pending = pending_operator_request(
+                                        &other,
+                                        thread_id,
+                                        turn_id,
+                                        context.effect_gate.clone(),
+                                        context.turn_interrupted.clone(),
+                                    )?;
+                                    let PendingServerRequestKind::Operator { method } =
+                                        &pending.kind
+                                    else {
+                                        unreachable!()
+                                    };
+                                    sink.set_pending(Some(CodexPendingContinuity::Operator {
+                                        turn_id: pending.turn_id.clone(),
+                                        request_key: pending.key.clone(),
+                                        method: method.clone(),
+                                    }));
+                                    if let Some(lifecycle) = context.lifecycle {
+                                        let held = hold_lifecycle_output(sink, output)?;
+                                        let subject_artifact = match &held {
+                                            LifecycleContinuation::HeldEmission {
+                                                artifact,
+                                                ..
+                                            } => artifact.clone(),
+                                            _ => unreachable!(),
+                                        };
+                                        let request_value = serde_json::to_value(&other).map_err(
+                                            |error| {
+                                                InterfaceDriverError::Protocol(format!(
+                                                    "permission_request source did not encode: {error}"
+                                                ))
+                                            },
+                                        )?;
+                                        let blocked = emit_lifecycle_trigger(
+                                            sink,
+                                            Some(lifecycle),
+                                            match scope {
+                                                TransportStateScope::Run(run) => run,
+                                            },
+                                            LifecycleTrigger {
+                                                event: LifecycleEventName::PermissionRequest,
+                                                trigger: "operator_approval_request".to_string(),
+                                                match_values: vec![method.clone()],
+                                                subject_artifact,
+                                                data: serde_json::json!({
+                                                    "method": method,
+                                                    "request": request_value,
+                                                    "thread_id": thread_id,
+                                                    "turn_id": turn_id,
+                                                }),
+                                                continuation: Some(held.clone()),
+                                            },
+                                        )?;
+                                        if !blocked {
+                                            sink.send_held_lifecycle(&held)?;
+                                        }
+                                    } else {
+                                        sink.send(output)?;
+                                    }
+                                    self.record_drain_outcome(
+                                        scope,
+                                        TurnDrainOutcome::Suspended(pending.clone()),
+                                    )
+                                    .await?;
+                                    control.publish(CodexTurnControlTarget::Suspended {
+                                        handle: client.request_handle(),
+                                        request_ids: self.next_request_id.clone(),
+                                        pending_requests: self.pending_server_requests.clone(),
+                                        scope: scope.clone(),
+                                        output: Arc::downgrade(sink.emit),
+                                        continuity: sink.continuity_snapshot(),
+                                        handoff_barrier: context.handoff_barrier.clone(),
+                                        effect_gate: pending.effect_gate.clone(),
+                                        turn_interrupted: pending.turn_interrupted.clone(),
+                                        thread_id: pending.thread_id.clone(),
+                                        turn_id: pending.turn_id.clone(),
+                                    });
+                                    return Ok(TurnDrainOutcome::Suspended(pending));
+                                }
+                                None => {
+                                    return Err(InterfaceDriverError::FailedClosed(format!(
+                                        "app-server issued an out-of-band server request mid-turn \
+                                         ({}); it is neither the native item/tool/call seam nor an \
+                                         operator approval/elicitation, failing closed",
+                                        server_request_method(&other)
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(AppServerEvent::UnknownServerNotification(notification)) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex emitted unknown app-server notification '{}'; provider protocol drift cannot be dropped silently",
+                        notification.method
+                    )));
+                }
+                Some(AppServerEvent::Disconnected { message }) => {
+                    if let Some(error) = terminal_error.take() {
+                        sink.set_pending(None);
+                        control.finish();
+                        sink.send_terminal(error)?;
+                        return Ok(TurnDrainOutcome::Complete);
+                    }
+                    return Err(InterfaceDriverError::Transport(format!(
+                        "app-server disconnected mid-turn: {message}"
+                    )));
+                }
+                Some(AppServerEvent::Lagged { skipped }) => {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "app-server event stream lagged ({skipped} skipped); turn integrity lost"
+                    )));
+                }
+                None => {
+                    if let Some(error) = terminal_error.take() {
+                        sink.set_pending(None);
+                        control.finish();
+                        sink.send_terminal(error)?;
+                        return Ok(TurnDrainOutcome::Complete);
+                    }
+                    return Err(InterfaceDriverError::Transport(
+                        "app-server event stream closed before TurnCompleted".into(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn isolated_thread_start_params(
+    model: Option<String>,
+    bound_instructions: String,
+    native_affordances: Vec<DynamicToolSpec>,
+) -> ThreadStartParams {
+    ThreadStartParams {
+        model,
+        developer_instructions: Some(bound_instructions),
+        environments: Some(Vec::<TurnEnvironmentParams>::new()),
+        sandbox: Some(SandboxMode::ReadOnly),
+        dynamic_tools: (!native_affordances.is_empty()).then_some(native_affordances),
+        ..ThreadStartParams::default()
+    }
+}
+
+fn non_empty_string_field(
+    value: Option<&serde_json::Value>,
+    field_path: &str,
+) -> Result<Option<String>, InterfaceDriverError> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.clone()))
+        }
+        Some(_) => Err(InterfaceDriverError::Protocol(format!(
+            "{field_path} must be a non-empty string"
+        ))),
+    }
+}
+
+fn parse_reasoning_effort(
+    effort: Option<&str>,
+) -> Result<Option<ReasoningEffort>, InterfaceDriverError> {
+    effort
+        .map(|value| {
+            value.parse::<ReasoningEffort>().map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "provider reasoning_effort '{value}' is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn parse_reasoning_summary(
+    summary: Option<&str>,
+) -> Result<ReasoningSummary, InterfaceDriverError> {
+    match summary {
+        Some("auto") => Ok(ReasoningSummary::Auto),
+        Some("concise") => Ok(ReasoningSummary::Concise),
+        Some("detailed") => Ok(ReasoningSummary::Detailed),
+        Some("none") => Ok(ReasoningSummary::None),
+        Some(value) => Err(InterfaceDriverError::Protocol(format!(
+            "provider reasoning_summary '{value}' is invalid"
+        ))),
+        None => Err(InterfaceDriverError::FailedClosed(
+            "provider interface declares no reasoning_summary; the app-server may not choose a hidden summary mode"
+                .to_string(),
+        )),
+    }
+}
+
+fn prepend_context_block_to_turn_input(
+    context_block: Option<String>,
+    input: Vec<UserInput>,
+) -> Vec<UserInput> {
+    match context_block.filter(|block| !block.trim().is_empty()) {
+        Some(block) => {
+            let mut prepended = Vec::with_capacity(input.len() + 1);
+            prepended.push(UserInput::Text {
+                text: block,
+                text_elements: Vec::new(),
+            });
+            prepended.extend(input);
+            prepended
+        }
+        None => input,
+    }
+}
+
+fn fresh_turn_start_params(
+    thread_id: String,
+    input: Vec<UserInput>,
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_summary: ReasoningSummary,
+    additional_context: BTreeMap<String, AdditionalContextEntry>,
+    turn_trigger: &str,
+) -> TurnStartParams {
+    TurnStartParams {
+        thread_id,
+        input,
+        model: Some(model),
+        effort: reasoning_effort,
+        summary: Some(reasoning_summary),
+        additional_context: (!additional_context.is_empty())
+            .then(|| additional_context.into_iter().collect()),
+        turn_trigger: Some(turn_trigger.to_string()),
+        ..TurnStartParams::default()
+    }
+}
+
+fn native_turn_context(
+    conversation: Option<String>,
+    grant: Option<String>,
+) -> BTreeMap<String, AdditionalContextEntry> {
+    [
+        ("octopus_bound_context", conversation, AdditionalContextKind::Untrusted),
+        ("octopus_formed_policy", grant, AdditionalContextKind::Application),
+    ]
+    .into_iter()
+    .filter_map(|(name, value, kind)| {
+        value.filter(|value| !value.trim().is_empty())
+            .map(|value| (name.to_string(), AdditionalContextEntry { value, kind }))
+    })
+    .collect()
+}
+
+fn encode_tool_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        match ch {
+            '-' => out.push_str("-h"),
+            '.' => out.push_str("-d"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn decode_tool_name(encoded: &str) -> Result<String, InterfaceDriverError> {
+    let mut out = String::with_capacity(encoded.len());
+    let mut chars = encoded.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '-' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('h') => out.push('-'),
+            Some('d') => out.push('.'),
+            other => {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "native tool name '{encoded}' has a malformed identifier escape (a '-' must be \
+                     followed by 'h' or 'd'; got {other:?}) — failing closed, never routing a mangled \
+                     tool name through the gate"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn extract_native_affordances_from_invocation(
+    input: &InterfaceInvocationEnvelope,
+    hidden_tools: &[String],
+) -> Result<Vec<DynamicToolSpec>, InterfaceDriverError> {
+    let arr = model_visible_affordances(input.interface_affordance_specs()?, hidden_tools)
+        .map_err(InterfaceDriverError::Protocol)?;
+    let mut specs = Vec::with_capacity(arr.len());
+    for (i, t) in arr.iter().enumerate() {
+        let name = t
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                InterfaceDriverError::Protocol(format!(
+                    "invocation metadata interface_affordance_specs[{i}] has no non-empty 'name' (failing closed — a nameless \
+                     native affordance would silently disappear from the interface-rendered list)"
+                ))
+            })?
+            .to_string();
+        let description = t
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let input_schema = match t.get("input_schema") {
+            None => serde_json::json!({ "type": "object", "properties": {} }),
+            Some(s) if s.is_object() => s.clone(),
+            Some(_) => {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "invocation metadata interface_affordance_specs[{i}] ('{name}') has a non-object 'input_schema' (the native \
+                     tool protocol requires a JSON-schema object) — failing closed"
+                )));
+            }
+        };
+        specs.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: encode_tool_name(&name),
+            description,
+            input_schema,
+            defer_loading: false,
+        }));
+    }
+    Ok(specs)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InterfaceOperationCatalogArtifact {
+    id: String,
+    label: String,
+    interface: InterfaceId,
+    request_label: String,
+    operations: Vec<InterfaceOperationCatalogEntry>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InterfaceOperationCatalogEntry {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    request_label: String,
+    output_label: String,
+}
+
+fn extract_native_affordance_catalog(
+    input: &InterfaceInvocationEnvelope,
+    hidden_tools: &[String],
+    namespace: &NativeToolNamespace,
+    run_affordances: Option<&RunAffordances>,
+    private_config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NativeAffordanceCatalog, InterfaceDriverError> {
+    let mut specs = extract_native_affordances_from_invocation(input, hidden_tools)?;
+    let mut names = input
+        .interface_affordance_specs()?
+        .iter()
+        .map(|spec| spec.name.as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    let allowed_interfaces = input
+        .metadata()
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?
+        .allowed_interfaces()
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut interface_operations = BTreeMap::new();
+    let mut catalog_interfaces = BTreeSet::new();
+    for bound in &input.artifact_binding_payloads {
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bound.as_bytes()) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        if !(object.contains_key("id")
+            && object.contains_key("label")
+            && object.contains_key("interface")
+            && object.contains_key("request_label")
+            && object.contains_key("operations"))
+        {
+            continue;
+        }
+        let catalog: InterfaceOperationCatalogArtifact =
+            serde_json::from_value(value).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "bound interface operation catalog '{}' is malformed: {error}",
+                    bound.artifact.id.as_str()
+                ))
+            })?;
+        for (field, value) in [
+            ("id", catalog.id.as_str()),
+            ("label", catalog.label.as_str()),
+            ("request_label", catalog.request_label.as_str()),
+        ] {
+            if value.trim().is_empty() || value.trim() != value {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "bound interface operation catalog '{}' has malformed {field}",
+                    bound.artifact.id.as_str()
+                )));
+            }
+        }
+        if catalog.id != bound.artifact.id.as_str() {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "bound interface operation catalog '{}' self-identifies as '{}'",
+                bound.artifact.id.as_str(),
+                catalog.id
+            )));
+        }
+        if !allowed_interfaces.contains(catalog.interface.as_str()) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "bound interface operation catalog '{}' names interface '{}' outside the formed grant",
+                bound.artifact.id.as_str(),
+                catalog.interface.as_str()
+            )));
+        }
+        if !catalog_interfaces.insert(catalog.interface.clone()) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "formed context repeats an operation catalog for exact interface '{}'",
+                catalog.interface.as_str()
+            )));
+        }
+        if catalog.operations.is_empty() {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "bound interface operation catalog '{}' is empty",
+                bound.artifact.id.as_str()
+            )));
+        }
+        for operation in catalog.operations {
+            for (field, value) in [
+                ("name", operation.name.as_str()),
+                ("description", operation.description.as_str()),
+                ("request_label", operation.request_label.as_str()),
+                ("output_label", operation.output_label.as_str()),
+            ] {
+                if value.trim().is_empty() || value.trim() != value {
+                    return Err(InterfaceDriverError::Protocol(format!(
+                        "bound interface operation catalog '{}' has an operation with malformed {field}",
+                        bound.artifact.id.as_str()
+                    )));
+                }
+            }
+            if operation.request_label != catalog.request_label {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "bound interface operation '{}' request label '{}' differs from catalog label '{}'",
+                    operation.name, operation.request_label, catalog.request_label
+                )));
+            }
+            if !operation.input_schema.is_object() {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "bound interface operation '{}' input_schema is not an object",
+                    operation.name
+                )));
+            }
+            if !names.insert(operation.name.clone()) {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "model-visible capability name '{}' is declared by more than one formed surface",
+                    operation.name
+                )));
+            }
+            specs.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: encode_tool_name(&operation.name),
+                description: operation.description,
+                input_schema: operation.input_schema,
+                defer_loading: false,
+            }));
+            let name = operation.name.clone();
+            if interface_operations
+                .insert(
+                    name.clone(),
+                    InterfaceOperationAffordance {
+                        name,
+                        interface: catalog.interface.clone(),
+                        request_label: operation.request_label,
+                        output_label: operation.output_label,
+                    },
+                )
+                .is_some()
+            {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "formed interface operation '{}' has more than one exact owner",
+                    operation.name
+                )));
+            }
+        }
+    }
+    if let Some(affordances) = run_affordances {
+        for affordance in affordances.affordances() {
+            if !names.insert(affordance.name.as_str().to_string()) {
+                return Err(InterfaceDriverError::FailedClosed("run affordance duplicates another formed tool name".into()));
+            }
+            specs.push(DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: encode_tool_name(affordance.name.as_str()), description: affordance.description,
+                input_schema: affordance.args_schema, defer_loading: false,
+            }));
+        }
+    }
+    let tool_names = apply_model_tool_names(&mut specs, private_config)?;
+    let specs = namespace_native_affordances(specs, namespace)?;
+    Ok(NativeAffordanceCatalog {
+        specs,
+        tool_names,
+        interface_operations,
+    })
+}
+
+fn apply_model_tool_names(
+    specs: &mut [DynamicToolSpec],
+    private_config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<BTreeMap<String, String>, InterfaceDriverError> {
+    let aliases: BTreeMap<String, String> = match private_config.get("model_tool_names") {
+        Some(value) => serde_json::from_value(value.clone()).map_err(|error| InterfaceDriverError::Protocol(format!("model_tool_names is malformed: {error}")))?,
+        None => BTreeMap::new(),
+    };
+    for (exact, name) in &aliases {
+        if exact.trim().is_empty() || exact.trim() != exact || name.is_empty()
+            || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+            return Err(InterfaceDriverError::Protocol("model_tool_names requires exact tool ids and nonempty alphanumeric/underscore names".into()));
+        }
+    }
+    let mut names = BTreeMap::new();
+    for spec in specs {
+        let DynamicToolSpec::Function(function) = spec else {
+            return Err(InterfaceDriverError::Protocol("model names must be formed before namespaces".into()));
+        };
+        let exact = decode_tool_name(&function.name)?;
+        if let Some(name) = aliases.get(&exact) {
+            function.name = name.clone();
+        }
+        if names.insert(function.name.clone(), exact).is_some() {
+            return Err(InterfaceDriverError::FailedClosed(format!("model tool name '{}' has more than one admitted target", function.name)));
+        }
+    }
+    Ok(names)
+}
+
+fn instruction_artifact_selection(
+    config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<String>, InterfaceDriverError> {
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for key in ["worker_instruction_artifacts", "instruction_artifacts"] {
+        let value = config.get(key).ok_or_else(|| InterfaceDriverError::Protocol(format!("provider descriptor declares no {key}")))?;
+        let ids: Vec<String> = serde_json::from_value(value.clone())
+            .map_err(|error| InterfaceDriverError::Protocol(format!("{key} is malformed: {error}")))?;
+        let mut local = BTreeSet::new();
+        for id in ids {
+            if id.trim().is_empty() || id.trim() != id || !local.insert(id.clone()) {
+                return Err(InterfaceDriverError::Protocol(format!("{key} requires unique nonempty artifact ids")));
+            }
+            if seen.insert(id.clone()) { selected.push(id); }
+        }
+    }
+    Ok(selected)
+}
+
+fn namespace_native_affordances(
+    specs: Vec<DynamicToolSpec>,
+    namespace: &NativeToolNamespace,
+) -> Result<Vec<DynamicToolSpec>, InterfaceDriverError> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tools = specs
+        .into_iter()
+        .map(|spec| match spec {
+            DynamicToolSpec::Function(function) => Ok(DynamicToolNamespaceTool::Function(function)),
+            DynamicToolSpec::Namespace(_) => Err(InterfaceDriverError::FailedClosed(
+                "formed interface affordances already contain a provider namespace".to_string(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+        name: namespace.name.clone(),
+        description: namespace.description.clone(),
+        tools,
+    })])
+}
+
+fn read_codex_context_generation(
+    record: &serde_json::Value,
+    interface: &octopus_descriptors::InterfaceId,
+) -> Result<u64, InterfaceDriverError> {
+    let object = record.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol("codex interface run record must be a JSON object".into())
+    })?;
+    let Some(interface_state) = object.get("interface_state") else {
+        return Ok(0);
+    };
+    let interface_state = interface_state.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "codex interface run record interface_state must be a JSON object".into(),
+        )
+    })?;
+    let Some(state) = interface_state.get(interface.as_str()) else {
+        return Ok(0);
+    };
+    let state = state.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(format!(
+            "codex interface run record interface_state.{} must be a JSON object",
+            interface.as_str()
+        ))
+    })?;
+    let Some(generation) = state.get("context_generation") else {
+        return Ok(0);
+    };
+    generation.as_u64().ok_or_else(|| {
+        InterfaceDriverError::Protocol(format!(
+            "codex interface run record interface_state.{}.context_generation must be an unsigned integer",
+            interface.as_str()
+        ))
+    })
+}
+
+fn invocation_runtime_metadata(
+    input: &InterfaceInvocationEnvelope,
+) -> Result<&RuntimeInvocationMetadata, InterfaceDriverError> {
+    input
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.runtime.as_ref())
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "codex interface requires runtime metadata beside the artifact".into(),
+            )
+        })
+}
+
+fn parse_run_record_json(
+    bytes: &[u8],
+    expected_run: &str,
+) -> Result<serde_json::Value, InterfaceDriverError> {
+    let record: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
+        InterfaceDriverError::Protocol(format!(
+            "codex interface pinned run record is not JSON: {e}"
+        ))
+    })?;
+    let observed_run = record
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "codex interface pinned run record has no string id".to_string(),
+            )
+        })?;
+    if observed_run != expected_run {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "codex interface pinned run record belongs to '{}', not '{}'",
+            observed_run, expected_run
+        )));
+    }
+    Ok(record)
+}
+
+#[cfg(test)]
+fn source_interface_for_checkpoint(
+    record: &serde_json::Value,
+    checkpoint_id: &str,
+) -> Result<InterfaceId, InterfaceDriverError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct CanonicalInterfaceBinding {
+        interface: InterfaceId,
+        #[serde(rename = "config")]
+        _config: serde_json::Map<String, serde_json::Value>,
+    }
+
+    let active = record
+        .get("active_checkpoints")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "codex interface pinned run record has no active_checkpoints array".to_string(),
+            )
+        })?;
+    if !active
+        .iter()
+        .any(|value| value.as_str() == Some(checkpoint_id))
+    {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex invocation checkpoint '{checkpoint_id}' is not active in the pinned run"
+        )));
+    }
+    let checkpoints = record
+        .get("checkpoints")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "codex interface pinned run record has no checkpoints array".to_string(),
+            )
+        })?;
+    let matches = checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.get("id").and_then(serde_json::Value::as_str) == Some(checkpoint_id)
+        })
+        .collect::<Vec<_>>();
+    let [checkpoint] = matches.as_slice() else {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "codex pinned run contains {} checkpoints named '{checkpoint_id}'",
+            matches.len()
+        )));
+    };
+    let binding = checkpoint
+        .get("interface_binding")
+        .cloned()
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "codex invocation checkpoint '{checkpoint_id}' has no exact interface binding"
+            ))
+        })?;
+    let binding: CanonicalInterfaceBinding = serde_json::from_value(binding).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "codex invocation checkpoint '{checkpoint_id}' has a malformed canonical interface binding: {error}"
+        ))
+    })?;
+    let interface = binding.interface.as_str();
+    if interface.trim().is_empty() || interface.trim() != interface {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "codex invocation checkpoint '{checkpoint_id}' has no exact interface binding"
+        )));
+    }
+    Ok(binding.interface)
+}
+
+fn materialize_codex_emitted_artifact(
+    output_root: &Path,
+    label: &str,
+    payload_bytes: &[u8],
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    InterfaceArtifactFile::write(output_root, label, payload_bytes)
+        .map_err(|e| InterfaceDriverError::Protocol(e.to_string()))
+}
+
+impl OperatorResponseArtifact {
+    fn request_id(&self) -> Result<String, InterfaceDriverError> {
+        let value = match self {
+            Self::Approval { request_id, .. }
+            | Self::Elicitation { request_id, .. }
+            | Self::UserInput { request_id, .. } => request_id,
+        };
+        if value.trim().is_empty() || value.trim() != value {
+            return Err(InterfaceDriverError::Protocol(
+                "operator response artifact has an empty or untrimmed request_id".to_string(),
+            ));
+        }
+        Ok(value.clone())
+    }
+}
+
+fn validate_recovered_tool_result(
+    result: &ToolResultArtifact,
+    pending: &CodexPendingContinuity,
+) -> Result<(), InterfaceDriverError> {
+    result.validate().map_err(InterfaceDriverError::Protocol)?;
+    let CodexPendingContinuity::DynamicTool { call_id, tool, .. } = pending else {
+        return Err(InterfaceDriverError::FailedClosed(
+            "tool result conflicts with the kind of the durable pending request".to_string(),
+        ));
+    };
+    if result.correlation_id.as_deref() != Some(call_id) || result.tool != *tool {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "tool result conflicts with the durable pending correlation: expected call_id='{call_id}' tool='{tool}', got correlation_id={:?} tool='{}'",
+            result.correlation_id, result.tool
+        )));
+    }
+    Ok(())
+}
+
+fn validate_recovered_interface_operation_input(
+    result: &InterfaceOperationResultArtifact,
+    pending: &CodexPendingContinuity,
+) -> Result<(), InterfaceDriverError> {
+    let CodexPendingContinuity::InterfaceOperation {
+        call_id,
+        operation,
+        output_label,
+        ..
+    } = pending
+    else {
+        return Err(InterfaceDriverError::FailedClosed(
+            "interface operation result conflicts with the kind of the durable pending request"
+                .to_string(),
+        ));
+    };
+    validate_recovered_interface_operation_result(
+        &result.label,
+        &result.value,
+        call_id,
+        operation,
+        output_label,
+    )
+}
+
+fn validate_recovered_interface_operation_result(
+    source_label: &str,
+    value: &serde_json::Value,
+    call_id: &str,
+    operation: &str,
+    output_label: &str,
+) -> Result<(), InterfaceDriverError> {
+    let object = value.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "durable interface-operation result is not a JSON object".to_string(),
+        )
+    })?;
+    let payload_label = object.get("label").and_then(serde_json::Value::as_str);
+    let payload_operation = object.get("operation").and_then(serde_json::Value::as_str);
+    let correlation_id = object
+        .get("correlation_id")
+        .and_then(serde_json::Value::as_str);
+    let ok = object.get("ok").and_then(serde_json::Value::as_bool);
+    if source_label != output_label
+        || payload_label != Some(output_label)
+        || payload_operation != Some(operation)
+        || correlation_id != Some(call_id)
+        || ok.is_none()
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "interface operation result conflicts with the durable pending coordinates".to_string(),
+        ));
+    }
+    match (ok, object.get("result"), object.get("error")) {
+        (Some(true), Some(_), None) | (Some(false), None, Some(_)) => Ok(()),
+        _ => Err(InterfaceDriverError::Protocol(
+            "durable interface-operation result has inconsistent ok/result/error fields"
+                .to_string(),
+        )),
+    }
+}
+
+fn validate_recovered_operator_response(
+    response: &OperatorResponseArtifact,
+    pending: &CodexPendingContinuity,
+) -> Result<(), InterfaceDriverError> {
+    let CodexPendingContinuity::Operator {
+        request_key,
+        method,
+        ..
+    } = pending
+    else {
+        return Err(InterfaceDriverError::FailedClosed(
+            "operator response conflicts with the kind of the durable pending request".to_string(),
+        ));
+    };
+    let request_id = response.request_id()?;
+    if format!("operator:{request_id}") != *request_key {
+        return Err(InterfaceDriverError::FailedClosed(
+            "operator response conflicts with the durable pending correlation".to_string(),
+        ));
+    }
+    operator_response_value(method, response).map(|_| ())
+}
+
+fn pending_turn_id(pending: &CodexPendingContinuity) -> &str {
+    match pending {
+        CodexPendingContinuity::DynamicTool { turn_id, .. }
+        | CodexPendingContinuity::InterfaceOperation { turn_id, .. }
+        | CodexPendingContinuity::Operator { turn_id, .. } => turn_id,
+    }
+}
+
+fn interrupted_transport_output(
+    last_artifact_label: &str,
+    pending: Option<&CodexPendingContinuity>,
+) -> CodexTurnOutput {
+    CodexTurnOutput::client(
+        TURN_ERROR_LABEL,
+        serde_json::json!({
+            "message": "Codex provider restarted after a non-terminal artifact. The external model call was not replayed; any exact pending result remains an ordinary future artifact.",
+            "will_retry": false,
+            "additional_details": {
+                "code": "transport_turn_interrupted",
+                "last_artifact_label": last_artifact_label,
+                "pending_turn_id": pending.map(pending_turn_id),
+            },
+        }),
+    )
+}
+
+fn validate_live_pending_continuity(
+    recovered: Option<&CodexContinuityState>,
+    pending: &PendingServerRequest,
+    context_generation: u64,
+    live: &TransportState,
+) -> Result<(), InterfaceDriverError> {
+    if live.thread_id.as_deref() != Some(pending.thread_id.as_str())
+        || live.context_generation > context_generation
+        || live.thread_shape_fingerprint.is_none()
+        || live.static_context_fingerprint.is_none()
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex pending request conflicts with the live transport coordinates".to_string(),
+        ));
+    }
+    let recovered = recovered.ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "Codex pending result has no immutable continuity artifact".to_string(),
+        )
+    })?;
+    if recovered.thread_id != pending.thread_id
+        || recovered.context_generation != context_generation
+        || live.thread_shape_fingerprint.as_deref()
+            != Some(recovered.thread_shape_fingerprint.as_str())
+        || live.static_context_fingerprint.as_deref()
+            != Some(recovered.static_context_fingerprint.as_str())
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex pending continuity has stale transport coordinates".to_string(),
+        ));
+    }
+    let durable_pending = recovered
+        .pending
+        .as_ref()
+        .or(recovered.interrupted_pending.as_ref());
+    let matches = match (durable_pending, &pending.kind) {
+        (
+            Some(CodexPendingContinuity::DynamicTool {
+                native_operation: _,
+                turn_id,
+                call_id,
+                tool,
+            }),
+            PendingServerRequestKind::DynamicTool {
+                call_id: pending_call_id,
+                tool: pending_tool,
+            },
+        ) => {
+            turn_id == &pending.turn_id
+                && call_id == pending_call_id
+                && tool == pending_tool
+                && pending.key == format!("tool:{call_id}")
+        }
+        (
+            Some(CodexPendingContinuity::InterfaceOperation {
+                turn_id,
+                call_id,
+                operation,
+                interface,
+                output_label,
+            }),
+            PendingServerRequestKind::InterfaceOperation {
+                call_id: pending_call_id,
+                operation: pending_operation,
+                interface: pending_interface,
+                output_label: pending_output_label,
+            },
+        ) => {
+            turn_id == &pending.turn_id
+                && call_id == pending_call_id
+                && operation == pending_operation
+                && interface == pending_interface
+                && output_label == pending_output_label
+                && pending.key == format!("tool:{call_id}")
+        }
+        (
+            Some(CodexPendingContinuity::Operator {
+                turn_id,
+                request_key,
+                method,
+            }),
+            PendingServerRequestKind::Operator {
+                method: pending_method,
+            },
+        ) => turn_id == &pending.turn_id && request_key == &pending.key && method == pending_method,
+        _ => false,
+    };
+    if !matches {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex durable pending coordinates do not match the live app-server request"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+impl ProviderInput {
+    fn into_turn_input(self) -> Result<Vec<UserInput>, InterfaceDriverError> {
+        match self {
+            Self::Turn(input) => Ok(input),
+            Self::Resume { .. } => Ok(Vec::new()),
+            Self::ToolResult(_)
+            | Self::InterfaceOperationResult(_)
+            | Self::InterfaceContext(_)
+            | Self::OperatorResponse(_) => {
+                Err(InterfaceDriverError::FailedClosed(
+                    "provider result has no live structured pending request and cannot become a new semantic turn"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct SelectedFileAlias {
+    artifact_ref: ArtifactRef,
+    filename: String,
+    source_message_id: String,
+    source_artifact: ArtifactRef,
+    mime_type: String,
+    size_bytes: u64,
+}
+
+struct SelectedFileProjection {
+    text: String,
+    current_attachments: BTreeSet<usize>,
+    source_label: String,
+    source_payload_sha256: String,
+}
+
+fn selected_file_projection(
+    record: &octopus_runtime::run_record::RunRecord,
+    input: &InterfaceInvocationEnvelope,
+    source_artifact: &ArtifactRef,
+    source_label: &str,
+    source_bytes: &[u8],
+    contexts: &BoundSessionContexts,
+    current_context: &[SessionContextArtifact],
+    projection: ModelResultProjection,
+) -> Result<SelectedFileProjection, InterfaceDriverError> {
+    let metadata = input.metadata()?;
+    let runtime = invocation_runtime_metadata(input)?;
+    let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+        record,
+        metadata,
+        &input.artifact_binding_payloads,
+    )
+    .map_err(InterfaceDriverError::FailedClosed)?;
+    let context_payloads = resolve_instruction_context(metadata, &context_payloads)
+        .map_err(InterfaceDriverError::FailedClosed)?
+        .remaining_payloads;
+    let selected =
+        octopus_provider_run_authoring::payload_artifact_bindings(record, &runtime.interface)
+            .map_err(InterfaceDriverError::FailedClosed)?;
+    if selected.is_empty() {
+        return Ok(SelectedFileProjection {
+            text: "{\"selected_files\":[]}".into(),
+            current_attachments: BTreeSet::new(),
+            source_label: source_label.to_string(),
+            source_payload_sha256: sha256_hex(source_bytes),
+        });
+    }
+    let mut payloads = BTreeMap::<(String, u64), Vec<&ArtifactRef>>::new();
+    for bound in &input.artifact_binding_payloads {
+        if selected.contains(&bound.artifact) {
+            payloads
+                .entry((sha256_hex(bound.as_bytes()), bound.as_bytes().len() as u64))
+                .or_default()
+                .push(&bound.artifact);
+        }
+    }
+    let mut sources = BTreeMap::<String, (ArtifactRef, serde_json::Value)>::new();
+    let mut insert = |reference: &ArtifactRef,
+                      label: &str,
+                      value: &serde_json::Value|
+     -> Result<(), InterfaceDriverError> {
+        if label != OPERATOR_MESSAGE_LABEL {
+            return Ok(());
+        }
+        let key = continuity_source_key(reference);
+        if let Some((previous, body)) = sources.get(&key) {
+            if previous != reference || body != value {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "selected file context repeats an immutable message with different bytes"
+                        .into(),
+                ));
+            }
+        } else {
+            sources.insert(key, (reference.clone(), value.clone()));
+        }
+        Ok(())
+    };
+    if source_label == OPERATOR_MESSAGE_LABEL {
+        let value = serde_json::from_slice(source_bytes).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "selected file operator message is not JSON: {error}"
+            ))
+        })?;
+        insert(source_artifact, source_label, &value)?;
+    }
+    for artifact in current_context {
+        insert(
+            &artifact.source_artifact,
+            &artifact.label,
+            &artifact.payload,
+        )?;
+    }
+    for context in contexts.values() {
+        if let BoundSessionContext::Current(artifacts) = context {
+            for artifact in artifacts.iter() {
+                insert(
+                    &artifact.source_artifact,
+                    &artifact.label,
+                    &artifact.payload,
+                )?;
+            }
+        }
+    }
+    for bound in &context_payloads {
+        let value: serde_json::Value =
+            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "selected file bound context '{}' is not JSON: {error}",
+                    bound.artifact.id
+                ))
+            })?;
+        if value.get(SESSION_CONTEXT_FIELD).is_some() {
+            continue;
+        }
+        let label = value
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                bound
+                    .artifact
+                    .id
+                    .as_str()
+                    .rsplit_once(':')
+                    .and_then(|(label, hash)| {
+                        (hash == bound.artifact.content.to_hex()).then_some(label)
+                    })
+            });
+        if let Some(label) = label {
+            insert(&bound.artifact, label, &value)?;
+        }
+    }
+    let mut files = Vec::<SelectedFileAlias>::new();
+    let mut current_attachments = BTreeSet::new();
+    for (_, (reference, body)) in sources {
+        let Some(attachments) = body.get("attachments") else {
+            continue;
+        };
+        let attachments = attachments.as_array().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "selected file source attachments must be an array".into(),
+            )
+        })?;
+        if attachments.is_empty() {
+            continue;
+        }
+        let message_id = body
+            .get("message_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value)
+            .ok_or_else(|| {
+                InterfaceDriverError::Protocol(
+                    "selected file source has no exact message_id".into(),
+                )
+            })?;
+        for (index, attachment) in attachments.iter().enumerate() {
+            let hash = attachment
+                .get("payload_content_hash")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| is_sha256_hex(value))
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "selected file attachment has no SHA256 payload pin".into(),
+                    )
+                })?;
+            let size = attachment
+                .get("size")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "selected file attachment has no exact byte length".into(),
+                    )
+                })?;
+            let Some(references) = payloads.get(&(hash.to_string(), size)) else {
+                continue;
+            };
+            let filename = attachment
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "selected file attachment has no filename".into(),
+                    )
+                })?;
+            let mime_type = attachment
+                .get("mime_type")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "selected file attachment has no MIME type".into(),
+                    )
+                })?;
+            for selected_ref in references {
+                let alias = SelectedFileAlias {
+                    artifact_ref: (*selected_ref).clone(),
+                    filename: filename.to_string(),
+                    source_message_id: message_id.to_string(),
+                    source_artifact: reference.clone(),
+                    mime_type: mime_type.to_string(),
+                    size_bytes: size,
+                };
+                if !files.contains(&alias) {
+                    files.push(alias);
+                }
+            }
+            if &reference == source_artifact {
+                current_attachments.insert(index);
+            }
+        }
+    }
+    let mut visible = serde_json::json!({"selected_files": files});
+    let unnamed = input.artifact_binding_payloads.iter()
+        .filter(|bound| selected.contains(&bound.artifact)
+            && !files.iter().any(|file| file.artifact_ref == bound.artifact))
+        .map(|bound| serde_json::json!({
+            "artifact_ref": bound.artifact,
+            "label": bound.artifact.id.as_str().rsplit_once(':')
+                .filter(|(_, hash)| *hash == bound.artifact.content.to_hex())
+                .map_or(bound.artifact.id.as_str(), |(label, _)| label),
+            "size_bytes": bound.as_bytes().len(),
+        })).collect::<Vec<_>>();
+    if !unnamed.is_empty() {
+        visible["selected_artifacts"] = serde_json::json!(unnamed);
+    }
+    let text =
+        serde_json::to_string(&visible).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "selected file metadata did not encode: {error}"
+            ))
+        })?;
+    if octopus_util_string::approx_token_count(&text) > projection.validate()?.max_tokens {
+        return Err(InterfaceDriverError::FailedClosed(
+            "selected file metadata exceeds model_result_projection.max_tokens; no partial file identity was emitted".into(),
+        ));
+    }
+    Ok(SelectedFileProjection {
+        text,
+        current_attachments,
+        source_label: source_label.to_string(),
+        source_payload_sha256: sha256_hex(source_bytes),
+    })
+}
+
+fn decode_provider_input(
+    bytes: &[u8],
+    manifest_label: &str,
+    source_interface: Option<&InterfaceId>,
+    interface_operations: &BTreeMap<String, InterfaceOperationAffordance>,
+    selected_files: Option<&SelectedFileProjection>,
+) -> Result<ProviderInput, InterfaceDriverError> {
+    if selected_files.is_some_and(|files| {
+        files.source_label != manifest_label || files.source_payload_sha256 != sha256_hex(bytes)
+    }) {
+        return Err(InterfaceDriverError::FailedClosed(
+            "selected file projection belongs to a different immutable input".into(),
+        ));
+    }
+    if manifest_label == OPERATOR_TURN_CONTROL_LABEL {
+        let control =
+            serde_json::from_slice::<ExplicitTurnControlArtifact>(bytes).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "operator turn-control artifact is not a strict control envelope: {error}"
+                ))
+            })?;
+        return match control {
+            ExplicitTurnControlArtifact::Resume { control_id } => Ok(ProviderInput::Resume {
+                control_id: validated_control_id(control_id)?,
+            }),
+            _ => Err(InterfaceDriverError::FailedClosed(
+                "only an inactive explicit Resume may enter the provider turn path".to_string(),
+            )),
+        };
+    }
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) => {
+            if let Some(result) = decode_tool_result_artifact(&value)? {
+                return Ok(ProviderInput::ToolResult(result));
+            }
+            let source_is_operation_interface = interface_operations
+                .values()
+                .any(|operation| source_interface == Some(&operation.interface));
+            if source_is_operation_interface {
+                let source_interface = source_interface.ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "operation-interface input lost its source interface".to_string(),
+                    )
+                })?;
+                let result_label = interface_operations.values().any(|operation| {
+                    operation.interface == *source_interface
+                        && operation.output_label == manifest_label
+                });
+                if result_label {
+                    let result = decode_interface_operation_result_artifact(
+                        &value,
+                        manifest_label,
+                        source_interface,
+                        interface_operations,
+                    )?
+                    .ok_or_else(|| {
+                        InterfaceDriverError::Protocol(format!(
+                            "artifact '{}' from operation interface '{}' uses a result label without a strict result envelope",
+                            manifest_label,
+                            source_interface.as_str()
+                        ))
+                    })?;
+                    return Ok(ProviderInput::InterfaceOperationResult(result));
+                }
+                return Ok(ProviderInput::InterfaceContext(InterfaceContextArtifact {
+                    interface: source_interface.clone(),
+                    label: manifest_label.to_string(),
+                    content: value,
+                }));
+            }
+            if let Some(response) = decode_operator_response_artifact(&value)? {
+                return Ok(ProviderInput::OperatorResponse(response));
+            }
+            let turn_envelope = manifest_label == OPERATOR_MESSAGE_LABEL
+                || value.as_object().is_some_and(|object| {
+                    [SOURCE_ARTIFACT_FIELD, "text", "attachments", "task", "prompt"]
+                        .iter().any(|key| object.contains_key(*key))
+                });
+            let input = if turn_envelope {
+                extract_turn_input_from_value(&value, selected_files)?
+            } else {
+                vec![UserInput::Text {
+                    text: serde_json::to_string_pretty(&serde_json::json!({
+                        "artifact": {
+                            "label": manifest_label,
+                            "source_interface": source_interface,
+                            "payload": value,
+                        }
+                    })).map_err(|error| InterfaceDriverError::Protocol(
+                        format!("interface input artifact failed to render: {error}")
+                    ))?,
+                    text_elements: Vec::new(),
+                }]
+            };
+            Ok({
+                ProviderInput::Turn(prepend_context_block_to_turn_input(
+                    selected_files.map(|files| files.text.clone()),
+                    input,
+                ))
+            })
+        }
+        Err(_) => {
+            let text = std::str::from_utf8(bytes).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "interface input artifact is neither JSON nor utf-8 text; this provider interface renders text input only: {error}"
+                ))
+            })?;
+            if text.trim().is_empty() {
+                return Err(InterfaceDriverError::Protocol(
+                    "interface input artifact is empty; refusing to fabricate a prompt".to_string(),
+                ));
+            }
+            Ok(ProviderInput::Turn(prepend_context_block_to_turn_input(
+                selected_files.map(|files| files.text.clone()),
+                vec![UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            )))
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum ExplicitTurnControlArtifact {
+    Interrupt { control_id: String },
+    Stop { control_id: String },
+    Pause { control_id: String },
+    Resume { control_id: String },
+}
+
+pub(crate) fn is_explicit_turn_control_label(label: &str) -> bool {
+    label == OPERATOR_TURN_CONTROL_LABEL
+}
+
+pub(crate) fn is_inflight_turn_control_candidate_label(label: &str) -> bool {
+    label == OPERATOR_MESSAGE_LABEL || is_explicit_turn_control_label(label) || peer_notification_label(label)
+}
+
+fn peer_notification_label(label: &str) -> bool {
+    label == PEER_MESSAGE_LABEL || label == INTERFACE_ARTIFACT_OUTPUT_LABEL
+        || label.starts_with("turn.") || label.starts_with("provider.")
+        || label.starts_with("hook.") || label.starts_with("interface.context.")
+}
+
+#[cfg(test)]
+#[path = "../tests/support/input_decoder.rs"]
+mod input_decoder_tests;
+
+pub(crate) fn admitted_peer_message(input: &InterfaceInvocationEnvelope, selection: Option<&serde_json::Value>) -> Result<Option<PeerMessage>, InterfaceDriverError> {
+    let metadata = input.metadata()?;
+    let runtime = metadata.runtime.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed("peer message has no runtime identity".into()))?;
+    let inbound = metadata.checkpoint_binding_policy.as_ref().map(|binding| &binding.inbound.interface);
+    let label = input.read_artifact_manifest()?.label;
+    if label == octopus_operator_chat_client::input_intake::INPUT_INTAKE_LABEL {
+        let endpoint = selection.and_then(|selection| selection.get("interface_id")).and_then(serde_json::Value::as_str).filter(|id| !id.is_empty()).ok_or_else(|| InterfaceDriverError::FailedClosed("intake delivery has no selected concrete endpoint".into()))?;
+        if inbound.is_none_or(|id| id.as_str() != endpoint) { return Err(InterfaceDriverError::FailedClosed("intake delivery did not arrive through its exact selected endpoint".into())); }
+        let delivery: crate::intake_state::InputDelivery = serde_json::from_slice(&input.read_artifact_payload()?).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        delivery.validate().map_err(InterfaceDriverError::Protocol)?;
+        return Ok(Some(delivery.message));
+    }
+    if inbound != Some(&runtime.worker) { return Ok(None); }
+    let bytes = input.read_artifact_payload()?;
+    if label == PEER_MESSAGE_LABEL {
+        return serde_json::from_slice(&bytes).map(Some).map_err(|error| InterfaceDriverError::Protocol(format!("peer message is malformed: {error}")));
+    }
+    if !peer_notification_label(&label) { return Ok(None); }
+    let text = peer_notification_text(&label, &bytes)?;
+    Ok(Some(PeerMessage { action: PeerAction::Queue, control_id: input.artifact.id.as_str().into(), text: Some(text), artifacts: vec![input.artifact.clone()] }))
+}
+
+pub(crate) fn peer_notification_text(label: &str, bytes: &[u8]) -> Result<String, InterfaceDriverError> {
+    if !matches!(label, INTERFACE_ARTIFACT_OUTPUT_LABEL | TURN_ERROR_LABEL | TURN_CONTROL_ACKNOWLEDGED_LABEL | TURN_CONTROL_FAILED_LABEL | INTERFACE_CONTEXT_UPDATED_LABEL) {
+        return Ok(format!("Connected execution recorded {label}."));
+    }
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let text = match label {
+        INTERFACE_ARTIFACT_OUTPUT_LABEL => value.get("text").and_then(serde_json::Value::as_str).ok_or_else(|| InterfaceDriverError::Protocol("peer terminal artifact has no text".into()))?.to_string(),
+        TURN_ERROR_LABEL | TURN_CONTROL_ACKNOWLEDGED_LABEL | TURN_CONTROL_FAILED_LABEL | INTERFACE_CONTEXT_UPDATED_LABEL => {
+            let mut visible = value.as_object().ok_or_else(|| InterfaceDriverError::Protocol("peer outcome must be an object".into()))?.clone();
+            visible.remove(CODEX_CONTINUITY_FIELD);
+            visible.remove(SESSION_CONTEXT_FIELD);
+            serde_json::to_string(&visible).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?
+        }
+        _ => format!("Connected execution recorded {label}."),
+    };
+    Ok(text)
+}
+
+fn peer_input_text(message: &PeerMessage, artifact: &ArtifactRef) -> Result<String, InterfaceDriverError> {
+    serde_json::to_string(&serde_json::json!({
+        "received_system_artifact": artifact, "text": message.text, "artifact_references": message.artifacts,
+    })).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))
+}
+
+fn queued_peer_item(text: String) -> serde_json::Value {
+    serde_json::json!({"type":"message", "role":"user", "content":[{"type":"input_text", "text":text}]})
+}
+
+pub(crate) fn is_admitted_peer_interrupt(input: &InterfaceInvocationEnvelope, descriptor: &InterfaceDescriptor) -> bool {
+    matches!(admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake"))), Ok(Some(PeerMessage { action: PeerAction::Interrupt, .. })))
+}
+
+pub(crate) fn decode_inflight_turn_control(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    pinned_run_record: Option<&[u8]>,
+) -> Result<Option<CodexTurnControl>, InterfaceDriverError> {
+    let manifest = input.artifact_file.read_manifest().map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "turn-control source artifact manifest cannot be read: {error}"
+        ))
+    })?;
+    let bytes = input.read_artifact_payload()?;
+    if let Some(peer) = admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake")))? {
+        return Ok(Some(match peer.action {
+            PeerAction::Queue => CodexTurnControl::Inject {
+                control_id: peer.control_id.clone(), items: vec![queued_peer_item(peer_input_text(&peer, &input.artifact)?)],
+            },
+            PeerAction::Followup => CodexTurnControl::Steer {
+                control_id: peer.control_id.clone(), input: vec![UserInput::Text { text: peer_input_text(&peer, &input.artifact)?, text_elements: Vec::new() }],
+            },
+            PeerAction::Interrupt => CodexTurnControl::Interrupt { control_id: peer.control_id, action: "interrupt".into() },
+        }));
+    }
+    if manifest.label == OPERATOR_MESSAGE_LABEL {
+        let pinned_run_record = pinned_run_record.ok_or_else(|| InterfaceDriverError::FailedClosed(
+            "operator steering has no source-pinned run record".into(),
+        ))?;
+        let runtime = invocation_runtime_metadata(input)?;
+        let record = octopus_runtime::run_record::RunRecord::from_bytes(pinned_run_record)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if runtime.interface != descriptor.id || runtime.run != record.id
+            || runtime.ee != record.ee || runtime.worker != record.worker
+            || runtime.run_record_hash.as_deref() != Some(octopus_ledger::ContentHash::of_bytes(pinned_run_record).to_hex().as_str())
+            || !record.active_checkpoints.contains(&runtime.checkpoint)
+            || !record.checkpoint(&runtime.checkpoint).is_some_and(|checkpoint| checkpoint.epoch.0 == runtime.epoch)
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "operator steering differs from its exact source-pinned run/checkpoint".into(),
+            ));
+        }
+        let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed(
+            "operator steering provider declares no interface_driver_config".into(),
+        ))?;
+        let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+            &record, input.metadata()?, &input.artifact_binding_payloads,
+        ).map_err(InterfaceDriverError::FailedClosed)?;
+        let context_payloads = resolve_instruction_context(input.metadata()?, &context_payloads)
+            .map_err(InterfaceDriverError::FailedClosed)?
+            .remaining_payloads;
+        for bound in &context_payloads {
+            serde_json::from_slice::<serde_json::Value>(bound.as_bytes()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!("operator steering context '{}' is not JSON: {error}", bound.artifact.id))
+            })?;
+        }
+        let selected_files = selected_file_projection(
+            &record, input, &input.artifact, &manifest.label, &bytes, &BTreeMap::new(), &[],
+            ModelResultProjection::from_private_config(&config.private_config)?,
+        )?;
+        let provider_input = decode_provider_input(
+            &bytes, &manifest.label, None, &BTreeMap::new(), Some(&selected_files),
+        )?;
+        let ProviderInput::Turn(turn_input) = provider_input else {
+            return Ok(None);
+        };
+        return Ok(Some(CodexTurnControl::Steer {
+            control_id: operator_message_control_id(&bytes)
+                .unwrap_or_else(|| input.artifact.id.as_str().to_string()),
+            input: turn_input,
+        }));
+    }
+    if manifest.label != OPERATOR_TURN_CONTROL_LABEL {
+        return Ok(None);
+    }
+    let control =
+        serde_json::from_slice::<ExplicitTurnControlArtifact>(&bytes).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "operator turn-control artifact is not a strict control envelope: {error}"
+            ))
+        })?;
+    let control = match control {
+        ExplicitTurnControlArtifact::Interrupt { control_id } => CodexTurnControl::Interrupt {
+            control_id: validated_control_id(control_id)?,
+            action: "interrupt".to_string(),
+        },
+        ExplicitTurnControlArtifact::Stop { control_id } => CodexTurnControl::Interrupt {
+            control_id: validated_control_id(control_id)?,
+            action: "stop".to_string(),
+        },
+        ExplicitTurnControlArtifact::Pause { control_id } => CodexTurnControl::Unsupported {
+            control_id: validated_control_id(control_id)?,
+            action: "pause".to_string(),
+        },
+        ExplicitTurnControlArtifact::Resume { control_id } => CodexTurnControl::Unsupported {
+            control_id: validated_control_id(control_id)?,
+            action: "resume".to_string(),
+        },
+    };
+    Ok(Some(control))
+}
+
+fn operator_message_control_id(bytes: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    value
+        .get("message_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .map(str::to_string)
+}
+
+fn validated_control_id(control_id: String) -> Result<String, InterfaceDriverError> {
+    if control_id.trim().is_empty() || control_id.trim() != control_id || control_id.len() > 256 {
+        return Err(InterfaceDriverError::Protocol(
+            "operator turn-control artifact has an empty, untrimmed, or oversized control_id"
+                .to_string(),
+        ));
+    }
+    Ok(control_id)
+}
+
+pub(crate) fn materialize_independent_input_receipt(
+    output_root: &Path,
+    source_movement_seq: u64,
+    source_label: &str,
+    source_artifact: &ArtifactRef,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    let value = serde_json::json!({
+        "label": TURN_INPUT_ACKNOWLEDGED_LABEL,
+        "action": "receive",
+        "status": "acknowledged",
+        "source_movement_seq": source_movement_seq,
+        "source_label": source_label,
+        "source_artifact": source_artifact.id.as_str(),
+    });
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    InterfaceArtifactFile::write(output_root, TURN_INPUT_ACKNOWLEDGED_LABEL, &bytes)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))
+}
+
+pub(crate) fn materialize_turn_control_result(
+    output_root: &Path,
+    source_movement_seq: u64,
+    result: CodexTurnControlResult,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    if result.continuity.is_some()
+        && (!result.acknowledged || !matches!(result.action.as_str(), "interrupt" | "stop"))
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "only acknowledged interruption may author a control continuity revision".into(),
+        ));
+    }
+    let label = if result.acknowledged && matches!(result.action.as_str(), "queue_message" | "steer") {
+        TURN_INPUT_ACKNOWLEDGED_LABEL
+    } else if result.acknowledged {
+        TURN_CONTROL_ACKNOWLEDGED_LABEL
+    } else {
+        TURN_CONTROL_FAILED_LABEL
+    };
+    let mut value = serde_json::json!({
+        "label": label,
+        "control_id": result.control_id,
+        "action": result.action,
+        "status": if result.acknowledged { "acknowledged" } else { "failed" },
+        "source_movement_seq": source_movement_seq,
+        "thread_id": result.thread_id,
+        "turn_id": result.turn_id,
+        "detail": result.detail,
+    });
+    if let Some(continuity) = result.continuity {
+        value
+            .as_object_mut()
+            .expect("turn-control result is an object")
+            .insert(
+                CODEX_CONTINUITY_FIELD.to_string(),
+                serde_json::to_value(continuity).map_err(|error| {
+                    InterfaceDriverError::Protocol(format!(
+                        "turn-control continuity could not be encoded: {error}"
+                    ))
+                })?,
+            );
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("turn-control result could not be encoded: {error}"))
+    })?;
+    materialize_codex_emitted_artifact(output_root, label, &bytes)
+}
+
+pub(crate) fn validate_durable_interrupted_continuity(
+    state: &CodexContinuityState,
+    provider_interface: &InterfaceId,
+    run: &str,
+) -> Result<(), String> {
+    let value = serde_json::to_value(state)
+        .map_err(|error| format!("durable interrupt continuity could not be encoded: {error}"))?;
+    let parsed = parse_codex_continuity(&value, provider_interface, run)
+        .map_err(|error| error.to_string())?;
+    if &parsed != state
+        || state.pending.is_some()
+        || state
+            .interrupted_pending
+            .as_ref()
+            .is_none_or(|pending| !interrupted_pending_has_external_result(pending))
+    {
+        return Err(
+            "durable interrupt continuity does not retain exactly one external effect".to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn interrupted_turn_identity(state: &CodexContinuityState) -> Result<LiveTurnIdentity, String> {
+    validate_durable_interrupted_continuity(state, &state.provider_interface, &state.run)?;
+    Ok(LiveTurnIdentity {
+        provider_interface: state.provider_interface.to_string(), run: state.run.clone(),
+        thread_id: state.thread_id.clone(),
+        turn_id: pending_turn_id(state.interrupted_pending.as_ref().ok_or("interrupted turn has no exact effect")?).to_string(),
+    })
+}
+
+pub(crate) fn exact_interrupted_result_source(
+    envelope: &InterfaceInvocationEnvelope,
+    continuity: &CodexContinuityState,
+) -> Result<bool, String> {
+    let Some(interrupted) = continuity.interrupted_pending.as_ref() else {
+        return Ok(false);
+    };
+    let manifest = envelope
+        .artifact_file
+        .read_manifest()
+        .map_err(|error| format!("interrupted result manifest cannot be read: {error}"))?;
+    let bytes = envelope
+        .artifact_file
+        .read_payload_bytes()
+        .map_err(|error| format!("interrupted result payload cannot be read: {error}"))?;
+    let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    match interrupted {
+        CodexPendingContinuity::DynamicTool { .. } => {
+            let Some(result) =
+                decode_tool_result_artifact(&value).map_err(|error| error.to_string())?
+            else {
+                return Ok(false);
+            };
+            validate_recovered_tool_result(&result, interrupted)
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        CodexPendingContinuity::InterfaceOperation {
+            operation,
+            interface,
+            output_label,
+            ..
+        } => {
+            if manifest.label != *output_label {
+                return Ok(false);
+            }
+            let operations = BTreeMap::from([(
+                operation.clone(),
+                InterfaceOperationAffordance {
+                    name: operation.clone(),
+                    interface: interface.clone(),
+                    request_label: String::new(),
+                    output_label: output_label.clone(),
+                },
+            )]);
+            let result = decode_interface_operation_result_artifact(
+                &value,
+                &manifest.label,
+                interface,
+                &operations,
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "interrupted interface-operation result has no strict result envelope".to_string()
+            })?;
+            validate_recovered_interface_operation_input(&result, interrupted)
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        CodexPendingContinuity::Operator { .. } => Err(
+            "durable interrupted result source cannot correlate an operator request".to_string(),
+        ),
+    }
+}
+
+pub(crate) fn exact_interrupted_control_continuity(
+    result: &CodexTurnControlResult,
+) -> Result<Option<CodexContinuityState>, String> {
+    if !result.acknowledged || !matches!(result.action.as_str(), "interrupt" | "stop") {
+        return Ok(None);
+    }
+    let Some(continuity) = result.continuity.as_ref() else {
+        return Ok(None);
+    };
+    if continuity.interrupted_pending.is_none() {
+        if continuity.pending.is_some() {
+            return Err(
+                "acknowledged interrupt continuity retained an active pending request".to_string(),
+            );
+        }
+        return Ok(None);
+    }
+    validate_durable_interrupted_continuity(
+        continuity,
+        &continuity.provider_interface,
+        continuity.run.as_str(),
+    )?;
+    Ok(Some(continuity.clone()))
+}
+
+pub(crate) fn interrupted_result_closure_ref(
+    artifact: &InterfaceArtifactFile,
+    interrupted: &CodexContinuityState,
+    source_artifact: &ArtifactRef,
+) -> Result<Option<ArtifactRef>, String> {
+    let manifest = artifact
+        .read_manifest()
+        .map_err(|error| format!("provider closure manifest is malformed: {error}"))?;
+    if manifest.label != TURN_INTERRUPTED_RESULT_LABEL {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = serde_json::from_slice(
+        &artifact
+            .read_payload_bytes()
+            .map_err(|error| format!("provider closure payload cannot be read: {error}"))?,
+    )
+    .map_err(|error| format!("provider closure payload is malformed: {error}"))?;
+    let pending = interrupted.interrupted_pending.as_ref().ok_or_else(|| {
+        "provider closure arbitration lost its interrupted exact effect".to_string()
+    })?;
+    let (result_kind, correlation_id, turn_id) = match pending {
+        CodexPendingContinuity::DynamicTool {
+            turn_id, call_id, ..
+        } => ("tool_result", call_id, turn_id),
+        CodexPendingContinuity::InterfaceOperation {
+            turn_id, call_id, ..
+        } => ("interface_operation_result", call_id, turn_id),
+        CodexPendingContinuity::Operator { .. } => {
+            return Err("provider closure cannot arbitrate an operator request".to_string());
+        }
+    };
+    if payload.get("label").and_then(serde_json::Value::as_str)
+        != Some(TURN_INTERRUPTED_RESULT_LABEL)
+        || payload
+            .get("result_kind")
+            .and_then(serde_json::Value::as_str)
+            != Some(result_kind)
+        || payload
+            .get("correlation_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(correlation_id)
+        || payload.get("thread_id").and_then(serde_json::Value::as_str)
+            != Some(interrupted.thread_id.as_str())
+        || payload.get("turn_id").and_then(serde_json::Value::as_str) != Some(turn_id.as_str())
+        || payload
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .is_none()
+        || payload
+            .get("turn_interrupted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || payload
+            .get("returned_to_model")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        || payload
+            .get("result_disposition")
+            .and_then(serde_json::Value::as_str)
+            != Some("durably_admitted_after_interrupt")
+        || payload.get("source_artifact")
+            != Some(
+                &serde_json::to_value(source_artifact)
+                    .map_err(|error| format!("source artifact could not be encoded: {error}"))?,
+            )
+    {
+        return Err(
+            "provider interrupted-result closure conflicts with durable arbitration".to_string(),
+        );
+    }
+    let closure = payload.get(CODEX_CONTINUITY_FIELD).ok_or_else(|| {
+        "provider interrupted-result closure has no continuity evidence".to_string()
+    })?;
+    let closure = parse_codex_continuity(
+        closure,
+        &interrupted.provider_interface,
+        interrupted.run.as_str(),
+    )
+    .map_err(|error| error.to_string())?;
+    let minimum_generation = interrupted
+        .context_generation
+        .checked_add(1)
+        .ok_or_else(|| "provider interrupted-result closure generation overflowed".to_string())?;
+    let maximum_generation = minimum_generation
+        .checked_add(1)
+        .ok_or_else(|| "provider interrupted-result closure generation overflowed".to_string())?;
+    if closure.thread_id != interrupted.thread_id
+        || closure.thread_shape_fingerprint != interrupted.thread_shape_fingerprint
+        || closure.static_context_fingerprint != interrupted.static_context_fingerprint
+        || closure.pending.is_some()
+        || closure.interrupted_pending.is_some()
+        || !(minimum_generation..=maximum_generation).contains(&closure.context_generation)
+    {
+        return Err(
+            "provider interrupted-result closure does not close the durable continuity generation"
+                .to_string(),
+        );
+    }
+    let manifest_bytes = std::fs::read(artifact.manifest_path()).map_err(|error| {
+        format!(
+            "provider closure manifest '{}' cannot be read: {error}",
+            artifact.manifest_path().display()
+        )
+    })?;
+    let content = octopus_ledger::ContentHash::of_bytes(&manifest_bytes);
+    Ok(Some(ArtifactRef {
+        id: octopus_descriptors::ArtifactId::new(format!(
+            "{}:{}",
+            manifest.label,
+            content.to_hex()
+        )),
+        content,
+    }))
+}
+
+fn decode_tool_result_artifact(
+    value: &serde_json::Value,
+) -> Result<Option<ToolResultArtifact>, InterfaceDriverError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    if !(object.contains_key("label") && object.contains_key("tool") && object.contains_key("ok")) {
+        return Ok(None);
+    }
+    let result = serde_json::from_value::<ToolResultArtifact>(value.clone()).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "tool result artifact is not a strict result envelope: {error}"
+        ))
+    })?;
+    result.validate().map_err(InterfaceDriverError::Protocol)?;
+    Ok(Some(result))
+}
+
+fn decode_interface_operation_result_artifact(
+    value: &serde_json::Value,
+    manifest_label: &str,
+    source_interface: &InterfaceId,
+    operations: &BTreeMap<String, InterfaceOperationAffordance>,
+) -> Result<Option<InterfaceOperationResultArtifact>, InterfaceDriverError> {
+    let object = value.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(format!(
+            "artifact from operation interface '{}' is not a JSON object",
+            source_interface.as_str()
+        ))
+    })?;
+    if !(object.contains_key("operation") || object.contains_key("ok")) {
+        return Ok(None);
+    }
+    let operation = object
+        .get("operation")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "result from operation interface '{}' has no operation name",
+                source_interface.as_str()
+            ))
+        })?;
+    let affordance = operations.get(operation).ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "result from interface '{}' names operation '{}' outside the bound catalog",
+            source_interface.as_str(),
+            operation
+        ))
+    })?;
+    if affordance.interface != *source_interface {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operation '{}' result arrived from interface '{}', bound owner is '{}'",
+            operation,
+            source_interface.as_str(),
+            affordance.interface.as_str()
+        )));
+    }
+    let payload_label = object
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operation '{}' result has no self-identifying label",
+                operation
+            ))
+        })?;
+    if payload_label != manifest_label || payload_label != affordance.output_label {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operation '{}' result label manifest='{}' payload='{}' expected='{}'",
+            operation, manifest_label, payload_label, affordance.output_label
+        )));
+    }
+    let correlation_id = object
+        .get("correlation_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operation '{}' result has no correlation_id",
+                operation
+            ))
+        })?;
+    let ok = object
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operation '{}' result has no boolean ok field",
+                operation
+            ))
+        })?;
+    match (ok, object.get("result"), object.get("error")) {
+        (true, Some(_), None) | (false, None, Some(_)) => {}
+        _ => {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "operation '{}' result has inconsistent ok/result/error fields",
+                operation
+            )));
+        }
+    }
+    Ok(Some(InterfaceOperationResultArtifact {
+        label: payload_label.to_string(),
+        operation: operation.to_string(),
+        correlation_id,
+        ok,
+        value: value.clone(),
+    }))
+}
+
+fn decode_operator_response_artifact(
+    value: &serde_json::Value,
+) -> Result<Option<OperatorResponseArtifact>, InterfaceDriverError> {
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let mut responses = Vec::new();
+    if let Some(value) = object.get("operator_approval_response") {
+        let response = value.as_object().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "operator_approval_response must be a JSON object".to_string(),
+            )
+        })?;
+        responses.push(OperatorResponseArtifact::Approval {
+            request_id: response_string(response, "request_id")?,
+            decision: response.get("decision").cloned().ok_or_else(|| {
+                InterfaceDriverError::Protocol(
+                    "operator_approval_response has no decision".to_string(),
+                )
+            })?,
+        });
+    }
+    if let Some(value) = object.get("operator_elicitation_response") {
+        let response = value.as_object().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "operator_elicitation_response must be a JSON object".to_string(),
+            )
+        })?;
+        responses.push(OperatorResponseArtifact::Elicitation {
+            request_id: response_string(response, "request_id")?,
+            answer: response.get("answer").cloned().ok_or_else(|| {
+                InterfaceDriverError::Protocol(
+                    "operator_elicitation_response has no answer".to_string(),
+                )
+            })?,
+        });
+    }
+    if let Some(value) = object.get("operator_user_input_response") {
+        let response = value.as_object().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "operator_user_input_response must be a JSON object".to_string(),
+            )
+        })?;
+        responses.push(OperatorResponseArtifact::UserInput {
+            request_id: response_string(response, "request_id")?,
+            answers: response.get("answers").cloned().ok_or_else(|| {
+                InterfaceDriverError::Protocol(
+                    "operator_user_input_response has no answers".to_string(),
+                )
+            })?,
+        });
+    }
+    match responses.len() {
+        0 => Ok(None),
+        1 => Ok(responses.pop()),
+        count => Err(InterfaceDriverError::Protocol(format!(
+            "provider input carries {count} operator response bodies; exactly one is required"
+        ))),
+    }
+}
+
+fn response_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Result<String, InterfaceDriverError> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operator response has no non-empty trimmed '{key}'"
+            ))
+        })
+}
+
+fn dynamic_tool_response_value(
+    result: &ToolResultArtifact,
+) -> Result<serde_json::Value, InterfaceDriverError> {
+    serde_json::to_value(DynamicToolCallResponse {
+        content_items: dynamic_tool_response_content(result)?,
+        success: result.ok,
+    })
+    .map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "dynamic tool response could not be encoded: {error}"
+        ))
+    })
+}
+
+fn native_pending_operation(pending: &CodexPendingContinuity) -> Result<Option<NativePending>, InterfaceDriverError> {
+    let CodexPendingContinuity::DynamicTool { native_operation: Some(value), tool, call_id, .. } = pending else { return Ok(None); };
+    let operation: NativePending = serde_json::from_value(value.clone()).map_err(|error| InterfaceDriverError::FailedClosed(format!("native operation continuity is malformed: {error}")))?;
+    if operation.effect.tool != *tool || operation.effect.correlation_id != *call_id {
+        return Err(InterfaceDriverError::FailedClosed("native operation lost its exact pending file/transfer effect".into()));
+    }
+    Ok(Some(operation))
+}
+
+fn emit_native_effect(
+    sink: &TurnSink<'_>, turn_id: &str, operation: NativePending,
+    bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+) -> Result<(), InterfaceDriverError> {
+    let value = serde_json::to_value(&operation).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let effect = operation.effect;
+    sink.set_pending(Some(CodexPendingContinuity::DynamicTool {
+        turn_id: turn_id.into(), call_id: effect.correlation_id.clone(), tool: effect.tool.clone(), native_operation: Some(value),
+    }));
+    let output = CodexTurnOutput::native_tool_call(effect.tool, effect.arguments, effect.correlation_id);
+    if bindings.is_empty() { sink.send(output) } else { sink.send_with_outgoing_bindings(output, bindings) }
+}
+
+fn native_result_success(value: &serde_json::Value) -> bool {
+    value.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(true)
+}
+
+fn native_operation_response(value: &serde_json::Value) -> Result<serde_json::Value, InterfaceDriverError> {
+    serde_json::to_value(DynamicToolCallResponse {
+        content_items: native_result_content(value, Vec::new())?, success: native_result_success(value),
+    }).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))
+}
+
+fn dynamic_tool_response_content(
+    result: &ToolResultArtifact,
+) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
+    let mut value = serde_json::json!({
+        "tool": result.tool,
+        "correlation_id": result.correlation_id,
+        "ok": result.ok,
+        "body": result.body,
+        "error": result.error,
+    });
+    let media = result.body.as_ref().map(crate::result_media::project).transpose()?.flatten();
+    let images = match media {
+        Some(media) => {
+            value["body"] = media.value;
+            media.images
+        }
+        None => Vec::new(),
+    };
+    native_result_content(&value, images)
+}
+
+fn native_result_content(
+    value: &serde_json::Value,
+    images: Vec<DynamicToolCallOutputContentItem>,
+) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
+    let text = serde_json::to_string(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "interface result could not be encoded for native continuation: {error}"
+        ))
+    })?;
+    let mut content = vec![DynamicToolCallOutputContentItem::InputText {
+        text,
+    }];
+    content.extend(images);
+    crate::result_media::validate_content(&content)?;
+    Ok(content)
+}
+
+fn recovered_result_output(
+    content: Vec<DynamicToolCallOutputContentItem>,
+) -> Result<serde_json::Value, InterfaceDriverError> {
+    if let [DynamicToolCallOutputContentItem::InputText { text }] = content.as_slice() {
+        return Ok(serde_json::Value::String(text.clone()));
+    }
+    let items = content.into_iter().map(|item| {
+        let item: octopus_protocol::dynamic_tools::DynamicToolCallOutputContentItem = item.into();
+        octopus_protocol::models::FunctionCallOutputContentItem::from(item)
+    }).collect::<Vec<_>>();
+    serde_json::to_value(items).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("recovered tool content could not be encoded: {error}"))
+    })
+}
+
+fn recovered_function_call_output(call_id: &str, output: impl Into<serde_json::Value>) -> serde_json::Value {
+    let output = output.into();
+    serde_json::json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": output,
+    })
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RecoveredToolResultRolloutEvidence {
+    output_persisted: bool,
+    successor_turn_id: Option<String>,
+    native_function_calls: usize,
+}
+
+impl RecoveredToolResultRolloutEvidence {
+    fn validate_injection(&self, expected: &serde_json::Value) -> Result<(), InterfaceDriverError> {
+        let call_id = expected
+            .get("call_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value)
+            .ok_or_else(|| {
+                InterfaceDriverError::Protocol(
+                    "recovered function-call output has no canonical call_id".into(),
+                )
+            })?;
+        if self.output_persisted || self.native_function_calls == 1 {
+            return Ok(());
+        }
+        Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex result recovery cannot inject call_id '{}' without one corresponding function call in the current native history (found {}); the admitted result requires explicit continuity repair",
+            call_id, self.native_function_calls,
+        )))
+    }
+}
+
+fn retain_native_recovery_call(
+    payload: &serde_json::Value,
+    expected_call_id: &str,
+    count: &mut usize,
+) -> Result<(), InterfaceDriverError> {
+    if payload.get("type").and_then(serde_json::Value::as_str) != Some("function_call")
+        || payload.get("call_id").and_then(serde_json::Value::as_str) != Some(expected_call_id)
+    {
+        return Ok(());
+    }
+    serde_json::from_value::<octopus_protocol::models::ResponseItem>(payload.clone()).map_err(
+        |error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex recovery function call '{expected_call_id}' is malformed: {error}"
+            ))
+        },
+    )?;
+    *count += 1;
+    Ok(())
+}
+
+fn recovered_tool_result_rollout_evidence(
+    rollout_path: &Path,
+    expected: &serde_json::Value,
+    activity: Option<&serde_json::Value>,
+) -> Result<RecoveredToolResultRolloutEvidence, InterfaceDriverError> {
+    let expected_call_id = expected
+        .get("call_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "recovered function-call output has no canonical call_id".to_string(),
+            )
+        })?;
+    let expected_output = expected.get("output").ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "recovered function-call output has no output body".to_string(),
+        )
+    })?;
+    let metadata = std::fs::metadata(rollout_path).map_err(|error| {
+        InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout '{}' cannot be inspected: {error}",
+            rollout_path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout '{}' is not a regular file",
+            rollout_path.display()
+        )));
+    }
+    let file = std::fs::File::open(rollout_path).map_err(|error| {
+        InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout '{}' cannot be opened: {error}",
+            rollout_path.display()
+        ))
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut exact = 0usize;
+    let mut dynamic_exact = 0usize;
+    let mut conflicting = 0usize;
+    let mut after_exact = false;
+    let mut successor_turn_ids = Vec::new();
+    let mut native_function_calls = 0usize;
+    let mut compacted_output_persisted = false;
+    loop {
+        line.clear();
+        let mut bounded = (&mut reader).take((RECOVERY_ROLLOUT_MAX_LINE_BYTES + 1) as u64);
+        let bytes = bounded.read_line(&mut line).map_err(|error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex recovery rollout '{}' cannot be read: {error}",
+                rollout_path.display()
+            ))
+        })?;
+        if bytes == 0 {
+            break;
+        }
+        if bytes > RECOVERY_ROLLOUT_MAX_LINE_BYTES {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex recovery rollout '{}' contains a line larger than {} bytes",
+                rollout_path.display(),
+                RECOVERY_ROLLOUT_MAX_LINE_BYTES
+            )));
+        }
+        if !line.ends_with('\n') {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex recovery rollout '{}' ends with a partial JSONL record",
+                rollout_path.display()
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim_end()).map_err(|error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex recovery rollout '{}' contains malformed JSONL: {error}",
+                rollout_path.display()
+            ))
+        })?;
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("response_item") => {
+                let Some(payload) = value.get("payload") else {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex recovery rollout '{}' has a response_item without payload",
+                        rollout_path.display()
+                    )));
+                };
+                retain_native_recovery_call(payload, expected_call_id, &mut native_function_calls)?;
+                if payload.get("type").and_then(serde_json::Value::as_str)
+                    != Some("function_call_output")
+                    || payload.get("call_id").and_then(serde_json::Value::as_str)
+                        != Some(expected_call_id)
+                {
+                    continue;
+                }
+                if payload.get("output").is_some_and(|recorded| {
+                    crate::result_media::matches_recorded_output(expected_output, recorded)
+                }) {
+                    exact += 1;
+                    after_exact = true;
+                } else {
+                    conflicting += 1;
+                }
+            }
+            Some("compacted") => {
+                let payload = value.get("payload").ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(format!(
+                        "Codex recovery rollout '{}' has a compacted record without payload",
+                        rollout_path.display()
+                    ))
+                })?;
+                let compacted: octopus_protocol::protocol::CompactedItem =
+                    serde_json::from_value(payload.clone()).map_err(|error| {
+                        InterfaceDriverError::FailedClosed(format!(
+                            "Codex recovery rollout '{}' has malformed compaction history: {error}",
+                            rollout_path.display()
+                        ))
+                    })?;
+                native_function_calls = 0;
+                if let Some(history) = compacted.replacement_history {
+                    let mut outputs = 0usize;
+                    for item in history {
+                        match item {
+                            octopus_protocol::models::ResponseItem::FunctionCall { call_id, .. }
+                                if call_id == expected_call_id => native_function_calls += 1,
+                            octopus_protocol::models::ResponseItem::FunctionCallOutput {
+                                call_id, output, ..
+                            } if call_id == expected_call_id => {
+                                outputs += 1;
+                                let output = serde_json::to_value(output).map_err(|error| {
+                                    InterfaceDriverError::Protocol(format!(
+                                        "Codex compacted result '{expected_call_id}' did not encode: {error}"
+                                    ))
+                                })?;
+                                if outputs > 1
+                                    || !crate::result_media::matches_recorded_output(expected_output, &output)
+                                {
+                                    return Err(InterfaceDriverError::FailedClosed(format!(
+                                        "Codex compaction has ambiguous or conflicting output for call_id '{expected_call_id}'"
+                                    )));
+                                }
+                                compacted_output_persisted = true;
+                                after_exact = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Some("event_msg") => {
+                let payload = value.get("payload").ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(format!(
+                        "Codex recovery rollout '{}' has an event_msg without payload",
+                        rollout_path.display()
+                    ))
+                })?;
+                if let Some(activity) = activity
+                    && payload.get("type").and_then(serde_json::Value::as_str) == Some("item_completed")
+                    && let Some(item) = payload.get("item")
+                    && item.get("type").and_then(serde_json::Value::as_str) == Some("DynamicToolCall")
+                    && item.get("id").and_then(serde_json::Value::as_str) == Some(expected_call_id)
+                {
+                    let content: Vec<DynamicToolCallOutputContentItem> = serde_json::from_value(
+                        item.get("content_items").cloned().unwrap_or(serde_json::Value::Null),
+                    ).map_err(|error| InterfaceDriverError::FailedClosed(format!(
+                        "Codex recovery receipt for '{expected_call_id}' has invalid content: {error}"
+                    )))?;
+                    let output = recovered_result_output(content)?;
+                    let matches = payload.get("thread_id") == activity.get("thread_id")
+                        && payload.get("turn_id") == activity.get("turn_id")
+                        && item.get("namespace") == activity.get("namespace")
+                        && activity.get("tool").and_then(serde_json::Value::as_str)
+                            .is_some_and(|tool| item.get("tool").and_then(serde_json::Value::as_str)
+                                == Some(encode_tool_name(tool).as_str()))
+                        && item.get("success") == activity.get("success")
+                        && item.get("status") == activity.get("status")
+                        && item.get("error").is_none_or(serde_json::Value::is_null)
+                        && expected_output == &output;
+                    if matches {
+                        dynamic_exact += 1;
+                        after_exact = true;
+                    } else {
+                        conflicting += 1;
+                    }
+                }
+                if !after_exact
+                    || !matches!(
+                        payload.get("type").and_then(serde_json::Value::as_str),
+                        Some("task_started" | "turn_started")
+                    )
+                {
+                    continue;
+                }
+                let turn_id = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty() && value.trim() == *value)
+                    .ok_or_else(|| {
+                        InterfaceDriverError::FailedClosed(format!(
+                            "Codex recovery rollout '{}' has a successor TurnStarted without canonical turn_id",
+                            rollout_path.display()
+                        ))
+                    })?;
+                successor_turn_ids.push(turn_id.to_string());
+            }
+            _ => {}
+        }
+    }
+    match (exact, dynamic_exact, conflicting, compacted_output_persisted) {
+        (0, 0, 0, false) => Ok(RecoveredToolResultRolloutEvidence {
+            native_function_calls,
+            ..RecoveredToolResultRolloutEvidence::default()
+        }),
+        (0..=1, 0..=1, 0, _) if successor_turn_ids.len() <= 1 => Ok(RecoveredToolResultRolloutEvidence {
+            output_persisted: true,
+            successor_turn_id: successor_turn_ids.pop(),
+            native_function_calls,
+        }),
+        (0..=1, 0..=1, 0, _) => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout '{}' carries {} successor TurnStarted receipts after call_id '{}'",
+            rollout_path.display(),
+            successor_turn_ids.len(),
+            expected_call_id
+        ))),
+        _ => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout '{}' carries ambiguous output history for call_id '{}' (exact={exact}, dynamic_exact={dynamic_exact}, conflicting={conflicting})",
+            rollout_path.display(),
+            expected_call_id
+        ))),
+    }
+}
+
+#[cfg(test)]
+fn recovered_function_call_output_is_persisted(
+    rollout_path: &Path,
+    expected: &serde_json::Value,
+) -> Result<bool, InterfaceDriverError> {
+    recovered_tool_result_rollout_evidence(rollout_path, expected, None)
+        .map(|evidence| evidence.output_persisted)
+}
+
+fn reconcile_recovered_successor_dispatch(
+    rollout: &RecoveredToolResultRolloutEvidence,
+    dispatches: &[RecoveredTurnStartDispatch],
+) -> Result<(), InterfaceDriverError> {
+    match (dispatches, rollout.successor_turn_id.as_deref()) {
+        ([], None) => Ok(()),
+        ([], Some(turn_id)) => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovery rollout already started successor turn '{turn_id}' without matching durable turn/start dispatch evidence"
+        ))),
+        ([dispatch], Some(turn_id)) => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovered tool-result continuation already started successor turn '{turn_id}' after durable turn/start dispatch movement {} (attempt {}, request {}); refusing a duplicate successor turn",
+            dispatch.movement_seq, dispatch.attempt, dispatch.request_blake3
+        ))),
+        ([dispatch], None) => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovered tool-result continuation has durable turn/start dispatch movement {} (attempt {}, artifact '{}', request {}) but no exact successor TurnStarted receipt; the outcome is ambiguous and a second successor turn is forbidden",
+            dispatch.movement_seq,
+            dispatch.attempt,
+            dispatch.artifact.id.as_str(),
+            dispatch.request_blake3
+        ))),
+        (dispatches, _) => Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex recovered tool-result continuation carries {} durable turn/start dispatches; successor execution is ambiguous",
+            dispatches.len()
+        ))),
+    }
+}
+
+fn interface_operation_response_value(
+    result: &InterfaceOperationResultArtifact,
+) -> Result<serde_json::Value, InterfaceDriverError> {
+    serde_json::to_value(DynamicToolCallResponse {
+        content_items: interface_operation_response_content(result)?,
+        success: result.ok,
+    })
+    .map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "interface operation response could not be encoded: {error}"
+        ))
+    })
+}
+
+fn interface_operation_response_content(
+    result: &InterfaceOperationResultArtifact,
+) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
+    match crate::result_media::project(&result.value)? {
+        Some(media) => native_result_content(&media.value, media.images),
+        None => native_result_content(&result.value, Vec::new()),
+    }
+}
+
+fn model_result_text(
+    value: &serde_json::Value,
+    identity: serde_json::Value,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
+) -> Result<String, InterfaceDriverError> {
+    let raw = serde_json::to_string(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "interface result could not be rendered for app-server continuation: {error}"
+        ))
+    })?;
+    let original_tokens = octopus_util_string::approx_token_count(&raw);
+    if original_tokens <= projection.max_tokens {
+        return Ok(raw);
+    }
+
+    let mut preview_budget = projection.max_tokens.saturating_sub(256);
+    for _ in 0..8 {
+        let (preview, _) =
+            octopus_util_string::truncate_middle_with_token_budget(&raw, preview_budget);
+        let retained_tokens = octopus_util_string::approx_token_count(&preview);
+        let projected = serde_json::json!({
+            "model_projection": "head_tail",
+            "truncated": true,
+            "identity": identity,
+            "source_artifact": source_artifact,
+            "rendered_json_blake3": blake3::hash(raw.as_bytes()).to_hex().to_string(),
+            "original_bytes": raw.len(),
+            "original_approx_tokens": original_tokens,
+            "retained_approx_tokens": retained_tokens,
+            "omitted_approx_tokens": original_tokens.saturating_sub(retained_tokens),
+            "max_tokens": projection.max_tokens,
+            "preview": preview,
+        });
+        let text = serde_json::to_string(&projected).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "model result projection metadata could not be encoded: {error}"
+            ))
+        })?;
+        let projected_tokens = octopus_util_string::approx_token_count(&text);
+        if projected_tokens <= projection.max_tokens {
+            return Ok(text);
+        }
+        let excess = projected_tokens.saturating_sub(projection.max_tokens);
+        preview_budget = preview_budget.saturating_sub(excess.saturating_add(8));
+    }
+    Err(InterfaceDriverError::FailedClosed(format!(
+        "model result projection could not fit descriptor max_tokens={} without losing its evidence header",
+        projection.max_tokens
+    )))
+}
+
+fn server_request_method(request: &ServerRequest) -> String {
+    serde_json::to_value(request)
+        .ok()
+        .and_then(|v| {
+            v.get("method")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn pending_operator_request(
+    request: &ServerRequest,
+    thread_id: &str,
+    active_turn_id: &str,
+    effect_gate: Arc<tokio::sync::Mutex<()>>,
+    turn_interrupted: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<PendingServerRequest, InterfaceDriverError> {
+    let value = serde_json::to_value(request).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "operator server request could not be serialized: {error}"
+        ))
+    })?;
+    let request_id =
+        serde_json::from_value::<RequestId>(value.get("id").cloned().ok_or_else(|| {
+            InterfaceDriverError::Protocol("operator server request has no request id".to_string())
+        })?)
+        .map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "operator server request id is malformed: {error}"
+            ))
+        })?;
+    for pointer in ["/params/threadId", "/params/conversationId"] {
+        let Some(request_thread) = value.pointer(pointer) else {
+            continue;
+        };
+        let request_thread = request_thread.as_str().ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operator server request carries a non-string thread identity at '{pointer}'"
+            ))
+        })?;
+        if request_thread != thread_id {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "operator server request belongs to thread '{}', active thread is '{}'",
+                request_thread, thread_id
+            )));
+        }
+    }
+    let turn_id = match value.pointer("/params/turnId") {
+        None | Some(serde_json::Value::Null) => active_turn_id.to_string(),
+        Some(value) => {
+            let request_turn = value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    InterfaceDriverError::Protocol(
+                        "operator server request carries a malformed turnId".to_string(),
+                    )
+                })?;
+            if request_turn != active_turn_id {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "operator server request belongs to turn '{}', active turn is '{}'",
+                    request_turn, active_turn_id
+                )));
+            }
+            request_turn.to_string()
+        }
+    };
+    let method = server_request_method(request);
+    Ok(PendingServerRequest {
+        key: format!("operator:{request_id}"),
+        request_id,
+        thread_id: thread_id.to_string(),
+        turn_id,
+        kind: PendingServerRequestKind::Operator { method },
+        effect_gate,
+        turn_interrupted,
+    })
+}
+
+const OPERATOR_APPROVAL_METHODS: &[&str] = &[
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+];
+
+const OPERATOR_ELICITATION_METHODS: &[&str] = &["mcpServer/elicitation/request"];
+
+fn classify_operator_request(
+    request: &ServerRequest,
+    continuity: &OperatorContinuityConfig,
+) -> Result<Option<CodexTurnOutput>, InterfaceDriverError> {
+    let value = serde_json::to_value(request).map_err(|e| {
+        InterfaceDriverError::Protocol(format!(
+            "failed to serialize server request for operator surfacing: {e}"
+        ))
+    })?;
+    let method = value
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "server request carries no method; cannot classify operator surface (fail-closed)"
+                    .into(),
+            )
+        })?
+        .to_string();
+
+    let is_approval = OPERATOR_APPROVAL_METHODS.contains(&method.as_str());
+    let is_elicitation = OPERATOR_ELICITATION_METHODS.contains(&method.as_str());
+    let is_user_input = method == "item/tool/requestUserInput";
+    if !is_approval && !is_elicitation && !is_user_input {
+        return Ok(None);
+    }
+
+    let request_id = value
+        .get("id")
+        .map(|id| match id {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operator server request '{method}' carries no id to correlate a response (fail-closed)"
+            ))
+        })?;
+
+    let params = value
+        .get("params")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    if is_approval {
+        let kind = approval_kind_for_method(&method);
+        let title = approval_title_from_params(kind, &params);
+        let inputs = continuity.approval_inputs(&request_id);
+        return Ok(Some(
+            CodexTurnOutput::approval_request(
+                &continuity.approval.request_label,
+                request_id,
+                kind,
+                title,
+                params,
+                method,
+            )
+            .with_verified_inputs(inputs),
+        ));
+    }
+
+    if is_user_input {
+        let questions = params
+            .get("questions")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        let auto_resolution_ms = params
+            .get("autoResolutionMs")
+            .and_then(serde_json::Value::as_u64);
+        let is_blocking = params
+            .get("isBlocking")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let inputs = continuity.provided_input(&continuity.user_input, &request_id);
+        return Ok(Some(
+            CodexTurnOutput::user_input_request(
+                &continuity.user_input.request_label,
+                request_id,
+                questions,
+                auto_resolution_ms,
+                is_blocking,
+                method,
+            )
+            .with_verified_inputs(inputs),
+        ));
+    }
+
+    let message = params
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            params
+                .get("questions")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|questions| questions.first())
+                .and_then(|question| {
+                    question
+                        .get("question")
+                        .or_else(|| question.get("header"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    let requested_schema = params
+        .get("requestedSchema")
+        .cloned()
+        .unwrap_or_else(|| params.clone());
+    let inputs = continuity.provided_input(&continuity.elicitation, &request_id);
+    Ok(Some(
+        CodexTurnOutput::elicitation_request(
+            &continuity.elicitation.request_label,
+            request_id,
+            message,
+            requested_schema,
+            method,
+        )
+        .with_verified_inputs(inputs),
+    ))
+}
+
+fn operator_response_value(
+    method: &str,
+    response: &OperatorResponseArtifact,
+) -> Result<serde_json::Value, InterfaceDriverError> {
+    if matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "execCommandApproval"
+            | "applyPatchApproval"
+    ) {
+        let OperatorResponseArtifact::Approval { decision, .. } = response else {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "operator response shape does not answer approval method '{method}'"
+            )));
+        };
+        return Ok(serde_json::json!({ "decision": decision }));
+    }
+    if method == "item/permissions/requestApproval" {
+        let OperatorResponseArtifact::Approval { decision, .. } = response else {
+            return Err(InterfaceDriverError::Protocol(
+                "permissions approval requires an operator approval response".to_string(),
+            ));
+        };
+        if !decision.is_object() || decision.get("permissions").is_none() {
+            return Err(InterfaceDriverError::Protocol(
+                "permissions approval decision must carry the complete app-server permissions response object"
+                    .to_string(),
+            ));
+        }
+        return Ok(decision.clone());
+    }
+    if method == "mcpServer/elicitation/request" {
+        let OperatorResponseArtifact::Elicitation { answer, .. } = response else {
+            return Err(InterfaceDriverError::Protocol(
+                "MCP elicitation requires an operator elicitation response".to_string(),
+            ));
+        };
+        if answer.get("action").is_some() {
+            return Ok(answer.clone());
+        }
+        return Ok(serde_json::json!({
+            "action": "accept",
+            "content": answer,
+            "_meta": null
+        }));
+    }
+    if method == "item/tool/requestUserInput" {
+        let OperatorResponseArtifact::UserInput { answers, .. } = response else {
+            return Err(InterfaceDriverError::Protocol(
+                "tool user-input request requires an operator user-input response".to_string(),
+            ));
+        };
+        let answers = answers.as_object().ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "operator user-input answers must be a JSON object".to_string(),
+            )
+        })?;
+        let mut encoded = serde_json::Map::new();
+        for (question, values) in answers {
+            let values = values.as_array().ok_or_else(|| {
+                InterfaceDriverError::Protocol(format!(
+                    "operator user-input answer '{question}' must be an array"
+                ))
+            })?;
+            if !values.iter().all(serde_json::Value::is_string) {
+                return Err(InterfaceDriverError::Protocol(format!(
+                    "operator user-input answer '{question}' contains a non-string value"
+                )));
+            }
+            encoded.insert(question.clone(), serde_json::json!({ "answers": values }));
+        }
+        return Ok(serde_json::json!({ "answers": encoded }));
+    }
+    Err(InterfaceDriverError::FailedClosed(format!(
+        "operator response targets unsupported app-server method '{method}'"
+    )))
+}
+
+fn validate_operator_response_evidence(
+    continuity: &OperatorContinuityConfig,
+    manifest_label: &str,
+    response: &OperatorResponseArtifact,
+    metadata: &InvocationMetadata,
+) -> Result<(), InterfaceDriverError> {
+    let request_id = response.request_id()?;
+    let (expected_label, allowed) = match response {
+        OperatorResponseArtifact::Approval { .. } => (
+            continuity.approval.response_label.as_str(),
+            vec![
+                continuity
+                    .approval
+                    .approved
+                    .required(&continuity.approval.response_label, &request_id),
+                continuity
+                    .approval
+                    .denied
+                    .required(&continuity.approval.response_label, &request_id),
+            ],
+        ),
+        OperatorResponseArtifact::Elicitation { .. } => (
+            continuity.elicitation.response_label.as_str(),
+            vec![
+                continuity
+                    .elicitation
+                    .provided
+                    .required(&continuity.elicitation.response_label, &request_id),
+            ],
+        ),
+        OperatorResponseArtifact::UserInput { .. } => (
+            continuity.user_input.response_label.as_str(),
+            vec![
+                continuity
+                    .user_input
+                    .provided
+                    .required(&continuity.user_input.response_label, &request_id),
+            ],
+        ),
+    };
+    if manifest_label != expected_label {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operator response body requires manifest label '{expected_label}', found '{manifest_label}'"
+        )));
+    }
+    let [required] = metadata.required_verified_artifacts.as_slice() else {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operator response '{request_id}' must arrive through exactly one authored verified-artifact requirement"
+        )));
+    };
+    if !allowed.contains(required) {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operator response '{request_id}' runtime requirement does not match its exact authored continuity edge"
+        )));
+    }
+    if !metadata
+        .grant
+        .mark_outcomes
+        .iter()
+        .any(|mark| mark == required.mark.as_str())
+    {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operator response '{request_id}' required mark '{}' is absent from the formed grant",
+            required.mark.as_str()
+        )));
+    }
+    let admission = metadata.checkpoint_admission.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "operator response '{request_id}' carries no checkpoint-admission evidence"
+        ))
+    })?;
+    if !admission.complete
+        || admission.artifact_label != expected_label
+        || admission.required_artifact_labels.as_slice() != [expected_label]
+        || metadata.verification_failure.is_some()
+    {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "operator response '{request_id}' did not arrive as one complete admitted verified artifact"
+        )));
+    }
+    Ok(())
+}
+
+fn approval_kind_for_method(method: &str) -> &'static str {
+    if method.contains("commandExecution") || method == "execCommandApproval" {
+        "exec"
+    } else if method.contains("fileChange") || method == "applyPatchApproval" {
+        "patch"
+    } else {
+        "permission"
+    }
+}
+
+fn approval_title_from_params(kind: &'static str, params: &serde_json::Value) -> String {
+    if kind == "exec" {
+        if let Some(command) = params.get("command") {
+            match command {
+                serde_json::Value::String(command) if !command.trim().is_empty() => {
+                    return command.clone();
+                }
+                serde_json::Value::Array(argv) => {
+                    let joined = argv
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !joined.trim().is_empty() {
+                        return joined;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return "Run command".to_string();
+    }
+    if kind == "patch" {
+        return "Apply patch".to_string();
+    }
+    "Grant permissions".to_string()
+}
+
+fn hook_result_output(
+    run: &octopus_appserver_proto::HookRunSummary,
+    notification: &'static str,
+    turn_id: Option<&str>,
+) -> CodexTurnOutput {
+    use octopus_appserver_proto::HookOutputEntryKind as K;
+    use octopus_appserver_proto::HookRunStatus as S;
+    let event = hook_event_wire(run.event_name);
+    let status = match run.status {
+        S::Running => "running",
+        S::Completed => "completed",
+        S::Failed => "failed",
+        S::Blocked => "blocked",
+        S::Stopped => "stopped",
+    };
+    let outputs: Vec<serde_json::Value> = run
+        .entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "kind": match entry.kind {
+                    K::Feedback => "feedback",
+                    K::Warning => "warning",
+                    K::Stop => "stop",
+                    K::Context => "context",
+                    K::Error => "error",
+                },
+                "text": entry.text,
+            })
+        })
+        .collect();
+    CodexTurnOutput::client(
+        HOOK_RESULT_LABEL,
+        serde_json::json!({
+            "id": run.id,
+            "event": event,
+            "notification": notification,
+            "turn_id": turn_id,
+            "handler_type": hook_handler_type_wire(run.handler_type),
+            "execution_mode": hook_execution_mode_wire(run.execution_mode),
+            "scope": hook_scope_wire(run.scope),
+            "source": hook_source_wire(run.source),
+            "source_path": serde_json::json!(run.source_path),
+            "display_order": run.display_order,
+            "status": status,
+            "status_message": run.status_message,
+            "started_at": run.started_at,
+            "completed_at": run.completed_at,
+            "duration_ms": run.duration_ms,
+            "outputs": outputs,
+        }),
+    )
+}
+
+fn hook_event_wire(event: octopus_appserver_proto::HookEventName) -> &'static str {
+    use octopus_appserver_proto::HookEventName as E;
+    match event {
+        E::PreToolUse => "PreToolUse",
+        E::PermissionRequest => "PermissionRequest",
+        E::PostToolUse => "PostToolUse",
+        E::PreCompact => "PreCompact",
+        E::PostCompact => "PostCompact",
+        E::SessionStart => "SessionStart",
+        E::SessionEnd => "SessionEnd",
+        E::UserPromptSubmit => "UserPromptSubmit",
+        E::SubagentStart => "SubagentStart",
+        E::SubagentStop => "SubagentStop",
+        E::Stop => "Stop",
+        E::Interrupt => "Interrupt",
+    }
+}
+
+fn hook_handler_type_wire(handler: octopus_appserver_proto::HookHandlerType) -> &'static str {
+    use octopus_appserver_proto::HookHandlerType as H;
+    match handler {
+        H::Command => "command",
+        H::McpTool => "mcp_tool",
+        H::Prompt => "prompt",
+        H::Agent => "agent",
+    }
+}
+
+fn hook_execution_mode_wire(mode: octopus_appserver_proto::HookExecutionMode) -> &'static str {
+    use octopus_appserver_proto::HookExecutionMode as M;
+    match mode {
+        M::Sync => "sync",
+        M::Async => "async",
+    }
+}
+
+fn hook_scope_wire(scope: octopus_appserver_proto::HookScope) -> &'static str {
+    use octopus_appserver_proto::HookScope as S;
+    match scope {
+        S::Thread => "thread",
+        S::Turn => "turn",
+    }
+}
+
+fn hook_source_wire(source: HookSource) -> &'static str {
+    match source {
+        HookSource::System => "system",
+        HookSource::User => "user",
+        HookSource::Project => "project",
+        HookSource::Mdm => "mdm",
+        HookSource::SessionFlags => "sessionFlags",
+        HookSource::Plugin => "plugin",
+        HookSource::CloudRequirements => "cloudRequirements",
+        HookSource::CloudManagedConfig => "cloudManagedConfig",
+        HookSource::LegacyManagedConfigFile => "legacyManagedConfigFile",
+        HookSource::LegacyManagedConfigMdm => "legacyManagedConfigMdm",
+        HookSource::Unknown => "unknown",
+    }
+}
+
+fn hook_trust_wire(trust: HookTrustStatus) -> &'static str {
+    match trust {
+        HookTrustStatus::Managed => "managed",
+        HookTrustStatus::Trusted => "trusted",
+        HookTrustStatus::Untrusted => "untrusted",
+        HookTrustStatus::Modified => "modified",
+    }
+}
+
+fn hook_catalog_output(entries: &[HooksListEntry]) -> CodexTurnOutput {
+    let mut hooks: Vec<serde_json::Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut warning_entries: Vec<serde_json::Value> = Vec::new();
+    let mut errors: Vec<serde_json::Value> = Vec::new();
+    let mut cwds: BTreeSet<String> = BTreeSet::new();
+    for entry in entries {
+        let cwd = entry.cwd.display().to_string();
+        cwds.insert(cwd.clone());
+        for warning in &entry.warnings {
+            warnings.push(warning.clone());
+            warning_entries.push(serde_json::json!({
+                "cwd": cwd,
+                "message": warning,
+            }));
+        }
+        for error in &entry.errors {
+            errors.push(serde_json::json!({
+                "cwd": cwd,
+                "path": error.path.display().to_string(),
+                "message": error.message,
+            }));
+        }
+        for hook in &entry.hooks {
+            let (handler_type, execution_mode, handler, command) = match &hook.handler {
+                HookHandlerMetadata::Command { command, r#async } => (
+                    "command",
+                    if *r#async { "async" } else { "sync" },
+                    serde_json::json!({
+                        "command": command,
+                        "async": r#async,
+                    }),
+                    Some(command.as_str()),
+                ),
+                HookHandlerMetadata::McpTool { server, tool } => (
+                    "mcp_tool",
+                    "sync",
+                    serde_json::json!({
+                        "server": server,
+                        "tool": tool,
+                    }),
+                    None,
+                ),
+                HookHandlerMetadata::Prompt {} => ("prompt", "sync", serde_json::json!({}), None),
+                HookHandlerMetadata::Agent {} => ("agent", "sync", serde_json::json!({}), None),
+            };
+            hooks.push(serde_json::json!({
+                "cwd": cwd,
+                "key": hook.key,
+                "event": hook_event_wire(hook.event_name),
+                "handler_type": handler_type,
+                "execution_mode": execution_mode,
+                "handler": handler,
+                "matcher": hook.matcher,
+                "command": command,
+                "timeout_sec": hook.timeout_sec,
+                "status_message": hook.status_message,
+                "additional_context_limit": hook.additional_context_limit,
+                "source": hook_source_wire(hook.source),
+                "source_path": serde_json::json!(hook.source_path),
+                "plugin_id": hook.plugin_id,
+                "display_order": hook.display_order,
+                "enabled": hook.enabled,
+                "is_managed": hook.is_managed,
+                "current_hash": hook.current_hash,
+                "trust": hook_trust_wire(hook.trust_status),
+            }));
+        }
+    }
+    CodexTurnOutput::client(
+        HOOK_CATALOG_LABEL,
+        serde_json::json!({
+            "cwds": cwds,
+            "hooks": hooks,
+            "warnings": warnings,
+            "warning_entries": warning_entries,
+            "errors": errors,
+        }),
+    )
+}
+
+fn hook_catalog_error_output(error: &str) -> CodexTurnOutput {
+    CodexTurnOutput::client(
+        HOOK_CATALOG_ERROR_LABEL,
+        serde_json::json!({
+            "operation": "hooks/list",
+            "error": {
+                "message": error,
+            },
+        }),
+    )
+}
+
+fn goal_status_output(goal: &octopus_appserver_proto::ThreadGoal) -> CodexTurnOutput {
+    use octopus_appserver_proto::ThreadGoalStatus as G;
+    CodexTurnOutput::client(
+        GOAL_STATUS_LABEL,
+        serde_json::json!({
+            "objective": goal.objective,
+            "status": match goal.status {
+                G::Active => "active",
+                G::Paused => "paused",
+                G::Blocked => "blocked",
+                G::UsageLimited => "usage_limited",
+                G::BudgetLimited => "budget_limited",
+                G::Complete => "complete",
+            },
+            "token_budget": goal.token_budget,
+            "tokens_used": goal.tokens_used,
+            "time_used_seconds": goal.time_used_seconds,
+        }),
+    )
+}
+
+fn turn_error_output(error: &octopus_appserver_proto::ErrorNotification) -> CodexTurnOutput {
+    let authentication_failed =
+        provider_authentication_failed(&error.error.message, error.error.codex_error_info.as_ref());
+    let mut value = serde_json::json!({
+        "message": error.error.message,
+        "will_retry": error.will_retry && !authentication_failed,
+        "additional_details": error.error.additional_details,
+    });
+    if authentication_failed {
+        value["failure_code"] =
+            serde_json::Value::String(PROVIDER_AUTHENTICATION_FAILURE_CODE.to_string());
+    }
+    CodexTurnOutput::client(TURN_ERROR_LABEL, value)
+}
+
+fn provider_error_is_terminal(error: &octopus_appserver_proto::ErrorNotification) -> bool {
+    !error.will_retry
+        || provider_authentication_failed(
+            &error.error.message,
+            error.error.codex_error_info.as_ref(),
+        )
+}
+
+fn provider_authentication_failed(
+    message: &str,
+    error_info: Option<&octopus_appserver_proto::CodexErrorInfo>,
+) -> bool {
+    matches!(
+        error_info,
+        Some(octopus_appserver_proto::CodexErrorInfo::Unauthorized)
+    ) || message.contains("Your access token could not be refreshed")
+}
+
+fn terminal_turn_may_emit_reply(
+    status: &TurnStatus,
+    error: Option<&octopus_appserver_proto::TurnError>,
+) -> Result<bool, InterfaceDriverError> {
+    match status {
+        TurnStatus::Completed => Ok(true),
+        TurnStatus::Interrupted => Ok(false),
+        TurnStatus::Failed => {
+            let message = error
+                .map(|error| error.message.trim())
+                .filter(|message| !message.is_empty())
+                .unwrap_or("app-server reported no failure message");
+            let details = error
+                .and_then(|error| error.additional_details.as_deref())
+                .map(str::trim)
+                .filter(|details| !details.is_empty())
+                .map(|details| format!(" ({details})"))
+                .unwrap_or_default();
+            Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex turn failed: {message}{details}"
+            )))
+        }
+        TurnStatus::InProgress => Err(InterfaceDriverError::Protocol(
+            "app-server emitted TurnCompleted with status 'inProgress'".to_string(),
+        )),
+    }
+}
+
+fn serialized_client_output<T: serde::Serialize>(
+    label: &'static str,
+    value: &T,
+) -> Result<CodexTurnOutput, InterfaceDriverError> {
+    let value = serde_json::to_value(value).map_err(|error| {
+        InterfaceDriverError::Protocol(format!(
+            "failed to encode app-server product event '{label}': {error}"
+        ))
+    })?;
+    Ok(CodexTurnOutput::client(label, value))
+}
+
+fn proposed_plan_delta_output(
+    delta: &octopus_appserver_proto::PlanDeltaNotification,
+) -> Result<CodexTurnOutput, InterfaceDriverError> {
+    let mut output = serialized_client_output(TURN_PLAN_DELTA_LABEL, delta)?;
+    insert_client_output_field(
+        &mut output,
+        "plan_kind",
+        serde_json::Value::String("proposed_plan".to_string()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "octopus_authority",
+        serde_json::Value::String("informational".to_string()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "model_stream_authority",
+        serde_json::Value::String("delta_non_authoritative".to_string()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "execution_authority",
+        serde_json::Value::String("octopus_checkpoints".to_string()),
+    );
+    Ok(output)
+}
+
+fn insert_client_output_field(output: &mut CodexTurnOutput, key: &str, value: serde_json::Value) {
+    if let Some(object) = output.value.as_object_mut() {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn forbidden_native_effect_item(item: &ThreadItem, web_search: WebSearchMode) -> bool {
+    if matches!(item, ThreadItem::WebSearch { .. }) {
+        return web_search == WebSearchMode::Disabled;
+    }
+    matches!(
+        item,
+        ThreadItem::HookPrompt { .. }
+            | ThreadItem::CommandExecution { .. }
+            | ThreadItem::FileChange { .. }
+            | ThreadItem::McpToolCall { .. }
+            | ThreadItem::CollabAgentToolCall { .. }
+            | ThreadItem::SubAgentActivity { .. }
+            | ThreadItem::ImageView { .. }
+            | ThreadItem::Sleep { .. }
+            | ThreadItem::ImageGeneration { .. }
+    )
+}
+
+fn reject_native_effect_item(
+    item: &ThreadItem,
+    phase: &str,
+    web_search: WebSearchMode,
+) -> Result<(), InterfaceDriverError> {
+    if !forbidden_native_effect_item(item, web_search) {
+        return Ok(());
+    }
+    let value = serde_json::to_value(item).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("native effect item cannot be serialized: {error}"))
+    })?;
+    let kind = value.get("type").and_then(serde_json::Value::as_str).ok_or_else(|| {
+        InterfaceDriverError::Protocol("native effect item has no type".to_string())
+    })?;
+    Err(InterfaceDriverError::FailedClosed(format!(
+        "Codex {phase} native effect '{kind}' (item '{}') outside its declared interface capabilities",
+        item.id(),
+    )))
+}
+
+fn started_item_output(
+    item: ThreadItem,
+    thread_id: &str,
+    turn_id: &str,
+    started_at_ms: i64,
+) -> Option<CodexTurnOutput> {
+    if matches!(
+        &item,
+        ThreadItem::UserMessage { .. }
+            | ThreadItem::HookPrompt { .. }
+            | ThreadItem::AgentMessage { .. }
+            | ThreadItem::ContextCompaction { .. }
+    ) {
+        return None;
+    }
+    let item_id = item.id().to_string();
+    let mut output = rich_item_output(item)?;
+    insert_client_output_field(
+        &mut output,
+        "thread_id",
+        serde_json::Value::String(thread_id.to_string()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "turn_id",
+        serde_json::Value::String(turn_id.to_string()),
+    );
+    insert_client_output_field(&mut output, "item_id", serde_json::Value::String(item_id));
+    insert_client_output_field(
+        &mut output,
+        "started_at_ms",
+        serde_json::Value::Number(started_at_ms.into()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "lifecycle",
+        serde_json::Value::String("started".to_string()),
+    );
+    Some(output)
+}
+
+fn completed_item_output(
+    item: ThreadItem,
+    thread_id: &str,
+    turn_id: &str,
+    completed_at_ms: i64,
+) -> Option<CodexTurnOutput> {
+    let item_id = item.id().to_string();
+    let mut output = rich_item_output(item)?;
+    insert_client_output_field(
+        &mut output,
+        "thread_id",
+        serde_json::Value::String(thread_id.to_string()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "turn_id",
+        serde_json::Value::String(turn_id.to_string()),
+    );
+    insert_client_output_field(&mut output, "item_id", serde_json::Value::String(item_id));
+    insert_client_output_field(
+        &mut output,
+        "completed_at_ms",
+        serde_json::Value::Number(completed_at_ms.into()),
+    );
+    insert_client_output_field(
+        &mut output,
+        "lifecycle",
+        serde_json::Value::String("completed".to_string()),
+    );
+    Some(output)
+}
+
+fn manual_compaction_completed_output(
+    id: String,
+    thread_id: &str,
+    turn_id: &str,
+    completed_at_ms: i64,
+) -> Result<CodexTurnOutput, InterfaceDriverError> {
+    let mut output = completed_item_output(
+        ThreadItem::ContextCompaction { id },
+        thread_id,
+        turn_id,
+        completed_at_ms,
+    )
+    .ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "manual compact produced no context-compaction projection".to_string(),
+        )
+    })?;
+    insert_client_output_field(
+        &mut output,
+        "source",
+        serde_json::Value::String("manual".to_string()),
+    );
+    insert_client_output_field(&mut output, "automatic", serde_json::Value::Bool(false));
+    Ok(output)
+}
+
+fn completed_agent_message_output(
+    item_id: &str,
+    text: &str,
+    phase: Option<MessagePhase>,
+    thread_id: &str,
+    turn_id: &str,
+    completed_at_ms: i64,
+) -> CodexTurnOutput {
+    CodexTurnOutput::client(
+        TURN_AGENT_MESSAGE_LABEL,
+        serde_json::json!({
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "item_id": item_id,
+            "text": text,
+            "phase": phase,
+            "completed_at_ms": completed_at_ms,
+            "lifecycle": "completed",
+        }),
+    )
+}
+
+fn completed_turn_final_message(
+    turn: &octopus_appserver_proto::Turn,
+) -> Result<(&str, &str), InterfaceDriverError> {
+    if turn.items_view == TurnItemsView::NotLoaded {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex completed turn '{}' has no loaded terminal items",
+            turn.id,
+        )));
+    }
+    let mut final_message = None;
+    for item in &turn.items {
+        if let ThreadItem::AgentMessage {
+            id,
+            text,
+            phase: Some(MessagePhase::FinalAnswer),
+        } = item
+        {
+            if final_message.replace((id.as_str(), text.as_str())).is_some() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex completed turn '{}' has multiple explicit final-answer items",
+                    turn.id,
+                )));
+            }
+            if id.trim().is_empty() || text.is_empty() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex completed turn '{}' has a final-answer item without identity or text",
+                    turn.id,
+                )));
+            }
+        }
+    }
+    final_message.ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "Codex completed turn '{}' has no explicit final-answer item",
+            turn.id,
+        ))
+    })
+}
+
+fn rich_item_output(item: ThreadItem) -> Option<CodexTurnOutput> {
+    let wire = serde_json::to_value(&item).ok()?;
+    match item {
+        ThreadItem::Reasoning {
+            id,
+            summary,
+            content,
+        } => Some(CodexTurnOutput::reasoning(id, summary, content)),
+        ThreadItem::UserMessage { .. } => None,
+        ThreadItem::CommandExecution {
+            id,
+            command,
+            cwd,
+            process_id,
+            source,
+            status,
+            command_actions,
+            aggregated_output,
+            exit_code,
+            duration_ms,
+        } => Some(CodexTurnOutput::exec_command(
+            id,
+            command,
+            cwd.to_string(),
+            process_id.filter(|p| !p.is_empty()),
+            command_actions
+                .into_iter()
+                .map(|action| command_action_wire(action.into_core()))
+                .collect(),
+            exec_source_wire(source),
+            exec_status_wire(status),
+            exit_code.map(i64::from),
+            duration_ms,
+            aggregated_output.filter(|o| !o.is_empty()),
+        )),
+        ThreadItem::HookPrompt { .. } => {
+            Some(CodexTurnOutput::client(TURN_HOOK_PROMPT_LABEL, wire))
+        }
+        ThreadItem::FileChange { .. } => {
+            Some(CodexTurnOutput::client(TURN_FILE_CHANGE_LABEL, wire))
+        }
+        ThreadItem::McpToolCall { .. } => {
+            Some(CodexTurnOutput::client(TURN_MCP_TOOL_CALL_LABEL, wire))
+        }
+        ThreadItem::DynamicToolCall { .. } => None,
+        ThreadItem::CollabAgentToolCall { .. } => {
+            Some(CodexTurnOutput::client(TURN_COLLABORATION_LABEL, wire))
+        }
+        ThreadItem::SubAgentActivity { .. } => {
+            Some(CodexTurnOutput::client(TURN_SUBAGENT_ACTIVITY_LABEL, wire))
+        }
+        ThreadItem::Plan { id, text } => Some(CodexTurnOutput::proposed_plan(id, text)),
+        ThreadItem::WebSearch {
+            id, query, action, results,
+        } => Some(web_search_output(id, query, action, results)),
+        ThreadItem::ImageView { .. } => Some(CodexTurnOutput::client(TURN_IMAGE_VIEW_LABEL, wire)),
+        ThreadItem::Sleep { .. } => Some(CodexTurnOutput::client(TURN_SLEEP_LABEL, wire)),
+        ThreadItem::ImageGeneration { .. } => {
+            Some(CodexTurnOutput::client(TURN_IMAGE_GENERATION_LABEL, wire))
+        }
+        ThreadItem::EnteredReviewMode { .. } => {
+            Some(CodexTurnOutput::client(TURN_REVIEW_ENTERED_LABEL, wire))
+        }
+        ThreadItem::ExitedReviewMode { .. } => {
+            Some(CodexTurnOutput::client(TURN_REVIEW_EXITED_LABEL, wire))
+        }
+        ThreadItem::ContextCompaction { .. } => {
+            Some(CodexTurnOutput::client(TURN_CONTEXT_COMPACTION_LABEL, wire))
+        }
+        _ => None,
+    }
+}
+
+fn web_search_output(
+    item_id: String,
+    query: String,
+    action: Option<WebSearchAction>,
+    results: Option<Vec<serde_json::Value>>,
+) -> CodexTurnOutput {
+    let action = action.map(|action| match action {
+        WebSearchAction::Search { query, queries } => serde_json::json!({
+            "kind": "search",
+            "query": query,
+            "queries": queries.unwrap_or_default(),
+        }),
+        WebSearchAction::OpenPage { url } => serde_json::json!({
+            "kind": "open_page",
+            "url": url,
+        }),
+        WebSearchAction::FindInPage { url, pattern } => serde_json::json!({
+            "kind": "find_in_page",
+            "url": url,
+            "pattern": pattern,
+        }),
+        WebSearchAction::Other => serde_json::json!({ "kind": "other" }),
+    });
+    let mut value = serde_json::json!({
+        "item_id": item_id,
+        "query": query,
+        "action": action,
+    });
+    if let Some(results) = results {
+        value["results"] = serde_json::json!(results);
+    }
+    CodexTurnOutput::client(TURN_WEB_SEARCH_LABEL, value)
+}
+
+pub(crate) fn materialize_terminal_turn_error(
+    output_root: &Path,
+    message: &str,
+    continuity: Option<&CodexContinuityState>,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    materialize_terminal_turn_error_payload(
+        output_root,
+        message,
+        continuity,
+        serde_json::Value::Null,
+    )
+}
+
+pub(crate) fn materialize_incompatible_continuity_turn_error(
+    output_root: &Path,
+    source_movement_seq: u64,
+    continuity_error: &str,
+    terminal_failure: &str,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    materialize_terminal_turn_error_payload(
+        output_root,
+        &format!(
+            "Codex cannot continue this task because its saved continuity state is incompatible with the current provider interface. Create a new task. Technical detail: {continuity_error}"
+        ),
+        None,
+        serde_json::json!({
+            "code": PROVIDER_CONTINUITY_INCOMPATIBLE_CODE,
+            "source_movement_seq": source_movement_seq,
+            "continuity_error": continuity_error,
+            "terminal_failure": terminal_failure,
+        }),
+    )
+}
+
+pub(crate) fn materialize_terminal_turn_error_payload(
+    output_root: &Path,
+    message: &str,
+    continuity: Option<&CodexContinuityState>,
+    additional_details: serde_json::Value,
+) -> Result<InterfaceArtifactFile, InterfaceDriverError> {
+    let mut value = serde_json::json!({
+        "label": TURN_ERROR_LABEL,
+        "message": message,
+        "will_retry": false,
+        "additional_details": additional_details,
+    });
+    if provider_authentication_failed(message, None) {
+        value["failure_code"] =
+            serde_json::Value::String(PROVIDER_AUTHENTICATION_FAILURE_CODE.to_string());
+    }
+    if let Some(continuity) = continuity {
+        value[CODEX_CONTINUITY_FIELD] = serde_json::to_value(continuity).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "failed to encode terminal Codex continuity: {error}"
+            ))
+        })?;
+    }
+    let bytes = serde_json::to_vec(&value).map_err(|e| {
+        InterfaceDriverError::Protocol(format!("failed to encode terminal turn.error: {e}"))
+    })?;
+    materialize_codex_emitted_artifact(output_root, TURN_ERROR_LABEL, &bytes)
+}
+
+fn exec_source_wire(source: CommandExecutionSource) -> &'static str {
+    match source {
+        CommandExecutionSource::Agent => "agent",
+        CommandExecutionSource::UserShell => "userShell",
+        CommandExecutionSource::UnifiedExecStartup => "unifiedExecStartup",
+        CommandExecutionSource::UnifiedExecInteraction => "unifiedExecInteraction",
+    }
+}
+
+fn command_action_wire(
+    action: octopus_protocol::parse_command::ParsedCommand,
+) -> serde_json::Value {
+    use octopus_protocol::parse_command::ParsedCommand;
+    match action {
+        ParsedCommand::Read { cmd, name, path } => serde_json::json!({
+            "kind": "read",
+            "cmd": cmd,
+            "name": name,
+            "path": path.display().to_string(),
+        }),
+        ParsedCommand::ListFiles { cmd, path } => serde_json::json!({
+            "kind": "list_files",
+            "cmd": cmd,
+            "path": path,
+        }),
+        ParsedCommand::Search { cmd, query, path } => serde_json::json!({
+            "kind": "search",
+            "cmd": cmd,
+            "query": query,
+            "path": path,
+        }),
+        ParsedCommand::Unknown { cmd } => serde_json::json!({
+            "kind": "unknown",
+            "cmd": cmd,
+        }),
+    }
+}
+
+fn exec_status_wire(status: CommandExecutionStatus) -> &'static str {
+    match status {
+        CommandExecutionStatus::InProgress => "in_progress",
+        CommandExecutionStatus::Completed => "completed",
+        CommandExecutionStatus::Failed => "failed",
+        CommandExecutionStatus::Declined => "declined",
+    }
+}
+
+fn plan_update_output(plan: &TurnPlanUpdatedNotification) -> CodexTurnOutput {
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(explanation) = plan
+        .explanation
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        lines.push(explanation.to_string());
+    }
+    for step in &plan.plan {
+        lines.push(format!("{} {}", plan_step_glyph(step), step.step));
+    }
+    CodexTurnOutput::agent_checklist(plan, lines.join("\n"))
+}
+
+fn model_safety_buffering_output(
+    status: &ModelSafetyBufferingUpdatedNotification,
+) -> Result<CodexTurnOutput, InterfaceDriverError> {
+    let mut output = serialized_client_output(TURN_WARNING_LABEL, status)?;
+    insert_client_output_field(
+        &mut output,
+        "message",
+        serde_json::Value::String(if status.show_buffering_ui {
+            "The model is taking extra time to review this request before responding.".to_string()
+        } else {
+            "The model's additional review period has ended.".to_string()
+        }),
+    );
+    insert_client_output_field(
+        &mut output,
+        "source",
+        serde_json::Value::String("model_safety_buffering".to_string()),
+    );
+    Ok(output)
+}
+
+fn plan_step_glyph(step: &TurnPlanStep) -> &'static str {
+    use octopus_appserver_proto::TurnPlanStepStatus;
+    match step.status {
+        TurnPlanStepStatus::Completed => "[x]",
+        TurnPlanStepStatus::InProgress => "[~]",
+        TurnPlanStepStatus::Pending => "[ ]",
+    }
+}
+
+fn terminal_usage_evidence(
+    usage: &ThreadTokenUsage,
+) -> Result<(ContextWindowUsage, ProviderTokenUsageEvidence), InterfaceDriverError> {
+    let context_window = usage.model_context_window.ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(
+            "app-server token usage omitted the positive model context window required by terminal usage evidence"
+                .to_string(),
+        )
+    })?;
+    let cumulative = token_usage_breakdown_evidence(&usage.total, "cumulative")?;
+    let current_context = token_usage_breakdown_evidence(&usage.last, "current-context")?;
+    let used_tokens = current_context.total_tokens;
+    let context_window = u64::try_from(context_window)
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "app-server token usage carries a non-positive context window".to_string(),
+            )
+        })?;
+    if used_tokens > context_window {
+        return Err(InterfaceDriverError::Protocol(
+            "app-server token usage exceeds its declared model context window".to_string(),
+        ));
+    }
+    Ok((
+        ContextWindowUsage {
+            used_tokens,
+            context_window,
+        },
+        ProviderTokenUsageEvidence {
+            cumulative,
+            current_context,
+            context_window,
+        },
+    ))
+}
+
+fn token_usage_breakdown_evidence(
+    usage: &TokenUsageBreakdown,
+    scope: &str,
+) -> Result<TokenUsageBreakdownEvidence, InterfaceDriverError> {
+    let nonnegative = |field: &str, value: i64| {
+        u64::try_from(value).map_err(|_| {
+            InterfaceDriverError::Protocol(format!(
+                "app-server {scope} token usage carries a negative {field}"
+            ))
+        })
+    };
+    let total_tokens = nonnegative("total_tokens", usage.total_tokens)?;
+    let input_tokens = nonnegative("input_tokens", usage.input_tokens)?;
+    let cached_input_tokens = nonnegative("cached_input_tokens", usage.cached_input_tokens)?;
+    let output_tokens = nonnegative("output_tokens", usage.output_tokens)?;
+    let reasoning_output_tokens =
+        nonnegative("reasoning_output_tokens", usage.reasoning_output_tokens)?;
+    let uncached_input_tokens = input_tokens
+        .checked_sub(cached_input_tokens)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "app-server {scope} token usage reports more cached input than total input"
+            ))
+        })?;
+    Ok(TokenUsageBreakdownEvidence {
+        total_tokens,
+        input_tokens,
+        cached_input_tokens,
+        uncached_input_tokens,
+        output_tokens,
+        reasoning_output_tokens,
+    })
+}
+
+fn resolve_bound_instructions(role: Option<&str>) -> Result<String, InterfaceDriverError> {
+    role.map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "provider worker context is missing: bound_instructions must be resolved from bound \
+                 artifacts; refusing a Rust fallback or codex ambient context"
+                    .into(),
+            )
+        })
+}
+
+const CONTEXT_REFERENCE_LABEL: &str = "context.reference";
+const SESSION_CONTEXT_FIELD: &str = "session_context";
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionContextSnapshot {
+    schema_version: u32,
+    provider_interface: InterfaceId,
+    #[serde(default, rename = "parent")]
+    _parent: Option<ArtifactRef>,
+    #[serde(rename = "artifacts")]
+    _artifacts: Vec<SessionContextArtifact>,
+}
+
+enum BoundSessionContext {
+    Current(Arc<Vec<SessionContextArtifact>>),
+    Foreign,
+}
+
+type BoundSessionContexts = BTreeMap<String, BoundSessionContext>;
+
+struct ContinuityCandidate {
+    current: bool,
+    source_movement_seq: Option<u64>,
+    state: CodexContinuityState,
+}
+
+struct SessionContinuityEvidence {
+    label: String,
+    payload: serde_json::Value,
+    source_movement_seq: Option<u64>,
+    source_key: String,
+}
+
+#[derive(Default)]
+struct AssembledContext {
+    role: Vec<String>,
+    conversation: Vec<String>,
+    static_context_bytes: Vec<u8>,
+    session_context_available: bool,
+}
+
+fn recover_codex_continuity_resolved(
+    artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    bound_session_contexts: &BoundSessionContexts,
+    provider_interface: &InterfaceId,
+    run: &str,
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let mut candidates = Vec::new();
+    let mut session_evidence = Vec::new();
+    let mut sources = BTreeSet::new();
+    let mut current_snapshot_seen = false;
+    for bound in artifact_binding_payloads {
+        let value: serde_json::Value =
+            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "Codex continuity carrier '{}' is not JSON: {error}",
+                    bound.artifact.id
+                ))
+            })?;
+        let session_context = if value.get(SESSION_CONTEXT_FIELD).is_some() {
+            Some(
+                bound_session_contexts
+                    .get(&continuity_source_key(&bound.artifact))
+                    .ok_or_else(|| {
+                        InterfaceDriverError::FailedClosed(format!(
+                            "Codex session carrier '{}' has no resolved snapshot",
+                            bound.artifact.id
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        if matches!(session_context, Some(BoundSessionContext::Foreign)) {
+            continue;
+        }
+        let is_current_snapshot = matches!(session_context, Some(BoundSessionContext::Current(_)));
+        if is_current_snapshot && current_snapshot_seen {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex invocation carries multiple current session snapshots".to_string(),
+            ));
+        }
+        if is_current_snapshot {
+            current_snapshot_seen = true;
+        }
+        if let Some(raw) = value.get(CODEX_CONTINUITY_FIELD) {
+            let label = continuity_carrier_label(&value, bound.artifact.id.as_str())?;
+            if !context_output_labels.contains(label) {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex continuity carrier '{}' is not a descriptor-declared provider context output",
+                    bound.artifact.id
+                )));
+            }
+            if !sources.insert(continuity_source_key(&bound.artifact)) {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex continuity repeats one immutable outer artifact source".to_string(),
+                ));
+            }
+            let state = parse_codex_continuity(raw, provider_interface, run)?;
+            candidates.push(ContinuityCandidate {
+                current: true,
+                source_movement_seq: None,
+                state,
+            });
+        }
+        let Some(BoundSessionContext::Current(session_artifacts)) = session_context else {
+            continue;
+        };
+        let label = continuity_carrier_label(&value, bound.artifact.id.as_str())?;
+        if !session_snapshot_labels.contains(label) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex session context carrier '{}' is not a descriptor-declared snapshot output",
+                bound.artifact.id
+            )));
+        }
+        let historical_len = session_artifacts.len().checked_sub(1).ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex session carrier '{}' resolves no current terminal artifact",
+                bound.artifact.id
+            ))
+        })?;
+        for artifact in &session_artifacts[..historical_len] {
+            if is_foreign_provider_payload(&artifact.payload, provider_interface)? {
+                continue;
+            }
+            let source_key = continuity_source_key(&artifact.source_artifact);
+            if let Some(raw) = artifact.payload.get(CODEX_CONTINUITY_FIELD) {
+                if !context_output_labels.contains(&artifact.label) {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex historical continuity label '{}' is not a descriptor-declared provider context output",
+                        artifact.label
+                    )));
+                }
+                if !sources.insert(source_key.clone()) {
+                    return Err(InterfaceDriverError::FailedClosed(
+                        "Codex continuity repeats one immutable historical artifact source"
+                            .to_string(),
+                    ));
+                }
+                let source_movement_seq = artifact.source_movement_seq.ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(
+                        "Codex historical continuity has no source movement sequence".to_string(),
+                    )
+                })?;
+                candidates.push(ContinuityCandidate {
+                    current: false,
+                    source_movement_seq: Some(source_movement_seq),
+                    state: parse_codex_continuity(raw, provider_interface, run)?,
+                });
+            }
+            session_evidence.push(SessionContinuityEvidence {
+                label: artifact.label.clone(),
+                payload: artifact.payload.clone(),
+                source_movement_seq: artifact.source_movement_seq,
+                source_key,
+            });
+        }
+    }
+    candidates.sort_by_key(|candidate| candidate.state.context_generation);
+    if candidates
+        .windows(2)
+        .any(|pair| pair[0].state.context_generation == pair[1].state.context_generation)
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex continuity has an ambiguous context generation".to_string(),
+        ));
+    }
+    if let Some(outer) = candidates.iter().rev().find(|candidate| candidate.current) {
+        if candidates.last().map(|candidate| &candidate.state) != Some(&outer.state) {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex current continuity is stale against its embedded history".to_string(),
+            ));
+        }
+        let pending = outer
+            .state
+            .pending
+            .as_ref()
+            .or(outer.state.interrupted_pending.as_ref());
+        let source_movement_seq = pending.and_then(|pending| {
+            candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate.state.pending.as_ref() == Some(pending)
+                        || candidate.state.interrupted_pending.as_ref() == Some(pending)
+                })
+                .filter_map(|candidate| candidate.source_movement_seq)
+                .min()
+        });
+        return close_recovered_pending_from_session(
+            ContinuityCandidate {
+                current: true,
+                source_movement_seq,
+                state: outer.state.clone(),
+            },
+            &session_evidence,
+        )
+        .map(Some);
+    }
+    let Some(mut candidate) = candidates.pop() else {
+        return Ok(None);
+    };
+    if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
+        candidate.source_movement_seq = candidates.iter()
+            .filter(|prior| prior.state.pending.as_ref() == Some(pending) || prior.state.interrupted_pending.as_ref() == Some(pending))
+            .filter_map(|prior| prior.source_movement_seq)
+            .chain(candidate.source_movement_seq)
+            .min();
+    }
+    close_recovered_pending_from_session(candidate, &session_evidence).map(Some)
+}
+
+fn recover_codex_continuity_from_current_session(
+    session_artifacts: &[SessionContextArtifact],
+    source_artifact: &ArtifactRef,
+    provider_interface: &InterfaceId,
+    run: &str,
+    context_output_labels: &BTreeSet<String>,
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let mut candidates = Vec::new();
+    let mut session_evidence = Vec::new();
+    let mut sources = BTreeSet::new();
+    for artifact in session_artifacts {
+        if artifact.source_artifact == *source_artifact {
+            continue;
+        }
+        if is_foreign_provider_payload(&artifact.payload, provider_interface)? {
+            continue;
+        }
+        let source_key = continuity_source_key(&artifact.source_artifact);
+        if !sources.insert(source_key.clone()) {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex current session repeats one immutable artifact source".to_string(),
+            ));
+        }
+        if let Some(raw) = artifact.payload.get(CODEX_CONTINUITY_FIELD) {
+            if !context_output_labels.contains(&artifact.label) {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex current session continuity label '{}' is not a descriptor-declared provider context output",
+                    artifact.label
+                )));
+            }
+            let source_movement_seq = artifact.source_movement_seq.ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "Codex current session continuity '{}' has no source movement sequence",
+                    source_key
+                ))
+            })?;
+            candidates.push(ContinuityCandidate {
+                current: true,
+                source_movement_seq: Some(source_movement_seq),
+                state: parse_codex_continuity(raw, provider_interface, run)?,
+            });
+        }
+        session_evidence.push(SessionContinuityEvidence {
+            label: artifact.label.clone(),
+            payload: artifact.payload.clone(),
+            source_movement_seq: artifact.source_movement_seq,
+            source_key,
+        });
+    }
+    candidates.sort_by_key(|candidate| candidate.state.context_generation);
+    if candidates
+        .windows(2)
+        .any(|pair| pair[0].state.context_generation == pair[1].state.context_generation)
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex current session has an ambiguous context generation".to_string(),
+        ));
+    }
+    let Some(mut candidate) = candidates.pop() else {
+        return Ok(None);
+    };
+    if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
+        candidate.source_movement_seq = candidates.iter()
+            .filter(|prior| prior.state.pending.as_ref() == Some(pending) || prior.state.interrupted_pending.as_ref() == Some(pending))
+            .filter_map(|prior| prior.source_movement_seq)
+            .chain(candidate.source_movement_seq)
+            .min();
+    }
+    close_recovered_pending_from_session(candidate, &session_evidence).map(Some)
+}
+
+pub(crate) fn reconcile_operator_session_continuity(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    bound: Option<CodexContinuityState>,
+    session: &[SessionContextArtifact],
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    if runtime.interface != descriptor.id {
+        return Err(InterfaceDriverError::FailedClosed(
+            "operator continuity crossed provider invocation coordinates".into(),
+        ));
+    }
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed("operator continuity has no provider config".into())
+    })?;
+    let labels = private_config_string_set(&config.private_config, "context_output_labels")?;
+    reconcile_current_session_continuity(bound, recover_codex_continuity_from_current_session(
+        session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels,
+    )?)
+}
+
+pub(crate) fn recovered_failed_result_source(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    bound: &CodexContinuityState,
+    session: &[SessionContextArtifact],
+    failed_sources: &[u64],
+) -> Result<Option<u64>, InterfaceDriverError> {
+    let Some(pending) = bound.pending.as_ref() else { return Ok(None); };
+    let mut matched = None;
+    for entry in session {
+        let Some(sequence) = entry.source_movement_seq.filter(|seq| failed_sources.contains(seq)) else { continue; };
+        let evidence = SessionContinuityEvidence {
+            label: entry.label.clone(), payload: entry.payload.clone(),
+            source_movement_seq: Some(sequence), source_key: continuity_source_key(&entry.source_artifact),
+        };
+        if session_evidence_targets_pending(&evidence, pending)? && matched.replace(sequence).is_some() {
+            return Err(InterfaceDriverError::FailedClosed("failed provider context contains multiple results for one pending request".into()));
+        }
+    }
+    if matched.is_some() {
+        let settled = reconcile_operator_session_continuity(descriptor, input, Some(bound.clone()), session)?;
+        if !codex_continuity_successor_is_settled(Some(bound), settled.as_ref()).map_err(InterfaceDriverError::FailedClosed)? {
+            return Err(InterfaceDriverError::FailedClosed("failed provider source did not settle its exact pending result".into()));
+        }
+    }
+    Ok(matched)
+}
+
+fn resumed_model_context(
+    session: &[SessionContextArtifact],
+    input: &ArtifactRef,
+    resumed: &CodexContinuityState,
+    projection: ModelResultProjection,
+) -> Result<Option<String>, InterfaceDriverError> {
+    let mut start = 0;
+    for (position, entry) in session.iter().enumerate().rev() {
+        if !matches!(entry.label.as_str(), TURN_AGENT_MESSAGE_LABEL | INTERFACE_ARTIFACT_OUTPUT_LABEL | TOOL_CALL_LABEL)
+            || is_foreign_provider_payload(&entry.payload, &resumed.provider_interface)?
+        {
+            continue;
+        }
+        let Some(raw) = entry.payload.get(CODEX_CONTINUITY_FIELD) else { continue; };
+        let state = parse_codex_continuity(raw, &resumed.provider_interface, &resumed.run)?;
+        if state.thread_id == resumed.thread_id {
+            start = position + 1;
+            break;
+        }
+    }
+    let mut assembled = AssembledContext::default();
+    for entry in session[start..].iter().filter(|entry| &entry.source_artifact != input) {
+        append_assembled_context(&mut assembled, Some(&entry.label), &entry.payload,
+            entry.source_artifact.id.as_str(), &entry.source_artifact, projection)?;
+    }
+    Ok((!assembled.conversation.is_empty()).then(|| assembled.conversation.join("\n\n")))
+}
+
+fn reconcile_current_session_continuity(
+    bound: Option<CodexContinuityState>,
+    current: Option<CodexContinuityState>,
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let (bound, current) = match (bound, current) {
+        (Some(bound), Some(current)) => (bound, current),
+        (Some(bound), None) => return Ok(Some(bound)),
+        (None, Some(current)) => return Ok(Some(current)),
+        (None, None) => return Ok(None),
+    };
+    if current.provider_interface != bound.provider_interface
+        || current.run != bound.run
+        || current.context_generation < bound.context_generation
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex current session continuity regressed or crossed invocation coordinates"
+                .to_string(),
+        ));
+    }
+    if current.context_generation == bound.context_generation {
+        let clears_active = bound.pending.is_some()
+            && current.pending.is_none()
+            && bound.interrupted_pending == current.interrupted_pending;
+        let clears_interrupted = bound.interrupted_pending.is_some()
+            && current.interrupted_pending.is_none()
+            && bound.pending == current.pending;
+        if current != bound && !clears_active && !clears_interrupted {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex current session continuity conflicts at one context generation".to_string(),
+            ));
+        }
+        return Ok(Some(current));
+    }
+    if codex_continuity_waits_for_result(&bound)
+        && (current.thread_id != bound.thread_id
+            || current.thread_shape_fingerprint != bound.thread_shape_fingerprint
+            || current.static_context_fingerprint != bound.static_context_fingerprint)
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex current session detached a pending result from its exact private thread"
+                .to_string(),
+        ));
+    }
+    Ok(Some(current))
+}
+
+pub(crate) fn terminal_failure_continuity(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    current_session_context: &[SessionContextArtifact],
+    expected_run: &octopus_descriptors::RunId,
+    current_run_record: &[u8],
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    if &runtime.run != expected_run || runtime.interface != descriptor.id {
+        return Err(InterfaceDriverError::FailedClosed(
+            "terminal Codex settlement crossed provider invocation coordinates".to_string(),
+        ));
+    }
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed(format!(
+            "provider interface '{}' has no interface_driver_config",
+            descriptor.id.as_str()
+        ))
+    })?;
+    let context_output_labels =
+        private_config_string_set(&config.private_config, "context_output_labels")?;
+    let Some(mut continuity) = recover_codex_continuity_from_current_session(
+        current_session_context,
+        &input.artifact,
+        &runtime.interface,
+        runtime.run.as_str(),
+        &context_output_labels,
+    )?
+    else {
+        return Ok(None);
+    };
+    if let Some(pending) = continuity.pending.as_ref() {
+        let manifest = input.read_artifact_manifest()?;
+        let payload = input.read_artifact_payload()?;
+        if let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&payload) {
+            let evidence = SessionContinuityEvidence {
+                label: manifest.label,
+                payload,
+                source_movement_seq: None,
+                source_key: continuity_source_key(&input.artifact),
+            };
+            if session_evidence_targets_pending(&evidence, pending)? {
+                continuity.pending = None;
+            }
+        }
+    }
+    let record: serde_json::Value = serde_json::from_slice(current_run_record)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if record.get("id").and_then(serde_json::Value::as_str) != Some(expected_run.as_str()) {
+        return Err(InterfaceDriverError::FailedClosed(
+            "terminal Codex settlement lost its current run record".into(),
+        ));
+    }
+    let generation = read_codex_context_generation(&record, &runtime.interface)?;
+    if continuity.context_generation > generation {
+        return Err(InterfaceDriverError::FailedClosed(
+            "terminal Codex continuity is ahead of its authored context".into(),
+        ));
+    }
+    continuity.context_generation =
+        generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "terminal Codex continuity context generation overflowed".to_string(),
+                )
+            })?;
+    Ok(Some(continuity))
+}
+
+fn close_recovered_pending_from_session(
+    candidate: ContinuityCandidate,
+    session_evidence: &[SessionContinuityEvidence],
+) -> Result<CodexContinuityState, InterfaceDriverError> {
+    let ContinuityCandidate {
+        source_movement_seq,
+        mut state,
+        ..
+    } = candidate;
+    let (pending, interrupted) = match (state.pending.as_ref(), state.interrupted_pending.as_ref())
+    {
+        (Some(pending), None) => (pending, false),
+        (None, Some(pending)) => (pending, true),
+        (None, None) => return Ok(state),
+        (Some(_), Some(_)) => {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex recovered continuity carries active and interrupted pending requests"
+                    .to_string(),
+            ));
+        }
+    };
+    let Some(pending_seq) = source_movement_seq else {
+        return Ok(state);
+    };
+    let mut closing_source = None;
+    for evidence in session_evidence {
+        match evidence.source_movement_seq {
+            Some(evidence_seq) if evidence_seq <= pending_seq => continue,
+            Some(_) => {}
+            None => {
+                if session_evidence_targets_pending(evidence, pending)? {
+                    return Err(InterfaceDriverError::FailedClosed(format!(
+                        "Codex pending result '{}' has no source movement sequence",
+                        evidence.source_key
+                    )));
+                }
+                continue;
+            }
+        }
+        if !session_evidence_targets_pending(evidence, pending)? {
+            continue;
+        }
+        if closing_source
+            .replace(evidence.source_key.as_str())
+            .is_some()
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "Codex session context contains multiple results for one pending request"
+                    .to_string(),
+            ));
+        }
+    }
+    if closing_source.is_some() {
+        state.tool_operator_request = None;
+        if interrupted {
+            state.interrupted_pending = None;
+        } else {
+            state.pending = None;
+        }
+    }
+    Ok(state)
+}
+
+fn session_evidence_targets_pending(
+    evidence: &SessionContinuityEvidence,
+    pending: &CodexPendingContinuity,
+) -> Result<bool, InterfaceDriverError> {
+    match pending {
+        CodexPendingContinuity::DynamicTool { call_id, tool, .. } => {
+            if evidence
+                .payload
+                .get("correlation_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(call_id)
+            {
+                return Ok(false);
+            }
+            let result = decode_tool_result_artifact(&evidence.payload)?.ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(format!(
+                    "Codex session artifact '{}' reuses pending correlation '{}' without a strict tool-result envelope",
+                    evidence.source_key, call_id
+                ))
+            })?;
+            validate_recovered_tool_result(&result, pending)?;
+            if ToolOperatorRequest::from_result(&result)?.is_some() {
+                return Ok(false);
+            }
+            if evidence.label != result.label {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "Codex session tool-result source label '{}' conflicts with payload label '{}'",
+                    evidence.label, result.label
+                )));
+            }
+            if result.tool != *tool {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "Codex session tool result conflicts with its durable pending tool".to_string(),
+                ));
+            }
+            if let Some(operation) = native_pending_operation(pending)? {
+                return operation.advance(&evidence.payload)
+                    .map(|step| matches!(step, NativeStep::Complete { .. }))
+                    .map_err(InterfaceDriverError::FailedClosed);
+            }
+            Ok(true)
+        }
+        CodexPendingContinuity::InterfaceOperation {
+            call_id,
+            operation,
+            output_label,
+            ..
+        } => {
+            if evidence
+                .payload
+                .get("correlation_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(call_id)
+            {
+                return Ok(false);
+            }
+            validate_recovered_interface_operation_result(
+                &evidence.label,
+                &evidence.payload,
+                call_id,
+                operation,
+                output_label,
+            )?;
+            Ok(true)
+        }
+        CodexPendingContinuity::Operator {
+            request_key,
+            method,
+            ..
+        } => {
+            let Some(response) = decode_operator_response_artifact(&evidence.payload)? else {
+                return Ok(false);
+            };
+            let request_id = response.request_id()?;
+            if format!("operator:{request_id}") != *request_key {
+                return Ok(false);
+            }
+            operator_response_value(method, &response)?;
+            Ok(true)
+        }
+    }
+}
+
+fn continuity_carrier_label<'a>(
+    value: &'a serde_json::Value,
+    source: &str,
+) -> Result<&'a str, InterfaceDriverError> {
+    value
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|label| !label.trim().is_empty() && label.trim() == *label)
+        .ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex continuity carrier '{source}' has no exact artifact label"
+            ))
+        })
+}
+
+fn continuity_source_key(artifact: &ArtifactRef) -> String {
+    format!("{}:{}", artifact.id, artifact.content.to_hex())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn parse_codex_continuity(
+    value: &serde_json::Value,
+    provider_interface: &InterfaceId,
+    run: &str,
+) -> Result<CodexContinuityState, InterfaceDriverError> {
+    let state: CodexContinuityState = serde_json::from_value(value.clone()).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("{CODEX_CONTINUITY_MALFORMED_PREFIX}{error}"))
+    })?;
+    if state.schema_version != 1
+        || state.provider_interface != *provider_interface
+        || state.run != run
+        || state.thread_id.trim().is_empty()
+        || state.thread_id.trim() != state.thread_id
+        || !is_sha256_hex(&state.thread_shape_fingerprint)
+        || !is_sha256_hex(&state.static_context_fingerprint)
+    {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex continuity state has forged, cross-provider, or incomplete coordinates"
+                .to_string(),
+        ));
+    }
+    if state.pending.is_some() && state.interrupted_pending.is_some() {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex continuity cannot carry active and interrupted pending requests together"
+                .to_string(),
+        ));
+    }
+    validate_pending_continuity_coordinates(state.pending.as_ref(), "pending")?;
+    validate_pending_continuity_coordinates(
+        state.interrupted_pending.as_ref(),
+        "interrupted pending",
+    )?;
+    for pending in state.pending.iter().chain(state.interrupted_pending.iter()) {
+        if let Some(operation) = native_pending_operation(pending)? {
+            if operation.source_run != state.run
+                || [&operation.call_id, &operation.operation_name].iter().any(|id| id.trim().is_empty() || id.trim() != id.as_str())
+            {
+                return Err(InterfaceDriverError::FailedClosed("native operation continuity crossed its source run or lost its call identity".into()));
+            }
+        }
+    }
+    if let Some(request) = &state.tool_operator_request {
+        octopus_provider_run_authoring::validate_payload_artifact_selection(&request.payload_artifact_bindings).map_err(InterfaceDriverError::FailedClosed)?;
+        request.request.validate()?;
+        request.request.validate_pending(&state)?;
+    }
+    Ok(state)
+}
+
+pub(crate) fn codex_continuity_incompatibility(error: &InterfaceDriverError) -> Option<&str> {
+    match error {
+        InterfaceDriverError::Protocol(message) => {
+            message.strip_prefix(CODEX_CONTINUITY_MALFORMED_PREFIX)
+        }
+        InterfaceDriverError::Transport(_) | InterfaceDriverError::FailedClosed(_) => None,
+    }
+}
+
+fn validate_pending_continuity_coordinates(
+    pending: Option<&CodexPendingContinuity>,
+    lifecycle: &str,
+) -> Result<(), InterfaceDriverError> {
+    match pending {
+        Some(CodexPendingContinuity::DynamicTool {
+            native_operation: _,
+            turn_id,
+            call_id,
+            tool,
+        }) if [turn_id, call_id, tool]
+            .into_iter()
+            .any(|value| value.trim().is_empty() || value.trim() != value) =>
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex continuity has malformed {lifecycle} dynamic-tool coordinates"
+            )));
+        }
+        Some(CodexPendingContinuity::InterfaceOperation {
+            turn_id,
+            call_id,
+            operation,
+            interface,
+            output_label,
+        }) if [
+            turn_id.as_str(),
+            call_id.as_str(),
+            operation.as_str(),
+            interface.as_str(),
+            output_label.as_str(),
+        ]
+        .into_iter()
+        .any(|value| value.trim().is_empty() || value.trim() != value) =>
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex continuity has malformed {lifecycle} interface-operation coordinates"
+            )));
+        }
+        Some(CodexPendingContinuity::Operator {
+            turn_id,
+            request_key,
+            method,
+        }) if turn_id.trim().is_empty()
+            || turn_id.trim() != turn_id
+            || method.trim().is_empty()
+            || method.trim() != method
+            || request_key
+                .strip_prefix("operator:")
+                .is_none_or(|key| key.trim().is_empty() || key.trim() != key) =>
+        {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex continuity has malformed {lifecycle} operator coordinates"
+            )));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn append_static_context_source(bytes: &mut Vec<u8>, bound: &ArtifactBindingPayload) {
+    let id = bound.artifact.id.as_str().as_bytes();
+    bytes.extend_from_slice(&(id.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(id);
+    bytes.extend_from_slice(&(bound.as_bytes().len() as u64).to_le_bytes());
+    bytes.extend_from_slice(bound.as_bytes());
+}
+
+fn is_foreign_provider_payload(
+    value: &serde_json::Value,
+    provider_interface: &InterfaceId,
+) -> Result<bool, InterfaceDriverError> {
+    let continuity_owner = value.get(CODEX_CONTINUITY_FIELD).map(|raw| {
+        raw.get("provider_interface").and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty() && id.trim() == *id)
+            .map(InterfaceId::new)
+            .ok_or_else(|| InterfaceDriverError::Protocol("Codex continuity has no exact provider owner".into()))
+    }).transpose()?;
+    let snapshot_owner = value.get(SESSION_CONTEXT_FIELD).map(|raw| {
+        let snapshot: SessionContextSnapshot = serde_json::from_value(raw.clone())
+            .map_err(|error| InterfaceDriverError::Protocol(format!("nested provider snapshot is malformed: {error}")))?;
+        if snapshot.schema_version != 3 {
+            return Err(InterfaceDriverError::FailedClosed("nested provider snapshot has an unsupported schema".into()));
+        }
+        Ok(snapshot.provider_interface)
+    }).transpose()?;
+    if let (Some(left), Some(right)) = (&continuity_owner, &snapshot_owner) {
+        if left != right {
+            return Err(InterfaceDriverError::FailedClosed("provider artifact has conflicting private-state owners".into()));
+        }
+    }
+    Ok(continuity_owner.or(snapshot_owner).is_some_and(|owner| owner != *provider_interface))
+}
+
+fn visible_foreign_provider_payload(value: &serde_json::Value) -> serde_json::Value {
+    let mut visible = value.clone();
+    if let Some(object) = visible.as_object_mut() {
+        object.remove(SESSION_CONTEXT_FIELD);
+        object.remove(CODEX_CONTINUITY_FIELD);
+        object.remove(CONTEXT_WINDOW_USAGE_FIELD);
+    }
+    visible
+}
+
+fn assemble_current_context(
+    payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    bound: &BoundSessionContexts,
+    provider: &InterfaceId,
+    snapshot_labels: &BTreeSet<String>,
+    current: &[SessionContextArtifact],
+    input: &ArtifactRef,
+    projection: ModelResultProjection,
+) -> Result<AssembledContext, InterfaceDriverError> {
+    let sources = current.iter().map(|entry| continuity_source_key(&entry.source_artifact)).collect::<BTreeSet<_>>();
+    let statics = payloads.iter().filter(|payload| {
+        let key = continuity_source_key(&payload.artifact);
+        !sources.contains(&key) && (current.is_empty() || !matches!(bound.get(&key), Some(BoundSessionContext::Current(_))))
+    }).cloned().collect::<Vec<_>>();
+    let mut assembled = assemble_context_resolved(&statics, bound, provider, snapshot_labels, projection)?;
+    for entry in current.iter().filter(|entry| &entry.source_artifact != input) {
+        append_assembled_context(&mut assembled, Some(&entry.label), &entry.payload,
+            entry.source_artifact.id.as_str(), &entry.source_artifact, projection)?;
+        assembled.session_context_available = true;
+    }
+    Ok(assembled)
+}
+
+fn assemble_context_resolved(
+    artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    bound_session_contexts: &BoundSessionContexts,
+    provider_interface: &InterfaceId,
+    session_snapshot_labels: &BTreeSet<String>,
+    projection: ModelResultProjection,
+) -> Result<AssembledContext, InterfaceDriverError> {
+    let mut assembled = AssembledContext::default();
+    let mut session_sources = BTreeSet::new();
+    for bound in artifact_binding_payloads {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bound.as_bytes()).map_err(|e| {
+                InterfaceDriverError::Protocol(format!(
+                    "artifact-turn bound artifact {} is not JSON: {e}",
+                    bound.artifact.id.as_str()
+                ))
+            })?;
+        if value.get(SESSION_CONTEXT_FIELD).is_some() {
+            let label = continuity_carrier_label(&value, bound.artifact.id.as_str())?;
+            if !session_snapshot_labels.contains(label) {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "artifact-turn session context {} is not on a descriptor-declared snapshot output",
+                    bound.artifact.id.as_str()
+                )));
+            }
+            let context = bound_session_contexts
+                .get(&continuity_source_key(&bound.artifact))
+                .ok_or_else(|| {
+                    InterfaceDriverError::FailedClosed(format!(
+                        "artifact-turn session context {} has no resolved snapshot",
+                        bound.artifact.id.as_str()
+                    ))
+                })?;
+            if matches!(context, BoundSessionContext::Foreign) {
+                let label = label.to_string();
+                let object = value.as_object_mut().ok_or_else(|| {
+                    InterfaceDriverError::Protocol(format!(
+                        "artifact-turn foreign terminal seed {} is not an object",
+                        bound.artifact.id.as_str()
+                    ))
+                })?;
+                object.remove(SESSION_CONTEXT_FIELD);
+                object.remove(CODEX_CONTINUITY_FIELD);
+                object.remove(CONTEXT_WINDOW_USAGE_FIELD);
+                let source_key = format!(
+                    "{}:{}:{}",
+                    bound.artifact.id.as_str(),
+                    bound.artifact.content.to_hex(),
+                    label
+                );
+                if !session_sources.insert(source_key) {
+                    return Err(InterfaceDriverError::Protocol(format!(
+                        "artifact-turn foreign terminal seed {} repeats its immutable source",
+                        bound.artifact.id.as_str()
+                    )));
+                }
+                append_assembled_context(
+                    &mut assembled,
+                    Some(&label),
+                    &value,
+                    &format!("{} foreign terminal seed", bound.artifact.id.as_str()),
+                    &bound.artifact,
+                    projection,
+                )?;
+                continue;
+            }
+            let BoundSessionContext::Current(snapshot_artifacts) = context else {
+                unreachable!();
+            };
+            assembled.session_context_available = true;
+            if snapshot_artifacts.is_empty() {
+                return Err(InterfaceDriverError::FailedClosed(format!(
+                    "artifact-turn session context {} resolves no current terminal artifact",
+                    bound.artifact.id.as_str()
+                )));
+            }
+            for (index, artifact) in snapshot_artifacts.iter().enumerate() {
+                if artifact.label.is_empty() || artifact.label.trim() != artifact.label {
+                    return Err(InterfaceDriverError::Protocol(format!(
+                        "artifact-turn session context {} artifact[{index}] has an invalid label",
+                        bound.artifact.id.as_str()
+                    )));
+                }
+                let source_key = format!(
+                    "{}:{}:{}",
+                    artifact.source_artifact.id.as_str(),
+                    artifact.source_artifact.content.to_hex(),
+                    artifact.label
+                );
+                if !session_sources.insert(source_key) {
+                    return Err(InterfaceDriverError::Protocol(format!(
+                        "artifact-turn session context {} repeats an artifact source across the invocation at index {index}",
+                        bound.artifact.id.as_str()
+                    )));
+                }
+                let foreign = is_foreign_provider_payload(&artifact.payload, provider_interface)?;
+                if !foreign && artifact.payload.get(SESSION_CONTEXT_FIELD).is_some() {
+                    return Err(InterfaceDriverError::Protocol(format!(
+                        "artifact-turn session context {} artifact[{index}] nests reserved session context",
+                        bound.artifact.id.as_str()
+                    )));
+                }
+                append_assembled_context(
+                    &mut assembled,
+                    Some(&artifact.label),
+                    &if foreign { visible_foreign_provider_payload(&artifact.payload) } else { artifact.payload.clone() },
+                    &format!("{} session artifact {index}", bound.artifact.id.as_str()),
+                    &artifact.source_artifact,
+                    projection,
+                )?;
+            }
+        } else {
+            if value.get("label").and_then(serde_json::Value::as_str) == Some(CONTEXT_REFERENCE_LABEL) {
+                append_static_context_source(&mut assembled.static_context_bytes, bound);
+            }
+            append_assembled_context(
+                &mut assembled,
+                value.get("label").and_then(serde_json::Value::as_str),
+                &value,
+                bound.artifact.id.as_str(),
+                &bound.artifact,
+                projection,
+            )?;
+        }
+    }
+    Ok(assembled)
+}
+
+#[cfg(test)]
+fn test_bound_session_contexts(
+    artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    provider_interface: &InterfaceId,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<BoundSessionContexts, InterfaceDriverError> {
+    let mut contexts = BTreeMap::new();
+    let mut current_seen = false;
+    for bound in artifact_binding_payloads {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "test session carrier '{}' is not JSON: {error}",
+                    bound.artifact.id
+                ))
+            })?;
+        let Some(raw) = value.get(SESSION_CONTEXT_FIELD).cloned() else {
+            continue;
+        };
+        let label = continuity_carrier_label(&value, bound.artifact.id.as_str())?.to_string();
+        if !session_snapshot_labels.contains(&label) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "test session carrier '{}' is not descriptor-declared",
+                bound.artifact.id
+            )));
+        }
+        let snapshot: SessionContextSnapshot = serde_json::from_value(raw).map_err(|error| {
+            InterfaceDriverError::Protocol(format!(
+                "test session carrier '{}' is malformed: {error}",
+                bound.artifact.id
+            ))
+        })?;
+        if snapshot.schema_version != 3 || snapshot._parent.is_some() {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "test session carrier '{}' requires unsupported snapshot coordinates",
+                bound.artifact.id
+            )));
+        }
+        let key = continuity_source_key(&bound.artifact);
+        if snapshot.provider_interface != *provider_interface {
+            contexts.insert(key, BoundSessionContext::Foreign);
+            continue;
+        }
+        if current_seen {
+            return Err(InterfaceDriverError::FailedClosed(
+                "test invocation carries multiple current session snapshots".to_string(),
+            ));
+        }
+        current_seen = true;
+        value
+            .as_object_mut()
+            .ok_or_else(|| {
+                InterfaceDriverError::Protocol(format!(
+                    "test session carrier '{}' is not an object",
+                    bound.artifact.id
+                ))
+            })?
+            .remove(SESSION_CONTEXT_FIELD);
+        let mut artifacts = snapshot._artifacts;
+        artifacts.push(SessionContextArtifact {
+            label,
+            payload: value,
+            source_artifact: bound.artifact.clone(),
+            source_movement_seq: None,
+        });
+        contexts.insert(key, BoundSessionContext::Current(Arc::new(artifacts)));
+    }
+    Ok(contexts)
+}
+
+#[cfg(test)]
+fn recover_codex_continuity(
+    artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    provider_interface: &InterfaceId,
+    run: &str,
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let contexts = test_bound_session_contexts(
+        artifact_binding_payloads,
+        provider_interface,
+        session_snapshot_labels,
+    )?;
+    recover_codex_continuity_resolved(
+        artifact_binding_payloads,
+        &contexts,
+        provider_interface,
+        run,
+        context_output_labels,
+        session_snapshot_labels,
+    )
+}
+
+#[cfg(test)]
+fn assemble_context(
+    artifact_binding_payloads: &[octopus_interfaces::ArtifactBindingPayload],
+    interface_id: &str,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<AssembledContext, InterfaceDriverError> {
+    let provider_interface = InterfaceId::new(interface_id);
+    let contexts = test_bound_session_contexts(
+        artifact_binding_payloads,
+        &provider_interface,
+        session_snapshot_labels,
+    )?;
+    assemble_context_resolved(
+        artifact_binding_payloads,
+        &contexts,
+        &provider_interface,
+        session_snapshot_labels,
+        ModelResultProjection { max_tokens: 10_000 },
+    )
+}
+
+fn append_assembled_context(
+    assembled: &mut AssembledContext,
+    label: Option<&str>,
+    value: &serde_json::Value,
+    source: &str,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
+) -> Result<(), InterfaceDriverError> {
+    let label = label.map(str::trim).filter(|label| !label.is_empty());
+    let text = value.get("text").and_then(serde_json::Value::as_str);
+    if label == Some(CONTEXT_REFERENCE_LABEL) {
+        let text = text.ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "artifact-turn role artifact {source} (label context.reference) has no string 'text' field"
+            ))
+        })?;
+        assembled.role.push(text.to_string());
+        return Ok(());
+    }
+    let speaker = match label {
+        Some(OPERATOR_MESSAGE_LABEL) => "User",
+        Some(TURN_AGENT_MESSAGE_LABEL | INTERFACE_ARTIFACT_OUTPUT_LABEL) => "Assistant",
+        Some(TURN_PLAN_UPDATE_LABEL) => "Assistant plan",
+        _ => "Artifact",
+    };
+    if label == Some(TURN_REASONING_LABEL) {
+        let summary: Vec<String> = serde_json::from_value(value.get("summary").cloned().unwrap_or(serde_json::Value::Null))
+            .map_err(|error| InterfaceDriverError::Protocol(format!("reasoning summary in {source} is malformed: {error}")))?;
+        if !summary.is_empty() {
+            assembled.conversation.push(format!("Assistant reasoning summary\n{}", summary.join("\n")));
+        }
+    } else if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
+        assembled.conversation.push(format!("{speaker}\n{text}"));
+    } else if let Some(prompt) = value
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|prompt| !prompt.trim().is_empty())
+    {
+        assembled.conversation.push(format!("{speaker}\n{prompt}"));
+    } else {
+        let mut visible = value.clone();
+        if let Some(object) = visible.as_object_mut() {
+            for field in [CODEX_CONTINUITY_FIELD, SESSION_CONTEXT_FIELD, CONTEXT_WINDOW_USAGE_FIELD,
+                "provider_token_usage", "thread_id", "turn_id", "item_id", "completed_at_ms", "lifecycle"] {
+                object.remove(field);
+            }
+        }
+        let payload = model_result_text(
+            &visible,
+            serde_json::json!({"kind": "context_artifact", "label": label}),
+            source_artifact,
+            projection,
+        )?;
+        assembled
+            .conversation
+            .push(format!("artifact {source}\n{payload}"));
+    }
+    Ok(())
+}
+
+fn extract_prompt_from_value(value: &serde_json::Value) -> Result<String, InterfaceDriverError> {
+    let object = value.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "interface input artifact payload must be a JSON object".into(),
+        )
+    })?;
+    let prompt = object
+        .get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(
+                "interface input artifact payload has no non-empty 'prompt' field".into(),
+            )
+        })?;
+    Ok(prompt)
+}
+
+fn extract_turn_input_from_value(
+    value: &serde_json::Value,
+    selected_files: Option<&SelectedFileProjection>,
+) -> Result<Vec<UserInput>, InterfaceDriverError> {
+    let object = value.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(
+            "interface input artifact payload must be a JSON object".into(),
+        )
+    })?;
+    if let Some(source_artifact) = object.get(SOURCE_ARTIFACT_FIELD) {
+        return turn_input_from_source_artifact(source_artifact);
+    }
+    if object.contains_key("text") || object.contains_key("attachments") {
+        return turn_input_from_operator_payload(value, selected_files);
+    }
+    if let Some(task) = object.get("task") {
+        let text = match task {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).map_err(|e| {
+                InterfaceDriverError::Protocol(format!("waking task field failed to render: {e}"))
+            })?,
+        };
+        if text.trim().is_empty() {
+            return Err(InterfaceDriverError::Protocol(
+                "waking task is empty; refusing to fabricate input (fail-closed)".into(),
+            ));
+        }
+        return Ok(vec![UserInput::Text {
+            text,
+            text_elements: Vec::new(),
+        }]);
+    }
+    let prompt = extract_prompt_from_value(value)?;
+    Ok(vec![UserInput::Text {
+        text: prompt,
+        text_elements: Vec::new(),
+    }])
+}
+
+fn turn_input_from_source_artifact(
+    source_artifact: &serde_json::Value,
+) -> Result<Vec<UserInput>, InterfaceDriverError> {
+    let manifest: InterfaceArtifactManifest = serde_json::from_value(source_artifact.clone())
+        .map_err(|e| {
+            InterfaceDriverError::Protocol(format!(
+                "interface input artifact source_artifact is not an interface artifact manifest: {e}"
+            ))
+        })?;
+    if manifest.label != OPERATOR_MESSAGE_LABEL {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "codex_app_server interface does not support source artifact label '{}'",
+            manifest.label
+        )));
+    }
+    let payload_bytes = read_artifact_payload_checked(
+        manifest.label.as_str(),
+        &manifest.payload_path,
+        manifest.payload_content_hash.as_deref(),
+    )?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).map_err(|e| {
+        InterfaceDriverError::Protocol(format!(
+            "source artifact '{}' payload is not JSON: {e}",
+            manifest.label
+        ))
+    })?;
+    turn_input_from_operator_payload(&payload, None)
+}
+
+fn turn_input_from_operator_payload(
+    payload: &serde_json::Value,
+    selected_files: Option<&SelectedFileProjection>,
+) -> Result<Vec<UserInput>, InterfaceDriverError> {
+    let mut input = Vec::new();
+    if let Some(text) = payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        input.push(UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        });
+    }
+
+    if let Some(attachments) = payload
+        .get("attachments")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (index, attachment) in attachments.iter().enumerate() {
+            push_attachment_input(
+                &mut input,
+                index,
+                attachment,
+                selected_files.is_some_and(|files| files.current_attachments.contains(&index)),
+            )?;
+        }
+    }
+
+    if input.is_empty()
+        && !selected_files.is_some_and(|files| !files.current_attachments.is_empty())
+    {
+        return Err(InterfaceDriverError::Protocol(
+            "operator content contains neither text nor supported attachments".into(),
+        ));
+    }
+    Ok(input)
+}
+
+fn push_attachment_input(
+    input: &mut Vec<UserInput>,
+    index: usize,
+    attachment: &serde_json::Value,
+    selected_file: bool,
+) -> Result<(), InterfaceDriverError> {
+    let object = attachment.as_object().ok_or_else(|| {
+        InterfaceDriverError::Protocol(format!(
+            "operator.message attachment[{index}] must be a JSON object"
+        ))
+    })?;
+    let label = object
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("operator.attachment");
+    let mime_type = object
+        .get("mime_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("application/octet-stream");
+    let expected_hash = object
+        .get("payload_content_hash")
+        .and_then(serde_json::Value::as_str);
+
+    if label == "operator.media.image" || mime_type.starts_with("image/") {
+        let payload_path = path_from_field(object.get("payload_path"), index)?;
+        let _ = read_artifact_payload_checked(label, &payload_path, expected_hash)?;
+        input.push(UserInput::LocalImage {
+            detail: None,
+            path: payload_path,
+        });
+        return Ok(());
+    }
+
+    if label == "operator.file.text" || mime_type.starts_with("text/") {
+        let payload_path = path_from_field(object.get("payload_path"), index)?;
+        let bytes = read_artifact_payload_checked(label, &payload_path, expected_hash)?;
+        let text = String::from_utf8(bytes).map_err(|e| {
+            InterfaceDriverError::Protocol(format!(
+                "operator.message attachment[{index}] text payload is not UTF-8: {e}"
+            ))
+        })?;
+        let name = object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("attached text file");
+        input.push(UserInput::Text {
+            text: format!("Attachment: {name}\n\n{text}"),
+            text_elements: Vec::new(),
+        });
+        return Ok(());
+    }
+
+    if selected_file {
+        return Ok(());
+    }
+
+    Err(InterfaceDriverError::Protocol(format!(
+        "codex_app_server interface does not support operator.message attachment[{index}] label \
+         '{label}' with mime_type '{mime_type}'"
+    )))
+}
+
+fn path_from_field(
+    value: Option<&serde_json::Value>,
+    attachment_index: usize,
+) -> Result<PathBuf, InterfaceDriverError> {
+    let path = value
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            InterfaceDriverError::Protocol(format!(
+                "operator.message attachment[{attachment_index}] has no payload_path"
+            ))
+        })?;
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "operator.message attachment[{attachment_index}] payload_path must be absolute: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn read_artifact_payload_checked(
+    label: &str,
+    payload_path: &PathBuf,
+    expected_hash: Option<&str>,
+) -> Result<Vec<u8>, InterfaceDriverError> {
+    if payload_path.as_os_str().is_empty() {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "source artifact '{label}' payload_path is empty"
+        )));
+    }
+    if !payload_path.is_absolute() {
+        return Err(InterfaceDriverError::Protocol(format!(
+            "source artifact '{label}' payload_path must be absolute: {}",
+            payload_path.display()
+        )));
+    }
+    let bytes = std::fs::read(payload_path).map_err(|e| {
+        InterfaceDriverError::Protocol(format!(
+            "source artifact '{label}' payload read failed at {}: {e}",
+            payload_path.display()
+        ))
+    })?;
+    if let Some(expected) = expected_hash.filter(|s| !s.trim().is_empty()) {
+        let actual = sha256_hex(&bytes);
+        if expected != actual {
+            return Err(InterfaceDriverError::Protocol(format!(
+                "source artifact '{label}' payload hash mismatch at {}: manifest={} actual={}",
+                payload_path.display(),
+                expected,
+                actual
+            )));
+        }
+    }
+    Ok(bytes)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
+
+fn required_formed_models(
+    input: &InterfaceInvocationEnvelope,
+) -> Result<BTreeSet<String>, InterfaceDriverError> {
+    let policy = input
+        .interface_policy()
+        .map_err(|error| {
+            InterfaceDriverError::FailedClosed(format!(
+                "Codex formed interface policy is invalid: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "Codex invocation carries no formed interface policy".to_string(),
+            )
+        })?;
+    let values = policy
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            InterfaceDriverError::FailedClosed(
+                "Codex formed interface policy models must be a string array".to_string(),
+            )
+        })?;
+    if values.is_empty() {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex formed interface policy models is empty".to_string(),
+        ));
+    }
+    let mut models = BTreeSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let model = value.as_str().filter(|model| {
+            !model.is_empty() && model.trim() == *model && !model.contains(['\r', '\n', '\0'])
+        });
+        let Some(model) = model else {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex formed interface policy models[{index}] is not a trimmed string"
+            )));
+        };
+        if !models.insert(model.to_string()) {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "Codex formed interface policy models repeats '{model}'"
+            )));
+        }
+    }
+    Ok(models)
+}
+
+fn catalog_model_allowed(model: &str, formed_models: &BTreeSet<String>) -> bool {
+    formed_models.contains(model)
+}
+
+fn validate_model_reroute(
+    selected_model: &str,
+    from_model: &str,
+    to_model: &str,
+) -> Result<(), InterfaceDriverError> {
+    if from_model != selected_model {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex model reroute started from '{from_model}', but the descriptor selected '{selected_model}'"
+        )));
+    }
+    if to_model != selected_model {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "Codex attempted to reroute descriptor-selected model '{selected_model}' to '{to_model}'; hidden provider fallback is forbidden"
+        )));
+    }
+    Ok(())
+}
+
+fn typed_error(error: TypedRequestError) -> InterfaceDriverError {
+    match error {
+        TypedRequestError::Transport { method, source } => {
+            InterfaceDriverError::Transport(format!("{method}: {source}"))
+        }
+        TypedRequestError::Server { method, source } => InterfaceDriverError::Protocol(format!(
+            "{method} failed: {} (code {})",
+            source.message, source.code
+        )),
+        TypedRequestError::Deserialize { method, source } => {
+            InterfaceDriverError::Protocol(format!("{method} response decode error: {source}"))
+        }
+    }
+}
+
+pub fn into_interface_driver(client: AppServerClient) -> Arc<CodexAppServerInterfaceDriver> {
+    Arc::new(CodexAppServerInterfaceDriver::new(client))
+}
+
+pub fn into_interface_driver_with_config(
+    client: AppServerClient,
+    interface_driver_config: Option<&InterfaceDriverConfig>,
+) -> Arc<CodexAppServerInterfaceDriver> {
+    Arc::new(CodexAppServerInterfaceDriver::new_with_config(
+        client,
+        interface_driver_config,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("../tests/support/steering_compatibility.rs");
+    include!("../tests/support/pending_history.rs");
+    include!("../tests/support/recovery_call_ownership.rs");
+    include!("../tests/support/completed_messages.rs");
+
+    fn metadata_input(
+        interface_affordance_specs: serde_json::Value,
+    ) -> InterfaceInvocationEnvelope {
+        let request_bytes = br#"{}"#;
+        let artifact_file = octopus_interfaces::InterfaceArtifactFile::write(
+            std::env::temp_dir().join("octopus-codex-handler-test"),
+            "test.request",
+            request_bytes,
+        )
+        .expect("test input artifact file writes");
+        let specs = interface_affordance_specs
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("test interface affordance is typed"))
+            .collect();
+        InterfaceInvocationEnvelope {
+            artifact: octopus_interfaces::ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("request-test"),
+                content: octopus_ledger::ContentHash::of_bytes(request_bytes),
+            },
+            artifact_file,
+            artifact_binding_payloads: Vec::new(),
+            metadata: Some(octopus_interfaces::InvocationMetadata::new(
+                octopus_interfaces::GrantProjection {
+                    interface_affordance_specs: specs,
+                    ..octopus_interfaces::GrantProjection::default()
+                },
+            )),
+        }
+    }
+
+    fn model_policy_input(models: serde_json::Value) -> InterfaceInvocationEnvelope {
+        let mut input = metadata_input(serde_json::json!([]));
+        let mut grant = octopus_interfaces::GrantProjection::default();
+        grant.interface_policy.insert(
+            "world_provider_codex".to_string(),
+            BTreeMap::from([("models".to_string(), models)]),
+        );
+        input.metadata = Some(
+            octopus_interfaces::InvocationMetadata::new(grant).with_runtime(
+                RuntimeInvocationMetadata {
+                    run: octopus_interfaces::RunId::new("run-model-policy"),
+                    ee: octopus_descriptors::EeId::new("ee-model-policy"),
+                    worker: InterfaceId::new("system_worker_test"),
+                    checkpoint: octopus_descriptors::CheckpointId::new("checkpoint-model-policy"),
+                    interface: InterfaceId::new("world_provider_codex"),
+                    epoch: 1,
+                    run_record_hash: None,
+                },
+            ),
+        );
+        input
+    }
+
+    #[test]
+    fn model_catalog_policy_is_strict_and_exact() {
+        let formed = required_formed_models(&model_policy_input(serde_json::json!([
+            "gpt-5.4", "gpt-5.5"
+        ])))
+        .expect("formed models");
+        assert!(catalog_model_allowed("gpt-5.4", &formed));
+        assert!(!catalog_model_allowed("gpt-5.3", &formed));
+        assert!(matches!(
+            required_formed_models(&model_policy_input(serde_json::json!([]))),
+            Err(InterfaceDriverError::FailedClosed(error)) if error.contains("models is empty")
+        ));
+        assert!(matches!(
+            required_formed_models(&model_policy_input(serde_json::json!(["gpt-5.4", "gpt-5.4"]))),
+            Err(InterfaceDriverError::FailedClosed(error)) if error.contains("repeats")
+        ));
+    }
+
+    #[test]
+    fn model_reroute_cannot_substitute_the_descriptor_selected_model() {
+        validate_model_reroute("gpt-selected", "gpt-selected", "gpt-selected")
+            .expect("a no-op notification retains the exact selected model");
+        assert!(matches!(
+            validate_model_reroute("gpt-selected", "gpt-selected", "gpt-fallback"),
+            Err(InterfaceDriverError::FailedClosed(error))
+                if error.contains("hidden provider fallback is forbidden")
+        ));
+        assert!(matches!(
+            validate_model_reroute("gpt-selected", "gpt-unknown", "gpt-selected"),
+            Err(InterfaceDriverError::FailedClosed(error))
+                if error.contains("started from 'gpt-unknown'")
+        ));
+    }
+
+    #[test]
+    fn model_catalog_retains_current_provider_metadata() {
+        let catalog: ModelListResponse = serde_json::from_value(serde_json::json!({
+            "data": [{
+                "id": "gpt-current",
+                "model": "gpt-current",
+                "upgrade": null,
+                "upgradeInfo": {
+                    "model": "gpt-next",
+                    "upgradeCopy": null,
+                    "modelLink": null,
+                    "migrationMarkdown": null,
+                    "retirementAt": 1800000000
+                },
+                "availabilityNux": null,
+                "displayName": "Current",
+                "description": "Current provider model",
+                "modelSpecialty": "cyber",
+                "hidden": false,
+                "supportedReasoningEfforts": [],
+                "defaultReasoningEffort": "ultra",
+                "multiAgentVersion": "v2",
+                "isDefault": true
+            }],
+            "nextCursor": null
+        }))
+        .expect("current model catalog decodes");
+        let wire = serde_json::to_value(catalog).expect("current model catalog re-encodes");
+        assert_eq!(wire["data"][0]["modelSpecialty"], "cyber");
+        assert_eq!(wire["data"][0]["multiAgentVersion"], "v2");
+        assert_eq!(wire["data"][0]["upgradeInfo"]["retirementAt"], 1800000000);
+    }
+
+    #[test]
+    fn safety_buffering_projects_an_actionable_warning() {
+        let output = model_safety_buffering_output(&ModelSafetyBufferingUpdatedNotification {
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            model: "gpt-current".into(),
+            show_buffering_ui: true,
+            reasons: vec!["additional_review".into()],
+            use_cases: vec!["cyber".into()],
+            faster_model: Some("gpt-fast".into()),
+        })
+        .expect("safety buffering warning encodes");
+        assert_eq!(output.label, TURN_WARNING_LABEL);
+        assert_eq!(output.value["source"], "model_safety_buffering");
+        assert_eq!(output.value["showBufferingUi"], true);
+        assert_eq!(output.value["fasterModel"], "gpt-fast");
+        assert!(
+            output.value["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
+        );
+    }
+
+    #[test]
+    fn interface_driver_ref_is_the_codex_app_server_family() {
+        assert_eq!(CODEX_APP_SERVER_INTERFACE_DRIVER_REF, "codex_app_server");
+    }
+
+    #[test]
+    fn every_source_codex_app_server_descriptor_satisfies_the_projection_contract() {
+        let interface_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let native_owners = BTreeSet::from([
+            "world_provider_chatgpt".to_string(),
+            "world_provider_codex".to_string(),
+            "world_provider_codex_memory_consolidation".to_string(),
+        ]);
+        let mut owners = BTreeSet::new();
+        let mut opencodex_owners = BTreeSet::new();
+        for entry in std::fs::read_dir(&interface_root).expect("source interface registry reads") {
+            let path = entry
+                .expect("source interface owner reads")
+                .path()
+                .join("interface.json");
+            if !path.is_file() {
+                continue;
+            }
+            let descriptor: InterfaceDescriptor = serde_json::from_slice(
+                &std::fs::read(&path).expect("source interface descriptor reads"),
+            )
+            .expect("source interface descriptor parses");
+            let owns_opencodex = descriptor
+                .interface_driver_config
+                .as_ref()
+                .is_some_and(|config| config.private_config.contains_key("opencodex"));
+            if owns_opencodex {
+                assert_eq!(
+                    descriptor.interface_driver_ref,
+                    CODEX_APP_SERVER_INTERFACE_DRIVER_REF,
+                    "OpenCodex owner '{}' must use the declared Codex harness",
+                    descriptor.id.as_str()
+                );
+                opencodex_owners.insert(descriptor.id.as_str().to_string());
+            }
+            if descriptor.interface_driver_ref != CODEX_APP_SERVER_INTERFACE_DRIVER_REF {
+                continue;
+            }
+            validate_codex_projection_descriptor_contract(&descriptor)
+                .expect("source codex_app_server projection contract validates");
+            if descriptor.id.as_str() == "world_provider_codex" {
+                let config = descriptor.interface_driver_config.as_ref().unwrap();
+                assert!(
+                    LiveStreamRules::from_private_config(&config.private_config)
+                        .unwrap()
+                        .enabled()
+                );
+            }
+            owners.insert(descriptor.id.as_str().to_string());
+        }
+        assert!(
+            native_owners.is_subset(&owners),
+            "the native Codex harness owners must remain explicit and self-contained"
+        );
+        assert!(
+            !opencodex_owners.is_empty() && opencodex_owners.is_subset(&owners),
+            "every concrete OpenCodex owner must remain explicit and self-contained"
+        );
+    }
+
+    fn provider_operations_value() -> serde_json::Value {
+        serde_json::json!({
+            "error_output_label": PROVIDER_OPERATION_ERROR_LABEL,
+            "account_login_completed_output_label": PROVIDER_ACCOUNT_LOGIN_COMPLETED_LABEL,
+            "account_updated_output_label": PROVIDER_ACCOUNT_UPDATED_LABEL,
+            "account_rate_limits_updated_output_label": PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL,
+            "account_login_start": {
+                "request_label": PROVIDER_ACCOUNT_LOGIN_START_LABEL,
+                "output_label": PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL,
+            },
+            "account_login_cancel": {
+                "request_label": PROVIDER_ACCOUNT_LOGIN_CANCEL_LABEL,
+                "output_label": PROVIDER_ACCOUNT_LOGIN_CANCELLED_LABEL,
+            },
+            "account_login_status_read": {
+                "request_label": PROVIDER_ACCOUNT_LOGIN_STATUS_READ_LABEL,
+                "output_label": PROVIDER_ACCOUNT_LOGIN_STATUS_LABEL,
+            },
+            "account_logout": {
+                "request_label": PROVIDER_ACCOUNT_LOGOUT_LABEL,
+                "output_label": PROVIDER_ACCOUNT_LOGGED_OUT_LABEL,
+            },
+            "account_read": {
+                "request_label": PROVIDER_ACCOUNT_READ_LABEL,
+                "output_label": PROVIDER_ACCOUNT_SNAPSHOT_LABEL,
+            },
+            "account_rate_limits_read": {
+                "request_label": PROVIDER_ACCOUNT_RATE_LIMITS_READ_LABEL,
+                "output_label": PROVIDER_ACCOUNT_RATE_LIMITS_LABEL,
+            },
+            "account_rate_limit_reset_consume": {
+                "request_label": PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUME_LABEL,
+                "output_label": PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUMED_LABEL,
+            },
+            "account_usage_read": {
+                "request_label": PROVIDER_ACCOUNT_USAGE_READ_LABEL,
+                "output_label": PROVIDER_ACCOUNT_USAGE_LABEL,
+            },
+            "account_workspace_messages_read": {
+                "request_label": PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_READ_LABEL,
+                "output_label": PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_LABEL,
+            },
+            "capabilities_read": {
+                "request_label": PROVIDER_CAPABILITIES_READ_LABEL,
+                "output_label": PROVIDER_CAPABILITIES_LABEL,
+            },
+            "thread_compact_start": {
+                "request_label": PROVIDER_THREAD_COMPACT_START_LABEL,
+                "output_label": TURN_CONTEXT_COMPACTION_LABEL,
+            },
+        })
+    }
+
+    #[test]
+    fn provider_operation_vocabulary_is_strict_and_secret_free() {
+        let operations: ProviderOperations =
+            serde_json::from_value(provider_operations_value()).unwrap();
+        validate_provider_operations(&operations).unwrap();
+        assert!(operations.thread_compact_start.is_some());
+        assert!(!is_undeclared_provider_operation(
+            PROVIDER_THREAD_COMPACT_START_LABEL,
+            true,
+        ));
+        assert!(is_undeclared_provider_operation(
+            PROVIDER_THREAD_COMPACT_START_LABEL,
+            false,
+        ));
+        let mut drifted = provider_operations_value();
+        drifted["account_logout"]["output_label"] = serde_json::json!("provider.account.done");
+        let drifted: ProviderOperations = serde_json::from_value(drifted).unwrap();
+        assert!(validate_provider_operations(&drifted).is_err());
+        let mut missing_reset = provider_operations_value();
+        missing_reset
+            .as_object_mut()
+            .unwrap()
+            .remove("account_rate_limit_reset_consume");
+        assert!(serde_json::from_value::<ProviderOperations>(missing_reset).is_err());
+        assert!(
+            serde_json::from_value::<AccountLoginStartRequest>(serde_json::json!({
+                "method": "api_key",
+                "api_key": "must-not-be-an-artifact",
+            }))
+            .is_err()
+        );
+        let output = scoped_secret_operation_error(ScopedSecretError::InvalidHandle(
+            "must-not-be-an-artifact".to_string(),
+        ));
+        let encoded = serde_json::to_string(&output.value).unwrap();
+        assert!(!encoded.contains("must-not-be-an-artifact"));
+        assert!(encoded.contains("secret_handle_invalid"));
+        let reset: AccountRateLimitResetConsumeRequest = serde_json::from_value(
+            serde_json::json!({"idempotency_key":"reset-1","credit_id":"credit-1"}),
+        )
+        .unwrap();
+        assert_eq!(reset.idempotency_key, "reset-1");
+        assert_eq!(reset.credit_id.as_deref(), Some("credit-1"));
+        let usage: AccountUsageReadRequest =
+            serde_json::from_value(serde_json::json!({"thread_id":"thread-1"})).unwrap();
+        assert_eq!(usage.thread_id.as_deref(), Some("thread-1"));
+    }
+
+    #[test]
+    fn extract_prompt_fails_closed_without_a_real_prompt() {
+        assert_eq!(
+            extract_prompt_from_value(&serde_json::json!({"prompt":"hello"})).unwrap(),
+            "hello"
+        );
+        assert!(matches!(
+            extract_prompt_from_value(&serde_json::json!({"text":"hi"})),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+        assert!(matches!(
+            extract_prompt_from_value(&serde_json::json!({})),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+        assert!(matches!(
+            extract_prompt_from_value(&serde_json::json!({"prompt":""})),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn bound_instructions_must_be_bound_artifact_context() {
+        let role = "You are the flash worker. Reply only from the bound artifacts.";
+        assert_eq!(resolve_bound_instructions(Some(role)).unwrap(), role);
+
+        assert!(matches!(
+            resolve_bound_instructions(None),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+        assert!(matches!(
+            resolve_bound_instructions(Some("   ")),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+        assert!(matches!(
+            resolve_bound_instructions(Some("")),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+    }
+
+    #[test]
+    fn terminal_usage_uses_current_context_not_cumulative_thread_usage() {
+        let usage: ThreadTokenUsage = serde_json::from_value(serde_json::json!({
+            "total": {
+                "totalTokens": 3_218_100,
+                "inputTokens": 3_000_000,
+                "cachedInputTokens": 2_750_000,
+                "outputTokens": 218_100,
+                "reasoningOutputTokens": 0
+            },
+            "last": {
+                "totalTokens": 42_000,
+                "inputTokens": 40_000,
+                "cachedInputTokens": 32_000,
+                "outputTokens": 2_000,
+                "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258_400
+        }))
+        .unwrap();
+
+        assert_eq!(
+            terminal_usage_evidence(&usage).unwrap().0,
+            ContextWindowUsage {
+                used_tokens: 42_000,
+                context_window: 258_400,
+            }
+        );
+        let (_, provider_usage) = terminal_usage_evidence(&usage).unwrap();
+        assert_eq!(provider_usage.cumulative.cached_input_tokens, 2_750_000);
+        assert_eq!(provider_usage.cumulative.uncached_input_tokens, 250_000);
+        assert_eq!(provider_usage.current_context.cached_input_tokens, 32_000);
+        assert_eq!(provider_usage.current_context.uncached_input_tokens, 8_000);
+        let output = CodexTurnOutput::final_message(
+            "thread-a", "turn-a", "final-a", "done",
+            Some(ContextWindowUsage {
+                used_tokens: 42_000,
+                context_window: 258_400,
+            }),
+        )
+        .with_provider_token_usage(provider_usage);
+        assert_eq!(
+            output
+                .value
+                .pointer("/provider_token_usage/cumulative/uncached_input_tokens")
+                .and_then(serde_json::Value::as_u64),
+            Some(250_000)
+        );
+    }
+
+    #[test]
+    fn provider_token_usage_rejects_impossible_cache_accounting() {
+        let usage: ThreadTokenUsage = serde_json::from_value(serde_json::json!({
+            "total": {
+                "totalTokens": 10,
+                "inputTokens": 8,
+                "cachedInputTokens": 9,
+                "outputTokens": 2,
+                "reasoningOutputTokens": 0
+            },
+            "last": {
+                "totalTokens": 10,
+                "inputTokens": 8,
+                "cachedInputTokens": 0,
+                "outputTokens": 2,
+                "reasoningOutputTokens": 0
+            },
+            "modelContextWindow": 258_400
+        }))
+        .unwrap();
+        assert!(matches!(
+            terminal_usage_evidence(&usage),
+            Err(InterfaceDriverError::Protocol(error))
+                if error.contains("more cached input than total input")
+        ));
+    }
+
+    #[test]
+    fn terminal_usage_refuses_missing_model_window_telemetry() {
+        let usage: ThreadTokenUsage = serde_json::from_value(serde_json::json!({
+            "total": {
+                "totalTokens": 42_000,
+                "inputTokens": 40_000,
+                "cachedInputTokens": 0,
+                "outputTokens": 2_000,
+                "reasoningOutputTokens": 0
+            },
+            "last": {
+                "totalTokens": 42_000,
+                "inputTokens": 40_000,
+                "cachedInputTokens": 0,
+                "outputTokens": 2_000,
+                "reasoningOutputTokens": 0
+            }
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            terminal_usage_evidence(&usage),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+    }
+
+    fn bound(id: &str, payload: serde_json::Value) -> octopus_interfaces::ArtifactBindingPayload {
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        octopus_interfaces::ArtifactBindingPayload::new(
+            octopus_interfaces::ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new(id),
+                content: octopus_ledger::ContentHash::of_bytes(&bytes),
+            },
+            bytes,
+        )
+    }
+
+    fn session_artifact(
+        id: &str,
+        label: &str,
+        payload: serde_json::Value,
+        source_movement_seq: u64,
+    ) -> serde_json::Value {
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        serde_json::json!({
+            "label": label,
+            "payload": payload,
+            "source_artifact": octopus_interfaces::ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new(id),
+                content: octopus_ledger::ContentHash::of_bytes(&bytes),
+            },
+            "source_movement_seq": source_movement_seq,
+        })
+    }
+
+    fn continuity(
+        provider: &str,
+        run: &str,
+        thread_id: &str,
+        context_generation: u64,
+        pending: Option<CodexPendingContinuity>,
+    ) -> CodexContinuityState {
+        CodexContinuityState {
+            schema_version: 1,
+            provider_interface: InterfaceId::new(provider),
+            run: run.to_string(),
+            thread_id: thread_id.to_string(),
+            thread_shape_fingerprint: "a".repeat(64),
+            context_generation,
+            static_context_fingerprint: "b".repeat(64),
+            pending,
+            interrupted_pending: None,
+            tool_operator_request: None,
+        }
+    }
+
+    fn codex_context_labels() -> BTreeSet<String> {
+        [
+            TURN_AGENT_MESSAGE_LABEL,
+            TURN_REASONING_LABEL,
+            TURN_PLAN_UPDATE_LABEL,
+            INTERFACE_ARTIFACT_OUTPUT_LABEL,
+            INTERFACE_CONTEXT_UPDATED_LABEL,
+            TOOL_CALL_LABEL,
+            TURN_ERROR_LABEL,
+            OPERATOR_APPROVAL_REQUEST_LABEL,
+            OPERATOR_ELICITATION_REQUEST_LABEL,
+            TURN_CONTROL_ACKNOWLEDGED_LABEL,
+            TURN_INTERRUPTED_RESULT_LABEL,
+            TURN_CONTEXT_COMPACTION_LABEL,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn codex_snapshot_labels() -> BTreeSet<String> {
+        [
+            INTERFACE_ARTIFACT_OUTPUT_LABEL,
+            TURN_INTERRUPTED_RESULT_LABEL,
+            TURN_ERROR_LABEL,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn codex_client_projection_labels() -> BTreeSet<String> {
+        let mut labels = [
+            "turn.stream",
+            INTERFACE_ARTIFACT_OUTPUT_LABEL,
+            INTERFACE_CONTEXT_UPDATED_LABEL,
+            TOOL_CALL_LABEL,
+            TURN_ERROR_LABEL,
+            OPERATOR_APPROVAL_REQUEST_LABEL,
+            OPERATOR_ELICITATION_REQUEST_LABEL,
+            OPERATOR_USER_INPUT_REQUEST_LABEL,
+            PROVIDER_MODELS_CATALOG_LABEL,
+            PROVIDER_OPERATION_ERROR_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_COMPLETED_LABEL,
+            PROVIDER_ACCOUNT_UPDATED_LABEL,
+            PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_CANCELLED_LABEL,
+            PROVIDER_ACCOUNT_LOGIN_STATUS_LABEL,
+            PROVIDER_ACCOUNT_LOGGED_OUT_LABEL,
+            PROVIDER_ACCOUNT_SNAPSHOT_LABEL,
+            PROVIDER_ACCOUNT_RATE_LIMITS_LABEL,
+            PROVIDER_ACCOUNT_RATE_LIMIT_RESET_CONSUMED_LABEL,
+            PROVIDER_ACCOUNT_USAGE_LABEL,
+            PROVIDER_ACCOUNT_WORKSPACE_MESSAGES_LABEL,
+            PROVIDER_CAPABILITIES_LABEL,
+            TURN_CONTROL_ACKNOWLEDGED_LABEL,
+            TURN_CONTROL_FAILED_LABEL,
+            TURN_INTERRUPTED_RESULT_LABEL,
+            LIFECYCLE_EVENT_LABEL,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+        labels.extend(
+            CLIENT_ACTIVITY_OUTPUT_LABELS
+                .iter()
+                .map(|label| (*label).to_string()),
+        );
+        labels
+    }
+
+    fn live_stream_config_value() -> serde_json::Value {
+        serde_json::json!({
+            "artifact_label": "turn.stream",
+            "always_stream_labels": [
+                AGENT_MESSAGE_DELTA_LABEL,
+                TURN_REASONING_DELTA_LABEL,
+                TURN_PLAN_DELTA_LABEL,
+                TURN_EXEC_OUTPUT_DELTA_LABEL,
+                TURN_FILE_CHANGE_DELTA_LABEL,
+                TURN_DYNAMIC_TOOL_CALL_LABEL,
+                TURN_STARTED_LABEL
+            ],
+            "active_turn_stream_labels": [
+                PROVIDER_ACCOUNT_RATE_LIMITS_UPDATED_LABEL,
+                ACCOUNT_RATE_LIMITS_LABEL
+            ],
+            "phase_rules": [{
+                "label": TURN_REASONING_LABEL,
+                "field": "lifecycle",
+                "stream_values": ["started"],
+                "artifact_values": ["completed"]
+            }]
+        })
+    }
+
+    fn live_stream_rules() -> LiveStreamRules {
+        let config = serde_json::json!({"live_stream": live_stream_config_value()});
+        LiveStreamRules::from_private_config(config.as_object().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn descriptor_requires_durable_interruption_outputs_in_context_and_snapshots() {
+        let context = codex_context_labels();
+        let snapshots = codex_snapshot_labels();
+        validate_durable_interruption_output_labels(&context, &snapshots).unwrap();
+
+        let mut stale_context = context.clone();
+        stale_context.remove(TURN_CONTROL_ACKNOWLEDGED_LABEL);
+        assert!(matches!(
+            validate_durable_interruption_output_labels(&stale_context, &snapshots),
+            Err(InterfaceDriverError::FailedClosed(message))
+                if message.contains(TURN_CONTROL_ACKNOWLEDGED_LABEL)
+        ));
+
+        let mut stale_snapshots = snapshots;
+        stale_snapshots.remove(TURN_INTERRUPTED_RESULT_LABEL);
+        assert!(matches!(
+            validate_durable_interruption_output_labels(&context, &stale_snapshots),
+            Err(InterfaceDriverError::FailedClosed(message))
+                if message.contains(TURN_INTERRUPTED_RESULT_LABEL)
+        ));
+    }
+
+    #[test]
+    fn interrupt_moves_exact_effect_into_durable_interrupted_continuity() {
+        let pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let state = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thread-a",
+            7,
+            Some(pending.clone()),
+        );
+        let (interrupted, retained) = interrupted_continuity(Some(state)).unwrap();
+        let interrupted = interrupted.expect("continuity remains durable");
+        assert!(retained);
+        assert_eq!(interrupted.context_generation, 8);
+        assert!(interrupted.pending.is_none());
+        assert_eq!(interrupted.interrupted_pending, Some(pending));
+
+        let parsed = parse_codex_continuity(
+            &serde_json::to_value(&interrupted).unwrap(),
+            &InterfaceId::new("world_provider_codex"),
+            "run-a",
+        )
+        .unwrap();
+        assert_eq!(parsed, interrupted);
+
+        let operator = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thread-a",
+            8,
+            Some(CodexPendingContinuity::Operator {
+                turn_id: "turn-2".to_string(),
+                request_key: "operator:request-1".to_string(),
+                method: "item/commandExecution/requestApproval".to_string(),
+            }),
+        );
+        let (operator, retained) = interrupted_continuity(Some(operator)).unwrap();
+        assert!(!retained);
+        let operator = operator.unwrap();
+        assert!(operator.pending.is_none());
+        assert!(operator.interrupted_pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn interrupt_retains_effect_correlation_but_drops_operator_waits() {
+        let requests = Arc::new(Mutex::new(BTreeMap::new()));
+        let scope = TransportStateScope::Run("run-a".to_string());
+        let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        requests.lock().await.insert(
+            (scope.clone(), "tool:call-1".to_string()),
+            PendingServerRequest {
+                request_id: RequestId::Integer(1),
+                thread_id: "thread-a".to_string(),
+                turn_id: "turn-a".to_string(),
+                key: "tool:call-1".to_string(),
+                kind: PendingServerRequestKind::DynamicTool {
+                    call_id: "call-1".to_string(),
+                    tool: "coder.exec".to_string(),
+                },
+                effect_gate: effect_gate.clone(),
+                turn_interrupted: interrupted.clone(),
+            },
+        );
+        requests.lock().await.insert(
+            (scope.clone(), "operator:request-1".to_string()),
+            PendingServerRequest {
+                request_id: RequestId::Integer(2),
+                thread_id: "thread-a".to_string(),
+                turn_id: "turn-a".to_string(),
+                key: "operator:request-1".to_string(),
+                kind: PendingServerRequestKind::Operator {
+                    method: "item/commandExecution/requestApproval".to_string(),
+                },
+                effect_gate: effect_gate.clone(),
+                turn_interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+
+        let ack_guard = effect_gate.clone().lock_owned().await;
+        interrupted.store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            retain_interrupted_effect_request(&requests, &scope, Some("thread-a"), Some("turn-a"),)
+                .await
+        );
+        drop(ack_guard);
+        assert!(interrupted.load(std::sync::atomic::Ordering::Acquire));
+        let requests = requests.lock().await;
+        assert!(requests.contains_key(&(scope.clone(), "tool:call-1".to_string())));
+        assert!(!requests.contains_key(&(scope, "operator:request-1".to_string())));
+    }
+
+    #[tokio::test]
+    async fn exact_result_winning_gate_clears_stale_interrupt_continuity() {
+        let requests = Arc::new(Mutex::new(BTreeMap::new()));
+        let scope = TransportStateScope::Run("run-a".to_string());
+        let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
+        requests.lock().await.insert(
+            (scope.clone(), "tool:call-1".to_string()),
+            PendingServerRequest {
+                request_id: RequestId::Integer(1),
+                thread_id: "thread-a".to_string(),
+                turn_id: "turn-a".to_string(),
+                key: "tool:call-1".to_string(),
+                kind: PendingServerRequestKind::DynamicTool {
+                    call_id: "call-1".to_string(),
+                    tool: "coder.exec".to_string(),
+                },
+                effect_gate: effect_gate.clone(),
+                turn_interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+
+        let result_guard = effect_gate.clone().lock_owned().await;
+        requests
+            .lock()
+            .await
+            .remove(&(scope.clone(), "tool:call-1".to_string()))
+            .expect("the exact result claims its pending request first");
+        drop(result_guard);
+
+        let ack_guard = effect_gate.lock_owned().await;
+        let retained =
+            retain_interrupted_effect_request(&requests, &scope, Some("thread-a"), Some("turn-a"))
+                .await;
+        assert!(!retained);
+        let pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-a".to_string(),
+            call_id: "call-1".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let mut state = continuity("world_provider_codex", "run-a", "thread-a", 8, None);
+        state.interrupted_pending = Some(pending);
+        let mut result = CodexTurnControlResult {
+            control_id: "control-1".to_string(),
+            action: "stop".to_string(),
+            acknowledged: true,
+            thread_id: Some("thread-a".to_string()),
+            turn_id: Some("turn-a".to_string()),
+            detail: serde_json::json!({
+                "interrupted": true,
+                "exact_result_pending": true,
+            }),
+            continuity: Some(state),
+        };
+        reconcile_interrupted_control_result(&mut result, retained);
+        drop(ack_guard);
+        assert_eq!(result.detail["exact_result_pending"], false);
+        assert!(
+            result
+                .continuity
+                .as_ref()
+                .is_some_and(|state| state.interrupted_pending.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_barrier_does_not_lose_early_completion() {
+        let barrier = ProviderHandoffBarrier::new();
+        barrier.finish(Ok(()));
+        tokio::time::timeout(std::time::Duration::from_millis(50), barrier.wait())
+            .await
+            .expect("a completed handoff barrier returns immediately")
+            .expect("completed handoff remains successful");
+
+        let failed = ProviderHandoffBarrier::new();
+        failed.finish(Err("authoring failed".to_string()));
+        let error = tokio::time::timeout(std::time::Duration::from_millis(50), failed.wait())
+            .await
+            .expect("a failed handoff barrier returns immediately")
+            .expect_err("a failed prior handoff cannot open the next authoring lane");
+        assert_eq!(error, "authoring failed");
+    }
+
+    #[test]
+    fn control_ack_materializes_durable_interrupted_correlation() {
+        let temp = tempfile::tempdir().unwrap();
+        let pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let mut state = continuity("world_provider_codex", "run-a", "thread-a", 8, None);
+        state.interrupted_pending = Some(pending);
+        let artifact = materialize_turn_control_result(
+            temp.path(),
+            42,
+            CodexTurnControlResult {
+                control_id: "control-1".to_string(),
+                action: "stop".to_string(),
+                acknowledged: true,
+                thread_id: Some("thread-a".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                detail: serde_json::json!({
+                    "interrupted": true,
+                    "exact_result_pending": true,
+                }),
+                continuity: Some(state),
+            },
+        )
+        .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(payload["label"], TURN_CONTROL_ACKNOWLEDGED_LABEL);
+        assert_eq!(payload["detail"]["exact_result_pending"], true);
+        assert_eq!(
+            payload[CODEX_CONTINUITY_FIELD]["interrupted_pending"]["call_id"],
+            "call-1"
+        );
+        assert!(payload[CODEX_CONTINUITY_FIELD].get("pending").is_none());
+
+        let mut queued = CodexTurnControlResult {
+            control_id: "queue-1".into(),
+            action: "queue_message".into(),
+            acknowledged: true,
+            thread_id: Some("thread-a".into()),
+            turn_id: Some("turn-1".into()),
+            detail: serde_json::json!({"queued": true, "turn_triggered": false}),
+            continuity: Some(continuity("world_provider_codex", "run-a", "thread-a", 8, None)),
+        };
+        assert!(materialize_turn_control_result(temp.path(), 43, queued.clone()).is_err());
+        queued.continuity = None;
+        let artifact = materialize_turn_control_result(temp.path(), 43, queued).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(payload["label"], TURN_INPUT_ACKNOWLEDGED_LABEL);
+        assert!(!codex_context_labels().contains(TURN_INPUT_ACKNOWLEDGED_LABEL));
+        assert!(payload.get(CODEX_CONTINUITY_FIELD).is_none());
+        assert_eq!(payload["detail"]["turn_triggered"], false);
+    }
+
+    #[test]
+    fn native_continuity_closes_on_the_final_checked_effect_only() {
+        use crate::run_affordances::{CreatedRun, FileProof, NativeEffect, NativePhase};
+        let file = FileProof {
+            path: PathBuf::from("/fixture/record.json"), before_hash: None,
+            after_hash: octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(), bytes: 2,
+        };
+        let writing = NativePending {
+            call_id: "native-call".into(), operation_name: "run_create".into(), source_run: "run-a".into(),
+            effect: NativeEffect { tool: "file.write".into(), correlation_id: "native:write".into(), arguments: serde_json::json!({}) },
+            state: NativePhase::Writing {
+                created: CreatedRun {
+                    run_id: "run-b".into(), worker_interface_id: "system_worker_b".into(),
+                    provider_interface_id: "world_provider_b".into(), receive_interface_id: "system_worker_b".into(),
+                    return_interface_ids: vec!["system_worker_a".into()], model: "model".into(), reasoning_effort: "high".into(),
+                },
+                files: vec![file.clone()], outgoing_bindings: vec![],
+                seed: NativeEffect { tool: "artifact.send".into(), correlation_id: "native:seed".into(), arguments: serde_json::json!({}) },
+            },
+        };
+        let pending = |operation: &NativePending| CodexPendingContinuity::DynamicTool {
+            turn_id: "turn-1".into(), call_id: operation.effect.correlation_id.clone(),
+            tool: operation.effect.tool.clone(), native_operation: Some(serde_json::to_value(operation).unwrap()),
+        };
+        let mut evidence = SessionContinuityEvidence {
+            label: "file.write.result".into(), source_key: "write-receipt".into(), source_movement_seq: Some(11),
+            payload: serde_json::json!({"label":"file.write.result","tool":"file.write","correlation_id":"native:write","ok":true,"body":{"result":"files_written","writes":[file]}}),
+        };
+        assert!(!session_evidence_targets_pending(&evidence, &pending(&writing)).unwrap());
+        let NativeStep::Effect { pending: seeding, .. } = writing.advance(&evidence.payload).unwrap() else { panic!("write must precede seed"); };
+        evidence.label = "artifact.send.result".into();
+        evidence.payload = serde_json::json!({"label":"artifact.send.result","tool":"artifact.send","correlation_id":"native:seed","ok":true,"body":{"admitted":{"seq":12}}});
+        assert!(session_evidence_targets_pending(&evidence, &pending(&seeding)).unwrap());
+        assert!(!session_evidence_targets_pending(&evidence, &pending(&writing)).unwrap());
+        evidence.payload["body"] = serde_json::json!({"admitted":{"seq":12},"invented":true});
+        assert!(session_evidence_targets_pending(&evidence, &pending(&seeding)).is_err());
+        assert_eq!(peer_notification_text("turn.stream", b"{\"seq\":1}\n{\"seq\":2}\n").unwrap(), "Connected execution recorded turn.stream.");
+        assert!(peer_notification_text(INTERFACE_ARTIFACT_OUTPUT_LABEL, b"{\"seq\":1}\n{\"seq\":2}\n").is_err());
+    }
+
+    #[test]
+    fn continuity_recovery_is_exact_provider_scoped_and_unambiguous() {
+        let old = continuity("world_provider_codex", "run-a", "thr-exact", 4, None);
+        let latest = continuity("world_provider_codex", "run-a", "thr-exact", 7, None);
+        let history_payload = serde_json::json!({
+            "label": INTERFACE_ARTIFACT_OUTPUT_LABEL,
+            CODEX_CONTINUITY_FIELD: old.clone(),
+        });
+        let current = bound(
+            "current",
+            serde_json::json!({
+                "label": INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                CODEX_CONTINUITY_FIELD: latest.clone(),
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_codex",
+                    "artifacts": [session_artifact(
+                        "provider-output-old",
+                        INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                        history_payload.clone(),
+                        41,
+                    )]
+                }
+            }),
+        );
+        let labels = codex_context_labels();
+        let snapshots = codex_snapshot_labels();
+        assert_eq!(
+            recover_codex_continuity(
+                std::slice::from_ref(&current),
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .unwrap(),
+            Some(latest.clone())
+        );
+
+        let next_pending = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            8,
+            Some(CodexPendingContinuity::DynamicTool {
+                native_operation: None,
+                turn_id: "turn-2".to_string(),
+                call_id: "call-2".to_string(),
+                tool: "coder.exec".to_string(),
+            }),
+        );
+        let pending_output = bound(
+            "pending-output",
+            serde_json::json!({
+                "label": TOOL_CALL_LABEL,
+                CODEX_CONTINUITY_FIELD: next_pending.clone(),
+            }),
+        );
+        assert_eq!(
+            recover_codex_continuity(
+                &[current.clone(), pending_output],
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .unwrap(),
+            Some(next_pending.clone())
+        );
+
+        let mut stale_outer = next_pending.clone();
+        stale_outer.context_generation += 1;
+        let resolved_session = bound(
+            "resolved-session",
+            serde_json::json!({
+                "label": TURN_ERROR_LABEL,
+                "message": "the connection-local turn was interrupted",
+                CODEX_CONTINUITY_FIELD: stale_outer.clone(),
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_codex",
+                    "artifacts": [
+                        session_artifact(
+                            "pending-tool-call",
+                            TOOL_CALL_LABEL,
+                            serde_json::json!({
+                                "label": TOOL_CALL_LABEL,
+                                "tool": "coder.exec",
+                                "correlation_id": "call-2",
+                                "arguments": {},
+                                CODEX_CONTINUITY_FIELD: next_pending.clone(),
+                            }),
+                            50,
+                        ),
+                        session_artifact(
+                            "pending-tool-result",
+                            "coder.exec.result",
+                            serde_json::json!({
+                                "label": "coder.exec.result",
+                                "tool": "coder.exec",
+                                "correlation_id": "call-2",
+                                "ok": true,
+                                "body": {"exit_code": 0},
+                            }),
+                            51,
+                        ),
+                    ]
+                }
+            }),
+        );
+        let mut resolved = stale_outer;
+        resolved.pending = None;
+        assert_eq!(
+            recover_codex_continuity(
+                std::slice::from_ref(&resolved_session),
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .unwrap(),
+            Some(resolved)
+        );
+
+        let interrupted_pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-3".to_string(),
+            call_id: "call-3".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let mut interrupted = continuity("world_provider_codex", "run-a", "thr-exact", 9, None);
+        interrupted.interrupted_pending = Some(interrupted_pending.clone());
+        let interrupted_resolved_session = bound(
+            "interrupted-resolved-session",
+            serde_json::json!({
+                "label": TURN_ERROR_LABEL,
+                "message": "the connection-local turn was interrupted",
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_codex",
+                    "artifacts": [
+                        session_artifact(
+                            "interrupted-tool-call",
+                            TURN_CONTROL_ACKNOWLEDGED_LABEL,
+                            serde_json::json!({
+                                "label": TURN_CONTROL_ACKNOWLEDGED_LABEL,
+                                "control_id": "control-3",
+                                "action": "stop",
+                                "acknowledged": true,
+                                CODEX_CONTINUITY_FIELD: interrupted.clone(),
+                            }),
+                            52,
+                        ),
+                        session_artifact(
+                            "interrupted-tool-result",
+                            "coder.exec.result",
+                            serde_json::json!({
+                                "label": "coder.exec.result",
+                                "tool": "coder.exec",
+                                "correlation_id": "call-3",
+                                "ok": true,
+                                "body": {"exit_code": 0},
+                            }),
+                            53,
+                        ),
+                    ]
+                }
+            }),
+        );
+        interrupted.interrupted_pending = None;
+        assert_eq!(
+            recover_codex_continuity(
+                std::slice::from_ref(&interrupted_resolved_session),
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .unwrap(),
+            Some(interrupted)
+        );
+
+        let forged = bound(
+            "forged",
+            serde_json::json!({
+                "label": OPERATOR_MESSAGE_LABEL,
+                CODEX_CONTINUITY_FIELD: latest.clone(),
+            }),
+        );
+        assert!(
+            recover_codex_continuity(
+                &[forged],
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .is_err()
+        );
+
+        let forged_history = bound(
+            "forged-history",
+            serde_json::json!({
+                "label": OPERATOR_MESSAGE_LABEL,
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_codex",
+                    "artifacts": [session_artifact(
+                        "forged-history-source",
+                        INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                        history_payload.clone(),
+                        40,
+                    )]
+                }
+            }),
+        );
+        assert!(
+            recover_codex_continuity(
+                std::slice::from_ref(&forged_history),
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .is_err()
+        );
+        assert!(assemble_context(&[forged_history], "world_provider_codex", &snapshots,).is_err());
+
+        let cross = bound(
+            "cross",
+            serde_json::json!({
+                "label": INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                CODEX_CONTINUITY_FIELD: continuity(
+                    "world_provider_other",
+                    "run-a",
+                    "thr-exact",
+                    8,
+                    None,
+                ),
+            }),
+        );
+        assert!(
+            recover_codex_continuity(
+                &[cross],
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .is_err()
+        );
+
+        let duplicate_generation = bound(
+            "duplicate-generation",
+            serde_json::json!({
+                "label": INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                CODEX_CONTINUITY_FIELD: latest,
+            }),
+        );
+        assert!(
+            recover_codex_continuity(
+                &[current, duplicate_generation],
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .is_err()
+        );
+
+        let terminal_dir = tempfile::tempdir().unwrap();
+        let terminal_file =
+            materialize_terminal_turn_error(terminal_dir.path(), "terminal failure", None).unwrap();
+        let mut terminal_payload: serde_json::Value =
+            serde_json::from_slice(&terminal_file.read_payload_bytes().unwrap()).unwrap();
+        terminal_payload.as_object_mut().unwrap().insert(
+            SESSION_CONTEXT_FIELD.to_string(),
+            serde_json::json!({
+                "schema_version": 3,
+                "provider_interface": "world_provider_codex",
+                "artifacts": [session_artifact(
+                    "provider-output-before-error",
+                    INTERFACE_ARTIFACT_OUTPUT_LABEL,
+                    history_payload,
+                    42,
+                )]
+            }),
+        );
+        let terminal = bound("terminal", terminal_payload);
+        assert_eq!(
+            recover_codex_continuity(
+                &[terminal],
+                &InterfaceId::new("world_provider_codex"),
+                "run-a",
+                &labels,
+                &snapshots,
+            )
+            .unwrap(),
+            Some(old)
+        );
+    }
+
+    #[test]
+    fn recovered_code_mode_result_requires_the_exact_native_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let expected = recovered_function_call_output("exec-call", "missing directory");
+        let activity = CodexTurnOutput::dynamic_tool_completed(
+            "formed_interfaces".into(), "workspace.list".into(), "exec-call".into(),
+            "thread-a".into(), "turn-a".into(), false, None, None,
+        );
+        let receipt = serde_json::json!({"type":"event_msg", "payload":{
+            "type":"item_completed", "thread_id":"thread-a", "turn_id":"turn-a",
+            "item":{"type":"DynamicToolCall", "id":"exec-call", "namespace":"formed_interfaces",
+                "tool":"workspace-dlist", "status":"failed", "success":false,
+                "content_items":[{"type":"inputText", "text":"missing directory"}]}
+        }});
+        std::fs::write(&rollout, format!("{receipt}\n")).unwrap();
+        assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).unwrap().output_persisted);
+        assert!(!recovered_tool_result_rollout_evidence(&rollout, &expected, None).unwrap().output_persisted);
+        for (pointer, value) in [
+            ("/payload/thread_id", serde_json::json!("other")),
+            ("/payload/turn_id", serde_json::json!("other")),
+            ("/payload/item/namespace", serde_json::json!("other")),
+            ("/payload/item/tool", serde_json::json!("other")),
+            ("/payload/item/success", serde_json::json!(true)),
+            ("/payload/item/content_items/0/text", serde_json::json!("invented")),
+        ] {
+            let mut bad = receipt.clone();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            std::fs::write(&rollout, format!("{bad}\n")).unwrap();
+            assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).is_err(), "{pointer}");
+        }
+        std::fs::write(&rollout, format!("{receipt}\n{receipt}\n")).unwrap();
+        assert!(recovered_tool_result_rollout_evidence(&rollout, &expected, Some(&activity.value)).is_err());
+    }
+
+    #[test]
+    fn recovered_function_output_reconciles_exact_rollout_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let expected = recovered_function_call_output("call-7", "result".to_string());
+        std::fs::write(
+            &rollout,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "response_item",
+                    "payload": {"type": "message", "role": "assistant", "content": []}
+                })
+            ),
+        )
+        .unwrap();
+        assert!(!recovered_function_call_output_is_persisted(&rollout, &expected).unwrap());
+        let exact = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "call-7", "output": "result"}
+        });
+        std::fs::write(&rollout, format!("{exact}\n")).unwrap();
+        assert!(recovered_function_call_output_is_persisted(&rollout, &expected).unwrap());
+        let conflict = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "call-7", "output": "other"}
+        });
+        std::fs::write(&rollout, format!("{exact}\n{conflict}\n")).unwrap();
+        assert!(recovered_function_call_output_is_persisted(&rollout, &expected).is_err());
+        std::fs::write(&rollout, format!("{exact}\n{exact}\n")).unwrap();
+        assert!(recovered_function_call_output_is_persisted(&rollout, &expected).is_err());
+        std::fs::write(&rollout, exact.to_string()).unwrap();
+        assert!(recovered_function_call_output_is_persisted(&rollout, &expected).is_err());
+    }
+
+    #[test]
+    fn recovered_successor_dispatch_fails_closed_before_duplicate_turn_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let expected = recovered_function_call_output("call-7", "result".to_string());
+        let exact = serde_json::json!({
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "call-7", "output": "result"}
+        });
+        let started = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "task_started",
+                "turn_id": "turn-successor",
+                "model_context_window": 128000,
+                "collaboration_mode_kind": "default"
+            }
+        });
+        std::fs::write(&rollout, format!("{exact}\n{started}\n")).unwrap();
+        let rollout_evidence =
+            recovered_tool_result_rollout_evidence(&rollout, &expected, None).unwrap();
+        assert_eq!(
+            rollout_evidence,
+            RecoveredToolResultRolloutEvidence {
+                output_persisted: true,
+                successor_turn_id: Some("turn-successor".to_string()),
+                native_function_calls: 0,
+            }
+        );
+        assert!(reconcile_recovered_successor_dispatch(&rollout_evidence, &[]).is_err());
+
+        std::fs::write(&rollout, format!("{exact}\n")).unwrap();
+        let rollout_evidence =
+            recovered_tool_result_rollout_evidence(&rollout, &expected, None).unwrap();
+        let request_frame = br#"{"id":7,"method":"turn/start","params":{}}
+"#;
+        let dispatch_file = materialize_codex_transport_dispatch(
+            dir.path(),
+            &InterfaceId::new("world_provider_codex"),
+            70,
+            2,
+            "turn/start",
+            request_frame,
+            None,
+        )
+        .unwrap();
+        let manifest_bytes = std::fs::read(dispatch_file.manifest_path()).unwrap();
+        let content = octopus_ledger::ContentHash::of_bytes(&manifest_bytes);
+        let artifact = ArtifactRef {
+            id: octopus_descriptors::ArtifactId::new(format!(
+                "{PROVIDER_TRANSPORT_DISPATCH_LABEL}:{}",
+                content.to_hex()
+            )),
+            content,
+        };
+        let recovered = CodexRecoveredHandoffArtifact {
+            movement_seq: 71,
+            artifact,
+            payload: dispatch_file.read_payload_bytes().unwrap(),
+        };
+        let dispatches = recovered_turn_start_dispatches(
+            &[recovered],
+            &InterfaceId::new("world_provider_codex"),
+            70,
+        )
+        .unwrap();
+        assert_eq!(dispatches.len(), 1);
+        let error =
+            reconcile_recovered_successor_dispatch(&rollout_evidence, &dispatches).unwrap_err();
+        assert!(matches!(
+            error,
+            InterfaceDriverError::FailedClosed(message)
+                if message.contains("no exact successor TurnStarted receipt")
+                    && message.contains("second successor turn is forbidden")
+        ));
+    }
+
+    #[test]
+    fn current_session_recovery_keeps_the_newest_outstanding_effect() {
+        let old_pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-7".to_string(),
+            call_id: "call-7".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let old = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            7,
+            Some(old_pending),
+        );
+        let source: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "source-result",
+            "coder.exec.result",
+            serde_json::json!({
+                "label": "coder.exec.result",
+                "tool": "coder.exec",
+                "correlation_id": "call-7",
+                "ok": true,
+                "body": {"exit_code": 0},
+            }),
+            71,
+        ))
+        .unwrap();
+        let new_pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-8".to_string(),
+            call_id: "call-8".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let newest = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            8,
+            Some(new_pending),
+        );
+        let artifacts = vec![
+            serde_json::from_value(session_artifact(
+                "old-call",
+                TOOL_CALL_LABEL,
+                serde_json::json!({"label": TOOL_CALL_LABEL, CODEX_CONTINUITY_FIELD: old.clone()}),
+                70,
+            ))
+            .unwrap(),
+            source.clone(),
+            serde_json::from_value(session_artifact(
+                "new-call",
+                TOOL_CALL_LABEL,
+                serde_json::json!({"label": TOOL_CALL_LABEL, CODEX_CONTINUITY_FIELD: newest.clone()}),
+                72,
+            ))
+            .unwrap(),
+        ];
+        let current = recover_codex_continuity_from_current_session(
+            &artifacts,
+            &source.source_artifact,
+            &InterfaceId::new("world_provider_codex"),
+            "run-a",
+            &codex_context_labels(),
+        )
+        .unwrap();
+        assert_eq!(current, Some(newest.clone()));
+        assert_eq!(
+            reconcile_current_session_continuity(Some(old), current).unwrap(),
+            Some(newest)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_settles_only_the_result_owned_by_its_source() {
+        let descriptor: InterfaceDescriptor = serde_json::from_slice(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../interface.json")
+                    .canonicalize()
+                    .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-7".to_string(),
+            call_id: "call-7".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let old = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            7,
+            Some(pending),
+        );
+        let mut old_artifact: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "old-call",
+            TOOL_CALL_LABEL,
+            serde_json::json!({"label": TOOL_CALL_LABEL, CODEX_CONTINUITY_FIELD: old}),
+            70,
+        ))
+        .unwrap();
+        old_artifact.payload["correlation_id"] = serde_json::json!("call-7");
+        old_artifact.payload["tool"] = serde_json::json!("coder.exec");
+        let result = serde_json::json!({
+            "label": "coder.exec.result",
+            "tool": "coder.exec",
+            "correlation_id": "call-7",
+            "ok": true,
+            "body": {"exit_code": 0},
+        });
+        let result_bytes = serde_json::to_vec(&result).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let input = InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("source-result"),
+                content: octopus_ledger::ContentHash::of_bytes(&result_bytes),
+            },
+            artifact_file: InterfaceArtifactFile::write(
+                dir.path(),
+                "coder.exec.result",
+                &result_bytes,
+            )
+            .unwrap(),
+            artifact_binding_payloads: Vec::new(),
+            metadata: Some(
+                octopus_interfaces::InvocationMetadata::new(
+                    octopus_interfaces::GrantProjection::default(),
+                )
+                .with_runtime(RuntimeInvocationMetadata {
+                    run: octopus_interfaces::RunId::new("run-a"),
+                    ee: octopus_descriptors::EeId::new("ee-a"),
+                    worker: InterfaceId::new("system_worker_test"),
+                    checkpoint: octopus_descriptors::CheckpointId::new("checkpoint-a"),
+                    interface: InterfaceId::new("world_provider_codex"),
+                    epoch: 1,
+                    run_record_hash: None,
+                }),
+            ),
+        };
+        let settled = terminal_failure_continuity(
+            &descriptor,
+            &input,
+            std::slice::from_ref(&old_artifact),
+            &octopus_descriptors::RunId::new("run-a"),
+            br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":7}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(settled.context_generation, 8);
+        assert!(settled.pending.is_none());
+
+        let bound = parse_codex_continuity(
+            &old_artifact.payload[CODEX_CONTINUITY_FIELD], &descriptor.id, "run-a",
+        ).unwrap();
+        let mut operator = input.clone();
+        operator.artifact.id = octopus_descriptors::ArtifactId::new("operator-message");
+        let completed_result: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "completed-result", "coder.exec.result", result, 71,
+        )).unwrap();
+        assert!(reconcile_operator_session_continuity(
+            &descriptor, &operator, Some(bound.clone()), std::slice::from_ref(&old_artifact),
+        ).unwrap().unwrap().pending.is_some());
+        assert!(reconcile_operator_session_continuity(
+            &descriptor, &operator, Some(bound.clone()), &[old_artifact.clone(), completed_result.clone()],
+        ).unwrap().unwrap().pending.is_none());
+        let recovered_context = [old_artifact.clone(), completed_result.clone()];
+        assert_eq!(recovered_failed_result_source(&descriptor, &operator, &bound, &recovered_context, &[]).unwrap(), None);
+        assert_eq!(recovered_failed_result_source(&descriptor, &operator, &bound, &recovered_context, &[69]).unwrap(), None);
+        assert_eq!(recovered_failed_result_source(&descriptor, &operator, &bound, &recovered_context, &[71]).unwrap(), Some(71));
+        let restored_model_context = resumed_model_context(&recovered_context, &operator.artifact, &settled, ModelResultProjection { max_tokens: 1000 }).unwrap().unwrap();
+        assert!(restored_model_context.contains("completed-result") && restored_model_context.contains("call-7"));
+        let native_context = native_turn_context(Some(restored_model_context), None);
+        assert!(matches!(native_context["octopus_bound_context"].kind, AdditionalContextKind::Untrusted));
+        let settled_error: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "settled-error", TURN_ERROR_LABEL, serde_json::json!({"label":TURN_ERROR_LABEL,"message":"provider stopped",CODEX_CONTINUITY_FIELD:settled}), 72,
+        )).unwrap();
+        let foreign_output: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "foreign-result", INTERFACE_ARTIFACT_OUTPUT_LABEL, serde_json::json!({"label":INTERFACE_ARTIFACT_OUTPUT_LABEL,"text":"peer result",CODEX_CONTINUITY_FIELD:continuity("world_provider_peer","run-peer","thr-peer",1,None)}), 72,
+        )).unwrap();
+        let after_error = [old_artifact.clone(), completed_result.clone(), foreign_output, settled_error];
+        let after_error_context = resumed_model_context(&after_error, &operator.artifact, &settled, ModelResultProjection { max_tokens: 1000 }).unwrap().unwrap();
+        assert!(after_error_context.contains("completed-result") && after_error_context.contains("peer result"));
+        assert!(resumed_model_context(&recovered_context, &completed_result.source_artifact, &settled, ModelResultProjection { max_tokens: 1000 }).unwrap().is_none());
+        let mut wrong_result = completed_result.clone();
+        wrong_result.payload["tool"] = serde_json::json!("coder.write_file");
+        assert!(recovered_failed_result_source(&descriptor, &operator, &bound, &[old_artifact.clone(), wrong_result], &[71]).is_err());
+        assert!(recovered_failed_result_source(&descriptor, &operator, &bound, &[old_artifact.clone(), completed_result.clone(), completed_result], &[71]).is_err());
+
+        let new_pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-8".to_string(),
+            call_id: "call-8".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let newest = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            8,
+            Some(new_pending.clone()),
+        );
+        let newest_artifact: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "new-call",
+            TOOL_CALL_LABEL,
+            serde_json::json!({"label": TOOL_CALL_LABEL, CODEX_CONTINUITY_FIELD: newest}),
+            72,
+        ))
+        .unwrap();
+        let retained = terminal_failure_continuity(
+            &descriptor,
+            &input,
+            &[old_artifact, newest_artifact],
+            &octopus_descriptors::RunId::new("run-a"),
+            br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":9}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retained.context_generation, 10);
+        assert_eq!(retained.pending, Some(new_pending));
+    }
+
+    #[test]
+    fn stale_or_unstructured_continuation_fails_closed() {
+        let recovered = continuity("world_provider_codex", "run-a", "thr-exact", 7, None);
+        assert!(
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 7, &"b".repeat(64),)
+                .is_err()
+        );
+        assert!(
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 8, &"b".repeat(64),)
+                .is_ok()
+        );
+        assert!(
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 9, &"b".repeat(64),)
+                .is_err()
+        );
+        assert!(validate_recovered_reseed_coordinates(&recovered, 8, true).is_ok());
+        assert!(validate_recovered_reseed_coordinates(&recovered, 8, false).is_err());
+        let mut future = recovered.clone();
+        future.context_generation = 9;
+        assert!(validate_recovered_reseed_coordinates(&future, 8, true).is_err());
+        let input = ProviderInput::ToolResult(ToolResultArtifact {
+            label: "coder.exec.result".to_string(),
+            tool: "coder.exec".to_string(),
+            correlation_id: Some("call-1".to_string()),
+            ok: true,
+            body: Some(serde_json::json!({"exit_code": 0})),
+            error: None,
+        });
+        assert!(matches!(
+            input.into_turn_input(),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+
+        let pending = PendingServerRequest {
+            request_id: RequestId::Integer(1),
+            thread_id: "thr-exact".to_string(),
+            turn_id: "turn-1".to_string(),
+            key: "tool:call-1".to_string(),
+            kind: PendingServerRequestKind::DynamicTool {
+                call_id: "call-1".to_string(),
+                tool: "coder.exec".to_string(),
+            },
+            effect_gate: Arc::new(tokio::sync::Mutex::new(())),
+            turn_interrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let live = TransportState {
+            context_generation: 8,
+            hooks_catalog_emitted: true,
+            thread_id: Some("thr-exact".to_string()),
+            thread_shape_fingerprint: Some("a".repeat(64)),
+            static_context_fingerprint: Some("b".repeat(64)),
+            rollout_path: None,
+        };
+        let mut pending_continuity = recovered.clone();
+        pending_continuity.context_generation = 8;
+        pending_continuity.pending = Some(CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool: "coder.exec".to_string(),
+        });
+        assert!(
+            validate_live_pending_continuity(Some(&pending_continuity), &pending, 8, &live,)
+                .is_ok()
+        );
+        let mut forged = pending_continuity.clone();
+        forged.static_context_fingerprint = "c".repeat(64);
+        assert!(validate_live_pending_continuity(Some(&forged), &pending, 8, &live).is_err());
+        assert!(
+            validate_live_pending_continuity(Some(&pending_continuity), &pending, 7, &live)
+                .is_err()
+        );
+        assert!(validate_live_pending_continuity(None, &pending, 8, &live).is_err());
+    }
+
+    #[test]
+    fn structured_tool_failure_reaches_the_codex_continuation_intact() {
+        let mut details = serde_json::Map::new();
+        details.insert("engine".to_string(), serde_json::json!("docker"));
+        let result = ToolResultArtifact::failure(
+            "container.status",
+            Some("call-2".to_string()),
+            octopus_tool_handlers::ToolResultError::new(
+                "container_engine_unavailable",
+                "container engine is unavailable",
+            )
+            .with_details(details),
+        );
+        let response = dynamic_tool_response_value(&result).unwrap();
+        assert_eq!(response["success"], false);
+        let text = response["contentItems"][0]["text"].as_str().unwrap();
+        let wire: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(wire["tool"], "container.status");
+        assert_eq!(wire["error"]["code"], "container_engine_unavailable");
+        assert_eq!(wire["error"]["details"]["engine"], "docker");
+
+        let full_text = format!("{}middle-observation-ref{}", "界🙂".repeat(4_000), "é".repeat(8_000));
+        let large = ToolResultArtifact::success(
+            "coder.worktree.snapshot",
+            Some("call-3".to_string()),
+            serde_json::json!({"unified_diff": full_text}),
+        );
+        let raw = dynamic_tool_response_value(&large).unwrap();
+        let raw_text = raw["contentItems"][0]["text"].as_str().unwrap();
+        let raw_value: serde_json::Value = serde_json::from_str(raw_text).unwrap();
+        assert_eq!(raw_value["body"], large.body.as_ref().unwrap().clone());
+        assert!(raw_text.contains("middle-observation-ref"));
+        assert!(raw_value.get("model_projection").is_none());
+
+        let bound_result = bound("coder.result:source", serde_json::to_value(&large).unwrap());
+        let original_payload = bound_result.as_bytes().to_vec();
+        let assembled = assemble_context_resolved(
+            std::slice::from_ref(&bound_result),
+            &BTreeMap::new(),
+            &InterfaceId::new("world_provider_test"),
+            &codex_snapshot_labels(),
+            ModelResultProjection { max_tokens: 512 },
+        ).unwrap();
+        let projected_text = assembled.conversation[0].split_once('\n').unwrap().1;
+        assert!(octopus_util_string::approx_token_count(projected_text) <= 512);
+        let projection: serde_json::Value = serde_json::from_str(projected_text).unwrap();
+        assert_eq!(projection["model_projection"], "head_tail");
+        assert_eq!(projection["source_artifact"], serde_json::to_value(&bound_result.artifact).unwrap());
+        assert_eq!(bound_result.as_bytes(), original_payload.as_slice());
+        assert!(projection["omitted_approx_tokens"].as_u64().unwrap() > 0);
+        assert!(
+            projection["preview"]
+                .as_str()
+                .unwrap()
+                .contains("tokens truncated")
+        );
+
+        let recovered = recovered_function_call_output(
+            "call-3",
+            recovered_result_output(dynamic_tool_response_content(&large).unwrap()).unwrap(),
+        );
+        assert_eq!(recovered["output"], raw_text);
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(rollout.path(), format!("{}\n", serde_json::json!({
+            "type": "response_item", "payload": recovered,
+        }))).unwrap();
+        assert!(recovered_function_call_output_is_persisted(rollout.path(), &recovered).unwrap());
+        let projected_output = recovered_function_call_output("call-3", projected_text);
+        assert!(recovered_function_call_output_is_persisted(rollout.path(), &projected_output).is_err());
+
+        let mut operation = InterfaceOperationResultArtifact {
+            label: "room.result".into(), operation: "observe".into(),
+            correlation_id: "call-4".into(), ok: true, value: large.body.clone().unwrap(),
+        };
+        let operation_response = interface_operation_response_value(&operation).unwrap();
+        let operation_text = operation_response["contentItems"][0]["text"].as_str().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(operation_text).unwrap(), operation.value);
+        operation.value = serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)});
+        assert!(interface_operation_response_value(&operation).is_err());
+        let oversized = ToolResultArtifact::success("room.observe", Some("call-5".into()), operation.value);
+        assert!(dynamic_tool_response_value(&oversized).is_err());
+    }
+
+    #[test]
+    fn embedded_result_media_survives_live_and_recovered_tool_outputs() {
+        use base64::Engine;
+        let encoded = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGNwaDgARAwQCgAoDgYBQzpj2gAAAABJRU5ErkJggg==";
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).unwrap();
+        let body = serde_json::json!({"media": [{
+            "mime_type": "image/png", "payload_base64": encoded,
+            "artifact": {"label": "screen.captured", "payload_path": "/unreadable/room/screen.payload",
+                "payload_content_hash": blake3::hash(&bytes).to_hex().to_string()}
+        }], "observation_id": "exact-observation"});
+        let result = ToolResultArtifact::success("room.observe", Some("call-image".into()), body.clone());
+        let content = dynamic_tool_response_content(&result).unwrap();
+        let live = dynamic_tool_response_value(&result).unwrap();
+        assert_eq!(live["contentItems"][1]["imageUrl"], format!("data:image/png;base64,{encoded}"));
+        assert!(!live["contentItems"][0]["text"].as_str().unwrap().contains(encoded));
+        assert!(live["contentItems"][0]["text"].as_str().unwrap().contains("exact-observation"));
+        assert_eq!(result.body.as_ref().unwrap(), &body);
+        let recovered = recovered_function_call_output("call-image", recovered_result_output(content).unwrap());
+        let typed: octopus_protocol::models::ResponseInputItem = serde_json::from_value(recovered.clone()).unwrap();
+        assert!(matches!(typed, octopus_protocol::models::ResponseInputItem::FunctionCallOutput { .. }));
+        assert_eq!(recovered["output"][1]["image_url"], live["contentItems"][1]["imageUrl"]);
+        let operation = InterfaceOperationResultArtifact { label: "room.result".into(), operation: "observe".into(),
+            correlation_id: "call-image".into(), ok: true, value: body.clone() };
+        let operation_live = interface_operation_response_value(&operation).unwrap();
+        assert_eq!(operation_live["contentItems"][1], live["contentItems"][1]);
+        let operation_recovered = recovered_result_output(interface_operation_response_content(&operation).unwrap()).unwrap();
+        assert_eq!(operation_recovered[1], recovered["output"][1]);
+        let rollout = tempfile::NamedTempFile::new().unwrap();
+        for detail in ["high", "original", "low", "auto"] {
+            let mut recorded = recovered.clone();
+            recorded["output"][1]["detail"] = serde_json::json!(detail);
+            std::fs::write(rollout.path(), format!("{}\n", serde_json::json!({
+                "type": "response_item", "payload": recorded,
+            }))).unwrap();
+            let persisted = recovered_function_call_output_is_persisted(rollout.path(), &recovered);
+            if matches!(detail, "high" | "original") {
+                assert!(persisted.unwrap());
+            } else {
+                assert!(persisted.is_err());
+            }
+        }
+        let mut changed = recovered["output"].clone();
+        changed[1]["image_url"] = serde_json::json!("data:image/png;base64,changed");
+        assert!(!crate::result_media::matches_recorded_output(&recovered["output"], &changed));
+        for (fixture, valid) in [
+            ("iVBORw0KGgoAAAANSUhEUgAADIAAAAABCAIAAACTqqMmAAAAJUlEQVR4nO3CQREAAAgDIKMtmtGMZoe94ZjsqaqqqqqqqqqqWnzgSsEP43FopgAAAABJRU5ErkJggg==", true),
+            ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZQAAAABJRU5ErkJggg==", false),
+        ] {
+            let mut candidate = body.clone();
+            candidate["media"][0]["payload_base64"] = serde_json::json!(fixture);
+            candidate["media"][0]["artifact"]["payload_content_hash"] = serde_json::json!(
+                blake3::hash(&base64::engine::general_purpose::STANDARD.decode(fixture).unwrap()).to_hex().to_string());
+            let normalized = crate::result_media::project(&candidate);
+            assert_eq!(normalized.is_ok(), valid);
+            if let Ok(Some(normalized)) = normalized {
+                assert_eq!(normalized.value["media"][0]["source_image"]["width"], 3200);
+                let DynamicToolCallOutputContentItem::InputImage { image_url } = &normalized.images[0] else { panic!() };
+                assert_eq!(image_url, &format!("data:image/png;base64,{fixture}"));
+                let expected = recovered_result_output(normalized.images.clone()).unwrap();
+                for (detail, max_dimension, max_patches) in [("high", 2048, 2500), ("original", 6000, 10000)] {
+                    let prepared = octopus_util_image::load_data_url_for_prompt(image_url,
+                        octopus_util_image::PromptImageMode::ResizeWithLimits(octopus_util_image::PromptImageResizeLimits {
+                            max_dimension, max_patches,
+                        })).unwrap();
+                    assert_eq!(prepared.width, if detail == "high" { 2048 } else { 3200 });
+                    let mut recorded = expected.clone();
+                    recorded[0]["detail"] = serde_json::json!(detail);
+                    recorded[0]["image_url"] = serde_json::json!(prepared.into_data_url());
+                    assert!(crate::result_media::matches_recorded_output(&expected, &recorded));
+                    recorded[0]["image_url"] = serde_json::json!(format!("data:image/png;base64,{encoded}"));
+                    assert!(!crate::result_media::matches_recorded_output(&expected, &recorded));
+                }
+            }
+        }
+        assert!(crate::result_media::validate_content(&[
+            DynamicToolCallOutputContentItem::InputText { text: "\"".repeat(4 * 1024 * 1024) },
+        ]).is_err());
+        for (field, value) in [("payload_base64", serde_json::json!("AAAA")),
+            ("mime_type", serde_json::json!("image/jpeg")), ("artifact", serde_json::json!({}))] {
+            let mut invalid = body.clone();
+            invalid["media"][0][field] = value;
+            assert!(crate::result_media::project(&invalid).is_err());
+        }
+        let mut missing = body.clone();
+        missing["media"][0].as_object_mut().unwrap().remove("payload_base64");
+        assert!(crate::result_media::project(&missing).is_err());
+        let mut missing_hash = body.clone();
+        missing_hash["media"][0]["artifact"].as_object_mut().unwrap().remove("payload_content_hash");
+        assert!(crate::result_media::project(&missing_hash).is_err());
+        assert!(crate::result_media::project(&serde_json::json!({"media": vec![body["media"][0].clone(); 17]})).is_err());
+        assert_eq!(recovered_result_output(vec![DynamicToolCallOutputContentItem::InputText { text: "exact old text".into() }]).unwrap(), "exact old text");
+    }
+
+    #[test]
+    fn ten_thousand_transient_events_never_reach_run_authoring() {
+        let labels = codex_context_labels();
+        let projected = codex_client_projection_labels();
+        let rules = live_stream_rules();
+        let (emit, mut receiver) = ProviderOutputStream::channel();
+        let output = tempfile::tempdir().unwrap();
+        let live_stream_root = output.path().join("streams");
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let sink = TurnSink {
+            emit: &emit,
+            output_root: output.path(),
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 7,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        };
+        sink.bind_live_stream("thread-a", "turn-a").unwrap();
+        let user = |client_id: Option<&str>| ThreadItem::UserMessage {
+            id: "user-a".to_string(), client_id: client_id.map(str::to_string), content: Vec::new(),
+        };
+        sink.record_input_item(&user(None), "thread-a", "turn-a", InputRecordedSource::ItemStarted, Some(1)).unwrap();
+        sink.record_input_item(&user(Some("control-a")), "thread-a", "turn-a", InputRecordedSource::ItemStarted, Some(1)).unwrap();
+        sink.record_input_item(&user(Some("control-a")), "thread-a", "turn-a", InputRecordedSource::ItemCompleted, Some(2)).unwrap();
+        for seq in 0..10_000u64 {
+            sink.send(CodexTurnOutput::client(
+                AGENT_MESSAGE_DELTA_LABEL,
+                serde_json::json!({"seq": seq, "text": "x"}),
+            ))
+            .unwrap();
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        let stream_guard = sink.live_stream.lock().unwrap();
+        let stream = stream_guard.as_ref().unwrap();
+        let manifest = InterfaceArtifactFile::new(stream.manifest_path().to_path_buf())
+            .unwrap()
+            .read_manifest()
+            .unwrap();
+        assert!(manifest.payload_content_hash.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&manifest.payload_path)
+                .unwrap()
+                .lines()
+                .count(),
+            10_002
+        );
+        let receipts = std::fs::read_to_string(&manifest.payload_path).unwrap().lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|row| row["type"] == "input_recorded").collect::<Vec<_>>();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["client_id"], "control-a");
+        drop(stream_guard);
+        sink.send(CodexTurnOutput::client(
+            TURN_COMPLETED_LABEL,
+            serde_json::json!({"status": "completed"}),
+        ))
+        .unwrap();
+        let ProviderStreamEmission::Turn(completed) = receiver.try_recv().unwrap() else {
+            panic!("turn.completed must cross ordinary provider run-authoring")
+        };
+        assert_eq!(
+            completed.artifact.read_manifest().unwrap().label,
+            TURN_COMPLETED_LABEL
+        );
+    }
+
+    #[test]
+    fn reasoning_started_streams_but_reasoning_completed_is_an_artifact() {
+        let labels = codex_context_labels();
+        let projected = codex_client_projection_labels();
+        let rules = live_stream_rules();
+        let (emit, mut receiver) = ProviderOutputStream::channel();
+        let output = tempfile::tempdir().unwrap();
+        let live_stream_root = output.path().join("streams");
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let sink = TurnSink {
+            emit: &emit,
+            output_root: output.path(),
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 8,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        };
+        sink.bind_live_stream("thread-a", "turn-a").unwrap();
+        let reasoning = || ThreadItem::Reasoning {
+            id: "reason-a".to_string(),
+            summary: vec!["summary".to_string()],
+            content: vec!["content".to_string()],
+        };
+        sink.send(started_item_output(reasoning(), "thread-a", "turn-a", 1).unwrap())
+            .unwrap();
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        sink.send(completed_item_output(reasoning(), "thread-a", "turn-a", 2).unwrap())
+            .unwrap();
+        let ProviderStreamEmission::Turn(completed) = receiver.try_recv().unwrap() else {
+            panic!("completed reasoning must cross the ordinary artifact seam")
+        };
+        assert_eq!(
+            completed.artifact.read_manifest().unwrap().label,
+            TURN_REASONING_LABEL
+        );
+        let completed_payload: serde_json::Value =
+            serde_json::from_slice(&completed.artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(completed_payload["lifecycle"], "completed");
+        let stream = sink.live_stream.lock().unwrap();
+        let body = std::fs::read_to_string(stream.as_ref().unwrap().body_path()).unwrap();
+        let rows = body
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let event = rows.iter().find(|row| row["type"] == "event").unwrap();
+        let boundary = rows
+            .iter()
+            .find(|row| row["type"] == "semantic_boundary")
+            .unwrap();
+        assert_eq!(event["payload"]["lifecycle"], "started");
+        assert_eq!(boundary["label"], TURN_REASONING_LABEL);
+        assert!(
+            boundary["artifact_payload_blake3"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+        assert!(boundary.get("payload").is_none());
+    }
+
+    #[tokio::test]
+    async fn continuity_generation_tracks_input_and_provider_context_handoffs() {
+        let labels = codex_context_labels();
+        let projected = codex_client_projection_labels();
+        let (emit, mut receiver) = ProviderOutputStream::channel();
+        let output = tempfile::tempdir().unwrap();
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let live_stream_root = output.path().join("streams");
+        let live_stream_rules = live_stream_rules();
+        let sink = TurnSink {
+            emit: &emit,
+            output_root: output.path(),
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 7,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &live_stream_rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: emit.continuity.clone(),
+        };
+        sink.continuity.lock().unwrap().pending_input_context = true;
+        sink.set_continuity(continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            3,
+            None,
+        ));
+        sink.bind_live_stream("thr-exact", "turn-exact").unwrap();
+        for _ in 0..3 {
+            sink.send(CodexTurnOutput::client(
+                AGENT_MESSAGE_DELTA_LABEL,
+                serde_json::json!({"text": "before any handoff"}),
+            ))
+            .unwrap();
+        }
+        assert_eq!(sink.continuity_snapshot().unwrap().context_generation, 3);
+        assert!(sink.continuity.lock().unwrap().pending_input_context);
+        sink.send(CodexTurnOutput::client(
+            HOOK_CATALOG_LABEL,
+            serde_json::json!({"hooks": []}),
+        ))
+        .unwrap();
+        sink.send(CodexTurnOutput::client(
+            AGENT_MESSAGE_DELTA_LABEL,
+            serde_json::json!({"text": "x"}),
+        ))
+        .unwrap();
+        sink.send_terminal(CodexTurnOutput::final_message("thr-exact", "turn-exact", "final-exact", "done", None))
+            .unwrap();
+        assert_eq!(
+            sink.continuity
+                .lock()
+                .unwrap()
+                .continuity
+                .as_ref()
+                .unwrap()
+                .context_generation,
+            5
+        );
+        let ProviderStreamEmission::Turn(catalog) = receiver.try_recv().unwrap() else {
+            panic!("expected one projected hook catalog")
+        };
+        assert_eq!(
+            catalog.artifact.read_manifest().unwrap().label,
+            HOOK_CATALOG_LABEL
+        );
+        let ProviderStreamEmission::TerminalGroup { stream, terminal } = receiver.try_recv().unwrap()
+        else {
+            panic!("expected one sealed stream and terminal output")
+        };
+        assert_eq!(
+            stream.artifact.read_manifest().unwrap().label,
+            "turn.stream"
+        );
+        let stream_payload = String::from_utf8(stream.artifact.read_payload_bytes().unwrap()).unwrap();
+        let transient = stream_payload
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["type"] == "event" && row["label"] == AGENT_MESSAGE_DELTA_LABEL)
+            .unwrap();
+        assert!(transient["payload"].get("codex_continuity").is_none());
+        assert_eq!(
+            terminal.artifact.read_manifest().unwrap().label,
+            INTERFACE_ARTIFACT_OUTPUT_LABEL
+        );
+        let terminal_payload: serde_json::Value =
+            serde_json::from_slice(&terminal.artifact.read_payload_bytes().unwrap()).unwrap();
+        for (key, expected) in [
+            ("thread_id", "thr-exact"), ("turn_id", "turn-exact"),
+            ("item_id", "final-exact"), ("phase", "final_answer"),
+        ] {
+            assert_eq!(terminal_payload[key], expected);
+        }
+        let seal: serde_json::Value = serde_json::from_str(stream_payload.lines().last().unwrap()).unwrap();
+        assert_eq!(seal["terminal_artifact_payload_blake3"], artifact_payload_blake3(&terminal.artifact).unwrap());
+        assert_eq!(
+            terminal_payload.pointer("/codex_continuity/context_generation"),
+            Some(&serde_json::json!(5))
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        emit.continuity.lock().unwrap().pending_input_context = true;
+        let warm_sink = TurnSink {
+            source_movement_seq: 8,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: emit.continuity.clone(),
+            ..sink
+        };
+        let request = ClientRequest::TurnStart {
+            request_id: octopus_appserver_proto::RequestId::Integer(1),
+            params: TurnStartParams {
+                thread_id: "thr-exact".to_string(),
+                ..TurnStartParams::default()
+            },
+        };
+        for accepted in [false, true] {
+            let dispatch = warm_sink.admit_app_server_dispatch(&request, None);
+            let receipt = async {
+                let ProviderStreamEmission::TransportDispatch { artifact, admitted } =
+                    receiver.recv().await.unwrap()
+                else {
+                    panic!("expected the next turn dispatch")
+                };
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+                assert_eq!(payload["method"], "turn/start");
+                assert_eq!(payload["source_movement_seq"], 8);
+                admitted
+                    .send(if accepted {
+                        Ok(())
+                    } else {
+                        Err("refused".into())
+                    })
+                    .unwrap();
+            };
+            let (result, ()) = tokio::join!(dispatch, receipt);
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!(
+                warm_sink.continuity_snapshot().unwrap().context_generation,
+                if accepted { 6 } else { 5 }
+            );
+            assert_eq!(
+                warm_sink.continuity.lock().unwrap().pending_input_context,
+                !accepted
+            );
+        }
+        let next = warm_sink
+            .materialize(CodexTurnOutput::final_message("thr-exact", "turn-next", "final-next", "next", None))
+            .unwrap()
+            .unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&next.artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(payload[CODEX_CONTINUITY_FIELD]["context_generation"], 7);
+        let (stopped, retained) = interrupted_continuity(emit.continuity_snapshot()).unwrap();
+        assert!(!retained);
+        let result = CodexTurnControlResult {
+            control_id: "stop".into(), action: "stop".into(), acknowledged: true,
+            thread_id: Some("thr-exact".into()), turn_id: Some("turn-exact".into()),
+            detail: serde_json::json!({"interrupted":true}), continuity: stopped,
+        };
+        emit.record_control_continuity(&result);
+        let ack = materialize_turn_control_result(output.path(), 9, result).unwrap();
+        let terminal = warm_sink.materialize(CodexTurnOutput::client(TURN_COMPLETED_LABEL, serde_json::json!({"status":"interrupted"}))).unwrap().unwrap();
+        for artifact in [&ack, &terminal.artifact] {
+            let value: serde_json::Value = serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+            assert_eq!(value[CODEX_CONTINUITY_FIELD]["context_generation"], 8);
+        }
+        let recovered = emit.continuity_snapshot().unwrap();
+        validate_recovered_thread_coordinates(&recovered, &recovered.thread_shape_fingerprint, 9, &recovered.static_context_fingerprint).unwrap();
+
+    }
+
+    #[test]
+    fn terminal_is_not_emitted_when_live_stream_seal_fails() {
+        let labels = codex_context_labels();
+        let projected = codex_client_projection_labels();
+        let rules = live_stream_rules();
+        let (emit, mut receiver) = ProviderOutputStream::channel();
+        let output = tempfile::tempdir().unwrap();
+        let live_stream_root = output.path().join("streams");
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let sink = TurnSink {
+            emit: &emit,
+            output_root: output.path(),
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 9,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        };
+        sink.bind_live_stream("thread-a", "turn-a").unwrap();
+        let manifest_path = sink
+            .live_stream
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .manifest_path()
+            .to_path_buf();
+        std::fs::remove_file(&manifest_path).unwrap();
+        std::fs::create_dir(&manifest_path).unwrap();
+
+        let error = sink
+            .send_terminal(CodexTurnOutput::final_message("thread-a", "turn-a", "final-a", "done", None))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not be atomically installed")
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    async fn next_test_rpc(
+        socket: &mut tokio_tungstenite::WebSocketStream<crate::uds::UnixStream>,
+    ) -> octopus_appserver_proto::JSONRPCMessage {
+        use futures::StreamExt;
+
+        let message = socket.next().await.unwrap().unwrap();
+        serde_json::from_str(&message.into_text().unwrap()).unwrap()
+    }
+
+    async fn send_test_result(
+        socket: &mut tokio_tungstenite::WebSocketStream<crate::uds::UnixStream>,
+        id: RequestId,
+        result: serde_json::Value,
+    ) {
+        use futures::SinkExt;
+
+        let response = octopus_appserver_proto::JSONRPCMessage::Response(
+            octopus_appserver_proto::JSONRPCResponse { id, result },
+        );
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&response).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    async fn send_test_error(
+        socket: &mut tokio_tungstenite::WebSocketStream<crate::uds::UnixStream>,
+        id: RequestId,
+        message: impl Into<String>,
+    ) {
+        use futures::SinkExt;
+
+        let response =
+            octopus_appserver_proto::JSONRPCMessage::Error(octopus_appserver_proto::JSONRPCError {
+                id,
+                error: octopus_appserver_proto::JSONRPCErrorError {
+                    code: -32600,
+                    message: message.into(),
+                    data: None,
+                },
+            });
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&response).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    struct FixedSecretStore;
+
+    impl ScopedSecretStore for FixedSecretStore {
+        fn resolve(
+            &self,
+            exact_interface: &InterfaceId,
+            handle: &str,
+        ) -> Result<crate::auth::ScopedSecretValue, ScopedSecretError> {
+            assert_eq!(exact_interface.as_str(), "world_provider_codex");
+            assert_eq!(handle, "secret://world_provider_codex/OPENAI_API_KEY");
+            Ok(crate::auth::ScopedSecretValue::from_test_value(
+                "upstream-only-secret",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn api_key_login_resolves_exact_secret_without_emitting_its_value() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("account-app-server.sock");
+        let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let init = next_test_rpc(&mut socket).await;
+            let octopus_appserver_proto::JSONRPCMessage::Request(init) = init else {
+                panic!("expected initialize request")
+            };
+            send_test_result(
+                &mut socket,
+                init.id,
+                serde_json::json!({"userAgent": "codex/test", "codexHome": "/tmp"}),
+            )
+            .await;
+            assert!(matches!(
+                next_test_rpc(&mut socket).await,
+                octopus_appserver_proto::JSONRPCMessage::Notification(_)
+            ));
+            let login = next_test_rpc(&mut socket).await;
+            let octopus_appserver_proto::JSONRPCMessage::Request(login) = login else {
+                panic!("expected account/login/start request")
+            };
+            assert_eq!(login.method, "account/login/start");
+            assert_eq!(login.params.as_ref().unwrap()["type"], "apiKey");
+            assert_eq!(
+                login.params.as_ref().unwrap()["apiKey"],
+                "upstream-only-secret"
+            );
+            send_test_result(&mut socket, login.id, serde_json::json!({"type": "apiKey"})).await;
+        });
+        let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
+            endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+                socket_path: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(
+                    &socket_path,
+                )
+                .unwrap(),
+            },
+            client_name: "octopus-test".to_string(),
+            client_version: "0".to_string(),
+            experimental_api: false,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        .unwrap();
+        let config = InterfaceDriverConfig {
+            private_config: serde_json::json!({
+                "provider_operations": provider_operations_value(),
+                "instruction_artifacts": [],
+                "worker_instruction_artifacts": [],
+                "context_output_labels": codex_context_labels(),
+                "session_snapshot_labels": codex_snapshot_labels(),
+                "client_projection_output_labels": codex_client_projection_labels(),
+                "live_stream": live_stream_config_value(),
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            ..InterfaceDriverConfig::default()
+        };
+        let driver = CodexAppServerInterfaceDriver::new_with_config_and_secret_store(
+            AppServerClient::Remote(client),
+            Some(&config),
+            Arc::new(FixedSecretStore),
+        );
+        let (output, mut output_rx) = ProviderOutputStream::channel();
+        let labels = BTreeSet::new();
+        let projected = codex_client_projection_labels();
+        let output_root = temp.path().join("emitted");
+        let live_stream_root = temp.path().join("streams");
+        let live_stream_rules = live_stream_rules();
+        let provider_interface = InterfaceId::new("world_provider_codex");
+        let sink = TurnSink {
+            emit: &output,
+            output_root: &output_root,
+            live_stream_root: &live_stream_root,
+            provider_interface: &provider_interface,
+            run: "run-a",
+            source_movement_seq: 7,
+            attempt: 1,
+            context_output_labels: &labels,
+            client_projection_output_labels: &projected,
+            live_stream_rules: &live_stream_rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState::default())),
+        };
+        let operation = driver
+            .handle_account_login_start(
+                &provider_interface,
+                br#"{"method":"api_key","secret_handle":"secret://world_provider_codex/OPENAI_API_KEY"}"#,
+                &sink,
+            );
+        let receive = async {
+            let ProviderStreamEmission::TransportDispatch { artifact, admitted } =
+                output_rx.recv().await.unwrap()
+            else {
+                panic!("expected transport dispatch emission")
+            };
+            assert_eq!(
+                artifact.read_manifest().unwrap().label,
+                PROVIDER_TRANSPORT_DISPATCH_LABEL
+            );
+            let dispatch: serde_json::Value =
+                serde_json::from_slice(&artifact.read_payload_bytes().unwrap()).unwrap();
+            assert_eq!(dispatch["provider_interface"], "world_provider_codex");
+            assert_eq!(dispatch["method"], "account/login/start");
+            assert_eq!(dispatch["source_movement_seq"], 7);
+            assert_eq!(
+                dispatch["credential_handle_fingerprint"]
+                    .as_str()
+                    .map(str::len),
+                Some(64)
+            );
+            admitted.send(Ok(())).unwrap();
+            let ProviderStreamEmission::Turn(emission) = output_rx.recv().await.unwrap() else {
+                panic!("expected provider turn emission")
+            };
+            emission
+        };
+        let (result, emission) = tokio::join!(operation, receive);
+        result.unwrap();
+        assert_eq!(
+            emission.artifact.read_manifest().unwrap().label,
+            PROVIDER_ACCOUNT_LOGIN_STARTED_LABEL
+        );
+        let payload = emission.artifact.read_payload_bytes().unwrap();
+        let payload = String::from_utf8(payload).unwrap();
+        assert!(payload.contains("secret://world_provider_codex/OPENAI_API_KEY"));
+        assert!(!payload.contains("upstream-only-secret"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_continuity_resumes_and_reads_the_exact_native_thread() {
+        use octopus_appserver_proto::{
+            ApprovalsReviewer, AskForApproval, SandboxPolicy, SessionSource, Thread, ThreadStatus,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("app-server.sock");
+        let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
+        let cwd = octopus_util_abspath::AbsolutePathBuf::from_absolute_path(temp.path()).unwrap();
+        let (method_tx, mut method_rx) = tokio::sync::mpsc::unbounded_channel();
+        let thread = Thread {
+            id: "thr-exact".to_string(),
+            session_id: "thr-exact".to_string(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            preview: String::new(),
+            ephemeral: false,
+            model_provider: "openai".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            recency_at: Some(1),
+            status: ThreadStatus::Idle,
+            path: None,
+            cwd: cwd.clone(),
+            cli_version: "test".to_string(),
+            source: SessionSource::Exec,
+            thread_source: None,
+            agent_nickname: None,
+            agent_role: None,
+            git_info: None,
+            name: None,
+            turns: Vec::new(),
+        };
+        let server = tokio::spawn({
+            let cwd = cwd.clone();
+            let thread = thread.clone();
+            async move {
+                use futures::StreamExt;
+
+                let stream = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let init = next_test_rpc(&mut socket).await;
+                let octopus_appserver_proto::JSONRPCMessage::Request(init) = init else {
+                    panic!("expected initialize request")
+                };
+                assert_eq!(init.method, "initialize");
+                send_test_result(
+                    &mut socket,
+                    init.id,
+                    serde_json::json!({"userAgent": "codex/test", "codexHome": cwd}),
+                )
+                .await;
+                assert!(matches!(
+                    next_test_rpc(&mut socket).await,
+                    octopus_appserver_proto::JSONRPCMessage::Notification(_)
+                ));
+                let resume = next_test_rpc(&mut socket).await;
+                let octopus_appserver_proto::JSONRPCMessage::Request(resume) = resume else {
+                    panic!("expected thread/resume request")
+                };
+                method_tx.send(resume.method.clone()).unwrap();
+                assert_eq!(resume.method, "thread/resume");
+                assert_eq!(resume.params.as_ref().unwrap()["threadId"], "thr-exact");
+                assert_eq!(resume.params.as_ref().unwrap()["excludeTurns"], true);
+                assert_eq!(
+                    resume.params.as_ref().unwrap()["config"]["features.code_mode.direct_only_tool_namespaces"],
+                    serde_json::json!([])
+                );
+                assert_eq!(resume.params.as_ref().unwrap()["config"]["web_search"], "live");
+                assert_eq!(resume.params.as_ref().unwrap()["config"]["features.view_image"], false);
+                assert_eq!(resume.params.as_ref().unwrap()["sandbox"], "read-only");
+                assert_eq!(resume.params.as_ref().unwrap()["model"], "gpt-5.5");
+                send_test_result(
+                    &mut socket,
+                    resume.id,
+                    serde_json::to_value(ThreadResumeResponse {
+                        thread: thread.clone(),
+                        model: "gpt-5.5".to_string(),
+                        model_provider: "openai".to_string(),
+                        service_tier: None,
+                        cwd: cwd.clone(),
+                        runtime_workspace_roots: Vec::new(),
+                        instruction_sources: Vec::new(),
+                        approval_policy: AskForApproval::OnFailure,
+                        approvals_reviewer: ApprovalsReviewer::User,
+                        sandbox: SandboxPolicy::DangerFullAccess,
+                        active_permission_profile: None,
+                        reasoning_effort: None,
+                        multi_agent_mode: None,
+                        initial_turns_page: None,
+                    })
+                    .unwrap(),
+                )
+                .await;
+                let read = next_test_rpc(&mut socket).await;
+                let octopus_appserver_proto::JSONRPCMessage::Request(read) = read else {
+                    panic!("expected thread/read request")
+                };
+                method_tx.send(read.method.clone()).unwrap();
+                assert_eq!(read.method, "thread/read");
+                assert_eq!(read.params.as_ref().unwrap()["threadId"], "thr-exact");
+                assert!(read.params.as_ref().unwrap().get("includeTurns").is_none());
+                send_test_result(
+                    &mut socket,
+                    read.id,
+                    serde_json::to_value(ThreadReadResponse { thread }).unwrap(),
+                )
+                .await;
+                while socket.next().await.is_some() {}
+            }
+        });
+        let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
+            endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+                socket_path: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(
+                    &socket_path,
+                )
+                .unwrap(),
+            },
+            client_name: "octopus-test".to_string(),
+            client_version: "0".to_string(),
+            experimental_api: false,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        .unwrap();
+        let driver_config = InterfaceDriverConfig {
+            private_config: serde_json::json!({
+                "model": "gpt-5.5",
+                "reasoning_summary": "none",
+                "web_search": "live",
+                "instruction_artifacts": [],
+                "worker_instruction_artifacts": ["role-instruction"],
+                "context_output_labels": codex_context_labels(),
+                "session_snapshot_labels": codex_snapshot_labels(),
+                "client_projection_output_labels": codex_client_projection_labels(),
+                "live_stream": live_stream_config_value(),
+                "native_tool_namespace": {
+                    "name": "formed_interfaces",
+                    "description": "Formed interface tools."
+                },
+                "model_result_projection": {
+                    "max_tokens": 10000
+                },
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            ..InterfaceDriverConfig::default()
+        };
+        let driver = CodexAppServerInterfaceDriver::new_with_config(
+            AppServerClient::Remote(client),
+            Some(&driver_config),
+        );
+        let mut web_policy = model_policy_input(serde_json::json!(["gpt-5.5"]));
+        for modes in [serde_json::json!(["cached"]), serde_json::json!([]), serde_json::json!("live")] {
+            web_policy.metadata.as_mut().unwrap().grant.interface_policy
+                .get_mut("world_provider_codex").unwrap()
+                .insert("web_search_modes".into(), modes);
+            assert!(driver.enforce_native_web_search_policy(&web_policy).is_err());
+        }
+        assert_eq!(driver.native_tool_thread_config().unwrap()["web_search"], "live");
+        assert_eq!(driver.native_tool_thread_config().unwrap()["features.view_image"], false);
+        let result_bytes = serde_json::to_vec(&serde_json::json!({
+            "label": "coder.exec.result",
+            "tool": "coder.exec",
+            "correlation_id": "call-1",
+            "ok": false,
+            "error": {
+                "code": "file_not_found",
+                "message": "AGENTS.md was not found"
+            },
+        }))
+        .unwrap();
+        let input_file = InterfaceArtifactFile::write(
+            temp.path().join("input"),
+            "coder.exec.result",
+            &result_bytes,
+        )
+        .unwrap();
+        let mut pending = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thr-exact",
+            7,
+            Some(CodexPendingContinuity::DynamicTool {
+                native_operation: None,
+                turn_id: "turn-1".to_string(),
+                call_id: "call-1".to_string(),
+                tool: "coder.exec".to_string(),
+            }),
+        );
+        let native_affordances = namespace_native_affordances(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "coder-dexec".into(), description: "execute".into(),
+            input_schema: serde_json::json!({"type":"object"}), defer_loading: false,
+        })], &NativeToolNamespace { name: "formed_interfaces".into(), description: "Formed interface tools.".into() }).unwrap();
+        let role = bound("role-instruction", serde_json::json!({"label":"context.reference","text":"role"}));
+        let mut static_bytes = Vec::new();
+        append_static_context_source(&mut static_bytes, &role);
+        static_bytes.extend_from_slice(br#"{"coder-dexec":"coder.exec"}"#);
+        pending.static_context_fingerprint = sha256_hex(&static_bytes);
+        pending.thread_shape_fingerprint = thread_shape_fingerprint(
+            Some("gpt-5.5"),
+            "role",
+            &native_affordances,
+            &pending.static_context_fingerprint,
+        )
+        .unwrap();
+        let mut runtime_grant = octopus_interfaces::GrantProjection::default();
+        runtime_grant.tools.push("coder.exec".into());
+        runtime_grant.interface_affordance_specs.push(octopus_ledger::InterfaceToolAffordance {
+            name: "coder.exec".into(), description: "execute".into(), args_schema: serde_json::json!({"type":"object"}),
+        });
+        runtime_grant.interface_policy.insert(
+            "world_provider_codex".to_string(),
+            BTreeMap::from([
+                ("models".to_string(), serde_json::json!(["gpt-5.5"])),
+                ("web_search_modes".to_string(), serde_json::json!(["live"])),
+            ]),
+        );
+        let mut runtime_metadata = octopus_interfaces::InvocationMetadata::new(runtime_grant)
+            .with_runtime(RuntimeInvocationMetadata {
+                run: octopus_interfaces::RunId::new("run-a"),
+                ee: octopus_descriptors::EeId::new("ee-a"),
+                worker: InterfaceId::new("system_worker_test"),
+                checkpoint: octopus_descriptors::CheckpointId::new("checkpoint-a"),
+                interface: InterfaceId::new("world_provider_codex"),
+                epoch: 1,
+                run_record_hash: None,
+            });
+        runtime_metadata.grant.role_artifacts = vec!["role-instruction".into()];
+        runtime_metadata.artifact_binding_refs.push(role.artifact.clone());
+        runtime_metadata.grant.artifact_access.insert("role-instruction".into(), serde_json::from_value(
+            serde_json::json!({"read":true,"change":false,"create":false,"delete":false}),
+        ).unwrap());
+        let runtime = runtime_metadata.runtime.as_ref().unwrap();
+        let mut pinned_record = octopus_runtime::run_record::RunRecord {
+            id: runtime.run.clone(),
+            ee: runtime.ee.clone(),
+            worker: runtime.worker.clone(),
+            trace: octopus_runtime::TraceId("trace:cold-continuity".to_string()),
+            status: serde_json::json!("running"),
+            interface_state: BTreeMap::new(),
+            checkpoints: Vec::new(),
+            active_checkpoints: Vec::new(),
+        };
+        let pinned_run_record = serde_json::to_vec(&pinned_record).unwrap();
+        octopus_runtime::run_record::RunRecord::from_bytes(&pinned_run_record).unwrap();
+        pinned_record.interface_state.insert(
+            runtime.interface.clone(),
+            BTreeMap::from([("context_generation".to_string(), serde_json::json!(7))]),
+        );
+        let catalog_bytes = serde_json::to_vec(&serde_json::json!({"limit": 1})).unwrap();
+        let catalog_file = InterfaceArtifactFile::write(
+            temp.path().join("catalog-input"),
+            PROVIDER_MODELS_LIST_LABEL,
+            &catalog_bytes,
+        )
+        .unwrap();
+        let catalog_envelope = InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("provider-models-list"),
+                content: octopus_ledger::ContentHash::of_bytes(&catalog_bytes),
+            },
+            artifact_file: catalog_file,
+            artifact_binding_payloads: vec![role.clone(), bound(
+                "pending-catalog-tool-call",
+                serde_json::json!({
+                    "label": TOOL_CALL_LABEL,
+                    CODEX_CONTINUITY_FIELD: pending.clone(),
+                }),
+            )],
+            metadata: Some(runtime_metadata.clone()),
+        };
+        let (catalog_output, _catalog_output_rx) = ProviderOutputStream::channel();
+        let blocked_catalog = driver
+            .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                input: catalog_envelope,
+                emit: catalog_output,
+                resolved_session_snapshot: None,
+                current_session_context: Arc::new(Vec::new()),
+                output_root: &temp.path().join("catalog-output"),
+                live_stream_root: &temp.path().join("catalog-streams"),
+                source_movement_seq: 1,
+                attempt: 1,
+                admitted_run_record: &pinned_run_record,
+                current_run_record: &pinned_run_record,
+                input_changes_context: false,
+                interrupted_after_artifact: None,
+                recovered_handoff_artifacts: Arc::new(Vec::new()),
+                durable_interrupted_continuity: None,
+                control: &CodexTurnControlBroker::new(Some(1)),
+                handoff_barrier: ProviderHandoffBarrier::new(),
+            })
+            .await;
+        assert!(matches!(
+            &blocked_catalog,
+            Err(InterfaceDriverError::FailedClosed(error))
+                if error.contains("model catalog request cannot replace an unresolved app-server request")
+        ), "{blocked_catalog:?}");
+        assert!(method_rx.try_recv().is_err());
+        let captured_inject = temp.path().join("inject-request.json");
+        let rollout_path = temp.path().join("native-rollout.jsonl");
+        std::fs::write(&rollout_path, format!("{}\n", serde_json::json!({
+            "type":"response_item", "payload":{
+                "type":"function_call", "call_id":"call-1", "name":"coder-dexec",
+                "namespace":"formed_interfaces", "arguments":"{\"command\":\"pwd\"}"
+            }
+        }))).unwrap();
+        let mut restored_thread = thread.clone();
+        restored_thread.path = Some(rollout_path);
+        let resume_response = serde_json::json!({"id":1, "result": ThreadResumeResponse {
+            thread: restored_thread.clone(), model: "gpt-5.5".into(), model_provider: "openai".into(),
+            service_tier: None, cwd: cwd.clone(), runtime_workspace_roots: Vec::new(),
+            instruction_sources: Vec::new(), approval_policy: AskForApproval::OnFailure,
+            approvals_reviewer: ApprovalsReviewer::User, sandbox: SandboxPolicy::DangerFullAccess,
+            active_permission_profile: None, reasoning_effort: None, multi_agent_mode: None,
+            initial_turns_page: None,
+        }}).to_string();
+        let read_response = serde_json::json!({"id":2, "result": ThreadReadResponse {
+            thread: restored_thread,
+        }}).to_string();
+        let script_path = temp.path().join("app-server.sh");
+        std::fs::write(
+            &script_path,
+            r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"id":"initialize","result":{"userAgent":"codex/test","codexHome":"/tmp"}}'
+IFS= read -r _
+IFS= read -r _
+printf '%s\n' "$3"
+IFS= read -r _
+printf '%s\n' "$4"
+IFS= read -r inject
+printf '%s\n' "$inject" > "$1"
+printf '%s\n' '{"id":3,"result":{}}'
+IFS= read -r turn
+case "$turn" in *'"input":[]'*) ;; *) exit 1;; esac
+printf '%s\n' '{"id":4,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
+printf '%s\n' '{"method":"item/started","params":{"threadId":"thr-exact","turnId":"turn-continued","startedAtMs":1,"item":{"type":"webSearch","id":"web-1","query":"example","action":null}}}'
+printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":2,"item":{"type":"webSearch","id":"web-1","query":"example","action":{"type":"search","query":"example"},"results":[{"url":"https://example.com","title":"Example","snippet":"search evidence"}]}}}'
+printf '%s\n' '{"id":"server-tool-1","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-2","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"pwd"}}}'
+printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":3,"item":{"type":"agentMessage","id":"commentary-after-result","text":"Continuing","phase":"commentary"}}}'
+printf '%s\n' '{"id":"server-tool-2","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-3","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"ls"}}}'
+IFS= read -r _
+printf '%s\n' '{"id":5,"result":{"data":[]}}'
+IFS= read -r response
+printf '%s\n' "$response" > "$2"
+while IFS= read -r _; do :; done
+"#,
+        )
+        .unwrap();
+        let spawned = crate::SpawnAppServerClient::connect(crate::spawn::SpawnConfig {
+            bin: "/bin/sh".to_string(),
+            args: vec![
+                script_path.display().to_string(),
+                captured_inject.display().to_string(),
+                temp.path()
+                    .join("queued-native-response.json")
+                    .display()
+                    .to_string(),
+                resume_response,
+                read_response,
+            ],
+            cwd: Some(temp.path().to_path_buf()),
+            codex_home: None,
+            initialize_params: serde_json::from_value(serde_json::json!({
+                "clientInfo": {"name": "octopus-test", "version": "0"},
+                "capabilities": {},
+            }))
+            .unwrap(),
+            compatibility: None,
+            channel_capacity: 16,
+        })
+        .await
+        .unwrap();
+        let mut exact_driver_config = driver_config.clone();
+        exact_driver_config.private_config.insert(
+            "private_thread_cold_start".to_string(),
+            serde_json::json!("resume_exact"),
+        );
+        let cold_driver = CodexAppServerInterfaceDriver::new_with_config(
+            AppServerClient::Spawn(spawned),
+            Some(&exact_driver_config),
+        );
+        let session_artifact: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "previous-message",
+            "operator.message",
+            serde_json::json!({"text": "earlier task"}),
+            1,
+        ))
+        .unwrap();
+        let pending_carrier = bound(
+            "pending-tool-call",
+            serde_json::json!({
+                "label": "interface.artifact.output",
+                CODEX_CONTINUITY_FIELD: pending.clone(),
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_codex",
+                    "artifacts": [session_artifact.clone()],
+                },
+            }),
+        );
+        let resolved_session_snapshot = ProviderInvocationSessionSnapshot {
+            carrier: pending_carrier.artifact.clone(),
+            artifacts: Arc::new(vec![session_artifact]),
+        };
+        let document_bytes = b"# Architecture\n";
+        let document = InterfaceArtifactFile::write(
+            temp.path().join("document"), "architecture.md", document_bytes,
+        ).unwrap();
+        let document_ref = document.pin_manifest_into_blob(
+            &mut octopus_ledger::InMemoryBlobs::new(),
+        ).unwrap().artifact;
+        let document = octopus_interfaces::ArtifactBindingPayload::new(
+            document_ref.clone(), document_bytes.to_vec(),
+        );
+        let read_access = serde_json::json!({"read":true,"change":false,"create":false,"delete":false});
+        let mut admitted_record = serde_json::to_value(&pinned_record).unwrap();
+        admitted_record["interface_state"]["world_provider_codex"]["run_authoring_binding"] = serde_json::json!({
+            "schema_version":2,"run":"run-a","worker":"system_worker_test",
+            "provider_interface":"world_provider_codex","authoring_source_interface":"world_provider_codex",
+            "payload_artifact_bindings":[document_ref],"checkpoints":[],
+        });
+        admitted_record["interface_state"]["world_provider_codex"]["context_generation"] = serde_json::json!(6);
+        admitted_record["checkpoints"] = serde_json::json!([{
+            "id":"checkpoint-a","run":"run-a","trace":"trace:cold-continuity","epoch":1,
+            "interface_binding":octopus_runtime::AuthoredInterfaceBinding::all(InterfaceId::new("system_coder")),
+            "outbound_interface_bindings":[octopus_runtime::AuthoredInterfaceBinding::all(runtime.interface.clone())],
+            "artifact_bindings":[{"id":document_ref.id,"access":read_access}],
+            "required_verified_artifacts":[],
+        }]);
+        admitted_record["active_checkpoints"] = serde_json::json!(["checkpoint-a"]);
+        let admitted_context_record = serde_json::to_vec(&admitted_record).unwrap();
+        octopus_runtime::run_record::RunRecord::from_bytes(&admitted_context_record).unwrap();
+        let mut current_record = admitted_record;
+        current_record["interface_state"]["world_provider_codex"]["context_generation"] = serde_json::json!(7);
+        current_record["checkpoints"] = serde_json::json!([]);
+        current_record["active_checkpoints"] = serde_json::json!([]);
+        let current_context_record = serde_json::to_vec(&current_record).unwrap();
+        let mut result_metadata = runtime_metadata.clone();
+        result_metadata.runtime.as_mut().unwrap().run_record_hash = Some(
+            octopus_ledger::ContentHash::of_bytes(&admitted_context_record).to_hex(),
+        );
+        result_metadata.artifact_binding_refs = vec![pending_carrier.artifact.clone(), document_ref.clone(), role.artifact.clone()];
+        result_metadata.grant.artifact_access.insert(
+            document_ref.id.as_str().into(), serde_json::from_value(read_access).unwrap(),
+        );
+        let envelope = InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("coder-exec-result"),
+                content: octopus_ledger::ContentHash::of_bytes(&result_bytes),
+            },
+            artifact_file: input_file,
+            artifact_binding_payloads: vec![pending_carrier, document, role.clone()],
+            metadata: Some(result_metadata),
+        };
+        let (output, mut output_rx) = ProviderOutputStream::channel();
+        let cold_output_root = temp.path().join("output");
+        let cold_live_stream_root = temp.path().join("cold-streams");
+        let cold_control = CodexTurnControlBroker::new(Some(1));
+        let cold_pending =
+            cold_driver.receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                input: envelope,
+                emit: output,
+                resolved_session_snapshot: Some(resolved_session_snapshot),
+                current_session_context: Arc::new(Vec::new()),
+                output_root: &cold_output_root,
+                live_stream_root: &cold_live_stream_root,
+                source_movement_seq: 1,
+                attempt: 1,
+                admitted_run_record: &admitted_context_record,
+                current_run_record: &current_context_record,
+                input_changes_context: true,
+                interrupted_after_artifact: None,
+                recovered_handoff_artifacts: Arc::new(Vec::new()),
+                durable_interrupted_continuity: None,
+                control: &cold_control,
+                handoff_barrier: ProviderHandoffBarrier::new(),
+            });
+        let collect = async {
+            let mut emissions = Vec::new();
+            while let Some(output) = output_rx.recv().await {
+                match output {
+                    ProviderStreamEmission::Turn(emission) => emissions.push(emission),
+                    ProviderStreamEmission::TransportDispatch { admitted, .. } => {
+                        admitted.send(Ok(())).unwrap();
+                    }
+                    _ => panic!("unexpected cold-continuation output family"),
+                }
+            }
+            emissions
+        };
+        let (cold_pending, emissions) = tokio::join!(cold_pending, collect);
+        cold_pending.unwrap();
+        let inject_request: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(captured_inject).unwrap()).unwrap();
+        let injected_item = &inject_request["params"]["items"][0];
+        assert_eq!(injected_item["call_id"], "call-1");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(injected_item["output"].as_str().unwrap())
+                .unwrap()["error"]["code"],
+            "file_not_found"
+        );
+        let search = emissions.iter().find(|emission| {
+            emission.artifact.read_manifest().unwrap().label == TURN_WEB_SEARCH_LABEL
+                && serde_json::from_slice::<serde_json::Value>(
+                    &emission.artifact.read_payload_bytes().unwrap(),
+                ).unwrap()["lifecycle"] == "completed"
+        }).expect("native search must survive as a completed artifact before the next tool call");
+        let search: serde_json::Value = serde_json::from_slice(
+            &search.artifact.read_payload_bytes().unwrap(),
+        ).unwrap();
+        assert_eq!(search["results"][0]["url"], "https://example.com");
+        let continued_call = emissions
+            .iter()
+            .find(|emission| emission.artifact.read_manifest().unwrap().label == TOOL_CALL_LABEL)
+            .expect("the next model turn must emit its next tool-call artifact");
+        let continued_call: serde_json::Value =
+            serde_json::from_slice(&continued_call.artifact.read_payload_bytes().unwrap()).unwrap();
+        assert_eq!(continued_call["correlation_id"], "call-2");
+        let queue_scope = TransportStateScope::Run("run-a".to_string());
+        let first_pending = cold_driver
+            .pending_request(&queue_scope, "tool:call-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_pending.request_id,
+            RequestId::String("server-tool-1".to_string())
+        );
+        let recovered_queue: CodexContinuityState =
+            serde_json::from_value(continued_call[CODEX_CONTINUITY_FIELD].clone()).unwrap();
+        let queue_root = temp.path().join("queued-native-output");
+        let queue_stream_root = temp.path().join("queued-native-streams");
+        let context_labels = codex_context_labels();
+        let projection_labels = codex_client_projection_labels();
+        let stream_rules = live_stream_rules();
+        let (queue_output, mut queue_output_rx) = ProviderOutputStream::channel();
+        let queue_sink = TurnSink {
+            emit: &queue_output,
+            output_root: &queue_root,
+            live_stream_root: &queue_stream_root,
+            provider_interface: &recovered_queue.provider_interface,
+            run: "run-a",
+            source_movement_seq: 2,
+            attempt: 1,
+            context_output_labels: &context_labels,
+            client_projection_output_labels: &projection_labels,
+            live_stream_rules: &stream_rules,
+            live_stream: std::sync::Mutex::new(None),
+            continuity: Arc::new(std::sync::Mutex::new(ContinuityEmitterState {
+                continuity: Some(recovered_queue.clone()),
+                pending_input_context: false,
+            })),
+        };
+        let source_artifact = bound(
+            "queued-native-result",
+            serde_json::json!({"output":"first"}),
+        );
+        let operations = BTreeMap::new();
+        let barrier = ProviderHandoffBarrier::new();
+        let queue_context = TurnContext {
+            run_invocation: None,
+            scope: &queue_scope,
+            sink: &queue_sink,
+            control: &cold_control,
+            interface_operations: &operations,
+            tool_names: &BTreeMap::from([("coder-dexec".into(), "coder.exec".into())]),
+            source_artifact: &source_artifact.artifact,
+            handoff_barrier: &barrier,
+            effect_gate: &first_pending.effect_gate,
+            turn_interrupted: &first_pending.turn_interrupted,
+            lifecycle: None,
+            lifecycle_prompt: None,
+        };
+        let first_result = ToolResultArtifact::success(
+            "coder.exec",
+            Some("call-2".to_string()),
+            serde_json::json!({"output":"first"}),
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                cold_driver.resume_tool_result(
+                    queue_context,
+                    first_result.clone(),
+                    Some(&recovered_queue),
+                    recovered_queue.context_generation,
+                    false
+                )
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        );
+        let second_pending = cold_driver
+            .pending_request(&queue_scope, "tool:call-3")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second_pending.request_id,
+            RequestId::String("server-tool-2".to_string())
+        );
+        assert_eq!(second_pending.turn_id, "turn-continued");
+        assert!(
+            cold_driver
+                .pending_request(&queue_scope, "tool:call-2")
+                .await
+                .is_err()
+        );
+        let mut second_call = None;
+        let mut resolved_commentary = false;
+        while let Ok(emission) = queue_output_rx.try_recv() {
+            if let ProviderStreamEmission::Turn(emission) = emission {
+                if emission.artifact.read_manifest().unwrap().label == TURN_AGENT_MESSAGE_LABEL {
+                    let value: serde_json::Value = serde_json::from_slice(&emission.artifact.read_payload_bytes().unwrap()).unwrap();
+                    assert!(value[CODEX_CONTINUITY_FIELD].get("pending").is_none());
+                    resolved_commentary = true;
+                }
+                if emission.artifact.read_manifest().unwrap().label == TOOL_CALL_LABEL {
+                    assert!(second_call.is_none());
+                    second_call = Some(
+                        serde_json::from_slice::<serde_json::Value>(
+                            &emission.artifact.read_payload_bytes().unwrap(),
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+        }
+        assert!(resolved_commentary);
+        let second_call =
+            second_call.expect("the queued request must become its own tool artifact");
+        assert_eq!(second_call["correlation_id"], "call-3");
+        assert_eq!(second_call["arguments"]["command"], "ls");
+        let second_continuity: CodexContinuityState =
+            serde_json::from_value(second_call[CODEX_CONTINUITY_FIELD].clone()).unwrap();
+        assert_eq!(
+            second_continuity.pending,
+            Some(CodexPendingContinuity::DynamicTool {
+                native_operation: None,
+                turn_id: "turn-continued".to_string(),
+                call_id: "call-3".to_string(),
+                tool: "coder.exec".to_string(),
+            })
+        );
+        assert!(
+            validate_recovered_tool_result(
+                &first_result,
+                second_continuity.pending.as_ref().unwrap()
+            )
+            .is_err()
+        );
+        let wire_response = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Ok(bytes) = std::fs::read(temp.path().join("queued-native-response.json")) {
+                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        break value;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(wire_response["id"], "server-tool-1");
+        assert_eq!(wire_response["result"]["success"], true);
+
+        let interrupted_pending = CodexPendingContinuity::DynamicTool {
+            native_operation: None,
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool: "coder.exec".to_string(),
+        };
+        let mut interrupted = continuity("world_provider_codex", "run-a", "thr-exact", 8, None);
+        interrupted.interrupted_pending = Some(interrupted_pending.clone());
+        let mut result_before_ack = interrupted.clone();
+        result_before_ack.context_generation = 7;
+        result_before_ack.pending = Some(interrupted_pending);
+        result_before_ack.interrupted_pending = None;
+        let interrupted_result_envelope = |root: &str| InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("coder-exec-interrupted-result"),
+                content: octopus_ledger::ContentHash::of_bytes(&result_bytes),
+            },
+            artifact_file: InterfaceArtifactFile::write(
+                temp.path().join(root),
+                "coder.exec.result",
+                &result_bytes,
+            )
+            .unwrap(),
+            artifact_binding_payloads: vec![role.clone(), bound(
+                &format!("result-before-interrupt-ack-{root}"),
+                serde_json::json!({
+                    "label": TOOL_CALL_LABEL,
+                    CODEX_CONTINUITY_FIELD: result_before_ack.clone(),
+                }),
+            )],
+            metadata: Some(runtime_metadata.clone()),
+        };
+        let queued_turn_bytes = serde_json::to_vec(&serde_json::json!({
+            "text": "queued after stop",
+            "message_id": "queued-message-1",
+        }))
+        .unwrap();
+        let queued_turn_envelope = InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("queued-turn-after-stop"),
+                content: octopus_ledger::ContentHash::of_bytes(&queued_turn_bytes),
+            },
+            artifact_file: InterfaceArtifactFile::write(
+                temp.path().join("queued-turn"),
+                OPERATOR_MESSAGE_LABEL,
+                &queued_turn_bytes,
+            )
+            .unwrap(),
+            artifact_binding_payloads: vec![role.clone(), bound(
+                "pending-result-before-queued-turn",
+                serde_json::json!({
+                    "label": TOOL_CALL_LABEL,
+                    CODEX_CONTINUITY_FIELD: result_before_ack.clone(),
+                }),
+            )],
+            metadata: Some(runtime_metadata.clone()),
+        };
+        let (queued_output, mut queued_output_rx) = ProviderOutputStream::channel();
+        let queued = driver
+            .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                input: queued_turn_envelope,
+                emit: queued_output,
+                resolved_session_snapshot: None,
+                current_session_context: Arc::new(Vec::new()),
+                output_root: &temp.path().join("queued-turn-output"),
+                live_stream_root: &temp.path().join("queued-turn-streams"),
+                source_movement_seq: 2,
+                attempt: 1,
+                admitted_run_record: &pinned_run_record,
+                current_run_record: &pinned_run_record,
+                input_changes_context: true,
+                interrupted_after_artifact: None,
+                recovered_handoff_artifacts: Arc::new(Vec::new()),
+                durable_interrupted_continuity: Some(interrupted.clone()),
+                control: &CodexTurnControlBroker::new(Some(2)),
+                handoff_barrier: ProviderHandoffBarrier::new(),
+            })
+            .await;
+        assert!(matches!(
+            queued,
+            Err(InterfaceDriverError::FailedClosed(error))
+                if error.contains("cannot replace a durably interrupted exact effect")
+        ));
+        assert!(queued_output_rx.recv().await.is_none());
+
+        let (interrupted_output, mut interrupted_output_rx) = ProviderOutputStream::channel();
+        driver
+            .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                input: interrupted_result_envelope("interrupted-output"),
+                emit: interrupted_output,
+                resolved_session_snapshot: None,
+                current_session_context: Arc::new(Vec::new()),
+                output_root: &temp.path().join("interrupted-emitted"),
+                live_stream_root: &temp.path().join("interrupted-streams"),
+                source_movement_seq: 3,
+                attempt: 1,
+                admitted_run_record: &pinned_run_record,
+                current_run_record: &pinned_run_record,
+                input_changes_context: true,
+                interrupted_after_artifact: None,
+                recovered_handoff_artifacts: Arc::new(Vec::new()),
+                durable_interrupted_continuity: Some(interrupted.clone()),
+                control: &CodexTurnControlBroker::new(Some(3)),
+                handoff_barrier: ProviderHandoffBarrier::new(),
+            })
+            .await
+            .unwrap();
+        let ProviderStreamEmission::InterruptedResult {
+            activity: None,
+            stream: Some(interrupted_stream),
+            closure: interrupted_closure,
+        } = interrupted_output_rx.recv().await.unwrap()
+        else {
+            panic!("expected one exact interrupted-result emission group")
+        };
+        assert_eq!(
+            interrupted_stream.artifact.read_manifest().unwrap().label,
+            "turn.stream"
+        );
+        let interrupted_stream_payload =
+            String::from_utf8(interrupted_stream.artifact.read_payload_bytes().unwrap()).unwrap();
+        assert!(interrupted_stream_payload.contains(TURN_DYNAMIC_TOOL_CALL_LABEL));
+        assert!(interrupted_stream_payload.contains("durably_admitted_after_interrupt"));
+        let interrupted_closure_bytes = interrupted_closure.artifact.read_payload_bytes().unwrap();
+        let interrupted_closure_payload: serde_json::Value =
+            serde_json::from_slice(&interrupted_closure_bytes).unwrap();
+        assert_eq!(
+            interrupted_closure.artifact.read_manifest().unwrap().label,
+            TURN_INTERRUPTED_RESULT_LABEL
+        );
+        assert_eq!(
+            interrupted_closure_payload["result_disposition"],
+            "durably_admitted_after_interrupt"
+        );
+        assert!(
+            interrupted_closure_payload
+                .pointer("/codex_continuity/interrupted_pending")
+                .is_none()
+        );
+        assert_eq!(
+            interrupted_closure_payload.pointer("/codex_continuity/context_generation"),
+            Some(&serde_json::json!(9))
+        );
+        assert!(interrupted_output_rx.recv().await.is_none());
+
+        let (recovered_output, mut recovered_output_rx) = ProviderOutputStream::channel();
+        driver
+            .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                input: interrupted_result_envelope("interrupted-recovery-output"),
+                emit: recovered_output,
+                resolved_session_snapshot: None,
+                current_session_context: Arc::new(Vec::new()),
+                output_root: &temp.path().join("interrupted-recovery-emitted"),
+                live_stream_root: &temp.path().join("interrupted-streams"),
+                source_movement_seq: 4,
+                attempt: 2,
+                admitted_run_record: &pinned_run_record,
+                current_run_record: &pinned_run_record,
+                input_changes_context: true,
+                interrupted_after_artifact: Some(TURN_DYNAMIC_TOOL_CALL_LABEL.to_string()),
+                recovered_handoff_artifacts: Arc::new(Vec::new()),
+                durable_interrupted_continuity: Some(interrupted.clone()),
+                control: &CodexTurnControlBroker::new(Some(4)),
+                handoff_barrier: ProviderHandoffBarrier::new(),
+            })
+            .await
+            .unwrap();
+        let ProviderStreamEmission::InterruptedResult {
+            activity: None,
+            stream: Some(recovered_stream),
+            closure: recovered_closure,
+        } = recovered_output_rx.recv().await.unwrap()
+        else {
+            panic!("expected resumed interrupted-result closure without duplicate activity")
+        };
+        assert_eq!(
+            recovered_closure.artifact.read_manifest().unwrap().label,
+            TURN_INTERRUPTED_RESULT_LABEL
+        );
+        assert_eq!(
+            recovered_closure.artifact.read_payload_bytes().unwrap(),
+            interrupted_closure_bytes
+        );
+        assert_eq!(
+            recovered_stream.artifact.read_payload_bytes().unwrap(),
+            interrupted_stream.artifact.read_payload_bytes().unwrap()
+        );
+        assert!(recovered_output_rx.recv().await.is_none());
+        assert!(method_rx.try_recv().is_err());
+
+        let static_context = "b".repeat(64);
+        let fingerprint =
+            thread_shape_fingerprint(Some("gpt-5.5"), "role", &[], &static_context).unwrap();
+        let mut recovered = continuity("world_provider_codex", "run-a", "thr-exact", 7, None);
+        recovered.thread_shape_fingerprint = fingerprint;
+        let acquired = driver
+            .acquire_transport_thread(
+                &TransportStateScope::Run("run-a".to_string()),
+                ThreadAcquisition {
+                    recovered: Some(&recovered),
+                    require_exact_resume: false,
+                    context_generation: 8,
+                    model: Some("gpt-5.5".to_string()),
+                    bound_instructions: "role",
+                    native_affordances: &[],
+                    static_context_fingerprint: &static_context,
+                    session_context_available: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(acquired, ("thr-exact".to_string(), false, true));
+        assert_eq!(method_rx.recv().await.as_deref(), Some("thread/resume"));
+        assert_eq!(method_rx.recv().await.as_deref(), Some("thread/read"));
+        assert!(method_rx.try_recv().is_err());
+        let mut regressed = recovered.clone();
+        regressed.context_generation = 6;
+        let rejected = driver
+            .acquire_transport_thread(
+                &TransportStateScope::Run("run-a".to_string()),
+                ThreadAcquisition {
+                    recovered: Some(&regressed),
+                    require_exact_resume: false,
+                    context_generation: 7,
+                    model: Some("gpt-5.5".to_string()),
+                    bound_instructions: "role",
+                    native_affordances: &[],
+                    static_context_fingerprint: &static_context,
+                    session_context_available: false,
+                },
+            )
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(InterfaceDriverError::FailedClosed(error))
+                if error.contains("regressed behind the live transport context generation")
+        ));
+        assert!(method_rx.try_recv().is_err());
+        driver.shutdown().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn assemble_context_splits_role_from_lenta_by_label() {
+        let payloads = vec![
+            bound(
+                "artifact-worker-role-template",
+                serde_json::json!({"label":"context.reference","id":"role","text":"You are the coder worker."}),
+            ),
+            bound(
+                "artifact-grounding-system-architecture",
+                serde_json::json!({"label":"context.reference","id":"grounding","text":"How Octopus works."}),
+            ),
+            bound(
+                "inbound-operator-message",
+                serde_json::json!({"label":"operator.message","text":"earlier: fix the build"}),
+            ),
+        ];
+        let assembled =
+            assemble_context(&payloads, "world_provider_test", &codex_snapshot_labels())
+                .expect("mixed context assembles, never fails closed");
+        assert_eq!(
+            assembled.role,
+            vec![
+                "You are the coder worker.".to_string(),
+                "How Octopus works.".to_string()
+            ],
+            "context.reference artifacts become the role, in order"
+        );
+        assert_eq!(
+            assembled.conversation,
+            vec!["User\nearlier: fix the build".to_string()],
+            "a non-context label is lenta, folded into the conversation, not the role"
+        );
+    }
+
+    #[test]
+    fn assemble_context_retains_a_json_artifact_without_text() {
+        let payloads = vec![
+            bound(
+                "role",
+                serde_json::json!({"label":"context.reference","text":"role text"}),
+            ),
+            bound(
+                "lenta",
+                serde_json::json!({"label":"operator.message","payload_path":"/tmp/x"}),
+            ),
+        ];
+        let assembled =
+            assemble_context(&payloads, "world_provider_test", &codex_snapshot_labels())
+                .expect("textless lenta is tolerated");
+        assert_eq!(assembled.role, vec!["role text".to_string()]);
+        assert_eq!(assembled.conversation.len(), 1);
+        assert!(assembled.conversation[0].starts_with("artifact lenta\n"));
+        assert!(assembled.conversation[0].contains("\"payload_path\":\"/tmp/x\""));
+    }
+
+    #[test]
+    fn session_snapshot_growth_preserves_the_static_context_fingerprint() {
+        let role = bound(
+            "role",
+            serde_json::json!({"label":"context.reference","text":"role text"}),
+        );
+        let queued = assemble_context(
+            &[
+                role.clone(),
+                bound("provider.peer.input:queued", serde_json::json!({"label":"provider.peer.input","message":{"action":"queue","text":"next assignment context"}})),
+                bound("interface.context.updated:receipt", serde_json::json!({"label":"interface.context.updated","queued":true,"turn_triggered":false})),
+            ],
+            "world_provider_test",
+            &codex_snapshot_labels(),
+        ).unwrap();
+        let first = assemble_context(
+            &[
+                role.clone(),
+                bound(
+                    "session-a",
+                    serde_json::json!({
+                        "label": "interface.artifact.output",
+                        "text": "TWO",
+                        "session_context": {
+                            "schema_version": 3,
+                            "provider_interface": "world_provider_test",
+                            "artifacts": [session_artifact(
+                                "operator.message:one",
+                                "operator.message",
+                                serde_json::json!({"text":"ONE"}),
+                                1
+                            )]
+                        }
+                    }),
+                ),
+            ],
+            "world_provider_test",
+            &codex_snapshot_labels(),
+        )
+        .expect("first snapshot assembles");
+        let second = assemble_context(
+            &[
+                role,
+                bound(
+                    "session-b",
+                    serde_json::json!({
+                        "label": "interface.artifact.output",
+                        "text": "THREE",
+                        "session_context": {
+                            "schema_version": 3,
+                            "provider_interface": "world_provider_test",
+                            "artifacts": [
+                                session_artifact(
+                                    "operator.message:one",
+                                    "operator.message",
+                                    serde_json::json!({"text":"ONE"}),
+                                    1
+                                ),
+                                session_artifact(
+                                    "interface.artifact.output:two",
+                                    "interface.artifact.output",
+                                    serde_json::json!({"text":"TWO"}),
+                                    2
+                                )
+                            ]
+                        }
+                    }),
+                ),
+            ],
+            "world_provider_test",
+            &codex_snapshot_labels(),
+        )
+        .expect("grown snapshot assembles");
+        assert_eq!(
+            sha256_hex(&first.static_context_bytes),
+            sha256_hex(&second.static_context_bytes)
+        );
+        assert_eq!(queued.static_context_bytes, first.static_context_bytes);
+        assert_eq!(queued.conversation.len(), 2);
+        assert_eq!(first.conversation, vec!["User\nONE", "Assistant\nTWO"]);
+        assert_eq!(second.conversation, vec!["User\nONE", "Assistant\nTWO", "Assistant\nTHREE"]);
+        assert!(
+            first
+                .conversation
+                .iter()
+                .all(|entry| !entry.contains(SESSION_CONTEXT_FIELD))
+        );
+    }
+
+    #[test]
+    fn native_compaction_is_same_turn_activity() {
+        assert!(
+            codex_client_projection_labels().contains(TURN_CONTEXT_COMPACTION_LABEL),
+            "native compaction must cross the exact client projection allowlist"
+        );
+        assert!(codex_context_labels().contains(TURN_CONTEXT_COMPACTION_LABEL));
+        let output = rich_item_output(ThreadItem::ContextCompaction {
+            id: "compact-one".to_string(),
+        })
+        .expect("context compaction is projected");
+        assert_eq!(output.label, TURN_CONTEXT_COMPACTION_LABEL);
+        assert_eq!(output.value.get("run_boundary"), None);
+
+        let state = continuity("world_provider_test", "run-one", "thread-one", 3, None);
+        let encoded = serde_json::to_value(state).expect("continuity encodes");
+        assert_eq!(encoded.get("run_boundary"), None);
+
+        let manual = manual_compaction_completed_output(
+            "compact-manual".to_string(),
+            "thread-one",
+            "turn-one",
+            7,
+        )
+        .expect("manual compaction projects");
+        assert_eq!(manual.value["source"], "manual");
+        assert_eq!(manual.value["automatic"], false);
+        assert_eq!(manual.value["thread_id"], "thread-one");
+        assert_eq!(manual.value["turn_id"], "turn-one");
+    }
+
+    #[test]
+    fn auth_recovery_is_turn_scoped_client_activity() {
+        assert!(codex_client_projection_labels().contains(TURN_AUTH_RECOVERY_STARTED_LABEL));
+        assert!(codex_client_projection_labels().contains(TURN_AUTH_RECOVERY_COMPLETED_LABEL));
+        let recovery = octopus_appserver_proto::AuthRecoveryNotification {
+            thread_id: "thread-one".to_string(),
+            turn_id: "turn-one".to_string(),
+            provider: "example".to_string(),
+            message: "Authentication recovered".to_string(),
+        };
+        assert!(
+            server_notification_matches_turn(
+                &ServerNotification::AuthRecoveryStarted(recovery.clone()),
+                "thread-one",
+                "turn-one",
+            )
+            .unwrap()
+        );
+        assert!(
+            !server_notification_matches_turn(
+                &ServerNotification::AuthRecoveryCompleted(recovery),
+                "thread-one",
+                "turn-two",
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn session_snapshots_are_provider_scoped_and_globally_source_unique() {
+        let source = session_artifact(
+            "operator.message:one",
+            "operator.message",
+            serde_json::json!({"text":"ONE"}),
+            1,
+        );
+        let snapshot = |id: &str, provider_interface: &str| {
+            bound(
+                id,
+                serde_json::json!({
+                    "label": "interface.artifact.output",
+                    "text": "TWO",
+                    "session_context": {
+                        "schema_version": 3,
+                        "provider_interface": provider_interface,
+                        "artifacts": [source.clone()]
+                    }
+                }),
+            )
+        };
+
+        let foreign = bound(
+            "session-wrong-provider",
+            serde_json::json!({
+                "label": "interface.artifact.output",
+                "text": "TWO",
+                CODEX_CONTINUITY_FIELD: continuity(
+                    "world_provider_other",
+                    "run-other",
+                    "thread-other",
+                    4,
+                    None,
+                ),
+                "context_window_usage": {
+                    "used_tokens": 900,
+                    "context_window": 1000
+                },
+                "session_context": {
+                    "schema_version": 3,
+                    "provider_interface": "world_provider_other",
+                    "artifacts": [source.clone()]
+                }
+            }),
+        );
+        let assembled = assemble_context(
+            std::slice::from_ref(&foreign),
+            "world_provider_test",
+            &codex_snapshot_labels(),
+        )
+        .expect("a foreign terminal is a fresh-run seed, not foreign provider continuity");
+        assert_eq!(assembled.conversation, vec!["Assistant\nTWO"]);
+        assert!(!assembled.session_context_available);
+        let received = session_artifact(
+            "received-foreign-terminal",
+            "interface.artifact.output",
+            serde_json::from_slice(foreign.as_bytes()).unwrap(),
+            8,
+        );
+        let local = continuity("world_provider_test", "run-test", "local-thread", 5, None);
+        let local_snapshot = bound("local-snapshot", serde_json::json!({
+            "label": "interface.artifact.output", "text": "LOCAL",
+            CODEX_CONTINUITY_FIELD: local,
+            "session_context": {
+                "schema_version": 3, "provider_interface": "world_provider_test",
+                "artifacts": [received]
+            }
+        }));
+        let local_assembled = assemble_context(std::slice::from_ref(&local_snapshot), "world_provider_test", &codex_snapshot_labels()).unwrap();
+        assert_eq!(local_assembled.conversation, vec!["Assistant\nTWO", "Assistant\nLOCAL"]);
+        assert_eq!(recover_codex_continuity(
+            &[local_snapshot], &InterfaceId::new("world_provider_test"), "run-test",
+            &codex_context_labels(), &codex_snapshot_labels(),
+        ).unwrap(), Some(local));
+        assert_eq!(
+            recover_codex_continuity(
+                &[foreign],
+                &InterfaceId::new("world_provider_test"),
+                "run-test",
+                &codex_context_labels(),
+                &codex_snapshot_labels(),
+            )
+            .expect("foreign private continuity is ignored"),
+            None
+        );
+        assert!(matches!(
+            assemble_context(
+                &[
+                    snapshot("session-a", "world_provider_test"),
+                    snapshot("session-b", "world_provider_test"),
+                ],
+                "world_provider_test",
+                &codex_snapshot_labels(),
+            ),
+            Err(InterfaceDriverError::FailedClosed(_))
+        ));
+    }
+
+    #[test]
+    fn assemble_context_still_requires_text_on_a_role_artifact() {
+        let payloads = vec![bound(
+            "role",
+            serde_json::json!({"label":"context.reference","id":"role"}),
+        )];
+        assert!(
+            matches!(
+                assemble_context(&payloads, "world_provider_test", &codex_snapshot_labels(),),
+                Err(InterfaceDriverError::Protocol(_))
+            ),
+            "role authority missing its text is a fail-closed protocol error"
+        );
+    }
+
+    #[test]
+    fn isolated_thread_start_params_suppress_environment_gated_native_tools() {
+        let params = isolated_thread_start_params(
+            Some("gpt-5.5".to_string()),
+            "You are the flash worker.".to_string(),
+            Vec::new(),
+        );
+
+        match &params.environments {
+            Some(environments) => assert!(
+                environments.is_empty(),
+                "environments must be EMPTY to disable codex's environment-gated native tools"
+            ),
+            None => panic!(
+                "environments must be Some(vec![]) for environment-gated tools, never \
+                 None — None re-admits codex's default environment and its native tools"
+            ),
+        }
+
+        assert_eq!(
+            params.sandbox,
+            Some(SandboxMode::ReadOnly),
+            "the codex sandbox must be pinned read-only (no exec side effects outside the gate)"
+        );
+
+        assert_eq!(
+            params.developer_instructions.as_deref(),
+            Some("You are the flash worker.")
+        );
+        assert!(params.base_instructions.is_none());
+    }
+
+    #[test]
+    fn model_names_preserve_exact_targets_and_reject_collisions() {
+        let mut specs = ["workspace.read__a", "workspace.read__b"].map(|name| {
+            DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: encode_tool_name(name), description: "Read".into(),
+                input_schema: serde_json::json!({"type":"object"}), defer_loading: false,
+            })
+        });
+        let mut config = serde_json::json!({"model_tool_names": {
+            "workspace.read__a":"read_primary", "workspace.read__b":"read_secondary"
+        }}).as_object().unwrap().clone();
+        let original = specs.clone();
+        let names = apply_model_tool_names(&mut specs, &config).unwrap();
+        assert_eq!(names["read_primary"], "workspace.read__a");
+        assert_eq!(names["read_secondary"], "workspace.read__b");
+        assert!(!names.contains_key("workspace-dread__a"));
+        config["model_tool_names"]["workspace.read__b"] = serde_json::json!("read_primary");
+        assert!(apply_model_tool_names(&mut original.clone(), &config).is_err());
+    }
+
+    #[test]
+    fn cold_history_keeps_model_decisions_without_private_transport_context() {
+        let mut assembled = AssembledContext::default();
+        for (label, payload) in [
+            (TURN_REASONING_LABEL, serde_json::json!({"summary":["The first approach failed; use the alternative."],"codex_continuity":{"thread_id":"private"}})),
+            (TURN_AGENT_MESSAGE_LABEL, serde_json::json!({"text":"I will check the remaining dependency."})),
+            (TURN_PLAN_UPDATE_LABEL, serde_json::json!({"text":"Next: verify the result."})),
+            ("tool.result", serde_json::json!({"ok":false,"error":{"message":"missing file"},"codex_continuity":{"thread_id":"private"},"provider_token_usage":{"total":9000}})),
+        ] {
+            let source = bound(label, payload.clone());
+            append_assembled_context(&mut assembled, Some(label), &payload, label, &source.artifact, ModelResultProjection { max_tokens: 10000 }).unwrap();
+        }
+        let history = assembled.conversation.join("\n");
+        for expected in ["alternative", "Assistant\nI will", "Assistant plan\nNext", "missing file"] { assert!(history.contains(expected)); }
+        for excluded in ["private", "codex_continuity", "provider_token_usage"] { assert!(!history.contains(excluded)); }
+    }
+
+    #[test]
+    fn interface_affordances_enter_the_native_dynamic_tools_field() {
+        let native_affordances = vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "artifact.read".into(),
+            description: "read a bound artifact through the context interface".into(),
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            defer_loading: false,
+        })];
+        let params = isolated_thread_start_params(
+            Some("gpt-5.5".into()),
+            "You are flash.".into(),
+            native_affordances.clone(),
+        );
+        let presented = params
+            .dynamic_tools
+            .as_ref()
+            .expect("interface affordances must be presented in the native dynamic_tools field");
+        assert_eq!(
+            presented.len(),
+            1,
+            "exactly the one projected native affordance is presented"
+        );
+        match &presented[0] {
+            DynamicToolSpec::Function(f) => assert_eq!(f.name, "artifact.read"),
+            other => panic!("expected a native Function affordance spec, got {other:?}"),
+        }
+        assert_eq!(
+            params.environments.as_deref(),
+            Some(&[][..]),
+            "codex's own natives stay OFF even while OUR affordances are presented (layer-2b)"
+        );
+
+        let none = isolated_thread_start_params(Some("gpt-5.5".into()), "x".into(), Vec::new());
+        assert!(
+            none.dynamic_tools.is_none(),
+            "an empty affordance set presents NO native tool list (the model can only reply directly)"
+        );
+    }
+
+    #[test]
+    fn fresh_turn_start_params_carries_bound_reasoning_effort() {
+        let params = fresh_turn_start_params(
+            "thread-1".to_string(),
+            vec![UserInput::Text {
+                text: "do the work".to_string(),
+                text_elements: Vec::new(),
+            }],
+            "gpt-5.5".to_string(),
+            Some(ReasoningEffort::XHigh),
+            ReasoningSummary::Detailed,
+            native_turn_context(Some("context".repeat(200_000)), Some("grant".into())),
+            TURN_TRIGGER_INPUT,
+        );
+
+        assert_eq!(params.input.len(), 1);
+        assert_eq!(params.additional_context.as_ref().unwrap()["octopus_bound_context"].value.len(), 1_400_000);
+        let continuation = LifecycleContinuation::StartTurn {
+            turn_input: serde_json::to_value(&params.input).unwrap(),
+            additional_context: params.additional_context.clone().unwrap().into_iter().collect(),
+            source_artifact: ArtifactRef { id: octopus_descriptors::ArtifactId::new("input"), content: octopus_ledger::ContentHash::of_bytes(b"input") },
+        };
+        assert_eq!(serde_json::from_value::<LifecycleContinuation>(serde_json::to_value(&continuation).unwrap()).unwrap(), continuation);
+        assert_eq!(params.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(params.effort, Some(ReasoningEffort::XHigh));
+        assert_eq!(params.summary, Some(ReasoningSummary::Detailed));
+        assert_eq!(params.turn_trigger.as_deref(), Some(TURN_TRIGGER_INPUT));
+        assert_eq!(
+            serde_json::to_value(&params)
+                .expect("turn params serialize")
+                .get("effort")
+                .and_then(serde_json::Value::as_str),
+            Some("xhigh")
+        );
+
+        let resumed = fresh_turn_start_params(
+            "thread-1".to_string(),
+            Vec::new(),
+            "gpt-5.5".to_string(),
+            Some(ReasoningEffort::XHigh),
+            ReasoningSummary::Detailed,
+            BTreeMap::new(),
+            TURN_TRIGGER_RESUME_INTERRUPTED_TASK,
+        );
+        assert!(resumed.input.is_empty());
+        assert_eq!(
+            resumed.turn_trigger.as_deref(),
+            Some(TURN_TRIGGER_RESUME_INTERRUPTED_TASK)
+        );
+    }
+
+    #[test]
+    fn explicit_resume_is_an_empty_provider_turn_and_never_replays_a_prompt() {
+        let input = decode_provider_input(
+            br#"{"action":"resume","control_id":"control-resume"}"#,
+            OPERATOR_TURN_CONTROL_LABEL,
+            None,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            input,
+            ProviderInput::Resume { control_id } if control_id == "control-resume"
+        ));
+        assert!(
+            decode_provider_input(
+                br#"{"action":"stop","control_id":"control-stop"}"#,
+                OPERATOR_TURN_CONTROL_LABEL,
+                None,
+                &BTreeMap::new(),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn extract_native_affordances_is_data_driven_and_fails_closed() {
+        let parsed = extract_native_affordances_from_invocation(
+            &metadata_input(serde_json::json!([
+                {
+                    "name": "artifact.read",
+                    "description": "read bound artifact",
+                    "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } }
+                }
+            ])),
+            &[],
+        )
+        .expect("a well-formed grant parses");
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            DynamicToolSpec::Function(f) => {
+                assert_eq!(f.name, "artifact-dread");
+                assert!(
+                    f.name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+                    "the presented native name must satisfy codex's ^[a-zA-Z0-9_-]+$ identifier pattern"
+                );
+                assert_eq!(
+                    decode_tool_name(&f.name).unwrap(),
+                    "artifact.read",
+                    "the encoded native name decodes back to OUR real dotted tool id"
+                );
+                assert_eq!(f.description, "read bound artifact");
+                assert!(f.input_schema.get("properties").is_some());
+            }
+            other => panic!("expected a Function spec, got {other:?}"),
+        }
+
+        assert!(extract_native_affordances_from_invocation(
+            &metadata_input(serde_json::json!([])),
+            &[],
+        )
+        .unwrap()
+        .is_empty());
+
+        let cut = extract_native_affordances_from_invocation(
+            &metadata_input(serde_json::json!([
+                {
+                    "name": "file.write",
+                    "description": "write file",
+                    "input_schema": { "type": "object", "properties": {} }
+                },
+                {
+                    "name": "artifact.read",
+                    "description": "read",
+                    "input_schema": { "type": "object", "properties": {} }
+                }
+            ])),
+            &["file.write".to_string()],
+        )
+        .expect("formed metadata tools honor the interface's descriptor-owned hidden list");
+        let cut_names: Vec<String> = cut
+            .iter()
+            .map(|spec| match spec {
+                DynamicToolSpec::Function(f) => decode_tool_name(&f.name).unwrap(),
+                other => panic!("expected a Function spec, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(cut_names, vec!["artifact.read".to_string()]);
+        let descriptor: serde_json::Value =
+            serde_json::from_str(include_str!("../../../interface.json")).unwrap();
+        let hidden = model_hidden_tool_names(
+            descriptor["interface_driver_config"]["private_config"]
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut application_input = metadata_input(serde_json::json!([
+            {"name":"gui.app_state","description":"application state","input_schema":{"type":"object"}},
+            {"name":"gui.app_resume","description":"operator continuation","input_schema":{"type":"object"}}
+        ]));
+        application_input.metadata.as_mut().unwrap().grant.tools =
+            vec!["gui.app_state".into(), "gui.app_resume".into()];
+        let granted = application_input.granted_tool_names().unwrap();
+        let visible =
+            extract_native_affordances_from_invocation(&application_input, &hidden).unwrap();
+        let visible: Vec<String> = visible
+            .iter()
+            .map(|spec| match spec {
+                DynamicToolSpec::Function(function) => decode_tool_name(&function.name).unwrap(),
+                other => panic!("unexpected native spec: {other:?}"),
+            })
+            .collect();
+        assert_eq!(visible, vec!["gui.app_state"]);
+        assert_eq!(application_input.granted_tool_names().unwrap(), granted);
+        assert!(granted.iter().any(|tool| tool == "gui.app_resume"));
+
+        let mut missing_metadata = metadata_input(serde_json::json!([]));
+        missing_metadata.metadata = None;
+        assert!(matches!(
+            extract_native_affordances_from_invocation(&missing_metadata, &[]),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+
+        let mut missing_name = metadata_input(serde_json::json!([]));
+        missing_name
+            .metadata
+            .as_mut()
+            .unwrap()
+            .grant
+            .interface_affordance_specs = vec![octopus_interfaces::InterfaceToolAffordance {
+            name: octopus_descriptors::ToolId::new(""),
+            description: "x".to_string(),
+            args_schema: serde_json::json!({}),
+        }];
+        assert!(matches!(
+            extract_native_affordances_from_invocation(&missing_name, &[]),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+
+        let mut malformed_schema = metadata_input(serde_json::json!([]));
+        malformed_schema
+            .metadata
+            .as_mut()
+            .unwrap()
+            .grant
+            .interface_affordance_specs = vec![octopus_interfaces::InterfaceToolAffordance {
+            name: octopus_descriptors::ToolId::new("t"),
+            description: String::new(),
+            args_schema: serde_json::json!("oops"),
+        }];
+        assert!(matches!(
+            extract_native_affordances_from_invocation(&malformed_schema, &[]),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn bound_operation_catalog_becomes_an_exact_interface_affordance() {
+        let mut input = metadata_input(serde_json::json!([
+            {
+                "name": "artifact.read",
+                "description": "read bound artifact",
+                "input_schema": { "type": "object", "properties": {} }
+            }
+        ]));
+        input.metadata.as_mut().unwrap().grant.interfaces =
+            vec!["world_mcp_drive_exact".to_string()];
+        input.artifact_binding_payloads.push(bound(
+            "artifact-operation-catalog-drive",
+            serde_json::json!({
+                "id": "artifact-operation-catalog-drive",
+                "label": "mcp.operation_catalog",
+                "interface": "world_mcp_drive_exact",
+                "request_label": "mcp.operation.request",
+                "operations": [{
+                    "name": "google_drive.read_resource",
+                    "description": "read one resource from the exact interface",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"uri": {"type": "string"}},
+                        "required": ["uri"]
+                    },
+                    "request_label": "mcp.operation.request",
+                    "output_label": "mcp.resource"
+                }]
+            }),
+        ));
+        let namespace = NativeToolNamespace {
+            name: "formed_interfaces".to_string(),
+            description: "Formed interface tools.".to_string(),
+        };
+        let catalog = extract_native_affordance_catalog(&input, &[], &namespace, None, &serde_json::Map::new()).unwrap();
+        assert_eq!(catalog.specs.len(), 1);
+        let DynamicToolSpec::Namespace(presented) = &catalog.specs[0] else {
+            panic!("formed affordances must share the descriptor-owned namespace")
+        };
+        assert_eq!(presented.name, namespace.name);
+        assert_eq!(presented.tools.len(), 2);
+        let operation = catalog
+            .interface_operations
+            .get("google_drive.read_resource")
+            .unwrap();
+        assert_eq!(
+            operation.interface,
+            InterfaceId::new("world_mcp_drive_exact")
+        );
+        let output = CodexTurnOutput::interface_operation_call(
+            operation,
+            serde_json::json!({"uri": "drive://document"}),
+            "call-1".to_string(),
+        );
+        assert_eq!(output.label, "mcp.operation.request");
+        assert_eq!(
+            output.route,
+            ProviderEmissionRoute::Interface {
+                interface: InterfaceId::new("world_mcp_drive_exact")
+            }
+        );
+        let result = decode_interface_operation_result_artifact(
+            &serde_json::json!({
+                "label": "mcp.resource",
+                "operation": "google_drive.read_resource",
+                "correlation_id": "call-1",
+                "session_disposition": "reused",
+                "ok": true,
+                "result": {"contents": []}
+            }),
+            "mcp.resource",
+            &InterfaceId::new("world_mcp_drive_exact"),
+            &catalog.interface_operations,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(result.ok);
+        assert_eq!(result.correlation_id, "call-1");
+
+        let context = decode_provider_input(
+            br#"{"ok":true,"resources":["drive://document"]}"#,
+            "mcp.resources.updated",
+            Some(&InterfaceId::new("world_mcp_drive_exact")),
+            &catalog.interface_operations,
+            None,
+        )
+        .unwrap();
+        let ProviderInput::InterfaceContext(context) = context else {
+            panic!("an unrelated operation-interface artifact must become live context")
+        };
+        assert_eq!(context.interface, InterfaceId::new("world_mcp_drive_exact"));
+        assert_eq!(context.label, "mcp.resources.updated");
+        assert_eq!(
+            context.content,
+            serde_json::json!({"ok": true, "resources": ["drive://document"]})
+        );
+    }
+
+    #[test]
+    fn checkpoint_source_interface_requires_the_canonical_binding_object() {
+        let mut record = serde_json::json!({
+            "active_checkpoints": ["checkpoint-a"],
+            "checkpoints": [{
+                "id": "checkpoint-a",
+                "interface_binding": {
+                    "interface": "world_mcp_drive_exact",
+                    "config": {"artifact_policy": {"mode": "all"}}
+                }
+            }]
+        });
+        assert_eq!(
+            source_interface_for_checkpoint(&record, "checkpoint-a").unwrap(),
+            InterfaceId::new("world_mcp_drive_exact")
+        );
+
+        record["checkpoints"][0]["interface_binding"] = serde_json::json!("world_mcp_drive_exact");
+        assert!(matches!(
+            source_interface_for_checkpoint(&record, "checkpoint-a"),
+            Err(InterfaceDriverError::Protocol(error))
+                if error.contains("malformed canonical interface binding")
+        ));
+    }
+
+    #[test]
+    fn tool_name_encoding_is_a_codex_valid_bijection() {
+        for name in [
+            "probe.echo",
+            "artifact.read",
+            "coder.build.commit",
+            "fixture.reply",
+            "no_dot_name",
+            "with-hyphen.and_underscore",
+        ] {
+            let encoded = encode_tool_name(name);
+            assert!(
+                encoded
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')),
+                "encoded '{encoded}' must satisfy codex's ^[a-zA-Z0-9_-]+$ (no '.')"
+            );
+            assert!(
+                !encoded.contains('.'),
+                "the codex-forbidden '.' must be gone after encoding"
+            );
+            assert_eq!(
+                decode_tool_name(&encoded).unwrap(),
+                name,
+                "the native name must decode back to OUR real tool id (C2)"
+            );
+        }
+        assert_eq!(encode_tool_name("probe.echo"), "probe-decho");
+        assert_eq!(encode_tool_name("a-b.c"), "a-hb-dc");
+
+        assert!(matches!(
+            decode_tool_name("bad-x"),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+        assert!(matches!(
+            decode_tool_name("trailing-"),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn typed_error_maps_to_failclosed_taxonomy() {
+        use octopus_appserver_proto::JSONRPCErrorError;
+        let transport = TypedRequestError::Transport {
+            method: "thread/start".into(),
+            source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "x"),
+        };
+        assert!(matches!(
+            typed_error(transport),
+            InterfaceDriverError::Transport(_)
+        ));
+
+        let server = TypedRequestError::Server {
+            method: "thread/start".into(),
+            source: JSONRPCErrorError {
+                code: -32000,
+                message: "boom".into(),
+                data: None,
+            },
+        };
+        assert!(matches!(
+            typed_error(server),
+            InterfaceDriverError::Protocol(_)
+        ));
+    }
+
+    #[test]
+    fn transport_state_keys_by_run_id_and_reuses_the_warm_thread() {
+        let flash = TransportStateScope::from_run(&octopus_interfaces::RunId::new("run_flash"));
+        let planner = TransportStateScope::from_run(&octopus_interfaces::RunId::new("run_planner"));
+        assert_eq!(flash, TransportStateScope::Run("run_flash".to_string()));
+        assert_ne!(flash, planner);
+
+        let fp = thread_shape_fingerprint(Some("gpt-5.5"), "role text", &[], "context-a")
+            .expect("fingerprint computes");
+
+        let mut transport_state: BTreeMap<TransportStateScope, TransportState> = BTreeMap::new();
+        {
+            let flash_state = transport_state.entry(flash.clone()).or_default();
+            flash_state.thread_id = Some("thr_flash".to_string());
+            flash_state.thread_shape_fingerprint = Some(fp.clone());
+            flash_state.hooks_catalog_emitted = true;
+        }
+
+        match plan_thread_action(transport_state.get(&flash).unwrap(), &fp) {
+            ThreadAction::Reuse { thread_id } => assert_eq!(thread_id, "thr_flash"),
+            ThreadAction::Mint => panic!("a warm identical-shape turn must reuse the thread"),
+        }
+
+        let planner_state = transport_state.entry(planner.clone()).or_default();
+        assert!(matches!(
+            plan_thread_action(planner_state, &fp),
+            ThreadAction::Mint
+        ));
+        assert!(
+            !planner_state.hooks_catalog_emitted,
+            "the once-per-run hooks-catalog bit is per-run and distinct across runs"
+        );
+    }
+
+    #[test]
+    fn grant_or_static_context_drift_forces_a_cold_thread() {
+        let fp_a = thread_shape_fingerprint(Some("gpt-5.5"), "role text", &[], "context-a")
+            .expect("fingerprint computes");
+        let state = TransportState {
+            context_generation: 0,
+            hooks_catalog_emitted: true,
+            thread_id: Some("thr_1".to_string()),
+            thread_shape_fingerprint: Some(fp_a.clone()),
+            static_context_fingerprint: Some("context-a".to_string()),
+            rollout_path: None,
+        };
+
+        let drifted_grant = thread_shape_fingerprint(
+            Some("gpt-5.5"),
+            "role text",
+            &[DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: "coder.exec".to_string(),
+                description: "exec".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: false,
+            })],
+            "context-a",
+        )
+        .expect("fingerprint computes");
+        assert_ne!(
+            fp_a, drifted_grant,
+            "a formation that grants a different tool list must change the thread shape"
+        );
+        assert!(matches!(
+            plan_thread_action(&state, &drifted_grant),
+            ThreadAction::Mint
+        ));
+
+        let drifted_role =
+            thread_shape_fingerprint(Some("gpt-5.5"), "another role", &[], "context-a")
+                .expect("fingerprint computes");
+        assert_ne!(fp_a, drifted_role);
+        assert!(matches!(
+            plan_thread_action(&state, &drifted_role),
+            ThreadAction::Mint
+        ));
+
+        let drifted_context =
+            thread_shape_fingerprint(Some("gpt-5.5"), "role text", &[], "context-b")
+                .expect("fingerprint computes");
+        assert!(
+            matches!(
+                plan_thread_action(&state, &drifted_context),
+                ThreadAction::Mint
+            ),
+            "a changed non-session artifact binding must reset the transport thread"
+        );
+        assert!(matches!(
+            plan_thread_action(&state, &fp_a),
+            ThreadAction::Reuse { .. }
+        ));
+
+        let stable = thread_shape_fingerprint(Some("gpt-5.5"), "role text", &[], "context-a")
+            .expect("fingerprint computes");
+        assert_eq!(
+            fp_a, stable,
+            "a stable grant keeps a stable fingerprint — no spurious re-mints killing the cache"
+        );
+    }
+
+    #[test]
+    fn context_block_is_prepended_to_turn_input_every_turn() {
+        let real_input = vec![UserInput::Text {
+            text: "do the work".to_string(),
+            text_elements: Vec::new(),
+        }];
+
+        let with_block = prepend_context_block_to_turn_input(
+            Some("OBLIGATIONS — produce artifact `screenshot`".to_string()),
+            real_input.clone(),
+        );
+        assert_eq!(
+            with_block.len(),
+            2,
+            "the block is an extra leading input element"
+        );
+        match &with_block[0] {
+            UserInput::Text { text, .. } => {
+                assert!(
+                    text.contains("OBLIGATIONS"),
+                    "the obligations block leads the turn input"
+                );
+            }
+            other => panic!("expected a leading Text obligations block, got {other:?}"),
+        }
+        match &with_block[1] {
+            UserInput::Text { text, .. } => assert_eq!(text, "do the work"),
+            other => panic!("expected the real input to follow, got {other:?}"),
+        }
+
+        assert_eq!(
+            prepend_context_block_to_turn_input(None, real_input.clone()).len(),
+            1
+        );
+        assert_eq!(
+            prepend_context_block_to_turn_input(Some("   ".to_string()), real_input).len(),
+            1
+        );
+        assert_selected_file_projection_uses_materialized_sources();
+    }
+
+    fn assert_selected_file_projection_uses_materialized_sources() {
+        use octopus_ledger::ContentHash;
+        use octopus_runtime::run_record::RunRecord;
+        let root = tempfile::tempdir().unwrap().keep();
+        eprintln!("selected file projection fixture artifacts: {}", root.display());
+        let materialize = |label: &str, bytes: &[u8]| {
+            let file = InterfaceArtifactFile::write(root.as_path(), label, bytes).unwrap();
+            let reference = file
+                .pin_manifest_into_blob(&mut octopus_ledger::InMemoryBlobs::new())
+                .unwrap()
+                .artifact;
+            let payload = octopus_interfaces::ArtifactBindingPayload::new(
+                reference.clone(),
+                file.read_payload_bytes().unwrap(),
+            );
+            (file, reference, payload)
+        };
+        let (first_file, first_ref, first) =
+            materialize("operator.file.binary", &[0xff, 0, 0x81, b'A']);
+        let (second_file, second_ref, second) =
+            materialize("operator.file.binary", &[0xff, 0, 0x81, b'B']);
+        let attachment = |file: &InterfaceArtifactFile, filename: &str| {
+            let bytes = file.read_payload_bytes().unwrap();
+            serde_json::json!({"name":filename,"label":"operator.file.binary","mime_type":"application/zip",
+                "size":bytes.len(),"payload_path":file.read_manifest().unwrap().payload_path,
+                "payload_content_hash":sha256_hex(&bytes),"last_modified":0})
+        };
+        let original = serde_json::json!({"text":"Use the attached files","message_id":"original-message",
+            "attachments":[attachment(&first_file,"shared.zip"),attachment(&second_file,"shared.zip")]});
+        let (_, original_ref, original_bound) = materialize(
+            OPERATOR_MESSAGE_LABEL,
+            &serde_json::to_vec(&original).unwrap(),
+        );
+        let current = serde_json::json!({"text":"Use the same file with either exact name","message_id":"next-message",
+            "attachments":[attachment(&first_file,"résumé.zip"),attachment(&first_file,"another.zip")]});
+        let current_bytes = serde_json::to_vec(&current).unwrap();
+        let (current_file, current_ref, _) = materialize(OPERATOR_MESSAGE_LABEL, &current_bytes);
+        let mut input = InterfaceInvocationEnvelope {
+            artifact: current_ref.clone(),
+            artifact_file: current_file,
+            artifact_binding_payloads: vec![first.clone(), second.clone(), original_bound.clone()],
+            metadata: Some(octopus_interfaces::InvocationMetadata::new(
+                octopus_interfaces::GrantProjection::default(),
+            )),
+        };
+        let make_record = |input: &mut InterfaceInvocationEnvelope,
+                           provider: &str,
+                           selected: &[ArtifactRef]| {
+            let bindings = input.artifact_binding_payloads.iter().map(|bound| serde_json::json!({
+                "id":bound.artifact.id,"access":{"read":true,"change":false,"create":false,"delete":false}
+            })).collect::<Vec<_>>();
+            let inbound = octopus_runtime::AuthoredInterfaceBinding::all(
+                InterfaceId::new("world_operator_chat_test"),
+            );
+            let outbound = octopus_runtime::AuthoredInterfaceBinding::all(
+                InterfaceId::new(provider),
+            );
+            let record = serde_json::json!({"id":"file-projection-run","ee":"file-projection-ee",
+                "worker":"system_worker_test","trace":"file-projection-trace","status":"running",
+                "interface_state":{provider:{"run_authoring_binding":{"schema_version":2,
+                    "run":"file-projection-run","worker":"system_worker_test","provider_interface":provider,
+                    "authoring_source_interface":provider,"payload_artifact_bindings":selected,
+                    "checkpoints":[{"name":"input","role":"stable","include_context":true,
+                        "interface_binding":inbound,
+                        "outbound_interface_bindings":[outbound],"required_verified_artifacts":[]}]}}},
+                "checkpoints":[{"id":"input","run":"file-projection-run","trace":"file-projection-trace","epoch":1,
+                    "interface_binding":inbound,"outbound_interface_bindings":[outbound],
+                    "artifact_bindings":bindings,"required_verified_artifacts":[]}],"active_checkpoints":["input"]});
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let record = RunRecord::from_bytes(&bytes).unwrap();
+            let metadata = input.metadata.as_mut().unwrap();
+            metadata.runtime = Some(RuntimeInvocationMetadata {
+                run: record.id.clone(),
+                ee: record.ee.clone(),
+                worker: record.worker.clone(),
+                checkpoint: record.checkpoints[0].id.clone(),
+                interface: InterfaceId::new(provider),
+                epoch: 1,
+                run_record_hash: Some(ContentHash::of_bytes(&bytes).to_hex()),
+            });
+            metadata.artifact_binding_refs = input
+                .artifact_binding_payloads
+                .iter()
+                .map(|bound| bound.artifact.clone())
+                .collect();
+            metadata.checkpoint_binding_policy =
+                Some(octopus_interfaces::CheckpointBindingPolicySnapshot {
+                    inbound: record.checkpoints[0].interface_binding.clone().unwrap(),
+                    outbound: record.checkpoints[0].outbound_interface_bindings.clone(),
+                });
+            metadata.outbound_interface_bindings = record.checkpoints[0]
+                .outbound_interfaces()
+                .cloned()
+                .collect();
+            metadata.grant.interfaces = vec!["world_operator_chat_test".into(), provider.into()];
+            metadata.grant.artifact_access = record.checkpoints[0]
+                .artifact_bindings
+                .iter()
+                .map(|binding| (binding.id.as_str().to_string(), binding.access.clone()))
+                .collect();
+            record
+        };
+        let selected = vec![first_ref.clone(), second_ref.clone()];
+        let record = make_record(&mut input, "world_provider_test", &selected);
+        let project = |record: &RunRecord,
+                       input: &InterfaceInvocationEnvelope,
+                       contexts: &BoundSessionContexts,
+                       history: &[SessionContextArtifact],
+                       limit| {
+            selected_file_projection(
+                record,
+                input,
+                &input.artifact,
+                OPERATOR_MESSAGE_LABEL,
+                &input.read_artifact_payload().unwrap(),
+                contexts,
+                history,
+                ModelResultProjection { max_tokens: limit },
+            )
+        };
+        let projection = project(&record, &input, &BTreeMap::new(), &[], 10_000).unwrap();
+        let (_, document_ref, document) = materialize("architecture.md", b"# Architecture\n");
+        let mut template_input = input.clone();
+        template_input.artifact_binding_payloads.push(document);
+        let mut template_selected = selected.clone();
+        template_selected.push(document_ref.clone());
+        let template_record = make_record(&mut template_input, "world_provider_test", &template_selected);
+        let projected = project(&template_record, &template_input, &BTreeMap::new(), &[], 10_000).unwrap();
+        let projected: serde_json::Value = serde_json::from_str(&projected.text).unwrap();
+        assert_eq!(projected["selected_artifacts"], serde_json::json!([{
+            "artifact_ref": document_ref, "label": "architecture.md", "size_bytes": 15,
+        }]));
+        let ProviderInput::Turn(turn) = decode_provider_input(
+            &current_bytes,
+            OPERATOR_MESSAGE_LABEL,
+            None,
+            &BTreeMap::new(),
+            Some(&projection),
+        )
+        .unwrap() else {
+            panic!("ordinary operator input lost its turn");
+        };
+        let UserInput::Text { text, .. } = &turn[0] else {
+            panic!("file metadata is not visible text");
+        };
+        let visible: serde_json::Value = serde_json::from_str(text).unwrap();
+        let rows = visible["selected_files"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        let chooser_args = serde_json::json!({"files":rows.iter().map(|row| serde_json::json!({
+            "artifact_ref":row["artifact_ref"],"filename":row["filename"]
+        })).collect::<Vec<_>>()});
+        for file in chooser_args["files"].as_array().unwrap() {
+            let reference: ArtifactRef =
+                serde_json::from_value(file["artifact_ref"].clone()).unwrap();
+            let bound = input
+                .artifact_binding_payloads
+                .iter()
+                .find(|bound| bound.artifact == reference)
+                .unwrap();
+            assert!(selected.contains(&reference));
+            assert!(
+                rows.iter()
+                    .any(|row| row["artifact_ref"] == file["artifact_ref"]
+                        && row["filename"] == file["filename"]
+                        && row["size_bytes"] == bound.as_bytes().len())
+            );
+        }
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["filename"] == "shared.zip")
+                .count(),
+            2
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["source_message_id"] == "next-message")
+                .count(),
+            2
+        );
+        assert!(rows.iter().any(|row| row["filename"] == "résumé.zip"));
+        assert!(!text.contains("payload_path"));
+        assert!(!text.contains(&root.as_path().display().to_string()));
+        assert_ne!(first_ref.content.to_hex(), sha256_hex(first.as_bytes()));
+        let snapshot_body = serde_json::json!({"label":"interface.artifact.output","text":"Files retained",
+            "session_context":{"schema_version":3,"provider_interface":"world_provider_test",
+                "artifacts":[{"label":OPERATOR_MESSAGE_LABEL,"payload":original,
+                    "source_artifact":original_ref,"source_movement_seq":null}]}});
+        let (_, snapshot_ref, snapshot_bound) = materialize(
+            "interface.artifact.output",
+            &serde_json::to_vec(&snapshot_body).unwrap(),
+        );
+        let preserved = SessionContextArtifact {
+            label: OPERATOR_MESSAGE_LABEL.into(),
+            payload: serde_json::from_slice(original_bound.as_bytes()).unwrap(),
+            source_artifact: original_ref,
+            source_movement_seq: None,
+        };
+        let grounded = ProviderInvocationSessionSnapshot {
+            carrier: snapshot_ref,
+            artifacts: Arc::new(vec![preserved.clone()]),
+        };
+        let mut cold_input = input.clone();
+        cold_input.artifact_binding_payloads[2] = snapshot_bound;
+        let cold_record = make_record(&mut cold_input, "world_provider_test", &selected);
+        let context_payloads = octopus_provider_run_authoring::context_artifact_payloads(
+            &cold_record,
+            cold_input.metadata().unwrap(),
+            &cold_input.artifact_binding_payloads,
+        )
+        .unwrap();
+        let contexts = CodexAppServerInterfaceDriver::resolve_bound_session_contexts(
+            &context_payloads,
+            &InterfaceId::new("world_provider_test"),
+            &codex_snapshot_labels(),
+            Some(&grounded),
+        )
+        .unwrap();
+        let cold = project(&cold_record, &cold_input, &contexts, &[], 10_000).unwrap();
+        assert_eq!(cold.text, projection.text);
+        assert_eq!(
+            project(&cold_record, &cold_input, &contexts, &[preserved], 10_000)
+                .unwrap()
+                .text,
+            projection.text
+        );
+        let switched_record = make_record(&mut cold_input, "world_provider_other", &selected);
+        let contexts = CodexAppServerInterfaceDriver::resolve_bound_session_contexts(
+            &context_payloads,
+            &InterfaceId::new("world_provider_other"),
+            &codex_snapshot_labels(),
+            None,
+        )
+        .unwrap();
+        let foreign_only: serde_json::Value = serde_json::from_str(
+            &project(&switched_record, &cold_input, &contexts, &[], 10_000)
+                .unwrap()
+                .text,
+        )
+        .unwrap();
+        assert_eq!(foreign_only["selected_files"].as_array().unwrap().len(), 2);
+        cold_input.artifact_binding_payloads.push(original_bound);
+        let switched_record = make_record(&mut cold_input, "world_provider_other", &selected);
+        assert_eq!(
+            project(&switched_record, &cold_input, &contexts, &[], 10_000)
+                .unwrap()
+                .text,
+            projection.text
+        );
+        let mut denied = input.clone();
+        for field in ["checkpoint", "epoch", "run"] {
+            let mut mismatched = input.clone();
+            let runtime = mismatched.metadata.as_mut().unwrap().runtime.as_mut().unwrap();
+            match field {
+                "checkpoint" => runtime.checkpoint = octopus_descriptors::CheckpointId::new("replaced"),
+                "epoch" => runtime.epoch += 1,
+                "run" => runtime.run = octopus_interfaces::RunId::new("other-run"),
+                _ => unreachable!(),
+            }
+            assert!(project(&record, &mismatched, &BTreeMap::new(), &[], 10_000).is_err());
+        }
+        denied
+            .metadata
+            .as_mut()
+            .unwrap()
+            .grant
+            .artifact_access
+            .get_mut(first_ref.id.as_str())
+            .unwrap()
+            .read = false;
+        assert!(project(&record, &denied, &BTreeMap::new(), &[], 10_000).is_err());
+        let mut role = input.clone();
+        role.metadata
+            .as_mut()
+            .unwrap()
+            .grant
+            .role_artifacts
+            .push(first_ref.id.as_str().to_string());
+        assert!(project(&record, &role, &BTreeMap::new(), &[], 10_000).is_err());
+        let mut wrong = input.clone();
+        wrong.artifact_binding_payloads[0].artifact.content =
+            ContentHash::of_bytes(b"different manifest");
+        assert!(project(&record, &wrong, &BTreeMap::new(), &[], 10_000).is_err());
+        let mut cleared = input.clone();
+        cleared.artifact_binding_payloads.clear();
+        let cleared_record = make_record(&mut cleared, "world_provider_test", &[]);
+        let empty = project(
+            &cleared_record,
+            &cleared,
+            &BTreeMap::new(),
+            &grounded.artifacts,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(empty.text, "{\"selected_files\":[]}");
+        assert!(
+            decode_provider_input(
+                &current_bytes,
+                OPERATOR_MESSAGE_LABEL,
+                None,
+                &BTreeMap::new(),
+                Some(&empty)
+            )
+            .is_err()
+        );
+        assert!(
+            decode_provider_input(
+                &current_bytes,
+                OPERATOR_MESSAGE_LABEL,
+                None,
+                &BTreeMap::new(),
+                None
+            )
+            .is_err()
+        );
+        let mut unselected = input.clone();
+        let unselected_record = make_record(&mut unselected, "world_provider_test", &[]);
+        let payloads = octopus_provider_run_authoring::context_artifact_payloads(
+            &unselected_record,
+            unselected.metadata().unwrap(),
+            &unselected.artifact_binding_payloads,
+        )
+        .unwrap();
+        assert!(
+            assemble_context_resolved(
+                &payloads,
+                &BTreeMap::new(),
+                &InterfaceId::new("world_provider_test"),
+                &codex_snapshot_labels(),
+                ModelResultProjection { max_tokens: 10_000 }
+            )
+            .is_err()
+        );
+        let mut changed_size = current.clone();
+        changed_size["attachments"][0]["size"] = serde_json::json!(5);
+        let (file, reference, _) = materialize(
+            OPERATOR_MESSAGE_LABEL,
+            &serde_json::to_vec(&changed_size).unwrap(),
+        );
+        let mut mismatch = input.clone();
+        mismatch.artifact_file = file;
+        mismatch.artifact = reference;
+        let mismatched = project(&record, &mismatch, &BTreeMap::new(), &[], 10_000).unwrap();
+        assert!(!mismatched.current_attachments.contains(&0));
+        assert!(
+            decode_provider_input(
+                &serde_json::to_vec(&changed_size).unwrap(),
+                OPERATOR_MESSAGE_LABEL,
+                None,
+                &BTreeMap::new(),
+                Some(&mismatched)
+            )
+            .is_err()
+        );
+        assert!(
+            decode_provider_input(
+                &serde_json::to_vec(&changed_size).unwrap(),
+                OPERATOR_MESSAGE_LABEL,
+                None,
+                &BTreeMap::new(),
+                Some(&projection)
+            )
+            .is_err()
+        );
+        let mut wrong_hash = current.clone();
+        wrong_hash["attachments"][0]["payload_content_hash"] =
+            serde_json::json!(first_ref.content.to_hex());
+        let (file, reference, _) = materialize(
+            OPERATOR_MESSAGE_LABEL,
+            &serde_json::to_vec(&wrong_hash).unwrap(),
+        );
+        let mut wrong_hash_input = input.clone();
+        wrong_hash_input.artifact_file = file;
+        wrong_hash_input.artifact = reference;
+        assert!(
+            !project(&record, &wrong_hash_input, &BTreeMap::new(), &[], 10_000)
+                .unwrap()
+                .current_attachments
+                .contains(&0)
+        );
+        let mut overlong = current.clone();
+        overlong["attachments"][0]["name"] = serde_json::json!("x".repeat(4000));
+        let (file, reference, _) = materialize(
+            OPERATOR_MESSAGE_LABEL,
+            &serde_json::to_vec(&overlong).unwrap(),
+        );
+        let mut oversized = input.clone();
+        oversized.artifact_file = file;
+        oversized.artifact = reference;
+        assert!(project(&record, &oversized, &BTreeMap::new(), &[], 512).is_err());
+        use base64::Engine;
+        let png=base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGNwaDgARAwQCgAoDgYBQzpj2gAAAABJRU5ErkJggg==").unwrap();
+        let (image_file, image_ref, image_bound) = materialize("operator.media.image", &png);
+        let (text_file, text_ref, text_bound) =
+            materialize("operator.file.text", b"original UTF-8 text");
+        let mut image = attachment(&image_file, "image.png");
+        image["label"] = serde_json::json!("operator.media.image");
+        image["mime_type"] = serde_json::json!("image/png");
+        let mut text = attachment(&text_file, "note.txt");
+        text["label"] = serde_json::json!("operator.file.text");
+        text["mime_type"] = serde_json::json!("text/plain");
+        let supported_bytes=serde_json::to_vec(&serde_json::json!({"text":"read these","message_id":"supported-message","attachments":[image,text]})).unwrap();
+        let (file, reference, _) = materialize(OPERATOR_MESSAGE_LABEL, &supported_bytes);
+        let mut supported = input.clone();
+        supported.artifact_file = file;
+        supported.artifact = reference;
+        supported.artifact_binding_payloads = vec![image_bound, text_bound];
+        let supported_record = make_record(
+            &mut supported,
+            "world_provider_test",
+            &[image_ref, text_ref],
+        );
+        let metadata =
+            project(&supported_record, &supported, &BTreeMap::new(), &[], 10_000).unwrap();
+        let ProviderInput::Turn(projected) = decode_provider_input(
+            &supported_bytes,
+            OPERATOR_MESSAGE_LABEL,
+            None,
+            &BTreeMap::new(),
+            Some(&metadata),
+        )
+        .unwrap() else {
+            panic!("supported input lost its turn");
+        };
+        let ProviderInput::Turn(original) = decode_provider_input(
+            &supported_bytes,
+            OPERATOR_MESSAGE_LABEL,
+            None,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap() else {
+            panic!("original input lost its turn");
+        };
+        assert_eq!(
+            serde_json::to_value(&projected[1..]).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(image_file.read_payload_bytes().unwrap(), png);
+    }
+
+    #[test]
+    fn our_goal_from_metadata_reaches_the_model_context_block() {
+        let metadata =
+            octopus_interfaces::InvocationMetadata::new(octopus_interfaces::GrantProjection {
+                tools: vec!["coder.exec".to_string()],
+                goal: Some("drive the coder worker to a green build".to_string()),
+                ..octopus_interfaces::GrantProjection::default()
+            });
+        let block = render_model_context_block(&metadata)
+            .expect("our goal renders the model context block the driver prepends every turn");
+        assert!(
+            block.contains("GOAL"),
+            "the driver-prepended block leads with OUR goal, not codex-native ThreadGoal"
+        );
+        assert!(block.contains("drive the coder worker to a green build"));
+        let goal_at = block.find("GOAL").expect("goal section present");
+        if let Some(grant_at) = block.find("GRANT") {
+            assert!(
+                goal_at < grant_at,
+                "our goal precedes the grant in the model context"
+            );
+        }
+    }
+
+    #[test]
+    fn model_resolves_only_from_bound_interface_folder_config() {
+        let bound: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({ "model": "gpt-5.5", "reasoning_effort": "xhigh" }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            non_empty_string_field(
+                bound.get("model"),
+                "interface_driver_config.private_config.model"
+            )
+            .unwrap(),
+            Some("gpt-5.5".to_string())
+        );
+        assert_eq!(
+            non_empty_string_field(
+                bound.get("reasoning_effort"),
+                "interface_driver_config.private_config.reasoning_effort"
+            )
+            .unwrap(),
+            Some("xhigh".to_string())
+        );
+
+        let empty = serde_json::Map::new();
+        assert_eq!(
+            non_empty_string_field(
+                empty.get("model"),
+                "interface_driver_config.private_config.model"
+            )
+            .unwrap(),
+            None
+        );
+
+        let malformed: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({ "model": 7 })).unwrap();
+        assert!(matches!(
+            non_empty_string_field(
+                malformed.get("model"),
+                "interface_driver_config.private_config.model"
+            ),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+        let blank: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({ "model": "  " })).unwrap();
+        assert!(matches!(
+            non_empty_string_field(
+                blank.get("model"),
+                "interface_driver_config.private_config.model"
+            ),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn model_change_is_pure_provider_interface_json_change() {
+        let interface_a = InterfaceDriverConfig {
+            private_config: serde_json::from_value(
+                serde_json::json!({ "model": "provider-model-alpha", "reasoning_effort": "low" }),
+            )
+            .unwrap(),
+            residual_ambient: None,
+            host_slots: std::collections::BTreeMap::new(),
+            transport: None,
+            supported_reasoning_efforts: Vec::new(),
+        };
+        let interface_b = InterfaceDriverConfig {
+            private_config: serde_json::from_value(
+                serde_json::json!({ "model": "provider-model-beta", "reasoning_effort": "high" }),
+            )
+            .unwrap(),
+            residual_ambient: None,
+            host_slots: std::collections::BTreeMap::new(),
+            transport: None,
+            supported_reasoning_efforts: Vec::new(),
+        };
+
+        assert_eq!(
+            non_empty_string_field(
+                interface_a.private_config.get("model"),
+                "interface_driver_config.private_config.model"
+            )
+            .unwrap(),
+            Some("provider-model-alpha".to_string())
+        );
+        assert_eq!(
+            non_empty_string_field(
+                interface_a.private_config.get("reasoning_effort"),
+                "interface_driver_config.private_config.reasoning_effort"
+            )
+            .unwrap(),
+            Some("low".to_string())
+        );
+
+        assert_eq!(
+            non_empty_string_field(
+                interface_b.private_config.get("model"),
+                "interface_driver_config.private_config.model"
+            )
+            .unwrap(),
+            Some("provider-model-beta".to_string())
+        );
+        assert_eq!(
+            non_empty_string_field(
+                interface_b.private_config.get("reasoning_effort"),
+                "interface_driver_config.private_config.reasoning_effort"
+            )
+            .unwrap(),
+            Some("high".to_string())
+        );
+    }
+
+    #[test]
+    fn interface_private_config_comes_from_folder_config() {
+        let config = InterfaceDriverConfig {
+            private_config: serde_json::from_value(
+                serde_json::json!({ "model": "gpt-5.5", "reasoning_effort": "xhigh" }),
+            )
+            .unwrap(),
+            residual_ambient: None,
+            host_slots: std::collections::BTreeMap::new(),
+            transport: None,
+            supported_reasoning_efforts: vec!["xhigh".to_string()],
+        };
+        let extracted = config.private_config.clone();
+        assert_eq!(
+            extracted.get("model").and_then(serde_json::Value::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            extracted
+                .get("reasoning_effort")
+                .and_then(serde_json::Value::as_str),
+            Some("xhigh")
+        );
+        assert!(
+            None::<&InterfaceDriverConfig>
+                .map(|config| config.private_config.clone())
+                .unwrap_or_default()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn server_requests_classify_into_labelled_operator_artifacts() {
+        let exec_approval: ServerRequest = serde_json::from_value(serde_json::json!({
+            "method": "item/commandExecution/requestApproval",
+            "id": 7,
+            "params": {
+                "threadId": "t1",
+                "turnId": "u1",
+                "itemId": "i1",
+                "startedAtMs": 0,
+                "command": "rm -rf /tmp/scratch",
+                "reason": "needs write access"
+            }
+        }))
+        .expect("exec approval server request deserializes from its wire form");
+        let output = classify_operator_request(&exec_approval, &test_operator_continuity_config())
+            .expect("classify does not error")
+            .expect("an approval request has an operator home");
+        assert_eq!(output.label, OPERATOR_APPROVAL_REQUEST_LABEL);
+        let ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { inputs } = &output.route
+        else {
+            panic!("approval request must author verified response inputs before projection")
+        };
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|input| input.required_verified_artifact.mark.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["operator.approval", "operator.input.provided"])
+        );
+        assert_eq!(
+            output
+                .value
+                .get("method")
+                .and_then(serde_json::Value::as_str),
+            Some("item/commandExecution/requestApproval")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str),
+            Some("7"),
+            "the server request id (as request_id) correlates the operator's response back"
+        );
+        assert_eq!(
+            output.value.get("kind").and_then(serde_json::Value::as_str),
+            Some("exec")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("title")
+                .and_then(serde_json::Value::as_str),
+            Some("rm -rf /tmp/scratch"),
+            "the exec approval's headline is the command line"
+        );
+        assert_eq!(
+            output
+                .value
+                .pointer("/detail/command")
+                .and_then(serde_json::Value::as_str),
+            Some("rm -rf /tmp/scratch"),
+            "the full prompt data (the command, the reason) rides the artifact as opaque detail"
+        );
+
+        let legacy_patch_approval: ServerRequest = serde_json::from_value(serde_json::json!({
+            "method": "applyPatchApproval",
+            "id": "req-8",
+            "params": {
+                "conversationId": "00000000-0000-0000-0000-000000000000",
+                "callId": "c1",
+                "fileChanges": {},
+                "reason": null,
+                "grantRoot": null
+            }
+        }))
+        .expect("legacy patch approval server request deserializes from its wire form");
+        let output =
+            classify_operator_request(&legacy_patch_approval, &test_operator_continuity_config())
+                .expect("classify does not error")
+                .expect("a legacy approval request has an operator home");
+        assert_eq!(output.label, OPERATOR_APPROVAL_REQUEST_LABEL);
+        assert_eq!(
+            output
+                .value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str),
+            Some("req-8"),
+            "a string request id passes through unchanged for correlation"
+        );
+        assert_eq!(
+            output.value.get("kind").and_then(serde_json::Value::as_str),
+            Some("patch")
+        );
+
+        let user_input: ServerRequest = serde_json::from_value(serde_json::json!({
+            "method": "item/tool/requestUserInput",
+            "id": 9,
+            "params": {
+                "threadId": "t1",
+                "turnId": "u1",
+                "itemId": "i1",
+                "questions": [{ "id": "q1", "header": "Env", "question": "Which environment?" }]
+            }
+        }))
+        .expect("user-input server request deserializes from its wire form");
+        let output = classify_operator_request(&user_input, &test_operator_continuity_config())
+            .expect("classify does not error")
+            .expect("a user-input request has an operator home");
+        assert_eq!(output.label, OPERATOR_USER_INPUT_REQUEST_LABEL);
+        let ProviderEmissionRoute::ClientProjectionWithVerifiedInputs { inputs } = &output.route
+        else {
+            panic!("user-input request must author its verified response input")
+        };
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(
+            inputs[0].required_verified_artifact.mark.as_str(),
+            "operator.input.provided"
+        );
+        assert_eq!(
+            output
+                .value
+                .get("request_id")
+                .and_then(serde_json::Value::as_str),
+            Some("9")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("message")
+                .and_then(serde_json::Value::as_str),
+            Some("Which environment?"),
+            "the first tool question is the operator-readable message"
+        );
+        assert!(
+            output.value.pointer("/questions/0/options").is_some(),
+            "a question form carries the complete question surface"
+        );
+        assert_eq!(
+            output
+                .value
+                .get("is_blocking")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "legacy payloads remain blocking"
+        );
+
+        let attestation: ServerRequest = serde_json::from_value(serde_json::json!({
+            "method": "attestation/generate",
+            "id": 11,
+            "params": {}
+        }))
+        .expect("attestation server request deserializes from its wire form");
+        assert!(
+            classify_operator_request(&attestation, &test_operator_continuity_config())
+                .expect("classify does not error")
+                .is_none(),
+            "an out-of-band request is not surfaced to the operator; the caller fails it closed"
+        );
+    }
+
+    #[test]
+    fn operator_response_continuation_requires_exact_admitted_edge() {
+        let continuity = test_operator_continuity_config();
+        let response = OperatorResponseArtifact::Approval {
+            request_id: "request-7".to_string(),
+            decision: serde_json::json!("accept"),
+        };
+        let approved = continuity
+            .approval
+            .approved
+            .required(&continuity.approval.response_label, "request-7");
+        let metadata = InvocationMetadata::new(octopus_ledger::GrantProjection {
+            mark_outcomes: vec!["operator.approval".to_string()],
+            ..octopus_ledger::GrantProjection::default()
+        })
+        .with_required_verified_artifacts(vec![approved])
+        .with_checkpoint_admission(octopus_ledger::CheckpointAdmissionMetadata {
+            artifact_label: OPERATOR_APPROVAL_RESPONSE_LABEL.to_string(),
+            required_artifact_labels: vec![OPERATOR_APPROVAL_RESPONSE_LABEL.to_string()],
+            complete: true,
+        });
+        validate_operator_response_evidence(
+            &continuity,
+            OPERATOR_APPROVAL_RESPONSE_LABEL,
+            &response,
+            &metadata,
+        )
+        .unwrap();
+
+        let elicitation = OperatorResponseArtifact::Elicitation {
+            request_id: "request-7".to_string(),
+            answer: serde_json::json!({"value": "yes"}),
+        };
+        assert!(
+            validate_operator_response_evidence(
+                &continuity,
+                OPERATOR_ELICITATION_RESPONSE_LABEL,
+                &elicitation,
+                &metadata,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reasoning_item_becomes_turn_reasoning_artifact() {
+        let item = ThreadItem::Reasoning {
+            id: "reason-1".into(),
+            summary: vec!["Plan the change".into(), "Run the tests".into()],
+            content: vec!["First read the file".into()],
+        };
+        let output = rich_item_output(item).expect("a reasoning item is a rich turn item");
+        assert_eq!(output.label, TURN_REASONING_LABEL);
+        assert_eq!(
+            output
+                .value
+                .get("item_id")
+                .and_then(serde_json::Value::as_str),
+            Some("reason-1")
+        );
+        assert_eq!(
+            output
+                .value
+                .pointer("/summary/0")
+                .and_then(serde_json::Value::as_str),
+            Some("Plan the change")
+        );
+        assert_eq!(
+            output
+                .value
+                .pointer("/content/0")
+                .and_then(serde_json::Value::as_str),
+            Some("First read the file")
+        );
+    }
+
+    #[test]
+    fn command_execution_item_becomes_turn_exec_command_artifact() {
+        let item: ThreadItem = serde_json::from_value(serde_json::json!({
+            "type": "commandExecution",
+            "id": "exec-1",
+            "command": "cargo test -p octopus-provider-codex",
+            "cwd": "/work/repo",
+            "processId": null,
+            "source": "agent",
+            "status": "completed",
+            "commandActions": [],
+            "aggregatedOutput": "test result: ok. 12 passed",
+            "exitCode": 0,
+            "durationMs": 1234
+        }))
+        .expect("a command-execution ThreadItem deserializes from its wire form");
+        let output = rich_item_output(item).expect("an exec item is a rich turn item");
+        assert_eq!(output.label, TURN_EXEC_COMMAND_LABEL);
+        assert_eq!(
+            output
+                .value
+                .get("command")
+                .and_then(serde_json::Value::as_str),
+            Some("cargo test -p octopus-provider-codex")
+        );
+        assert_eq!(
+            output.value.get("cwd").and_then(serde_json::Value::as_str),
+            Some("/work/repo")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("source")
+                .and_then(serde_json::Value::as_str),
+            Some("agent")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("status")
+                .and_then(serde_json::Value::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("exit_code")
+                .and_then(serde_json::Value::as_i64),
+            Some(0)
+        );
+        assert_eq!(
+            output
+                .value
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_i64),
+            Some(1234)
+        );
+        assert_eq!(
+            output
+                .value
+                .get("aggregated_output")
+                .and_then(serde_json::Value::as_str),
+            Some("test result: ok. 12 passed")
+        );
+    }
+
+    #[test]
+    fn dynamic_tool_lifecycle_is_projected_as_client_activity() {
+        let started = CodexTurnOutput::dynamic_tool_started(
+            "formed_interfaces".to_string(),
+            "coder.exec__exact".to_string(),
+            serde_json::json!({"cmd": "pwd"}),
+            "call-7".to_string(),
+            "thread-3".to_string(),
+            "turn-9".to_string(),
+        );
+        assert_eq!(started.label, TURN_DYNAMIC_TOOL_CALL_LABEL);
+        assert_eq!(started.route, ProviderEmissionRoute::ClientProjection);
+        assert_eq!(started.value["call_id"], "call-7");
+        assert_eq!(started.value["namespace"], "formed_interfaces");
+        assert_eq!(started.value["tool"], "coder.exec__exact");
+        assert_eq!(started.value["arguments"]["cmd"], "pwd");
+        assert_eq!(started.value["status"], "started");
+
+        let completed = CodexTurnOutput::dynamic_tool_completed(
+            "formed_interfaces".to_string(),
+            "coder.exec__exact".to_string(),
+            "call-7".to_string(),
+            "thread-3".to_string(),
+            "turn-9".to_string(),
+            true,
+            Some(serde_json::json!({"output": {"exit_code": 0, "stdout": "ok"}})),
+            None,
+        );
+        assert_eq!(completed.label, TURN_DYNAMIC_TOOL_CALL_LABEL);
+        assert_eq!(completed.route, ProviderEmissionRoute::ClientProjection);
+        assert_eq!(completed.value["call_id"], "call-7");
+        assert_eq!(completed.value["namespace"], "formed_interfaces");
+        assert_eq!(completed.value["status"], "completed");
+        assert_eq!(completed.value["body"]["output"]["stdout"], "ok");
+
+        let source = ArtifactRef {
+            id: octopus_descriptors::ArtifactId::new("coder-result-1"),
+            content: octopus_ledger::ContentHash::of_bytes(b"result"),
+        };
+        let interrupted = CodexTurnOutput::interrupted_result_closed(
+            "tool_result",
+            "call-7".to_string(),
+            "thread-3".to_string(),
+            "turn-9".to_string(),
+            true,
+            &source,
+        );
+        assert_eq!(interrupted.label, TURN_INTERRUPTED_RESULT_LABEL);
+        assert_eq!(interrupted.value["correlation_id"], "call-7");
+        assert_eq!(interrupted.value["returned_to_model"], false);
+        assert_eq!(
+            interrupted.value["result_disposition"],
+            "durably_admitted_after_interrupt"
+        );
+        assert_eq!(interrupted.value["source_artifact"]["id"], "coder-result-1");
+    }
+
+    #[test]
+    fn lifecycle_context_uses_exact_bound_and_session_artifact_refs() {
+        let connection = ArtifactRef {
+            id: octopus_descriptors::ArtifactId::new("lifecycle.connection:connected"),
+            content: octopus_ledger::ContentHash::of_bytes(b"connection"),
+        };
+        let event = ArtifactRef {
+            id: octopus_descriptors::ArtifactId::new("lifecycle.event:event-1"),
+            content: octopus_ledger::ContentHash::of_bytes(b"event"),
+        };
+        let snapshot = ProviderInvocationSessionSnapshot {
+            carrier: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("session-context"),
+                content: octopus_ledger::ContentHash::of_bytes(b"snapshot"),
+            },
+            artifacts: Arc::new(vec![
+                SessionContextArtifact {
+                    label: LIFECYCLE_CONNECTION_LABEL.to_string(),
+                    payload: serde_json::json!({"label": LIFECYCLE_CONNECTION_LABEL}),
+                    source_artifact: connection.clone(),
+                    source_movement_seq: Some(7),
+                },
+                SessionContextArtifact {
+                    label: LIFECYCLE_EVENT_LABEL.to_string(),
+                    payload: serde_json::json!({"label": LIFECYCLE_EVENT_LABEL}),
+                    source_artifact: event.clone(),
+                    source_movement_seq: Some(8),
+                },
+                SessionContextArtifact {
+                    label: "operator.message".to_string(),
+                    payload: serde_json::json!({"label": "operator.message"}),
+                    source_artifact: ArtifactRef {
+                        id: octopus_descriptors::ArtifactId::new("operator-message"),
+                        content: octopus_ledger::ContentHash::of_bytes(b"message"),
+                    },
+                    source_movement_seq: Some(9),
+                },
+            ]),
+        };
+        let payloads = lifecycle_context_payloads(&[], Some(&snapshot)).unwrap();
+        assert_eq!(
+            payloads
+                .iter()
+                .map(|payload| {
+                    (
+                        payload.artifact.id.as_str().to_string(),
+                        payload.artifact.content.to_hex(),
+                    )
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                (
+                    connection.id.as_str().to_string(),
+                    connection.content.to_hex(),
+                ),
+                (event.id.as_str().to_string(), event.content.to_hex()),
+            ])
+        );
+        assert!(lifecycle_payload_label(LIFECYCLE_DECISION_LABEL));
+        assert!(lifecycle_payload_label(LIFECYCLE_HANDLER_OUTPUT_LABEL));
+        assert!(!lifecycle_payload_label(TOOL_CALL_LABEL));
+
+        let conflicting = ArtifactBindingPayload::new(connection, b"different".to_vec());
+        assert!(lifecycle_context_payloads(&[conflicting], Some(&snapshot)).is_err());
+    }
+
+    #[test]
+    fn isolated_turn_rejects_native_effect_items() {
+        let exec: ThreadItem = serde_json::from_value(serde_json::json!({
+            "type": "commandExecution",
+            "id": "exec-9",
+            "command": "cargo build -p octopus-runtime",
+            "cwd": "/work/repo",
+            "processId": null,
+            "source": "agent",
+            "status": "completed",
+            "commandActions": [],
+            "aggregatedOutput": "ok",
+            "exitCode": 0,
+            "durationMs": 10
+        }))
+        .expect("a command-execution ThreadItem deserializes");
+        let patch: ThreadItem = serde_json::from_value(serde_json::json!({
+            "type": "fileChange",
+            "id": "patch-3",
+            "status": "completed",
+            "changes": []
+        }))
+        .expect("a file-change ThreadItem deserializes");
+        assert!(forbidden_native_effect_item(&exec, WebSearchMode::Live));
+        assert!(forbidden_native_effect_item(&patch, WebSearchMode::Live));
+        let image: ThreadItem = serde_json::from_value(serde_json::json!({
+            "type": "imageView", "id": "image-9", "path": "/work/repo/image.png",
+        })).unwrap();
+        for phase in ["started", "completed"] {
+            let error = reject_native_effect_item(&image, phase, WebSearchMode::Live).unwrap_err().to_string();
+            for expected in [phase, "imageView", "image-9"] { assert!(error.contains(expected)); }
+        }
+        assert!(forbidden_native_effect_item(&ThreadItem::Sleep {
+            id: "sleep-1".into(),
+            duration_ms: 100,
+        }, WebSearchMode::Live));
+        assert!(!forbidden_native_effect_item(&ThreadItem::Reasoning {
+            id: "r-1".into(),
+            summary: Vec::new(),
+            content: Vec::new(),
+        }, WebSearchMode::Live));
+        assert!(!forbidden_native_effect_item(&ThreadItem::DynamicToolCall {
+            id: "tool-1".into(),
+            namespace: None,
+            tool: "coder.exec".into(),
+            arguments: serde_json::json!({"cmd": "pwd"}),
+            status: octopus_appserver_proto::DynamicToolCallStatus::InProgress,
+            content_items: None,
+            success: None,
+            duration_ms: None,
+        }, WebSearchMode::Live));
+        let search = ThreadItem::WebSearch {
+            id: "web-1".into(), query: "example".into(), action: None, results: None,
+        };
+        assert!(forbidden_native_effect_item(&search, WebSearchMode::Disabled));
+        assert!(!forbidden_native_effect_item(&search, WebSearchMode::Live));
+    }
+
+
+    #[test]
+    fn exec_source_and_status_render_client_wire_words() {
+        assert_eq!(exec_source_wire(CommandExecutionSource::Agent), "agent");
+        assert_eq!(
+            exec_source_wire(CommandExecutionSource::UserShell),
+            "userShell"
+        );
+        assert_eq!(
+            exec_source_wire(CommandExecutionSource::UnifiedExecStartup),
+            "unifiedExecStartup"
+        );
+        assert_eq!(
+            exec_source_wire(CommandExecutionSource::UnifiedExecInteraction),
+            "unifiedExecInteraction"
+        );
+        assert_eq!(
+            exec_status_wire(CommandExecutionStatus::InProgress),
+            "in_progress"
+        );
+        assert_eq!(
+            exec_status_wire(CommandExecutionStatus::Completed),
+            "completed"
+        );
+        assert_eq!(exec_status_wire(CommandExecutionStatus::Failed), "failed");
+        assert_eq!(
+            exec_status_wire(CommandExecutionStatus::Declined),
+            "declined"
+        );
+    }
+
+    #[test]
+    fn plan_item_becomes_turn_plan_update_artifact() {
+        let item = ThreadItem::Plan {
+            id: "plan-1".into(),
+            text: "1. read\n2. edit\n3. test".into(),
+        };
+        let output = rich_item_output(item).expect("a plan item is a rich turn item");
+        assert_eq!(output.label, TURN_PLAN_UPDATE_LABEL);
+        assert_eq!(
+            output
+                .value
+                .get("item_id")
+                .and_then(serde_json::Value::as_str),
+            Some("plan-1")
+        );
+        assert!(
+            output
+                .value
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains("2. edit")
+        );
+        assert_eq!(output.value["plan_kind"], "proposed_plan");
+        assert_eq!(output.value["model_stream_authority"], "completed_item");
+        assert_eq!(output.value["execution_authority"], "octopus_checkpoints");
+    }
+
+    #[test]
+    fn turn_plan_update_notification_becomes_plan_artifact() {
+        use octopus_appserver_proto::TurnPlanStepStatus;
+        let plan = TurnPlanUpdatedNotification {
+            thread_id: "t1".into(),
+            turn_id: "u1".into(),
+            explanation: Some("Here is the plan".into()),
+            plan: vec![
+                TurnPlanStep {
+                    step: "read the file".into(),
+                    status: TurnPlanStepStatus::Completed,
+                },
+                TurnPlanStep {
+                    step: "edit it".into(),
+                    status: TurnPlanStepStatus::InProgress,
+                },
+                TurnPlanStep {
+                    step: "run tests".into(),
+                    status: TurnPlanStepStatus::Pending,
+                },
+            ],
+        };
+        let output = plan_update_output(&plan);
+        assert_eq!(output.label, TURN_PLAN_UPDATE_LABEL);
+        assert_eq!(
+            output
+                .value
+                .get("item_id")
+                .and_then(serde_json::Value::as_str),
+            Some("u1"),
+            "the turn id is the stable plan cell id (the plan updates in place)"
+        );
+        let text = output
+            .value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(text.contains("Here is the plan"));
+        assert!(text.contains("[x] read the file"));
+        assert!(text.contains("[~] edit it"));
+        assert!(text.contains("[ ] run tests"));
+        assert_eq!(output.value["plan_kind"], "agent_checklist");
+        assert_eq!(output.value["explanation"], "Here is the plan");
+        assert_eq!(output.value["steps"][1]["status"], "inProgress");
+        assert_eq!(output.value["execution_authority"], "octopus_checkpoints");
+    }
+
+    #[test]
+    fn action_less_web_search_still_maps() {
+        let bare = rich_item_output(ThreadItem::WebSearch {
+            results: None,
+            id: "ws-2".into(),
+            query: "bare".into(),
+            action: None,
+        })
+        .expect("an action-less web search still maps");
+        assert_eq!(bare.label, TURN_WEB_SEARCH_LABEL);
+        assert!(
+            bare.value
+                .get("action")
+                .expect("action field present")
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn unmapped_items_are_skipped_not_fabricated() {
+        assert!(
+            rich_item_output(ThreadItem::AgentMessage {
+                id: "msg-1".into(),
+                text: "hello".into(),
+                phase: None,
+            })
+            .is_none(),
+            "the assistant message is the terminal reply, not a rich-item artifact"
+        );
+    }
+
+    #[test]
+    fn user_message_echo_is_not_duplicated_as_provider_activity() {
+        assert!(
+            rich_item_output(ThreadItem::UserMessage {
+                id: "um-1".into(),
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text: "steer me".into(),
+                    text_elements: Vec::new(),
+                }],
+            })
+            .is_none(),
+            "the inbound operator artifact is already the user-visible evidence"
+        );
+    }
+
+    #[test]
+    fn only_a_completed_turn_may_emit_a_terminal_reply() {
+        let failure = octopus_appserver_proto::TurnError {
+            message: "upstream rejected the turn".to_string(),
+            codex_error_info: None,
+            additional_details: Some("request id 42".to_string()),
+        };
+        assert!(terminal_turn_may_emit_reply(&TurnStatus::Completed, None).unwrap());
+        assert!(!terminal_turn_may_emit_reply(&TurnStatus::Interrupted, None).unwrap());
+        assert!(matches!(
+            terminal_turn_may_emit_reply(&TurnStatus::Failed, Some(&failure)),
+            Err(InterfaceDriverError::FailedClosed(message))
+                if message.contains("upstream rejected the turn")
+                    && message.contains("request id 42")
+        ));
+        assert!(matches!(
+            terminal_turn_may_emit_reply(&TurnStatus::InProgress, None),
+            Err(InterfaceDriverError::Protocol(_))
+        ));
+    }
+
+    #[test]
+    fn unauthorized_error_is_terminal_even_when_upstream_marks_it_retryable() {
+        let unauthorized = octopus_appserver_proto::ErrorNotification {
+            error: octopus_appserver_proto::TurnError {
+                message: "expired credentials".to_string(),
+                codex_error_info: Some(octopus_appserver_proto::CodexErrorInfo::Unauthorized),
+                additional_details: None,
+            },
+            will_retry: true,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+        let output = turn_error_output(&unauthorized);
+        assert_eq!(output.value["will_retry"], false);
+        assert_eq!(
+            output.value["failure_code"],
+            PROVIDER_AUTHENTICATION_FAILURE_CODE
+        );
+        assert!(provider_error_is_terminal(&unauthorized));
+
+        let transient = octopus_appserver_proto::ErrorNotification {
+            error: octopus_appserver_proto::TurnError {
+                message: "temporary upstream overload".to_string(),
+                codex_error_info: None,
+                additional_details: None,
+            },
+            will_retry: true,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+        };
+        assert!(!provider_error_is_terminal(&transient));
+        assert_eq!(turn_error_output(&transient).value["will_retry"], true);
+    }
+
+    #[test]
+    fn steer_ownership_defers_only_when_app_server_proves_the_target_turn_moved() {
+        let steer = CodexTurnControl::Steer {
+            control_id: "message-1".to_string(),
+            input: Vec::new(),
+        };
+        let pending = continuity(
+            "world_provider_codex",
+            "run-a",
+            "thread-1",
+            1,
+            Some(CodexPendingContinuity::DynamicTool {
+                native_operation: None,
+                turn_id: "turn-1".to_string(),
+                call_id: "call-1".to_string(),
+                tool: "coder.exec".to_string(),
+            }),
+        );
+        let settled = continuity("world_provider_codex", "run-a", "thread-1", 2, None);
+        assert!(steer_waits_for_pending_continuity(&steer, Some(&pending)));
+        assert!(!steer_waits_for_pending_continuity(&steer, Some(&settled)));
+
+        let complete = |application| match application {
+            SteerAttemptApplication::Complete(application) => application,
+            SteerAttemptApplication::Retarget { .. } => panic!("expected completed steer attempt"),
+        };
+        let accepted = complete(steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            Ok(TurnSteerResponse {
+                turn_id: "turn-1".to_string(),
+            }),
+            true,
+        ));
+        assert_eq!(accepted.disposition, CodexTurnControlDisposition::Applied);
+        assert!(accepted.result.acknowledged);
+
+        let missing = complete(steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            Err(TypedRequestError::Server {
+                method: "turn/steer".to_string(),
+                source: octopus_appserver_proto::JSONRPCErrorError {
+                    code: -32600,
+                    data: None,
+                    message: "no active turn to steer".to_string(),
+                },
+            }),
+            true,
+        ));
+        assert_eq!(
+            missing.disposition,
+            CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::TerminalTurnMoved)
+        );
+        assert_eq!(missing.result.detail["reason"], "no_active_turn");
+
+        let mismatch = steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            Err(TypedRequestError::Server {
+                method: "turn/steer".to_string(),
+                source: octopus_appserver_proto::JSONRPCErrorError {
+                    code: -32600,
+                    data: None,
+                    message: "expected active turn id `turn-1` but found `turn-2`".to_string(),
+                },
+            }),
+            true,
+        );
+        assert!(matches!(
+            mismatch,
+            SteerAttemptApplication::Retarget { actual_turn_id } if actual_turn_id == "turn-2"
+        ));
+        let repeated_mismatch = complete(steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-2".to_string(),
+            Err(TypedRequestError::Server {
+                method: "turn/steer".to_string(),
+                source: octopus_appserver_proto::JSONRPCErrorError {
+                    code: -32600,
+                    data: None,
+                    message: "expected active turn id `turn-2` but found `turn-3`".to_string(),
+                },
+            }),
+            false,
+        ));
+        assert_eq!(
+            repeated_mismatch.disposition,
+            CodexTurnControlDisposition::Applied
+        );
+        assert_eq!(
+            repeated_mismatch.result.detail["retarget_retry_exhausted"],
+            true
+        );
+
+        let terminal = complete(steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            Err(TypedRequestError::Server {
+                method: "turn/steer".to_string(),
+                source: octopus_appserver_proto::JSONRPCErrorError {
+                    code: -32600,
+                    data: None,
+                    message: "cannot steer a review turn".to_string(),
+                },
+            }),
+            true,
+        ));
+        assert_eq!(terminal.disposition, CodexTurnControlDisposition::Applied);
+        assert!(!terminal.result.acknowledged);
+
+        let invalid_ack = complete(steer_attempt_application_with_retarget(
+            "message-1".to_string(),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            Ok(TurnSteerResponse {
+                turn_id: "turn-2".to_string(),
+            }),
+            true,
+        ));
+        assert_eq!(
+            invalid_ack.disposition,
+            CodexTurnControlDisposition::Applied
+        );
+        assert!(!invalid_ack.result.acknowledged);
+
+        let request_ids = std::sync::atomic::AtomicI64::new(7);
+        let ClientRequest::TurnSteer { params, .. } =
+            turn_steer_request(&request_ids, "thread-1", "message-1", Vec::new(), "turn-2")
+        else {
+            panic!("expected turn/steer request")
+        };
+        assert_eq!(params.client_user_message_id.as_deref(), Some("message-1"));
+        assert_eq!(params.expected_turn_id, "turn-2");
+    }
+
+    #[tokio::test]
+    async fn steer_retargets_once_with_the_same_operator_message_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("steer-retarget.sock");
+        let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
+        let server = tokio::spawn(async move {
+            use futures::StreamExt;
+
+            let stream = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let initialize = next_test_rpc(&mut socket).await;
+            let octopus_appserver_proto::JSONRPCMessage::Request(initialize) = initialize else {
+                panic!("expected initialize request")
+            };
+            send_test_result(
+                &mut socket,
+                initialize.id,
+                serde_json::json!({"userAgent": "codex/test", "codexHome": "/tmp"}),
+            )
+            .await;
+            assert!(matches!(
+                next_test_rpc(&mut socket).await,
+                octopus_appserver_proto::JSONRPCMessage::Notification(_)
+            ));
+
+            let first = next_test_rpc(&mut socket).await;
+            let octopus_appserver_proto::JSONRPCMessage::Request(first) = first else {
+                panic!("expected first turn/steer request")
+            };
+            assert_eq!(first.method, "turn/steer");
+            let first_params = first.params.as_ref().unwrap();
+            assert_eq!(first_params["threadId"], "thread-1");
+            assert_eq!(first_params["expectedTurnId"], "turn-1");
+            assert_eq!(first_params["clientUserMessageId"], "message-1");
+            assert_eq!(first_params["input"][0]["text"], "keep going");
+            send_test_error(
+                &mut socket,
+                first.id,
+                "expected active turn id `turn-1` but found `turn-2`",
+            )
+            .await;
+
+            let second = next_test_rpc(&mut socket).await;
+            let octopus_appserver_proto::JSONRPCMessage::Request(second) = second else {
+                panic!("expected retargeted turn/steer request")
+            };
+            assert_eq!(second.method, "turn/steer");
+            let second_params = second.params.as_ref().unwrap();
+            assert_eq!(second_params["threadId"], "thread-1");
+            assert_eq!(second_params["expectedTurnId"], "turn-2");
+            assert_eq!(second_params["clientUserMessageId"], "message-1");
+            assert_eq!(second_params["input"], first_params["input"]);
+            send_test_result(
+                &mut socket,
+                second.id,
+                serde_json::json!({"turnId": "turn-2"}),
+            )
+            .await;
+            while socket.next().await.is_some() {}
+        });
+        let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
+            endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+                socket_path: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(
+                    &socket_path,
+                )
+                .unwrap(),
+            },
+            client_name: "octopus-test".to_string(),
+            client_version: "0".to_string(),
+            experimental_api: false,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        .unwrap();
+        let request_handle = AppServerRequestHandle::Remote(client.request_handle());
+        let mut retargets = Vec::new();
+        let application = apply_control_to_target(
+            CodexTurnControl::Steer {
+                control_id: "message-1".to_string(),
+                input: vec![UserInput::Text {
+                    text: "keep going".to_string(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            request_handle,
+            Arc::new(std::sync::atomic::AtomicI64::new(1)),
+            "thread-1".to_string(),
+            "turn-1".to_string(),
+            None,
+            &mut |intent| {
+                let CodexTurnControlEffectIntent::Retarget {
+                    expected_turn_id,
+                    actual_turn_id,
+                } = intent
+                else {
+                    panic!("the broker owns the initial intent")
+                };
+                retargets.push((expected_turn_id, actual_turn_id));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(retargets, [("turn-1".to_string(), "turn-2".to_string())]);
+        assert_eq!(
+            application.disposition,
+            CodexTurnControlDisposition::Applied
+        );
+        assert!(application.result.acknowledged);
+        assert_eq!(application.result.turn_id.as_deref(), Some("turn-2"));
+        client.shutdown().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn message_delta_payload_carries_seq_and_text() {
+        let output = CodexTurnOutput::scoped_message_delta(
+            3,
+            "hel".into(),
+            "turn-1".into(),
+            "item-1".into(),
+            Some(MessagePhase::Commentary),
+        );
+        assert_eq!(output.label, AGENT_MESSAGE_DELTA_LABEL);
+        assert_eq!(output.route, ProviderEmissionRoute::ClientProjection);
+        assert_eq!(
+            output.value.get("seq").and_then(serde_json::Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            output.value.get("text").and_then(serde_json::Value::as_str),
+            Some("hel")
+        );
+        assert_eq!(
+            output
+                .value
+                .get("phase")
+                .and_then(serde_json::Value::as_str),
+            Some("commentary")
+        );
+        let a = serde_json::to_vec(
+            &CodexTurnOutput::scoped_message_delta(
+                1,
+                "same".into(),
+                "turn-1".into(),
+                "item-1".into(),
+                None,
+            )
+            .value,
+        )
+        .unwrap();
+        let b = serde_json::to_vec(
+            &CodexTurnOutput::scoped_message_delta(
+                2,
+                "same".into(),
+                "turn-1".into(),
+                "item-1".into(),
+                None,
+            )
+            .value,
+        )
+        .unwrap();
+        assert_ne!(a, b);
+    }
+}
+
+#[cfg(test)]
+#[path = "wire_roundtrip.rs"]
+mod wire_roundtrip;

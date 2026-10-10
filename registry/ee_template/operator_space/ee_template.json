@@ -1,0 +1,10 @@
+{
+  "id": "operator_space",
+  "goal_class": "Operate the selected human space through one Home and its real project environments.",
+  "allowed_interfaces": null,
+  "allowed_worker_environment_kinds": null,
+  "allowed_child_ee_templates": [
+    "project"
+  ],
+  "bootstrap_root": false
+}

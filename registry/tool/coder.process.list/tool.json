@@ -1,0 +1,31 @@
+{
+  "id": "coder.process.list",
+  "interface": "system_coder_env",
+  "handler_config": {"operation": "process_list"},
+  "process": {
+    "bin": "target/debug/octopus-coder-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": ["worktree_root"],
+      "optional_read_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["platform_toolchain_root"],
+      "optional_executable_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": ["PATH"],
+      "allow_network": true,
+      "allow_local_ipc": true,
+      "allow_sandbox_delegation": true
+    }
+  },
+  "supported_worker_environment_kinds": ["git_worktree"],
+  "description": "List every still-addressable persistent process owned by this formed Git worktree room without consuming its ordered output.",
+  "args_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+  "is_world_effect": false
+}

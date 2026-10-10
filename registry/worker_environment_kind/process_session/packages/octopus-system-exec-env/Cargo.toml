@@ -1,0 +1,28 @@
+[package]
+name = "octopus-system-exec-env"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+tracing = "0.1.44"
+base64 = "0.22.1"
+blake3.workspace = true
+
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-process-session-tool-runtime = { path = "../octopus-process-session-tool-runtime" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+octopus-exec-substrate = { path = "../octopus-exec-substrate" }
+octopus-util-pathuri = { path = "../octopus-util-pathuri" }
+
+[dev-dependencies]
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

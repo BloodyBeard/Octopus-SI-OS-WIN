@@ -1,0 +1,79 @@
+.mark-activity {
+  container-type: inline-size;
+  container-name: priority-list;
+  padding-top: calc(var(--sidebar-scroll-header-mask-start) + var(--spacing) * 1.5);
+}
+.mark-activity-heading {
+  position: sticky;
+  top: calc(var(--sidebar-scroll-header-mask-start) + var(--spacing) * 1.5);
+  z-index: 10;
+  height: var(--height-token-row);
+  flex-shrink: 0;
+}
+.mark-activity-heading-blur {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  mask-image: linear-gradient(to bottom, black calc(100% - var(--spacing)), transparent);
+  backdrop-filter: blur(var(--blur-xs, 4px));
+}
+@media (forced-colors: active) { .mark-activity-heading-blur { display: none; } }
+@media (prefers-reduced-transparency: reduce) { .mark-activity-heading-blur { backdrop-filter: none; } }
+.mark-activity-row {
+  position: relative;
+  min-height: var(--height-token-row);
+  cursor: var(--cursor-interaction);
+  padding: var(--padding-row-y) var(--padding-row-y) var(--padding-row-y) var(--padding-row-cell-x, var(--padding-row-x));
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  outline: none;
+}
+.mark-activity-row[data-multiline] { padding-top: calc(var(--spacing) * 1.5); padding-bottom: calc(var(--spacing) * 2); }
+.mark-activity-row:hover, .mark-activity-row[data-active] { background: var(--color-background-primary-ghost-hover); }
+.mark-activity-row:focus-visible { outline: 2px solid var(--color-ring); outline-offset: 0; }
+.mark-activity-secondary { color: var(--color-text-tertiary); }
+.mark-activity-agent-icon { background: currentColor; mask-position: center; mask-repeat: no-repeat; mask-size: contain; }
+.mark-activity-unread { position: relative; display: flex; width: 20px; height: 20px; flex-shrink: 0; align-items: center; justify-content: center; color: var(--color-text-description); }
+.mark-activity-unread-dot { position: absolute; inset: 0; border-radius: 9999px; background: var(--color-background-info-solid); }
+.mark-activity-empty, .mark-activity-message { padding: calc(var(--spacing) * 2); font-size: var(--text-base); color: var(--color-text-description); text-align: start; user-select: none; }
+.mark-activity-empty { opacity: .5; }
+.mark-activity-message[role=alert] { color: var(--color-text-danger); }
+.octopus-sidebar-scroll[data-activity=true] {
+  --sidebar-scroll-header-mask-distance: calc(var(--spacing) / 2);
+}
+@supports (animation-timeline: view(block)) {
+  .mark-activity-content {
+    overflow: hidden;
+    view-timeline: --sidebar-sticky-section block;
+    view-timeline-inset: calc(var(--sidebar-scroll-header-mask-start) + var(--spacing) * 1.5 + var(--height-token-row)) 0px;
+  }
+  .mark-activity-clip-window,
+  .mark-activity-clip-content {
+    animation: mark-activity-clip-motion auto linear both;
+    animation-timeline: --sidebar-sticky-section;
+    animation-range: exit-crossing;
+  }
+  .mark-activity-clip-window {
+    --mark-activity-displacement: 100%;
+    margin-top: calc(-1 * var(--spacing));
+    padding-top: var(--spacing);
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, #0000 calc(-1 * var(--spacing)), #000 0px);
+    mask-image: linear-gradient(180deg, #0000 calc(-1 * var(--spacing)), #000 0px);
+  }
+  .mark-activity-clip-content {
+    --mark-activity-displacement: calc(-100% - var(--spacing));
+  }
+  .mark-activity-heading {
+    animation: mark-activity-heading-fade auto linear both;
+    animation-timeline: view(block calc(var(--sidebar-scroll-header-mask-start) + var(--sidebar-scroll-header-mask-distance)) 0px);
+    animation-range: exit 0% exit calc(var(--spacing) * 2);
+  }
+}
+@keyframes mark-activity-clip-motion {
+  to { transform: translateY(var(--mark-activity-displacement)); }
+}
+@keyframes mark-activity-heading-fade {
+  to { opacity: 0; }
+}

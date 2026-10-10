@@ -1,0 +1,38 @@
+[package]
+name = "octopus-system-room-env"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "octopus_system_room_env"
+path = "src/lib.rs"
+
+[[bin]]
+name = "octopus-artifact-send-tool"
+path = "src/bin/octopus-artifact-send-tool.rs"
+
+[[bin]]
+name = "octopus-artifact-bound-tool"
+path = "src/bin/octopus-artifact-bound-tool.rs"
+
+[dependencies]
+fs2 = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+json-patch.workspace = true
+tokio = { workspace = true }
+
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread"] }

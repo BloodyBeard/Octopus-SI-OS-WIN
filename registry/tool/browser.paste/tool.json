@@ -1,0 +1,54 @@
+{
+  "id": "browser.paste",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "paste"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Paste text through the actual focused page clipboard/input behavior. This uses a room-private virtual clipboard and never reads the operator OS clipboard. Optional target_id addresses only that already-owned page without selecting, creating or focusing it. Requires the declared native browser transport. The browser door page_editing_profile explicitly chooses Markdown-derived text/html alongside text/plain, or plain text for its declared document profiles; the model does not choose an application or OS clipboard.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "maxLength": 1048576
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "text"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

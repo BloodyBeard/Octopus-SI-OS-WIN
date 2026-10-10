@@ -1,0 +1,194 @@
+--- a/content/browser/web_contents/web_contents_impl.cc
++++ b/content/browser/web_contents/web_contents_impl.cc
+@@ -1954,6 +1954,7 @@
+   // activate or discard it does not run before this point.
+   DCHECK(
+       !GetOuterWebContents() || (result.size() == 1) ||
++      admitted_unowned_inner_web_contents_ ||
+       base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents));
+ 
+   return result;
+@@ -3245,6 +3246,11 @@
+     base::PassKey<UnownedInnerWebContentsClient>,
+     WebContents* inner_web_contents,
+     RenderFrameHost* render_frame_host) {
++  CHECK(base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents) ||
++        GetContentClient()->browser()->IsUnownedInnerWebContentsAllowed(
++            inner_web_contents));
++  static_cast<WebContentsImpl*>(inner_web_contents)
++      ->admitted_unowned_inner_web_contents_ = true;
+   AttachInnerWebContentsImpl(inner_web_contents, render_frame_host,
+                              /*is_full_page=*/false,
+                              /*should_take_ownership=*/false);
+@@ -3383,7 +3389,9 @@
+ 
+ void WebContentsImpl::DetachUnownedInnerWebContents(
+     WebContents* inner_web_contents) {
+-  CHECK(base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents));
++  CHECK(static_cast<WebContentsImpl*>(inner_web_contents)
++            ->admitted_unowned_inner_web_contents_ ||
++        base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents));
+   CHECK(node_.IsUnownedInnerWebContents(inner_web_contents));
+ 
+   WebContentsImpl* inner_web_contents_impl =
+--- a/content/browser/web_contents/web_contents_impl.h
++++ b/content/browser/web_contents/web_contents_impl.h
+@@ -1956,6 +1956,7 @@
+   // Internal implementation of DetachUnownedInnerWebContents() that does not
+   // require a pass key. Called by ~WebContentsImpl.
+   void DetachUnownedInnerWebContents(WebContents* inner_web_contents);
++  bool admitted_unowned_inner_web_contents_ = false;
+ 
+   // Called just after an inner web contents is attached.
+   void InnerWebContentsAttached(WebContents* inner_web_contents);
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -1706,6 +1706,10 @@
+ 
+ void ContentBrowserClient::OnWebContentsCreated(WebContents* web_contents) {}
+ 
++bool ContentBrowserClient::IsUnownedInnerWebContentsAllowed(WebContents*) {
++  return false;
++}
++
+ bool ContentBrowserClient::ShouldDisableOriginAgentClusterDefault(
+     BrowserContext* browser_context) {
+   return false;
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -2950,6 +2950,7 @@
+ 
+   // Called on every WebContents creation.
+   virtual void OnWebContentsCreated(WebContents* web_contents);
++  virtual bool IsUnownedInnerWebContentsAllowed(WebContents* web_contents);
+ 
+   // Allows overriding the policy of whether to assign documents to origin-keyed
+   // agent clusters by default. That is, it controls the behaviour when the
+--- a/electron/buildflags/BUILD.gn
++++ b/electron/buildflags/BUILD.gn
+@@ -5,10 +5,13 @@
+ import("//build/buildflag_header.gni")
+ import("//electron/buildflags/buildflags.gni")
+ 
++assert(!enable_owned_guest_embedder || is_mac)
++
+ buildflag_header("buildflags") {
+   header = "buildflags.h"
+ 
+   flags = [
++    "ENABLE_OWNED_GUEST_EMBEDDER=$enable_owned_guest_embedder",
+     "ENABLE_PDF_VIEWER=$enable_pdf_viewer",
+     "ENABLE_ELECTRON_EXTENSIONS=$enable_electron_extensions",
+     "ENABLE_BUILTIN_SPELLCHECKER=$enable_builtin_spellchecker",
+--- a/electron/buildflags/buildflags.gni
++++ b/electron/buildflags/buildflags.gni
+@@ -3,6 +3,8 @@
+ # found in the LICENSE file.
+ 
+ declare_args() {
++  enable_owned_guest_embedder = false
++
+   enable_pdf_viewer = true
+ 
+   # Provide a fake location provider for mocking
+--- a/electron/shell/browser/api/owned_guest_presentation.cc
++++ b/electron/shell/browser/api/owned_guest_presentation.cc
+@@ -5,7 +5,7 @@
+ #include <map>
+ #include <utility>
+ 
+-#include "base/feature_list.h"
++#include "electron/buildflags/buildflags.h"
+ #include "base/functional/bind.h"
+ #include "base/no_destructor.h"
+ #include "base/token.h"
+@@ -17,7 +17,6 @@
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+-#include "content/public/common/content_features.h"
+ #include "shell/browser/api/electron_api_web_contents.h"
+ #include "shell/browser/native_window.h"
+ #include "ui/gfx/geometry/size.h"
+@@ -98,7 +97,7 @@
+ };
+ 
+ bool OwnedGuestPresentation::IsAvailable() {
+-  return base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents);
++  return BUILDFLAG(ENABLE_OWNED_GUEST_EMBEDDER);
+ }
+ 
+ bool OwnedGuestPresentation::IsValidGeneration(double generation) {
+--- a/electron/shell/browser/electron_browser_client.cc
++++ b/electron/shell/browser/electron_browser_client.cc
+@@ -1619,6 +1619,12 @@
+              : *g_application_locale;
+ }
+ 
++bool ElectronBrowserClient::IsUnownedInnerWebContentsAllowed(
++    content::WebContents* contents) {
++  auto* owner = api::WebContents::From(contents);
++  return BUILDFLAG(ENABLE_OWNED_GUEST_EMBEDDER) && owner && owner->IsOwnedGuest();
++}
++
+ bool ElectronBrowserClient::ShouldEnableStrictSiteIsolation() {
+   // Enable site isolation. It is off by default in Chromium <= 69.
+   return true;
+--- a/electron/shell/browser/electron_browser_client.h
++++ b/electron/shell/browser/electron_browser_client.h
+@@ -83,6 +83,7 @@
+   // content::ContentBrowserClient:
+   std::string GetApplicationLocale() override;
+   bool ShouldEnableStrictSiteIsolation() override;
++  bool IsUnownedInnerWebContentsAllowed(content::WebContents* contents) override;
+   bool ShouldEnableSubframeZoom() override;
+ #if BUILDFLAG(ENABLE_PDF_VIEWER)
+   std::optional<network::CrossOriginEmbedderPolicy>
+--- a/electron/spec/api-owned-guest-spec.ts
++++ b/electron/spec/api-owned-guest-spec.ts
+@@ -1,5 +1,7 @@
+ import { strict as assert } from 'node:assert';
+ import { createHash, randomUUID } from 'node:crypto';
++import { createServer } from 'node:http';
++import { once } from 'node:events';
+ import { BrowserWindow, nativeImage, session, webContents } from 'electron';
+ 
+ type Guest = Electron.WebContents & {
+@@ -229,4 +231,37 @@
+     assert.equal(guest.id, id);
+   });
+ 
++  it('restores a BFCache document across native view replacement and owner destruction', async () => {
++    const server = createServer((_request, response) => {
++      response.writeHead(200, { 'Content-Type': 'text/html' });
++      response.end('<html><body><script>globalThis.birth=Math.random();onpageshow=e=>globalThis.restored=e.persisted</script></body></html>');
++    });
++    server.listen(0, '127.0.0.1');
++    await once(server, 'listening');
++    const address = server.address();
++    assert.ok(address && typeof address !== 'string');
++    const url = `http://127.0.0.1:${address.port}`;
++    const id = guest.id, room = guest.session;
++    try {
++      await guest.loadURL(url + '/first');
++      const birth = await guest.executeJavaScript('birth');
++      const destination = await outer();
++      await attach(destination, 1);
++      await guest.loadURL(url + '/second');
++      assert.equal(guest.releaseOwnedGuest(1), true);
++      await attach(destination, 2);
++      const restored = once(guest, 'did-navigate');
++      guest.navigationHistory.goBack();
++      await restored;
++      assert.equal(await guest.executeJavaScript('restored'), true);
++      assert.equal(await guest.executeJavaScript('birth'), birth);
++      destination.window.destroy();
++      assert.equal(guest.id, id); assert.equal(guest.session, room);
++      assert.equal(guest.isDestroyed(), false); assert.equal(guest.hostWebContents, null);
++      assert.equal(await guest.executeJavaScript('birth'), birth);
++      const next = await outer(); await attach(next, 3);
++      assert.equal(await guest.executeJavaScript('window.parent === window && window.top === window && window.frameElement === null'), true);
++    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
++  });
++
+ });

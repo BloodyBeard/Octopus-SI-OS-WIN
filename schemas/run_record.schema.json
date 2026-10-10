@@ -1,0 +1,260 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RunRecord",
+  "type": "object",
+  "required": [
+    "active_checkpoints",
+    "checkpoints",
+    "ee",
+    "id",
+    "status",
+    "trace",
+    "worker"
+  ],
+  "properties": {
+    "active_checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/CheckpointRecord"
+      }
+    },
+    "ee": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "interface_state": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "status": true,
+    "trace": {
+      "type": "string"
+    },
+    "worker": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactAccess": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "default": false,
+          "type": "boolean"
+        },
+        "create": {
+          "default": false,
+          "type": "boolean"
+        },
+        "delete": {
+          "default": false,
+          "type": "boolean"
+        },
+        "read": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArtifactBinding": {
+      "description": "POLICY.md §4 — an artifact binding is the run's authored declaration of its object-level rights on a specific artifact. The `id` names the artifact; the `access` states which of read/change/create/delete the run claims on it (default: read only — a bound artifact is readable context). Formation masks this down to the worker-interface + EE verb ceiling; the interface-binding (the default flow) is a separate axis on the checkpoint.",
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "access": {
+          "default": {
+            "change": false,
+            "create": false,
+            "delete": false,
+            "read": true
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ArtifactAccess"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AuthoredInterfaceBinding": {
+      "type": "object",
+      "required": [
+        "config",
+        "interface"
+      ],
+      "properties": {
+        "config": {
+          "$ref": "#/definitions/InterfaceBindingConfig"
+        },
+        "interface": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "BindingArtifactPolicy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "all"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "names",
+            "namespaces"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "allow"
+              ]
+            },
+            "names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "namespaces": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "CheckpointRecord": {
+      "type": "object",
+      "required": [
+        "epoch",
+        "id",
+        "run",
+        "trace"
+      ],
+      "properties": {
+        "artifact_bindings": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ArtifactBinding"
+          }
+        },
+        "epoch": {
+          "$ref": "#/definitions/GrantEpoch"
+        },
+        "id": {
+          "type": "string"
+        },
+        "interface_binding": {
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuthoredInterfaceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outbound_interface_bindings": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AuthoredInterfaceBinding"
+          }
+        },
+        "required_verified_artifacts": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RequiredVerifiedArtifact"
+          }
+        },
+        "run": {
+          "type": "string"
+        },
+        "trace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "GrantEpoch": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "InterfaceBindingConfig": {
+      "type": "object",
+      "required": [
+        "artifact_policy"
+      ],
+      "properties": {
+        "artifact_policy": {
+          "$ref": "#/definitions/BindingArtifactPolicy"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RequiredVerifiedArtifact": {
+      "type": "object",
+      "required": [
+        "artifact_label",
+        "mark",
+        "verifier"
+      ],
+      "properties": {
+        "artifact_label": {
+          "type": "string"
+        },
+        "mark": {
+          "type": "string"
+        },
+        "params": {
+          "default": null
+        },
+        "verifier": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

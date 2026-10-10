@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "remote_compaction_v2",
+  "stage": {
+    "kind": "stable"
+  }
+}

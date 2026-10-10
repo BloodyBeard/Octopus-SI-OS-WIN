@@ -1,0 +1,15 @@
+{
+  "id": "system_worker_pyecho",
+  "ceiling": {
+    "interfaces": [
+      "world_terminal",
+      "world_pyecho",
+      "system_worker_pyecho"
+    ],
+    "tools": [],
+    "wek": [],
+    "mark_outcomes": [],
+    "hard_blocked_tools": []
+  },
+  "role_artifacts": []
+}

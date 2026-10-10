@@ -1,0 +1,23 @@
+[package]
+name = "octopus-git-worktree-tool-runtime"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_git_worktree_tool_runtime"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "octopus-git-worktree-tool-door-life"
+path = "src/bin/tool_door_life.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+
+[dev-dependencies]
+tempfile = "3.23.0"

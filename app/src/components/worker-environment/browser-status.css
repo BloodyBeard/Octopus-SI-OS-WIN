@@ -1,0 +1,283 @@
+@layer components {
+  .we-browser-shell.is-native .we-browser-body {
+    flex-direction: column;
+  }
+  .we-native-browser-viewport {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
+  }
+  .we-native-browser-viewport {
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .we-native-browser-cursor {
+    pointer-events: none;
+    overflow: hidden;
+    position: absolute;
+    transform-origin: top left;
+    visibility: hidden;
+    z-index: 20;
+  }
+  .we-native-browser-guest {
+    border: 0;
+    display: flex;
+    position: absolute;
+    transform-origin: top left;
+    visibility: hidden;
+  }
+  .we-browser-shell.is-native .we-browser-find {
+    align-self: flex-end;
+    flex: 0 0 auto;
+    margin: 8px;
+    position: static;
+  }
+  .we-native-zoom {
+    align-items: center;
+    display: flex;
+    gap: 4px;
+    padding: var(--padding-row-y) var(--padding-row-x);
+  }
+  .we-native-zoom > span:first-child {
+    flex: 1;
+  }
+  .we-native-zoom button {
+    display: inline-flex;
+    width: 24px;
+    height: 24px;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+  }
+  .we-native-zoom button:enabled:is(:hover, :focus-visible) {
+    background: var(--color-background-primary-ghost-hover);
+  }
+  .we-native-zoom-value {
+    min-width: 40px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .we-browser-connection-state {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+    align-items: center;
+    justify-content: safe center;
+    gap: 16px;
+    overflow: auto;
+    padding: 32px 24px;
+    text-align: center;
+  }
+  .we-browser-connection-copy {
+    max-width: 390px;
+    color: var(--color-token-description-foreground);
+  }
+  .we-browser-connection-copy > svg { margin: 0 auto 16px; }
+  .we-browser-connection-copy h2 {
+    margin: 0 0 8px;
+    color: var(--color-token-foreground);
+    font-size: 16px;
+    line-height: 24px;
+    font-weight: 500;
+  }
+  .we-browser-connection-copy p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 20px;
+    text-wrap: pretty;
+  }
+  .we-browser-details {
+    min-width: 0;
+    color: var(--color-token-description-foreground);
+    font-size: 12px;
+    line-height: 18px;
+    text-align: start;
+  }
+  .we-browser-details summary {
+    width: fit-content;
+    border-radius: 6px;
+    cursor: var(--cursor-interaction);
+    padding: 4px 6px;
+  }
+  .we-browser-details summary:is(:hover, :focus-visible) {
+    background: var(--color-background-primary-ghost-hover);
+    color: var(--color-token-foreground);
+  }
+  .we-browser-details summary:focus-visible { outline: 2px solid var(--color-ring); }
+  .we-browser-details :is(p, dd) { overflow-wrap: anywhere; user-select: text; }
+  .we-browser-details p { margin: 12px 0 0; }
+  .we-browser-details dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 8px 16px;
+    margin: 12px 0 0;
+  }
+  .we-browser-details dd { margin: 0; color: var(--color-token-foreground); }
+  .we-browser-connection-state > .we-browser-details {
+    max-width: 440px;
+    width: 100%;
+    flex: 0 0 auto;
+  }
+  .we-browser-connection-state > .we-browser-details summary { margin-inline: auto; }
+  .we-browser-details-panel {
+    flex: 0 0 auto;
+    max-height: 40%;
+    overflow: auto;
+    padding: 8px 16px 12px;
+    border-bottom: .5px solid var(--color-border-strong);
+  }
+  .we-browser-status {
+    align-items: center;
+    border-bottom: 1px solid var(--color-token-border);
+    color: var(--color-token-description-foreground);
+    display: flex;
+    flex: 0 0 auto;
+    font-size: 11px;
+    gap: 8px;
+    min-height: 28px;
+    padding: 4px 10px;
+    position: relative;
+  }
+  .we-browser-status > span {
+    align-items: center;
+    display: flex;
+    flex: 1;
+    gap: 6px;
+    min-width: 0;
+  }
+  .we-browser-status .we-browser-tool-active {
+    color: var(--color-token-foreground);
+  }
+  .we-browser-status button,
+  .we-browser-control-error button {
+    background: transparent;
+    border: 0;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .we-browser-status summary {
+    cursor: pointer;
+  }
+  .we-browser-status dl {
+    background: var(--color-token-main-surface-primary);
+    border: 1px solid var(--color-token-border);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    display: grid;
+    gap: 6px 12px;
+    grid-template-columns: auto minmax(0, 1fr);
+    margin: 0;
+    max-height: 300px;
+    overflow: auto;
+    padding: 12px;
+    position: absolute;
+    right: 8px;
+    top: 100%;
+    width: min(440px, calc(100% - 16px));
+    z-index: 8;
+  }
+  .we-browser-status dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .we-browser-status ul {
+    margin: 0;
+    padding-inline-start: 14px;
+  }
+  .we-browser-control-error {
+    align-items: center;
+    background: var(--color-token-main-surface-secondary);
+    border-bottom: 1px solid var(--color-token-border);
+    display: flex;
+    font-size: 12px;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+  }
+  .we-browser-control-error > span {
+    flex: 1;
+    overflow-wrap: anywhere;
+  }
+  .we-browser-control-error .we-browser-details[open] { flex-basis: 100%; order: 1; }
+  .we-cdp-viewer > canvas {
+    display: block;
+    height: auto;
+    max-height: 100%;
+    max-width: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    width: auto;
+  }
+  .we-cdp-viewer > canvas[hidden] {
+    display: none;
+  }
+  .we-browser-frame-error {
+    max-width: 360px;
+    padding: 24px;
+    text-align: center;
+  }
+  .we-browser-status > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .we-browser-status > span > svg {
+    flex-shrink: 0;
+  }
+  .we-browser-control-error button:disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+}
+
+@layer components {
+  .we-downloads { position: relative; flex: 0 0 auto; }
+  .we-downloads > button { position: relative; }
+  .we-downloads button { cursor: var(--cursor-interaction); }
+  .we-downloads button:disabled { cursor: default; opacity: .45; }
+  .we-downloads .has-download-activity { color: var(--color-token-charts-blue); }
+  .we-download-panel, .we-download-peek { background: var(--color-surface-elevated-secondary); position: absolute; right: 0; top: calc(100% + 6px); width: 360px; max-width: calc(100vw - 32px); padding: 8px; z-index: 60; }
+  .we-download-panel { max-height: 480px; display: flex; flex-direction: column; }
+  .we-download-panel > header, .we-download-peek > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 4px 0 8px; font-size: 14px; font-weight: 500; }
+  .we-download-list { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow: auto; }
+  .we-download-row { display: flex; align-items: center; gap: 12px; border-radius: 8px; padding: 8px; user-select: none; }
+  .we-download-row:hover { background: var(--color-background-button-primary-hover); }
+  .we-download-main { display: flex; align-items: center; text-align: start; gap: 12px; min-width: 0; flex: 1; border: 0; background: transparent; color: inherit; padding: 0; border-radius: 8px; }
+  .we-download-main:focus-visible { outline: 2px solid var(--color-ring); }
+  .we-download-file { display: flex; flex: 0 0 32px; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; background: color-mix(in srgb, var(--color-text) 5%, transparent); color: var(--color-text-tertiary); }
+  .we-download-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .we-download-copy > span:first-child { font-size: 12px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .we-download-copy small { color: var(--color-text-tertiary); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .we-download-copy small.is-failed, .we-download-error { color: var(--color-text-danger); }
+  .we-download-progress { height: 4px; margin-top: 4px; border-radius: 999px; overflow: hidden; background: color-mix(in srgb, var(--color-text) 10%, transparent); }
+  .we-download-progress > i { display: block; height: 100%; width: 100%; border-radius: inherit; transform-origin: left; background: var(--color-text-info); transition: transform .3s cubic-bezier(.4, 0, .2, 1), opacity .3s cubic-bezier(.4, 0, .2, 1); }
+  .we-download-progress > i.is-paused { background: var(--color-text-tertiary); }
+  .we-download-progress > i.is-indeterminate { width: 33.333%; animation: we-download-pulse 2s cubic-bezier(.4, 0, .6, 1) infinite; }
+  .we-download-progress > i.is-paused.is-indeterminate { visibility: hidden; }
+  .we-download-row-actions { display: flex; flex: 0 0 auto; gap: 4px; align-items: center; }
+  .we-download-panel button, .we-download-peek header button { display: inline-flex; align-items: center; justify-content: center; border: 0; background: transparent; color: inherit; min-width: 24px; min-height: 24px; }
+  .we-download-ring { position: absolute; inset: 2px; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; transform: rotate(-90deg); }
+  .we-download-ring.is-paused { color: var(--color-text-tertiary); }
+  .we-download-ring.is-indeterminate { animation: we-download-spin 1s linear infinite; }
+  .we-download-empty { padding: 24px; min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; text-align: center; font-size: 12px; color: var(--color-text-tertiary); }
+  .we-download-empty strong { color: var(--color-text); }
+  .we-download-error { padding: 8px; font-size: 12px; }
+  .we-download-peek p { margin: 2px 8px 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-tertiary); font-size: 11px; }
+  .we-download-peek > div { display: flex; justify-content: flex-end; gap: 8px; }
+  .we-download-announcement { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .we-downloads.is-standalone { display: flex; min-height: 0; flex: 1; }
+  .we-downloads.is-standalone .we-download-panel { position: static; flex: 1; width: 100%; max-height: none; max-width: none; }
+  @keyframes we-download-pulse { 50% { opacity: .5; } }
+  @keyframes we-download-spin { to { transform: rotate(270deg); } }
+  @media (prefers-reduced-motion: reduce) { .we-download-progress > i, .we-download-ring { animation: none; transition: none; } }
+}

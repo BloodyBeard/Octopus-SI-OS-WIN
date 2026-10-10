@@ -1,0 +1,41 @@
+[package]
+name = "octopus-sandbox-substrate"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_sandbox"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+octopus-network-proxy = { path = "../octopus-network-proxy" }
+octopus-substrate-contract = { path = "../octopus-substrate-contract" }
+octopus-util-abspath = { path = "../octopus-util-abspath" }
+octopus-util-pathuri = { path = "../octopus-util-pathuri" }
+octopus-worker-env-floor = { path = "../octopus-worker-env-floor" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+blake3.workspace = true
+serde.workspace = true
+
+serde_json.workspace = true
+dunce = "1.0.4"
+regex-lite = "0.1.8"
+tracing = { version = "0.1.44", features = ["log"] }
+url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.182"
+which = "8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+dirs = "6"
+tempfile = "3.23.0"
+
+[dev-dependencies]
+anyhow.workspace = true
+pretty_assertions = "1.4.1"
+tempfile = "3.23.0"
+tokio = { workspace = true, features = ["macros", "rt"] }

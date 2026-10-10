@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 98 98" role="img" aria-label="Atlassian Rovo">
+  <metadata>Atlassian Rovo logo by Atlassian Pty Ltd. Vendor artwork and trademark; not Octopus-authored artwork.
+Source: https://registry.npmjs.org/@atlaskit/logo/-/logo-23.3.1.tgz#package/dist/esm/artifacts/logo-components/rovo/icon.js
+Presentation changes: centered proportional sizing on a neutral white square; vendor geometry and colors unchanged.
+Vendor rights and usage terms apply; the Octopus repository license does not relicense this mark.
+
+Copyright 2019 Atlassian Pty Ltd
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.</metadata>
+  <rect width="98" height="98" rx="20" fill="#fff"/>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" x="15" y="15" width="68" height="68">
+    <path fill="#1868db" fill-rule="evenodd" d="m13.227 16.789-7.154 4.169-3.403-1.96a2.72 2.72 0 0 1-1.362-2.355V7.366c0-.973.518-1.87 1.361-2.354l6.044-3.487-.038.114a3.6 3.6 0 0 0-.172 1.088v9.278c0 1.274.68 2.45 1.786 3.085z" clip-rule="evenodd"/>
+    <path fill="#6a9a23" fill-rule="evenodd" d="m11.296 15.671-7.193 4.153 6.607 3.812a2.73 2.73 0 0 0 2.676.026l.048-.033a2.73 2.73 0 0 0 1.232-1.525 2.7 2.7 0 0 0 .127-.822v-3.594z" clip-rule="evenodd"/>
+    <path fill="#af59e1" fill-rule="evenodd" d="m21.477 5.003-4.404-2.539-5.904 4.89 2.69 1.556a3.56 3.56 0 0 1 1.785 3.086v9.277a3.6 3.6 0 0 1-.21 1.202l6.044-3.486a2.71 2.71 0 0 0 1.362-2.355V7.357c0-.97-.521-1.87-1.363-2.354" clip-rule="evenodd"/>
+    <path fill="#fca700" fill-rule="evenodd" d="M12.74 8.266 9.353 6.312V2.718c0-.283.044-.56.127-.821A2.73 2.73 0 0 1 10.71.372V.37a.4.4 0 0 0 .048-.033 2.73 2.73 0 0 1 2.676.026l6.499 3.75z" clip-rule="evenodd"/>
+</svg>
+</svg>

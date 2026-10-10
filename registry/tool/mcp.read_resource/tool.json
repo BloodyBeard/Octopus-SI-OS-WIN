@@ -1,0 +1,25 @@
+{
+  "id": "mcp.read_resource",
+  "interface": "system_mcp",
+  "process": {
+    "bin": "target/debug/octopus-mcp-stdio-room-tool",
+    "inherit_env": ["PATH"],
+    "inherit_env_from_interface": ["/interface_driver_config/private_config/process_env_keys"],
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
+      "allow_network": true, "allow_local_ipc": false
+    }
+  },
+  "handler_config": { "operation": "read_resource" },
+  "supported_worker_environment_kinds": ["mcp_stdio_session"],
+  "description": "Read a concrete resource from the persistent MCP server.",
+  "args_schema": {
+    "type": "object",
+    "properties": { "uri": { "type": "string", "minLength": 1 } },
+    "required": ["uri"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

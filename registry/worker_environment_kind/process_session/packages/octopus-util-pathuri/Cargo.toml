@@ -1,0 +1,23 @@
+[package]
+name = "octopus-util-pathuri"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+base64 = "0.22.1"
+octopus-util-abspath = { path = "../octopus-util-abspath" }
+schemars = "0.8.22"
+serde = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+ts-rs = { version = "11", features = ["no-serde-warnings"] }
+url = "2"
+urlencoding = "2.1"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+serde_json.workspace = true

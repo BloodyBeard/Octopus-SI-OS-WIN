@@ -1,0 +1,115 @@
+{
+  "id": "gui.app_state",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "app_state"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Resolve one exact macOS application target and request operator consent before launch, Accessibility observation or window capture. After admitted consent, return app-scoped AX refs and original-pixel window images; these refs never target global display tools.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "app": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "bundle_id",
+              "bundle_path"
+            ]
+          },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "kind",
+          "value"
+        ],
+        "additionalProperties": false
+      },
+      "include_screenshots": {
+        "type": "boolean"
+      },
+      "capture_selection": {
+        "type": "string",
+        "enum": ["primary", "all_windows"],
+        "description": "primary captures only the actual native AX-selected primary window and its owned cursor, in this same observation. Other windows remain AX/inventory metadata and are not imaged. all_windows preserves bounded primary-first capture of all observed windows and is the explicit default when omitted. include_screenshots=false captures no images in either mode."
+      },
+      "presentation_base": {
+        "type": "object",
+        "properties": {
+          "app": {
+            "type": "object",
+            "properties": {
+              "host_generation": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "app_instance_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            "required": [
+              "host_generation",
+              "app_instance_id"
+            ],
+            "additionalProperties": false
+          },
+          "observation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "app",
+          "observation_id",
+          "revision"
+        ],
+        "additionalProperties": false,
+        "description": "Request a display diff only against this exact previously received complete application observation. Omit for the first observation or full display. This never grants application access."
+      }
+    },
+    "required": [
+      "app"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

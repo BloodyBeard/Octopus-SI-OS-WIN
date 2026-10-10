@@ -1,0 +1,47 @@
+{
+  "id": "browser.filechooser_cancel",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "filechooser_cancel"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Cancel this exact outstanding chooser and discard unapplied private staging. Does not cancel unrelated pages or erase applied/uncertain files.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "reservation_id": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{32}$"
+      }
+    },
+    "required": [
+      "reservation_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

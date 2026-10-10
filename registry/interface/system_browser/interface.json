@@ -1,0 +1,73 @@
+{
+  "id": "system_browser",
+  "interface_type": "system",
+  "role": "system",
+  "direction": "bidirectional",
+  "source_names": [
+    "browser"
+  ],
+  "interface_driver_ref": "system_browser",
+  "interface_driver_config": {
+    "private_config": {
+      "browser_room": {
+        "schema_version": 1,
+        "transport": {
+          "wire": "browser.native.v1",
+          "host_root_slot": "browser_native_host_root",
+          "request_timeout_ms": 30000,
+          "navigation_timeout_ms": 45000
+        },
+        "limits": {
+          "max_snapshot_nodes": 2000,
+          "max_snapshot_chars": 120000,
+          "max_type_chars": 1048576,
+          "max_eval_chars": 1048576,
+          "max_screenshot_bytes": 50000000,
+          "max_pdf_bytes": 50000000,
+          "max_event_count": 4096,
+          "max_event_bytes": 8388608,
+          "max_console_entries": 1000,
+          "max_images": 5000
+        },
+        "page_editing_profile": {
+          "rich_text_paste": true,
+          "plain_text_documents": [
+            {
+              "host": "docs.google.com",
+              "first_path_segment": "spreadsheets"
+            }
+          ]
+        },
+        "upload_approval": {
+          "request_tools": [
+            "browser.filechooser_set_files"
+          ],
+          "operator_interface": "world_operator_chat",
+          "resume_tool": "browser.filechooser_resume",
+          "permission_policy": {
+            "permitted_persistence": [
+              "once",
+              "session",
+              "always"
+            ],
+            "requirements": {
+              "default_policy": {},
+              "origins": []
+            },
+            "configuration": {
+              "default_policy": {},
+              "origins": []
+            }
+          }
+        },
+        "max_upload_staged_bytes": 268435456,
+        "wait_completion": {
+          "request_tools": [
+            "browser.wait"
+          ],
+          "completion_tool": "browser.wait_complete"
+        }
+      }
+    }
+  }
+}

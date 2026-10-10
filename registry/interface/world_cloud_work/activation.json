@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "interface": "world_cloud_work",
+  "activations": [
+    {
+      "enabled": false,
+      "activation_driver_ref": "app_server_transport",
+      "config": {
+        "bind_interface_socket_when_env_unset": true
+      }
+    }
+  ]
+}

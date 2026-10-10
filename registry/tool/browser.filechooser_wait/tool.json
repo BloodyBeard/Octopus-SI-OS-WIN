@@ -1,0 +1,52 @@
+{
+  "id": "browser.filechooser_wait",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "filechooser_wait"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Observe a previously armed native chooser, independent of the selected tab. Returns its exact event id and multiplicity, or an explicit bounded observation deadline; does not upload.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "reservation_id": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{32}$"
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3000
+      }
+    },
+    "required": [
+      "reservation_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

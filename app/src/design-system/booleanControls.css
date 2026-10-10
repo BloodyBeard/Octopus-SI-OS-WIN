@@ -1,0 +1,35 @@
+.oc-switch__thumb[data-state=unchecked] { translate: 2px; }
+.oc-switch__thumb[data-state=checked] { translate: 14px; }
+.oc-switch__thumb:dir(rtl)[data-state=unchecked] { translate: -2px; }
+.oc-switch__thumb:dir(rtl)[data-state=checked] { translate: -14px; }
+.oc-switch__thumb { box-shadow: 0 1px 2px -1px #00000014; }
+
+.oc-checkbox__control {
+  display: flex;
+  width: var(--icon-secondary-size, 14px);
+  height: var(--icon-secondary-size, 14px);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--color-text);
+  outline: none;
+  box-shadow: 0 1px 2px -1px #00000014;
+  transition: background-color .15s cubic-bezier(.4, 0, .2, 1), border-color .15s cubic-bezier(.4, 0, .2, 1), box-shadow .15s cubic-bezier(.4, 0, .2, 1);
+}
+.oc-checkbox[data-state=checked] .oc-checkbox__control,
+.oc-checkbox[data-state=mixed] .oc-checkbox__control { background: var(--color-background-primary-soft); }
+@media (hover: hover) {
+  .oc-checkbox__input:not(:disabled) + .oc-checkbox__control:hover { background: var(--color-surface-tertiary); }
+}
+.oc-checkbox__input:focus-visible + .oc-checkbox__control {
+  border-color: var(--color-ring);
+  box-shadow: 0 0 0 2px var(--color-ring), 0 1px 2px -1px #00000014;
+}
+.oc-checkbox__input[aria-invalid=true] + .oc-checkbox__control {
+  border-color: var(--color-text-danger);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--color-text-danger) 20%, transparent), 0 1px 2px -1px #00000014;
+}
+.oc-checkbox__control > svg { flex-shrink: 0; }

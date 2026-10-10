@@ -1,0 +1,88 @@
+.workspace-pane-launcher-host {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  container: pane-launcher / inline-size;
+}
+
+.workspace-pane-launcher {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 32px var(--padding-panel, 24px);
+  background: var(--color-surface-canvas, var(--color-surface));
+  user-select: none;
+}
+
+.workspace-pane-launcher-section {
+  display: flex;
+  width: 100%;
+  max-width: 768px;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.workspace-pane-launcher-section > h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.workspace-pane-launcher-list {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px 16px;
+}
+
+@container pane-launcher (min-width: 448px) {
+  .workspace-pane-launcher-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.workspace-pane-launcher-item {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-background-primary-soft-alpha, color-mix(in srgb, var(--color-text) 5%, transparent));
+  color: var(--color-text);
+  cursor: var(--cursor-interaction);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: start;
+}
+
+.workspace-pane-launcher-item > svg { flex: none; color: var(--color-text-secondary); }
+.workspace-pane-launcher-item > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-pane-launcher-item:hover { background: var(--color-background-primary-ghost-hover); }
+.workspace-pane-launcher-item:focus-visible { outline: 2px solid var(--color-ring); outline-offset: -2px; }
+
+.workspace-pane-launcher-item .workspace-pane-shortcut {
+  margin: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.workspace-pane-launcher-empty {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border: .5px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}

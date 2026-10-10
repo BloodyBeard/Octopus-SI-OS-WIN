@@ -1,0 +1,13 @@
+[package]
+name = "octopus-ee"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-policy = { path = "../octopus-policy" }

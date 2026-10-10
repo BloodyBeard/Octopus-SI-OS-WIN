@@ -1,0 +1,33 @@
+{
+  "schema": "octopus.client_surface",
+  "schema_version": 1,
+  "release_channel": "lab",
+  "id": "agent.activity-lab",
+  "revision": 1,
+  "title": "Activity lab",
+  "glyph": "metrics",
+  "target": {
+    "kind": "workspace.surface",
+    "workspaces": ["agent"],
+    "order": 70,
+    "chrome": {
+      "topbar": "none",
+      "workspace": "immersive"
+    }
+  },
+  "sources": [
+    {
+      "id": "movement_summary",
+      "kind": "projection",
+      "method": "projection.movements.list",
+      "params": { "limit": 12 }
+    }
+  ],
+  "render": {
+    "kind": "sandbox",
+    "initial_height": 720,
+    "html": "<main><header><div><span>LIVE PROJECTION</span><h1>Activity lab</h1><p>Interactive client surface over admitted movement rows.</p></div><button id=mode type=button>Density</button></header><section id=summary></section><section class=feed><h2>Recent movements</h2><div id=rows></div></section></main>",
+    "css": "body{padding:32px;background:radial-gradient(circle at 50% 0,rgba(255,255,255,.035),transparent 34%)}main{max-width:980px;margin:auto}header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:28px}header span{color:var(--color-text-secondary);font-size:10px;letter-spacing:.12em}h1{margin:7px 0 5px;font-size:28px;font-weight:500}p{margin:0;color:var(--color-text-secondary)}button{height:32px;padding:0 12px;border:1px solid var(--color-border-primary);border-radius:8px;color:var(--color-text-primary);background:rgba(255,255,255,.035)}#summary{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric,.feed{border:1px solid var(--color-border-primary);border-radius:12px;background:rgba(255,255,255,.018)}.metric{padding:16px}.metric span{display:block;color:var(--color-text-secondary);font-size:11px}.metric strong{display:block;margin-top:8px;font-size:24px;font-weight:400}.feed{margin-top:12px;overflow:hidden}.feed h2{margin:0;padding:14px 16px;border-bottom:1px solid var(--color-border-primary);font-size:12px;font-weight:500}.row{display:grid;grid-template-columns:90px 1fr 1fr;gap:12px;padding:10px 16px;border-bottom:1px solid var(--color-border-primary);font-size:11px}.row:last-child{border-bottom:0}.row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.row span:first-child{color:var(--color-text-secondary)}body.compact .row{padding-block:6px}@media(max-width:680px){body{padding:20px}#summary{grid-template-columns:1fr}.row{grid-template-columns:72px 1fr}.row span:last-child{display:none}}",
+    "javascript": "const source=window.octopusSurface.sources.movement_summary||{};const rows=Array.isArray(source.movements)?source.movements:[];const kinds=new Set(rows.map(row=>row.kind).filter(Boolean));document.querySelector('#summary').innerHTML=[['Rows',rows.length],['Kinds',kinds.size],['Projected',rows.length?'Live':'Empty']].map(([label,value])=>`<article class=metric><span>${label}</span><strong>${value}</strong></article>`).join('');document.querySelector('#rows').innerHTML=rows.length?rows.map(row=>`<div class=row><span>${row.kind||'movement'}</span><span>${row.artifact_label||row.artifact_id||'artifact'}</span><span>${row.trace||'no trace'}</span></div>`).join(''):'<div class=row><span>Empty</span><span>No movement rows are projected.</span><span></span></div>';document.querySelector('#mode').onclick=()=>document.body.classList.toggle('compact');"
+  }
+}

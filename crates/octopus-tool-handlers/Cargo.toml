@@ -1,0 +1,22 @@
+[package]
+name = "octopus-tool-handlers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "octopus_tool_handlers"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+octopus-worker-env = { path = "../octopus-worker-env" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-descriptors = { path = "../octopus-descriptors" }

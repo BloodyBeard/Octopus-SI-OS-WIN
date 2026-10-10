@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "accepted_labels": [
+      "external_import.request"
+    ],
+    "operation": "external_import.inspect",
+    "source_root_slot": "external_import_source_root",
+    "products": [
+      "claude_code",
+      "cursor"
+    ],
+    "scopes": [
+      "home",
+      "repository"
+    ],
+    "classes": [
+      "configuration",
+      "instructions",
+      "skills",
+      "plugins",
+      "mcp",
+      "worker_templates",
+      "hooks",
+      "commands",
+      "memory",
+      "history"
+    ],
+    "max_file_bytes": 4194304,
+    "max_total_bytes": 67108864,
+    "max_files": 4096,
+    "max_session_age_days": 30,
+    "max_sessions": 50,
+    "max_text_chars": 1000000
+  },
+  "driver_ipc": {
+    "ledger_batch_size": 32,
+    "idle_sleep_ms": 250,
+    "verdict_timeout_ms": 30000,
+    "max_cached_manifest_bytes": 1048576,
+    "max_outbound_payload_bytes": 268435456,
+    "ledger_fallback_max_line_bytes": 8388608
+  }
+}

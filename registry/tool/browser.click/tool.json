@@ -1,0 +1,206 @@
+{
+  "id": "browser.click",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "click"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Click an accessibility ref from the latest snapshot or an explicit viewport point in this formed browser room, then refresh the snapshot by default. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. An explicit selector uses the actual locator/frame engine with bounded waits and optional force/modifiers, returning value without an implicit accessibility snapshot. On the typed native click path, load_waits distinguishes a completed input dispatch from page/frame load observation: a 250ms classification deadline or bounded completion deadline does not assert that the page loaded; no click is replayed. An explicit native viewport click with snapshot:false uses the same CUA dispatch and load_waits result without an implicit snapshot; its timeout_ms is capped at3000ms.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "ref": {
+        "type": "string",
+        "pattern": "^@m[1-9][0-9]*e[1-9][0-9]*$"
+      },
+      "x": {
+        "type": "number"
+      },
+      "y": {
+        "type": "number"
+      },
+      "button": {
+        "type": "string",
+        "enum": [
+          "left",
+          "right",
+          "middle"
+        ]
+      },
+      "click_count": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 3
+      },
+      "snapshot": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      },
+      "selector": {
+        "type": "string",
+        "maxLength": 1048576,
+        "minLength": 1
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 300000,
+        "description": "Effective locator maximum is 3000ms; sequential typing maximum is 5000ms. Typed clicks separately observe load start for 250ms and completion for at most 3000ms; load_waits reports the actual outcome. Other typed actions do not add a navigation-settling wait."
+      },
+      "force": {
+        "type": "boolean"
+      },
+      "modifiers": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "Alt",
+            "Control",
+            "ControlOrMeta",
+            "Meta",
+            "Shift"
+          ]
+        },
+        "maxItems": 16
+      }
+    },
+    "oneOf": [
+      {
+        "required": [
+          "ref"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "x"
+              ]
+            },
+            {
+              "required": [
+                "y"
+              ]
+            },
+            {
+              "required": [
+                "selector"
+              ]
+            },
+            {
+              "required": [
+                "force"
+              ]
+            },
+            {
+              "required": [
+                "timeout_ms"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "required": [
+          "x",
+          "y"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "ref"
+              ]
+            },
+            {
+              "required": [
+                "selector"
+              ]
+            },
+            {
+              "required": [
+                "force"
+              ]
+            }
+          ]
+        },
+        "if": {
+          "required": [
+            "timeout_ms"
+          ]
+        },
+        "then": {
+          "required": [
+            "snapshot"
+          ],
+          "properties": {
+            "snapshot": {
+              "const": false
+            }
+          }
+        }
+      },
+      {
+        "required": [
+          "selector"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "ref"
+              ]
+            },
+            {
+              "required": [
+                "x"
+              ]
+            },
+            {
+              "required": [
+                "y"
+              ]
+            },
+            {
+              "required": [
+                "snapshot"
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

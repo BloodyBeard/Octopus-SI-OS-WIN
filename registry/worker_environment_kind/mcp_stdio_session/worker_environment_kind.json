@@ -1,0 +1,39 @@
+{
+  "worker_environment_kind_id": "mcp_stdio_session",
+  "substrate_family": "mcp_stdio",
+  "door_driver_refs": [
+    "system_mcp"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-mcp-stdio-room-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "instance_config_files": [
+    "mcp_stdio.json"
+  ],
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "mcp_stdio_session",
+    "persistent_process",
+    "tool_discovery",
+    "resource_access",
+    "prompt_templates",
+    "server_events",
+    "durable_event_cursor",
+    "request_cancellation",
+    "progress_notifications",
+    "artifact_capture",
+    "live_view"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "restricted"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

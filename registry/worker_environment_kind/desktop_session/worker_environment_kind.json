@@ -1,0 +1,35 @@
+{
+  "worker_environment_kind_id": "desktop_session",
+  "substrate_family": "gui",
+  "door_driver_refs": [
+    "system_gui"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-gui-session-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "instance_config_files": [
+    "desktop.json"
+  ],
+  "supported_executor_kinds": [
+    "computer_use",
+    "ui_navigation"
+  ],
+  "capabilities": [
+    "desktop_session",
+    "screen_capture",
+    "input_events",
+    "computer_use",
+    "artifact_capture",
+    "live_view"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "restricted"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

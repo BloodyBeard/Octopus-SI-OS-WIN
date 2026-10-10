@@ -1,0 +1,15 @@
+{
+  "id": "world_cron",
+  "interface_type": "world",
+  "role": "sensor",
+  "direction": "inbound",
+  "source_names": [
+    "cron"
+  ],
+  "interface_driver_ref": "cron_life",
+  "interface_driver_config": {
+    "private_config": {
+      "task_planner_executable": "target/debug/octopus-world-cron-task-plan"
+    }
+  }
+}

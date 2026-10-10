@@ -1,0 +1,31 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_unity",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_unity",
+  "release_status": "optional",
+  "display": {
+    "name": "Unity MCP",
+    "description": "Inspect, edit, test, and operate Unity projects through a running Unity MCP server.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "code"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_unity",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-unity-context"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-skill-unity-mcp-orchestrator"
+    }
+  ]
+}

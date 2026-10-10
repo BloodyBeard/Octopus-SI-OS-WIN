@@ -1,0 +1,59 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "driver.code_mode",
+  "version": "1.0.0",
+  "product_kind": "driver",
+  "product_id": "code_mode",
+  "release_status": "optional",
+  "display": {
+    "name": "Code Mode",
+    "description": "JavaScript execution with explicitly bound persistent context and artifact-mediated tools.",
+    "developer": "Octopus",
+    "category": "worker_environment",
+    "icon": "code"
+  },
+  "members": [
+    {
+      "registry_kind": "worker_environment_kind",
+      "owner": "code_mode",
+      "primary": true
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_code_mode",
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "code_mode.run",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "code_mode.wait",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "code_mode.resume",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "code_mode.cancel",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-code-mode-cua-prelude"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-code-mode-browser-prelude"
+    }
+  ],
+  "required_packages": [
+    "driver.system_room"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "command": "target/debug/octopus-mcp-stdio-room-tool",
+  "args": [
+    "--example-server"
+  ],
+  "forward_env": [],
+  "env": {},
+  "protocol_versions": [
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26"
+  ],
+  "client_name": "octopus-mcp-stdio-room",
+  "client_version": "1",
+  "request_timeout_ms": 120000,
+  "max_message_bytes": 8388608,
+  "max_stderr_segment_bytes": 1048576,
+  "stderr_retained_segments": 8,
+  "event_journal_segment_bytes": 16777216,
+  "event_journal_retained_segments": 64
+}

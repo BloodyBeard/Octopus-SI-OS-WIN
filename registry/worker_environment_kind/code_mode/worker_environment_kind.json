@@ -1,0 +1,31 @@
+{
+  "worker_environment_kind_id": "code_mode",
+  "substrate_family": "code_mode",
+  "door_driver_refs": [
+    "code_mode_env"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-code-mode-room-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "instance_config_files": [
+    "code_mode.json"
+  ],
+  "supported_executor_kinds": [
+    "in_process"
+  ],
+  "capabilities": [
+    "script_exec",
+    "persistent_cells",
+    "nested_artifact_emission"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "denied"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

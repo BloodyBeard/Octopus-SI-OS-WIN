@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_box",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_box",
+  "release_status": "optional",
+  "display": {
+    "name": "Box",
+    "description": "Work with Box files, folders, and collaboration.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "box"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_box",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-box-context"
+    }
+  ]
+}

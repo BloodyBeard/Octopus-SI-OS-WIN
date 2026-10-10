@@ -1,0 +1,54 @@
+@property --octopus-marquee-mask-extension {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@layer components {
+  .octopus-marquee {
+    --marquee-speed-em-per-second: 2;
+    --marquee-left-fade: .571429em;
+    --marquee-right-fade: 1.14286em;
+    display: block;
+    inline-size: 100%;
+    min-inline-size: 0;
+    white-space: nowrap;
+  }
+  .octopus-marquee-clip {
+    box-sizing: border-box;
+    display: block;
+    margin-left: calc(0px - var(--marquee-left-fade));
+    padding-left: var(--marquee-left-fade);
+    overflow: clip;
+  }
+  .octopus-marquee-track, .octopus-marquee-content {
+    display: inline-block;
+    inline-size: max-content;
+  }
+  .octopus-marquee-overflowing {
+    mask-image: linear-gradient(90deg,
+      transparent 0,
+      black var(--marquee-left-fade),
+      black calc(100% - var(--marquee-right-fade)),
+      transparent 100%);
+    mask-repeat: no-repeat;
+    mask-size: calc(100% + var(--octopus-marquee-mask-extension)) 100%;
+  }
+  .group:hover .octopus-marquee-on-group-hover[data-marquee-animatable] .octopus-marquee-track {
+    animation: octopus-title-travel var(--marquee-duration) var(--marquee-scroll-timing) both;
+  }
+  .group:hover .octopus-marquee-on-group-hover[data-marquee-animatable] .octopus-marquee-clip {
+    animation: octopus-title-unmask calc(var(--marquee-duration) * .25) linear calc(var(--marquee-duration) * .75) both;
+  }
+  @keyframes octopus-title-travel {
+    from { transform: translateX(0); }
+    to { transform: translateX(calc(0px - var(--marquee-scroll-distance))); }
+  }
+  @keyframes octopus-title-unmask {
+    to { --octopus-marquee-mask-extension: var(--marquee-right-fade); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .group:hover .octopus-marquee-on-group-hover[data-marquee-animatable] :is(.octopus-marquee-track, .octopus-marquee-clip) {
+      animation: none;
+    }
+  }
+}

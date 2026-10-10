@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_atlassian_rovo",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_atlassian_rovo",
+  "release_status": "optional",
+  "display": {
+    "name": "Atlassian Rovo",
+    "description": "Search and act across Atlassian workspaces through Rovo.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "sparkles"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_atlassian_rovo",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-atlassian-rovo-context"
+    }
+  ]
+}

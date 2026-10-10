@@ -1,0 +1,1403 @@
+import { AnimatePresence, motion } from "motion/react";
+import "../icon-glyphs/chat";
+import "../icon-glyphs/voice";
+import "../icon-glyphs/worker";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { subscribeClientCommands } from "../../clientActions";
+import type { ChatRun } from "../../chatRuns";
+import { ClientSurfaceRenderer, resetVoiceWidgetLayout, restoreVoiceWidgetLayout } from "../../client-surfaces/ClientSurfaceRenderer";
+import { homeSurfaceIdentity } from "../../client-surfaces/homePresentation";
+import { useHomeSurfaceDocuments } from "../../client-surfaces/useHomeSurfaceDocuments";
+import { QueuedMessageList } from "../chat/QueuedMessageList";
+import type { AdmittedClientSurfaceDocument, ClientSurfaceActionEvent, ClientSurfaceHostSource } from "../../client-surfaces/types";
+import type { EnvironmentNode, RunProjection, TopologySnapshot } from "../../data/topology";
+import { OcMenuItem, OcMenuSectionLabel, OcMenuSurface } from "../../design-system/components";
+import { readClientChatProjects } from "../../shell/clientWorkspaces";
+import { appToast, useAppErrorToast } from "../../toasts";
+import type { ChatWorkspace } from "../chat";
+import { OperatorRequestSurface } from "../chat/OperatorRequestSurface";
+import { MessageContent } from "../chat/MessageContent";
+import type { ChatAttachmentView, ChatRenderMessage, ChatToolPresentationIndex } from "../chat/types";
+import type { OctopusClientAccessProfile } from "../../electron";
+import { Glyph, type GlyphName } from "../IconGlyphs";
+import { ChatComposer } from "../chat/ChatComposer";
+import type { ProjectedFileSource } from "../chat/ProjectedFilePicker";
+import { AirHandVoiceController } from "./AirHandVoiceController";
+import { HomeCallControls } from "./HomeCallControls";
+import { HomeTurnActivity, homeTurnActivity } from "./HomeTurnActivity";
+import { projectHomeVoiceContext } from "./voiceCallArtifacts";
+import { isVoiceCallActive, voicePresentation } from "./voicePresentation";
+import { VoiceOrbScene } from "./VoiceOrbScene";
+import type { VoiceSession } from "./useVoiceSession";
+import {
+  buildVoiceWidgetDocuments,
+  type InsightsWidget,
+  type TaskProgressWidget,
+  type UpcomingScheduledWidgetItem,
+  type VoiceWidgetItem,
+} from "./voiceWidgetDocuments";
+import type { HomeRunActivity } from "./useHomeActivityWorkspace";
+import { chatProductError } from "../chat/chatProductError";
+import { OctopusLoadingState } from "../OctopusLoadingLogo";
+import "../chat/chat.css";
+import "./voice.css";
+
+const RunEnvironmentView = lazy(() => import("../worker-environment/RunEnvironmentView").then((module) => ({ default: module.RunEnvironmentView })));
+
+type Props = {
+  accessProfile: OctopusClientAccessProfile;
+  activity: HomeRunActivity;
+  builtinWidgetSources: Record<string, ClientSurfaceHostSource[]>;
+  commandsActive?: boolean;
+  homeRunId: string;
+  installedWidgetIds: string[];
+  installedWidgetsReady: boolean;
+  onViewModeChange?: (mode: HomeViewMode) => void;
+  onWidgetsOpenChange?: (open: boolean) => void;
+  viewMode: HomeViewMode;
+  session: VoiceSession;
+  surfaces: AdmittedClientSurfaceDocument[];
+  topology: TopologySnapshot;
+  workerEnvironmentSurfaces: AdmittedClientSurfaceDocument[];
+  widgetsOpen: boolean;
+  workspace: ChatWorkspace;
+};
+
+export type HomeViewMode = "voice" | "activity";
+
+type ProjectionTarget = {
+  environment: EnvironmentNode | null;
+  run: RunProjection | null;
+};
+
+type DetailPanelKind = "context" | "tools" | "goals" | "memory";
+type ProjectionItem = VoiceWidgetItem;
+
+const VOICE_TITLE_KEY = "octopus.voice.session-title.v1";
+const VOICE_RECORDING_KEY = "octopus.voice.save-audio.v1";
+const VOICE_SPEAKER_KEY = "octopus.voice.speaker-enabled.v1";
+const VOICE_HIDDEN_SURFACES_KEY = "octopus.voice.hidden-surfaces.v1";
+const LAB_TASK_PROGRESS: TaskProgressWidget = {
+  completion: 62,
+  running: 7,
+  scheduled: 4,
+  unseenDone: 16,
+  waiting: 3,
+};
+const LAB_INSIGHTS: InsightsWidget = {
+  label: "Leads this month",
+  value: "1,284",
+  change: "+18%",
+  changeDetail: "vs last month",
+  series: [2.1, 2.4, 3.6, 3.1, 4.2, 3.8, 5.1, 6.4],
+};
+export function VoiceView({ accessProfile, activity, builtinWidgetSources, commandsActive = true, homeRunId, installedWidgetIds, installedWidgetsReady, onViewModeChange, onWidgetsOpenChange, session, surfaces, topology, workerEnvironmentSurfaces, widgetsOpen, workspace, viewMode }: Props) {
+  const storageKeys = voiceStorageKeys(accessProfile);
+  const [detailPanel, setDetailPanel] = useState<DetailPanelKind | null>(null);
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
+  const [environmentMaximized, setEnvironmentMaximized] = useState(false);
+  const [hiddenSurfaceIds, setHiddenSurfaceIds] = useState(() => readStoredStringSet(storageKeys.hiddenSurfaces));
+  const installedWidgetIdsHydratedRef = useRef(false);
+  const previousInstalledWidgetIdsRef = useRef(new Set<string>());
+  const [sessionTitle, setSessionTitle] = useState(() => readStoredText(storageKeys.title, "Home"));
+  const [saveAudio] = useState(() => readStoredBoolean(storageKeys.recording, false));
+  const [speakerEnabled, setSpeakerEnabled] = useState(() => readStoredBoolean(storageKeys.speaker, true));
+  const widgetCanvasRef = useRef<HTMLDivElement>(null);
+  const stageMainRef = useRef<HTMLElement>(null);
+  const orbProbeRef = useRef<HTMLElement>(null);
+  const outputMeter = useSyncExternalStore(
+    session.subscribeOutputMeter,
+    session.getOutputMeterSnapshot,
+    session.getOutputMeterSnapshot,
+  );
+
+  const boundRunId = homeRunId;
+  const homeProjectionLoading = accessProfile === "live"
+    && (
+      (!homeRunId && !workspace.runsLoaded && !workspace.runsError)
+      || (Boolean(homeRunId) && (workspace.activeRunId !== homeRunId || workspace.loadingMessages))
+    );
+  const target = useMemo(() => findProjectionTarget(topology, boundRunId), [boundRunId, topology]);
+  const projectedFileSources = useMemo<ProjectedFileSource[]>(() => {
+    if (accessProfile !== "live" || !window.octopusTransport?.readWorkerEnvironmentFileAttachment || !target.run) return [];
+    const environments = target.run.workerEnvironments.length
+      ? target.run.workerEnvironments
+      : target.run.workerEnvironment.id
+        ? [target.run.workerEnvironment]
+        : [];
+    return environments.flatMap((environment) => environment.surfaces.filter((surface) => (
+      surface.kind === "files"
+      && surface.mode === "direct"
+      && (
+        (surface.protocol.trim().toLowerCase() === "filesystem.readonly" && surface.readOnly)
+        || (surface.protocol.trim().toLowerCase() === "filesystem.readwrite" && !surface.readOnly)
+      )
+    )).map((surface) => ({
+      workerEnvironmentId: environment.id,
+      surfaceId: surface.id,
+      label: `${environment.label} · ${surface.label}`,
+    })));
+  }, [accessProfile, target.run]);
+  const homeInterfaceId = workspace.activeRun?.runId === boundRunId
+    ? workspace.activeRun.chatInterfaceId
+    : workspace.runs.find((run) => run.runId === boundRunId)?.chatInterfaceId || "";
+  const homeInterfaceMessages = useMemo(() => workspace.renderedMessages.filter((message) => (
+    Boolean(homeInterfaceId)
+    && message.runId === boundRunId
+    && message.interfaceId === homeInterfaceId
+  )), [boundRunId, homeInterfaceId, workspace.renderedMessages]);
+  const voiceConversationContext = useMemo(() => projectHomeVoiceContext(homeInterfaceMessages, homeRunId, homeInterfaceId), [homeInterfaceMessages, homeRunId, homeInterfaceId]);
+  useEffect(() => {
+    void session.updateContext(voiceConversationContext);
+  }, [session.updateContext, voiceConversationContext]);
+  const homeOperatorRequests = useMemo(() => homeInterfaceMessages.filter((message) =>
+    ["approval", "user_input", "elicitation"].includes(message.eventKind ?? "") && message.eventData?.resolved !== true
+  ), [homeInterfaceMessages]);
+  const latestHomePrompt = useMemo(() => [...homeInterfaceMessages]
+    .reverse()
+    .find((message) => message.role === "user" && message.direction === "in") ?? null, [homeInterfaceMessages]);
+  const latestHomeTerminal = useMemo(() => {
+    const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
+    return [...homeInterfaceMessages]
+      .reverse()
+      .find((message) => (
+        message.direction === "out"
+        && message.role === "assistant"
+        && (message.eventKind === "message" || message.eventKind === "error")
+        && message.terminal
+        && message.createdAtMs >= latestPromptAtMs
+        && Boolean(message.text.trim() || message.attachments?.length || message.error)
+      )) ?? null;
+  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+  const latestHomeResponse = latestHomeTerminal
+    && latestHomeTerminal.eventKind === "message"
+    && !latestHomeTerminal.error
+    ? latestHomeTerminal
+    : null;
+  const latestHomeFailure = latestHomeTerminal
+    && (latestHomeTerminal.eventKind === "error" || latestHomeTerminal.error)
+    ? latestHomeTerminal
+    : null;
+  const latestHomeStreamingResponse = useMemo(() => {
+    const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
+    return [...homeInterfaceMessages]
+      .reverse()
+      .find((message) => (
+        message.direction === "out"
+        && message.role === "assistant"
+        && message.eventKind === "message_delta"
+        && message.createdAtMs >= latestPromptAtMs
+        && Boolean(message.text.trim())
+      )) ?? null;
+  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+  const latestHomeActivity = useMemo(() => homeTurnActivity(
+    homeInterfaceMessages, latestHomePrompt?.createdAtMs ?? 0,
+  ), [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+  const displayTitle = session.context?.homeRunId === homeRunId ? session.context.runTitle : sessionTitle;
+  const voiceBinding = workspace.runs.find((run) => run.runId === homeRunId && run.clientSurfaceRole === "home")?.voiceContext;
+  const providerId = voiceBinding?.providerId || "";
+  const providerLabel = workspace.declaredProviderInterfaces.find((provider) => provider.id === providerId)?.label || "Voice";
+  const callActive = isVoiceCallActive(session.phase);
+  const callActiveRef = useRef(callActive);
+  callActiveRef.current = callActive;
+  const callState = voicePresentation(session.phase);
+  const [callSceneReady, setCallSceneReady] = useState(false);
+  const replyHidden = callActive || callSceneReady;
+  const voiceStartDisabledReason = !homeRunId
+    ? "Home is not available yet."
+    : !providerId
+      ? "No voice interface is available for Home."
+      : "";
+  const projectName = useMemo(() => {
+    if (accessProfile === "lab") {
+      return readClientChatProjects(accessProfile)
+        .find((project) => project.chatRunIds.includes(boundRunId))?.name || "No project";
+    }
+    const boundRun = workspace.runs.find((run) => run.runId === boundRunId);
+    if (!boundRun || !target.environment || target.environment.id === boundRun.osRootEeId) return "No project";
+    return target.environment.name || target.environment.id;
+  }, [accessProfile, boundRunId, target.environment, workspace.runs]);
+  const contextItems = useMemo(() => projectContext(target, projectName), [projectName, target]);
+  const toolItems = useMemo(() => projectTools(target), [target]);
+  const goalItems = useMemo(() => projectGoals(target), [target]);
+  const memoryItems = useMemo(() => projectMemory(target), [target]);
+  const taskProgress = useMemo(
+    () => accessProfile === "lab"
+      ? LAB_TASK_PROGRESS
+      : projectTaskProgress(topology, target, boundRunId, workspace.runs),
+    [accessProfile, boundRunId, target, topology, workspace.runs],
+  );
+  const upcomingScheduled = useMemo(
+    () => projectUpcomingScheduled(workspace.runs),
+    [workspace.runs],
+  );
+  const environmentAvailable = Boolean(
+    topology.projection.mode === "live"
+    &&
+    target.run?.workerEnvironments.some((environment) => (
+      environment.id && environment.live
+    )),
+  );
+  const insights = useMemo(
+    () => accessProfile === "lab" ? LAB_INSIGHTS : projectInsights(activity),
+    [accessProfile, activity],
+  );
+  const installedWidgetIdSet = useMemo(() => new Set(installedWidgetIds), [installedWidgetIds]);
+  const builtInSurfaces = useMemo(() => buildVoiceWidgetDocuments({
+    context: contextItems,
+    environmentAvailable,
+    goals: goalItems,
+    memory: memoryItems,
+    insights,
+    scheduled: upcomingScheduled,
+    taskProgress,
+    tools: toolItems,
+  }).filter((surface) => installedWidgetIdSet.has(surface.document.id)).map((surface) => ({
+    ...surface,
+    sourceExtensionId: surface.document.id,
+    hostSources: builtinWidgetSources[surface.document.id] ?? [],
+  })), [builtinWidgetSources, contextItems, environmentAvailable, goalItems, insights, installedWidgetIdSet, memoryItems, taskProgress, toolItems, upcomingScheduled]);
+  const homeSurfaces = useHomeSurfaceDocuments(surfaces, { accessProfile, runId: boundRunId, interfaceId: homeInterfaceId });
+  const visibleHomeSurfaceIds = useMemo(() => new Set(homeSurfaces.visibleDocuments.map(homeSurfaceIdentity)), [homeSurfaces.visibleDocuments]);
+  const allSurfaces = useMemo(() => [...builtInSurfaces, ...homeSurfaces.documents].sort((left, right) => (
+    left.document.target.order - right.document.target.order
+      || left.document.title.localeCompare(right.document.title)
+  )), [builtInSurfaces, homeSurfaces.documents]);
+  const surfaceVisible = (surface: AdmittedClientSurfaceDocument) => surface.sourceExtensionId
+    ? !hiddenSurfaceIds.has(surface.document.id)
+    : visibleHomeSurfaceIds.has(homeSurfaceIdentity(surface));
+  const visibleSurfaces = allSurfaces.filter(surfaceVisible);
+  const leftSurfaces = visibleSurfaces.filter((surface) => (
+    (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
+    && surface.document.target.slot === "left"
+  ));
+  const rightSurfaces = visibleSurfaces.filter((surface) => (
+    (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
+    && surface.document.target.slot === "right"
+  ));
+
+  useAppErrorToast(chatProductError(workspace) || "");
+  useAppErrorToast(homeSurfaces.errors.join("\n"));
+
+  useEffect(() => {
+    window.localStorage.setItem(storageKeys.title, sessionTitle);
+  }, [sessionTitle, storageKeys.title]);
+
+  useEffect(() => {
+    window.localStorage.setItem(storageKeys.recording, saveAudio ? "true" : "false");
+  }, [saveAudio, storageKeys.recording]);
+
+  useEffect(() => {
+    window.localStorage.setItem(storageKeys.speaker, speakerEnabled ? "true" : "false");
+    session.setSpeakerEnabled(speakerEnabled);
+  }, [session, speakerEnabled, storageKeys.speaker]);
+
+  useEffect(() => {
+    window.localStorage.setItem(storageKeys.hiddenSurfaces, JSON.stringify([...hiddenSurfaceIds]));
+  }, [hiddenSurfaceIds, storageKeys.hiddenSurfaces]);
+
+  useEffect(() => {
+    if (!installedWidgetsReady) return;
+    const previous = previousInstalledWidgetIdsRef.current;
+    const newlyInstalled = installedWidgetIds.filter((id) => !previous.has(id));
+    previousInstalledWidgetIdsRef.current = new Set(installedWidgetIds);
+    if (!installedWidgetIdsHydratedRef.current) {
+      installedWidgetIdsHydratedRef.current = true;
+      return;
+    }
+    if (!newlyInstalled.length) return;
+    setHiddenSurfaceIds((current) => {
+      const next = new Set(current);
+      newlyInstalled.forEach((id) => next.delete(id));
+      return next;
+    });
+  }, [installedWidgetIds, installedWidgetsReady]);
+
+  useEffect(() => {
+    const stage = widgetCanvasRef.current;
+    if (!stage) return;
+    let timeout = 0;
+    let observed = false;
+    const observer = new ResizeObserver(() => {
+      if (!observed) {
+        observed = true;
+        return;
+      }
+      stage.classList.add("is-stage-resizing");
+      window.clearTimeout(timeout);
+      timeout = window.setTimeout(() => stage.classList.remove("is-stage-resizing"), 220);
+    });
+    observer.observe(stage);
+    return () => {
+      window.clearTimeout(timeout);
+      observer.disconnect();
+      stage.classList.remove("is-stage-resizing");
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const stage = stageMainRef.current;
+    if (!stage) return;
+    const update = () => {
+      const shortest = Math.min(stage.clientWidth, stage.clientHeight);
+      stage.style.setProperty("--voice-stage-min", `${Math.round(shortest)}px`);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => subscribeClientCommands((command) => {
+    if (!commandsActive) return;
+    if (command === "voice_primary") {
+      handlePrimaryAction();
+      return;
+    }
+    if (command === "voice_end" && callState.canEnd) void session.end();
+  }), [boundRunId, callActive, commandsActive, providerId, providerLabel, saveAudio, session, sessionTitle]);
+
+  function startVoice() {
+    if (!callState.canStart) return;
+    if (voiceStartDisabledReason || !voiceBinding) {
+      appToast.warning(voiceStartDisabledReason);
+      return;
+    }
+    const title = sessionTitle.trim() || "Home";
+    if (title !== sessionTitle) setSessionTitle(title);
+    void session.start({
+      ...voiceBinding,
+      homeRunId,
+      providerLabel,
+      runTitle: title,
+    }, { saveRecording: saveAudio, context: voiceConversationContext });
+  }
+
+  function handlePrimaryAction() {
+    if (callState.canStart) {
+      startVoice();
+      return;
+    }
+    if (callState.canMute) session.toggleMute();
+  }
+
+  function toggleDetail(kind: DetailPanelKind) {
+    setDetailPanel((current) => {
+      const next = current === kind ? null : kind;
+      if (next) {
+        onWidgetsOpenChange?.(false);
+        setEnvironmentOpen(false);
+        setEnvironmentMaximized(false);
+      }
+      return next;
+    });
+  }
+
+  function openEnvironment() {
+    setDetailPanel(null);
+    onWidgetsOpenChange?.(false);
+    setEnvironmentOpen(true);
+  }
+
+  function handleSurfaceAction(event: ClientSurfaceActionEvent): boolean {
+    if (event.action.event === "voice.open-environment") {
+      if (target.run) openEnvironment();
+      return true;
+    }
+    if (event.action.event === "voice.open-activity") {
+      onViewModeChange?.("activity");
+      return true;
+    }
+    if (event.action.event !== "voice.open-detail") return false;
+    const panel = event.action.payload?.panel;
+    if (panel !== "context" && panel !== "tools" && panel !== "goals" && panel !== "memory") return false;
+    toggleDetail(panel);
+    return true;
+  }
+
+  function setSurfaceVisible(surface: AdmittedClientSurfaceDocument, visible: boolean) {
+    if (!surface.sourceExtensionId) {
+      if (visible) homeSurfaces.restore(surface);
+      else homeSurfaces.dismiss(surface);
+      return;
+    }
+    setHiddenSurfaceIds((current) => {
+      const next = new Set(current);
+      if (visible) next.delete(surface.document.id);
+      else next.add(surface.document.id);
+      return next;
+    });
+  }
+
+  function setWidgetsMenuOpen(next: boolean) {
+    onWidgetsOpenChange?.(next);
+    if (!next) return;
+    setDetailPanel(null);
+    setEnvironmentOpen(false);
+    setEnvironmentMaximized(false);
+  }
+
+  const status = homeEnvironmentStatus(target, homeProjectionLoading);
+  const orbActivity = accessProfile === "lab"
+    ? { source: "preview" as const }
+    : {
+        source: "live" as const,
+        speakingLevel: outputMeter.level,
+        thinkingLevel: session.providerActivity || workspace.busy || workspace.submitting ? 1 : 0,
+      };
+
+  if (!callActive && homeProjectionLoading) {
+    return (
+      <section className="voice-view is-loading">
+        <OctopusLoadingState className="surface-content-loading-state" label="Opening Home" />
+      </section>
+    );
+  }
+
+  return (
+    <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`}>
+      <header className="voice-session-heading">
+        <VoiceSessionTitle
+          editable={!callActive}
+          onChange={setSessionTitle}
+          title={displayTitle}
+        />
+        {status.label ? (
+          <div className={`voice-session-status is-${status.tone}`}>
+            <span>{status.label}</span>
+          </div>
+        ) : null}
+      </header>
+
+      <HomeWidgetsControl
+        accessProfile={accessProfile}
+        errors={homeSurfaces.errors}
+        hasHiddenSurfaces={Boolean(hiddenSurfaceIds.size || homeSurfaces.dismissed.size || homeSurfaces.errors.length)}
+        onOpenChange={setWidgetsMenuOpen}
+        onShowAll={() => { setHiddenSurfaceIds(new Set()); homeSurfaces.restoreAll(); }}
+        onSurfaceVisibleChange={setSurfaceVisible}
+        open={widgetsOpen}
+        surfaceVisible={surfaceVisible}
+        surfaces={allSurfaces}
+      />
+      <main className="voice-session-stage" ref={stageMainRef}>
+        <i aria-hidden="true" className="voice-orb-probe" ref={orbProbeRef} />
+        <div aria-hidden="true" className="voice-stage-scene">
+          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} sizeProbe={orbProbeRef} />
+        </div>
+        <HomeResponseStage
+          operatorRequests={homeOperatorRequests}
+          onOperatorRequestResponse={workspace.respondToOperatorRequest}
+          replyHidden={replyHidden}
+          onReplyHidden={() => { if (callActiveRef.current) setCallSceneReady(true); }}
+          busy={workspace.busy}
+          activity={latestHomeActivity}
+          activityStartedAtMs={latestHomePrompt?.createdAtMs ?? 0}
+          toolPresentations={workspace.toolPresentations}
+          composer={(
+            <HomeCommandDock
+              callActive={callActive}
+              commandsActive={commandsActive}
+              onVoiceStart={handlePrimaryAction}
+              voiceStartDisabled={!callState.canStart || Boolean(voiceStartDisabledReason)}
+              callControls={<HomeCallControls onSpeakerChange={setSpeakerEnabled} onStart={startVoice} session={session} speakerEnabled={speakerEnabled} />}
+              projectedFileSources={projectedFileSources}
+              workspace={workspace}
+            />
+          )}
+          dragOver={!callActive && workspace.dragOver}
+          dropEnabled={!callActive && !workspace.submitting}
+          homeInterfaceReady={Boolean(homeInterfaceId)}
+          loading={homeProjectionLoading}
+          onDragLeave={workspace.onDragLeave}
+          onDragOver={workspace.onDragOver}
+          onDrop={workspace.dropFiles}
+          key="home"
+          response={latestHomeResponse}
+          submitting={workspace.submitting}
+          streamingResponse={latestHomeStreamingResponse}
+          failure={latestHomeFailure}
+          turnKey={latestHomePrompt?.id ?? latestHomeResponse?.id ?? "empty"}
+        />
+      </main>
+
+      <AnimatePresence>
+        {session.pendingAudioArtifact ? (
+          <motion.aside
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            aria-label="Incoming audio artifact"
+            className="voice-incoming-audio"
+            exit={{ opacity: 0, y: 5, scale: 0.985 }}
+            initial={{ opacity: 0, y: 5, scale: 0.985 }}
+            key={session.pendingAudioArtifact.artifactId}
+            transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
+          >
+            <span className="voice-incoming-audio__icon"><Glyph name="volume" size={16} /></span>
+            <span className="voice-incoming-audio__copy">
+              <strong>Play incoming audio?</strong>
+              <small>{session.pendingAudioArtifact.mimeType} · {formatVoiceBytes(session.pendingAudioArtifact.size)}</small>
+            </span>
+            <button onClick={() => session.respondToPendingAudioArtifact(false)} type="button">Skip</button>
+            <button className="is-primary" onClick={() => session.respondToPendingAudioArtifact(true)} type="button">Play</button>
+          </motion.aside>
+        ) : null}
+      </AnimatePresence>
+
+      <div className="voice-widget-canvas" ref={widgetCanvasRef}>
+        {leftSurfaces.map((surface, index) => (
+          <ClientSurfaceRenderer
+            accessProfile={accessProfile}
+            admitted={surface}
+            key={homeSurfaceIdentity(surface)}
+            onAction={handleSurfaceAction}
+            onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
+            voicePlacement={{ count: leftSurfaces.length, index, slot: "left" }}
+          />
+        ))}
+        {rightSurfaces.map((surface, index) => (
+          <ClientSurfaceRenderer
+            accessProfile={accessProfile}
+            admitted={surface}
+            key={homeSurfaceIdentity(surface)}
+            onAction={handleSurfaceAction}
+            onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
+            voicePlacement={{ count: rightSurfaces.length, index, slot: "right" }}
+          />
+        ))}
+      </div>
+      <AirHandVoiceController accessProfile={accessProfile} stageRef={widgetCanvasRef} />
+
+      <AnimatePresence>
+        {detailPanel ? (
+          <VoiceDetailPanel
+            items={detailItems(detailPanel, contextItems, toolItems, goalItems, memoryItems)}
+            kind={detailPanel}
+            onClose={() => setDetailPanel(null)}
+          />
+        ) : null}
+        {environmentOpen && target.run ? (
+          <VoiceEnvironmentPanel
+            accessProfile={accessProfile}
+            maximized={environmentMaximized}
+            onClose={() => {
+              setEnvironmentOpen(false);
+              setEnvironmentMaximized(false);
+            }}
+            onMaximizedChange={setEnvironmentMaximized}
+            run={target.run}
+            surfaces={workerEnvironmentSurfaces}
+          />
+        ) : null}
+      </AnimatePresence>
+
+      <div className="home-secondary-actions">
+        {onViewModeChange ? (
+          <HomeActivityToggle expanded={false} onToggle={() => onViewModeChange("activity")} />
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function formatVoiceBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "Unknown size";
+  if (bytes < 1_024) return `${Math.round(bytes)} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(bytes < 10_240 ? 1 : 0)} KB`;
+  return `${(bytes / 1_048_576).toFixed(bytes < 10_485_760 ? 1 : 0)} MB`;
+}
+
+function VoiceSessionTitle({ editable, onChange, title }: {
+  editable: boolean;
+  onChange: (title: string) => void;
+  title: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [editing, title]);
+
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+
+  function commit() {
+    const next = draft.trim();
+    if (next) onChange(next);
+    else setDraft(title);
+    setEditing(false);
+  }
+
+  if (editing && editable) {
+    return (
+      <motion.form
+        animate={{ opacity: 1, scale: 1 }}
+        className="voice-session-title-editor"
+        initial={{ opacity: 0, scale: 0.985 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          commit();
+        }}
+      >
+        <input
+          aria-label="Home title"
+          maxLength={96}
+          onBlur={commit}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setDraft(title);
+            setEditing(false);
+          }}
+          ref={inputRef}
+          value={draft}
+        />
+      </motion.form>
+    );
+  }
+
+  return (
+    <motion.h1
+      animate={{ opacity: 1 }}
+      initial={{ opacity: 0 }}
+      transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
+    >
+      {editable ? (
+        <button aria-label="Rename Home" onClick={() => setEditing(true)} title="Rename Home" type="button">
+          <span>{title}</span>
+          <Glyph className="icon-xs" name="edit" size={16} />
+        </button>
+      ) : <span>{title}</span>}
+    </motion.h1>
+  );
+}
+
+function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyHidden, onReplyHidden, busy, activity, activityStartedAtMs, toolPresentations, composer, dragOver, dropEnabled, homeInterfaceReady, loading, onDragLeave, onDragOver, onDrop, response, streamingResponse, submitting, failure, turnKey }: {
+  operatorRequests: ChatRenderMessage[];
+  onOperatorRequestResponse: ChatWorkspace["respondToOperatorRequest"];
+  replyHidden: boolean;
+  onReplyHidden: () => void;
+  busy: boolean;
+  activity: ChatRenderMessage[];
+  activityStartedAtMs: number;
+  toolPresentations: ChatToolPresentationIndex;
+  composer: ReactNode;
+  dragOver: boolean;
+  dropEnabled: boolean;
+  homeInterfaceReady: boolean;
+  loading: boolean;
+  onDragLeave: ChatWorkspace["onDragLeave"];
+  onDragOver: ChatWorkspace["onDragOver"];
+  onDrop: ChatWorkspace["dropFiles"];
+  response: ChatRenderMessage | null;
+  streamingResponse: ChatRenderMessage | null;
+  submitting: boolean;
+  failure: ChatRenderMessage | null;
+  turnKey: string;
+}) {
+  const stageRef = useRef<HTMLElement>(null);
+  const composerFooterRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [scrolled, setScrolled] = useState(false);
+  const text = response?.text.trim() ?? "";
+  const working = busy && !submitting;
+  const streamingText = working ? streamingResponse?.text ?? "" : "";
+  const responseStreaming = Boolean(streamingText.trim());
+  const attachments = response?.attachments ?? [];
+  const finalVisible = !working && Boolean(response && (text || attachments.length));
+  const responseTimestamp = responseStreaming ? streamingResponse?.createdAtMs : finalVisible ? response?.createdAtMs : undefined;
+  const responseDate = responseTimestamp && Number.isFinite(responseTimestamp) && responseTimestamp > 0
+    ? new Date(responseTimestamp)
+    : null;
+  const datedResponse = responseDate && Number.isFinite(responseDate.getTime()) ? responseDate : null;
+  const turnFailed = Boolean(failure);
+  const quiet = submitting || turnFailed;
+  const hasResponse = operatorRequests.length > 0 || responseStreaming || working || submitting || finalVisible || turnFailed;
+  const compact = operatorRequests.length > 0 ? false : responseStreaming
+    ? isCompactHomeResponse(streamingText, [])
+    : submitting
+    ? true
+    : working
+    ? true
+    : finalVisible
+    ? isCompactHomeResponse(text, attachments)
+    : !turnFailed;
+
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    const footer = composerFooterRef.current;
+    if (!stage || !footer) return;
+    const updateStageMetrics = () => {
+      stage.style.setProperty("--home-composer-height", `${Math.ceil(footer.getBoundingClientRect().height)}px`);
+      stage.style.setProperty("--home-stage-height", `${Math.floor(stage.clientHeight)}px`);
+    };
+    updateStageMetrics();
+    const observer = new ResizeObserver(updateStageMetrics);
+    observer.observe(footer);
+    observer.observe(stage);
+    return () => {
+      observer.disconnect();
+      stage.style.removeProperty("--home-composer-height");
+      stage.style.removeProperty("--home-stage-height");
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTo({ top: 0, behavior: "instant" });
+    setScrolled(false);
+  }, [turnKey]);
+
+  return (
+    <motion.section
+      animate={{ opacity: 1 }}
+      aria-busy={busy || submitting}
+      aria-label="Home latest response viewport"
+      className={`home-response-stage${working ? " is-generating is-transient" : ""}${hasResponse ? " has-response" : " is-empty"}${compact ? " is-compact" : " is-expanded"}${scrolled ? " is-scrolled" : ""}${dragOver ? " is-drag-over" : ""}${replyHidden ? " is-call" : ""}`}
+      initial={{ opacity: 0 }}
+      onDragLeave={dropEnabled ? onDragLeave : undefined}
+      onDragOver={dropEnabled ? onDragOver : undefined}
+      onDrop={dropEnabled ? onDrop : undefined}
+      ref={stageRef}
+      transition={{ duration: 0.28, ease: [0.23, 1, 0.32, 1] }}
+    >
+      <span aria-live="polite" className="sr-only">
+        {submitting
+          ? "Sending to Octopus."
+          : turnFailed
+            ? "The latest Home turn failed. Review the error banner."
+            : working
+              ? ""
+              : finalVisible
+                ? "Octopus replied."
+                : ""}
+      </span>
+      <motion.div
+        animate={{ opacity: replyHidden ? 0 : 1 }}
+        aria-hidden={replyHidden}
+        className="home-response-stage__body"
+        inert={replyHidden}
+        initial={{ opacity: 1 }}
+        onAnimationComplete={(definition) => {
+          if (replyHidden && typeof definition === "object" && !Array.isArray(definition) && definition.opacity === 0) onReplyHidden();
+        }}
+        transition={{ duration: replyHidden ? 0.5 : 0.2, ease: [0.2, 0, 0, 1] }}
+      >
+        <div
+          aria-live={working ? "polite" : undefined}
+          className="home-response-stage__viewport"
+          onScroll={(event) => setScrolled(event.currentTarget.scrollTop > 1)}
+          ref={viewportRef}
+          tabIndex={hasResponse ? 0 : undefined}
+        >
+          <div className="home-response-stage__content">
+            {failure ? <div className="home-response-failure" role="alert"><strong>Home could not finish this reply</strong><p>{failure.text || failure.label || "Review the failed turn in Home history."}</p></div> : null}
+            {operatorRequests.map((message) => <OperatorRequestSurface key={message.id} message={message} onRespond={onOperatorRequestResponse} />)}
+            {responseStreaming || finalVisible ? (
+              <article
+                className={`home-response-output${responseStreaming ? " home-response-output--streaming octopus-assistant-streaming" : ""}`}
+                key="assistant-response"
+              >
+                {datedResponse ? (
+                  <header className="home-response-stage__header">
+                    <time dateTime={datedResponse.toISOString()}>
+                      {formatResponseDay(datedResponse)}
+                      {" at "}{datedResponse.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+                    </time>
+                  </header>
+                ) : null}
+                {responseStreaming || text ? (
+                  <div className="home-response-output__copy">
+                    {responseStreaming ? (
+                      <MessageContent streamKey={streamingResponse?.id ?? "home-response"} streaming text={streamingText} />
+                    ) : <MessageContent text={text} />}
+                  </div>
+                ) : null}
+                {!responseStreaming && attachments.length ? <HomeResponseAttachments attachments={attachments} /> : null}
+              </article>
+            ) : working ? (
+              <article className="home-response-output home-response-output--live" key="working">
+                <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} />
+              </article>
+            ) : quiet || loading ? null : (
+              <div className="home-response-empty" key="empty">
+                <h2 className="heading-xl font-normal whitespace-pre-wrap text-token-foreground">{homeInterfaceReady ? "What would you like to do?" : "Home is not available yet"}</h2>
+                <p className="text-base text-token-text-secondary">{homeInterfaceReady ? "Talk to Home or send a message." : "The Home connection has not been projected."}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </motion.div>
+      <div className="home-response-stage__composer-footer" ref={composerFooterRef}>
+        <div className="home-response-stage__composer">{composer}</div>
+      </div>
+    </motion.section>
+  );
+}
+
+function formatResponseDay(at: Date): string {
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (at.toDateString() === now.toDateString()) return "Today";
+  if (at.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return at.toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+}
+
+function isCompactHomeResponse(text: string, attachments: ChatAttachmentView[]): boolean {
+  if (attachments.length) return false;
+  const lines = text.split(/\r?\n/).filter((line) => line.trim()).length;
+  return lines <= 5 && text.length <= 440 && !/\n\s*\|.+\|/.test(text);
+}
+
+function HomeResponseAttachments({ attachments }: { attachments: ChatAttachmentView[] }) {
+  return (
+    <section className="home-response-artifacts" aria-label="Evidence and references">
+      <h2><Glyph name="paperclip" size={12} /> Evidence &amp; references</h2>
+      <div>
+        {attachments.map((attachment) => (
+          <article key={attachment.id} title={`${attachment.name}\n${attachment.type || attachment.label}`}>
+            <span><Glyph name={attachment.type.startsWith("image/") ? "image" : "file"} size={16} /></span>
+            <span>
+              <strong>{attachment.name}</strong>
+              <small>{[attachment.size > 0 ? formatVoiceBytes(attachment.size) : "", formatResponseArtifactType(attachment)].filter(Boolean).join(" · ")}</small>
+            </span>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function formatResponseArtifactType(attachment: ChatAttachmentView): string {
+  const type = attachment.type.trim().toLocaleLowerCase();
+  if (type.startsWith("image/")) return type.slice(6).toUpperCase();
+  if (type === "application/pdf") return "PDF";
+  if (type === "application/zip" || type === "application/x-zip-compressed") return "ZIP";
+  if (type.includes("json")) return "JSON";
+  if (type.startsWith("text/")) return type === "text/plain" ? "Text" : type.slice(5).toUpperCase();
+  return attachment.label || "Artifact";
+}
+
+function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartDisabled, callControls, projectedFileSources, workspace }: {
+  callActive: boolean;
+  commandsActive: boolean;
+  onVoiceStart: () => void;
+  voiceStartDisabled: boolean;
+  callControls: ReactNode;
+  projectedFileSources: readonly ProjectedFileSource[];
+  workspace: ChatWorkspace;
+}) {
+  return (
+    <div className="home-command-dock">
+      {callControls}
+      <div hidden={callActive} inert={callActive}>
+        <QueuedMessageList
+          messages={workspace.queuedTurns}
+          notice={workspace.queueNotice}
+          paused={workspace.queuePaused}
+          sendNowAvailable={workspace.canSendQueued}
+          onDelete={workspace.deleteQueuedTurn}
+          onEdit={workspace.editQueuedTurn}
+          onSendNow={workspace.steerQueuedTurn}
+          onReorder={workspace.reorderQueuedTurns}
+          onResume={workspace.resumeQueuedTurns}
+          onRetry={workspace.retryQueuedTurn}
+        />
+        <ChatComposer
+          accessProfile={workspace.accessProfile}
+          activeProvider={workspace.activeProvider}
+          attachments={workspace.attachments}
+          canSubmit={workspace.canSubmit}
+          fileInputRef={workspace.fileInputRef}
+          interruptPending={workspace.turnControlPending}
+          listenToGlobalCommands={commandsActive && !callActive}
+          onFilesPicked={workspace.onFilesPicked}
+          onKeyDown={workspace.onComposerKeyDown}
+          onInterrupt={workspace.interruptActiveTurn}
+          onResume={workspace.resumeActiveTurn}
+          onProviderInterfaceChange={workspace.setProviderInterfaceId}
+          onProviderModelChange={workspace.setProviderModel}
+          onProviderModelsRefresh={workspace.refreshProviderModels}
+          onReasoningEffortChange={workspace.setReasoningEffort}
+          onRemoveAttachment={workspace.removeAttachment}
+          onResolvePausedQueueSubmission={workspace.resolvePausedQueueSubmission}
+          onSubmit={workspace.submit}
+          onTextChange={workspace.setText}
+          onVoiceStart={onVoiceStart}
+          placeholder="Message Home"
+          providerInterfaceId={workspace.providerInterfaceId}
+          providerModel={workspace.providerModel}
+          providerInterfaces={workspace.providerInterfaces}
+          providerInterfacesLoaded={workspace.providerInterfacesLoaded}
+          projectedFileSources={projectedFileSources}
+          pausedQueueSubmissionCount={workspace.pausedQueueSubmissionCount}
+          reasoningEffort={workspace.reasoningEffort}
+          resumeAvailable={workspace.resumeAvailable}
+          isSubmitting={workspace.submitting}
+          submissionMode={workspace.turnOpen ? "steer" : "send"}
+          submitBlockReason={workspace.submitBlockReason}
+          text={workspace.text}
+          turnOpen={workspace.turnOpen}
+          variant="home"
+          voiceStartDisabled={voiceStartDisabled}
+        />
+      </div>
+    </div>
+  );
+}
+
+export function HomeActivityToggle({ expanded, onToggle }: { expanded: boolean; onToggle: () => void }) {
+  return (
+    <button
+      aria-expanded={expanded}
+      className={`home-agent-activity-toggle${expanded ? " is-expanded" : ""}`}
+      onClick={onToggle}
+      type="button"
+    >
+      <Glyph name={expanded ? "chevronUp" : "chevronDown"} size={12} />
+      <span>Activity</span>
+    </button>
+  );
+}
+
+function HomeWidgetsControl({ accessProfile, errors, hasHiddenSurfaces, onOpenChange, onShowAll, onSurfaceVisibleChange, open, surfaceVisible, surfaces }: {
+  accessProfile: OctopusClientAccessProfile;
+  errors: readonly string[];
+  hasHiddenSurfaces: boolean;
+  onOpenChange: (open: boolean) => void;
+  onShowAll: () => void;
+  onSurfaceVisibleChange: (surface: AdmittedClientSurfaceDocument, visible: boolean) => void;
+  open: boolean;
+  surfaceVisible: (surface: AdmittedClientSurfaceDocument) => boolean;
+  surfaces: AdmittedClientSurfaceDocument[];
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-titlebar-surface-action]")) return;
+      if (!rootRef.current?.contains(event.target as Node)) onOpenChange(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onOpenChange(false);
+    };
+    window.addEventListener("pointerdown", dismiss);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [onOpenChange, open]);
+
+  return (
+    <div className="home-widgets-control" ref={rootRef}>
+      <AnimatePresence>
+        {open ? (
+          <motion.div
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            className="home-widgets-popover"
+            exit={{ opacity: 0, scale: 0.985, y: 4 }}
+            initial={{ opacity: 0, scale: 0.985, y: 4 }}
+            transition={{ duration: 0.15, ease: [0.19, 1, 0.22, 1] }}
+          >
+            <OcMenuSurface aria-label="Home widgets" className="home-widgets-menu-surface" role="menu">
+              <OcMenuSectionLabel>Home widgets</OcMenuSectionLabel>
+              {errors.map((error, index) => <p className="home-widgets-menu-error" key={index} role="alert">{error}</p>)}
+              {surfaces.map((surface) => {
+                const visible = surfaceVisible(surface);
+                return (
+                  <OcMenuItem
+                    aria-checked={visible}
+                    description={surface.document.target.kind === "voice.window" ? "Window" : "Widget"}
+                    key={homeSurfaceIdentity(surface)}
+                    label={surface.document.title}
+                    leadingIcon={surface.document.glyph}
+                    onClick={() => onSurfaceVisibleChange(surface, !visible)}
+                    role="menuitemcheckbox"
+                    selected={visible}
+                  />
+                );
+              })}
+              {surfaces.length === 0 ? <span className="home-widgets-menu-empty">No widgets available.</span> : null}
+              <div aria-hidden="true" className="home-widgets-menu-separator" />
+              {hasHiddenSurfaces ? <OcMenuItem label="Restore all" leadingIcon="viewAll" onClick={onShowAll} role="menuitem" /> : null}
+              <OcMenuItem label="Reset positions" leadingIcon="refresh" onClick={() => {
+                try {
+                  const previous = resetVoiceWidgetLayout(accessProfile);
+                  appToast.info("Home widget positions reset", 8, {
+                    action: {
+                      label: "Undo",
+                      onSelect: () => {
+                        try {
+                          restoreVoiceWidgetLayout(accessProfile, previous);
+                        } catch (failure) {
+                          appToast.danger(failure instanceof Error ? failure.message : String(failure));
+                        }
+                      },
+                    },
+                    dedupeKey: `voice-widget-layout-reset:${accessProfile}`,
+                  });
+                } catch (failure) {
+                  appToast.danger(failure instanceof Error ? failure.message : String(failure));
+                }
+              }} role="menuitem" />
+            </OcMenuSurface>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function VoiceDetailPanel({ items, kind, onClose }: {
+  items: ProjectionItem[];
+  kind: DetailPanelKind;
+  onClose: () => void;
+}) {
+  return (
+    <motion.aside
+      animate={{ opacity: 1, x: 0 }}
+      className="voice-detail-panel"
+      exit={{ opacity: 0, x: 12 }}
+      initial={{ opacity: 0, x: 12 }}
+      transition={{ duration: 0.16, ease: [0.2, 0, 0, 1] }}
+    >
+      <header>
+        <span><Glyph className="icon-xs" name={detailGlyph(kind)} size={16} />{detailTitle(kind)}</span>
+        <button aria-label={`Close ${detailTitle(kind)}`} onClick={onClose} type="button"><Glyph className="icon-xs" name="close" size={16} /></button>
+      </header>
+      <div>
+        {items.length ? items.map((item, index) => (
+          <article key={`${item.label}:${index}`}>
+            <span>{item.glyph ? <Glyph name={item.glyph} size={14} /> : null}{item.label}</span>
+            {item.detail ? <p>{item.detail}</p> : null}
+            {item.state ? <small>{item.state}</small> : null}
+          </article>
+        )) : <p className="voice-panel-empty">No projected data is available for this run.</p>}
+      </div>
+    </motion.aside>
+  );
+}
+
+function VoiceEnvironmentPanel({ accessProfile, maximized, onClose, onMaximizedChange, run, surfaces }: {
+  accessProfile: OctopusClientAccessProfile;
+  maximized: boolean;
+  onClose: () => void;
+  onMaximizedChange: (maximized: boolean) => void;
+  run: RunProjection;
+  surfaces: AdmittedClientSurfaceDocument[];
+}) {
+  return (
+    <motion.aside
+      animate={{ opacity: 1, scale: 1, x: 0 }}
+      className={`voice-environment-panel${maximized ? " is-maximized" : ""}`}
+      exit={{ opacity: 0, scale: 0.99, x: 12 }}
+      initial={{ opacity: 0, scale: 0.99, x: 12 }}
+      transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
+    >
+      <Suspense fallback={null}>
+        <RunEnvironmentView
+          accessProfile={accessProfile}
+          maximized={maximized}
+          onClose={onClose}
+          onMaximizedChange={onMaximizedChange}
+          run={run}
+          surfaces={surfaces}
+        />
+      </Suspense>
+    </motion.aside>
+  );
+}
+
+function findProjectionTarget(topology: TopologySnapshot, runId: string): ProjectionTarget {
+  if (!runId) return { environment: null, run: null };
+  for (const environment of topology.environments) {
+    const run = environment.runs.find((candidate) => candidate.id === runId);
+    if (run) return { environment, run };
+  }
+  return { environment: null, run: null };
+}
+
+function projectContext(target: ProjectionTarget, projectName: string): ProjectionItem[] {
+  const run = target.run;
+  const artifacts = run?.artifacts || [];
+  const files = artifacts.filter((artifact) => /file|path|workspace|attachment|source|code/i.test(
+    `${artifact.name} ${artifact.description} ${artifact.tag}`,
+  ));
+  const recent = artifacts.slice(0, 2).map((artifact) => artifact.name).join("\n");
+  const roots = run ? projectedRunRoots(run) : [];
+  return [
+    { label: "Project", detail: projectName, tone: "accent" },
+    { label: "Focus", detail: run?.goal || target.environment?.goal || "No focus" },
+    { label: "Files", detail: run ? `${files.length} in context` : "No files" },
+    { label: "Recent", detail: recent || "Nothing recent" },
+    ...(roots.length
+      ? roots.map((root) => ({ label: "Workspace", detail: root }))
+      : [{ label: "Workspace", detail: "No workspace" }]),
+    ...(run?.interfaces || []).map((item) => ({ label: "Interface", detail: item.name, state: item.status })),
+    ...(run?.bindings || []).map((item) => ({ label: "Binding", detail: item.name, state: item.status })),
+  ];
+}
+
+function projectTools(target: ProjectionTarget): ProjectionItem[] {
+  const run = target.run;
+  const environments = run?.workerEnvironments.length
+    ? run.workerEnvironments
+    : run?.workerEnvironment.id
+      ? [run.workerEnvironment]
+      : [];
+  const tools = environments.flatMap((environment) => environment.tools.map((tool) => ({ environment, tool })));
+  if (!tools.length) return [{ glyph: "plugins", label: "No active tools", state: "Off" }];
+  return tools.map(({ environment, tool }) => ({
+    glyph: glyphForTool(tool),
+    label: readableTool(tool),
+    detail: `${environment.label} · ${tool}`,
+    state: normalizeState(environment.status || "Unavailable"),
+  }));
+}
+
+function projectedRunRoots(run: RunProjection): string[] {
+  const environments = run.workerEnvironments.length
+    ? run.workerEnvironments
+    : run.workerEnvironment.id
+      ? [run.workerEnvironment]
+      : [];
+  const roots = new Set<string>();
+  for (const environment of environments) {
+    const surfaceRoots = environment.surfaces
+      .filter((surface) => surface.kind === "files" && surface.mode === "direct")
+      .map((surface) => surface.root.trim())
+      .filter(Boolean);
+    if (surfaceRoots.length) surfaceRoots.forEach((root) => roots.add(root));
+    else if (environment.root.trim()) roots.add(environment.root.trim());
+  }
+  return [...roots];
+}
+
+function projectGoals(target: ProjectionTarget): ProjectionItem[] {
+  const values = [target.run?.goal, target.environment?.goal]
+    .filter((value): value is string => Boolean(value && value.trim()));
+  const unique = [...new Set(values)];
+  return unique.length
+    ? unique.map((goal) => ({ glyph: "target", label: goal, detail: target.run?.statusLabel || target.environment?.statusLabel }))
+    : [{ glyph: "target", label: "No goals", detail: "Nothing is active yet." }];
+}
+
+function projectMemory(target: ProjectionTarget): ProjectionItem[] {
+  const artifacts = target.run?.artifacts || [];
+  const explicitMemory = artifacts.filter((item) => /memory|persona|context/i.test(`${item.name} ${item.description} ${item.tag}`));
+  const visible = explicitMemory.length ? explicitMemory : artifacts;
+  return visible.map((item) => ({
+    glyph: "artifact",
+    label: item.name,
+    detail: item.description || item.tag,
+    state: explicitMemory.length ? item.status : "Bound artifact",
+  }));
+}
+
+function projectInsights(activity: HomeRunActivity): InsightsWidget {
+  const entries = activity.entries.filter((entry) => entry.createdAtMs > 0);
+  if (!entries.length) {
+    return {
+      label: "Home activity",
+      value: "0",
+      change: "Ready",
+      changeDetail: "for the next movement",
+      series: [0, 0, 0, 0, 0, 0, 0, 0],
+    };
+  }
+  const first = entries.reduce((minimum, entry) => Math.min(minimum, entry.createdAtMs), entries[0].createdAtMs);
+  const last = entries.reduce((maximum, entry) => Math.max(maximum, entry.createdAtMs), entries[0].createdAtMs);
+  const duration = Math.max(1, last - first + 1);
+  const series = Array.from({ length: 8 }, () => 0);
+  for (const entry of entries) {
+    const index = Math.min(series.length - 1, Math.floor(((entry.createdAtMs - first) / duration) * series.length));
+    series[index] += 1;
+  }
+  const recent = series.slice(4).reduce((total, value) => total + value, 0);
+  const earlier = series.slice(0, 4).reduce((total, value) => total + value, 0);
+  const delta = recent - earlier;
+  return {
+    label: "Home activity",
+    value: String(activity.total || entries.length),
+    change: delta === 0 ? "Even" : delta > 0 ? `+${delta}` : String(delta),
+    changeDetail: "recent movements",
+    series,
+  };
+}
+
+function projectTaskProgress(
+  topology: TopologySnapshot,
+  target: ProjectionTarget,
+  homeRunId: string,
+  chatRuns: ChatRun[],
+): TaskProgressWidget {
+  const environmentIds = homeEnvironmentIds(topology, target.environment?.id || target.run?.eeId || "");
+  const scopedRuns = topology.environments
+    .filter((environment) => environmentIds.has(environment.id))
+    .flatMap((environment) => environment.runs)
+    .filter((run) => run.id !== homeRunId);
+  const now = Date.now();
+  const scheduledRunIds = new Set(chatRuns
+    .filter((run) => environmentIds.has(run.eeId) && run.nextScheduledAtMs > now)
+    .map((run) => run.runId));
+  const unseenDone = scopedRuns.filter((run) => run.status === "done" || run.status === "settled").length;
+  const running = scopedRuns.filter((run) => run.status === "active").length;
+  const scheduled = scheduledRunIds.size;
+  const waiting = scopedRuns.filter((run) => (
+    run.status !== "done"
+    && run.status !== "settled"
+    && run.status !== "active"
+    && !scheduledRunIds.has(run.id)
+  )).length;
+  const total = unseenDone + running + waiting;
+  return {
+    completion: total ? (unseenDone / total) * 100 : 0,
+    running,
+    scheduled,
+    unseenDone,
+    waiting,
+  };
+}
+
+function projectUpcomingScheduled(chatRuns: ChatRun[]): UpcomingScheduledWidgetItem[] {
+  const now = Date.now();
+  return chatRuns
+    .filter((run) => run.nextScheduledAtMs > now)
+    .sort((left, right) => left.nextScheduledAtMs - right.nextScheduledAtMs)
+    .map((run) => ({
+      at: formatScheduledTime(run.nextScheduledAtMs, now),
+      label: run.title,
+    }));
+}
+
+function homeEnvironmentIds(topology: TopologySnapshot, rootId: string): Set<string> {
+  const ids = new Set<string>();
+  if (!rootId) return ids;
+  ids.add(rootId);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const environment of topology.environments) {
+      if (!environment.parentId || !ids.has(environment.parentId) || ids.has(environment.id)) continue;
+      ids.add(environment.id);
+      changed = true;
+    }
+  }
+  return ids;
+}
+
+function formatScheduledTime(timestamp: number, now: number): string {
+  const at = new Date(timestamp);
+  const today = new Date(now);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const sameDay = at.toDateString() === today.toDateString();
+  const nextDay = at.toDateString() === tomorrow.toDateString();
+  const day = sameDay ? "Today" : nextDay ? "Tomorrow" : at.toLocaleDateString([], { day: "numeric", month: "short" });
+  return `${day}, ${at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function detailItems(
+  kind: DetailPanelKind,
+  context: ProjectionItem[],
+  tools: ProjectionItem[],
+  goals: ProjectionItem[],
+  memory: ProjectionItem[],
+): ProjectionItem[] {
+  if (kind === "context") return context;
+  if (kind === "tools") return tools;
+  if (kind === "goals") return goals;
+  return memory;
+}
+
+function detailTitle(kind: DetailPanelKind): string {
+  if (kind === "context") return "Live context";
+  if (kind === "tools") return "Active tools";
+  if (kind === "goals") return "Current goals";
+  return "Memory";
+}
+
+function detailGlyph(kind: DetailPanelKind): GlyphName {
+  if (kind === "context") return "layers";
+  if (kind === "tools") return "plugins";
+  if (kind === "goals") return "target";
+  return "memory";
+}
+
+function glyphForTool(tool: string): GlyphName {
+  const value = tool.toLowerCase();
+  if (value.includes("browser") || value.includes("web")) return "browser";
+  if (value.includes("terminal") || value.includes("exec") || value.includes("shell")) return "terminal";
+  if (value.includes("file") || value.includes("read") || value.includes("write")) return "file";
+  if (value.includes("code") || value.includes("patch") || value.includes("git")) return "changes";
+  if (value.includes("memory") || value.includes("artifact")) return "artifact";
+  return "plugins";
+}
+
+function readableTool(tool: string): string {
+  const tail = tool.split(/[./:]/).filter(Boolean).pop() || tool;
+  return tail.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function normalizeState(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (["active", "running", "ready", "attached"].includes(normalized)) return "Ready";
+  if (["idle", "parked"].includes(normalized)) return "Standby";
+  if (!normalized || normalized === "unknown") return "Unavailable";
+  return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function homeEnvironmentStatus(target: ProjectionTarget, loading: boolean): { label: string; tone: string } {
+  if (loading) return { label: "", tone: "pending" };
+  const environment = target.environment;
+  const label = environment?.name || environment?.goal || target.run?.eeId || "Execution environment unavailable";
+  if (environment?.status === "active") return { label, tone: "local" };
+  if (environment?.status === "blocked") return { label, tone: "error" };
+  if (environment?.status === "idle") return { label, tone: "muted" };
+  return { label, tone: "idle" };
+}
+
+function shortLabel(value: string, limit: number): string {
+  const compact = value.trim();
+  return compact.length > limit ? `${compact.slice(0, Math.max(1, limit - 1))}…` : compact;
+}
+
+function readStoredText(key: string, fallback: string): string {
+  const value = window.localStorage.getItem(key)?.trim();
+  return value || fallback;
+}
+
+function readStoredBoolean(key: string, fallback: boolean): boolean {
+  const value = window.localStorage.getItem(key);
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return fallback;
+}
+
+function readStoredStringSet(key: string): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || "[]");
+    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function voiceStorageKeys(accessProfile: OctopusClientAccessProfile) {
+  return {
+    title: `${VOICE_TITLE_KEY}.${accessProfile}`,
+    recording: `${VOICE_RECORDING_KEY}.${accessProfile}`,
+    speaker: `${VOICE_SPEAKER_KEY}.${accessProfile}`,
+    hiddenSurfaces: `${VOICE_HIDDEN_SURFACES_KEY}.${accessProfile}`,
+  };
+}

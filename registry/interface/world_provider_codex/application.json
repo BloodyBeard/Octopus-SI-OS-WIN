@@ -1,0 +1,14 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_codex",
+  "name": "Codex",
+  "description": "Use Codex as the model provider for Home and agent tasks.",
+  "category": "provider",
+  "developer": "OpenAI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_codex"
+  ]
+}

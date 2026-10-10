@@ -1,0 +1,67 @@
+{
+  "id": "browser.type",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "type"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Focus an accessibility ref, optionally clear it, insert text through CDP, optionally submit with Enter, and refresh the snapshot by default. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "ref": {
+        "type": "string",
+        "pattern": "^@m[1-9][0-9]*e[1-9][0-9]*$"
+      },
+      "text": {
+        "type": "string"
+      },
+      "clear": {
+        "type": "boolean"
+      },
+      "submit": {
+        "type": "boolean"
+      },
+      "snapshot": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "ref",
+      "text"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

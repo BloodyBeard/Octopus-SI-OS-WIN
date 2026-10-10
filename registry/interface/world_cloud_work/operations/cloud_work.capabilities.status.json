@@ -1,0 +1,14 @@
+{
+  "id": "cloud_work.capabilities.status",
+  "request_label": "cloud_work.request",
+  "output_label": "cloud_work.status",
+  "handler_config": {
+    "operation": "capabilities.status"
+  },
+  "description": "Report configured protocol capabilities and current transport evidence without claiming that installation, policy availability, task connection, or a previous response proves current liveness.",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

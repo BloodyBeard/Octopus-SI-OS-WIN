@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_provider_realtime",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_provider_realtime",
+  "release_status": "optional",
+  "display": {
+    "name": "Live voice",
+    "description": "Full duplex voice and durable semantic artifacts through an exact provider interface.",
+    "developer": "Octopus",
+    "category": "provider",
+    "icon": "audio-lines"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_provider_realtime",
+      "primary": true,
+      "configuration": [{"path":"interface.json","fields":[{"pointer":"/interface_driver_config/private_config/model","schema":{"type":"string","minLength":1}},{"pointer":"/interface_driver_config/private_config/session/audio/output/voice","schema":{"type":"string","minLength":1}}]},{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    }
+  ],
+  "required_packages": [
+    "driver.system_room"
+  ]
+}

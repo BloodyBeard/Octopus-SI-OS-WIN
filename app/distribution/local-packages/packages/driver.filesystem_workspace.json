@@ -1,0 +1,83 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "driver.filesystem_workspace",
+  "version": "1.0.0",
+  "product_kind": "driver",
+  "product_id": "filesystem_workspace",
+  "release_status": "optional",
+  "display": {
+    "name": "Filesystem Workspace",
+    "description": "Provides Filesystem, Process Exec.",
+    "developer": "Octopus",
+    "category": "worker_environment",
+    "icon": "hard-drive"
+  },
+  "members": [
+    {
+      "registry_kind": "worker_environment_kind",
+      "owner": "filesystem_workspace",
+      "primary": true
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.apply_patch",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.build",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.exec",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.grep",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.list_dir",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.process.list",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.process.signal",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.process.terminate",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.read_file",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.write_file",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "workspace.write_stdin",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_workspace_env",
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]},{"path":"interface.json","fields":[{"pointer":"/interface_driver_config","schema":{"type":"object","required":["private_config"],"properties":{"private_config":{"type":"object","required":["context_artifact_bindings"],"properties":{"context_artifact_bindings":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}},"additionalProperties":false}},"additionalProperties":false}}]}]
+    }
+  ]
+}

@@ -1,0 +1,70 @@
+export const PROJECTION_READ_CONTRACT_VERSION = 1 as const;
+export const PROJECTION_READ_METHODS = [
+  "projection.artifact.bytes.read",
+  "projection.artifacts.list",
+  "projection.bindings.list",
+  "projection.client_surfaces.list",
+  "projection.descriptors.artifact_labels.list",
+  "projection.descriptors.ee.list",
+  "projection.descriptors.inventory.list",
+  "projection.descriptors.kinds.list",
+  "projection.descriptors.mark_kinds.list",
+  "projection.descriptors.tool.list",
+  "projection.descriptors.worker_environment_kind.list",
+  "projection.ee_instances.list",
+  "projection.ee_templates.list",
+  "projection.envelopes.list",
+  "projection.goals.snapshot",
+  "projection.interface_artifacts.list",
+  "projection.interface_media.read",
+  "projection.interfaces.artifact_transfer.targets",
+  "projection.interfaces.list",
+  "projection.interfaces.pending.list",
+  "projection.marks.list",
+  "projection.movements.list",
+  "projection.movements.payload",
+  "projection.operator.chat.contexts",
+  "projection.operator.chat.messages",
+  "projection.operator.chat.search",
+  "projection.operator.chats.list",
+  "projection.operator.chats.status",
+  "projection.operator.os.applications",
+  "projection.operator.os.drivers",
+  "projection.operator.os.local_packages",
+  "projection.operator.os.scope",
+  "projection.operator.os.workspace_setup",
+  "projection.operator.providers.list",
+  "projection.operator.providers.status",
+  "projection.operator.run.activity",
+  "projection.policy.ee.list",
+  "projection.runs.checkpoints.list",
+  "projection.runs.get",
+  "projection.runs.list",
+  "projection.runtime.snapshot",
+  "projection.runtime.topology",
+  "projection.scheduled_interfaces.list",
+  "projection.tools.list",
+  "projection.trace.recent",
+  "projection.verifiers.list",
+  "projection.worker_environment_pools.list",
+  "projection.worker_environments.list",
+  "projection.workers.list"
+] as const;
+export type ProjectionReadMethod = typeof PROJECTION_READ_METHODS[number];
+export const CLIENT_SURFACE_PROJECTION_READ_METHODS = [
+  "projection.artifacts.list",
+  "projection.envelopes.list",
+  "projection.interface_artifacts.list",
+  "projection.interfaces.list",
+  "projection.marks.list",
+  "projection.movements.list",
+  "projection.runs.list",
+  "projection.scheduled_interfaces.list",
+  "projection.worker_environments.list"
+] as const;
+export type ClientSurfaceProjectionReadMethod = typeof CLIENT_SURFACE_PROJECTION_READ_METHODS[number];
+export type OctopusClientProjectionReadRequest = {
+  contract_version: typeof PROJECTION_READ_CONTRACT_VERSION;
+  method: ProjectionReadMethod;
+  params?: Record<string, unknown>;
+};

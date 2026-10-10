@@ -1,0 +1,681 @@
+{
+  "schema_version": 1,
+  "action_url": "http://127.0.0.1:0/v1/action",
+  "viewer_url": "http://127.0.0.1:0/view",
+  "auth_header": "Authorization",
+  "auth_value_prefix": "Bearer ",
+  "headers": {},
+  "request_timeout_ms": 30000,
+  "max_response_bytes": 97871192,
+  "host": {
+    "native_program": "desktop_session/packages/octopus-system-gui-env/native/bin/octopus-desktop-native",
+    "state_directory": "desktop-host",
+    "device_lock_path": "/tmp/octopus-desktop-device.lock",
+    "connection_file": "desktop-host/connection.json",
+    "native_sandbox_profile": "desktop_session/packages/octopus-system-gui-env/native/desktop.sb",
+    "application_behavior": {
+      "schema_version": 1,
+      "defaults": {
+        "full_ui": {
+          "attribute": "manualIfSupportedOtherwiseEnhanced",
+          "enforceFocusBeforeEnhanced": false,
+          "universalAccess": "none",
+          "handshake": "nativeWindow"
+        },
+        "event_stream": {
+          "attribute": "none",
+          "enforceFocusBeforeEnhanced": false,
+          "universalAccess": "none",
+          "handshake": "nativeWindow"
+        },
+        "informational": {
+          "attribute": "none",
+          "enforceFocusBeforeEnhanced": false,
+          "universalAccess": "none",
+          "handshake": "nativeWindow"
+        },
+        "typing_interval_us": 250,
+        "focus_dom_field_by_click": false,
+        "mouse_targeting": "native_hit",
+        "suppress_menu_dismissal_on_window": false,
+        "menu_bar_presentation": {
+          "omit_first_item": true,
+          "excluded_title_substrings": [
+            "Debug"
+          ],
+          "clear_immediate_actions": true
+        },
+        "accessibility_presentation": {
+          "context_type": "full_ui",
+          "hide_cancel_actions": false,
+          "omit_calendar_event_children": false,
+          "excluded_action_descriptions": [
+            "Add comment",
+            "Remove unused rows",
+            "Remove unused columns",
+            "Remove unused rows and columns"
+          ],
+          "capture_note": null
+        }
+      },
+      "profiles": [
+        {
+          "selector": {
+            "match": "prefix",
+            "bundle_id": "com.apple.iWork"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "enhancedUserInterface",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "enhancedUserInterface",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.spotify.client"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": true,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "enhancedUserInterface",
+              "enforceFocusBeforeEnhanced": true,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "enhancedUserInterface",
+              "enforceFocusBeforeEnhanced": true,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": "\n\nNote: In order to be usable, Spotify app links must be rewritten as regular links (e.g. use open.spotify.com instead of xpui.app.spotify.com). Only use Spotify links that are written verbatim in the UI above. Note that IDs are only valid with their associated type (e.g. you cannot change an \"album\" URL to a \"track\" URL)."
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.microsoft.Excel"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "company.thebrowser.Browser"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "pulse100ms",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "company.thebrowser.dia"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "pulse100ms",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.apple.Music"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "untilRelease",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "prefix",
+            "bundle_id": "com.openai.atlas"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "pulse100ms",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "pulse100ms",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "pulse100ms",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "supplied_window",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.apple.ScreenContinuity"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 5000,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.apple.Safari"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": true,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.apple.controlcenter"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": true,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": false,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        },
+        {
+          "selector": {
+            "match": "exact",
+            "bundle_id": "com.apple.iCal"
+          },
+          "behavior": {
+            "full_ui": {
+              "attribute": "manualIfSupportedOtherwiseEnhanced",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "event_stream": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "informational": {
+              "attribute": "none",
+              "enforceFocusBeforeEnhanced": false,
+              "universalAccess": "none",
+              "handshake": "nativeWindow"
+            },
+            "typing_interval_us": 250,
+            "focus_dom_field_by_click": false,
+            "mouse_targeting": "native_hit",
+            "suppress_menu_dismissal_on_window": false,
+            "menu_bar_presentation": {
+              "omit_first_item": true,
+              "excluded_title_substrings": [
+                "Debug"
+              ],
+              "clear_immediate_actions": true
+            },
+            "accessibility_presentation": {
+              "context_type": "full_ui",
+              "hide_cancel_actions": false,
+              "omit_calendar_event_children": true,
+              "excluded_action_descriptions": [
+                "Add comment",
+                "Remove unused rows",
+                "Remove unused columns",
+                "Remove unused rows and columns"
+              ],
+              "capture_note": null
+            }
+          }
+        }
+      ],
+      "instruction_resource": {
+        "path": "desktop_session/packages/octopus-system-gui-env/native/resources/application-instructions.json",
+        "content_sha256": "e16d63c913d7dc0771b203b55cb9787dad9f712fdc4f6ed0177de8131d9af3f3"
+      }
+    },
+    "application_policy": {
+      "schema_version": 1,
+      "enabled": true,
+      "allow_persistent_approval": true,
+      "required_access": {
+        "default_access": "allow",
+        "bundle_ids": {}
+      },
+      "configured_access": {
+        "default_access": "allow",
+        "bundle_ids": {}
+      },
+      "forbidden_bundle_ids": [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "org.alacritty",
+        "dev.warp.Warp-Stable",
+        "net.kovidgoyal.kitty",
+        "co.zeit.hyper",
+        "com.github.wez.wezterm",
+        "org.tabby",
+        "com.mitchellh.ghostty",
+        "com.raphaelamorim.rio",
+        "dev.commandline.waveterm",
+        "com.octopus.desktop",
+        "com.openai.codex",
+        "com.openai.codex.alpha",
+        "com.openai.codex.beta",
+        "com.openai.codex.dev",
+        "com.openai.codex.nightly",
+        "com.openai.chat",
+        "com.openai.chat.alpha",
+        "com.openai.chat.beta",
+        "com.openai.chat.nightly",
+        "com.openai.chat.mac-debug",
+        "com.apple.UserNotificationCenter",
+        "com.apple.LocalAuthenticationRemoteService",
+        "com.apple.SecurityAgent"
+      ],
+      "elevated_risk_bundle_ids": [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "org.alacritty",
+        "dev.warp.Warp-Stable",
+        "net.kovidgoyal.kitty",
+        "co.zeit.hyper",
+        "com.github.wez.wezterm",
+        "org.tabby",
+        "com.mitchellh.ghostty",
+        "com.raphaelamorim.rio",
+        "dev.commandline.waveterm",
+        "com.apple.ScreenContinuity",
+        "com.1password.1password",
+        "com.1password.safari",
+        "com.bitwarden.desktop",
+        "com.dashlane.dashlanephonefinal",
+        "com.lastpass.LastPass",
+        "com.nordsec.nordpass",
+        "me.proton.pass.electron",
+        "me.proton.pass.catalyst"
+      ],
+      "high_risk_url_schemes": [
+        "http"
+      ],
+      "high_risk_warning_subtitle": "Allowing Octopus to use this app introduces new risks, including those related to prompt injection attacks, such as data theft or loss. Carefully monitor Octopus while it uses this app."
+    },
+    "application_preferences": {
+      "root_slot": "desktop_app_preferences_root"
+    }
+  },
+  "app_approval": {
+    "operator_interface": "world_operator_chat",
+    "resume_tool": "gui.app_resume"
+  }
+}

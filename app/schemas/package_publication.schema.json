@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://octopus.local/schemas/package_publication.schema.json",
+  "title": "Octopus Package Publication",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "layout",
+    "source_registry_id",
+    "package_id",
+    "package_version",
+    "product_kind",
+    "product_id",
+    "manifest_path",
+    "manifest_digest",
+    "source_digest",
+    "license",
+    "members",
+    "files",
+    "bundle_digest"
+  ],
+  "properties": {
+    "schema": { "const": "octopus.package_publication" },
+    "schema_version": { "const": 1 },
+    "layout": { "const": "octopus.local_package_library.v1" },
+    "source_registry_id": { "$ref": "#/$defs/id" },
+    "package_id": { "$ref": "#/$defs/id" },
+    "package_version": { "$ref": "#/$defs/version" },
+    "product_kind": { "enum": ["application", "driver", "artifact"] },
+    "product_id": { "$ref": "#/$defs/id" },
+    "manifest_path": { "$ref": "#/$defs/path" },
+    "manifest_digest": { "$ref": "#/$defs/digest" },
+    "source_digest": { "$ref": "#/$defs/digest" },
+    "license": { "$ref": "#/$defs/license" },
+    "members": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "required": ["registry_kind", "owner", "digest", "files"],
+        "properties": {
+          "registry_kind": {
+            "enum": [
+              "interface",
+              "worker_environment_kind",
+              "tool",
+              "artifact",
+              "mark",
+              "verifier",
+              "ee_template"
+            ]
+          },
+          "owner": { "$ref": "#/$defs/id" },
+          "primary": { "type": "boolean" },
+          "digest": { "$ref": "#/$defs/digest" },
+          "files": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/file" }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "bundle_digest": { "$ref": "#/$defs/digest" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?$",
+      "maxLength": 64
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+    },
+    "file": {
+      "type": "object",
+      "required": ["path", "size", "mode", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/path" },
+        "size": { "type": "integer", "minimum": 0 },
+        "mode": { "type": "integer", "minimum": 0, "maximum": 511 },
+        "sha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "license": {
+      "type": "object",
+      "required": ["spdx", "path", "sha256"],
+      "properties": {
+        "spdx": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]{0,63}$"
+        },
+        "path": { "$ref": "#/$defs/path" },
+        "sha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

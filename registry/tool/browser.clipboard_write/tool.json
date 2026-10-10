@@ -1,0 +1,118 @@
+{
+  "id": "browser.clipboard_write",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "clipboard_write"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Replace this formed browser room virtual clipboard with explicit MIME text/base64 items under the existing room byte limit. Turn completion removes page bridges while retaining the room store. Optional target_id addresses only that already-owned page without selecting, creating or focusing it. Requires the declared native browser transport.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "items": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "properties": {
+            "entries": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "mime_type": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 1048576
+                  },
+                  "base64": {
+                    "type": "string",
+                    "maxLength": 1048576
+                  }
+                },
+                "required": [
+                  "mime_type"
+                ],
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ],
+                    "not": {
+                      "required": [
+                        "base64"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "base64"
+                    ],
+                    "not": {
+                      "required": [
+                        "text"
+                      ]
+                    }
+                  }
+                ],
+                "additionalProperties": false
+              }
+            },
+            "presentation_style": {
+              "type": "string",
+              "enum": [
+                "unspecified",
+                "inline",
+                "attachment"
+              ]
+            }
+          },
+          "required": [
+            "entries"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

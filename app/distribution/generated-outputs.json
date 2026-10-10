@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "paths": [
+    "registry/interface/world_provider_codex/packages/bin/",
+    "registry/interface/world_provider_codex/packages/octopus-provider-codex/life-bin/",
+    "registry/interface/world_provider_codex/packages/octopus-provider-codex/build-receipt.json",
+    "registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/",
+    "registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/build-receipt.json",
+    "registry/worker_environment_kind/desktop_session/packages/octopus-system-gui-env/native/bin/"
+  ]
+}

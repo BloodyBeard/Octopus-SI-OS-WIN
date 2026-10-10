@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_microsoft_sharepoint",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_microsoft_sharepoint",
+  "release_status": "optional",
+  "display": {
+    "name": "SharePoint",
+    "description": "Search and work with SharePoint sites, files, lists, and pages.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "panels-top-left"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_microsoft_sharepoint",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-microsoft-sharepoint-context"
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+{
+  "schema": "octopus.local_application_pack",
+  "schema_version": 1,
+  "id": "codex",
+  "version": "1.3.1",
+  "name": "Codex Pack",
+  "description": "Codex provider, agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
+  "components": [
+    {
+      "package_id": "world_provider_chatgpt",
+      "selection": "recommended",
+      "reason": "Keeps the separate ChatGPT provider available for explicit installation."
+    },
+    {
+      "package_id": "world_provider_codex",
+      "selection": "included",
+      "reason": "Provides the model interface with task-private state and the machine-wide Codex sign-in boundary."
+    },
+    {
+      "package_id": "artifact.codex_context",
+      "selection": "included",
+      "reason": "Gives tasks the declared architecture and working-role context."
+    },
+    {
+      "package_id": "world_operator_chat",
+      "selection": "included",
+      "reason": "Provides the exact Home, task, and authoring interfaces without making the provider a runtime identity."
+    },
+    {
+      "package_id": "driver.system_room",
+      "selection": "included",
+      "reason": "Provides the narrowly granted file authoring room used to create Home and projected task checkpoints."
+    },
+    {
+      "package_id": "driver.browser_session",
+      "selection": "included",
+      "reason": "Provides the native browser room and its tools for Home and new tasks under their formed policy."
+    },
+    {
+      "package_id": "driver.filesystem_workspace",
+      "selection": "included",
+      "reason": "Provides the direct project workspace for files, networked commands, PTY sessions, and persistent process control."
+    },
+    {
+      "package_id": "driver.process_session",
+      "selection": "included",
+      "reason": "Keeps isolated private process rooms available for explicit selection without adding them to ordinary coding tasks."
+    },
+    {
+      "package_id": "driver.git_worktree",
+      "selection": "included",
+      "reason": "Provides isolated code and file operations in selected project folders."
+    },
+    {
+      "package_id": "driver.desktop_session",
+      "selection": "included",
+      "reason": "Provides Computer Use tools for Home and new tasks under their formed policy."
+    },
+    {
+      "package_id": "driver.audio_device_session",
+      "selection": "included",
+      "reason": "Supplies the declared audio dependencies of the Computer Use worker ceiling; tasks select desktop tools separately."
+    },
+    {
+      "package_id": "driver.code_mode",
+      "selection": "included",
+      "reason": "Provides the declared JavaScript room and artifact-bound persistent context for explicitly selected tasks."
+    },
+    {
+      "package_id": "world_provider_realtime",
+      "selection": "included",
+      "reason": "Provides Home voice media with explicit control, transcript, delegation and result artifacts."
+    }
+  ],
+  "extensions": [
+    {
+      "extension_id": "builtin.provider-credential-repair",
+      "selection": "recommended",
+      "reason": "Offers an explicit machine sign-in check after a provider authentication failure."
+    }
+  ],
+  "workspace_setup": {
+    "selection": "included",
+    "home": {
+      "provider_interface_id": "world_provider_codex",
+      "worker_interface_id": "system_worker_operator_home",
+      "context_artifact_bindings": [
+        {
+          "id": "artifact-worker-role-template"
+        },
+        {
+          "id": "artifact-grounding-system-architecture"
+        },
+        {
+          "id": "artifact-codebase-layout"
+        },
+        {
+          "id": "artifact-code-mode-browser-prelude"
+        },
+        {
+          "id": "artifact-code-mode-cua-prelude"
+        },
+        {
+          "id": "artifact-worker-role-operator-home"
+        },
+        {
+          "id": "artifact-home-task-authoring"
+        },
+        {
+          "id": "artifact-spawn-literacy"
+        },
+        {
+          "id": "artifact-home-widget-authoring"
+        }
+      ],
+      "selected_worker_environment_kinds": [
+        "browser_session",
+        "code_mode",
+        "desktop_session",
+        "system_room"
+      ]
+    },
+    "project_defaults": [
+      {
+        "package_id": "world_provider_codex",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "driver.browser_session",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "driver.desktop_session",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "driver.filesystem_workspace",
+        "default_for_new_tasks": true
+      },
+      {
+        "package_id": "driver.process_session",
+        "default_for_new_tasks": false
+      },
+      {
+        "package_id": "driver.git_worktree",
+        "default_for_new_tasks": false
+      }
+    ],
+    "agent_presets": [
+      {
+        "id": "computer-use",
+        "component_package_id": "driver.desktop_session",
+        "name": "Computer Use",
+        "icon": "goggles",
+        "worker_interface_id": "system_worker_computer_use",
+        "provider_interface_id": "world_provider_codex",
+        "context_artifact_bindings": [
+          {
+            "id": "artifact-worker-role-template"
+          },
+          {
+            "id": "artifact-worker-role-computer-use"
+          },
+          {
+            "id": "artifact-grounding-system-architecture"
+          },
+          {
+            "id": "artifact-secret-handle-flow"
+          },
+          {
+            "id": "artifact-code-mode-cua-prelude"
+          },
+          {
+            "id": "artifact-code-mode-browser-prelude"
+          }
+        ],
+        "selected_worker_environment_kinds": [
+          "desktop_session",
+          "code_mode",
+          "browser_session"
+        ],
+        "selected_application_ids": []
+      }
+    ]
+  }
+}

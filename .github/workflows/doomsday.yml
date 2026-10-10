@@ -1,0 +1,40 @@
+name: doomsday
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: doomsday-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  doomsday:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Policy formation and exact authored grants
+        run: cargo test -p octopus-policy --lib
+
+      - name: Runtime checkpoint coordination and replay
+        run: cargo test -p octopus-runtime --lib
+
+      - name: Ledger proof, deduplication and cache reconstruction
+        run: cargo test -p octopus-ledger-index --lib
+
+      - name: App-server artifact, worker binding and verifier integration
+        run: cargo test -p octopus-app-server
+
+      - name: Framework round-trip latency with a durable ledger
+        run: cargo test --release -p octopus-app-server --test doomsday -- --ignored --nocapture

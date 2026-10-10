@@ -1,0 +1,54 @@
+{
+  "processes": [
+    {
+      "bin": "target/debug/octopus-git-worktree-tool-door-life",
+      "io_limits": {
+        "max_control_frame_bytes": 1048576,
+        "max_stderr_bytes": 262144,
+        "max_manifest_bytes": 1048576,
+        "max_payload_bytes": 268435456
+      },
+      "args": [],
+      "inherit_env": ["HOME", "PATH"],
+      "authority": {
+        "read_root_slots": ["registry_interface_root", "registry_tool_root", "registry_worker_environment_kind_root", "repo_root", "worktree_root"],
+        "write_root_slots": [
+          "repo_root",
+          "worktree_root"
+        ],
+        "executable_root_slots": [
+          "worktree_root"
+        ],
+        "optional_read_root_slots": [
+          "platform_toolchain_root",
+          "tool_cache_root",
+          "toolchain_root"
+        ],
+        "optional_write_root_slots": [
+          "platform_toolchain_root"
+        ],
+        "optional_executable_root_slots": [
+          "platform_toolchain_root",
+          "tool_cache_root",
+          "toolchain_root"
+        ],
+        "read_paths": [],
+        "write_paths": [],
+        "executable_paths": ["target/debug/octopus-coder-exec-tool", "target/debug/octopus-coder-fs-tool"],
+        "executable_commands": [
+          "git"
+        ],
+        "read_env_paths": [],
+        "write_env_paths": [],
+        "executable_env_paths": [
+          "PATH"
+        ],
+        "allow_network": true,
+        "allow_local_ipc": true,
+        "allow_sandbox_delegation": true
+      },
+      "coordinate_root_slots": ["interface_life_install_root", "registry_interface_root", "registry_tool_root", "registry_worker_environment_kind_root", "repo_root", "worktree_root"],
+      "read_handles": ["ledger", "ledger_index", "blobs"]
+    }
+  ]
+}

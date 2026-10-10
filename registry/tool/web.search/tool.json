@@ -1,0 +1,307 @@
+{
+  "id": "web.search",
+  "interface": "system_web_search",
+  "process": {
+    "bin": "target/debug/octopus-web-search-tool",
+    "inherit_env": [
+      "OCTOPUS_WEB_SEARCH_URL",
+      "OCTOPUS_WEB_SEARCH_API_KEY",
+      "TAVILY_BASE_URL",
+      "TAVILY_API_KEY",
+      "EXA_BASE_URL",
+      "EXA_API_KEY",
+      "FIRECRAWL_API_URL",
+      "FIRECRAWL_API_KEY",
+      "BRAVE_SEARCH_BASE_URL",
+      "BRAVE_SEARCH_API_KEY",
+      "SEARXNG_BASE_URL",
+      "OCTOPUS_WEB_PROXY"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "web_search"
+  ],
+  "handler_config": {
+    "operation": "search",
+    "default_provider": "custom",
+    "request_timeout_ms": 60000,
+    "max_response_bytes": 4000000,
+    "proxy_env": "OCTOPUS_WEB_PROXY",
+    "providers": {
+      "custom": {
+        "base_url": "",
+        "base_url_env": "OCTOPUS_WEB_SEARCH_URL",
+        "path": "",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "OCTOPUS_WEB_SEARCH_API_KEY",
+          "placement": "header",
+          "name": "Authorization",
+          "prefix": "Bearer ",
+          "required": false
+        },
+        "query": {},
+        "body": {
+          "argument_fields": {
+            "query": "query",
+            "limit": "limit",
+            "include_domains": "include_domains",
+            "exclude_domains": "exclude_domains",
+            "search_depth": "search_depth",
+            "time_range": "time_range",
+            "country": "country",
+            "language": "language",
+            "include_raw_content": "include_raw_content"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title", "name"],
+          "url_paths": ["url", "link"],
+          "snippet_paths": ["snippet", "description", "content"],
+          "published_paths": ["published_at", "publishedDate", "date"],
+          "image_paths": ["image_url", "image"]
+        },
+        "retry": {}
+      },
+      "tavily": {
+        "base_url": "https://api.tavily.com",
+        "base_url_env": "TAVILY_BASE_URL",
+        "path": "/search",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "TAVILY_API_KEY",
+          "placement": "body",
+          "name": "api_key",
+          "prefix": "",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "static_values": {
+            "include_images": false,
+            "include_raw_content": false
+          },
+          "argument_fields": {
+            "query": "query",
+            "limit": "max_results",
+            "include_domains": "include_domains",
+            "exclude_domains": "exclude_domains",
+            "search_depth": "search_depth",
+            "time_range": "time_range",
+            "country": "country",
+            "include_raw_content": "include_raw_content"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "snippet_paths": ["content", "snippet"],
+          "published_paths": ["published_date"],
+          "image_paths": []
+        },
+        "retry": {}
+      },
+      "exa": {
+        "base_url": "https://api.exa.ai",
+        "base_url_env": "EXA_BASE_URL",
+        "path": "/search",
+        "method": "POST",
+        "headers": {
+          "x-exa-integration": "octopus"
+        },
+        "auth": {
+          "env": "EXA_API_KEY",
+          "placement": "header",
+          "name": "x-api-key",
+          "prefix": "",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "static_values": {
+            "contents": {
+              "highlights": true
+            }
+          },
+          "argument_fields": {
+            "query": "query",
+            "limit": "numResults",
+            "include_domains": "includeDomains",
+            "exclude_domains": "excludeDomains"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "snippet_paths": ["highlights", "text"],
+          "published_paths": ["publishedDate"],
+          "image_paths": ["image"]
+        },
+        "retry": {}
+      },
+      "firecrawl": {
+        "base_url": "https://api.firecrawl.dev",
+        "base_url_env": "FIRECRAWL_API_URL",
+        "path": "/v2/search",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "FIRECRAWL_API_KEY",
+          "placement": "header",
+          "name": "Authorization",
+          "prefix": "Bearer ",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "argument_fields": {
+            "query": "query",
+            "limit": "limit"
+          }
+        },
+        "response": {
+          "items_path": "data",
+          "title_paths": ["title", "metadata.title"],
+          "url_paths": ["url", "metadata.sourceURL"],
+          "snippet_paths": ["description", "markdown"],
+          "published_paths": ["metadata.publishedTime"],
+          "image_paths": ["metadata.ogImage"]
+        },
+        "retry": {}
+      },
+      "brave": {
+        "base_url": "https://api.search.brave.com",
+        "base_url_env": "BRAVE_SEARCH_BASE_URL",
+        "path": "/res/v1/web/search",
+        "method": "GET",
+        "headers": {
+          "Accept": "application/json",
+          "Accept-Encoding": "gzip"
+        },
+        "auth": {
+          "env": "BRAVE_SEARCH_API_KEY",
+          "placement": "header",
+          "name": "X-Subscription-Token",
+          "prefix": "",
+          "required": true
+        },
+        "query": {
+          "argument_fields": {
+            "query": "q",
+            "limit": "count",
+            "country": "country",
+            "language": "search_lang",
+            "time_range": "freshness"
+          }
+        },
+        "body": {},
+        "response": {
+          "items_path": "web.results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "snippet_paths": ["description", "profile.long_name"],
+          "published_paths": ["page_age"],
+          "image_paths": ["thumbnail.src"]
+        },
+        "retry": {}
+      },
+      "searxng": {
+        "base_url": "",
+        "base_url_env": "SEARXNG_BASE_URL",
+        "path": "/search",
+        "method": "GET",
+        "headers": {
+          "Accept": "application/json"
+        },
+        "query": {
+          "static_values": {
+            "format": "json"
+          },
+          "argument_fields": {
+            "query": "q",
+            "language": "language",
+            "time_range": "time_range"
+          }
+        },
+        "body": {},
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "snippet_paths": ["content"],
+          "published_paths": ["publishedDate"],
+          "image_paths": ["thumbnail"]
+        },
+        "retry": {}
+      }
+    }
+  },
+  "description": "Search through a declared web provider from the invoking run's formed web-search room. Provider choice, endpoint, auth placement, request projection, response projection, retry limits and payload bounds are descriptor data; the room fails closed when the requested provider or credential is absent.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Search query."
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "default": 5
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["custom", "tavily", "exa", "firecrawl", "brave", "searxng"]
+      },
+      "include_domains": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "maxItems": 100
+      },
+      "exclude_domains": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "maxItems": 100
+      },
+      "search_depth": {
+        "type": "string"
+      },
+      "time_range": {
+        "type": "string"
+      },
+      "country": {
+        "type": "string"
+      },
+      "language": {
+        "type": "string"
+      },
+      "include_raw_content": {
+        "type": "boolean"
+      }
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,66 @@
+{
+  "id": "google_calendar.create_event",
+  "request_label": "mcp.operation.request",
+  "output_label": "mcp.tool.result",
+  "handler_config": {
+    "operation": "call_tool",
+    "mcp_tool_name": "google_calendar_create_event"
+  },
+  "description": "Create a Google Calendar event through the external Google Calendar MCP server behind world_mcp_google_calendar. The mcp_tool_call family forwards this call over the interface transport wire and returns the server's result as an artifact.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "event": {
+        "$ref": "#/definitions/Event"
+      },
+      "notify_attendees": {
+        "type": "boolean",
+        "description": "Whether attendees should receive notifications."
+      }
+    },
+    "required": [
+      "event"
+    ],
+    "definitions": {
+      "Event": {
+        "type": "object",
+        "description": "Calendar event payload.",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title."
+          },
+          "start": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/DateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "DateTime": {
+        "type": "object",
+        "description": "Calendar date-time.",
+        "properties": {
+          "dateTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 date-time."
+          },
+          "timeZone": {
+            "type": "string",
+            "enum": [
+              "UTC",
+              "America/Los_Angeles"
+            ],
+            "description": "IANA time zone."
+          }
+        }
+      }
+    }
+  }
+}

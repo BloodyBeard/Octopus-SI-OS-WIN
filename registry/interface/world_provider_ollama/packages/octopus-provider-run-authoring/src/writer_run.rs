@@ -1,0 +1,1623 @@
+use super::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+const DECLARATION: &str = "file_writer_target";
+
+#[derive(Default)]
+pub(super) struct WriterCallIndex {
+    generations: BTreeMap<PathBuf, Option<u64>>,
+    directories: BTreeMap<PathBuf, WriterCallDirectory>,
+}
+
+#[derive(Default)]
+struct WriterCallDirectory {
+    fingerprint: Option<(std::time::SystemTime, u64)>,
+    by_generation: BTreeMap<u64, BTreeSet<PathBuf>>,
+    unclassified: BTreeSet<PathBuf>,
+}
+
+impl WriterCallIndex {
+    fn candidates(&mut self, root: &Path, generation: u64) -> Result<Vec<PathBuf>, String> {
+        let fingerprint = match Self::fingerprint(root) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.directories.remove(root);
+                self.generations
+                    .retain(|path, _| path.parent() != Some(root));
+                return Ok(Vec::new());
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        let fresh = self
+            .directories
+            .get(root)
+            .is_some_and(|directory| directory.fingerprint.as_ref() == Some(&fingerprint));
+        if !fresh {
+            let mut paths = BTreeSet::new();
+            for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
+                let path = entry.map_err(|error| error.to_string())?.path();
+                if path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".artifact.json"))
+                {
+                    paths.insert(path);
+                }
+            }
+            self.generations
+                .retain(|path, _| path.parent() != Some(root) || paths.contains(path));
+            let mut directory = WriterCallDirectory::default();
+            for path in paths {
+                match self.generations.get(&path) {
+                    Some(Some(generation)) => {
+                        directory
+                            .by_generation
+                            .entry(*generation)
+                            .or_default()
+                            .insert(path);
+                    }
+                    Some(None) => {}
+                    None => {
+                        directory.unclassified.insert(path);
+                    }
+                }
+            }
+            let observed = Self::fingerprint(root).map_err(|error| error.to_string())?;
+            if observed == fingerprint {
+                directory.fingerprint = Some(fingerprint);
+            }
+            self.directories.insert(root.to_path_buf(), directory);
+        }
+        let directory = self
+            .directories
+            .get(root)
+            .ok_or("writer directory index disappeared")?;
+        Ok(directory
+            .unclassified
+            .iter()
+            .chain(
+                directory
+                    .by_generation
+                    .get(&generation)
+                    .into_iter()
+                    .flatten(),
+            )
+            .cloned()
+            .collect())
+    }
+
+    fn fingerprint(root: &Path) -> Result<(std::time::SystemTime, u64), std::io::Error> {
+        let metadata = std::fs::metadata(root)?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "provider hand-in root is not a directory",
+            ));
+        }
+        Ok((metadata.modified()?, metadata.len()))
+    }
+
+    fn record(&mut self, path: PathBuf, generation: Option<u64>) {
+        let previous = self.generations.insert(path.clone(), generation);
+        if let Some(directory) = path
+            .parent()
+            .and_then(|root| self.directories.get_mut(root))
+        {
+            directory.unclassified.remove(&path);
+            if let Some(Some(previous)) = previous {
+                if let Some(paths) = directory.by_generation.get_mut(&previous) {
+                    paths.remove(&path);
+                }
+            }
+            if let Some(generation) = generation {
+                directory
+                    .by_generation
+                    .entry(generation)
+                    .or_default()
+                    .insert(path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/writer_call_index.rs"]
+mod writer_call_index_tests;
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriterRunBinding {
+    pub run: RunId,
+    pub initial_record: Value,
+    pub role_artifact_bindings: Vec<ArtifactBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Target {
+    run: RunId,
+    provider: InterfaceId,
+    source: InterfaceId,
+    door: InterfaceId,
+    generation: u64,
+}
+
+impl WriterRunBinding {
+    pub(super) fn roles(
+        &self,
+        record: &RunRecord,
+        provider: &InterfaceId,
+        templates: &[RunAuthoringCheckpoint],
+    ) -> Result<Vec<ArtifactBinding>, String> {
+        let initial =
+            RunRecord::from_bytes(&bytes(&self.initial_record)?).map_err(|e| e.to_string())?;
+        let target = target(&initial, provider)?;
+        if self.run == record.id
+            || initial.id != self.run
+            || initial.worker != record.worker
+            || initial.ee != record.ee
+            || target.run != record.id
+            || target.provider != *provider
+            || target.generation != 0
+            || initial.checkpoints.len() != 2
+            || initial.active_checkpoints.len() != 2
+        {
+            return Err(
+                "separate writer declaration changed its exact run, EE, worker or initial boundary"
+                    .into(),
+            );
+        }
+        let role = |role| -> Result<&RunAuthoringCheckpoint, String> {
+            let matches = templates
+                .iter()
+                .filter(|t| t.role == role)
+                .collect::<Vec<_>>();
+            match matches.as_slice() {
+                [one] => Ok(*one),
+                _ => Err("separate writer has ambiguous templates".into()),
+            }
+        };
+        let call = role(RunAuthoringCheckpointRole::AuthoringCall)?;
+        let result = role(RunAuthoringCheckpointRole::AuthoringResult)?;
+        if call.interface() != &target.source || result.interface() != &target.door {
+            return Err("separate writer declaration has a different exact source or door".into());
+        }
+        let frontier = initial.checkpoints.iter().collect::<Vec<_>>();
+        canonical_role_bindings(&frontier, call, result, &initial.id)?;
+        if self.role_artifact_bindings.iter().any(|b| !b.access.read) {
+            return Err("writer target roles must be readable".into());
+        }
+        Ok(self.role_artifact_bindings.clone())
+    }
+}
+
+fn bytes(value: &Value) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+pub(super) fn binding(
+    record: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<Option<WriterRunBinding>, String> {
+    record
+        .interface_state
+        .get(provider)
+        .and_then(|s| s.get(RUN_AUTHORING_BINDING))
+        .and_then(|v| v.get("writer_run"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+pub fn owner_writer_binding(
+    record: &RunRecord,
+    owner: &InterfaceId,
+) -> Result<Option<WriterRunBinding>, String> {
+    record
+        .interface_state
+        .get(owner)
+        .and_then(|s| s.get("writer_run"))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+fn owner_config(
+    record: &RunRecord,
+    writer: &CheckedRunWriter,
+) -> Result<RunAuthoringConfig, String> {
+    if record
+        .interface_state
+        .get(&writer.owner)
+        .is_some_and(|s| s.contains_key(RUN_AUTHORING_BINDING))
+    {
+        return Ok(validate_declared_provider_writer(record, writer)?.config(
+            &RunAuthoringProfile {
+                file_write_tool: writer.tool.clone(),
+                file_write_label: writer.call_label.clone(),
+                file_write_result_label: writer.result_label.clone(),
+                result_timeout_ms: 1,
+            },
+        ));
+    }
+    let bound =
+        owner_writer_binding(record, &writer.owner)?.ok_or("owner has no declared writer Run")?;
+    let initial =
+        RunRecord::from_bytes(&bytes(&bound.initial_record)?).map_err(|e| e.to_string())?;
+    let mut templates = Vec::new();
+    for (name, role, source, target, label) in [
+        (
+            "call",
+            "authoring_call",
+            &writer.source,
+            &writer.door,
+            &writer.call_label,
+        ),
+        (
+            "result",
+            "authoring_result",
+            &writer.door,
+            &writer.owner,
+            &writer.result_label,
+        ),
+    ] {
+        let rows = initial
+            .checkpoints
+            .iter()
+            .filter(|cp| {
+                cp.inbound_interface() == Some(source) && cp.outbound_interfaces().eq([target])
+            })
+            .collect::<Vec<_>>();
+        let [cp] = rows.as_slice() else {
+            return Err("owner writer Run has ambiguous exact edges".into());
+        };
+        if !cp
+            .interface_binding
+            .as_ref()
+            .is_some_and(|b| b.config.artifact_policy.admits(label))
+        {
+            return Err("owner writer label is not admitted by its binding".into());
+        }
+        templates.push(serde_json::from_value(json!({"name":name,"role":role,"interface_binding":cp.interface_binding,
+            "outbound_interface_bindings":cp.outbound_interface_bindings,"required_verified_artifacts":cp.required_verified_artifacts,"include_context":false})).map_err(|e|e.to_string())?);
+    }
+    bound.roles(record, &writer.owner, &templates)?;
+    Ok(RunAuthoringConfig {
+        run: record.id.clone(),
+        worker: record.worker.clone(),
+        provider_interface: writer.owner.clone(),
+        authoring_source_interface: writer.source.clone(),
+        file_write_tool: writer.tool.clone(),
+        file_write_label: writer.call_label.clone(),
+        file_write_result_label: writer.result_label.clone(),
+        payload_artifact_bindings: vec![],
+        writer_run: Some(bound),
+        checkpoints: templates,
+        result_timeout_ms: 1,
+    })
+}
+
+pub fn separate_owner_writer_run(
+    record: &mut Value,
+    writer: &CheckedRunWriter,
+    run: &RunId,
+) -> Result<Value, String> {
+    let parsed = RunRecord::from_bytes(&bytes(record)?).map_err(|e| e.to_string())?;
+    if let Some(prior) = owner_writer_binding(&parsed, &writer.owner)? {
+        if prior.run != *run {
+            return Err("owner writer Run identity changed".into());
+        }
+        owner_config(&parsed, writer)?;
+        return Ok(prior.initial_record);
+    }
+    let owned: BTreeSet<String> = serde_json::from_value(
+        record["interface_state"][writer.owner.as_str()]["owned_checkpoint_ids"].clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut ids = BTreeSet::new();
+    let mut rows = Vec::new();
+    for (source, target) in [
+        (&writer.source, &writer.door),
+        (&writer.door, &writer.owner),
+    ] {
+        let candidates = parsed
+            .checkpoints
+            .iter()
+            .filter(|cp| {
+                owned.contains(cp.id.as_str())
+                    && parsed.active_checkpoints.contains(&cp.id)
+                    && cp.inbound_interface() == Some(source)
+                    && cp.outbound_interfaces().eq([target])
+            })
+            .collect::<Vec<_>>();
+        let [cp] = candidates.as_slice() else {
+            return Err("owner needs its exact active call/result pair".into());
+        };
+        let mut row = serde_json::to_value(cp).map_err(|e| e.to_string())?;
+        row["run"] = json!(run);
+        row["trace"] = json!(format!("trace:{run}:{}", cp.id));
+        for requirement in row["required_verified_artifacts"]
+            .as_array_mut()
+            .ok_or("writer requirements absent")?
+        {
+            if let Some(matches) = requirement
+                .pointer_mut("/params/metadata_matches")
+                .and_then(Value::as_array_mut)
+            {
+                for item in matches {
+                    if item["payload"] == "/arguments/expected_before_hash"
+                        && item["metadata"] == "/runtime/run_record_hash"
+                    {
+                        item["payload"] = json!("/arguments/writes/0/expected_before_hash");
+                    }
+                }
+            }
+        }
+        ids.insert(cp.id.to_string());
+        rows.push(row);
+    }
+    let initial = json!({"id":run,"ee":parsed.ee,"worker":parsed.worker,"trace":format!("trace:{run}"),"status":"idle",
+        "interface_state":{writer.owner.as_str():{DECLARATION:Target {run:parsed.id,provider:writer.owner.clone(),source:writer.source.clone(),door:writer.door.clone(),generation:0}}},
+        "checkpoints":rows,"active_checkpoints":ids});
+    let bound = WriterRunBinding {
+        run: run.clone(),
+        initial_record: initial.clone(),
+        role_artifact_bindings: serde_json::from_value(rows[0]["artifact_bindings"].clone())
+            .map_err(|e| e.to_string())?,
+    };
+    for key in ["checkpoints", "active_checkpoints"] {
+        record[key]
+            .as_array_mut()
+            .ok_or("owner checkpoints absent")?
+            .retain(|row| {
+                !ids.contains(if key == "checkpoints" {
+                    row["id"].as_str().unwrap_or_default()
+                } else {
+                    row.as_str().unwrap_or_default()
+                })
+            });
+    }
+    let state = &mut record["interface_state"][writer.owner.as_str()];
+    for key in ["owned_checkpoint_ids", FRONTIER_CHECKPOINT_IDS] {
+        state[key]
+            .as_array_mut()
+            .ok_or("owner frontier absent")?
+            .retain(|id| !ids.contains(id.as_str().unwrap_or_default()));
+    }
+    state["writer_run"] = serde_json::to_value(bound).map_err(|e| e.to_string())?;
+    owner_config(
+        &RunRecord::from_bytes(&bytes(record)?).map_err(|e| e.to_string())?,
+        writer,
+    )?;
+    Ok(initial)
+}
+
+fn target(record: &RunRecord, provider: &InterfaceId) -> Result<Target, String> {
+    serde_json::from_value(
+        record
+            .interface_state
+            .get(provider)
+            .and_then(|s| s.get(DECLARATION))
+            .ok_or("writer Run has no exact target declaration")?
+            .clone(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub(super) fn consume_result(
+    ctx: &InterfaceLiftContext,
+    cache: &Mutex<BTreeMap<RunId, WriterHistory>>,
+    profile: &RunAuthoringProfile,
+    movement: &Movement,
+    record: &RunRecord,
+) -> Result<bool, String> {
+    if !record
+        .interface_state
+        .get(&ctx.interface)
+        .is_some_and(|s| s.contains_key(DECLARATION))
+    {
+        return Ok(false);
+    }
+    let target = target(record, &ctx.interface)?;
+    let root = ctx
+        .root_slot("run_records_root")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let bytes =
+        std::fs::read(root.join(format!("{}.json", target.run))).map_err(|e| e.to_string())?;
+    let original = RunRecord::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    let config = config_from_persisted_profile(&original, &ctx.interface, profile)?;
+    if config
+        .writer_run
+        .as_ref()
+        .is_none_or(|b| b.run != record.id)
+    {
+        return Err("writer result target no longer declares this exact writer Run".into());
+    }
+    let history = history(ctx, cache, &config)?;
+    if history
+        .completed
+        .values()
+        .any(|(seq, _)| *seq == movement.seq.0)
+    {
+        Ok(true)
+    } else {
+        Err("writer result has no exact checked ordered effect".into())
+    }
+}
+
+pub fn separate_writer_run(
+    record: &mut Value,
+    provider: &InterfaceId,
+    run: &RunId,
+) -> Result<Value, String> {
+    let original = RunRecord::from_bytes(&bytes(record)?).map_err(|e| e.to_string())?;
+    let mut topology: BoundRunAuthoringTopology = serde_json::from_value(
+        record["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING].clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    topology.validate_identity(&original, provider)?;
+    let prior = topology.writer_run.clone();
+    if prior.as_ref().is_some_and(|binding| &binding.run != run) {
+        return Err("writer continuation changed its exact Run".into());
+    }
+    let mut ids = BTreeSet::new();
+    let mut checkpoints = Vec::new();
+    for template in topology.checkpoints.iter_mut().filter(|cp| {
+        matches!(
+            cp.role,
+            RunAuthoringCheckpointRole::AuthoringCall | RunAuthoringCheckpointRole::AuthoringResult
+        )
+    }) {
+        let matches = original
+            .checkpoints
+            .iter()
+            .filter(|cp| {
+                original.active_checkpoints.contains(&cp.id)
+                    && checkpoint_record_matches_template(cp, template, &original.id)
+            })
+            .collect::<Vec<_>>();
+        let cp = match matches.as_slice() {
+            [cp] => Some(*cp),
+            [] if prior.is_some() => None,
+            _ => {
+                return Err(
+                    "separate writer needs one exact active checkpoint per authoring role".into(),
+                );
+            }
+        };
+        if template.role == RunAuthoringCheckpointRole::AuthoringCall {
+            for requirement in &mut template.required_verified_artifacts {
+                if let Some(matches) = requirement
+                    .params
+                    .get_mut("metadata_matches")
+                    .and_then(Value::as_array_mut)
+                {
+                    for requirement in matches {
+                        if requirement["payload"] == "/arguments/expected_before_hash"
+                            && requirement["metadata"] == "/runtime/run_record_hash"
+                        {
+                            requirement["payload"] =
+                                json!("/arguments/writes/0/expected_before_hash");
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(cp) = cp {
+            ids.insert(cp.id.to_string());
+            let mut row = serde_json::to_value(cp).map_err(|e| e.to_string())?;
+            row["run"] = json!(run);
+            row["trace"] = json!(format!("trace:{run}:{}", cp.id));
+            row["required_verified_artifacts"] = json!(template.required_verified_artifacts);
+            checkpoints.push(row);
+        }
+    }
+    if checkpoints.len() != 2 && !(checkpoints.is_empty() && prior.is_some()) {
+        return Err("writer declaration has an incomplete authoring pair".into());
+    }
+    let roles = checkpoints
+        .first()
+        .map(|cp| {
+            serde_json::from_value::<Vec<ArtifactBinding>>(cp["artifact_bindings"].clone())
+                .map_err(|e| e.to_string())
+        })
+        .transpose()?;
+    let mut detached = if let Some(mut prior) = prior {
+        if let Some(roles) = roles {
+            prior.role_artifact_bindings = roles;
+        }
+        prior
+    } else {
+        let door = topology
+            .checkpoints
+            .iter()
+            .find(|cp| cp.role == RunAuthoringCheckpointRole::AuthoringResult)
+            .ok_or("writer result absent")?
+            .interface()
+            .clone();
+        let initial = json!({
+            "id":run,"ee":original.ee,"worker":original.worker,"trace":format!("trace:{run}"),"status":"idle",
+            "interface_state":{provider.as_str():{DECLARATION:Target {run:original.id.clone(), provider:provider.clone(), source:topology.authoring_source_interface.clone(), door, generation:0}}},
+            "checkpoints":checkpoints,"active_checkpoints":ids,
+        });
+        WriterRunBinding {
+            run: run.clone(),
+            initial_record: initial,
+            role_artifact_bindings: roles.ok_or("writer roles absent")?,
+        }
+    };
+    detached.roles(&original, provider, &topology.checkpoints)?;
+    for key in ["checkpoints", "active_checkpoints"] {
+        record[key]
+            .as_array_mut()
+            .ok_or("writer target lost its checkpoints")?
+            .retain(|row| {
+                !ids.contains(if key == "checkpoints" {
+                    row["id"].as_str().unwrap_or_default()
+                } else {
+                    row.as_str().unwrap_or_default()
+                })
+            });
+    }
+    for state in record["interface_state"]
+        .as_object_mut()
+        .ok_or("run state absent")?
+        .values_mut()
+    {
+        for key in ["cycle_checkpoint_ids", FRONTIER_CHECKPOINT_IDS] {
+            if let Some(rows) = state.get_mut(key).and_then(Value::as_array_mut) {
+                rows.retain(|id| !ids.contains(id.as_str().unwrap_or_default()));
+            }
+        }
+    }
+    topology.writer_run = Some(detached.clone());
+    record["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING] =
+        serde_json::to_value(&topology).map_err(|e| e.to_string())?;
+    let next = RunRecord::from_bytes(&bytes(record)?).map_err(|e| e.to_string())?;
+    validate_checkpoint_topology(&next, provider, &topology.checkpoints, None)?;
+    Ok(std::mem::take(&mut detached.initial_record))
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OrderedArguments {
+    ordered: bool,
+    writes: Vec<OrderedEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerWriterEdit {
+    arguments: OrderedArguments,
+    writer: CheckedRunWriter,
+    correlation_id: String,
+}
+
+#[derive(Default)]
+pub struct OwnerWriterEvidence(Mutex<BTreeMap<RunId, WriterHistory>>);
+
+impl OwnerWriterEdit {
+    pub fn prepare(
+        before: &[u8],
+        edit: &CheckedRunEdit,
+        writer: &CheckedRunWriter,
+    ) -> Result<Option<Self>, String> {
+        let record = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
+        let declared = if record.interface_state.get(&writer.owner)
+            .is_some_and(|state| state.contains_key(RUN_AUTHORING_BINDING)) {
+            binding(&record, &writer.owner)?
+        } else {
+            owner_writer_binding(&record, &writer.owner)?
+        };
+        let Some(binding) = declared else {
+            return Ok(None);
+        };
+        let config = owner_config(&record, writer)?;
+        let path = edit
+            .path
+            .parent()
+            .ok_or("writer edit target has no parent")?
+            .join(format!("{}.json", binding.run));
+        let current = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let next = next_writer(&current, &config)?;
+        let arguments = OrderedArguments {
+            ordered: true,
+            writes: vec![
+                OrderedEntry {
+                    path,
+                    content: String::from_utf8(next).map_err(|e| e.to_string())?,
+                    expected_before_hash: ContentHash::of_bytes(&current).to_hex(),
+                    expected_before_content: String::from_utf8(current)
+                        .map_err(|e| e.to_string())?,
+                },
+                OrderedEntry {
+                    path: edit.path.clone(),
+                    content: edit.content.clone(),
+                    expected_before_hash: edit.before_hash.clone(),
+                    expected_before_content: String::from_utf8(before.to_vec())
+                        .map_err(|e| e.to_string())?,
+                },
+            ],
+        };
+        let result = Self {
+            arguments,
+            writer: writer.clone(),
+            correlation_id: edit.correlation_id.clone(),
+        };
+        result.validate(before, edit, writer)?;
+        Ok(Some(result))
+    }
+
+    pub fn validate(
+        &self,
+        before: &[u8],
+        edit: &CheckedRunEdit,
+        writer: &CheckedRunWriter,
+    ) -> Result<(), String> {
+        if self.writer != *writer || self.correlation_id != edit.correlation_id {
+            return Err("owner ordered edit changed its writer or correlation".into());
+        }
+        let first = self
+            .arguments
+            .writes
+            .first()
+            .ok_or("owner writer advance absent")?;
+        let (pinned, args) = self.arguments.checked_call(
+            writer,
+            first.expected_before_content.as_bytes(),
+            &edit.path,
+        )?;
+        if pinned != before
+            || args.expected_before_hash != edit.before_hash
+            || args.expected_after_hash != edit.after_hash
+            || args.patch != edit.patch
+        {
+            return Err("owner ordered edit changed its exact target intent".into());
+        }
+        Ok(())
+    }
+
+    pub fn materialize(&self, root: &Path) -> Result<InterfaceArtifactFile, String> {
+        InterfaceArtifactFile::write(root,&self.writer.call_label,&serde_json::to_vec(&json!({"tool":self.writer.tool,"arguments":self.arguments,"correlation_id":self.correlation_id})).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
+    }
+
+    pub fn matches_call(&self, value: &Value) -> bool {
+        *value
+            == json!({"tool":self.writer.tool,"arguments":self.arguments,"correlation_id":self.correlation_id})
+    }
+}
+
+impl OwnerWriterEvidence {
+    pub fn result(
+        &self,
+        ctx: &InterfaceLiftContext,
+        attempt: &OwnerWriterEdit,
+    ) -> Result<Option<bool>, String> {
+        let entry = attempt
+            .arguments
+            .writes
+            .get(1)
+            .ok_or("ordered owner target absent")?;
+        let before = RunRecord::from_bytes(entry.expected_before_content.as_bytes())
+            .map_err(|e| e.to_string())?;
+        let config = owner_config(&before, &attempt.writer)?;
+        let progress = history(ctx, &self.0, &config)?;
+        let result = progress
+            .completed
+            .get(&ContentHash::of_bytes(entry.content.as_bytes()).to_hex())
+            .map(|(_, applied)| *applied);
+        if result.is_none()
+            && progress.current
+                != attempt.arguments.writes[0]
+                    .expected_before_content
+                    .as_bytes()
+        {
+            return Err("owner writer preimage has no exact checked history".into());
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedEntry {
+    path: PathBuf,
+    content: String,
+    expected_before_content: String,
+    expected_before_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedReceipt {
+    path: PathBuf,
+    before_hash: Option<String>,
+    after_hash: String,
+    bytes: u64,
+    outcome: String,
+    observed_hash: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedResult {
+    result: String,
+    writes: Vec<OrderedReceipt>,
+}
+
+fn next_writer(before: &[u8], config: &RunAuthoringConfig) -> Result<Vec<u8>, String> {
+    let record = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
+    let declaration = target(&record, &config.provider_interface)?;
+    let binding = config
+        .writer_run
+        .as_ref()
+        .ok_or("writer run not selected")?;
+    if record.id != binding.run
+        || record.worker != config.worker
+        || declaration.run != config.run
+        || declaration.provider != config.provider_interface
+        || declaration.source != config.authoring_source_interface
+    {
+        return Err("writer continuation changed exact owner or target".into());
+    }
+    let generation = declaration
+        .generation
+        .checked_add(1)
+        .ok_or("writer generation overflow")?;
+    let initial =
+        RunRecord::from_bytes(&bytes(&binding.initial_record)?).map_err(|e| e.to_string())?;
+    if record.ee != initial.ee || record.trace != initial.trace || record.status != initial.status {
+        return Err("writer continuation changed EE, trace or status".into());
+    }
+    if bytes(&writer_generation(
+        binding,
+        &config.provider_interface,
+        declaration.generation,
+    )?)? != before
+    {
+        return Err("writer Run differs from its declared generation".into());
+    }
+    bytes(&writer_generation(
+        binding,
+        &config.provider_interface,
+        generation,
+    )?)
+}
+
+fn writer_generation(
+    binding: &WriterRunBinding,
+    provider: &InterfaceId,
+    generation: u64,
+) -> Result<Value, String> {
+    let mut next = binding.initial_record.clone();
+    if generation == 0 {
+        return Ok(next);
+    }
+    next["interface_state"][provider.as_str()][DECLARATION]["generation"] = json!(generation);
+    let mut ids = Vec::new();
+    for cp in next["checkpoints"]
+        .as_array_mut()
+        .ok_or("writer checkpoints absent")?
+    {
+        let id = format!(
+            "{}_{}",
+            cp["id"].as_str().ok_or("writer id absent")?,
+            generation
+        );
+        cp["id"] = json!(id);
+        cp["trace"] = json!(format!("trace:{}:{id}", binding.run));
+        ids.push(id);
+    }
+    next["active_checkpoints"] = json!(ids);
+    Ok(next)
+}
+
+impl OrderedArguments {
+    pub fn targets(&self, path: &Path) -> bool {
+        self.writes.get(1).is_some_and(|entry| entry.path == path)
+    }
+
+    pub fn checked_call(
+        &self,
+        writer: &CheckedRunWriter,
+        snapshot: &[u8],
+        path: &Path,
+    ) -> Result<(Vec<u8>, FileWriteCallArguments), String> {
+        let [advance, edit] = self.writes.as_slice() else {
+            return Err(
+                "provider ordered write needs exactly its writer and target entries".into(),
+            );
+        };
+        if !self.ordered
+            || edit.path != path
+            || !path.is_absolute()
+            || advance.path.parent() != path.parent()
+            || advance.expected_before_content.as_bytes() != snapshot
+        {
+            return Err(
+                "provider ordered write changed its exact paths or admitted writer preimage".into(),
+            );
+        }
+        for entry in &self.writes {
+            if entry.expected_before_hash
+                != ContentHash::of_bytes(entry.expected_before_content.as_bytes()).to_hex()
+            {
+                return Err("ordered write preimage hash differs from its pinned content".into());
+            }
+        }
+        let before = edit.expected_before_content.as_bytes().to_vec();
+        let record = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
+        let config = owner_config(&record, writer)?;
+        let bound = config
+            .writer_run
+            .as_ref()
+            .ok_or("ordered call target has no declared writer Run")?;
+        bound.roles(&record, &writer.owner, &config.checkpoints)?;
+        if advance.path.file_name().and_then(|s| s.to_str()) != Some(&format!("{}.json", bound.run))
+            || edit.path.file_name().and_then(|s| s.to_str())
+                != Some(&format!("{}.json", record.id))
+            || next_writer(snapshot, &config)? != advance.content.as_bytes()
+        {
+            return Err("ordered call does not author exactly the next writer generation".into());
+        }
+        let prospective =
+            RunRecord::from_bytes(edit.content.as_bytes()).map_err(|e| e.to_string())?;
+        if record.id != prospective.id
+            || record.ee != prospective.ee
+            || record.worker != prospective.worker
+        {
+            return Err("ordered call changes its target identity".into());
+        }
+        let patch = json_patch::diff(
+            &serde_json::from_slice(&before).map_err(|e| e.to_string())?,
+            &serde_json::from_str(&edit.content).map_err(|e| e.to_string())?,
+        );
+        let arguments = FileWriteCallArguments {
+            path: edit.path.clone(),
+            patch,
+            expected_before_hash: ContentHash::of_bytes(&before).to_hex(),
+            expected_after_hash: ContentHash::of_bytes(edit.content.as_bytes()).to_hex(),
+        };
+        if apply_run_json_patch(&before, &arguments.patch, &arguments.expected_after_hash)?
+            != edit.content
+        {
+            return Err("ordered call target is not the exact canonical patched JSON".into());
+        }
+        Ok((before, arguments))
+    }
+
+    pub fn checked_result(
+        &self,
+        writer: &CheckedRunWriter,
+        metadata: &InvocationMetadata,
+        snapshot: &[u8],
+        result: &ToolResultArtifact,
+    ) -> Result<bool, String> {
+        let [advance, edit] = self.writes.as_slice() else {
+            return Err("ordered result lost its two exact writes".into());
+        };
+        let record = RunRecord::from_bytes(snapshot).map_err(|e| e.to_string())?;
+        let runtime = metadata
+            .runtime
+            .as_ref()
+            .ok_or("ordered result has no runtime coordinate")?;
+        let cp = record
+            .checkpoint(&runtime.checkpoint)
+            .ok_or("ordered result checkpoint absent")?;
+        let inbound = cp
+            .interface_binding
+            .clone()
+            .ok_or("ordered result inbound absent")?;
+        if snapshot != advance.content.as_bytes()
+            || runtime.run != record.id
+            || runtime.ee != record.ee
+            || runtime.worker != record.worker
+            || runtime.interface != writer.owner
+            || runtime.epoch != cp.epoch.0
+            || !record.active_checkpoints.contains(&cp.id)
+            || inbound.interface != writer.door
+            || !cp.outbound_interfaces().eq([&writer.owner])
+            || metadata.checkpoint_binding_policy.as_ref()
+                != Some(&CheckpointBindingPolicySnapshot {
+                    inbound,
+                    outbound: cp.outbound_interface_bindings.clone(),
+                })
+            || metadata.outbound_interface_bindings != [writer.owner.clone()]
+            || metadata.verification_failure.is_some()
+            || !metadata.required_verified_artifacts.is_empty()
+            || !cp.required_verified_artifacts.is_empty()
+            || !artifact_refs_match_bindings(&metadata.artifact_binding_refs, &cp.artifact_bindings)
+            || !metadata.checkpoint_admission.as_ref().is_some_and(|a| {
+                a.complete
+                    && a.artifact_label == writer.result_label
+                    && a.required_artifact_labels.is_empty()
+            })
+        {
+            return Err(
+                "ordered result differs from its newly admitted exact writer checkpoint".into(),
+            );
+        }
+        if result.tool != writer.tool || result.label != writer.result_label {
+            return Err("ordered result changed tool or label".into());
+        }
+        let body = if result.ok {
+            if result.error.is_some() {
+                return Err("successful ordered result carries an error".into());
+            }
+            result.body.as_ref().ok_or("ordered result body absent")?
+        } else {
+            let error = result.error.as_ref().ok_or("ordered result error absent")?;
+            if result.body.is_some() || error.code != "file_write_incomplete" {
+                return Err(format!(
+                    "ordered file write failed without complete effect evidence: {}",
+                    error.message
+                ));
+            }
+            error
+                .details
+                .as_ref()
+                .and_then(|d| d.get("file_write"))
+                .ok_or("ordered failure has no partial effect evidence")?
+        };
+        let body: OrderedResult =
+            serde_json::from_value(body.clone()).map_err(|e| e.to_string())?;
+        if body.result != "ordered_file_writes" || body.writes.len() != 2 {
+            return Err("ordered result has a different operation or entry count".into());
+        }
+        for (entry, receipt) in [advance, edit].into_iter().zip(&body.writes) {
+            if receipt.path != entry.path
+                || receipt.before_hash.as_deref()
+                    != Some(
+                        &ContentHash::of_bytes(entry.expected_before_content.as_bytes()).to_hex(),
+                    )
+                || receipt.after_hash != ContentHash::of_bytes(entry.content.as_bytes()).to_hex()
+                || receipt.bytes != entry.content.len() as u64
+            {
+                return Err("ordered result changed a pinned entry".into());
+            }
+            if receipt.outcome == "applied"
+                && (receipt.observed_hash.as_ref() != Some(&receipt.after_hash)
+                    || receipt.error.is_some())
+            {
+                return Err("ordered applied result lacks exact readback evidence".into());
+            }
+        }
+        if body.writes[0].outcome != "applied" {
+            return Err("ordered writer Run was not advanced".into());
+        }
+        match body.writes[1].outcome.as_str() {
+            "applied" if result.ok => Ok(true),
+            "refused" if !result.ok && body.writes[1].error.is_some() => Ok(false),
+            _ => Err(
+                "ordered target effect remains uncertain; no retry is authorized by this receipt"
+                    .into(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct WriterHistory {
+    binding: WriterRunBinding,
+    next_seq: u64,
+    current: Vec<u8>,
+    pending: Option<(String, OrderedArguments, Movement)>,
+    completed: BTreeMap<String, (u64, bool)>,
+    applied_calls: BTreeMap<String, u64>,
+    cursor: Option<(u64, u64, ContentHash)>,
+}
+
+fn writer(config: &RunAuthoringConfig) -> Result<CheckedRunWriter, String> {
+    Ok(CheckedRunWriter {
+        owner: config.provider_interface.clone(),
+        source: config.authoring_source_interface.clone(),
+        door: config
+            .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?
+            .interface()
+            .clone(),
+        tool: config.file_write_tool.clone(),
+        call_label: config.file_write_label.clone(),
+        result_label: config.file_write_result_label.clone(),
+    })
+}
+
+fn history(
+    ctx: &InterfaceLiftContext,
+    cache: &Mutex<BTreeMap<RunId, WriterHistory>>,
+    config: &RunAuthoringConfig,
+) -> Result<WriterHistory, String> {
+    let binding = config
+        .writer_run
+        .as_ref()
+        .ok_or("writer Run not selected")?;
+    let mut cache = cache.lock().map_err(|_| "writer evidence cache poisoned")?;
+    let saved = cache.entry(binding.run.clone()).or_insert(WriterHistory {
+        binding: binding.clone(),
+        next_seq: 0,
+        current: bytes(&binding.initial_record)?,
+        pending: None,
+        completed: BTreeMap::new(),
+        applied_calls: BTreeMap::new(),
+        cursor: None,
+    });
+    if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record {
+        return Err("writer evidence cache declaration changed".into());
+    }
+    let mut current = saved.clone();
+    let limits = ctx.required_host_io_limits()?;
+    let evidence = CheckedRunEvidence {
+        movements_path: &ctx.movements_path,
+        ledger_index_path: &ctx.ledger_index_path,
+        blobs_dir: &ctx.blobs_dir,
+        max_control_frame_bytes: limits.max_control_frame_bytes,
+        max_manifest_bytes: limits.max_manifest_bytes,
+        max_payload_bytes: limits.max_payload_bytes,
+    };
+    let mut reader = FileCheckedRunReader::open(&evidence, None)?;
+    if let Some((start, end, hash)) = current.cursor {
+        if reader
+            .reader
+            .get_ref()
+            .metadata()
+            .map_err(|e| e.to_string())?
+            .len()
+            < end
+        {
+            return Err("writer evidence ledger was truncated".into());
+        }
+        reader
+            .reader
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| e.to_string())?;
+        let BoundedLedgerRow::Complete(row) =
+            read_bounded_ledger_row(&mut reader.reader, limits.max_control_frame_bytes)?
+        else {
+            return Err("writer evidence cursor lost its durable boundary".into());
+        };
+        if ContentHash::of_bytes(&row) != hash
+            || reader.reader.stream_position().map_err(|e| e.to_string())? != end
+        {
+            return Err("writer evidence boundary changed".into());
+        }
+        reader.next_seq = current.next_seq;
+    }
+    let mut last_start = None;
+    let declared = writer(config)?;
+    let target_path = ctx
+        .root_slot("run_records_root")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+        .join(format!("{}.json", config.run));
+    loop {
+        let seq = reader.next_seq;
+        let start = reader.reader.stream_position().map_err(|e| e.to_string())?;
+        reader.snapshot_bytes = 0;
+        let Some(movement) = reader.movement(seq)? else {
+            break;
+        };
+        last_start = Some(start);
+        current.next_seq = seq
+            .checked_add(1)
+            .ok_or("writer evidence sequence overflow")?;
+        if movement.kind != MovementKind::InterfaceOutbound {
+            continue;
+        }
+        let call_edge = movement.from == Endpoint::Interface(declared.source.clone())
+            && movement.to == Endpoint::Interface(declared.door.clone());
+        let result_edge = movement.from == Endpoint::Interface(declared.door.clone())
+            && movement.to == Endpoint::Interface(declared.owner.clone());
+        if !call_edge && !result_edge {
+            continue;
+        }
+        let metadata = movement
+            .invocation_metadata
+            .as_ref()
+            .and_then(|m| m.invocation())
+            .ok_or("writer movement metadata absent")?;
+        let runtime = metadata
+            .runtime
+            .as_ref()
+            .ok_or("writer movement coordinate absent")?;
+        if runtime.run != binding.run {
+            continue;
+        }
+        let reference = movement
+            .artifact
+            .as_ref()
+            .ok_or("writer movement artifact absent")?;
+        let (manifest, payload) = reader.artifact(reference)?;
+        let hash = runtime
+            .run_record_hash
+            .as_deref()
+            .and_then(ContentHash::from_hex)
+            .ok_or("writer snapshot hash absent")?;
+        let snapshot = reader.snapshot(&hash)?;
+        if ContentHash::of_bytes(&snapshot) != hash {
+            return Err("writer snapshot integrity failed".into());
+        }
+        if call_edge {
+            let call: octopus_tool_handlers::ToolCallArtifact =
+                serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+            if manifest.label != declared.call_label
+                || call.tool != declared.tool
+                || current.pending.is_some()
+                || snapshot != current.current
+            {
+                return Err("writer call changed its declared route, sequential generation or proven preimage".into());
+            }
+            let args: OrderedArguments =
+                serde_json::from_value(call.arguments).map_err(|e| e.to_string())?;
+            let (before, _) = args.checked_call(&declared, &snapshot, &target_path)?;
+            let before = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
+            if owner_config(&before, &declared)?
+                .writer_run
+                .as_ref()
+                .is_none_or(|bound| {
+                    bound.run != current.binding.run
+                        || bound.initial_record != current.binding.initial_record
+                })
+            {
+                return Err("writer call target declared a different writer Run".into());
+            }
+            let pinned = RunRecord::from_bytes(&snapshot).map_err(|e| e.to_string())?;
+            let cp = pinned
+                .checkpoint(&runtime.checkpoint)
+                .ok_or("writer call checkpoint absent")?;
+            let template = config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringCall)?;
+            if runtime.ee != pinned.ee
+                || runtime.worker != config.worker
+                || runtime.interface != declared.door
+                || !pinned.active_checkpoints.contains(&cp.id)
+                || runtime.epoch != cp.epoch.0
+                || !checkpoint_record_matches_template(cp, template, &pinned.id)
+                || !metadata_matches_checkpoint(metadata, template)
+                || !artifact_refs_match_bindings(
+                    &metadata.artifact_binding_refs,
+                    &cp.artifact_bindings,
+                )
+                || !metadata.grant.tools.contains(&declared.tool)
+                || metadata.grant.hard_blocked_tools.contains(&declared.tool)
+                || !metadata
+                    .grant
+                    .interfaces
+                    .contains(&declared.door.to_string())
+                || metadata.verification_failure.is_some()
+                || !metadata
+                    .checkpoint_admission
+                    .as_ref()
+                    .is_some_and(|a| a.complete && a.artifact_label == declared.call_label)
+            {
+                return Err(
+                    "writer call differs from its exact admitted checkpoint or grant".into(),
+                );
+            }
+            current.pending = Some((
+                call.correlation_id
+                    .ok_or("writer call correlation absent")?,
+                args,
+                movement,
+            ));
+        } else {
+            let result: ToolResultArtifact =
+                serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+            let (correlation, args, call) = current
+                .pending
+                .take()
+                .ok_or("writer result has no preceding admitted call")?;
+            if result.correlation_id.as_ref() != Some(&correlation)
+                || manifest.label != declared.result_label
+            {
+                return Err("writer result correlation or label differs".into());
+            }
+            let applied = args.checked_result(&declared, metadata, &snapshot, &result)?;
+            let call_seq = call.seq.0;
+            if applied {
+                let transition = CheckedRunTransition {
+                    writer: declared.clone(),
+                    before: args.writes[1].expected_before_content.as_bytes().to_vec(),
+                    after: args.writes[1].content.as_bytes().to_vec(),
+                    call,
+                    result: movement.clone(),
+                };
+                validate_checked_owner_transition(&transition)?;
+                generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
+                validate_verified_input_transition(&mut reader, &transition)?;
+            }
+            current.current = args.writes[0].content.as_bytes().to_vec();
+            let hash = ContentHash::of_bytes(args.writes[1].content.as_bytes()).to_hex();
+            if applied {
+                current.applied_calls.insert(hash.clone(), call_seq);
+            }
+            if current.completed.insert(hash, (seq, applied)).is_some() {
+                return Err("writer repeated an already resolved target attempt".into());
+            }
+        }
+    }
+    if let Some(start) = last_start {
+        reader
+            .reader
+            .seek(std::io::SeekFrom::Start(start))
+            .map_err(|e| e.to_string())?;
+        let BoundedLedgerRow::Complete(row) =
+            read_bounded_ledger_row(&mut reader.reader, limits.max_control_frame_bytes)?
+        else {
+            return Err("writer evidence boundary is incomplete".into());
+        };
+        current.cursor = Some((
+            start,
+            reader.reader.stream_position().map_err(|e| e.to_string())?,
+            ContentHash::of_bytes(&row),
+        ));
+    }
+    *saved = current.clone();
+    Ok(current)
+}
+
+pub(super) fn success_evidence(
+    ctx: &InterfaceLiftContext,
+    session: &ProviderHandoffSession,
+    config: &RunAuthoringConfig,
+    authored: &AuthoredRun,
+    after_seq: Option<u64>,
+) -> Result<Option<u64>, String> {
+    Ok(history(ctx, &session.writer_history, config)?
+        .completed
+        .get(&authored.after_hash)
+        .filter(|(seq, ok)| *ok && after_seq.is_none_or(|after| *seq > after))
+        .map(|(seq, _)| *seq))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedCall {
+    tool: String,
+    arguments: OrderedArguments,
+    correlation_id: String,
+}
+
+struct Attempt {
+    manifest: InterfaceArtifactFile,
+    args: OrderedArguments,
+    authored: AuthoredRun,
+    generation: u64,
+}
+
+impl ProviderOutputHandoff {
+    fn writer_attempts(&self, authoring_generation: u64) -> Result<Vec<Attempt>, String> {
+        let paths = self.session.writer_call_generations.lock()
+            .map_err(|_| "provider writer call index is poisoned".to_string())?
+            .candidates(&self.hand_in_root, authoring_generation)?;
+        let declared = writer(&self.config)?;
+        let prefix = format!("provider-writer-run:{}:", self.config.run);
+        let limits = self.ctx.required_host_io_limits()?;
+        let mut attempts = Vec::new();
+        for path in paths {
+            let manifest = InterfaceArtifactFile::new(path.clone()).map_err(|e| e.to_string())?;
+            let snapshot = manifest
+                .read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+                .map_err(|e| e.to_string())?;
+            let value = (snapshot.manifest.label == self.config.file_write_label)
+                .then(|| serde_json::from_slice::<Value>(&snapshot.payload_bytes).ok())
+                .flatten()
+                .filter(|value| {
+                    value["correlation_id"]
+                        .as_str()
+                        .is_some_and(|s| s.starts_with(&prefix))
+                });
+            let declared_generation = value.as_ref().map(|value| {
+                value["correlation_id"]
+                    .as_str()
+                    .and_then(|s| s.strip_prefix(&prefix))
+                    .and_then(|s| s.split(':').next())
+                    .and_then(|s| s.parse::<u64>().ok())
+            });
+            if !matches!(declared_generation, Some(None)) {
+                self.session
+                    .writer_call_generations
+                    .lock()
+                    .map_err(|_| "provider writer call index is poisoned".to_string())?
+                    .record(path, declared_generation.flatten());
+            }
+            let Some(value) = value else {
+                continue;
+            };
+            if declared_generation.flatten().is_some_and(|generation| generation != authoring_generation) {
+                continue;
+            }
+            let call: OrderedCall = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            if call.tool != self.config.file_write_tool {
+                return Err("private ordered call changed its tool".into());
+            }
+            let first = call
+                .arguments
+                .writes
+                .first()
+                .ok_or("private ordered call has no writer")?;
+            let (before, args) = call.arguments.checked_call(
+                &declared,
+                first.expected_before_content.as_bytes(),
+                &self.run_path,
+            )?;
+            let prospective = call.arguments.writes[1].content.clone();
+            let record =
+                RunRecord::from_bytes(prospective.as_bytes()).map_err(|e| e.to_string())?;
+            let pending = persisted_pending_handoff(&record, &self.config.provider_interface)?
+                .ok_or("private ordered call lost pending outputs")?;
+            let generation = optional_u64(
+                record
+                    .interface_state
+                    .get(&self.config.provider_interface)
+                    .ok_or("private call provider state absent")?,
+                "authoring_generation",
+            )?;
+            let writer_record =
+                RunRecord::from_bytes(first.content.as_bytes()).map_err(|e| e.to_string())?;
+            let writer_generation =
+                target(&writer_record, &self.config.provider_interface)?.generation;
+            if call.correlation_id != format!("{prefix}{generation}:{writer_generation}") {
+                return Err(
+                    "private ordered call correlation differs from its exact generations".into(),
+                );
+            }
+            if generation != authoring_generation {
+                continue;
+            }
+            validate_bound_run_authoring_topology(&record, &self.config, None)?;
+            let result_template = self
+                .config
+                .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
+            let result = writer_record
+                .checkpoints
+                .iter()
+                .find(|cp| {
+                    checkpoint_record_matches_template(cp, result_template, &writer_record.id)
+                })
+                .ok_or("writer result checkpoint absent")?;
+            let authored = AuthoredRun {
+                content: prospective,
+                patch: args.patch,
+                before_hash: ContentHash::of_bytes(&before).to_hex(),
+                after_hash: args.expected_after_hash,
+                correlation_id: format!("provider-run-authoring:{}:{generation}", self.config.run),
+                authoring_result_checkpoint: result.id.clone(),
+                authoring_result_interface: declared.door.clone(),
+                pending_handoff: pending,
+            };
+            attempts.push(Attempt {
+                manifest,
+                args: call.arguments,
+                authored,
+                generation: writer_generation,
+            });
+        }
+        attempts.sort_by_key(|a| a.generation);
+        if attempts
+            .windows(2)
+            .any(|pair| pair[0].generation == pair[1].generation)
+        {
+            return Err("private writer has competing attempts for one generation".into());
+        }
+        Ok(attempts)
+    }
+
+    pub(super) fn recover_writer_attempt(
+        &self,
+        record: &RunRecord,
+        record_bytes: &[u8],
+    ) -> Result<AuthoringAttemptRecovery, String> {
+        let generation = optional_u64(
+            record
+                .interface_state
+                .get(&self.config.provider_interface)
+                .ok_or("provider recovery state absent")?,
+            "authoring_generation",
+        )?;
+        let expected = generation
+            .checked_add(1)
+            .ok_or("provider recovery generation overflow")?;
+        let attempts = self.writer_attempts(expected)?;
+        let mut selected = None;
+        for attempt in attempts {
+            if correlation_generation(&record.id, &attempt.authored.correlation_id)? != expected {
+                continue;
+            }
+            let before =
+                RunRecord::from_bytes(attempt.args.writes[1].expected_before_content.as_bytes())
+                    .map_err(|e| e.to_string())?;
+            if before.interface_state.get(&self.config.provider_interface)
+                != record.interface_state.get(&self.config.provider_interface)
+            {
+                let protected = output_connections::protected_record(&before, record_bytes, &self.config)?
+                    .ok_or("private writer recovery changed provider-owned target state")?;
+                let protected = RunRecord::from_bytes(&protected).map_err(|error| error.to_string())?;
+                if before.interface_state.get(&self.config.provider_interface)
+                    != protected.interface_state.get(&self.config.provider_interface) {
+                    return Err("private writer recovery changed protected provider-owned target state".into());
+                }
+            }
+            if let Some(previous) = &selected {
+                let previous: &Attempt = previous;
+                if history(&self.ctx, &self.session.writer_history, &self.config)?
+                    .completed
+                    .get(&previous.authored.after_hash)
+                    .is_none_or(|(_, ok)| *ok)
+                {
+                    return Err("writer recovery has an unexplained overlapping attempt".into());
+                }
+            }
+            selected = Some(attempt);
+        }
+        match selected {
+            None => Ok(AuthoringAttemptRecovery::None),
+            Some(attempt)
+                if attempt.authored.pending_handoff.source_movement_seq
+                    != self.source_movement_seq =>
+            {
+                Ok(AuthoringAttemptRecovery::OtherSource(
+                    attempt.authored.pending_handoff.source_movement_seq,
+                ))
+            }
+            Some(attempt) => Ok(AuthoringAttemptRecovery::InFlight(
+                ValidatedAuthoringAttempt {
+                    manifest_path: attempt.manifest.manifest_path().to_path_buf(),
+                    provider_source_movement_seq: self.source_movement_seq,
+                    authored: attempt.authored,
+                },
+            )),
+        }
+    }
+
+    pub(super) async fn install_with_writer_run(
+        &self,
+        state: &mut HandoffState,
+        authored: &AuthoredRun,
+    ) -> Result<AuthoredRunInstallOutcome, String> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(self.config.result_timeout_ms))
+            .ok_or("writer deadline overflow")?;
+        let mut planned = authored.clone();
+        loop {
+            if Instant::now() >= deadline {
+                return Err("provider ordered file write awaits its admitted result".into());
+            }
+            let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
+            let attempts = self.writer_attempts(correlation_generation(
+                &self.config.run,
+                &planned.correlation_id,
+            )?)?;
+            let existing = attempts
+                .into_iter()
+                .find(|a| a.authored.after_hash == planned.after_hash);
+            if let Some((_, true)) = progress.completed.get(&planned.after_hash) {
+                state.run_record_bytes = planned.content.as_bytes().to_vec();
+                state.run_record_evidence_seq =
+                    progress.applied_calls.get(&planned.after_hash).copied();
+                return Ok(AuthoredRunInstallOutcome::Installed);
+            }
+            if let Some((_, false)) = progress.completed.get(&planned.after_hash) {
+                let attempt = existing.ok_or("refused ordered write lost its private call")?;
+                let before = attempt.args.writes[1].expected_before_content.as_bytes();
+                let remaining = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                let (current, chain) = await_checked_evidence(&self.ctx, remaining, || {
+                    checked_live_run_advance(
+                        &self.ctx,
+                        &self.run_path,
+                        before,
+                        self.source_movement_seq,
+                        &self.config,
+                    )
+                })
+                .await?;
+                let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+                let routing_only = output_connections::protected_record(&original, &current, &self.config)?
+                    .is_some_and(|protected| ContentHash::of_bytes(&protected) == ContentHash::of_bytes(before));
+                if (chain.is_empty() && !routing_only) || chain
+                        .iter()
+                        .any(|t| t.writer.owner == self.config.provider_interface)
+                {
+                    return Err(
+                        "refused target write has no exact independent checked advance".into(),
+                    );
+                }
+                planned =
+                    authoring_retry::rebase_authored_run(before, &current, &planned, &self.config)?;
+                state.run_record_bytes = current;
+                if let Some(last) = chain.last() {
+                    state.run_record_evidence_seq = Some(last.call.seq.0);
+                }
+                continue;
+            }
+            let manifest = if let Some(attempt) = existing {
+                attempt.manifest
+            } else {
+                if progress.pending.is_some() {
+                    return Err("writer Run already has a different admitted attempt".into());
+                }
+                let binding = self
+                    .config
+                    .writer_run
+                    .as_ref()
+                    .ok_or("writer binding absent")?;
+                let path = self
+                    .run_path
+                    .parent()
+                    .ok_or("run parent absent")?
+                    .join(format!("{}.json", binding.run));
+                if std::fs::read(&path).map_err(|e| e.to_string())? != progress.current {
+                    return Err("writer Run changed without admitted ordered-write evidence".into());
+                }
+                if ContentHash::of_bytes(&state.run_record_bytes).to_hex() != planned.before_hash {
+                    return Err("writer lost its planned target preimage".into());
+                }
+                let next = next_writer(&progress.current, &self.config)?;
+                let next_record = RunRecord::from_bytes(&next).map_err(|e| e.to_string())?;
+                let generation = target(&next_record, &self.config.provider_interface)?.generation;
+                let call = OrderedCall {
+                    tool: self.config.file_write_tool.clone(),
+                    correlation_id: format!(
+                        "provider-writer-run:{}:{}:{generation}",
+                        self.config.run,
+                        correlation_generation(&self.config.run, &planned.correlation_id)?
+                    ),
+                    arguments: OrderedArguments {
+                        ordered: true,
+                        writes: vec![
+                            OrderedEntry {
+                                path,
+                                content: String::from_utf8(next).map_err(|e| e.to_string())?,
+                                expected_before_hash: ContentHash::of_bytes(&progress.current)
+                                    .to_hex(),
+                                expected_before_content: String::from_utf8(progress.current)
+                                    .map_err(|e| e.to_string())?,
+                            },
+                            OrderedEntry {
+                                path: self.run_path.clone(),
+                                content: planned.content.clone(),
+                                expected_before_hash: ContentHash::of_bytes(
+                                    &state.run_record_bytes,
+                                )
+                                .to_hex(),
+                                expected_before_content: String::from_utf8(
+                                    state.run_record_bytes.clone(),
+                                )
+                                .map_err(|e| e.to_string())?,
+                            },
+                        ],
+                    },
+                };
+                InterfaceArtifactFile::write(
+                    &self.hand_in_root,
+                    &self.config.file_write_label,
+                    &serde_json::to_vec(&call).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?
+            };
+            if progress.pending.is_none() {
+                let verdict = self
+                    .send_authoring_manifest(
+                        &std::fs::read(manifest.manifest_path()).map_err(|e| e.to_string())?,
+                    )
+                    .await?;
+                if let DeliveryVerdict::Refused { reason, detail } = verdict {
+                    if reason != octopus_interfaces::RefusedReason::CheckpointSpent {
+                        return Err(format!(
+                            "writer hand-in refused {}: {detail}",
+                            reason.as_str()
+                        ));
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}

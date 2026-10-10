@@ -1,0 +1,162 @@
+name: quality
+
+on:
+  push: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install client dependencies without native rebuild
+        working-directory: app
+        run: npm ci --ignore-scripts
+
+      - name: Client source and contract checks
+        working-directory: app
+        run: |
+          npx tsc --noEmit --incremental false
+          npm run check:design-system
+          npm run test:chat-trace-contracts
+          npm run test:chat-composer-contracts
+          npm run test:agent-templates
+          npm run test:files-contracts
+          npm run test:workspace-setup
+          node scripts/test-home-experience.cjs
+          node scripts/test-home-voice-contracts.cjs
+          node scripts/test-task-environment-summary.cjs
+          node scripts/test-client-turn-queue.cjs
+          node scripts/test-client-artifact-delivery.cjs
+          node scripts/test-command-delivery.cjs
+          node scripts/test-steering-input-receipts.cjs
+          node scripts/test-chat-receipt-state.cjs
+          node scripts/test-chat-message-projection.cjs
+          node scripts/test-command-activity.cjs
+
+      - name: Client package and lifecycle contracts
+        working-directory: app
+        run: |
+          node scripts/test-local-packages.cjs
+          node scripts/test-local-packages.cjs --consent-recipe
+          node scripts/test-client-setup.cjs
+          node scripts/test-client-extensions.cjs
+
+      - name: Client interaction and file contracts
+        working-directory: app
+        run: |
+          node scripts/test-client-navigation.cjs
+          node scripts/test-client-context-menu.cjs
+          node scripts/test-client-interface-contracts.cjs
+          node scripts/test-client-window-close.cjs
+          node scripts/test-model-picker.cjs
+          node scripts/test-model-picker-dom.mjs
+          node scripts/test-agent-selection.cjs
+          node scripts/test-files-engine.cjs
+          node scripts/test-files-lifecycle.cjs
+          node scripts/test-mark-activity.cjs
+          node scripts/test-scheduled-ui.cjs
+          node scripts/test-markdown-presentation.mjs
+
+      - name: Interface package source contracts
+        run: |
+          node registry/interface/world_operator_chat/test_client_outbound.cjs
+          node registry/interface/world_operator_chat/test_planned_artifact_write.cjs
+          node registry/interface/world_whatsapp/bridge/allowlist.test.mjs
+          node registry/interface/world_whatsapp/bridge/redaction.test.mjs
+          node registry/worker_environment_kind/desktop_session/packages/octopus-system-gui-env/native/configure-transport.test.cjs
+          node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/setup-host.test.cjs
+          node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/engine-mode.test.cjs
+          node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/standard-history.test.cjs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux audio headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Public source boundary
+        run: node app/scripts/check-public-source.cjs
+
+      - name: Workspace check (fail-closed, no degraded compile)
+        run: cargo check --workspace --all-targets --keep-going
+
+      - name: Policy formation and ledger proof contracts
+        run: |
+          cargo test -p octopus-policy --lib
+          cargo test -p octopus-ledger-index --lib
+
+      - name: Heart — runtime checkpoint and exactly-once contracts
+        run: cargo test -p octopus-runtime --lib
+
+      - name: Home bindings and instruction context
+        run: |
+          cargo test -p octopus-operator-chat-client --lib real_registry_home_plan_exports_authoring_and_exact_policy_requirements
+          cargo test -p octopus-model-context-render --test instructions
+
+  native-contracts:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install client dependencies without native rebuild
+        working-directory: app
+        run: npm ci --ignore-scripts
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Home admission, stop and provider recovery
+        run: |
+          cargo test -p octopus-operator-chat-client --lib
+          cargo test -p octopus-provider-run-authoring --lib
+
+      - name: Voice lifecycle and evidence contracts
+        run: cargo test -p octopus-realtime-signaling --lib
+
+      - name: Prepare the declared managed provider executable
+        run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$PWD/registry/interface/world_provider_codex/packages/bin"
+
+      - name: Package and fresh Home setup through the real topology planner
+        run: |
+          cargo build --locked -p octopus-operator-chat-client --bin octopus-operator-chat-topology -p octopus-provider-codex --bin octopus-input-intake-life
+          mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
+          install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
+          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology
+          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://octopus.local/schemas/world_cron/one_shot_state.schema.json",
+  "title": "World cron one-shot delivery state",
+  "description": "Interface-private receipt at OCTOPUS_VAR_DIR/one-shot/<due_unix_ns>.json. A prepared receipt is not admission proof. An admitted receipt requires the exact InterfaceArrival ledger row at admitted_seq, from this exact interface, carrying artifact id artifact_label:manifest_hash. Completion means time-artifact admission, not completion of the receiving task. An admitted occurrence has no next due time or recurrence.",
+  "type": "object",
+  "required": ["schema_version", "schedule_fingerprint", "due_unix_ns", "status", "artifact_label", "manifest_hash", "admitted_seq"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "schedule_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "due_unix_ns": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,18})$",
+      "description": "Exact Unix nanoseconds parsed from schedule.due_at, encoded as a decimal string for lossless JavaScript reads; also the receipt filename stem. Do not convert through Number."
+    },
+    "status": { "enum": ["prepared", "admitted"] },
+    "artifact_label": { "const": "cron.current_time" },
+    "manifest_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "admitted_seq": { "type": ["integer", "null"], "minimum": 0 }
+  },
+  "allOf": [{
+    "if": { "properties": { "status": { "const": "prepared" } } },
+    "then": { "properties": { "admitted_seq": { "type": "null" } } },
+    "else": { "properties": { "admitted_seq": { "type": "integer", "minimum": 0 } } }
+  }],
+  "additionalProperties": false
+}

@@ -1,0 +1,248 @@
+# Desktop client
+
+> **The desktop client is optional.** The Octopus runtime does not depend on
+> this app. You can run it without a GUI or write a different client over the
+> same interfaces, descriptors, and recorded evidence. The screens below are
+> one presentation of that architecture, not required runtime components.
+
+The Octopus desktop client currently supports **macOS 14 and later**. Its
+interaction design is inspired by the ChatGPT desktop app: a conversation,
+voice controls, a sidebar, and work opened beside the conversation. It is an
+Octopus client over Octopus runs, interfaces, and policy. Signing in with
+ChatGPT connects a model provider; it does not make ChatGPT the runtime.
+
+Start with [Getting started](getting-started.md) to build and set up the app.
+The client is a research preview; a capability appearing in a catalog does not
+mean it is installed, configured, or available to the current task.
+Screenshots show a development installation, including its incomplete setups.
+
+## Where to go
+
+| Destination | Use it for |
+| --- | --- |
+| **Home** | The ongoing conversation with Octopus: text, voice calls, current activity, and widgets. |
+| **Tasks** | Work grouped into Projects, reusable Agents, individual tasks, scheduled work, and archived tasks. |
+| **Dashboard** | Inspect Topology, Registry, Worker Environments, and Movements. These views explain what is running and what crossed an interface. |
+| **Inbox** | Review activity and requests that need attention, then open the associated work. |
+| **Applications** | Install and configure providers, connectors, plugins, and context packages; choose where they are available. |
+| **Drivers** | Install and configure the environments in which tools act: files, worktrees, browsers, desktops, containers, and remote execution. |
+
+The avatar menu offers **Settings** and **Log out**. Log out locks local client
+access and returns to the [password screen](getting-started.md#first-setup);
+it does not sign out of the model provider. Unlock with your password, or
+Touch ID if you enabled it. **Surfaces** controls additional views;
+the primary navigation destinations stay available. Workspace views support
+split panes, so a conversation and its evidence can remain visible together.
+
+### Home: conversation, Activity, and voice
+
+Home presents one continuing run. Use the composer for text and attachments.
+Open **Activity** for the conversation and the detailed trace of its work.
+Widgets can show task progress, upcoming work, or other configured sources;
+their visibility and positions are client presentation choices.
+
+![Home conversation beside a Files pane showing a local client configuration](images/client/home-files.png)
+
+Here, Files is an operator view of local configuration. Opening a file beside
+Home does not automatically give the run access to it; model access still
+requires the appropriate bindings and granted tools.
+
+There are two distinct audio features:
+
+- **Dictation** transcribes speech into the active composer. It prepares text
+  locally in the client flow; transcription may call the configured provider.
+  It does not submit an Octopus message until you send the text.
+- **A voice call** connects the Home run through its declared voice interface.
+  The controls include microphone mute, speaker output, device selection,
+  transcript, and ending the call. Calls require a configured voice provider
+  and microphone permission; text-provider sign-in alone is not enough.
+
+**Settings → Voice & Audio** contains device choices, dictation settings and
+dictionary, and the floating call controls used outside Home. A selectable
+synthesized voice is offered only when the speech interface declares one.
+
+Audio remains part of the artifact contract: microphone or speech interfaces
+produce audio or transcript artifacts; receiving interfaces decide how to
+play or interpret them. An audio artifact can reference binary media without
+turning its contents into JSON. The kernel does not decode audio.
+
+### Tasks: Project → Agent → task
+
+A **Project** supplies the goal and permission boundary. An **Agent** is a
+reusable worker template in that project: its pin, capability ceiling, and
+defaults for authoring a task. Creating an Agent does not start work. A **task**
+is a run created from that template; subsequent messages continue that run.
+
+For example, to work on a repository:
+
+1. Choose the Project and configure its folder and Drivers.
+2. Use **Create agent**, select an offered model, and review capabilities.
+3. Select that Agent in the task composer and describe the change.
+4. Inspect the resulting files, tool trace, and changes before accepting them.
+
+A workspace Driver operates in the chosen folder. A worktree Driver supplies a
+separate Git worktree. Choose according to where the work should happen;
+creating a task does not itself promise branch isolation.
+
+Task environment panels can expose files, a terminal, changes, a browser,
+desktop, or connection details. The available panels come from the task's
+actual environment. **Scheduled** and **Archived** are views within Tasks.
+Scheduling is presented by the client over declared runtime interfaces.
+
+![Tasks with Projects, Agents, task history, and the new-task composer](images/client/tasks.png)
+
+### Following the evidence
+
+**Inbox** can lead from a recorded mark to its movement. For example,
+`tool.call.allowed` records permission for a call, not proof that the tool
+finished successfully. **Dashboard → Movements** shows the route, artifact,
+and delivery evidence; [Topology](architecture.md#the-desktop-client)
+shows how the environments, runs, and interfaces connect. These are views of
+the same system, not separate client histories.
+
+![Inbox showing a recorded tool.call.allowed mark and its View movement action](images/client/inbox.png)
+
+See the [movement and metadata example](contracts/LEDGER_INDEX.md#reading-a-movement-in-the-client).
+
+## Applications, Drivers, and Extensions
+
+These are different catalogs, not three names for plugins.
+Applications and Drivers package capabilities expressed by the architecture;
+Extensions let you arrange and extend how the client presents your work.
+
+| Catalog | What it adds | Example |
+| --- | --- | --- |
+| **Applications** | Interface or context packages a run can use. The catalog groups AI Providers, Connectors, Plugins, and Artifacts. | A model provider, a messaging connector, a knowledge package. |
+| **Drivers** | Worker-environment kinds, their doors, and tools. They supply the room where effects happen. | A browser session or a Git worktree. |
+| **Settings → Extensions** | Client widgets, tabs/panels, and guided repairs. Their declared sources and actions are reviewed during setup. | A Home widget or an additional workspace view. |
+
+In architecture documents, *driver* also means the implementation behind any
+interface, including a provider. The **Drivers** screen specifically presents
+worker environments. Neither use means a macOS kernel extension.
+For concrete catalog examples, see [Applications](contracts/EXTENSION_SURFACES.md#in-the-client)
+and [Drivers](contracts/ENVIRONMENTS.md#in-the-app).
+
+Installation and access are separate:
+
+1. **Install** materializes the package and its required dependencies.
+2. **Configure** supplies the required account, endpoint, device, or folder.
+3. **Make available** admits it within Home or the chosen Project's ceiling.
+4. **Select/connect** gives a task the relevant bindings. A default for new
+   tasks is not evidence that an existing task already uses it.
+
+An installed package grants no authority by itself. The catalogs distinguish
+installation, configuration, project availability, task connections, and
+incomplete states. Removal can be blocked while live records depend on it.
+
+### Client Extensions
+
+Open **Settings → Extensions** to browse and manage additions to the client:
+
+- **Widgets** add focused views to Home, such as **Live context**, **Task
+  progress**, or **Memory** with a selected knowledge folder such as an Obsidian
+  vault.
+- **Tabs** add workspace views, including **Metrics** and **Codex Usage**.
+- **Repairs** provide explicit maintenance actions, such as **Codex sign-in
+  check** after an authentication failure.
+
+Review an extension's declared sources and actions before installing it, then
+complete any required setup. Adding a client view does not grant a run new
+tools or access to data.
+
+An extension's source is client configuration, not an interface binding. For
+example, selecting an Obsidian vault for **Memory** gives that widget a folder
+to display; it does not create a runtime memory module or bind the vault to a
+task. **Metrics** similarly presents existing evidence rather than creating
+another event log.
+
+![Extensions catalog with Home widgets, workspace tabs, and guided repairs](images/client/extensions.png)
+
+Custom Extensions are files too. **Open folder** opens the extension root;
+packages live at `packages/<id>/extension.json` and follow the
+[manifest schema](../app/schemas/client_extension_manifest.schema.json).
+An agent can author them with ordinary file tools when its environment grants
+that path. The client discovers the package, validates it, and asks you to
+review its current revision before installation. It does not silently run
+new code. Custom views use the [surface document contract](../app/client-surfaces/README.md)
+for native components or sandboxed HTML/CSS/JavaScript; no new kernel feature
+is needed.
+
+### Where packages come from
+
+**Today the app uses a local package library, not a hosted marketplace.** The
+source and delivery path is:
+
+```text
+repository registry/ + app/distribution/local-packages/
+    → packaging: startup baseline + local package library inside Octopus.app
+    → Install: selected package files and receipts in the chosen Home
+    → project/task setup: explicit descriptor and binding changes
+```
+
+During source development, the library resolves to the checkout. A packaged
+app uses the copy bundled inside it. Clicking Install materializes those local
+files; it does not fetch a newer Driver from an Octopus server. Building the
+app can download dependencies, and an installed integration can contact its
+external service during use. Those are separate network operations.
+
+Client Extensions have their own built-in catalog and local package directory
+in the Electron user-data area. This is separate from the runtime registry.
+The current client has no hosted Extension marketplace or automatic app
+updater. A new build supplies a new bundled library; local Home changes still
+need to be reconciled through the package lifecycle.
+
+To add a capability, start with [Extending Octopus](contracts/EXTENSION_SURFACES.md).
+To understand updates and local JSON changes, read
+[Source and Home](development.md#source-and-home).
+
+## Experimental interaction and Test
+
+**Settings → Gestures** maps camera-recognized hand gestures to client
+commands. It includes camera selection, built-in mappings, custom gesture
+recording, and a preview. Camera access is required. Treat these controls as
+experimental, particularly across different cameras and lighting.
+
+These gestures are client input, like keyboard shortcuts. The camera recognizer
+emits a local event, which selects a client command or moves a Home widget.
+Switching a tab or dragging a widget does not send an artifact through the
+runtime. If a command submits a message or starts a call, that action enters
+the ordinary chat or voice interface path.
+
+The repository also carries [AirHand](../registry/interface/world_hand_gesture_control/README.md),
+a macOS prototype for moving the pointer, clicking, and scrolling from a
+camera. Desktop input requires Accessibility permission as well as Camera
+permission. Its experimental `world_hand_gesture_control` bridge can report
+gesture/tracking events to a bound run and accept commands to start recognition,
+read status, or calibrate AirHand. The current client does not launch this
+native app or use its bridge, and the shipped setup supplies no gesture-to-agent
+run binding. Using that integration requires the separate app and an explicitly
+authored binding. Native pointer control stays in AirHand's own process.
+
+**Test** is a separate client access profile, not another name for Tasks.
+Its **Test Lab** settings expose fixtures, synthetic voice activity, and
+surface previews. It has no live runtime or endpoint authority. A successful
+Test preview does not prove a real model call, tool execution, or device setup.
+
+For custom UI, [client surface documents](../app/client-surfaces/README.md)
+describe small widgets and workspace views as validated JSON. Test can watch
+local documents; Administrator reads stable documents from runtime projection
+evidence. A client widget cannot grant itself tool or runtime access.
+
+## Cost and local data
+
+Octopus is MIT-licensed and has no paid Octopus tier in this preview. You supply
+the model/provider access. Account limits, API charges, voice services, remote
+compute, and other connected services remain those providers' costs. There is
+no single per-task price: it depends on the selected model and work performed.
+
+The **Home screen** is a conversation. The **Home directory**, normally
+`~/.octopus`, is the private state of an installation: its active registry,
+runs, ledger, and interface data. Client preferences and Extensions also use
+Electron's user-data area; provider authentication can live separately, such
+as Codex credentials under `~/.codex`. Changing `OCTOPUS_HOME` alone does not
+isolate all client settings or provider accounts.
+
+Use **Settings → About & Diagnostics** for build facts, Doctor, and client logs.
+See [Troubleshooting](../TROUBLESHOOTING.md) before sharing a report or changing
+an installation that fails. Read the [security model](security-model.md) when
+granting new capabilities.

@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_slack",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_slack",
+  "release_status": "optional",
+  "display": {
+    "name": "Slack Tools",
+    "description": "Search and work with content in Slack.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "plugins"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_slack",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-slack-context"
+    }
+  ]
+}

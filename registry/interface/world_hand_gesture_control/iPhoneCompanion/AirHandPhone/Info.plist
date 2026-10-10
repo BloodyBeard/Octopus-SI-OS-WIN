@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSCameraUsageDescription</key>
+    <string>AirHand Phone uses the iPhone ultra-wide camera for hand tracking.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>AirHand Phone streams camera frames to AirHand on your Mac.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_airhand._tcp</string>
+    </array>
+</dict>
+</plist>
+

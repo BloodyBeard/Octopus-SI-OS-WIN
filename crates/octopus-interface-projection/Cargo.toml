@@ -1,0 +1,34 @@
+[package]
+name = "octopus-interface-projection"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+# edition 2024 requires rustc >= 1.85 (override workspace 1.80).
+rust-version = "1.85"
+
+[lib]
+name = "octopus_interface_projection"
+path = "src/lib.rs"
+doctest = false
+
+# Interface-boundary projections derived from descriptors, grants, and activation JSON. Concrete
+# interface packages live under `interfaces/`; this crate must not grow product/channel vocabulary.
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Portable interface descriptor/manifest/invocation-envelope data. `octopus-interfaces` stays
+# data-only and has no heavy `octopus-core` coupling.
+octopus-interfaces = { path = "../octopus-interfaces" }
+# The spine id newtypes the activation loader + driver surface speak in (`InterfaceId`,
+# `ArtifactId`).
+octopus-descriptors = { path = "../octopus-descriptors" }
+# Artifact refs and blob reads used by interface delivery/payload projections.
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-policy = { path = "../octopus-policy" }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

@@ -1,0 +1,16 @@
+[package]
+name = "octopus-desktop-session-tool-runtime"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[[bin]]
+name = "octopus-desktop-session-tool-door-life"
+path = "src/bin/tool_door_life.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+octopus-system-gui-env = { path = "../octopus-system-gui-env" }

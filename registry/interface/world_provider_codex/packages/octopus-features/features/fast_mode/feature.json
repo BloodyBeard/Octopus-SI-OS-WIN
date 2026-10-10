@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "fast_mode",
+  "stage": {
+    "kind": "stable"
+  }
+}

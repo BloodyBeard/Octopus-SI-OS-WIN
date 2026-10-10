@@ -1,0 +1,58 @@
+@property --octopus-shimmer-center {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: -25%;
+}
+
+.loading-shimmer-pure-text {
+  --shimmer-text-primary: var(--color-token-description-foreground);
+  --shimmer-text-secondary: color-mix(in srgb, var(--shimmer-text-primary) 55%, transparent);
+  --shimmer-contrast: rgb(255 255 255 / 75%);
+  display: inline-block;
+}
+
+:is([data-theme="dark"], .dark, .electron-dark) .loading-shimmer-pure-text {
+  --shimmer-text-secondary: color-mix(in srgb, var(--shimmer-text-primary) 45%, transparent);
+  --shimmer-contrast: rgb(0 0 0 / 60%);
+}
+
+.octopus-cadenced-shimmer {
+  position: relative;
+}
+.octopus-cadenced-shimmer, .octopus-cadenced-shimmer * {
+  color: var(--shimmer-text-secondary) !important;
+}
+
+.octopus-cadenced-shimmer-sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  visibility: hidden;
+  mask-image: linear-gradient(90deg,
+    transparent calc(var(--octopus-shimmer-center) - 25%),
+    black calc(var(--octopus-shimmer-center) - 5%),
+    black calc(var(--octopus-shimmer-center) + 5%),
+    transparent calc(var(--octopus-shimmer-center) + 25%));
+}
+.octopus-cadenced-shimmer-highlight {
+  display: block;
+  inline-size: 100%;
+}
+.octopus-cadenced-shimmer .octopus-cadenced-shimmer-highlight,
+.octopus-cadenced-shimmer .octopus-cadenced-shimmer-highlight * {
+  color: var(--shimmer-contrast) !important;
+}
+
+.octopus-cadenced-shimmer.is-shimmering .octopus-cadenced-shimmer-sweep {
+  visibility: visible;
+  animation: octopus-text-highlight 1s steps(48, end) both;
+}
+@keyframes octopus-text-highlight {
+  to { --octopus-shimmer-center: 150%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .octopus-cadenced-shimmer.is-shimmering .octopus-cadenced-shimmer-sweep {
+    animation: none;
+    visibility: hidden;
+  }
+}

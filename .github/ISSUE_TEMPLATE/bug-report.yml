@@ -1,0 +1,96 @@
+name: Bug report
+description: Report one reproducible Octopus failure with privacy-safe evidence.
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read [Troubleshooting](https://github.com/miuuyy/Octopus-SI-OS/blob/main/TROUBLESHOOTING.md) and reproduce the failure once before filing.
+        Never upload a Home, ledger, provider sign-in files, API keys, or unredacted prompts and tool output.
+
+  - type: input
+    id: revision
+    attributes:
+      label: Octopus revision
+      description: The commit you built, from `git rev-parse --short HEAD`.
+      placeholder: 1540d11
+    validations:
+      required: true
+
+  - type: input
+    id: os-version
+    attributes:
+      label: macOS version and architecture
+      placeholder: macOS 15.7, Apple silicon
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happens
+      options:
+        - Build or packaging
+        - First setup and sign-in
+        - Home
+        - Tasks, Projects, Agents
+        - Applications
+        - Drivers and tools
+        - Voice
+        - Runtime, policy, ledger
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      placeholder: ChatGPT sign-in, the model shown in the composer
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence that reproduces it on a fresh Home if possible.
+      placeholder: |
+        1. Launch with OCTOPUS_HOME=~/.octopus-preview
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed
+      description: The exact error text. A source check, a packaged build, and a real provider reply are different claims - say which this is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: The `last_error` from `client/setup-state/operations/`, the refusal row from `ledger/movements.jsonl`, or the end of the interface's stderr log. Redact paths, prompts, and artifact contents.
+      render: text
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed credentials, sign-in URLs, private prompts, project paths, and artifact contents.
+          required: true
+        - label: I searched existing issues and did not find a duplicate.
+          required: true

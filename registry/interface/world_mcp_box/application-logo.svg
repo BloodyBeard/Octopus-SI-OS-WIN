@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 98 98" role="img" aria-label="Box">
+  <metadata>Box logo by Box, Inc.. Vendor artwork and trademark; not Octopus-authored artwork.
+Source: https://github.com/box/box-ui-elements/blob/master/src/icon/logo/IconBoxApp512.tsx
+Presentation changes: centered proportional sizing on a neutral white square; vendor geometry and colors unchanged.
+Vendor rights and usage terms apply; the Octopus repository license does not relicense this mark.
+
+Copyright 2017 Box, Inc. All rights reserved.
+
+This product includes software developed by Box, Inc. ("Box")
+(http://www.box.com)
+ALL BOX SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL BOX BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+See the Box license for the specific language governing permissions
+and limitations under the license.
+Source license: https://github.com/box/box-ui-elements/blob/master/LICENSE</metadata>
+  <rect width="98" height="98" rx="20" fill="#fff"/>
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" x="15" y="15" width="68" height="68"><g fill="none" fill-rule="evenodd">
+            <rect fill="#0061D5" width="512" height="512" rx="118" />
+            <path
+                d="M94.933 155.23c7.076 0 12.827 5.644 12.955 12.696v54.57c10.857-8.137 24.312-12.954 38.877-12.954 24.804 0 46.363 13.941 57.229 34.412 10.862-20.47 32.432-34.412 57.219-34.412 35.76 0 64.771 28.992 64.771 64.763 0 35.787-29.01 64.786-64.771 64.786-24.787 0-46.357-13.955-57.22-34.405-10.865 20.45-32.424 34.405-57.228 34.405-35.428 0-64.18-28.423-64.75-63.707H82V167.926c.162-7.052 5.857-12.697 12.933-12.697zm309.058 60.17c4.767-5.538 13.41-6.633 19.57-2.362 6.152 4.235 7.43 12.204 2.974 17.912l-35.251 43.27 35.208 43.186c4.465 5.724 3.181 13.671-2.972 17.923-6.16 4.252-14.8 3.17-19.572-2.377l-30.284-37.117-30.3 37.117c-4.718 5.547-13.414 6.63-19.556 2.377-6.141-4.252-7.425-12.199-2.946-17.923h-.012l35.187-43.186-35.187-43.27h.012c-4.479-5.708-3.195-13.674 2.946-17.912 6.142-4.27 14.838-3.176 19.555 2.363v-.01l30.301 37.169 30.327-37.168zm-142.778 20.073c-21.465 0-38.87 17.385-38.87 38.832 0 21.464 17.405 38.853 38.87 38.853 21.455 0 38.85-17.389 38.85-38.853 0-21.447-17.395-38.832-38.85-38.832zm-114.448 0c-21.46 0-38.877 17.385-38.877 38.84 0 21.46 17.416 38.845 38.877 38.845 21.458 0 38.838-17.389 38.838-38.853 0-21.447-17.38-38.832-38.838-38.832z"
+                fill="#FFFFFE"
+            />
+        </g></svg>
+</svg>

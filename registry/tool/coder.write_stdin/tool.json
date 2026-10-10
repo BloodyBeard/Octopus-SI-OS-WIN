@@ -1,0 +1,70 @@
+{
+  "id": "coder.write_stdin",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "write_stdin",
+    "default_yield_time_ms": 10000,
+    "max_yield_time_ms": 30000,
+    "default_max_output_bytes": 65536,
+    "max_output_bytes": 1048576,
+    "max_input_bytes": 65536
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": ["worktree_root"],
+      "optional_read_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["platform_toolchain_root"],
+      "optional_executable_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": ["PATH"],
+      "allow_network": true,
+      "allow_local_ipc": true,
+      "allow_sandbox_delegation": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "Write UTF-8 bytes to an opaque coder.exec process owned by the same formed worker environment, then collect its ordered exact output. An empty chars value performs a bounded poll without writing.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "process_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Opaque process identifier returned by coder.exec."
+      },
+      "chars": {
+        "type": "string",
+        "maxLength": 65536,
+        "description": "UTF-8 text to write. Defaults to an empty poll."
+      },
+      "yield_time_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 30000,
+        "description": "Wait window for collecting the ordered output sequence. Defaults to 10000."
+      },
+      "max_output_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1048576,
+        "description": "Maximum exact output bytes returned by this call. Defaults to 65536; any unread tail remains available."
+      }
+    },
+    "required": [
+      "process_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

@@ -1,0 +1,7 @@
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    if let Err(error) = octopus_system_coder_env::run_workspace_exec_tool_process().await {
+        eprintln!("octopus-workspace-exec-tool failed: {error}");
+        std::process::exit(1);
+    }
+}

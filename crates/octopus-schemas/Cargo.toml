@@ -1,0 +1,19 @@
+[package]
+name = "octopus-schemas"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde_json.workspace = true
+octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-marks = { path = "../octopus-marks" }
+octopus-runtime = { path = "../octopus-runtime" }
+octopus-verifiers = { path = "../octopus-verifiers" }
+
+[[bin]]
+name = "octopus-emit-schemas"
+path = "src/main.rs"

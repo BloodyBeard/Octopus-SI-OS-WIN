@@ -1,0 +1,31 @@
+{
+  "id": "workspace.write_file",
+  "interface": "system_workspace_env",
+  "handler_config": {"operation": "write_file"},
+  "process": {
+    "bin": "target/debug/octopus-workspace-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "workspace_root"],
+      "write_root_slots": ["workspace_root"],
+      "executable_root_slots": [],
+      "optional_read_root_slots": ["host_filesystem_root"],
+      "optional_write_root_slots": ["host_filesystem_root"],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+      "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["filesystem_workspace"],
+  "description": "Write full UTF-8 file content inside the formed direct workspace or an additional filesystem root explicitly granted to this task, while refusing symlink escapes from narrower roots.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "Path relative to the formed workspace root, or an absolute path inside another filesystem root explicitly granted to this task."},
+      "content": {"type": "string"}
+    },
+    "required": ["path", "content"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

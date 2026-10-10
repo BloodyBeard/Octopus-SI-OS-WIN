@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.handler.task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "connection_id",
+    "event_id",
+    "handler_id",
+    "task",
+    "event",
+    "result_interface",
+    "result_label"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.handler.task" },
+    "schema_version": { "const": 1 },
+    "connection_id": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string", "pattern": "^lifecycle:[0-9a-f]{64}$" },
+    "handler_id": { "type": "string", "minLength": 1 },
+    "task": { "type": "string", "minLength": 1 },
+    "event": { "$ref": "event.schema.json" },
+    "result_interface": { "const": "system_lifecycle_events" },
+    "result_label": { "enum": ["lifecycle.decision", "lifecycle.handler.output"] }
+  }
+}

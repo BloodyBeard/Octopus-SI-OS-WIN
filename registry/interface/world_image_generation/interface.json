@@ -1,0 +1,38 @@
+{
+  "id": "world_image_generation",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "image_generation"
+  ],
+  "interface_driver_ref": "image_generation",
+  "interface_driver_config": {
+    "private_config": {
+      "input_request_label": "image.generation.request",
+      "prompt_field": "prompt",
+      "model": "gpt-image-1",
+      "size": "1024x1024",
+      "n": 1,
+      "response_format": "b64_json",
+      "data_path": "data",
+      "b64_field": "b64_json",
+      "url_field": "url",
+      "allow_endpoint_origin": true,
+      "allowed_url_origins": [],
+      "revised_prompt_field": "revised_prompt",
+      "media_label": "image.generated",
+      "max_image_bytes": 33554432
+    },
+    "transport": {
+      "base_url": "",
+      "base_url_env": "OCTOPUS_IMAGE_GENERATION_URL",
+      "wire": "image_json_http",
+      "auth_env_key": "OCTOPUS_IMAGE_GENERATION_API_KEY",
+      "auth_header": "Authorization",
+      "auth_value_prefix": "Bearer ",
+      "request_timeout_ms": 120000,
+      "max_response_bytes": 16777216
+    }
+  }
+}

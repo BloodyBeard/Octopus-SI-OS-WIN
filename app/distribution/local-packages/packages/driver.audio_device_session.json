@@ -1,0 +1,53 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "driver.audio_device_session",
+  "version": "1.0.0",
+  "product_kind": "driver",
+  "product_id": "audio_device_session",
+  "release_status": "optional",
+  "display": {
+    "name": "Audio Device Session",
+    "description": "Provides Audio Capture, Audio Device Inventory, Audio Playback, Local Hardware Io, Media Artifact Capture.",
+    "developer": "Octopus",
+    "category": "worker_environment",
+    "icon": "hard-drive"
+  },
+  "members": [
+    {
+      "registry_kind": "worker_environment_kind",
+      "owner": "audio_device_session",
+      "primary": true
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "microphone.capture",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "microphone.list_devices",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "speaker.list_devices",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "tool",
+      "owner": "speaker.play",
+      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_microphone",
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_speaker",
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    }
+  ]
+}

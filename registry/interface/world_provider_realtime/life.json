@@ -1,0 +1,48 @@
+{
+  "processes": [
+    {
+      "bin": "target/debug/octopus-realtime-signaling-life",
+      "io_limits": {
+        "max_control_frame_bytes": 1048576,
+        "max_stderr_bytes": 262144,
+        "max_manifest_bytes": 1048576,
+        "max_payload_bytes": 268435456
+      },
+      "args": [],
+      "read_handles": [
+        "ledger",
+        "ledger_index",
+        "blobs"
+      ],
+      "authority": {
+        "read_root_slots": [
+          "run_records_root"
+        ],
+        "write_root_slots": [
+          "interface_hand_in_root"
+        ],
+        "executable_root_slots": [],
+        "read_paths": [],
+        "write_paths": [],
+        "executable_paths": [],
+        "executable_commands": [],
+        "read_env_paths": [
+          "OCTOPUS_MACHINE_CODEX_AUTH_FILE"
+        ],
+        "write_env_paths": [
+          "OCTOPUS_MACHINE_CODEX_AUTH_FILE"
+        ],
+        "executable_env_paths": [],
+        "allow_network": true,
+        "allow_local_ipc": true
+      },
+      "coordinate_root_slots": [
+        "run_records_root",
+        "app_server_control_root"
+      ],
+      "inherit_env": [
+        "OCTOPUS_MACHINE_CODEX_AUTH_FILE"
+      ]
+    }
+  ]
+}

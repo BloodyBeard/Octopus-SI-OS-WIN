@@ -1,0 +1,44 @@
+{
+  "schema_version": 3,
+  "id": "world_mcp_unity",
+  "name": "Unity MCP",
+  "description": "Inspect, edit, test, and operate Unity projects through a running Unity MCP server.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "code",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_mcp_unity"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-mcp-unity-context",
+      "label": "Unity MCP capability contract"
+    },
+    {
+      "artifact_id": "artifact-skill-unity-mcp-orchestrator",
+      "label": "Unity MCP operator guide"
+    }
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_mcp_unity",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Server URL",
+        "kind": "url",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "id": "cloud_work.task.apply_candidate",
+  "request_label": "cloud_work.request",
+  "output_label": "cloud_work.apply_candidate",
+  "handler_config": {
+    "operation": "task.apply_candidate"
+  },
+  "description": "Materialize a non-applied reviewed handoff candidate. The cloud interface returns applied=false and cannot write a worktree; a separately bound run may use the existing git_worktree room only after its authored operator.approval required_verified_artifact passes operator_approval.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "task_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "attempt_placement": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3
+      },
+      "turn_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "target": {
+        "type": "object",
+        "properties": {
+          "root_slot": {
+            "const": "worktree_root"
+          },
+          "repository_identity": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "base_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "head_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$"
+          }
+        },
+        "required": [
+          "root_slot",
+          "repository_identity",
+          "branch",
+          "base_ref",
+          "head_commit"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "task_id",
+      "target"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "id": "browser.filechooser_arm",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "filechooser_arm"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Arm one native file chooser on the exact already-owned page and return immediately. Trigger an ordinary page action, then call filechooser_wait; arming does not choose or upload a file.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

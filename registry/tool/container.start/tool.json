@@ -1,0 +1,45 @@
+{
+  "id": "container.start",
+  "interface": "system_container",
+  "process": {
+    "bin": "target/debug/octopus-container-room-tool",
+    "inherit_env": [
+      "PATH"
+    ],
+    "inherit_env_from_interface": [
+      "/interface_driver_config/private_config/process_env_keys"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [
+        "PATH"
+      ],
+      "allow_network": true,
+      "allow_local_ipc": true,
+      "optional_read_env_paths": [
+        "DOCKER_CERT_PATH",
+        "DOCKER_CONFIG",
+        "REGISTRY_AUTH_FILE",
+        "XDG_RUNTIME_DIR"
+      ]
+    }
+  },
+  "handler_config": { "operation": "start" },
+  "supported_worker_environment_kinds": [
+    "container_session"
+  ],
+  "description": "Create or restart the exact container pinned by this formed worker environment and return its attested runtime coordinates.",
+  "args_schema": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

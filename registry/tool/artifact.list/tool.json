@@ -1,0 +1,31 @@
+{
+  "id": "artifact.list",
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "handler_config": { "operation": "list" },
+  "description": "List artifacts currently bound to this run. Memory, persona, context, media, and session files appear here only if policy already made their ArtifactRefs visible.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "label": {
+        "type": "string",
+        "description": "Optional exact artifact id label filter."
+      },
+      "id_prefix": {
+        "type": "string",
+        "description": "Optional artifact id prefix filter."
+      }
+    },
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

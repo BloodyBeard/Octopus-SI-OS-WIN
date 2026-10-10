@@ -1,0 +1,10 @@
+{
+  "id": "world_pyecho",
+  "interface_type": "world",
+  "role": "transformer",
+  "direction": "bidirectional",
+  "source_names": [
+    "pyecho"
+  ],
+  "interface_driver_ref": "pyecho_life"
+}

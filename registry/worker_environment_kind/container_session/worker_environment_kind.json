@@ -1,0 +1,51 @@
+{
+  "worker_environment_kind_id": "container_session",
+  "substrate_family": "container",
+  "door_driver_refs": [
+    "system_container"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-container-room-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "instance_config_files": [
+    "container.json"
+  ],
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "container_session",
+    "process_exec",
+    "filesystem",
+    "network_client",
+    "artifact_capture",
+    "live_view",
+    "recoverable_instance",
+    "binary_carriers"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [
+      {
+        "path": "worktree_root",
+        "access": [
+          "read"
+        ]
+      }
+    ],
+    "write_root_refs": [
+      {
+        "path": "worktree_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "full"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

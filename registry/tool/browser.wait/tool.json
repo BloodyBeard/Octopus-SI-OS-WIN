@@ -1,0 +1,299 @@
+{
+  "id": "browser.wait",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "wait"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Wait inside the current formed browser room for exactly one bounded duration, page text, JavaScript predicate, document readiness condition, anchored URL pattern, or native load-state event. URL/load_state variants are exclusive with other conditions and poll/snapshot fields; their effective timeout is min(timeout_ms,3000), default3000, separately for URL and subsequent load. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. For URL/load observation, phase=start with an exact target_id creates a retained native waiter and returns its handle promptly after initial condition observation or subscription setup. The separately declared browser.wait_complete tool owns completion. phase=cancel takes only that exact waiter handle; cancellation is explicit. Omitting phase retains this tool's synchronous wait contract.",
+  "args_schema": {
+    "oneOf": [
+      {
+        "type": "object",
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30000
+          },
+          "text": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ready_state": {
+            "type": "string",
+            "enum": [
+              "interactive",
+              "complete"
+            ]
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 300000
+          },
+          "poll_ms": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 5000
+          },
+          "snapshot": {
+            "type": "boolean"
+          },
+          "target_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+          },
+          "url_pattern": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact URL matcher: anchored whole URL; * matches non-slash characters, ** matches arbitrary characters; punctuation including ? is literal."
+          },
+          "wait_until": {
+            "type": "string",
+            "enum": [
+              "commit",
+              "load",
+              "domcontentloaded"
+            ],
+            "description": "URL wait only. Default commit. Subsequent load observation has its own effective timeout."
+          },
+          "load_state": {
+            "type": "string",
+            "enum": [
+              "load",
+              "domcontentloaded"
+            ],
+            "description": "Native document readiness plus actual page lifecycle event; networkidle is unsupported."
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "start"
+            ]
+          }
+        },
+        "required": [],
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "required": [
+              "duration_ms"
+            ]
+          },
+          {
+            "required": [
+              "text"
+            ]
+          },
+          {
+            "required": [
+              "expression"
+            ]
+          },
+          {
+            "required": [
+              "ready_state"
+            ]
+          },
+          {
+            "required": [
+              "url_pattern"
+            ]
+          },
+          {
+            "required": [
+              "load_state"
+            ]
+          }
+        ],
+        "allOf": [
+          {
+            "if": {
+              "anyOf": [
+                {
+                  "required": [
+                    "url_pattern"
+                  ]
+                },
+                {
+                  "required": [
+                    "load_state"
+                  ]
+                }
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "poll_ms"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "snapshot"
+                    ]
+                  }
+                ]
+              }
+            },
+            "else": {
+              "properties": {
+                "timeout_ms": {
+                  "minimum": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "wait_until"
+              ]
+            },
+            "then": {
+              "required": [
+                "url_pattern"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "phase"
+              ]
+            },
+            "then": {
+              "required": [
+                "target_id"
+              ],
+              "anyOf": [
+                {
+                  "required": [
+                    "url_pattern"
+                  ]
+                },
+                {
+                  "required": [
+                    "load_state"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "phase": {
+            "const": "cancel"
+          },
+          "waiter": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "wait_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "host_generation": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{32}$"
+              },
+              "worker_environment_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048
+              },
+              "formation_pin": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "browser_context_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "target_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "debugger_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "start_source_movement_seq": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "start_artifact_content_hash": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "condition_digest": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "wait_id",
+              "host_generation",
+              "worker_environment_id",
+              "formation_pin",
+              "browser_context_id",
+              "target_id",
+              "debugger_epoch",
+              "start_source_movement_seq",
+              "start_artifact_content_hash",
+              "condition_digest"
+            ]
+          }
+        },
+        "required": [
+          "phase",
+          "waiter"
+        ]
+      }
+    ]
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "module": "octopus-pip-receiver.node",
+  "platform": "darwin",
+  "architectures": [
+    "arm64",
+    "x64"
+  ],
+  "runtime_activation": "held",
+  "auth_bootstrap": "source_implemented",
+  "node_api_version": 8,
+  "header_version": "24.15.0",
+  "electron_version": "41.7.1",
+  "files": [
+    {
+      "path": "receiver.h",
+      "sha256": "909a5a4662614d299d9d554c9c05638c34f73351837c28b4f3fe98a73e64411b"
+    },
+    {
+      "path": "receiver.mm",
+      "sha256": "ba0d4f27ced0fef702b070f877d04bf90f2c3a7f06d12001805cfea38a2df889"
+    },
+    {
+      "path": "bootstrap.h",
+      "sha256": "7f58037794773064c86fc74f8c5c0aded77018e570e948c1facd48d263b6ec60"
+    },
+    {
+      "path": "bootstrap.mm",
+      "sha256": "cc925c953713463a48379129105cef36b951fab0adc121e5f045ad131549bfe9"
+    },
+    {
+      "path": "transport.h",
+      "sha256": "d496de9bc88c1bf638e599e2e2680115a1250b23d28bf3da1113f53f9f4e1eda"
+    },
+    {
+      "path": "binding.mm",
+      "sha256": "2673e8f8d1873d272d85addc8d4b29b8254e19eacd9d5b2ade7346f8c791bd4d"
+    },
+    {
+      "path": "build.cjs",
+      "sha256": "3e6016cfc1fedd76d4b4b9081fc48457edec4ef23a3c258976627e9d383c8b8f"
+    },
+    {
+      "path": "receiver-spec.mm",
+      "sha256": "a857b88e65bebcece4553aadbfdb16d5f68ae9002b6c151e5f42e0bc58355074"
+    },
+    {
+      "path": "stack.h",
+      "sha256": "259d0269ffc7946a321f4a0b9673c1596c897356616d121ff3c058ec9fc41b6f"
+    },
+    {
+      "path": "stack.mm",
+      "sha256": "cad386a3d6e96f416c3f5849834444131508a881da4c06765c17f53993d1c14d"
+    },
+    {
+      "path": "permissions.h",
+      "sha256": "1453ad1c833fbe4c08347cc9f58095018a8fa9d6ffd2cc9fb0d601f0ff36f567"
+    },
+    {
+      "path": "permissions.mm",
+      "sha256": "da1b6c56bb9cc433f00e65e17e4de5d94fd18fe2ce9a47c165d79848a53b9777"
+    },
+    {
+      "path": "settings-visuals.swift",
+      "sha256": "698e777b4d25d50ec0cecf7cafe69cbdc782ffc5bfa1b09ef3d848763039347f"
+    }
+  ],
+  "settings_resources": {
+    "assets/SettingsAccessory.bundle/Contents/Info.plist": {
+      "sha256": "9fc985fd70f134c1eb5971e4b93ad52aef8ba6df2157ab8ae532eb4684a1bbfe",
+      "bytes": 362
+    },
+    "assets/SettingsAccessory.bundle/Contents/Resources/Assets.car": {
+      "sha256": "f20daabb37db9e1a92f1af8d108c55683603b2c13633b3bc9d1d88524b41ccbb",
+      "bytes": 28632
+    }
+  }
+}

@@ -1,0 +1,86 @@
+.task-hover-card {
+  position: fixed;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing);
+  width: min(20rem, calc(100vw - 16px));
+  min-width: min(14rem, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(var(--spacing) * 1.5) var(--padding-row-x);
+  border-radius: var(--radius-xl);
+  background: color-mix(in oklab, var(--color-surface-elevated-secondary) 90%, transparent);
+  color: var(--color-text);
+  box-shadow: 0 0 0 0.5px var(--color-border), var(--shadow-xl);
+  backdrop-filter: blur(var(--blur-sm));
+  font-size: var(--text-sm);
+  line-height: 20px;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+
+.task-hover-card-heading {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--spacing) * 3);
+  min-width: 0;
+  padding-bottom: calc(var(--spacing) * 0.5);
+}
+
+.task-hover-card-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  flex: 1;
+  min-width: 0;
+  margin-inline-start: calc(var(--spacing) * -0.5);
+  padding-inline: calc(var(--spacing) * 1.5);
+  font-size: var(--text-base);
+  font-weight: var(--font-weight-medium);
+}
+
+.task-hover-card-meta {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--spacing);
+  color: var(--color-text-description);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.task-hover-card-meta > span:first-child {
+  display: inline-flex;
+  align-items: center;
+}
+
+.task-hover-card-notice {
+  color: var(--color-text-description);
+  font-size: var(--text-xs);
+}
+
+.task-hover-card-row {
+  display: flex;
+  align-items: start;
+  gap: calc(var(--spacing) * 1.5);
+  min-width: 0;
+}
+
+.task-hover-card-row > :first-child {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  min-height: 20px;
+  color: var(--color-text-description);
+}
+
+.task-hover-card-row > :last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

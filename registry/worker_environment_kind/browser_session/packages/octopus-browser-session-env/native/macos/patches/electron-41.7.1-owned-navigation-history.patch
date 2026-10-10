@@ -1,0 +1,734 @@
+diff --git a/electron/BUILD.gn b/electron/BUILD.gn
+--- a/electron/BUILD.gn
++++ b/electron/BUILD.gn
+@@ -584,8 +584,12 @@
+       "shell/browser/api/owned_download_history.h",
+       "shell/browser/api/owned_download_history_binding.cc",
+       "shell/browser/api/owned_download_history_binding.h",
+-    ]
+-    deps += [ "//components/history/core/browser", "//components/history/content/browser", "//components/url_formatter", "//sql" ]
++      "shell/browser/api/owned_navigation_history.cc",
++      "shell/browser/api/owned_navigation_history.h",
++      "shell/browser/api/owned_navigation_history_binding.cc",
++      "shell/browser/api/owned_navigation_history_binding.h",
++    ]
++    deps += [ "//components/history/core/browser", "//components/history/content/browser", "//components/url_formatter", "//components/query_parser", "//sql" ]
+   }
+   if (is_posix) {
+     sources += filenames.lib_sources_posix
+diff --git a/electron/lib/browser/api/session.ts b/electron/lib/browser/api/session.ts
+--- a/electron/lib/browser/api/session.ts
++++ b/electron/lib/browser/api/session.ts
+@@ -4,7 +4,7 @@
+ 
+ import { net } from 'electron/main';
+ 
+-const { fromPartition, fromPath, openOwnedDownloadHistory, Session } = process._linkedBinding('electron_browser_session');
++const { fromPartition, fromPath, openOwnedDownloadHistory, createOwnedNavigationHistory, Session } = process._linkedBinding('electron_browser_session');
+ const { isDisplayMediaSystemPickerAvailable } = process._linkedBinding('electron_browser_desktop_capturer');
+ 
+ // Fake video window that activates the native system picker
+@@ -118,6 +118,7 @@
+ 
+ export default {
+   openOwnedDownloadHistory,
++  createOwnedNavigationHistory,
+   fromPartition,
+   fromPath,
+   get defaultSession() {
+diff --git a/electron/shell/browser/api/electron_api_session.cc b/electron/shell/browser/api/electron_api_session.cc
+--- a/electron/shell/browser/api/electron_api_session.cc
++++ b/electron/shell/browser/api/electron_api_session.cc
+@@ -6,6 +6,7 @@
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include "shell/browser/api/owned_download_history_binding.h"
++#include "shell/browser/api/owned_navigation_history_binding.h"
+ #endif
+ 
+ #include <algorithm>
+@@ -1973,6 +1974,7 @@
+   dict.SetMethod("fromPath", &FromPath);
+ #if BUILDFLAG(IS_MAC)
+   dict.SetMethod("openOwnedDownloadHistory", &electron::api::OpenOwnedDownloadHistory);
++  dict.SetMethod("createOwnedNavigationHistory", &electron::api::CreateOwnedNavigationHistory);
+ #endif
+ }
+ 
+diff --git a/electron/shell/browser/api/owned_navigation_history.cc b/electron/shell/browser/api/owned_navigation_history.cc
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_navigation_history.cc
+@@ -0,0 +1,248 @@
++// Copyright 2012 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "shell/browser/api/owned_navigation_history.h"
++
++#include <optional>
++#include <utility>
++
++#include "base/check.h"
++#include "base/memory/raw_ptr.h"
++#include "components/history/content/browser/download_conversions.h"
++#include "components/download/public/common/download_interrupt_reasons.h"
++#include "components/history/core/browser/visit_delegate.h"
++#include "base/functional/bind.h"
++#include "base/notreached.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/uuid.h"
++#include "components/history/content/browser/history_context_helper.h"
++#include "components/history/core/browser/history_backend_client.h"
++#include "components/history/core/browser/history_client.h"
++#include "components/history/core/browser/history_constants.h"
++#include "components/history/core/browser/history_database_params.h"
++#include "components/history/core/browser/history_service.h"
++#include "components/history/core/browser/url_row.h"
++#include "components/version_info/channel.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_entry.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/page.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/browser/web_contents_user_data.h"
++#include "net/http/http_response_headers.h"
++#include "ui/base/page_transition_types.h"
++
++namespace electron::api {
++namespace {
++bool CanRecord(const GURL& url) { return url.is_valid() && url.SchemeIsHTTPOrHTTPS(); }
++class BackendClient final : public history::HistoryBackendClient {
++ public:
++  bool IsPinnedURL(const GURL&) override { return false; }
++  std::vector<history::URLAndTitle> GetPinnedURLs() override { return {}; }
++  bool IsWebSafe(const GURL& url) override { return CanRecord(url); }
++};
++class Client final : public history::HistoryClient {
++ public:
++  explicit Client(OwnedNavigationHistory* owner) : owner_(owner) {}
++  void OnHistoryServiceCreated(history::HistoryService* service) override {
++    CHECK(owner_); CHECK(service);
++  }
++  void Shutdown() override { owner_ = nullptr; }
++  history::CanAddURLCallback GetThreadSafeCanAddURLCallback() const override {
++    return base::BindRepeating(&CanRecord);
++  }
++  void NotifyProfileError(sql::InitStatus, const std::string&) override {
++    if (owner_) owner_->DatabaseError();
++  }
++  std::unique_ptr<history::HistoryBackendClient> CreateBackendClient() override {
++    return std::make_unique<BackendClient>();
++  }
++  void UpdateBookmarkLastUsedTime(int64_t, base::Time) override { NOTREACHED(); }
++ private:
++  raw_ptr<OwnedNavigationHistory> owner_;
++};
++}
++
++class OwnedNavigationHistory::Observer final
++    : public content::WebContentsObserver,
++      public content::WebContentsUserData<Observer> {
++ public:
++  bool Attach(base::WeakPtr<OwnedNavigationHistory> owner) {
++    if (!owner || !owner->Available() || owner_ || !web_contents()) return false;
++    owner_ = owner; owner_->observers_.insert(this); return true;
++  }
++  bool AttachedTo(const OwnedNavigationHistory* owner) const {
++    return owner_.get() == owner;
++  }
++  void Detach() {
++    if (owner_) {
++      EndVisit();
++      if (owner_->Available() && web_contents()) owner_->service_->ClearCachedDataForContextID(history::ContextIDForWebContents(web_contents()));
++      owner_->observers_.erase(this); owner_.reset();
++    }
++    cached_.reset();
++  }
++  ~Observer() override { Detach(); }
++
++ private:
++  friend class content::WebContentsUserData<Observer>;
++  explicit Observer(content::WebContents* contents)
++      : content::WebContentsObserver(contents),
++        content::WebContentsUserData<Observer>(*contents) {}
++  void EndVisit() {
++    if (owner_ && owner_->Available() && cached_) {
++      owner_->service_->UpdateWithPageEndTime(
++          history::ContextIDForWebContents(web_contents()), cached_->entry,
++          cached_->url, base::Time::Now());
++    }
++  }
++  void DidFinishNavigation(content::NavigationHandle* handle) override {
++    if (!owner_ || !owner_->Available() || !handle->HasCommitted()) return;
++    if (handle->IsInPrimaryMainFrame()) { loading_ = true; title_changes_ = 0; }
++    else if (!handle->IsInMainFrame() && !handle->HasSubframeNavigationEntryCommitted()) return;
++    if (!handle->ShouldUpdateHistory() ||
++        !handle->GetRenderFrameHost()->GetPage().IsPrimary() || !CanRecord(handle->GetURL())) return;
++    auto* entry = web_contents()->GetController().GetLastCommittedEntry();
++    if (!entry || entry->GetTimestamp().is_null()) return;
++    const int response = handle->GetResponseHeaders() ? handle->GetResponseHeaders()->response_code() : 0;
++    const auto transition = handle->GetPageTransition();
++    GURL referrer = handle->GetReferrer().url;
++    if (handle->IsInPrimaryMainFrame() && !referrer.is_empty() &&
++        referrer == referrer.DeprecatedGetOriginAsURL() &&
++        referrer.DeprecatedGetOriginAsURL() == handle->GetPreviousPrimaryMainFrameURL().DeprecatedGetOriginAsURL()) {
++      referrer = handle->GetPreviousPrimaryMainFrameURL();
++    }
++    const bool hidden = !ui::PageTransitionIsMainFrame(transition) || (response >= 400 && response < 600);
++    history::HistoryAddPageArgs args(
++        handle->GetURL(), entry->GetTimestamp(),
++        history::ContextIDForWebContents(web_contents()), entry->GetUniqueID(),
++        handle->GetNavigationId(), referrer, handle->GetRedirectChain(), transition,
++        hidden, history::SOURCE_BROWSED,
++        response == 404 ? history::VisitResponseCodeCategory::k404 : history::VisitResponseCodeCategory::kNot404,
++        handle->DidReplaceEntry(), false,
++        history::VisitContextEphemerality::kNotEphemeral,
++        handle->IsSameDocument() || handle->GetReloadType() != content::ReloadType::NONE
++            ? std::optional<std::u16string>(web_contents()->GetTitle()) : std::nullopt);
++    const auto virtual_url = web_contents()->GetLastCommittedURL();
++    if (ui::PageTransitionIsMainFrame(transition) && virtual_url != args.url && CanRecord(virtual_url)) {
++      args.url = virtual_url;
++      if (!args.redirects.empty()) args.redirects.back() = virtual_url;
++    }
++    EndVisit(); cached_ = Navigation{args.nav_entry_id, args.url};
++    owner_->service_->AddPage(std::move(args));
++  }
++  void DidFinishLoad(content::RenderFrameHost* frame, const GURL&) override {
++    if (!frame->IsInPrimaryMainFrame()) return;
++    loading_ = false; load_completed_ = base::TimeTicks::Now();
++  }
++  void TitleWasSet(content::NavigationEntry* entry) override {
++    if (!owner_ || !owner_->Available() || !entry || !cached_ ||
++        title_changes_ >= history::kMaxTitleChanges || !CanRecord(entry->GetVirtualURL())) return;
++    if (loading_ || base::TimeTicks::Now() - load_completed_ < history::GetTitleSettingWindow()) {
++      owner_->service_->SetPageTitle(entry->GetVirtualURL(), entry->GetTitleForDisplay());
++      ++title_changes_;
++    }
++  }
++  void WebContentsDestroyed() override { Detach(); }
++  struct Navigation { int entry; GURL url; };
++  std::optional<Navigation> cached_;
++  base::WeakPtr<OwnedNavigationHistory> owner_;
++  bool loading_ = false;
++  int title_changes_ = 0;
++  base::TimeTicks load_completed_;
++  WEB_CONTENTS_USER_DATA_KEY_DECL();
++};
++WEB_CONTENTS_USER_DATA_KEY_IMPL(OwnedNavigationHistory::Observer);
++
++OwnedNavigationHistory::OwnedNavigationHistory(base::FilePath directory,
++    std::string source_id, std::string source_digest)
++    : source_id_(std::move(source_id)), source_digest_(std::move(source_digest)),
++      epoch_(base::Uuid::GenerateRandomV4().AsLowercaseString()) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  service_ = std::make_unique<history::HistoryService>(std::make_unique<Client>(this), nullptr, nullptr, nullptr);
++  service_->AddObserver(this);
++  if (!service_->Init(history::HistoryDatabaseParams(directory, history::ToHistoryDownloadInterruptReason(download::DOWNLOAD_INTERRUPT_REASON_NONE), history::ToHistoryDownloadInterruptReason(download::DOWNLOAD_INTERRUPT_REASON_CRASH), version_info::Channel::STABLE))) DatabaseError();
++}
++OwnedNavigationHistory::~OwnedNavigationHistory() { Shutdown(); }
++bool OwnedNavigationHistory::Available() const { return !stopped_ && error_.empty() && loaded_ && service_; }
++base::DictValue OwnedNavigationHistory::Identity() const {
++  base::DictValue value;
++  value.Set("sourceId", source_id_); value.Set("sourceRefDigest", source_digest_);
++  value.Set("epoch", epoch_); value.Set("ready", Available());
++  value.Set("bookmarks", false); value.Set("visitedLinks", false);
++  return value;
++}
++void OwnedNavigationHistory::Ready(Reply reply) {
++  if (stopped_ || !error_.empty()) { std::move(reply).Run({{}, error_.empty() ? "Native navigation history is closed" : error_}); return; }
++  if (Available()) { std::move(reply).Run({Identity(), {}}); return; }
++  ready_.push_back(std::move(reply));
++}
++void OwnedNavigationHistory::CompleteReady(const std::string& error) {
++  auto pending = std::move(ready_);
++  for (auto& reply : pending) std::move(reply).Run({error.empty() ? Identity() : base::DictValue(), error});
++}
++void OwnedNavigationHistory::OnHistoryServiceLoaded(history::HistoryService* service) {
++  if (service != service_.get() || stopped_ || !error_.empty()) return;
++  loaded_ = true; CompleteReady({});
++}
++void OwnedNavigationHistory::HistoryServiceBeingDeleted(history::HistoryService* service) {
++  if (service == service_.get() && !stopped_) DatabaseError();
++}
++void OwnedNavigationHistory::DatabaseError() {
++  error_ = "Native navigation history database is unavailable";
++  CompleteReady(error_);
++  auto pending = std::move(pending_);
++  for (auto& [id, item] : pending) { item.tracker->TryCancelAll(); std::move(item.reply).Run({{}, error_}); }
++}
++bool OwnedNavigationHistory::Observe(content::WebContents* contents) {
++  if (!Available() || !contents || contents->IsBeingDestroyed()) return false;
++  Observer::CreateForWebContents(contents);
++  return Observer::FromWebContents(contents)->Attach(weak_factory_.GetWeakPtr());
++}
++bool OwnedNavigationHistory::Unobserve(content::WebContents* contents) {
++  auto* observer = contents ? Observer::FromWebContents(contents) : nullptr;
++  if (!observer || !observer->AttachedTo(this)) return false;
++  observer->Detach(); return true;
++}
++void OwnedNavigationHistory::Search(std::string request_id, std::u16string text,
++    history::QueryOptions options, Reply reply) {
++  if (!Available() || request_id.empty() || pending_.contains(request_id)) {
++    std::move(reply).Run({{}, "Native navigation history query is unavailable or duplicated"}); return;
++  }
++  auto [item, inserted] = pending_.emplace(request_id, Pending{std::make_unique<base::CancelableTaskTracker>(), std::move(reply)});
++  CHECK(inserted);
++  service_->QueryHistory(text, options,
++      base::BindOnce(&OwnedNavigationHistory::CompleteQuery, weak_factory_.GetWeakPtr(), request_id), item->second.tracker.get());
++}
++void OwnedNavigationHistory::CompleteQuery(std::string request_id, history::QueryResults results) {
++  auto found = pending_.find(request_id); if (found == pending_.end()) return;
++  auto reply = std::move(found->second.reply); pending_.erase(found);
++  if (!Available()) { std::move(reply).Run({{}, "Native navigation history became unavailable"}); return; }
++  base::ListValue rows;
++  for (const auto& row : results) {
++    base::DictValue item; item.Set("url", row.url().spec());
++    item.Set("title", base::UTF16ToUTF8(row.title()));
++    item.Set("lastVisitTime", row.visit_time().InMillisecondsFSinceUnixEpoch());
++    rows.Append(std::move(item));
++  }
++  auto value = Identity(); value.Set("items", std::move(rows)); value.Set("requestId", request_id);
++  std::move(reply).Run({std::move(value), {}});
++}
++bool OwnedNavigationHistory::Cancel(const std::string& request_id) {
++  auto found = pending_.find(request_id); if (found == pending_.end()) return false;
++  auto pending = std::move(found->second); pending_.erase(found); pending.tracker->TryCancelAll();
++  std::move(pending.reply).Run({{}, "Native navigation history query was cancelled"}); return true;
++}
++void OwnedNavigationHistory::Shutdown() {
++  if (stopped_) return;
++  while (!observers_.empty()) (*observers_.begin())->Detach();
++  stopped_ = true; weak_factory_.InvalidateWeakPtrs(); CompleteReady("Native navigation history is closed");
++  auto pending = std::move(pending_);
++  for (auto& [id, item] : pending) { item.tracker->TryCancelAll(); std::move(item.reply).Run({{}, "Native navigation history is closed"}); }
++  if (service_) { service_->RemoveObserver(this); service_->Shutdown(); service_.reset(); }
++}
++}
+diff --git a/electron/shell/browser/api/owned_navigation_history.h b/electron/shell/browser/api/owned_navigation_history.h
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_navigation_history.h
+@@ -0,0 +1,61 @@
++#ifndef ELECTRON_SHELL_BROWSER_API_OWNED_NAVIGATION_HISTORY_H_
++#define ELECTRON_SHELL_BROWSER_API_OWNED_NAVIGATION_HISTORY_H_
++
++#include <map>
++#include <memory>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/task/cancelable_task_tracker.h"
++#include "base/values.h"
++#include "components/history/core/browser/history_service_observer.h"
++#include "components/history/core/browser/history_types.h"
++
++namespace content { class WebContents; }
++namespace history { class HistoryService; }
++namespace electron::api {
++class OwnedNavigationHistory final : public history::HistoryServiceObserver {
++ public:
++  struct Result { base::DictValue value; std::string error; };
++  using Reply = base::OnceCallback<void(Result)>;
++  OwnedNavigationHistory(base::FilePath directory, std::string source_id,
++                         std::string source_digest);
++  ~OwnedNavigationHistory() override;
++  void Ready(Reply reply);
++  bool Observe(content::WebContents* contents);
++  bool Unobserve(content::WebContents* contents);
++  void Search(std::string request_id, std::u16string text,
++              history::QueryOptions options, Reply reply);
++  bool Cancel(const std::string& request_id);
++  void Shutdown();
++  const std::string& source_id() const { return source_id_; }
++  const std::string& source_digest() const { return source_digest_; }
++  const std::string& epoch() const { return epoch_; }
++  base::DictValue Identity() const;
++  void DatabaseError();
++
++ private:
++  class Observer;
++  friend class Observer;
++  struct Pending { std::unique_ptr<base::CancelableTaskTracker> tracker; Reply reply; };
++  void OnHistoryServiceLoaded(history::HistoryService* service) override;
++  void HistoryServiceBeingDeleted(history::HistoryService* service) override;
++  void CompleteReady(const std::string& error);
++  void CompleteQuery(std::string request_id, history::QueryResults results);
++  bool Available() const;
++  std::unique_ptr<history::HistoryService> service_;
++  std::set<Observer*> observers_;
++  std::vector<Reply> ready_;
++  std::map<std::string, Pending> pending_;
++  std::string source_id_, source_digest_, epoch_;
++  bool loaded_ = false;
++  bool stopped_ = false;
++  std::string error_;
++  base::WeakPtrFactory<OwnedNavigationHistory> weak_factory_{this};
++};
++}
++#endif
+diff --git a/electron/shell/browser/api/owned_navigation_history_binding.cc b/electron/shell/browser/api/owned_navigation_history_binding.cc
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_navigation_history_binding.cc
+@@ -0,0 +1,182 @@
++#include "shell/browser/api/owned_navigation_history_binding.h"
++
++#include <algorithm>
++#include <cmath>
++#include <map>
++#include <memory>
++#include <set>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_util.h"
++#include "base/uuid.h"
++#include "base/strings/utf_string_conversions.h"
++#include "components/query_parser/query_parser.h"
++#include "content/public/browser/browser_thread.h"
++#include "content/public/browser/web_contents.h"
++#include "electron/buildflags/buildflags.h"
++#include "gin/arguments.h"
++#include "gin/per_isolate_data.h"
++#include "shell/browser/api/electron_api_web_contents.h"
++#include "shell/browser/api/owned_navigation_history.h"
++#include "shell/browser/browser.h"
++#include "shell/common/gin_converters/file_path_converter.h"
++#include "shell/common/gin_converters/value_converter.h"
++#include "shell/common/gin_helper/dictionary.h"
++#include "shell/common/gin_helper/promise.h"
++
++namespace electron::api {
++namespace {
++using Source = OwnedNavigationHistory;
++using Promise = gin_helper::Promise<base::DictValue>;
++struct Reader {
++  std::shared_ptr<Source> source;
++  std::set<std::string> pending;
++  std::vector<base::WeakPtr<content::WebContents>> observed;
++  bool closed = false;
++};
++using ReaderRef = std::shared_ptr<Reader>;
++class Sources final : public gin::PerIsolateData::DisposeObserver {
++ public:
++  explicit Sources(v8::Isolate* isolate) { gin::PerIsolateData::From(isolate)->AddDisposeObserver(this); }
++  static auto& All() {
++    static base::NoDestructor<std::map<v8::Isolate*, std::unique_ptr<Sources>>> values;
++    return *values;
++  }
++  void OnBeforeDispose(v8::Isolate*) override {}
++  void OnDisposed() override {}
++  void OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) override {
++    for (auto& [path, source] : sources) if (auto current = source.lock()) current->Shutdown();
++    sources.clear(); gin::PerIsolateData::From(isolate)->RemoveDisposeObserver(this);
++    All().erase(isolate);
++  }
++  std::map<base::FilePath, std::weak_ptr<Source>> sources;
++};
++bool Hex(const std::string& value, size_t length) {
++  return value.size() == length && value.find_first_not_of("0123456789abcdef") == std::string::npos;
++}
++bool Fields(const base::DictValue& value, std::initializer_list<std::string_view> allowed) {
++  for (const auto [key, item] : value) {
++    if (std::find(allowed.begin(), allowed.end(), key) == allowed.end()) return false;
++  }
++  return true;
++}
++void Close(ReaderRef reader) {
++  if (reader->closed) return;
++  reader->closed = true; auto pending = std::move(reader->pending);
++  for (const auto& id : pending) reader->source->Cancel(id);
++  for (const auto& guest : reader->observed) if (guest) reader->source->Unobserve(guest.get());
++  reader->observed.clear();
++  reader->source.reset();
++}
++bool Observe(ReaderRef reader, WebContents* guest, gin::Arguments* args) {
++  if (reader->closed || !guest || !guest->IsOwnedGuest() || !guest->web_contents()) {
++    args->ThrowError("Navigation history accepts only a current owned guest"); return false;
++  }
++  if (!reader->source->Observe(guest->web_contents())) return false;
++  reader->observed.push_back(guest->web_contents()->GetWeakPtr());
++  return true;
++}
++bool Unobserve(ReaderRef reader, WebContents* guest) {
++  if (reader->closed || !guest || !guest->IsOwnedGuest() || !guest->web_contents()) return false;
++  auto found = std::find_if(reader->observed.begin(), reader->observed.end(),
++      [guest](const auto& value) { return value.get() == guest->web_contents(); });
++  if (found == reader->observed.end()) return false;
++  reader->observed.erase(found);
++  return reader->source->Unobserve(guest->web_contents());
++}
++bool Cancel(ReaderRef reader, const std::string& id) {
++  return !reader->closed && reader->pending.contains(id) && reader->source->Cancel(id);
++}
++v8::Local<v8::Promise> Search(ReaderRef reader, std::string id,
++    base::DictValue query, gin::Arguments* args) {
++  Promise promise(args->isolate()); auto result = promise.GetHandle();
++  const auto* text = query.FindString("text"); const auto maximum = query.FindInt("maxResults");
++  if (reader->closed || !Hex(id, 32) || reader->pending.contains(id) ||
++      !Fields(query, {"text", "maxResults", "startTime", "endTime", "deduplicateByDay", "matchingAlgorithm"}) ||
++      !text || !maximum || *maximum <= 0) {
++    promise.RejectWithErrorMessage("Native history query fields are invalid"); return result;
++  }
++  history::QueryOptions options; options.max_count = *maximum;
++  options.visit_order = history::QueryOptions::RECENT_FIRST;
++  options.policy_for_404_visits = history::VisitQuery404sPolicy::kExclude404s;
++  for (const auto field : {"startTime", "endTime"}) {
++    if (!query.contains(field)) continue;
++    const auto time = query.FindDouble(field);
++    if (!time || !std::isfinite(*time) || std::abs(*time) > 8640000000000000.0) {
++      promise.RejectWithErrorMessage("Native history timestamp is invalid"); return result;
++    }
++    (field == std::string_view("startTime") ? options.begin_time : options.end_time) = base::Time::FromMillisecondsSinceUnixEpoch(*time);
++  }
++  if (query.contains("deduplicateByDay")) {
++    const auto per_day = query.FindBool("deduplicateByDay");
++    if (!per_day) { promise.RejectWithErrorMessage("Native history duplicate policy is invalid"); return result; }
++    options.duplicate_policy = *per_day ? history::QueryOptions::REMOVE_DUPLICATES_PER_DAY : history::QueryOptions::REMOVE_ALL_DUPLICATES;
++  }
++  if (query.contains("matchingAlgorithm")) {
++    const auto* matching = query.FindString("matchingAlgorithm");
++    if (!matching || *matching != "alwaysPrefix") { promise.RejectWithErrorMessage("Native history matching algorithm is invalid"); return result; }
++    options.matching_algorithm = query_parser::MatchingAlgorithm::ALWAYS_PREFIX_SEARCH;
++  }
++  reader->pending.insert(id);
++  reader->source->Search(id, base::UTF8ToUTF16(*text), options,
++      base::BindOnce([](ReaderRef owner, std::string request, Promise value, Source::Result result) {
++        owner->pending.erase(request);
++        if (owner->closed) value.RejectWithErrorMessage("Native history reader is closed");
++        else if (!result.error.empty()) value.RejectWithErrorMessage(result.error);
++        else value.Resolve(result.value);
++      }, reader, id, std::move(promise)));
++  return result;
++}
++v8::Local<v8::Promise> Ready(ReaderRef reader, gin::Arguments* args) {
++  Promise promise(args->isolate()); auto result = promise.GetHandle();
++  if (reader->closed) {
++    promise.RejectWithErrorMessage("Native history reader is closed"); return result;
++  }
++  reader->source->Ready(base::BindOnce([](ReaderRef owner, Promise value, Source::Result ready) {
++    if (owner->closed) value.RejectWithErrorMessage("Native history reader is closed");
++    else if (!ready.error.empty()) value.RejectWithErrorMessage(ready.error);
++    else value.Resolve(ready.value);
++  }, reader, std::move(promise)));
++  return result;
++}
++gin_helper::Dictionary ReaderObject(v8::Isolate* isolate, ReaderRef reader) {
++  auto object = gin_helper::Dictionary::CreateEmpty(isolate);
++  object.SetMethod("ready", base::BindRepeating(&Ready, reader));
++  object.SetMethod("observe", base::BindRepeating(&Observe, reader));
++  object.SetMethod("unobserve", base::BindRepeating(&Unobserve, reader));
++  object.SetMethod("search", base::BindRepeating(&Search, reader));
++  object.SetMethod("cancel", base::BindRepeating(&Cancel, reader));
++  object.SetMethod("close", base::BindRepeating(&Close, reader));
++  return object;
++}
++}
++v8::Local<v8::Value> CreateOwnedNavigationHistory(base::DictValue options, gin::Arguments* args) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  const auto* directory = options.FindString("directory"), *id = options.FindString("sourceId"), *digest = options.FindString("sourceRefDigest");
++  if (!BUILDFLAG(ENABLE_OWNED_GUEST_EMBEDDER) || !Browser::Get()->is_ready() ||
++      options.size() != 3 || !directory || !id || !digest || !base::Uuid::ParseLowercase(*id).is_valid() || !Hex(*digest, 64)) {
++    args->ThrowError("Owned navigation history requires admitted source identity and engine readiness");
++    return v8::Undefined(args->isolate());
++  }
++  const auto path = base::FilePath::FromUTF8Unsafe(*directory);
++  base::FilePath canonical;
++  if (!path.IsAbsolute() || !base::DirectoryExists(path) || !base::NormalizeFilePath(path, &canonical) || canonical != path) {
++    args->ThrowError("Owned navigation history directory is not canonical");
++    return v8::Undefined(args->isolate());
++  }
++  auto& owners = Sources::All()[args->isolate()]; if (!owners) owners = std::make_unique<Sources>(args->isolate());
++  auto& weak = owners->sources[path]; auto source = weak.lock();
++  if (source && (source->source_id() != *id || source->source_digest() != *digest)) {
++    args->ThrowError("Owned navigation history source identity changed");
++    return v8::Undefined(args->isolate());
++  }
++  if (!source) { source = std::make_shared<Source>(path, *id, *digest); weak = source; }
++  auto reader = std::make_shared<Reader>(); reader->source = source;
++  return ReaderObject(args->isolate(), std::move(reader)).GetHandle();
++}
++}
+diff --git a/electron/shell/browser/api/owned_navigation_history_binding.h b/electron/shell/browser/api/owned_navigation_history_binding.h
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_navigation_history_binding.h
+@@ -0,0 +1,10 @@
++#ifndef ELECTRON_SHELL_BROWSER_API_OWNED_NAVIGATION_HISTORY_BINDING_H_
++#define ELECTRON_SHELL_BROWSER_API_OWNED_NAVIGATION_HISTORY_BINDING_H_
++#include "base/values.h"
++#include "v8/include/v8-forward.h"
++namespace gin { class Arguments; }
++namespace electron::api {
++v8::Local<v8::Value> CreateOwnedNavigationHistory(base::DictValue options,
++                                                  gin::Arguments* args);
++}
++#endif
+diff --git a/electron/spec/api-owned-guest-spec.ts b/electron/spec/api-owned-guest-spec.ts
+--- a/electron/spec/api-owned-guest-spec.ts
++++ b/electron/spec/api-owned-guest-spec.ts
+@@ -367,4 +367,116 @@
+     }
+   });
+ 
++  it('records native enrolled navigation and preserves visits across a fresh process', async function () {
++    this.timeout(90000);
++    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'owned-navigation-history-')));
++    await fs.chmod(root, 0o700);
++    const store = path.join(root, 'visits'); await fs.mkdir(store, { mode: 0o700 });
++    const sourceId = randomUUID(), sourceRefDigest = createHash('sha256').update(sourceId).digest('hex');
++    const script = path.join(root, 'navigation-child.cjs');
++    const server = createServer((request, response) => {
++      if (request.url === '/redirect') { response.writeHead(302, {Location:'/recorded-a'}); response.end(); return; }
++      if (request.url === '/missing') response.statusCode = 404;
++      response.setHeader('Content-Type', 'text/html');
++      response.end(`<title>${request.url}</title><p>native visit</p>`);
++    });
++    server.listen(0, '127.0.0.1'); await once(server, 'listening');
++    const origin = `http://127.0.0.1:${(server.address() as {port: number}).port}`;
++    await fs.writeFile(script, `
++'use strict';
++const { app, session, webContents } = require('electron');
++const fs = require('node:fs/promises');
++const path = require('node:path');
++const assert = require('node:assert/strict');
++const { randomUUID, randomBytes } = require('node:crypto');
++const [phase, root, origin, sourceId, sourceRefDigest] = process.argv.slice(2);
++const store = path.join(root, 'visits'), profile = path.join(root, 'profile-' + phase);
++require('node:fs').mkdirSync(profile, {mode:0o700}); app.setPath('userData', profile);
++app.on('window-all-closed', () => {});
++app.whenReady().then(async () => {
++  const options = {directory:store, sourceId, sourceRefDigest};
++  const reader = session.createOwnedNavigationHistory(options);
++  const identity = await reader.ready();
++  assert.equal(identity.ready,true); assert.equal(identity.sourceId,sourceId);
++  assert.equal(identity.bookmarks,false); assert.equal(identity.visitedLinks,false);
++  const query = () => reader.search(randomBytes(16).toString('hex'), {text:'',maxResults:100});
++  if (phase === 'write') {
++    const guests = Array.from({length:3}, () => webContents.createOwnedGuest({
++      session:session.fromPartition('navigation-history-' + randomUUID()), sandbox:true,
++      nodeIntegration:false, contextIsolation:true, initialSurfaceSize:{width:1280,height:720}
++    }));
++    assert.notEqual(guests[0].session,guests[1].session);
++    await guests[0].session.cookies.set({url:origin,name:'room',value:'a'});
++    assert.equal((await guests[1].session.cookies.get({url:origin,name:'room'})).length,0);
++    assert.equal(reader.observe(guests[0]),true); assert.equal(reader.observe(guests[1]),true);
++    assert.equal(reader.observe(guests[0]),false);
++    const separateReader = session.createOwnedNavigationHistory(options); await separateReader.ready();
++    assert.equal(separateReader.unobserve(guests[0]),false); separateReader.close();
++    const before = Date.now();
++    await guests[0].loadURL(origin + '/redirect'); await guests[1].loadURL(origin + '/recorded-b');
++    await guests[2].loadURL(origin + '/not-enrolled');
++    const result = await query();
++    assert.ok(result.items.some(row => row.url === origin + '/recorded-a' && row.title === '/recorded-a'));
++    assert.ok(result.items.some(row => row.url === origin + '/recorded-b'));
++    assert.ok(result.items.every(row => row.url !== origin + '/not-enrolled'));
++    assert.ok(result.items.every(row => Number.isFinite(row.lastVisitTime) && row.lastVisitTime >= before && row.lastVisitTime <= Date.now()));
++    await guests[0].executeJavaScript('history.pushState({}, "", "/same-document")');
++    assert.ok((await query()).items.some(row => row.url === origin + '/same-document'));
++    await guests[0].loadURL(origin + '/missing');
++    assert.ok((await query()).items.every(row => row.url !== origin + '/missing'));
++    assert.equal(reader.unobserve(guests[1]),true);
++    await guests[1].loadURL(origin + '/unobserved');
++    assert.ok((await query()).items.every(row => row.url !== origin + '/unobserved'));
++    const cancelledId = randomBytes(16).toString('hex');
++    const cancelled = reader.search(cancelledId,{text:'',maxResults:100});
++    assert.equal(reader.cancel(cancelledId),true); await assert.rejects(cancelled,/cancelled/);
++    const recorded = await query();
++    await fs.writeFile(path.join(root,'write.json'),JSON.stringify(recorded),{flag:'wx',mode:0o600});
++    reader.close(); await assert.rejects(reader.ready(),/closed/);
++    for (const guest of guests) guest.destroy();
++    const next = session.createOwnedNavigationHistory(options); const reopened = await next.ready();
++    assert.notEqual(reopened.epoch,identity.epoch);
++    assert.ok((await next.search(randomBytes(16).toString('hex'),{text:'',maxResults:100})).items.some(row => row.url === origin + '/recorded-b'));
++    next.close();
++  } else {
++    const original = JSON.parse(await fs.readFile(path.join(root,'write.json'),'utf8'));
++    const pageCount = webContents.getAllWebContents().length;
++    const result = await query();
++    assert.notEqual(result.epoch,original.epoch);
++    for (const row of original.items) {
++      assert.ok(result.items.some(current => current.url === row.url && current.title === row.title && current.lastVisitTime === row.lastVisitTime));
++    }
++    assert.equal(webContents.getAllWebContents().length,pageCount);
++    assert.equal(reader.cancel(randomBytes(16).toString('hex')),false);
++    await assert.rejects(reader.search(randomBytes(16).toString('hex'),{text:'',maxResults:0}),/invalid/);
++    assert.throws(() => session.createOwnedNavigationHistory({...options,sourceRefDigest:'0'.repeat(64)}),/identity changed/);
++    assert.equal((await fs.readFile(path.join(store,'History'))).subarray(0,16).toString(),'SQLite format 3\\0');
++    await fs.writeFile(path.join(root,'read.json'),JSON.stringify({pageCount,sourceId:result.sourceId,items:result.items}),{flag:'wx',mode:0o600});
++    reader.close();
++  }
++  app.quit();
++}).catch(error => { process.stderr.write(String(error.stack || error)); app.exit(1); });
++`, { flag: 'wx', mode: 0o600 });
++    const child = (phase: string) => new Promise<void>((resolve, reject) => {
++      const env = {...process.env}; delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
++      const subprocess = spawn(process.execPath, [script, phase, root, origin, sourceId, sourceRefDigest], {env, stdio:['ignore','pipe','pipe']});
++      let output = '', failure: Error | null = null;
++      const stop = (message: string) => { failure ??= new Error(message); subprocess.kill('SIGKILL'); };
++      const timer = setTimeout(() => stop('native navigation history child deadline'), 30000);
++      const collect = (bytes: Buffer) => { output += bytes.toString(); if (Buffer.byteLength(output) > 1024 * 1024) stop('native navigation history child output bound'); };
++      subprocess.stdout.on('data', collect); subprocess.stderr.on('data', collect);
++      subprocess.once('error', error => { failure = error; });
++      subprocess.once('close', code => { clearTimeout(timer); if (failure || code !== 0) reject(failure ?? new Error(output)); else resolve(); });
++    });
++    try {
++      await child('write'); await child('read');
++      const result = JSON.parse(await fs.readFile(path.join(root, 'read.json'), 'utf8'));
++      assert.equal(result.sourceId, sourceId);
++      assert.ok(result.items.some((row: {url: string}) => row.url === origin + '/recorded-b'));
++    } finally {
++      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
++      await fs.rm(root, {recursive:true, force:true});
++    }
++  });
++
+ });
+diff --git a/electron/typings/internal-electron.d.ts b/electron/typings/internal-electron.d.ts
+--- a/electron/typings/internal-electron.d.ts
++++ b/electron/typings/internal-electron.d.ts
+@@ -86,7 +86,32 @@
+     flush(): Promise<{ok: boolean}>;
+     close(): void;
+   }
++  interface OwnedNavigationHistoryIdentity {
++    sourceId: string;
++    sourceRefDigest: string;
++    epoch: string;
++    ready: boolean;
++    bookmarks: false;
++    visitedLinks: false;
++  }
++  interface OwnedNavigationHistoryQuery {
++    text: string;
++    maxResults: number;
++    startTime?: number;
++    endTime?: number;
++    deduplicateByDay?: boolean;
++    matchingAlgorithm?: 'alwaysPrefix';
++  }
++  interface OwnedNavigationHistoryReader {
++    ready(): Promise<OwnedNavigationHistoryIdentity>;
++    observe(guest: Electron.WebContents): boolean;
++    unobserve(guest: Electron.WebContents): boolean;
++    search(requestId: string, query: OwnedNavigationHistoryQuery): Promise<OwnedNavigationHistoryIdentity & {requestId: string; items: Array<{url: string; title: string; lastVisitTime: number}>}>;
++    cancel(requestId: string): boolean;
++    close(): void;
++  }
+   namespace Session {
++    function createOwnedNavigationHistory(options: {directory: string; sourceId: string; sourceRefDigest: string}): OwnedNavigationHistoryReader;
+     function openOwnedDownloadHistory(directory: string): Promise<OwnedDownloadHistoryReader>;
+   }
+   interface Session {

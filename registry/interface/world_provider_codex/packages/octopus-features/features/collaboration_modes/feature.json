@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "collaboration_modes",
+  "stage": {
+    "kind": "removed"
+  }
+}

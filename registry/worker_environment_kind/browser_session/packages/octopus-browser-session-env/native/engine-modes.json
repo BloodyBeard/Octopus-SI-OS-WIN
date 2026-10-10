@@ -1,0 +1,51 @@
+{
+  "standard": {
+    "mode": "standard",
+    "presentationProtocol": "electron.webContentsView.v1",
+    "capabilities": {
+      "pageTools": true,
+      "nativeView": true,
+      "ownedGuestEmbedding": false,
+      "scaledPresentation": false,
+      "modelViewport": true,
+      "hiddenPageCapture": true,
+      "navigationHistory": true,
+      "nativeNavigationHistory": false,
+      "persistentDownloadHistory": true,
+      "modelDownloads": true,
+      "manualDownloads": true,
+      "cursorOverlay": false,
+      "diagnosticHistoryReplacement": false
+    },
+    "limits": [
+      "Browser presentation uses a native rectangular view above the client renderer; HTML overlays cannot cover it.",
+      "Native presentation uses the actual pane bounds without CSS scaling. Chromium fits a model viewport inside those bounds; tool coordinates remain in page CSS pixels.",
+      "Background pages retain their native view in a hidden window for capture; no owned-guest embedding or cursor overlay is provided.",
+      "Navigation history records committed page events in private selected-source storage with literal substring matching; native Chromium history database semantics are unavailable.",
+      "Download history records stock DownloadItem observations in private scoped storage. Interrupted downloads are not silently restarted; model downloads retain their artifact and policy path.",
+      "Popups retain Electron's original child when supplied. Ordinary new-tab requests create a page in the same room with their referrer and POST data."
+    ]
+  },
+  "owned": {
+    "mode": "owned",
+    "presentationProtocol": "electron.ownedGuest.v1",
+    "capabilities": {
+      "pageTools": true,
+      "nativeView": false,
+      "ownedGuestEmbedding": true,
+      "scaledPresentation": true,
+      "modelViewport": true,
+      "hiddenPageCapture": true,
+      "navigationHistory": true,
+      "nativeNavigationHistory": true,
+      "persistentDownloadHistory": true,
+      "modelDownloads": true,
+      "manualDownloads": true,
+      "cursorOverlay": true,
+      "diagnosticHistoryReplacement": true
+    },
+    "limits": [
+      "Requires the exact compiled and native-accepted owned Electron artifact and its retained engine receipt."
+    ]
+  }
+}

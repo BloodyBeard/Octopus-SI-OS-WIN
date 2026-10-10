@@ -1,0 +1,26 @@
+{
+  "id": "browser.tab_select",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "tab_select"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [{"path": "secrets/browser-native-host.auth"}],
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+      "allow_network": true, "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": ["browser_session"],
+  "description": "Attach this formed browser room to one explicit page target returned by browser.tabs.",
+  "args_schema": {
+    "type": "object",
+    "properties": {"target_id": {"type": "string", "minLength": 1, "maxLength": 256}},
+    "required": ["target_id"],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

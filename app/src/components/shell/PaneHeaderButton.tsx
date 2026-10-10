@@ -1,0 +1,22 @@
+import { uniformRoundedCrossPath } from "../icon-glyphs/geometric-primitives";
+import type { ButtonHTMLAttributes, Ref } from "react";
+import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "./ShellTooltip";
+import "./paneHeaderButton.css";
+
+const icons = {
+  plus: <svg aria-hidden="true" focusable="false" viewBox="0 0 16 16" width={16} height={16}><path d={uniformRoundedCrossPath(8, 8, 5, 0.52539, 0.2899499)} fill="currentColor"/></svg>,
+  restore: <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20" width={20} height={20}><path d="M7.83279 11.0017C8.47609 11.0017 8.99765 11.5235 8.99783 12.1667V15.8337C8.99779 16.2009 8.70003 16.4987 8.33279 16.4987C7.96565 16.4986 7.66778 16.2009 7.66775 15.8337V13.2634L4.22048 16.7194C3.96112 16.9794 3.54007 16.9798 3.28005 16.7204C3.02036 16.461 3.01983 16.0399 3.27907 15.78L6.71853 12.3318H4.16579C3.79881 12.3314 3.50079 12.0338 3.50075 11.6667C3.50093 11.2998 3.79889 11.002 4.16579 11.0017H7.83279Z" fill="currentColor"/> <path d="M15.7781 3.28097C16.0372 3.02106 16.4584 3.02014 16.7185 3.27902C16.9787 3.53804 16.9803 3.95916 16.7215 4.21945L13.2859 7.66867H15.8338C16.2006 7.66911 16.4987 7.96683 16.4988 8.33371C16.4986 8.70055 16.2005 8.99831 15.8338 8.99875H12.1668C11.5235 8.99875 11.0019 8.47697 11.0017 7.83371V4.16671C11.0019 3.79957 11.2996 3.50168 11.6668 3.50168C12.0337 3.50194 12.3317 3.79973 12.3318 4.16671V6.74191L15.7781 3.28097Z" fill="currentColor"/></svg>,
+  expand: <svg aria-hidden="true" focusable="false" viewBox="0 0 20 20" width={20} height={20}><path d="M7.89136 11.1846C8.15092 10.925 8.57303 10.9253 8.83276 11.1846C9.09222 11.4442 9.09206 11.8653 8.83276 12.125L5.78491 15.1729H8.32886C8.69607 15.1729 8.99383 15.4707 8.9939 15.8379C8.9939 16.2051 8.69611 16.5029 8.32886 16.5029H4.2644C3.84223 16.5027 3.49997 16.1605 3.49976 15.7383V11.6748C3.49992 11.3077 3.79765 11.0098 4.16479 11.0098C4.53194 11.0098 4.82967 11.3077 4.82983 11.6748V14.2461L7.89136 11.1846Z" fill="currentColor"/> <path d="M15.7351 3.50488C16.1573 3.50512 16.4995 3.84736 16.4998 4.26953V8.33301C16.4997 8.70018 16.2019 8.99802 15.8347 8.99805C15.4677 8.9978 15.1698 8.70004 15.1697 8.33301V5.76172L12.1082 8.82324C11.8485 9.08279 11.4264 9.08277 11.1667 8.82324C10.9073 8.56369 10.9076 8.14251 11.1667 7.88281L14.2146 4.83496H11.6707C11.3036 4.83472 11.0056 4.53704 11.0056 4.16992C11.0056 3.8028 11.3036 3.50512 11.6707 3.50488H15.7351Z" fill="currentColor"/></svg>,
+  close: <Glyph name="close" size={20} />,
+  splitPane: <Glyph name="splitPane" size={16} />,
+};
+
+export function PaneHeaderButton({ buttonRef, glyph, label, selected, className, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & {
+  buttonRef?: Ref<HTMLButtonElement>;
+  glyph: keyof typeof icons;
+  label: string;
+  selected?: boolean;
+}) {
+  return <ShellTooltip label={label} disabled={props.disabled}><button {...props} ref={buttonRef} aria-label={label} type="button" className={`pane-header-button${className ? ` ${className}` : ""}`} data-state={selected ? "open" : undefined}>{icons[glyph]}</button></ShellTooltip>;
+}

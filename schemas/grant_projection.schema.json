@@ -1,0 +1,208 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GrantProjection",
+  "type": "object",
+  "properties": {
+    "artifact_access": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/ArtifactAccess"
+      }
+    },
+    "artifact_verbs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attached_interface_bindings": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AttachedInterfaceBinding"
+      }
+    },
+    "ee_root_slot_allowance": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "formation_pin": {
+      "default": {
+        "inputs": {}
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/FormationPin"
+        }
+      ]
+    },
+    "goal": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hard_blocked_tools": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "interface_affordance_names": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "interface_affordance_specs": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/InterfaceToolAffordance"
+      }
+    },
+    "interface_policy": {
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "interfaces": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mark_outcomes": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "role_artifacts": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tools": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "worker_environment_kinds": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ArtifactAccess": {
+      "type": "object",
+      "properties": {
+        "change": {
+          "default": false,
+          "type": "boolean"
+        },
+        "create": {
+          "default": false,
+          "type": "boolean"
+        },
+        "delete": {
+          "default": false,
+          "type": "boolean"
+        },
+        "read": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "AttachedInterfaceBinding": {
+      "type": "object",
+      "required": [
+        "direction",
+        "interface",
+        "interface_type",
+        "role"
+      ],
+      "properties": {
+        "direction": {
+          "type": "string"
+        },
+        "interface": {
+          "type": "string"
+        },
+        "interface_type": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DescriptorHash": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "uint8",
+        "minimum": 0.0
+      },
+      "maxItems": 32,
+      "minItems": 32
+    },
+    "FormationPin": {
+      "type": "object",
+      "required": [
+        "inputs"
+      ],
+      "properties": {
+        "inputs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/DescriptorHash"
+          }
+        }
+      }
+    },
+    "InterfaceToolAffordance": {
+      "type": "object",
+      "required": [
+        "args_schema",
+        "description",
+        "name"
+      ],
+      "properties": {
+        "args_schema": true,
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

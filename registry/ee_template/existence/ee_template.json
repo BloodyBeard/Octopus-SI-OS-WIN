@@ -1,0 +1,47 @@
+{
+  "id": "existence",
+  "goal_class": "existence",
+  "allowed_interfaces": null,
+  "allowed_worker_environment_kinds": [
+    "filesystem_workspace",
+    "git_worktree",
+    "process_session",
+    "browser_session",
+    "web_search",
+    "desktop_session",
+    "code_mode",
+    "mcp_stdio_session",
+    "remote_exec_server",
+    "container_session",
+    "system_room",
+    "audio_device_session"
+  ],
+  "allowed_child_ee_templates": [
+    "operator_space",
+    "self_improvement",
+    "operator_interaction",
+    "startup_management",
+    "memory_maintenance",
+    "project"
+  ],
+  "bootstrap_root": true,
+  "allowed_root_slots": [
+    "run_records_root",
+    "registry_artifact_root",
+    "registry_interface_root",
+    "registry_ee_template_root",
+    "registry_mark_root",
+    "registry_tool_root",
+    "registry_verifier_root",
+    "registry_worker_environment_kind_root",
+    "ee_instances_root",
+    "repo_root",
+    "workspace_root",
+    "host_filesystem_root",
+    "git_common_root",
+    "worktree_root",
+    "platform_toolchain_root",
+    "tool_cache_root",
+    "toolchain_root"
+  ]
+}

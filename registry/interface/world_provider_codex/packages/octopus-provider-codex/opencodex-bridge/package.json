@@ -1,0 +1,16 @@
+{
+  "name": "octopus-opencodex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ./scripts/run-bun.mjs build --compile ./src/main.ts --outfile ./bin/octopus-opencodex-bridge && node ./scripts/write-build-receipt.mjs",
+    "test": "npm run build && node ./scripts/run-bun.mjs test ./tests"
+  },
+  "dependencies": {
+    "@bitkyc08/opencodex": "2.39.0"
+  },
+  "devDependencies": {
+    "bun": "1.4.0"
+  }
+}

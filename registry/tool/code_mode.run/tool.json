@@ -1,0 +1,47 @@
+{
+  "id": "code_mode.run",
+  "interface": "system_code_mode",
+  "handler_config": {
+    "operation": "run"
+  },
+  "process": {
+    "bin": "target/debug/octopus-code-mode-room-tool",
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "code_mode"
+  ],
+  "description": "Start JavaScript in the formed V8 room. Pure computation can finish immediately; configured nested tools leave as ordinary tool.call artifacts and the cell yields until their results are supplied with code_mode.resume.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "script": {
+        "type": "string",
+        "minLength": 1
+      },
+      "yield_time_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      }
+    },
+    "required": [
+      "script"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

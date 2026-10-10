@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "id": "world_slack",
+  "name": "Slack",
+  "description": "Use Slack conversations in the tasks you choose.",
+  "category": "connector",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "message",
+  "logo": "application-logo.png",
+  "interfaces": ["world_slack"]
+}

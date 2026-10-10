@@ -1,0 +1,554 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::compiler_fence;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use crate::keyring_store::KeyringStore;
+use age::decrypt;
+use age::encrypt;
+use age::scrypt::Identity as ScryptIdentity;
+use age::scrypt::Recipient as ScryptRecipient;
+use age::secrecy::ExposeSecret;
+use age::secrecy::SecretString;
+use anyhow::Context;
+use anyhow::Result;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use rand::rngs::OsRng;
+use rand::TryRngCore;
+use serde::Deserialize;
+use serde::Serialize;
+
+use super::compute_keyring_account;
+use super::keyring_service;
+use super::SecretListEntry;
+use super::SecretName;
+use super::SecretScope;
+use super::SecretsBackend;
+
+const SECRETS_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalSecretsNamespace(String);
+
+impl LocalSecretsNamespace {
+    pub fn new(raw: impl Into<String>) -> Result<Self> {
+        let raw = raw.into();
+        anyhow::ensure!(!raw.is_empty(), "local secrets namespace must not be empty");
+        anyhow::ensure!(
+            raw.trim() == raw,
+            "local secrets namespace must not contain surrounding whitespace"
+        );
+        anyhow::ensure!(
+            raw.chars().all(|character| {
+                character.is_ascii_lowercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '_' | '-')
+            }),
+            "local secrets namespace must contain only a-z, 0-9, _, or -"
+        );
+        Ok(Self(raw))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn filename(&self) -> String {
+        format!("{}.age", self.0)
+    }
+}
+
+impl Default for LocalSecretsNamespace {
+    fn default() -> Self {
+        Self("local".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct SecretsFile {
+    version: u8,
+    secrets: BTreeMap<String, String>,
+}
+
+impl SecretsFile {
+    fn new_empty() -> Self {
+        Self {
+            version: SECRETS_VERSION,
+            secrets: BTreeMap::new(),
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.version == SECRETS_VERSION,
+            "secrets file version {} does not match supported version {}",
+            self.version,
+            SECRETS_VERSION
+        );
+        for (canonical_key, value) in &self.secrets {
+            parse_canonical_key(canonical_key).with_context(|| {
+                format!("secrets file contains malformed key {canonical_key:?}")
+            })?;
+            anyhow::ensure!(
+                !value.is_empty(),
+                "secret value for {canonical_key:?} must not be empty"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalSecretsBackend {
+    octopus_home: PathBuf,
+    keyring_store: Arc<dyn KeyringStore>,
+    namespace: LocalSecretsNamespace,
+}
+
+impl LocalSecretsBackend {
+    pub fn new(octopus_home: PathBuf, keyring_store: Arc<dyn KeyringStore>) -> Self {
+        Self::new_with_namespace(
+            octopus_home,
+            keyring_store,
+            LocalSecretsNamespace::default(),
+        )
+    }
+
+    pub fn new_with_namespace(
+        octopus_home: PathBuf,
+        keyring_store: Arc<dyn KeyringStore>,
+        namespace: LocalSecretsNamespace,
+    ) -> Self {
+        Self {
+            octopus_home,
+            keyring_store,
+            namespace,
+        }
+    }
+
+    pub fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()> {
+        anyhow::ensure!(!value.is_empty(), "secret value must not be empty");
+        let canonical_key = scope.canonical_key(name);
+        let mut file = self.load_file()?;
+        file.secrets.insert(canonical_key, value.to_string());
+        self.save_file(&file)
+    }
+
+    pub fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>> {
+        let canonical_key = scope.canonical_key(name);
+        let file = self.load_file()?;
+        Ok(file.secrets.get(&canonical_key).cloned())
+    }
+
+    pub fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
+        let canonical_key = scope.canonical_key(name);
+        let mut file = self.load_file()?;
+        let removed = file.secrets.remove(&canonical_key).is_some();
+        if removed {
+            self.save_file(&file)?;
+        }
+        Ok(removed)
+    }
+
+    pub fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
+        let file = self.load_file()?;
+        let mut entries = Vec::new();
+        for canonical_key in file.secrets.keys() {
+            let entry = parse_canonical_key(canonical_key).with_context(|| {
+                format!("secrets file contains malformed key {canonical_key:?}")
+            })?;
+            if let Some(scope) = scope_filter {
+                if entry.scope != *scope {
+                    continue;
+                }
+            }
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn secrets_dir(&self) -> PathBuf {
+        self.octopus_home.join("secrets")
+    }
+
+    fn secrets_path(&self) -> PathBuf {
+        self.secrets_dir().join(self.namespace.filename())
+    }
+
+    fn load_file(&self) -> Result<SecretsFile> {
+        let path = self.secrets_path();
+        let ciphertext = match fs::read(&path) {
+            Ok(ciphertext) => ciphertext,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SecretsFile::new_empty());
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read secrets file at {}", path.display()));
+            }
+        };
+        let passphrase = self.load_or_create_passphrase()?;
+        let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
+        let parsed: SecretsFile = serde_json::from_slice(&plaintext).with_context(|| {
+            format!(
+                "failed to deserialize decrypted secrets file at {}",
+                path.display()
+            )
+        })?;
+        parsed
+            .validate()
+            .with_context(|| format!("invalid secrets file at {}", path.display()))?;
+        Ok(parsed)
+    }
+
+    fn save_file(&self, file: &SecretsFile) -> Result<()> {
+        file.validate()
+            .context("refusing to persist invalid secrets file")?;
+        let dir = self.secrets_dir();
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create secrets dir {}", dir.display()))?;
+
+        let passphrase = self.load_or_create_passphrase()?;
+        let plaintext = serde_json::to_vec(file).context("failed to serialize secrets file")?;
+        let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
+        let path = self.secrets_path();
+        write_file_atomically(&path, &ciphertext)?;
+        Ok(())
+    }
+
+    fn load_or_create_passphrase(&self) -> Result<SecretString> {
+        let account = compute_keyring_account(&self.octopus_home);
+        let loaded = self
+            .keyring_store
+            .load(keyring_service(), &account)
+            .map_err(|err| anyhow::anyhow!(err.message()))
+            .with_context(|| format!("failed to load secrets key from keyring for {account}"))?;
+        match loaded {
+            Some(existing) => Ok(SecretString::from(existing)),
+            None => {
+                let generated = generate_passphrase()?;
+                self.keyring_store
+                    .save(keyring_service(), &account, generated.expose_secret())
+                    .map_err(|err| anyhow::anyhow!(err.message()))
+                    .context("failed to persist secrets key in keyring")?;
+                Ok(generated)
+            }
+        }
+    }
+}
+
+impl SecretsBackend for LocalSecretsBackend {
+    fn set(&self, scope: &SecretScope, name: &SecretName, value: &str) -> Result<()> {
+        LocalSecretsBackend::set(self, scope, name, value)
+    }
+
+    fn get(&self, scope: &SecretScope, name: &SecretName) -> Result<Option<String>> {
+        LocalSecretsBackend::get(self, scope, name)
+    }
+
+    fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
+        LocalSecretsBackend::delete(self, scope, name)
+    }
+
+    fn list(&self, scope_filter: Option<&SecretScope>) -> Result<Vec<SecretListEntry>> {
+        LocalSecretsBackend::list(self, scope_filter)
+    }
+}
+
+fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let dir = path.parent().with_context(|| {
+        format!(
+            "failed to compute parent directory for secrets file at {}",
+            path.display()
+        )
+    })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let filename = path.file_name().with_context(|| {
+        format!(
+            "failed to compute filename for secrets file at {}",
+            path.display()
+        )
+    })?;
+    let tmp_path = dir.join(format!(
+        ".{}.tmp-{}-{nonce}",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
+
+    {
+        let mut tmp_file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .with_context(|| {
+                format!(
+                    "failed to create temp secrets file at {}",
+                    tmp_path.display()
+                )
+            })?;
+        tmp_file.write_all(contents).with_context(|| {
+            format!(
+                "failed to write temp secrets file at {}",
+                tmp_path.display()
+            )
+        })?;
+        tmp_file.sync_all().with_context(|| {
+            format!("failed to sync temp secrets file at {}", tmp_path.display())
+        })?;
+    }
+
+    match fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(initial_error) => {
+            #[cfg(target_os = "windows")]
+            {
+                if path.exists() {
+                    fs::remove_file(path).with_context(|| {
+                        format!(
+                            "failed to remove existing secrets file at {} before replace",
+                            path.display()
+                        )
+                    })?;
+                    fs::rename(&tmp_path, path).with_context(|| {
+                        format!(
+                            "failed to replace secrets file at {} with {}",
+                            path.display(),
+                            tmp_path.display()
+                        )
+                    })?;
+                    return Ok(());
+                }
+            }
+
+            let _ = fs::remove_file(&tmp_path);
+            Err(initial_error).with_context(|| {
+                format!(
+                    "failed to atomically replace secrets file at {} with {}",
+                    path.display(),
+                    tmp_path.display()
+                )
+            })
+        }
+    }
+}
+
+fn generate_passphrase() -> Result<SecretString> {
+    let mut bytes = [0_u8; 32];
+    let mut rng = OsRng;
+    rng.try_fill_bytes(&mut bytes)
+        .context("failed to generate random secrets key")?;
+    let encoded = BASE64_STANDARD.encode(bytes);
+    wipe_bytes(&mut bytes);
+    Ok(SecretString::from(encoded))
+}
+
+fn wipe_bytes(bytes: &mut [u8]) {
+    for byte in bytes {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+fn encrypt_with_passphrase(plaintext: &[u8], passphrase: &SecretString) -> Result<Vec<u8>> {
+    let recipient = ScryptRecipient::new(passphrase.clone());
+    encrypt(&recipient, plaintext).context("failed to encrypt secrets file")
+}
+
+fn decrypt_with_passphrase(ciphertext: &[u8], passphrase: &SecretString) -> Result<Vec<u8>> {
+    let identity = ScryptIdentity::new(passphrase.clone());
+    decrypt(&identity, ciphertext).context("failed to decrypt secrets file")
+}
+
+fn parse_canonical_key(canonical_key: &str) -> Result<SecretListEntry> {
+    let mut parts = canonical_key.split('/');
+    let scope_kind = parts
+        .next()
+        .context("canonical secret key has no scope kind")?;
+    match scope_kind {
+        "global" => {
+            let name = parts.next().context("global secret key has no name")?;
+            anyhow::ensure!(
+                parts.next().is_none(),
+                "global secret key has extra segments"
+            );
+            let name = SecretName::new(name)?;
+            Ok(SecretListEntry {
+                scope: SecretScope::global(),
+                name,
+            })
+        }
+        "scope" => {
+            let scope = parts.next().context("named secret key has no scope")?;
+            let name = parts.next().context("named secret key has no name")?;
+            anyhow::ensure!(
+                parts.next().is_none(),
+                "named secret key has extra segments"
+            );
+            let name = SecretName::new(name)?;
+            let scope = SecretScope::named(scope.to_string())?;
+            Ok(SecretListEntry { scope, name })
+        }
+        other => anyhow::bail!("unknown canonical secret scope kind {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keyring_store::tests::MockKeyringStore;
+    use keyring::Error as KeyringError;
+    use pretty_assertions::assert_eq;
+
+    fn write_unvalidated_file(backend: &LocalSecretsBackend, file: &SecretsFile) -> Result<()> {
+        fs::create_dir_all(backend.secrets_dir())?;
+        let passphrase = backend.load_or_create_passphrase()?;
+        let plaintext = serde_json::to_vec(file)?;
+        let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
+        write_file_atomically(&backend.secrets_path(), &ciphertext)
+    }
+
+    #[test]
+    fn load_file_rejects_mismatched_schema_versions() -> Result<()> {
+        let octopus_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(octopus_home.path().to_path_buf(), keyring);
+
+        let file = SecretsFile {
+            version: SECRETS_VERSION + 1,
+            secrets: BTreeMap::new(),
+        };
+        write_unvalidated_file(&backend, &file)?;
+
+        let error = backend
+            .load_file()
+            .expect_err("must reject newer schema version");
+        assert!(format!("{error:#}").contains("does not match supported version"));
+        Ok(())
+    }
+
+    #[test]
+    fn list_rejects_malformed_canonical_keys() -> Result<()> {
+        let octopus_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(octopus_home.path().to_path_buf(), keyring);
+        let file = SecretsFile {
+            version: SECRETS_VERSION,
+            secrets: BTreeMap::from([("unknown/TEST_SECRET".to_string(), "value".to_string())]),
+        };
+        write_unvalidated_file(&backend, &file)?;
+
+        let error = backend
+            .list(None)
+            .expect_err("must reject a malformed canonical key");
+        assert!(format!("{error:#}").contains("secrets file contains malformed key"));
+        Ok(())
+    }
+
+    #[test]
+    fn set_fails_when_keyring_is_unavailable() -> Result<()> {
+        let octopus_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let account = compute_keyring_account(octopus_home.path());
+        keyring.set_error(
+            &account,
+            KeyringError::Invalid("error".into(), "load".into()),
+        );
+
+        let backend = LocalSecretsBackend::new(octopus_home.path().to_path_buf(), keyring);
+        let scope = SecretScope::global();
+        let name = SecretName::new("TEST_SECRET")?;
+        let error = backend
+            .set(&scope, &name, "secret-value")
+            .expect_err("must fail when keyring load fails");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to load secrets key from keyring"),
+            "unexpected error: {error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn save_file_does_not_leave_temp_files() -> Result<()> {
+        let octopus_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let backend = LocalSecretsBackend::new(octopus_home.path().to_path_buf(), keyring);
+
+        let scope = SecretScope::global();
+        let name = SecretName::new("TEST_SECRET")?;
+        backend.set(&scope, &name, "one")?;
+        backend.set(&scope, &name, "two")?;
+
+        let secrets_dir = backend.secrets_dir();
+        let entries = fs::read_dir(&secrets_dir)
+            .with_context(|| format!("failed to read {}", secrets_dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .with_context(|| format!("failed to enumerate {}", secrets_dir.display()))?;
+
+        let filenames: Vec<String> = entries
+            .into_iter()
+            .filter_map(|entry| entry.file_name().to_str().map(ToString::to_string))
+            .collect();
+        assert_eq!(filenames, vec![backend.namespace.filename()]);
+        assert_eq!(backend.get(&scope, &name)?, Some("two".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn local_namespaces_write_separate_files() -> Result<()> {
+        let octopus_home = tempfile::tempdir().expect("tempdir");
+        let keyring = Arc::new(MockKeyringStore::default());
+        let alpha_backend = LocalSecretsBackend::new_with_namespace(
+            octopus_home.path().to_path_buf(),
+            keyring.clone(),
+            LocalSecretsNamespace::new("alpha")?,
+        );
+        let beta_backend = LocalSecretsBackend::new_with_namespace(
+            octopus_home.path().to_path_buf(),
+            keyring,
+            LocalSecretsNamespace::new("beta")?,
+        );
+        let scope = SecretScope::global();
+        let name = SecretName::new("TEST_SECRET")?;
+
+        alpha_backend.set(&scope, &name, "alpha-value")?;
+        beta_backend.set(&scope, &name, "beta-value")?;
+
+        assert_eq!(
+            alpha_backend.get(&scope, &name)?,
+            Some("alpha-value".to_string())
+        );
+        assert_eq!(
+            beta_backend.get(&scope, &name)?,
+            Some("beta-value".to_string())
+        );
+        assert!(octopus_home
+            .path()
+            .join("secrets")
+            .join("alpha.age")
+            .exists());
+        assert!(octopus_home
+            .path()
+            .join("secrets")
+            .join("beta.age")
+            .exists());
+        assert!(!octopus_home
+            .path()
+            .join("secrets")
+            .join("local.age")
+            .exists());
+        assert!(LocalSecretsNamespace::new("../escape").is_err());
+        assert!(LocalSecretsNamespace::new("UPPERCASE").is_err());
+        Ok(())
+    }
+}

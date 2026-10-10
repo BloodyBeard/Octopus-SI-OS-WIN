@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "octopus-system-baseline",
+  "registry_owners": [
+    { "kind": "ee_template", "id": "context_maintenance" },
+    { "kind": "ee_template", "id": "existence" },
+    { "kind": "ee_template", "id": "memory_maintenance" },
+    { "kind": "ee_template", "id": "operator_interaction" },
+    { "kind": "ee_template", "id": "operator_space" },
+    { "kind": "ee_template", "id": "project" },
+    { "kind": "ee_template", "id": "self_improvement" },
+    { "kind": "ee_template", "id": "startup_management" }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "hooks",
+  "stage": {
+    "kind": "stable"
+  }
+}

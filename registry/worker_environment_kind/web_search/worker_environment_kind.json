@@ -1,0 +1,28 @@
+{
+  "worker_environment_kind_id": "web_search",
+  "substrate_family": "web_search",
+  "door_driver_refs": [
+    "system_web_search"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-web-search-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": [
+    "browser"
+  ],
+  "capabilities": [
+    "web_search",
+    "network_client",
+    "artifact_capture"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "restricted"
+  },
+  "lifecycle": {
+    "requires_release": false
+  }
+}

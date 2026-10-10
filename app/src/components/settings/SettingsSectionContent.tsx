@@ -1,0 +1,74 @@
+import type { ReactNode } from "react";
+import type { AdmittedClientSurfaceDocument, ClientSurfaceAdmissionVerdict } from "../../client-surfaces/types";
+import type { OctopusClientAccessProfile } from "../../electron";
+import type { ClientExtensionRegistryState } from "../../extensions/types";
+import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
+import { AppearanceSection } from "./AppearanceSection";
+import { ExtensionsSection } from "./ExtensionsSection";
+import {
+  AboutSection,
+  AccessSection,
+  ConnectionsSection,
+  GeneralSection,
+  GesturesSection,
+  ShortcutsSection,
+  TestLabSection,
+  VoiceAudioSection,
+  WorkerEnvironmentSettingsSection,
+} from "./OperationalSections";
+import { SurfacesSection } from "./SurfacesSection";
+import type { SettingsSectionId } from "./settingsCatalog";
+import { settingsTargetProps } from "./settingsCatalog";
+
+export type SettingsSectionContext = {
+  accessProfile: OctopusClientAccessProfile;
+  documentRoot: string;
+  documentVerdicts: ClientSurfaceAdmissionVerdict[];
+  documents: AdmittedClientSurfaceDocument[];
+  extensions: ClientExtensionRegistryState;
+  surfaceErrors: string[];
+  surfaces: ClientSurfaceDescriptor[];
+};
+
+const SETTINGS_SECTION_CONTENT: Record<SettingsSectionId, (context: SettingsSectionContext) => ReactNode> = {
+  general: ({ accessProfile, surfaces }) => <GeneralSection accessProfile={accessProfile} surfaces={surfaces} />,
+  appearance: () => <div {...settingsTargetProps("appearance.theme")}><AppearanceSection /></div>,
+  "voice-audio": ({ accessProfile }) => <VoiceAudioSection accessProfile={accessProfile} />,
+  gestures: ({ accessProfile }) => <GesturesSection accessProfile={accessProfile} />,
+  shortcuts: ({ accessProfile }) => <ShortcutsSection accessProfile={accessProfile} />,
+  access: ({ accessProfile }) => <AccessSection accessProfile={accessProfile} />,
+  extensions: ({ accessProfile, extensions }) => (
+    <div {...settingsTargetProps("extensions.catalog")}>
+      <ExtensionsSection accessProfile={accessProfile} registry={extensions} />
+    </div>
+  ),
+  connections: () => <ConnectionsSection />,
+  surfaces: ({ accessProfile, documentRoot, documents, surfaceErrors, surfaces }) => (
+    <div {...settingsTargetProps("surfaces.sidebar")}>
+      <SurfacesSection
+        accessProfile={accessProfile}
+        documentRoot={documentRoot}
+        documents={documents}
+        surfaceErrors={surfaceErrors}
+        surfaces={surfaces}
+      />
+    </div>
+  ),
+  "worker-environments": () => <WorkerEnvironmentSettingsSection />,
+  about: () => <AboutSection />,
+  "test-lab": ({ accessProfile, documentRoot, documentVerdicts, surfaceErrors }) => (
+    <TestLabSection
+      accessProfile={accessProfile}
+      documentRoot={documentRoot}
+      documentVerdicts={documentVerdicts}
+      surfaceErrors={surfaceErrors}
+    />
+  ),
+};
+
+export function SettingsSectionContent({
+  sectionId,
+  ...context
+}: SettingsSectionContext & { sectionId: SettingsSectionId }) {
+  return SETTINGS_SECTION_CONTENT[sectionId](context);
+}

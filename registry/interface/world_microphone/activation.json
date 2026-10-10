@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "interface": "world_microphone",
+  "activations": [
+    {
+      "activation_driver_ref": "app_server_transport",
+      "config": {
+        "listen_env": "OCTOPUS_MICROPHONE_LISTEN",
+        "bind_interface_socket_when_env_unset": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "id": "world_mcp_google_calendar",
+  "name": "Google Calendar",
+  "description": "Work with Google Calendar events and schedules.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "calendar",
+  "logo": "application-logo.png",
+  "interfaces": [
+    "world_mcp_google_calendar"
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_mcp_google_calendar",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Server URL",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_mcp_google_calendar",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Access token",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  },
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-mcp-google-calendar-context",
+      "label": "Google Calendar capability contract"
+    }
+  ]
+}

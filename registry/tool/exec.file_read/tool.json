@@ -1,0 +1,53 @@
+{
+  "id": "exec.file_read",
+  "interface": "system_exec_env",
+  "handler_config": {
+    "operation": "file_read"
+  },
+  "process": {
+    "bin": "target/debug/octopus-process-room-tool",
+    "inherit_env": [
+      "PATH"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [
+        "PATH"
+      ],
+      "allow_network": false,
+      "allow_local_ipc": true
+    },
+    "coordinate_root_slots": []
+  },
+  "supported_worker_environment_kinds": [
+    "process_session"
+  ],
+  "description": "Read a bounded regular file from the private workspace of this formed process-session worker environment.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "minLength": 1
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16777216
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

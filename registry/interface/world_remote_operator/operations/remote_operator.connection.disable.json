@@ -1,0 +1,14 @@
+{
+  "id": "remote_operator.connection.disable",
+  "request_label": "remote_operator.request",
+  "output_label": "remote_operator.status",
+  "handler_config": {
+    "operation": "connection.disable"
+  },
+  "description": "Disable the private remote operator connection and persist that desired state only when the current enrollment was enabled durably.",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

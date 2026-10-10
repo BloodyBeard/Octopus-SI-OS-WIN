@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "event_id",
+    "connection_id",
+    "connection_artifact",
+    "emitter_run",
+    "owner_run",
+    "handler_id",
+    "event",
+    "mode",
+    "handler_type",
+    "subject_artifact",
+    "trigger",
+    "data"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.event" },
+    "schema_version": { "const": 1 },
+    "event_id": {
+      "type": "string",
+      "pattern": "^lifecycle:[0-9a-f]{64}$"
+    },
+    "connection_id": { "$ref": "#/$defs/non_empty" },
+    "connection_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "emitter_run": { "$ref": "#/$defs/non_empty" },
+    "owner_run": { "$ref": "#/$defs/non_empty" },
+    "handler_id": { "$ref": "#/$defs/non_empty" },
+    "event": { "$ref": "#/$defs/event" },
+    "mode": { "enum": ["sync", "async"] },
+    "handler_type": { "enum": ["command", "mcp_tool", "prompt", "agent"] },
+    "subject_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "trigger": { "$ref": "#/$defs/non_empty" },
+    "data": { "type": "object" },
+    "continuation": { "$ref": "#/$defs/continuation" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "sync" } } },
+      "then": { "required": ["continuation"] },
+      "else": { "not": { "required": ["continuation"] } }
+    }
+  ],
+  "$defs": {
+    "non_empty": { "type": "string", "minLength": 1 },
+    "event": {
+      "enum": [
+        "pre_tool_use",
+        "permission_request",
+        "post_tool_use",
+        "pre_compact",
+        "post_compact",
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "subagent_start",
+        "subagent_stop",
+        "stop",
+        "interrupt"
+      ]
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "content": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "required_verified_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mark", "artifact_label", "verifier", "params"],
+      "properties": {
+        "mark": { "$ref": "#/$defs/non_empty" },
+        "artifact_label": { "$ref": "#/$defs/non_empty" },
+        "verifier": { "$ref": "#/$defs/non_empty" },
+        "params": { "type": "object" }
+      }
+    },
+    "verified_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_label", "required_verified_artifact"],
+      "properties": {
+        "artifact_label": { "$ref": "#/$defs/non_empty" },
+        "required_verified_artifact": { "$ref": "#/$defs/required_verified_artifact" }
+      }
+    },
+    "route": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "const": "client_projection" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "inputs"],
+          "properties": {
+            "kind": { "const": "client_projection_with_verified_inputs" },
+            "inputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/verified_input" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "tool"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "tool": { "$ref": "#/$defs/non_empty" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "interface"],
+          "properties": {
+            "kind": { "const": "interface" },
+            "interface": { "$ref": "#/$defs/non_empty" }
+          }
+        }
+      ]
+    },
+    "continuation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "turn_input", "source_artifact"],
+          "properties": {
+            "kind": { "const": "start_turn" },
+            "turn_input": {},
+            "source_artifact": { "$ref": "#/$defs/artifact_ref" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "artifact", "manifest_path", "route"],
+          "properties": {
+            "kind": { "const": "held_emission" },
+            "artifact": { "$ref": "#/$defs/artifact_ref" },
+            "manifest_path": { "$ref": "#/$defs/non_empty" },
+            "route": { "$ref": "#/$defs/route" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "artifact", "manifest_path", "route", "source_artifact"],
+          "properties": {
+            "kind": { "const": "held_emission_and_recover_boundary" },
+            "artifact": { "$ref": "#/$defs/artifact_ref" },
+            "manifest_path": { "$ref": "#/$defs/non_empty" },
+            "route": { "$ref": "#/$defs/route" },
+            "source_artifact": { "$ref": "#/$defs/artifact_ref" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "manifest_label", "payload", "source_artifact"],
+          "properties": {
+            "kind": { "const": "provider_input" },
+            "manifest_label": { "$ref": "#/$defs/non_empty" },
+            "payload": {},
+            "source_artifact": { "$ref": "#/$defs/artifact_ref" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "source_artifact"],
+          "properties": {
+            "kind": { "const": "recover_boundary" },
+            "source_artifact": { "$ref": "#/$defs/artifact_ref" }
+          }
+        }
+      ]
+    }
+  }
+}

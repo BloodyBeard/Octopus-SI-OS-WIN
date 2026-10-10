@@ -1,0 +1,38 @@
+[package]
+name = "octopus-interface-transport"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_interface_transport"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+notify.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-interface-projection = { path = "../octopus-interface-projection" }
+octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-runtime = { path = "../octopus-runtime" }
+octopus-verifiers = { path = "../octopus-verifiers" }
+schemars.workspace = true
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.182"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

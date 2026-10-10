@@ -1,0 +1,88 @@
+{
+  "id": "speaker.play",
+  "interface": "system_speaker",
+  "process": {
+    "bin": "target/debug/octopus-audio-device-session-tool",
+    "args": [],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": true
+    }
+  },
+  "handler_config": {
+    "operation": "play_output"
+  },
+  "description": "Play one exact audio artifact already bound to the run through the audio-device worker environment. WAV, MP3, FLAC, Vorbis/Ogg, and AAC-in-MP4/M4A are decoded locally; completion, refusal, device failure, and explicit duration-limit interruption return speaker.play.result evidence.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "audio_artifact_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "description": "Exact id of an audio artifact already bound to this run."
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "wav",
+          "mp3",
+          "flac",
+          "ogg",
+          "mp4",
+          "m4a"
+        ],
+        "description": "Declared carrier format used as the decoder hint; the bound bytes must still decode through that supported carrier family."
+      },
+      "host": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Optional exact CPAL host name. Omit it to use the platform default host."
+      },
+      "device_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "description": "Optional exact output device name. Omit it to use the selected host's default output device."
+      },
+      "volume": {
+        "type": "number",
+        "minimum": 0.0,
+        "maximum": 2.0,
+        "description": "Linear playback gain."
+      },
+      "speed": {
+        "type": "number",
+        "minimum": 0.25,
+        "maximum": 4.0,
+        "description": "Playback speed multiplier."
+      },
+      "max_duration_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000,
+        "description": "Hard playback deadline. Known longer media is refused before playback; unknown-duration media is stopped explicitly at the limit."
+      }
+    },
+    "required": [
+      "audio_artifact_id",
+      "format"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true,
+  "supported_worker_environment_kinds": [
+    "audio_device_session"
+  ]
+}

@@ -1,0 +1,219 @@
+[
+  {
+    "scope": [
+      "keyword.operator.accessor",
+      "meta.group.braces.round.function.arguments",
+      "meta.template.expression",
+      "markup.fenced_code meta.embedded.block"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-foreground)"
+    }
+  },
+  {
+    "scope": "emphasis",
+    "settings": {
+      "fontStyle": "italic"
+    }
+  },
+  {
+    "scope": [
+      "strong",
+      "markup.heading.markdown",
+      "markup.bold.markdown"
+    ],
+    "settings": {
+      "fontStyle": "bold"
+    }
+  },
+  {
+    "scope": [
+      "markup.italic.markdown"
+    ],
+    "settings": {
+      "fontStyle": "italic"
+    }
+  },
+  {
+    "scope": "meta.link.inline.markdown",
+    "settings": {
+      "fontStyle": "underline",
+      "foreground": "var(--shiki-token-link)"
+    }
+  },
+  {
+    "scope": [
+      "string",
+      "markup.fenced_code",
+      "markup.inline",
+      "string.quoted.docstring.multi.python"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-string)"
+    }
+  },
+  {
+    "scope": [
+      "comment",
+      "string.quoted.docstring.multi",
+      "meta.diff.header.from-file",
+      "meta.diff.header.to-file"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-comment)"
+    }
+  },
+  {
+    "scope": [
+      "constant.numeric",
+      "constant.language",
+      "constant.other.placeholder",
+      "constant.character.format.placeholder",
+      "variable.language.this",
+      "variable.other.object",
+      "variable.other.class",
+      "variable.other.constant",
+      "meta.property-name",
+      "meta.property-value",
+      "support"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-constant)"
+    }
+  },
+  {
+    "scope": [
+      "keyword",
+      "storage.modifier",
+      "storage.type",
+      "storage.control.clojure",
+      "entity.name.function.clojure",
+      "entity.name.tag.yaml",
+      "support.function.node",
+      "support.type.property-name.json",
+      "punctuation.separator.key-value",
+      "punctuation.definition.template-expression"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-keyword)"
+    }
+  },
+  {
+    "scope": "variable.parameter.function",
+    "settings": {
+      "foreground": "var(--shiki-token-parameter)"
+    }
+  },
+  {
+    "scope": [
+      "support.function",
+      "entity.name.type",
+      "entity.other.inherited-class",
+      "meta.function-call",
+      "meta.instance.constructor",
+      "entity.other.attribute-name",
+      "entity.name.function",
+      "constant.keyword.clojure"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-function)"
+    }
+  },
+  {
+    "scope": [
+      "entity.name.tag",
+      "string.quoted",
+      "string.regexp",
+      "string.interpolated",
+      "string.template",
+      "string.unquoted.plain.out.yaml",
+      "keyword.other.template"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-string-expression)"
+    }
+  },
+  {
+    "scope": [
+      "punctuation.definition.arguments",
+      "punctuation.definition.dict",
+      "punctuation.separator",
+      "meta.function-call.arguments"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-punctuation)"
+    }
+  },
+  {
+    "scope": [
+      "markup.underline.link",
+      "punctuation.definition.metadata.markdown"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-link)"
+    }
+  },
+  {
+    "scope": [
+      "beginning.punctuation.definition.list.markdown"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-string)"
+    }
+  },
+  {
+    "scope": [
+      "punctuation.definition.string.begin.markdown",
+      "punctuation.definition.string.end.markdown",
+      "string.other.link.title.markdown",
+      "string.other.link.description.markdown"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-keyword)"
+    }
+  },
+  {
+    "scope": [
+      "constant.numeric.decimal",
+      "constant.language.boolean",
+      "meta.var.exp.ts"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-number)"
+    }
+  },
+  {
+    "scope": [
+      "meta.objectliteral"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-object-literal)"
+    }
+  },
+  {
+    "scope": [
+      "support.variable.property"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-property)"
+    }
+  },
+  {
+    "scope": [
+      "punctuation.definition.deleted.diff",
+      "markup.deleted.diff"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-diff-deleted)"
+    }
+  },
+  {
+    "scope": [
+      "punctuation.definition.inserted.diff",
+      "markup.inserted.diff"
+    ],
+    "settings": {
+      "foreground": "var(--shiki-token-diff-inserted)"
+    }
+  }
+]

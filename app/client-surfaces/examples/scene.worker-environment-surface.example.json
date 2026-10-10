@@ -1,0 +1,44 @@
+{
+  "schema": "octopus.client_surface",
+  "schema_version": 1,
+  "release_channel": "lab",
+  "id": "scene-inspector",
+  "revision": 1,
+  "title": "Scene inspector",
+  "glyph": "topology",
+  "target": {
+    "kind": "worker_environment.surface",
+    "worker_environment_id": "lab_we_1",
+    "surface_id": "scene-inspector",
+    "order": 40
+  },
+  "data": {
+    "scene": "assembly.glb",
+    "objects": 42,
+    "state": "ready"
+  },
+  "render": {
+    "kind": "native",
+    "density": "comfortable",
+    "root": {
+      "type": "stack",
+      "gap": "md",
+      "children": [
+        {
+          "type": "status",
+          "label": "assembly.glb",
+          "state": "Ready",
+          "detail": "Projected 3D scene surface",
+          "glyph": "topology",
+          "tone": "positive"
+        },
+        {
+          "type": "metric",
+          "label": "Objects",
+          "value": 42,
+          "detail": "Scene graph nodes"
+        }
+      ]
+    }
+  }
+}

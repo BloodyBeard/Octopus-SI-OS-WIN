@@ -1,0 +1,96 @@
+{
+  "id": "browser.screenshot",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "screenshot"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Capture the current page into this worker environment's private captures directory and return its path, byte count, and content hash as evidence. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. A complete document-CSS clip takes precedence over full_page. pixel_mode=css uses 1/devicePixelRatio CDP scaling; device remains the existing default. Returned artifact geometry records actual decoded dimensions and mapping.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "format": {
+        "type": "string",
+        "enum": [
+          "png",
+          "jpeg",
+          "webp"
+        ]
+      },
+      "quality": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100
+      },
+      "full_page": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      },
+      "clip": {
+        "type": "object",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "height": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "additionalProperties": false
+      },
+      "pixel_mode": {
+        "type": "string",
+        "enum": [
+          "css",
+          "device"
+        ]
+      }
+    },
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

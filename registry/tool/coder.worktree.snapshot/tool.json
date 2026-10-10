@@ -1,0 +1,37 @@
+{
+  "id": "coder.worktree.snapshot",
+  "interface": "system_coder_env",
+  "process": {
+    "bin": "target/debug/octopus-coder-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "handler_config": {
+    "operation": "worktree_snapshot",
+    "max_diff_bytes": 16777216,
+    "max_changed_paths": 20000
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "Capture the leased run branch, HEAD, complete tracked/staged/untracked patch, changed paths, and digest as a replayable result artifact; dirty rooms must then be committed or explicitly abandoned before release.",
+  "args_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

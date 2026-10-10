@@ -1,0 +1,48 @@
+.oc-dropdown-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  pointer-events: none;
+}
+
+.oc-dropdown-layer.is-modal {
+  pointer-events: auto;
+}
+
+.oc-dropdown {
+  position: fixed;
+  pointer-events: auto;
+  outline: none;
+  min-width: min(220px, calc(100vw - 16px));
+  width: max-content;
+}
+
+.oc-dropdown[data-content-width="sidebar"] {
+  min-width: min(172px, calc(100vw - 16px));
+  width: max-content;
+  max-width: 240px;
+}
+
+.oc-dropdown[data-content-width="menuBounded"] {
+  min-width: min(200px, calc(100vw - 16px));
+  width: max-content;
+  max-width: 320px;
+}
+
+.oc-dropdown[data-content-width="menuWide"] {
+  min-width: min(240px, calc(100vw - 16px));
+  width: 240px;
+  max-width: 240px;
+}
+
+.oc-dropdown [role="menuitem"]:not([data-menu-unstyled]),
+.oc-dropdown [role="menuitemcheckbox"],
+.oc-dropdown [role="menuitemradio"] {
+  width: 100%;
+}
+
+.oc-dropdown[data-content-width="modelPicker"] {
+  min-width: min(254px, calc(100vw - 16px));
+  width: 254px;
+  overflow: hidden;
+}

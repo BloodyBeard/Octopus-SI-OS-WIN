@@ -1,0 +1,10 @@
+{
+  "id": "world_memory_cron",
+  "interface_type": "world",
+  "role": "sensor",
+  "direction": "inbound",
+  "source_names": [
+    "cron"
+  ],
+  "interface_driver_ref": "cron_life"
+}

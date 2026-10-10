@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "engine_api": "electron.ownedGuest.v1",
+  "history_api": "electron.ownedNavigationHistory.v1",
+  "source_only": true,
+  "runtime_activation": "held",
+  "native_compiled": false,
+  "native_accepted": false,
+  "foundation_patch_sha256": "f8f6715e491fc78fe1226fb483a6fc227cdb3eb4ef7df04ba5809c3eb1e97613",
+  "production_patch_sha256": "c0557cf1c680b1df7142951ca932f5df00bdc88edd143edcfe0f3ed31ad935b4",
+  "download_history_patch_sha256": "36898f5f6b7ff4e20f2737ca55befbe838fe8a9241338d6266fb6f72c0fa6c8e",
+  "download_history_manifest_sha256": "3f18b7bfdf74aa1902c22574bcb33db937560c4307d4bbcc048afa3580f44797",
+  "patch": {
+    "path": "patches/electron-41.7.1-owned-navigation-history.patch",
+    "sha256": "71b06584577b6acc5e973328352f7681abac8bffee9b736faeab800af6f4f64c"
+  },
+  "files": [
+    {
+      "path": "electron/BUILD.gn",
+      "before_sha256": "2041a84c7e8e251bd16cc8125b0ab48c6f1dd5947b1c0c07daf5513fac18c376",
+      "after_sha256": "6fbe82a40139959b8bd574b60448f4ad36d683fe867fc8971d12b812b36e5c36"
+    },
+    {
+      "path": "electron/lib/browser/api/session.ts",
+      "before_sha256": "0952b677f20c0efbc1ba269ee3def18d57fe1387b6fc928900971a0c7e0ad5c6",
+      "after_sha256": "53790cc28e81026157d3b1dbe7f28252040900dda7c0efba79511a046f4efd37"
+    },
+    {
+      "path": "electron/shell/browser/api/electron_api_session.cc",
+      "before_sha256": "4b460b29fb277b09c4a62b5d5e78e8713c583c75b93606c8c09b45022c5c5c9e",
+      "after_sha256": "d045e20593d78e0a6312ceaa6aecf0776c9cd27a687fa448f068a0d130557cd8"
+    },
+    {
+      "path": "electron/shell/browser/api/owned_navigation_history.cc",
+      "before_sha256": null,
+      "after_sha256": "30e1159d88d71c602e131046dcaffe7b15d63d374f8a856a65250d18c57fa4b7"
+    },
+    {
+      "path": "electron/shell/browser/api/owned_navigation_history.h",
+      "before_sha256": null,
+      "after_sha256": "ac1fd38a4a213339e8c8f5ac552c64c6d245c69f03848d7f6ffa4d9a22861c4c"
+    },
+    {
+      "path": "electron/shell/browser/api/owned_navigation_history_binding.cc",
+      "before_sha256": null,
+      "after_sha256": "e2c50999f7161038324b5ae7c3b920580c343018b3991f833d10abca35ac9d82"
+    },
+    {
+      "path": "electron/shell/browser/api/owned_navigation_history_binding.h",
+      "before_sha256": null,
+      "after_sha256": "c8d7d6be080ae9c52a050b84c7ea772e58e00e3ae28c088e47b6062a640f78a1"
+    },
+    {
+      "path": "electron/spec/api-owned-guest-spec.ts",
+      "before_sha256": "5a55bea8224a44cc07b022e5364a99c9ede8dafeb5f2c8ff5f352cc293d159e0",
+      "after_sha256": "16b6534f2618aa26bdf9eb24c9bff97f2c5bb1ed00e05ac9fedecec803dc4141"
+    },
+    {
+      "path": "electron/typings/internal-electron.d.ts",
+      "before_sha256": "f3492d5de54b176d124f84774dce260ffd7eb58d9fbc8b9f780a531c0456d78c",
+      "after_sha256": "093cbe279afdfd2089d1dacdcd35ec88587f09c479ce0ed272c9386fe056c256"
+    }
+  ],
+  "upstream": {
+    "electron": {
+      "version": "41.7.1",
+      "commit": "fda774933622cbc110f34a43015cc1fe6f4f56b3"
+    },
+    "chromium": {
+      "version": "146.0.7680.216",
+      "commit": "ff9214069a282850ff7ebbef6615bb009cf45c57"
+    },
+    "proof_files": {
+      "base/files/file_util.h": "71d2a4d750b7c4c6dec371db4a39f3db1c22532194895e73971e7486ba6d5a46",
+      "base/task/thread_pool.h": "c043af5f3be5c7d7116d9cd40728aed544a11ceb8c84c35daedcfc9b9aa937b3",
+      "chrome/browser/history/history_tab_helper.cc": "8700e1d37dda047c35829c2c503d21a06e5b51b0ad1581f0d2af4b292518eb14",
+      "chrome/browser/history/history_tab_helper.h": "b884b7d34cc9c666f223557dfdb5c0aafc522493675f47cfe1daa7ab36750061",
+      "components/history/content/browser/history_context_helper.cc": "cf48552e7969de07645c37f44033e13806e1584b1e7af511edf9e083291236c5",
+      "components/history/content/browser/history_context_helper.h": "d8e2d52f6d6fd860e3600d21839f1a98ed8f6b95a88056add52b7ca5567a2626",
+      "components/history/core/browser/history_backend_client.h": "5a2884fbb0fb1439a1c55d19f02a796d6f3eb2104fe39c7b8cc091331bc23b93",
+      "components/history/core/browser/history_client.h": "e5542c6decae63488a5b9baa5c6931fc5b1f34bc3ae76cc2157d14954f2d7882",
+      "components/history/core/browser/history_constants.h": "74721e2189a0c8d07325a292640bb4778c18a6b8081253daa27e34c70075cff6",
+      "components/history/core/browser/history_database_params.h": "e67190888a69bc76c052e853c0f2892aa13cf7fb7977effa268d6ad87bd4b07f",
+      "components/history/core/browser/history_service.cc": "4b8474bd8363235a9c5c0917a2a9126ae114c9c6c171413e1453bee9b2790e4d",
+      "components/history/core/browser/history_service_observer.h": "9a195179b3eb577a93cb281eb4ee96c8057fb4076846d835786c07fea6744e23",
+      "components/history/core/browser/history_types.h": "73d170d3dec6315e736de69f56ad99f559acd2e0076ac51441c693743021b55b",
+      "components/history/core/browser/url_row.h": "3c64bd27fd512e00bd1876ddb84ff9754cbd01fc5d14d752acdbc28400f02fc7",
+      "components/history/core/browser/visit_delegate.h": "634dc0640bb7ce5a8324da30e9ed995dabcce96264eacefe6a692cb880ed391e",
+      "components/query_parser/query_parser.h": "4d617b7614280050a1a423922e36c7b5bd11259b842597d9a326812c7d829a82"
+    }
+  },
+  "source_contract": {
+    "selection": "Optional exact artifact-selected collector. Factory called only by browser-kind main wrapper after trusted descriptor collection selection and source identity/implementation receipt verification. Read admission cannot enroll contexts. No Session/profile adoption or default collection.",
+    "database": "Real HistoryService(new HistoryClient, no unsupported VisitDelegate/bookmark/sync owner), disk Init. HistoryService::Init1464\u20131484 uses CreateSequencedTaskRunnerForResource(history_dir/History); thread_pool.h225\u2013233 explicitly sequences same path across contexts. Closing and a subsequent same-source reopen share this resource sequence. No testing-only lifecycle method.",
+    "factory": "session.createOwnedNavigationHistory({directory,sourceId,sourceRefDigest}) synchronously returns cancellable main-only native reader. UUID sourceId and SHA256 ref digest; canonical directory; live source cannot change identity. ready() resolves only actual HistoryServiceLoaded/error, carries fresh source epoch.",
+    "observation": "reader.observe/unobserve only actual owned WebContents. Each reader owns its successful registrations, closing one reader removes only its registrations and queries. Final source owner shutdown removes all registrations, ends current visits and clears actual ContextIDs, cancels pending trackers, detaches service observer, invalidates weak callbacks and shuts down backend. DOM detach never closes page or observer.",
+    "visit_evidence": "Native committed primary-page NavigationHandle/NavigationEntry URL, redirects, timestamp, context/nav IDs, response/transition/replace; same-document/reload title, bounded native TitleWasSet. HTTP(S) only; no JS timestamp insertion, DownloadDatabase visit invention, synthetic actor/bundle/tab IDs or off-the-record override.",
+    "query": "Native QueryHistory with CancelableTaskTracker and URLResult.visit_time; source-defined model options kept separate from explicit human per-day/alwaysPrefix options. DB failure, stale closed reader and cancellation reject. Isolate disposal occurs before V8 microtask runner disposal.",
+    "not_supported": [
+      "bookmark/pinned URL integration",
+      "visited-link rendering",
+      "unselected/global user-profile history"
+    ],
+    "authority": "Shared Home BrowserHistory typed-subject/request-specific proof remains separate from collection identity; A package producer awaits D exact published schema. Native API is not itself policy authority."
+  },
+  "native_check": {
+    "title": "records native enrolled navigation and preserves visits across a fresh process",
+    "spec": "electron/spec/api-owned-guest-spec.ts",
+    "execution": "held"
+  },
+  "limits": [
+    "Fragment application does not prove full canonical source composition, native compile/ABI/database/engine acceptance.",
+    "No collection/source authoring occurs without explicit selected descriptor and actual implementation receipt. No permanent Home/source records were written."
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "id": "gui.observe",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "observe"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [{"path": "desktop-host/connection.json"}],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Observe the current desktop state through the formed room and return bounded backend evidence.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "detail": {
+        "type": "string",
+        "enum": [
+          "compact",
+          "full"
+        ]
+      },
+      "include_screenshot": {
+        "type": "boolean"
+      },
+      "screen_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact screen id from gui.status; coordinates use this screenshot pixel domain."
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "screen_id"
+    ]
+  },
+  "is_world_effect": false
+}

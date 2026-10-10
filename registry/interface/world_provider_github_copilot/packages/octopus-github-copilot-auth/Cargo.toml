@@ -1,0 +1,24 @@
+[package]
+name = "octopus-github-copilot-auth"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+name = "octopus_github_copilot_auth"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = "1"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-secrets = { path = "../../../world_provider_codex/packages/octopus-secrets" }
+
+[dev-dependencies]
+tokio.workspace = true

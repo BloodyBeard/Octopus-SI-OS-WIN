@@ -1,0 +1,54 @@
+{
+  "id": "coder.read_file",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "read_file"
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "Read a bounded UTF-8 byte range from a text file inside the invoking run's leased worktree. Continue a truncated read with the returned next_offset_bytes.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Path relative to the leased worktree."
+      },
+      "offset_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "UTF-8 byte offset to start reading from. Defaults to 0; use only 0 or a next_offset_bytes returned by this tool."
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 4,
+        "maximum": 1048576,
+        "description": "Maximum UTF-8 bytes to return. Defaults to 65536."
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

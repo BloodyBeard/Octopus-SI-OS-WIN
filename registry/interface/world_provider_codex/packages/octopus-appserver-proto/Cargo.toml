@@ -1,0 +1,54 @@
+[package]
+name = "octopus-appserver-proto"
+# Ported Codex source uses edition 2024 idioms (let-chains) and matches octopus-protocol.
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_appserver_proto"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+# workspace primitives
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+# ported sibling octopus crates
+octopus-protocol = { path = "../octopus-protocol" }
+octopus-util-abspath = { path = "../../../../worker_environment_kind/process_session/packages/octopus-util-abspath" }
+octopus-util-pathuri = { path = "../../../../worker_environment_kind/process_session/packages/octopus-util-pathuri" }
+
+# box crate: command parsing + command-safety are a kernel/exec (box) concept,
+# not model protocol. A provider package may depend on a box crate
+# (registry -> box is allowed). Supplies parse_command()/shlex_join() used by
+# protocol::item_builders.
+octopus-shell-command = { package = "octopus-shell-command", path = "../../../../../registry/worker_environment_kind/process_session/packages/octopus-shell-command" }
+
+# vendored proc-macro (kept inside this crate dir; excluded from workspace glob)
+octopus-experimental-api-macros = { path = "vendor-macros" }
+
+# crates.io deps (versions copied from codex-rs workspace)
+clap = { version = "4", features = ["derive"] }
+schemars = "0.8.22"
+serde_with = "3.17"
+strum_macros = "0.28.0"
+rmcp = { version = "1.7.0", default-features = false, features = [
+    "base64",
+    "macros",
+    "schemars",
+    "server",
+] }
+ts-rs = "11"
+inventory = "0.3.19"
+tracing = "0.1.44"
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+similar = "2.7.0"
+tempfile = "3.23.0"

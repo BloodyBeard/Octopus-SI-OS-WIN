@@ -1,0 +1,55 @@
+{
+  "id": "notion.fetch_page",
+  "request_label": "mcp.operation.request",
+  "output_label": "mcp.tool.result",
+  "handler_config": {
+    "operation": "call_tool",
+    "mcp_tool_name": "notion_fetch_page"
+  },
+  "description": "Fetch a Notion page through the external Notion MCP server behind world_mcp_notion. The mcp_tool_call family forwards this call over the interface transport wire and returns the server's result as an artifact.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "page": {
+        "$ref": "#/$defs/Page%20Ref"
+      },
+      "filter": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/Filter"
+        }
+      },
+      "content_mode": {
+        "description": "How much content to return.",
+        "anyOf": [
+          {
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "$defs": {
+      "Page Ref": {
+        "type": "string",
+        "description": "Notion page ID or URL."
+      },
+      "Filter": {
+        "type": "object",
+        "description": "Filter object.",
+        "properties": {
+          "created_by": {
+            "type": "string",
+            "description": "Creator user ID."
+          }
+        }
+      }
+    }
+  }
+}

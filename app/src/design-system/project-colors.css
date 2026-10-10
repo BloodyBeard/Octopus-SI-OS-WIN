@@ -1,0 +1,29 @@
+:root {
+  --project-color-black: var(--vscode-icon-foreground);
+  --project-color-indigo: #4f46e5;
+  --project-color-cyan: #0891b2;
+  --project-color-teal: #0d9488;
+}
+
+:root,
+[data-theme="light"],
+.electron-light {
+  --project-color-violet: #924ff7;
+  --project-color-blue: #0285ff;
+  --project-color-green: #04b84c;
+  --project-color-amber: #ffc300;
+  --project-color-orange: #fb6a22;
+  --project-color-pink: #ff66ad;
+  --project-color-red: #fa423e;
+}
+
+[data-theme="dark"],
+.electron-dark {
+  --project-color-violet: #ad7bf9;
+  --project-color-blue: #339cff;
+  --project-color-green: #40c977;
+  --project-color-amber: #ffd240;
+  --project-color-orange: #ff8549;
+  --project-color-pink: #ff8cc1;
+  --project-color-red: #ff6764;
+}

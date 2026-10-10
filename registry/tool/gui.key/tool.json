@@ -1,0 +1,60 @@
+{
+  "id": "gui.key",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "key"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [{"path": "desktop-host/connection.json"}],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Send one key action through the formed desktop session and return backend evidence. Requires current gui.control ownership and a fresh single-use gui.observe observation. Posted input is not proof of the application outcome; observe again.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "key": {
+        "type": "string",
+        "pattern": "^(?:(?:cmd|ctrl|alt|shift|fn)\\+)*(?:a|s|d|f|h|g|z|x|c|v|b|q|w|e|r|y|t|1|2|3|4|6|5|equal|9|7|minus|8|0|rightbracket|o|u|leftbracket|i|p|l|j|quote|k|semicolon|backslash|comma|slash|n|m|period|grave|keypaddecimal|keypadmultiply|keypadplus|keypadclear|keypaddivide|keypadenter|keypadminus|keypadequals|keypad0|keypad1|keypad2|keypad3|keypad4|keypad5|keypad6|keypad7|keypad8|keypad9|enter|tab|space|backspace|escape|cmd|shift|capslock|alt|ctrl|rightcmd|rightshift|rightalt|rightctrl|fn|f17|volumeup|volumedown|mute|f18|f19|f20|f5|f6|f7|f3|f8|f9|f11|f13|f16|f14|f10|contextualmenu|f12|f15|help|home|pageup|delete|f4|end|f2|pagedown|f1|left|right|down|up|isosection|jisyen|jisunderscore|jiskeypadcomma|jiseisu|jiskana)$",
+        "description": "Lowercase physical macOS key names, ANSI positions independent of current keyboard layout; use gui.type for Unicode text. Optional unique cmd+, ctrl+, alt+, shift+, fn+ modifiers. Examples: cmd+shift+p, ctrl+alt+delete, f12, keypadenter. Supported keys: a, s, d, f, h, g, z, x, c, v, b, q, w, e, r, y, t, 1, 2, 3, 4, 6, 5, equal, 9, 7, minus, 8, 0, rightbracket, o, u, leftbracket, i, p, l, j, quote, k, semicolon, backslash, comma, slash, n, m, period, grave, keypaddecimal, keypadmultiply, keypadplus, keypadclear, keypaddivide, keypadenter, keypadminus, keypadequals, keypad0, keypad1, keypad2, keypad3, keypad4, keypad5, keypad6, keypad7, keypad8, keypad9, enter, tab, space, backspace, escape, cmd, shift, capslock, alt, ctrl, rightcmd, rightshift, rightalt, rightctrl, fn, f17, volumeup, volumedown, mute, f18, f19, f20, f5, f6, f7, f3, f8, f9, f11, f13, f16, f14, f10, contextualmenu, f12, f15, help, home, pageup, delete, f4, end, f2, pagedown, f1, left, right, down, up, isosection, jisyen, jisunderscore, jiskeypadcomma, jiseisu, jiskana"
+      },
+      "screen_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact screen id from gui.status; coordinates use this screenshot pixel domain."
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "required": [
+      "key",
+      "screen_id",
+      "observation_id",
+      "control_generation"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "interface": "system_interface_authoring_memory_schedule",
+  "activations": [
+    {
+      "activation_driver_ref": "app_server_transport",
+      "config": {
+        "bind_interface_socket_when_env_unset": true,
+        "listen_env": "OCTOPUS_MEMORY_SCHEDULE_AUTHORING_LISTEN"
+      }
+    }
+  ]
+}

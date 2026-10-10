@@ -1,0 +1,196 @@
+{
+  "id": "world_provider_bedrock_bearer",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "bedrock.bearer"
+  ],
+  "interface_driver_ref": "aws_bedrock_converse",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 4
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": [
+          "us.anthropic.claude-sonnet-4-6"
+        ]
+      }
+    }
+  },
+  "interface_driver_config": {
+    "private_config": {
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "process_env_names": [],
+      "model_hidden_tools": [
+        "file.write"
+      ],
+      "model": "us.anthropic.claude-sonnet-4-6",
+      "context_output_labels": [
+        "interface.artifact.output",
+        "provider.reasoning",
+        "provider.error",
+        "provider.tool_results.pending",
+        "tool.call"
+      ],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "provider.tool_results.pending",
+        "provider.error"
+      ],
+      "bedrock_converse": {
+        "operation": "converse_stream",
+        "region": "us-east-1",
+        "signing_name": "bedrock",
+        "paths": {
+          "converse": "/model/{model}/converse",
+          "converse_stream": "/model/{model}/converse-stream"
+        },
+        "authorization": {
+          "scheme": "bearer",
+          "token": {
+            "kind": "secret_handle",
+            "secret_ref": "secret://world_provider_bedrock_bearer/AWS_BEARER_TOKEN_BEDROCK"
+          }
+        },
+        "inference_config": {
+          "maxTokens": 32768
+        },
+        "request_fields": {},
+        "tools_enabled": true,
+        "tool_choice": null,
+        "reasoning_replay": "verbatim",
+        "input_content_types": [
+          "text",
+          "image",
+          "document",
+          "reasoningContent",
+          "toolUse",
+          "toolResult"
+        ],
+        "response_content_types": [
+          "text",
+          "reasoningContent",
+          "toolUse",
+          "toolResult",
+          "image",
+          "citationsContent"
+        ],
+        "carrier_policy": {
+          "max_inline_bytes": 26214400,
+          "max_images_per_message": 20,
+          "max_documents_per_message": 5,
+          "max_image_bytes": 3932160,
+          "max_document_bytes": 4718592,
+          "allowed_image_formats": [
+            "png",
+            "jpeg",
+            "gif",
+            "webp"
+          ],
+          "allowed_document_formats": [
+            "pdf",
+            "csv",
+            "doc",
+            "docx",
+            "xls",
+            "xlsx",
+            "html",
+            "txt",
+            "md"
+          ],
+          "rules": [
+            {
+              "encoding": "json_text",
+              "label": "interface.input",
+              "role": "user",
+              "text_pointer": "/prompt"
+            },
+            {
+              "encoding": "bedrock_message",
+              "label": "bedrock.message"
+            }
+          ]
+        },
+        "account_limits": {
+          "max_in_flight": 1,
+          "requests_per_window": 120,
+          "window_ms": 60000,
+          "max_request_bytes": 26214400,
+          "max_messages": 2048,
+          "max_content_blocks": 8192,
+          "max_tools": 256,
+          "max_tool_input_bytes": 1048576
+        },
+        "retry": {
+          "transport": true,
+          "auth_transport": true,
+          "base_delay_ms": 1000,
+          "max_delay_ms": 30000,
+          "retryable_statuses": [
+            408,
+            429,
+            500,
+            502,
+            503,
+            504
+          ],
+          "retryable_error_codes": [
+            "InternalServerException",
+            "ModelNotReadyException",
+            "ModelTimeoutException",
+            "ServiceQuotaExceededException",
+            "ServiceUnavailableException",
+            "ThrottlingException"
+          ]
+        },
+        "model_catalog": {
+          "request_label": "provider.models.list",
+          "output_label": "provider.models.catalog",
+          "base_url": "https://bedrock.us-east-1.amazonaws.com",
+          "signing_name": "bedrock",
+          "operations": [
+            {
+              "kind": "foundation_models",
+              "method": "GET",
+              "path": "/foundation-models",
+              "max_pages": 1,
+              "page_size": null,
+              "type_equals": null
+            },
+            {
+              "kind": "inference_profiles",
+              "method": "GET",
+              "path": "/inference-profiles",
+              "max_pages": 32,
+              "page_size": 1000,
+              "type_equals": null
+            }
+          ]
+        }
+      }
+    },
+    "transport": {
+      "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "wire": "aws_bedrock_converse_stream",
+      "headers": {
+        "accept": "application/vnd.amazon.eventstream",
+        "content-type": "application/json"
+      },
+      "request_timeout_ms": 600000,
+      "max_response_bytes": 268435456
+    }
+  }
+}

@@ -1,0 +1,134 @@
+{
+  "id": "browser.scroll",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "scroll"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Dispatch a wheel movement in this formed browser room and refresh the accessibility snapshot by default. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. mode=gesture uses actual Input.synthesizeScrollGesture with negated distances, mouse source, preventFling and speed8000; it is distinct from wheel input.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "delta_x": {
+        "type": "number"
+      },
+      "delta_y": {
+        "type": "number"
+      },
+      "x": {
+        "type": "number"
+      },
+      "y": {
+        "type": "number"
+      },
+      "snapshot": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      },
+      "mode": {
+        "const": "gesture"
+      },
+      "scroll_x": {
+        "type": "number"
+      },
+      "scroll_y": {
+        "type": "number"
+      }
+    },
+    "additionalProperties": false,
+    "oneOf": [
+      {
+        "anyOf": [
+          {
+            "required": [
+              "delta_x"
+            ]
+          },
+          {
+            "required": [
+              "delta_y"
+            ]
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "mode"
+              ]
+            },
+            {
+              "required": [
+                "scroll_x"
+              ]
+            },
+            {
+              "required": [
+                "scroll_y"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "required": [
+          "mode",
+          "x",
+          "y",
+          "scroll_x",
+          "scroll_y"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "delta_x"
+              ]
+            },
+            {
+              "required": [
+                "delta_y"
+              ]
+            },
+            {
+              "required": [
+                "snapshot"
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "is_world_effect": true
+}

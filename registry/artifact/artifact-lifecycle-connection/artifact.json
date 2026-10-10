@@ -1,0 +1,5 @@
+{
+  "label": "context.reference",
+  "id": "artifact-lifecycle-connection",
+  "text": "A lifecycle.connection is an immutable, run-bound configuration artifact validated by system_lifecycle_events/connection.schema.json and the provider's strict decoder. It is a resolved snapshot of layered handler sources: each handler names its source layer/path/trust and pins the canonical handler destination JSON by SHA-256. Enabled modified or untrusted handlers fail closed. The artifact has no authority by itself: the exact ArtifactRef must be both bound to a run and repeated in that provider run's lifecycle_connection pin, while the formed grant must independently admit system_lifecycle_events, every concrete handler destination, and lifecycle.decision.allowed for sync edges. Multiple selected sync handlers for one held continuation require an explicitly authored aggregate decision edge and otherwise fail closed; async matches remain separate sibling movements."
+}

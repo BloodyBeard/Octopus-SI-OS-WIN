@@ -1,0 +1,90 @@
+{
+  "processes": [
+    {
+      "bin": "python3",
+      "io_limits": {
+        "max_control_frame_bytes": 1048576,
+        "max_stderr_bytes": 262144,
+        "max_manifest_bytes": 1048576,
+        "max_payload_bytes": 268435456
+      },
+      "args": [
+        {
+          "repository_file": "registry/interface/world_discord/discord_boot.py"
+        }
+      ],
+      "private_var_directories": [
+        "python-runtime"
+      ],
+      "required_files": [
+        "registry/interface/world_discord/discord_boot.py",
+        "registry/interface/world_discord/discord_life.py",
+        "registry/interface/world_discord/discord_boundary.py",
+        "registry/interface/world_discord/discord_voice.py",
+        "registry/interface/world_discord/octopus_content_hash.py",
+        "registry/interface/world_discord/requirements.txt",
+        "registry/interface/world_discord/requirements.lock.txt"
+      ],
+      "inherit_env": [
+        "DISCORD_ALLOWED_CHANNELS",
+        "DISCORD_ALLOWED_GUILDS",
+        "DISCORD_ALLOWED_ROLES",
+        "DISCORD_ALLOWED_USERS",
+        "DISCORD_ALLOW_ALL_USERS",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_DENIED_CHANNELS",
+        "DISCORD_FREE_RESPONSE_CHANNELS",
+        "DISCORD_NO_THREAD_CHANNELS",
+        "OCTOPUS_DISCORD_API_BASE",
+        "OCTOPUS_DISCORD_PROXY",
+        "PATH"
+      ],
+      "required_env": [
+        "DISCORD_BOT_TOKEN"
+      ],
+      "authority": {
+        "read_root_slots": [
+          "registry_ee_template_root",
+          "registry_interface_root",
+          "registry_tool_root",
+          "registry_worker_environment_kind_root",
+          "run_records_root",
+          "ee_instances_root"
+        ],
+        "write_root_slots": [],
+        "executable_root_slots": [],
+        "read_paths": [],
+        "write_paths": [],
+        "executable_paths": [],
+        "executable_commands": [
+          "python3",
+          "ffmpeg"
+        ],
+        "read_env_paths": [],
+        "write_env_paths": [],
+        "executable_env_paths": [],
+        "executable_env_subpaths": [
+          {
+            "env": "OCTOPUS_VAR_DIR",
+            "relative_path": "python-runtime"
+          }
+        ],
+        "allow_network": true,
+        "allow_local_ipc": true
+      },
+      "coordinate_root_slots": [
+        "registry_ee_template_root",
+        "registry_interface_root",
+        "registry_tool_root",
+        "registry_worker_environment_kind_root",
+        "run_records_root",
+        "ee_instances_root"
+      ],
+      "read_handles": [
+        "ledger",
+        "blobs",
+        "ledger_index"
+      ]
+    }
+  ]
+}

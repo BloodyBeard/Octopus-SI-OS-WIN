@@ -1,0 +1,29 @@
+.pane-header-button {
+  display: flex;
+  height: var(--spacing-token-button-composer);
+  aspect-ratio: 1;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-lg-base) * var(--corner-radius-scale));
+  corner-shape: var(--octopus-corner-shape);
+  color: var(--color-text-tertiary);
+  background: transparent;
+  font: inherit;
+  line-height: 18px;
+  user-select: none;
+  cursor: var(--cursor-interaction);
+  -webkit-app-region: no-drag;
+}
+.pane-header-button:enabled:hover { background: var(--color-background-primary-ghost-hover); }
+.pane-header-button[data-state=open],
+.pane-header-button[data-state=open]:enabled:hover {
+  color: var(--color-text);
+  background: color-mix(in oklab, var(--color-text) 5%, transparent);
+}
+.pane-header-button:focus { outline: none; }
+.pane-header-button:focus-visible { box-shadow: 0 0 0 2px var(--color-ring); }
+.pane-header-button:disabled { cursor: default; opacity: .4; }

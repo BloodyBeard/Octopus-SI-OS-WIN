@@ -1,0 +1,9 @@
+{
+  "id": "system_worker_coder",
+  "interface_type": "system",
+  "role": "worker",
+  "direction": "bidirectional",
+  "source_names": [
+    "coder"
+  ]
+}

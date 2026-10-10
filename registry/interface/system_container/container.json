@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "engine": "docker",
+  "image": "ubuntu:24.04",
+  "pull_policy": "if_missing",
+  "name_prefix": "octopus",
+  "workdir": "/workspace",
+  "start_argv": [
+    "sleep",
+    "infinity"
+  ],
+  "network": "bridge",
+  "network_name": null,
+  "publish_ports": [],
+  "dns": [],
+  "hostname": null,
+  "init": true,
+  "read_only_root": false,
+  "user": null,
+  "cpu_limit": 2.0,
+  "memory_bytes": 4294967296,
+  "storage_bytes": null,
+  "shm_bytes": 67108864,
+  "pids_limit": 512,
+  "startup_timeout_ms": 300000,
+  "ready_condition": "running",
+  "ready_timeout_ms": 300000,
+  "ready_poll_ms": 250,
+  "exec_timeout_ms": 120000,
+  "max_output_bytes": 8388608,
+  "max_file_bytes": 16777216,
+  "max_directory_entries": 4096,
+  "inline_text_preview_bytes": 65536,
+  "reuse_stopped": true,
+  "recovery_policy": "restart_or_recreate",
+  "env": {},
+  "forward_env": [],
+  "labels": {},
+  "mounts": [
+    {
+      "root_slot": "worktree_root",
+      "target": "/workspace",
+      "access": "read_write",
+      "source_type": "directory"
+    }
+  ],
+  "readable_paths": [
+    "/workspace",
+    "/tmp"
+  ],
+  "writable_paths": [
+    "/workspace",
+    "/tmp"
+  ]
+}

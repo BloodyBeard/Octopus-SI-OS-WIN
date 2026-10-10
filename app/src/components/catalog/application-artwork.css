@@ -1,0 +1,11 @@
+.application-artwork-dark {
+  display: none;
+}
+
+[data-theme="dark"] .application-artwork-light {
+  display: none;
+}
+
+[data-theme="dark"] .application-artwork-dark {
+  display: block;
+}

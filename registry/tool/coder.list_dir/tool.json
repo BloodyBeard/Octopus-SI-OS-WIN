@@ -1,0 +1,51 @@
+{
+  "id": "coder.list_dir",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "list_dir"
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "List a deterministic bounded page of paths inside the invoking run's leased worktree.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Path relative to the leased worktree; omit or use . for the worktree root."
+      },
+      "offset": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Entry offset for deterministic pagination. Defaults to 0."
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "description": "Maximum entries to return. Defaults to 200."
+      }
+    },
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

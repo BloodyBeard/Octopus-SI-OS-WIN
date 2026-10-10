@@ -1,0 +1,21 @@
+{
+  "id": "browser.close",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "close"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [{"path": "secrets/browser-native-host.auth"}],
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+      "allow_network": true, "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": ["browser_session"],
+  "description": "Close the page target currently owned by this formed browser room and publish closed live-state.",
+  "args_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+  "is_world_effect": true
+}

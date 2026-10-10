@@ -1,0 +1,16 @@
+{
+  "id": "system_worker_dictation",
+  "ceiling": {
+    "interfaces": [
+      "world_microphone",
+      "world_speech_to_text",
+      "world_operator_dictation",
+      "system_worker_dictation"
+    ],
+    "tools": [],
+    "wek": [],
+    "mark_outcomes": [],
+    "hard_blocked_tools": []
+  },
+  "role_artifacts": []
+}

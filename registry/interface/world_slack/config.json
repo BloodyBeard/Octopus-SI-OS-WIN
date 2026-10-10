@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "mode": "gateway",
+  "ledger": {
+    "max_row_bytes": 1048576
+  },
+  "transport": {
+    "api_base_env": "OCTOPUS_SLACK_API_BASE",
+    "api_base_default": "https://slack.com/api",
+    "socket_url_env": "OCTOPUS_SLACK_SOCKET_URL",
+    "bot_token_env": "SLACK_BOT_TOKEN",
+    "app_token_env": "SLACK_APP_TOKEN",
+    "proxy_env": "OCTOPUS_SLACK_PROXY",
+    "connect_timeout_ms": 15000,
+    "request_timeout_ms": 60000,
+    "max_response_bytes": 16777216,
+    "max_frame_bytes": 33554432,
+    "reconnect_backoff_ms": 250,
+    "reconnect_backoff_cap_ms": 15000,
+    "rate_limit_max_wait_ms": 120000,
+    "read_retry_limit": 3
+  },
+  "authz": {
+    "allow_all_users": false,
+    "allow_all_users_env": "SLACK_ALLOW_ALL_USERS",
+    "allowed_user_ids": [],
+    "allowed_user_ids_env": "SLACK_ALLOWED_USERS",
+    "allowed_channel_ids": [],
+    "allowed_channel_ids_env": "SLACK_ALLOWED_CHANNELS",
+    "allowed_team_ids": [],
+    "allowed_team_ids_env": "SLACK_ALLOWED_TEAMS",
+    "deny_unmatched": true
+  },
+  "gating": {
+    "respond_in_dms": true,
+    "respond_in_channels_on_mention_only": true,
+    "free_response_channel_ids": [],
+    "free_response_channel_ids_env": "SLACK_FREE_RESPONSE_CHANNELS",
+    "mention_patterns": [],
+    "thread_sticky_after_mention": true,
+    "thread_sticky_after_bot_reply": true,
+    "accept_message_edits": true,
+    "accept_message_deletes": true,
+    "accept_bot_events": false
+  },
+  "intake": {
+    "event_types": [
+      "app_home_opened",
+      "app_mention",
+      "assistant_thread_context_changed",
+      "assistant_thread_started",
+      "file_change",
+      "file_created",
+      "file_shared",
+      "member_joined_channel",
+      "member_left_channel",
+      "message",
+      "reaction_added",
+      "reaction_removed",
+      "team_join"
+    ],
+    "interactive_types": [
+      "block_actions",
+      "message_action",
+      "shortcut",
+      "view_closed",
+      "view_submission"
+    ],
+    "max_pending_events": 10000,
+    "pending_retry_ms": 500,
+    "dedup_retention": 20000,
+    "thread_context_max_messages": 100
+  },
+  "routing": {
+    "binding_registry_path_env": "OCTOPUS_SLACK_BINDING_REGISTRY",
+    "private_scope": "all",
+    "unbound_policy": "retain",
+    "binding_authoring_mode": "automatic",
+    "ipc_listen": "127.0.0.1",
+    "ipc_port": 32741,
+    "ipc_max_frame_bytes": 33554432
+  },
+  "media": {
+    "download_enabled": true,
+    "max_download_bytes": 52428800,
+    "max_upload_bytes": 52428800,
+    "max_files_per_event": 20,
+    "text_preview_bytes": 102400,
+    "allowed_download_hosts": [
+      "files.slack.com",
+      "files.slack-gov.com",
+      "slack-files.com"
+    ],
+    "allowed_upload_hosts": [
+      "files.slack.com",
+      "files.slack-gov.com",
+      "slack-files.com"
+    ]
+  },
+  "outbound": {
+    "reply_labels": [
+      "interface.artifact.output",
+      "slack.operation"
+    ],
+    "stream_labels": [
+      "agent.message.delta"
+    ],
+    "error_labels": [
+      "turn.error"
+    ],
+    "telemetry_labels": [
+      "hook.catalog",
+      "hook.result",
+      "turn.exec.command",
+      "turn.plan.update",
+      "turn.reasoning",
+      "turn.token_usage",
+      "turn.web_search"
+    ],
+    "max_message_chars": 39000,
+    "max_manifest_bytes": 1048576,
+    "max_payload_bytes": 67108864,
+    "stream_edit_interval_ms": 1000,
+    "max_blocks": 50,
+    "max_block_json_bytes": 262144,
+    "home_channel_env": "SLACK_HOME_CHANNEL",
+    "reactions": {
+      "enabled": true,
+      "processing": "eyes",
+      "success": "white_check_mark",
+      "failure": "x"
+    },
+    "allowed_web_methods": [
+      "assistant.threads.setStatus",
+      "bookmarks.add",
+      "bookmarks.edit",
+      "bookmarks.list",
+      "bookmarks.remove",
+      "chat.getPermalink",
+      "conversations.history",
+      "conversations.info",
+      "conversations.list",
+      "conversations.members",
+      "conversations.open",
+      "conversations.replies",
+      "pins.add",
+      "pins.list",
+      "pins.remove",
+      "reactions.get",
+      "team.info",
+      "usergroups.list",
+      "users.info",
+      "users.list",
+      "users.profile.get"
+    ],
+    "retry_safe_web_methods": [
+      "bookmarks.list",
+      "chat.getPermalink",
+      "conversations.history",
+      "conversations.info",
+      "conversations.list",
+      "conversations.members",
+      "conversations.replies",
+      "pins.list",
+      "reactions.get",
+      "team.info",
+      "usergroups.list",
+      "users.info",
+      "users.list",
+      "users.profile.get"
+    ]
+  },
+  "private_run": {
+    "ee_template_owner": "operator_interaction",
+    "parent_ee": "ee_existence",
+    "model": "gpt-5.5",
+    "reasoning_effort": "xhigh",
+    "role_artifacts": [
+      "artifact-worker-role-slack"
+    ],
+    "interface_owners": {
+      "slack": "world_slack",
+      "provider": "world_provider_codex",
+      "interface_authoring": "system_interface_authoring",
+      "worker": "system_worker_slack",
+      "worker_environment": "system_room_slack_gateway",
+      "operator": "world_operator_chat"
+    },
+    "id_prefixes": {
+      "run": "run_slack_",
+      "ee": "ee_slack_",
+      "ee_template": "operator_interaction_slack_",
+      "slack": "world_slack_",
+      "provider": "world_provider_codex_slack_",
+      "interface_authoring": "system_interface_authoring_slack_",
+      "worker": "system_worker_slack_",
+      "worker_environment": "system_room_slack_",
+      "tool": "file.write.slack_"
+    },
+    "file_write_tool": "file.write.slack_gateway",
+    "file_write_label": "tool.call",
+    "file_write_result_label": "file.write.result",
+    "worker_environment_kind": "system_room",
+    "file_write_mark_outcome": "tool.call.allowed",
+    "provider_context_output_labels": [
+      "interface.artifact.output",
+      "tool.call",
+      "turn.error",
+      "operator.approval.request",
+      "operator.elicitation.request"
+    ],
+    "result_timeout_ms": 30000,
+    "authoring_retry_attempts": 3
+  },
+  "binding": null,
+  "gateway_run_template": {
+    "id": "run_slack_gateway",
+    "ee": "ee_existence",
+    "worker": "system_worker_slack",
+    "trace": "trace:run_slack_gateway",
+    "status": "running",
+    "interface_state": {},
+    "checkpoints": [
+      {
+        "id": "cp_slack_gateway_authoring_call",
+        "run": "run_slack_gateway",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_slack",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_room_slack_gateway",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-slack"
+          }
+        ],
+        "required_verified_artifacts": [],
+        "trace": "trace:run_slack_gateway:cp_slack_gateway_authoring_call"
+      },
+      {
+        "id": "cp_slack_gateway_authoring_result",
+        "run": "run_slack_gateway",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_room_slack_gateway",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_slack",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-slack"
+          }
+        ],
+        "required_verified_artifacts": [],
+        "trace": "trace:run_slack_gateway:cp_slack_gateway_authoring_result"
+      }
+    ],
+    "active_checkpoints": [
+      "cp_slack_gateway_authoring_call",
+      "cp_slack_gateway_authoring_result"
+    ]
+  }
+}

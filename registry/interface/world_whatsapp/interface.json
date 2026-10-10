@@ -1,0 +1,10 @@
+{
+  "id": "world_whatsapp",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "whatsapp"
+  ],
+  "interface_driver_ref": "whatsapp_life"
+}

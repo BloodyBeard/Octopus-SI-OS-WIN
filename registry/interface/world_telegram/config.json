@@ -1,0 +1,430 @@
+{
+  "schema_version": 2,
+  "mode": "gateway",
+  "bot_api": {
+    "base_url_env": "OCTOPUS_TELEGRAM_API_BASE",
+    "base_url_default": "https://api.telegram.org",
+    "token_env": "TELEGRAM_BOT_TOKEN",
+    "request_timeout_ms": 120000,
+    "max_response_bytes": 16777216,
+    "proxy_env": "TELEGRAM_PROXY",
+    "local_mode_env": "TELEGRAM_LOCAL",
+    "local_file_roots_env": "TELEGRAM_LOCAL_FILES_ROOTS",
+    "local_file_root_slots": [],
+    "fallback_ips_env": "OCTOPUS_TELEGRAM_FALLBACK_IPS",
+    "seed_fallback_ips": [
+      "149.154.167.220"
+    ],
+    "fallback_discovery": [
+      {
+        "url": "https://dns.google/resolve?name=api.telegram.org&type=A",
+        "answers_path": [
+          "Answer"
+        ],
+        "address_key": "data",
+        "record_type_key": "type",
+        "record_type_value": 1
+      },
+      {
+        "url": "https://cloudflare-dns.com/dns-query?name=api.telegram.org&type=A",
+        "headers": {
+          "Accept": "application/dns-json"
+        },
+        "answers_path": [
+          "Answer"
+        ],
+        "address_key": "data",
+        "record_type_key": "type",
+        "record_type_value": 1
+      }
+    ]
+  },
+  "intake": {
+    "mode": "long_poll",
+    "long_poll_timeout_s": 25,
+    "allowed_updates": [
+      "message",
+      "edited_message",
+      "channel_post",
+      "edited_channel_post",
+      "callback_query",
+      "my_chat_member",
+      "chat_member",
+      "chat_join_request",
+      "message_reaction",
+      "message_reaction_count"
+    ],
+    "drop_pending_updates": false,
+    "conflict_backoff_ms": 3000,
+    "conflict_max_retries": 10,
+    "network_backoff_ms": 1000,
+    "network_backoff_cap_ms": 15000,
+    "batching": {
+      "enabled": true,
+      "text_quiet_ms": 180,
+      "text_split_quiet_ms": 900,
+      "split_threshold_units": 3800,
+      "media_group_quiet_ms": 500,
+      "photo_burst_quiet_ms": 350,
+      "max_items": 10,
+      "max_text_chars": 65536
+    },
+    "webhook": {
+      "enabled_env": "OCTOPUS_TELEGRAM_WEBHOOK_URL",
+      "secret_env": "OCTOPUS_TELEGRAM_WEBHOOK_SECRET",
+      "listen": "127.0.0.1",
+      "port": 8443,
+      "port_env": "OCTOPUS_TELEGRAM_WEBHOOK_PORT_OVERRIDE",
+      "path": "/telegram",
+      "max_body_bytes": 1048576
+    }
+  },
+  "authz": {
+    "allow_all_users": false,
+    "allow_all_users_env": "TELEGRAM_ALLOW_ALL_USERS",
+    "allowed_user_ids": [],
+    "allowed_user_ids_env": "TELEGRAM_ALLOWED_USERS",
+    "allowed_chat_ids": [],
+    "allowed_chat_ids_env": "TELEGRAM_ALLOWED_CHATS",
+    "deny_unmatched": true,
+    "pairing": {
+      "enabled": true,
+      "prompt": "You are not paired. Send this code to the operator to be approved: {code}"
+    }
+  },
+  "gating": {
+    "respond_in_private": true,
+    "respond_in_groups_on_mention_only": true,
+    "bot_username_env": "OCTOPUS_TELEGRAM_BOT_USERNAME",
+    "mention_aliases": [],
+    "observe_unmentioned_group_messages": false,
+    "reply_to_bot_counts_as_mention": true,
+    "group_allowed_user_ids": [],
+    "group_allowed_user_ids_env": "TELEGRAM_GROUP_ALLOWED_USERS",
+    "group_allowed_chat_ids": [],
+    "group_allowed_chat_ids_env": "TELEGRAM_GROUP_ALLOWED_CHATS",
+    "free_response_chat_ids": [],
+    "free_response_chat_ids_env": "TELEGRAM_FREE_RESPONSE_CHATS",
+    "observe_chat_ids": [],
+    "observe_chat_ids_env": "TELEGRAM_OBSERVE_ALLOWED_CHATS",
+    "allowed_topics": [],
+    "ignored_topics": [],
+    "mention_patterns": [],
+    "exclusive_bot_mentions": true,
+    "guest_mode": false
+  },
+  "media": {
+    "max_download_bytes": 20971520,
+    "max_upload_bytes": 20971520,
+    "max_multipart_bytes": 67108864,
+    "max_text_preview_bytes": 102400,
+    "max_media_group_items": 10,
+    "text_extensions": [
+      ".txt",
+      ".md",
+      ".markdown",
+      ".json",
+      ".jsonl",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".csv",
+      ".tsv",
+      ".py",
+      ".rs",
+      ".js",
+      ".ts",
+      ".tsx",
+      ".jsx",
+      ".html",
+      ".css",
+      ".sh",
+      ".sql",
+      ".xml"
+    ],
+    "inbound_kinds": [
+      "photo",
+      "voice",
+      "audio",
+      "video",
+      "video_note",
+      "animation",
+      "document",
+      "sticker"
+    ]
+  },
+  "outbound": {
+    "parse_mode": "MarkdownV2",
+    "max_message_len": 4096,
+    "max_caption_len": 1024,
+    "disable_link_previews": false,
+    "min_edit_interval_ms": 1000,
+    "flood_backoff_ms": 3000,
+    "flood_max_wait_ms": 60000,
+    "flood_max_retries": 3,
+    "silent_default": false,
+    "reply_labels": [
+      "interface.artifact.output",
+      "telegram.outbound_message"
+    ],
+    "stream_labels": [
+      "agent.message.delta"
+    ],
+    "error_labels": [
+      "turn.error"
+    ],
+    "turn_start_labels": [
+      "turn.user_message"
+    ],
+    "telemetry_labels": [
+      "turn.reasoning",
+      "turn.plan.update",
+      "turn.token_usage",
+      "turn.exec.command",
+      "turn.web_search",
+      "hook.result",
+      "hook.catalog",
+      "goal.status"
+    ],
+    "allowed_api_methods": [
+      "sendPoll",
+      "sendContact",
+      "sendLocation",
+      "sendVenue",
+      "copyMessage",
+      "forwardMessage",
+      "deleteMessage",
+      "editMessageReplyMarkup",
+      "createForumTopic",
+      "editForumTopic",
+      "closeForumTopic",
+      "reopenForumTopic",
+      "deleteForumTopic",
+      "unpinAllForumTopicMessages",
+      "sendDice",
+      "sendInvoice",
+      "sendGame",
+      "setMessageReaction"
+    ],
+    "api_method_options": {
+      "copyMessage": {
+        "inject_chat_id": true,
+        "inject_thread_id": true
+      },
+      "forwardMessage": {
+        "inject_chat_id": true,
+        "inject_thread_id": true
+      },
+      "deleteMessage": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "editMessageReplyMarkup": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "createForumTopic": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "editForumTopic": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "closeForumTopic": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "reopenForumTopic": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "deleteForumTopic": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "unpinAllForumTopicMessages": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      },
+      "setMessageReaction": {
+        "inject_chat_id": true,
+        "inject_thread_id": false
+      }
+    },
+    "commands": {
+      "auto_register": true,
+      "menu": [],
+      "scopes": [
+        {
+          "type": "default"
+        },
+        {
+          "type": "all_private_chats"
+        },
+        {
+          "type": "all_group_chats"
+        }
+      ]
+    },
+    "reactions": {
+      "enabled": true,
+      "in_progress": "👀",
+      "success": "👍",
+      "failure": "👎",
+      "clear_on_cancel": true
+    },
+    "typing": {
+      "enabled": true,
+      "action": "typing"
+    },
+    "rich_messages": {
+      "enabled": true,
+      "drafts_enabled": false,
+      "pretty_tables": true,
+      "max_chars": 32768,
+      "skip_entity_detection": false,
+      "reject_details_math": true,
+      "reject_cjk": false
+    },
+    "streaming": {
+      "transport": "auto",
+      "native_drafts_private_only": true
+    },
+    "status_indicator": {
+      "enabled": false,
+      "online_text": "🟢 Online",
+      "offline_text": "🔴 Offline"
+    }
+  },
+  "driver_ipc": {
+    "listen": "127.0.0.1",
+    "port": 0,
+    "state_file": "driver-ipc.json",
+    "connect_timeout_ms": 30000,
+    "request_timeout_ms": 120000,
+    "reconnect_backoff_ms": 250,
+    "reconnect_backoff_cap_ms": 5000,
+    "max_manifest_bytes": 1048576,
+    "max_frame_bytes": 33554432
+  },
+  "proactive_bindings": [],
+  "private_run": {
+    "ee_template": "operator_interaction",
+    "parent_ee": "ee_existence",
+    "model": "gpt-5.5",
+    "reasoning_effort": "xhigh",
+    "role_artifacts": [
+      "artifact-worker-role-telegram"
+    ],
+    "context_routes": [],
+    "owners": {
+      "telegram": "world_telegram",
+      "provider": "world_provider_codex",
+      "interface_authoring": "system_interface_authoring",
+      "worker": "system_worker_telegram"
+    },
+    "id_prefixes": {
+      "run": "run_telegram_",
+      "ee": "ee_telegram_",
+      "ee_template": "operator_interaction_telegram_",
+      "telegram": "world_telegram_",
+      "provider": "world_provider_codex_telegram_",
+      "interface_authoring": "system_interface_authoring_telegram_",
+      "worker": "system_worker_telegram_",
+      "worker_environment": "system_room_telegram_",
+      "file_write_tool": "file.write.telegram_"
+    },
+    "file_write_tool": "file.write",
+    "file_write_label": "tool.call",
+    "file_write_result_label": "file.write.result",
+    "worker_environment_kind": "system_room",
+    "worker_environment_door_owner": "system_room",
+    "gateway_worker_environment_interface": "system_room_telegram_gateway",
+    "gateway_file_write_tool": "file.write.telegram_gateway",
+    "file_write_mark_outcome": "tool.call.allowed",
+    "provider_context_output_labels": [
+      "interface.artifact.output",
+      "tool.call",
+      "turn.error",
+      "operator.approval.request",
+      "operator.elicitation.request"
+    ],
+    "authoring_max_attempts": 4,
+    "result_timeout_ms": 30000
+  },
+  "gateway_run_template": {
+    "id": "run_telegram_gateway",
+    "ee": "ee_existence",
+    "worker": "system_worker_telegram",
+    "trace": "trace:run_telegram_gateway",
+    "status": "running",
+    "interface_state": {},
+    "checkpoints": [
+      {
+        "id": "cp_telegram_gateway_authoring_call",
+        "run": "run_telegram_gateway",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_telegram",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "system_room_telegram_gateway",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-telegram"
+          }
+        ],
+        "required_verified_artifacts": [],
+        "trace": "trace:run_telegram_gateway:cp_telegram_gateway_authoring_call"
+      },
+      {
+        "id": "cp_telegram_gateway_authoring_result",
+        "run": "run_telegram_gateway",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "system_room_telegram_gateway",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [
+          {
+            "interface": "world_telegram",
+            "config": {
+              "artifact_policy": {
+                "mode": "all"
+              }
+            }
+          }
+        ],
+        "artifact_bindings": [
+          {
+            "id": "artifact-worker-role-telegram"
+          }
+        ],
+        "required_verified_artifacts": [],
+        "trace": "trace:run_telegram_gateway:cp_telegram_gateway_authoring_result"
+      }
+    ],
+    "active_checkpoints": [
+      "cp_telegram_gateway_authoring_call",
+      "cp_telegram_gateway_authoring_result"
+    ]
+  }
+}

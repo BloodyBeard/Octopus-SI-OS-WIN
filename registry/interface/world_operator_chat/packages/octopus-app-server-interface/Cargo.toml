@@ -1,0 +1,28 @@
+[package]
+name = "octopus-app-server-interface"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_app_server_interface"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+sha2 = "0.10"
+url = "2"
+serde_json.workspace = true
+thiserror.workspace = true
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+tokio-stream = { version = "0.1", default-features = false }
+async-stream = "0.3"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }

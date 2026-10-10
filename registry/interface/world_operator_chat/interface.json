@@ -1,0 +1,10 @@
+{
+  "id": "world_operator_chat",
+  "interface_type": "world",
+  "role": "user",
+  "direction": "bidirectional",
+  "source_names": [
+    "operator.chat"
+  ],
+  "interface_driver_ref": "app_server"
+}

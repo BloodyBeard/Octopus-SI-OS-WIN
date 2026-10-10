@@ -1,0 +1,23 @@
+[package]
+name = "octopus-code-mode-tool-runtime"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[[bin]]
+name = "octopus-code-mode-tool-door-life"
+path = "src/bin/tool_door_life.rs"
+
+[dependencies]
+octopus-code-mode-room = { path = "../octopus-code-mode-room" }
+tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+
+octopus-provider-run-authoring = { path = "../../../../interface/world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

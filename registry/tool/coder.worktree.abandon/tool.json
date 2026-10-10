@@ -1,0 +1,42 @@
+{
+  "id": "coder.worktree.abandon",
+  "interface": "system_coder_env",
+  "process": {
+    "bin": "target/debug/octopus-coder-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": ["worktree_root"],
+      "optional_read_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["platform_toolchain_root"],
+      "optional_executable_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": ["PATH"],
+      "allow_network": true,
+      "allow_local_ipc": true,
+      "allow_sandbox_delegation": true
+    }
+  },
+  "handler_config": {
+    "operation": "worktree_abandon",
+    "max_diff_bytes": 16777216,
+    "max_changed_paths": 20000,
+    "cleanup_timeout_ms": 10000
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "First prove closure of every persistent coder process within the descriptor-owned cleanup deadline, then capture final branch/diff evidence and explicitly remove the leased worktree and run branch. Failed closure leaves the worktree intact.",
+  "args_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

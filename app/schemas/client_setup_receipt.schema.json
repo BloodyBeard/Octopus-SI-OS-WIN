@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://octopus.local/schemas/client_setup_receipt.schema.json",
+  "title": "Octopus Client Setup Receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "operation_id",
+    "plan_digest",
+    "plan",
+    "proof_semantics",
+    "proofs",
+    "completed_at"
+  ],
+  "properties": {
+    "schema": { "const": "octopus.client_setup_receipt" },
+    "schema_version": { "const": 1 },
+    "operation_id": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/operationId"
+    },
+    "plan_digest": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/digest"
+    },
+    "plan": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/plan"
+    },
+    "proof_semantics": { "const": "sequential_owner_observations" },
+    "proofs": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/proof"
+      }
+    },
+    "completed_at": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/timestamp"
+    }
+  },
+  "additionalProperties": false
+}

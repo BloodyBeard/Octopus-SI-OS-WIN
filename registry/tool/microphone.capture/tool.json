@@ -1,0 +1,75 @@
+{
+  "id": "microphone.capture",
+  "interface": "system_microphone",
+  "process": {
+    "bin": "target/debug/octopus-audio-device-session-tool",
+    "args": [],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": true
+    }
+  },
+  "handler_config": {
+    "operation": "capture_input"
+  },
+  "description": "Capture a bounded recording from one exact input device through the audio-device worker environment. Success emits a signed 16-bit PCM WAV artifact plus microphone.capture.result evidence; permission, device, stream, silence, and size outcomes remain explicit.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "host": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Optional exact CPAL host name. Omit it to use the platform default host."
+      },
+      "device_name": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024,
+        "description": "Optional exact input device name. Omit it to use the selected host's default input device."
+      },
+      "max_duration_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000,
+        "description": "Hard upper bound for this recording."
+      },
+      "minimum_duration_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 600000,
+        "description": "Minimum evidence duration before silence may stop the recording."
+      },
+      "stop_after_silence_ms": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 60000,
+        "description": "Optional continuous below-threshold duration that ends capture after minimum_duration_ms."
+      },
+      "silence_threshold_dbfs": {
+        "type": "number",
+        "minimum": -96.0,
+        "maximum": -3.0,
+        "description": "Optional silence threshold in dBFS; used only with stop_after_silence_ms."
+      }
+    },
+    "required": [
+      "max_duration_ms"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true,
+  "supported_worker_environment_kinds": [
+    "audio_device_session"
+  ]
+}

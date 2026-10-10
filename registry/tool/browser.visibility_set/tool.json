@@ -1,0 +1,53 @@
+{
+  "id": "browser.visibility_set",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "visibility_set"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Set page presentation visibility, or retain pending intent before page creation. Showing never autofocuses the client; this changes presentation, not selected target or room authority. Optional target_id addresses only that already-owned page without selecting, creating or focusing it. Requires the declared native browser transport.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "visible": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "visible"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

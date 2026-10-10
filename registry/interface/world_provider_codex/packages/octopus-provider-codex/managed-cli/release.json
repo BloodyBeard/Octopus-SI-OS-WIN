@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "version": "0.162.0",
+  "tag": "rust-v0.162.0",
+  "release_url": "https://github.com/openai/codex/releases/tag/rust-v0.162.0",
+  "source_tag_object": "1f3f93473394b620b35580859b7e6864f7a9f948",
+  "platforms": {
+    "darwin-arm64": {
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.162.0/codex-aarch64-apple-darwin.tar.gz",
+      "archive_sha256": "98e9413a1bd167ae573723939ff178e6d44f1bb21d5cda960dbeb2fa65f49104",
+      "archive_bytes": 98089521,
+      "archive_entry": "codex-aarch64-apple-darwin",
+      "companions": {
+        "codex-code-mode-host": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.162.0/codex-code-mode-host-aarch64-apple-darwin.tar.gz",
+          "archive_sha256": "9455c17fa9ba6e89f8ec24ebfd3419825e2c651c56f8bd8df7141411e6decdc2",
+          "archive_bytes": 23826884,
+          "archive_entry": "codex-code-mode-host-aarch64-apple-darwin"
+        }
+      }
+    },
+    "darwin-x64": {
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.162.0/codex-x86_64-apple-darwin.tar.gz",
+      "archive_sha256": "3caf648404cb5d2917f6e88f0addb3533584f8b05a1dd5835dd76f1c43eeb26b",
+      "archive_bytes": 106843279,
+      "archive_entry": "codex-x86_64-apple-darwin",
+      "companions": {
+        "codex-code-mode-host": {
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.162.0/codex-code-mode-host-x86_64-apple-darwin.tar.gz",
+          "archive_sha256": "a7e206e3177745467ac7cf2d43b8ff93134dfc955c1cb46529600e1a34213349",
+          "archive_bytes": 25705108,
+          "archive_entry": "codex-code-mode-host-x86_64-apple-darwin"
+        }
+      }
+    }
+  },
+  "schemas": {
+    "ClientRequest.json": "f1425525dae2903cb5b658ee412530ff7a8fcaf78887f182c169b299e7f6b09b",
+    "ServerNotification.json": "071ecc89ba71ce215e1ac01f6e05be509eafa533b2ba6fac43f4c05330305a83",
+    "v2/ThreadStartParams.json": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
+    "v2/ThreadResumeParams.json": "c69d0d08d046e48b2f9e631761e1127c347fac2f8c2776df458559eb3aa4bd83",
+    "v2/TurnStartParams.json": "062373a7dfc290b506e591bc5c2a35005211df27b3c60358cee3efed12859062",
+    "v2/TurnSteerParams.json": "99f7fdff8b090065b68f36420b70870b5eafed048c024b308230aaa02f15d891",
+    "v2/TurnSteerResponse.json": "866ba9a77c12b5d570c837d58f73bf40b24e50fa93404bdf792dd984d313b1aa",
+    "v2/ModelProviderCapabilitiesReadResponse.json": "96979d0111a38cb35a313e111c2f7c449441aee7fd51e1757f2d11c2213d4e77"
+  },
+  "legal": {
+    "LICENSE": {
+      "source_url": "https://raw.githubusercontent.com/openai/codex/rust-v0.162.0/LICENSE",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+    },
+    "NOTICE": {
+      "source_url": "https://raw.githubusercontent.com/openai/codex/rust-v0.162.0/NOTICE",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+    }
+  }
+}

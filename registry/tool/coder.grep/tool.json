@@ -1,0 +1,67 @@
+{
+  "id": "coder.grep",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "grep",
+    "max_scanned_files": 50000,
+    "max_scanned_bytes": 268435456,
+    "deadline_ms": 30000,
+    "max_line_bytes": 1048576
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "Search text content by regular expression inside the invoking run's leased worktree under descriptor-owned file, byte, deadline, and line-memory ceilings, or explicitly select fuzzy path mode. Incomplete content scans report exact counters and truncation reasons.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Regular expression in content mode or fuzzy path query in path mode."
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["content", "path"],
+        "description": "Search mode. Defaults to content."
+      },
+      "path": {
+        "type": "string",
+        "description": "Directory or file path relative to the leased worktree. Defaults to the worktree root."
+      },
+      "max_results": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500,
+        "description": "Maximum matches to return. Defaults to 100."
+      },
+      "case_sensitive": {
+        "type": "boolean",
+        "description": "Content-mode case behavior. Defaults to smart case: uppercase queries are sensitive."
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

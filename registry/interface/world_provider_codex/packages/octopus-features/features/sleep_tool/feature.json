@@ -1,0 +1,7 @@
+{
+  "default_enabled": false,
+  "id": "sleep_tool",
+  "stage": {
+    "kind": "under_development"
+  }
+}

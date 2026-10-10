@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "managed_venv_subdir": "python-environment",
+  "evidence_file": "dependency-evidence.json",
+  "install_timeout_seconds": 900,
+  "requirements": [
+    {
+      "path": "requirements.txt",
+      "sha256": "066811b8406a752b6129777f6c2e71c54b62b5c9c422badd5102161e9780ff12",
+      "modes": [
+        "off",
+        "optional",
+        "required"
+      ]
+    },
+    {
+      "path": "requirements-e2ee.txt",
+      "sha256": "ab4c93add7484d7ad9f5aa73388241f7663adb9d25d811ada9c6078143f4ecc2",
+      "modes": [
+        "required"
+      ]
+    }
+  ],
+  "resolved_profiles": [
+    {
+      "id": "darwin-arm64-py313-base",
+      "platform": "darwin",
+      "machine": "arm64",
+      "python": "3.13",
+      "modes": [
+        "off",
+        "optional"
+      ],
+      "requirements_path": "requirements-lock-darwin-arm64-py313.txt",
+      "sha256": "9117412fb5cd467b48d48b633423427f14a0f01607c1113c5b69c5fbd414cb34",
+      "smoke_imports": [
+        "aiohttp",
+        "aiohttp_socks",
+        "blake3",
+        "markdown",
+        "mautrix.api",
+        "mautrix.client",
+        "mautrix.client.dispatcher",
+        "mautrix.client.encryption_manager",
+        "mautrix.client.state_store",
+        "mautrix.types"
+      ],
+      "distributions": {
+        "Markdown": "3.10.2",
+        "aiohappyeyeballs": "2.7.1",
+        "aiohttp": "3.14.1",
+        "aiohttp-socks": "0.11.0",
+        "aiosignal": "1.4.0",
+        "attrs": "26.1.0",
+        "blake3": "1.0.9",
+        "frozenlist": "1.8.0",
+        "idna": "3.18",
+        "mautrix": "0.21.0",
+        "multidict": "6.7.1",
+        "propcache": "0.5.2",
+        "python-socks": "2.8.2",
+        "yarl": "1.24.2"
+      }
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+[package]
+name = "octopus-provider-run-authoring"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+name = "octopus_provider_run_authoring"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+json-patch.workspace = true
+blake3.workspace = true
+sha2 = "0.10"
+url = "2"
+tokio = { workspace = true, features = ["sync", "time", "rt", "net", "fs"] }
+futures = { version = "0.3", default-features = false }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
+octopus-app-server-interface = { path = "../../../world_operator_chat/packages/octopus-app-server-interface" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-marks = { path = "../../../../../crates/octopus-marks" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio-util = "0.7"

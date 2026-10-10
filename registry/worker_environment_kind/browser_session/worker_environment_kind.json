@@ -1,0 +1,41 @@
+{
+  "worker_environment_kind_id": "browser_session",
+  "substrate_family": "browser",
+  "door_driver_refs": [
+    "system_browser"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-browser-session-tool",
+    "target/debug/octopus-browser-wait-completion-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": [
+    "browser"
+  ],
+  "capabilities": [
+    "browser_session",
+    "persistent_browser",
+    "page_navigation",
+    "history_navigation",
+    "forms",
+    "pointer_interaction",
+    "devtools_events",
+    "native_dialogs",
+    "page_media_inventory",
+    "pdf_capture",
+    "cookie_store",
+    "network_client",
+    "accessibility_snapshot",
+    "artifact_capture",
+    "live_view"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "restricted"
+  },
+  "lifecycle": {
+    "requires_release": false
+  }
+}

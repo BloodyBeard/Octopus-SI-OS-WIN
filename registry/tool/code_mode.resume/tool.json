@@ -1,0 +1,67 @@
+{
+  "id": "code_mode.resume",
+  "interface": "system_code_mode",
+  "handler_config": {
+    "operation": "resume"
+  },
+  "process": {
+    "bin": "target/debug/octopus-code-mode-room-tool",
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "code_mode"
+  ],
+  "description": "Deliver one explicit nested-tool result or error to a yielded V8 cell and advance it to its next frontier.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "cell_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "tool_call_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "result": {},
+      "error": {
+        "type": "string",
+        "minLength": 1
+      },
+      "yield_time_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      }
+    },
+    "required": [
+      "cell_id",
+      "tool_call_id"
+    ],
+    "oneOf": [
+      {
+        "required": ["result"],
+        "not": { "required": ["error"] }
+      },
+      {
+        "required": ["error"],
+        "not": { "required": ["result"] }
+      }
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

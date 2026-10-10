@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "guardian_approval",
+  "stage": {
+    "kind": "stable"
+  }
+}

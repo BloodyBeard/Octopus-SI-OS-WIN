@@ -1,0 +1,70 @@
+{
+  "id": "browser.navigate",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "navigate"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Open or reuse this formed browser room, navigate its current tab, wait for the declared readiness state, and return a fresh accessibility snapshot with element refs. Supply target_id to act on that exact already-owned page independently of the selected or displayed tab. Omit target_id to use the selected tab. Only an invocation without target_id may create the initial page when no tab is selected. This never creates a replacement after host restart or loss of a selected target/context; use a granted browser.tab_new for an explicitly requested fresh page.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "minLength": 1
+      },
+      "wait_until": {
+        "type": "string",
+        "enum": [
+          "none",
+          "interactive",
+          "complete"
+        ]
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 300000
+      },
+      "snapshot": {
+        "type": "boolean"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

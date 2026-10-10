@@ -1,0 +1,40 @@
+[package]
+name = "octopus-app-server"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_app_server"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-ledger-index = { path = "../octopus-ledger-index" }
+octopus-runtime = { path = "../octopus-runtime" }
+octopus-interface-projection = { path = "../octopus-interface-projection" }
+octopus-marks = { path = "../octopus-marks" }
+octopus-policy = { path = "../octopus-policy" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+octopus-ee = { path = "../octopus-ee" }
+octopus-verifiers = { path = "../octopus-verifiers" }
+octopus-tool-registry = { path = "../octopus-tool-registry" }
+octopus-worker-env = { path = "../octopus-worker-env" }
+[dev-dependencies]
+octopus-ledger-store = { path = "../octopus-ledger-store" }
+pretty_assertions = "1.4.1"
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }
+tokio-stream = { version = "0.1", default-features = false }
+octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-marks = { path = "../octopus-marks" }
+octopus-descriptors = { path = "../octopus-descriptors" }
+tempfile = "3.23.0"

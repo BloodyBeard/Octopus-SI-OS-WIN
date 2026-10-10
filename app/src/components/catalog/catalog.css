@@ -1,0 +1,14 @@
+.oc-catalog-grid-container {
+  container-name: catalog-grid;
+  container-type: inline-size;
+}
+
+.oc-catalog-grid {
+  grid-template-columns: repeat(1, minmax(0, 1fr));
+}
+
+@container catalog-grid (width >= 581px) {
+  .oc-catalog-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

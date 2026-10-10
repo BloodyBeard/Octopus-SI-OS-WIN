@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://octopus.local/schemas/local_package_receipt.schema.json",
+  "title": "Octopus Local Package Receipt",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "package_id",
+    "package_version",
+    "product_kind",
+    "product_id",
+    "operation_id",
+    "manifest_digest",
+    "source_digest",
+    "members"
+  ],
+  "properties": {
+    "schema": { "const": "octopus.local_package_receipt" },
+    "schema_version": { "const": 1 },
+    "package_id": { "$ref": "#/$defs/id" },
+    "package_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "product_kind": { "enum": ["application", "driver", "artifact"] },
+    "product_id": { "$ref": "#/$defs/id" },
+    "operation_id": { "$ref": "#/$defs/operationId" },
+    "manifest_digest": { "$ref": "#/$defs/digest" },
+    "source_digest": { "$ref": "#/$defs/digest" },
+    "required_packages": {
+      "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    },
+    "members": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["registry_kind", "owner", "target", "digest"],
+        "properties": {
+          "registry_kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "owner": { "$ref": "#/$defs/id" },
+          "target": { "$ref": "#/$defs/relativePath" },
+          "digest": { "$ref": "#/$defs/digest" },
+          "content_digest": { "$ref": "#/$defs/digest" },
+          "json_files": {
+            "type": "array", "maxItems": 4096,
+            "items": {
+              "type": "object", "required": ["path", "sha256", "size"], "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+                "sha256": { "$ref": "#/$defs/digest" },
+                "size": { "type": "integer", "minimum": 0 },
+                "owned_sha256": { "$ref": "#/$defs/digest" },
+                "configuration_digest": { "$ref": "#/$defs/digest" }
+              },
+              "dependentRequired": {
+                "owned_sha256": ["configuration_digest"],
+                "configuration_digest": ["owned_sha256"]
+              }
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "operationId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$" },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    }
+  }
+}

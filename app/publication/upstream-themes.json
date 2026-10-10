@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "package": "@shikijs/themes",
+  "version": "4.3.1",
+  "license": "MIT",
+  "verification": "Full theme objects are equal after sorting object keys; array order and all values preserved. Direct imports replace redundant local JSON.",
+  "themes": [
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-ayu.json",
+      "source": "@shikijs/themes/ayu-dark",
+      "previous_sha256": "d12ec5d45edf0c6dd1b70eafffd1a1990800614dbddcb67ae9722a48bc73afd3",
+      "normalized_theme_sha256": "4199f367b4e2045a3c91c4c5be19ebc745d9571215b0aad7bc8a77cdd0e5672b"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-catppuccin.json",
+      "source": "@shikijs/themes/catppuccin-mocha",
+      "previous_sha256": "aa030d67dbd4a6b66995c89ba31ef90ac3c2da23a30f712277acb50c6e94d102",
+      "normalized_theme_sha256": "3b3525064b6e3e8c6fb5a6fc508cfa7d5b7dc0747a94344433bb1e6249196878"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-dracula.json",
+      "source": "@shikijs/themes/dracula",
+      "previous_sha256": "f026b056d5321f7e8469fd811ced975d98e0222a2515d27879f149f751763573",
+      "normalized_theme_sha256": "4231c79ec34e2aabd544fe5c55b00e25adf3d0ca06121c2dbf7dc801acd3458a"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-everforest.json",
+      "source": "@shikijs/themes/everforest-dark",
+      "previous_sha256": "cd9bf71333f0296d3cb6b83e25cab67356ce9631cba415762719a9232c2f5a98",
+      "normalized_theme_sha256": "6a60653606febf22a3bf7f24a053b8ac22cd1b6c9c7aa4845733603387e32384"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-github.json",
+      "source": "@shikijs/themes/github-dark-default",
+      "previous_sha256": "82ed36bb46a16e69056d2b8f67d217bb6e1ae465cc03479548040ef78bde8632",
+      "normalized_theme_sha256": "f44884588ea9b759a6ac4d2c911a3f48b12797e4f9a8d12e58ee6b6629436c06"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-gruvbox.json",
+      "source": "@shikijs/themes/gruvbox-dark-medium",
+      "previous_sha256": "8d301867af3eb863e1ae289e8657264e244ffbf2c12f4c40cd13635b102f0046",
+      "normalized_theme_sha256": "2c383e10f10ed6a895b1e2c23620f576319df752eaeaf81ec9e491c7973127bf"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-material.json",
+      "source": "@shikijs/themes/material-theme-darker",
+      "previous_sha256": "c906002a1229bc5e4e699ff7f0913f3429bcd6cf532702a969ac28cde189cfd6",
+      "normalized_theme_sha256": "23fca5e8499d0be45876540489b8a0d791a4edd9a7bde268d04adda726e52492"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-monokai.json",
+      "source": "@shikijs/themes/monokai",
+      "previous_sha256": "773bd87eac8eb9fa9d98ff0dab37faecffd7c8017e9a426b22407b2dcb984800",
+      "normalized_theme_sha256": "58466581a8d094ce7ebec95bf920f1a903eb744301f75a3b16699fbdbecc78a7"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-night-owl.json",
+      "source": "@shikijs/themes/night-owl",
+      "previous_sha256": "dda3b16f82e8cf18c429401a5a07cd5b60253f6b252657c0a7a51a36d1ad74f6",
+      "normalized_theme_sha256": "dffcd88da888879a52a64165ca49330dfbb2c39f2a82171d7c76747ed32b61a1"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-nord.json",
+      "source": "@shikijs/themes/nord",
+      "previous_sha256": "0ea054997b6bbe5ca17baae04576190ca34ab06e52908d8831a6cca91b49d090",
+      "normalized_theme_sha256": "00a651ffd2571d053bc101fda76d80fac0198ce87dd8e4cf982d6e4bb68de637"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-one.json",
+      "source": "@shikijs/themes/one-dark-pro",
+      "previous_sha256": "f8154cef4e56ff3ee9eee1857deed551842bc7fe6e2fd27023ae6f0655a94c39",
+      "normalized_theme_sha256": "1c36d6b2cb9feb7d73fe53d55abd7e3ef178c67d8a3dc3ac4885e6ab0c8a0fe6"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-rose-pine.json",
+      "source": "@shikijs/themes/rose-pine-moon",
+      "previous_sha256": "9b0bb8ac303a733e48d9872f0eedc40702c55bbfff30a38c038f73425429e47e",
+      "normalized_theme_sha256": "0813247fb9dfb8f8fe5039c341f7c854fe5e180e39f1aa1ed102dc5d12cd32f2"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-solarized.json",
+      "source": "@shikijs/themes/solarized-dark",
+      "previous_sha256": "4aa7a009f979ad2ceb727b23335e5031a10a181c148af3d0e32e57e5a477d3ac",
+      "normalized_theme_sha256": "887c958d176ae117d5d7d3e85d037290153bb7a5c4e1a688e56f97a598d4e3cc"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-tokyo-night.json",
+      "source": "@shikijs/themes/tokyo-night",
+      "previous_sha256": "b77b29c07cceabd70495101d64f1acd350965be209fc13f33ec246cc5f06da01",
+      "normalized_theme_sha256": "9aa5cc174df1963e5d11b12956790320b162aec7ac27a87beba8b8a55fcc16ee"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/dark-vscode-plus.json",
+      "source": "@shikijs/themes/dark-plus",
+      "previous_sha256": "9defc2bdb15852177f5937bd4b4d5a822c8bc1eeffddb6b741890a887f0683be",
+      "normalized_theme_sha256": "03ee72d7ed7259a69f38fc96a637b1f08a9f9cd41ad281f268295b67f7a0ae7c"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-catppuccin.json",
+      "source": "@shikijs/themes/catppuccin-latte",
+      "previous_sha256": "b8738fedce253854cb53ebae82d8b874d99a7dbfd5be07917f6613d4caff71d9",
+      "normalized_theme_sha256": "90cb362de5c3432f3df2c8a8051905d2ffacb9bb1014d4268f06895caa06068c"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-everforest.json",
+      "source": "@shikijs/themes/everforest-light",
+      "previous_sha256": "5a1d79eb1d563e6d560bf95fc787d1f02e02c74c88ecbc99803e0c180553f281",
+      "normalized_theme_sha256": "41c6a63aefad7c750cfe7c21baa70f30db1dac6b84d9d103637dfb54aeabcee3"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-github.json",
+      "source": "@shikijs/themes/github-light-default",
+      "previous_sha256": "6254983def23d3bb79bf10ee0b95b923c810e50242deacb283ee9761093937e8",
+      "normalized_theme_sha256": "f0cb5e4a67a8a6df08db66e16f904aa75756e856341850343384494feecceb36"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-gruvbox.json",
+      "source": "@shikijs/themes/gruvbox-light-medium",
+      "previous_sha256": "0fee7e7311f0c1c7b15d01cdb327b9651f7220b1702a3bdfcf9b1ead55752d5b",
+      "normalized_theme_sha256": "79390748afa49f7c0099b910d16d369d25b3eec65aa5cf5cfae59b0fa3fe5350"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-one.json",
+      "source": "@shikijs/themes/one-light",
+      "previous_sha256": "cd90b4b872605b8bc5bb5c2148927e19f8376ed2740a8100b1c9b525da7cc864",
+      "normalized_theme_sha256": "212e5e5123490bf415852537dde61e63df00986b82b4362e4ed905832de4c228"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-rose-pine.json",
+      "source": "@shikijs/themes/rose-pine-dawn",
+      "previous_sha256": "c1ee43a3885d3ca2078920603abf1854077217f82d6339fef02716fe33720f3b",
+      "normalized_theme_sha256": "114d4193d39769a44b178d15eecf23579d07eac852890ff6b843a1ee7a86eee6"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-solarized.json",
+      "source": "@shikijs/themes/solarized-light",
+      "previous_sha256": "accf40f3507c8d71ef46016b6570e334013fb19680fb27202da6a82661bb6320",
+      "normalized_theme_sha256": "438a5f39a6407f88ea0b0cbf6c7d5ddcdb39698faddce3d1d9cffcaa7a1844d2"
+    },
+    {
+      "previous_file": "app/src/components/settings/codex-diff-themes/light-vscode-plus.json",
+      "source": "@shikijs/themes/light-plus",
+      "previous_sha256": "704d9d039c566596c85d2d2e0a8e16153b260b3f953278102fbdd70f19cc95ff",
+      "normalized_theme_sha256": "9242a1f31727cf79647868df33aa5c5cf1943fbbb14206389c9009af61de16a3"
+    }
+  ]
+}

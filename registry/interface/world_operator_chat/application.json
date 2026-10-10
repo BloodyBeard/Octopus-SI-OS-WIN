@@ -1,0 +1,16 @@
+{
+  "schema_version": 3,
+  "id": "world_operator_chat",
+  "name": "Octopus Home",
+  "description": "Creates the exact Home and task interfaces through which you work with Octopus.",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "category": "connector",
+  "icon": "house",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_operator_chat",
+    "system_interface_authoring",
+    "system_worker_operator_home"
+  ]
+}

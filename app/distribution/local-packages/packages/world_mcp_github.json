@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_github",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_github",
+  "release_status": "optional",
+  "display": {
+    "name": "GitHub",
+    "description": "Work with GitHub repositories, issues, pull requests, and workflows.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "github"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_github",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-github-context"
+    }
+  ]
+}

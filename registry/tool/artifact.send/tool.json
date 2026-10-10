@@ -1,0 +1,72 @@
+{
+  "id": "artifact.send",
+  "interface": "system_room",
+  "process": {
+    "bin": "target/debug/octopus-artifact-send-tool",
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "description": "Move an artifact into one interface folder from this run's formed grant. The address is chosen ONLY here — there is no other way for a model to pick a destination — and it is nothing but the interface's folder id in registry/interface; there is no separate binding name. 'payload' creates a new self-labeled artifact; 'ref' moves an artifact already bound to this invocation with its existing identity and label. The response is the typed delivery verdict of the hand-in operation itself (admitted {seq} / refused::no_binding / refused::policy), never a reply from a receiver: an admitted emission with no live reader is a success — the recorded outbound movement is the fact, and a sleeping reader catches up from its cursor.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "interface": {
+        "type": "string",
+        "description": "Interface folder id to emit into — must be in this run's formed grant."
+      },
+      "label": {
+        "type": "string",
+        "description": "Self-identifying artifact label in the sender's own vocabulary."
+      },
+      "payload": {
+        "description": "Inline JSON body of the artifact to send."
+      },
+      "ref": {
+        "type": "string",
+        "description": "Id or content hash of a content-addressed interface artifact already bound to this invocation, moved as the same reference and original label. Registry seed artifacts that have not crossed an interface yet must first be emitted as payload."
+      }
+    },
+    "required": [
+      "interface"
+    ],
+    "oneOf": [
+      {
+        "required": [
+          "payload",
+          "label"
+        ],
+        "not": {
+          "required": [
+            "ref"
+          ]
+        }
+      },
+      {
+        "required": [
+          "ref"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "payload"
+              ]
+            },
+            {
+              "required": [
+                "label"
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

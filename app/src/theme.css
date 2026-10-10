@@ -1,0 +1,195 @@
+:root.translucent-sidebar .sidebar,
+:root.translucent-sidebar .settings-rail {
+  background: var(--sidebar);
+  backdrop-filter: blur(28px) saturate(1.08);
+  -webkit-backdrop-filter: blur(28px) saturate(1.08);
+}
+
+:root.translucent-sidebar .welcome {
+  background: var(--welcome-material, rgb(24 24 24 / 88%));
+  backdrop-filter: blur(28px) saturate(1.06);
+  -webkit-backdrop-filter: blur(28px) saturate(1.06);
+}
+
+:root[data-theme="light"] .welcome[data-step] {
+  background: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+[data-theme="light"] .brand-mark,
+[data-theme="light"] .welcome-brand-mark {
+  filter: invert(1);
+}
+
+[data-theme="light"] .composer-send {
+  background: var(--oc-color-text);
+  color: var(--oc-color-canvas);
+}
+
+[data-theme="light"] .endpoint-dot.offline {
+  background: color-mix(in srgb, var(--oc-color-text) 38%, transparent);
+}
+
+[data-theme="light"] .ee-zone-head span {
+  text-shadow: none;
+}
+
+.environment-surface-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--oc-color-text) 3.5%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--oc-color-text) 3.5%, transparent) 1px, transparent 1px);
+}
+
+.env-card {
+  background: color-mix(in srgb, var(--oc-color-card) 96%, transparent);
+}
+
+.env-card.is-selected {
+  border-color: color-mix(in srgb, var(--oc-color-text) 42%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--oc-color-text) 8%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--oc-color-text) 8%, transparent);
+}
+
+.artifact-flow,
+.registry-json {
+  border-color: var(--oc-color-border);
+  background: var(--oc-color-card);
+  color: var(--oc-color-text-soft);
+}
+
+.legend-bar {
+  background: var(--oc-color-surface);
+}
+
+.legend-items .line {
+  border-top-color: color-mix(in srgb, var(--oc-color-text) 35%, transparent);
+}
+
+.workspace-empty,
+.workspace-empty .glyph,
+.workspace-empty span,
+.rg-col-meta,
+.rg-empty,
+.rg-detail-title span,
+.panel-empty,
+.binding-row span,
+.metric-card span,
+.metric-card em,
+.metric-event-row time,
+.metric-event-row em {
+  color: var(--oc-color-text-muted);
+}
+
+.workspace-empty strong,
+.rg-col-title,
+.rg-row strong,
+.rg-detail-title strong,
+.json-panel-label,
+.binding-row strong,
+.metric-card strong,
+.metrics-panel h2,
+.distribution-row strong,
+.source-error strong {
+  color: var(--oc-color-text);
+}
+
+.registry-view,
+.custom-surface {
+  background: var(--oc-color-canvas);
+}
+
+.rg-col {
+  border-color: var(--oc-color-border);
+  background: var(--oc-color-surface);
+}
+
+.rg-col-root {
+  background: var(--oc-color-sidebar);
+}
+
+.rg-col-detail {
+  background: var(--oc-color-card);
+}
+
+.rg-col-head,
+.rg-row,
+.custom-surface-head,
+.custom-table th,
+.custom-table td,
+.source-error {
+  border-color: var(--oc-color-border);
+}
+
+.rg-col-filter {
+  border-color: var(--oc-color-border);
+  background: var(--oc-color-control);
+  color: var(--oc-color-text-soft);
+}
+
+.rg-col-filter:focus {
+  border-color: var(--oc-color-border-strong);
+}
+
+.rg-row:hover,
+.rg-row.is-active,
+.rg-root-row:hover,
+.rg-root-row.is-active {
+  background: var(--oc-color-control-hover);
+  color: var(--oc-color-text);
+}
+
+.custom-table th {
+  background: var(--oc-color-raised);
+}
+
+.distribution-row span,
+.metric-event-row strong {
+  color: var(--oc-color-text-soft);
+}
+
+.custom-table th {
+  background: var(--oc-color-surface);
+}
+
+.binding-row {
+  border-color: var(--oc-color-border);
+  background: var(--oc-color-card);
+}
+
+.metric-card,
+.metrics-panel {
+  border-color: var(--oc-color-border);
+}
+
+.distribution-row div {
+  background: var(--oc-color-control);
+}
+
+.distribution-row i {
+  background: var(--oc-color-text-muted);
+}
+
+.eventlog-filter,
+.eventlog-live,
+.eventlog-kind em,
+.checkpoint-bindings i {
+  background: color-mix(in srgb, var(--oc-color-text) 6%, transparent);
+}
+
+.eventlog-filter:hover,
+.eventlog-live:hover {
+  background: color-mix(in srgb, var(--oc-color-text) 10%, transparent);
+}
+
+.eventlog-table,
+.checkpoint-card {
+  background: var(--oc-color-surface);
+}
+
+.eventlog-row-line:hover,
+.eventlog-row.is-expanded .eventlog-row-line,
+.child-env-row:hover {
+  background: var(--row-hover);
+}

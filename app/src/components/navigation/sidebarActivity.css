@@ -1,0 +1,66 @@
+.sidebar-task-status {
+  --task-status-accent: var(--color-text-tertiary);
+  display: inline-flex;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--task-status-accent);
+  font-size: 12px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sidebar-task-status[data-state="running"] { --task-status-accent: var(--color-text-secondary); }
+.sidebar-task-status[data-state="unread"] { --task-status-accent: var(--color-token-charts-blue); }
+.sidebar-task-status[data-state="failed"] { --task-status-accent: color-mix(in oklab, var(--color-token-charts-red) 88%, var(--color-text)); }
+.sidebar-task-status[data-state="waiting"] { --task-status-accent: var(--color-token-charts-orange); }
+.sidebar-task-status[data-state="scheduled"] { --task-status-accent: var(--color-token-description-foreground); }
+
+.sidebar-task-status-text { color: var(--color-token-description-foreground); }
+
+.sidebar-task-status-orbit { width: 14px; height: 14px; animation: sidebar-task-orbit .96s steps(8) infinite; }
+@keyframes sidebar-task-orbit { to { transform: rotate(360deg); } }
+
+.sidebar-task-status-alert { width: 14px; height: 14px; }
+.sidebar-task-status > svg:not(.sidebar-task-status-orbit):not(.sidebar-task-status-alert) { width: 12px; height: 12px; }
+
+.sidebar-task-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.sidebar-task-status[data-state="waiting"] .sidebar-task-status-dot { animation: sidebar-task-attention 2.2s ease-in-out infinite; }
+@keyframes sidebar-task-attention {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in oklab, currentColor 22%, transparent); }
+}
+
+.sidebar-task-status[data-reduce-motion] .sidebar-task-status-orbit,
+.sidebar-task-status[data-reduce-motion] .sidebar-task-status-dot { animation: none; }
+.sidebar-task-title[data-unread="true"] { font-weight: 500; }
+
+.sidebar-task-trailing { position: relative; display: flex; min-width: 20px; flex: none; align-items: center; justify-content: flex-end; margin-left: 8px; }
+.sidebar-task-trailing > :not(.sidebar-task-action) { transition: opacity .12s ease; }
+.sidebar-task-age { color: var(--color-token-description-foreground); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.sidebar-task-action { position: absolute; top: 50%; right: 0; display: flex; justify-content: flex-end; opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity .12s ease; }
+.octopus-task-row:hover .sidebar-task-action,
+.octopus-task-row:focus-visible .sidebar-task-action,
+.octopus-task-row:focus-within .sidebar-task-action {
+  opacity: 1;
+  pointer-events: auto;
+}
+.octopus-task-row:is(:hover, :focus-visible, :focus-within) .sidebar-task-trailing:has(> .sidebar-task-action) > :not(.sidebar-task-action) { opacity: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-task-status-orbit,
+  .sidebar-task-status-dot { animation: none; }
+  .sidebar-task-action,
+  .sidebar-task-trailing > :not(.sidebar-task-action) { transition: none; }
+}

@@ -1,0 +1,63 @@
+{
+  "processes": [
+    {
+      "bin": "target/debug/octopus-web-search-tool-door-life",
+      "io_limits": {
+        "max_control_frame_bytes": 1048576,
+        "max_stderr_bytes": 262144,
+        "max_manifest_bytes": 1048576,
+        "max_payload_bytes": 268435456
+      },
+      "args": [],
+      "inherit_env": [
+        "BRAVE_SEARCH_API_KEY",
+        "BRAVE_SEARCH_BASE_URL",
+        "EXA_API_KEY",
+        "EXA_BASE_URL",
+        "FIRECRAWL_API_KEY",
+        "FIRECRAWL_API_URL",
+        "OCTOPUS_WEB_EXTRACT_URL",
+        "OCTOPUS_WEB_PROXY",
+        "OCTOPUS_WEB_SEARCH_API_KEY",
+        "OCTOPUS_WEB_SEARCH_URL",
+        "SEARXNG_BASE_URL",
+        "TAVILY_API_KEY",
+        "TAVILY_BASE_URL"
+      ],
+      "authority": {
+        "read_root_slots": [
+          "registry_interface_root",
+          "registry_tool_root",
+          "registry_worker_environment_kind_root",
+          "repo_root"
+        ],
+        "write_root_slots": [],
+        "executable_root_slots": [],
+        "read_paths": [],
+        "write_paths": [],
+        "executable_paths": [
+          "target/debug/octopus-web-search-tool"
+        ],
+        "executable_commands": [],
+        "read_env_paths": [],
+        "write_env_paths": [],
+        "executable_env_paths": [],
+        "allow_network": false,
+        "allow_local_ipc": false,
+        "allow_sandbox_delegation": true
+      },
+      "coordinate_root_slots": [
+        "interface_life_install_root",
+        "registry_interface_root",
+        "registry_tool_root",
+        "registry_worker_environment_kind_root",
+        "repo_root"
+      ],
+      "read_handles": [
+        "ledger",
+        "ledger_index",
+        "blobs"
+      ]
+    }
+  ]
+}

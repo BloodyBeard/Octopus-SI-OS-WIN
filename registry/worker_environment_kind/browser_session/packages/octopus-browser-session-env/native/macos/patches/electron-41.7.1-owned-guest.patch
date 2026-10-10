@@ -1,0 +1,1578 @@
+diff --git a/electron/BUILD.gn b/electron/BUILD.gn
+--- a/electron/BUILD.gn
++++ b/electron/BUILD.gn
+@@ -570,7 +570,11 @@
+ 
+   deps += [ "//electron/build/config:generate_mas_config" ]
+ 
+-  sources = filenames.lib_sources
++  deps += [ "//components/guest_contents/browser" ]
++  sources = filenames.lib_sources + [
++    "shell/browser/api/owned_guest_presentation.cc",
++    "shell/browser/api/owned_guest_presentation.h",
++  ]
+   if (is_win) {
+     sources += filenames.lib_sources_win
+   }
+diff --git a/electron/lib/browser/api/web-contents.ts b/electron/lib/browser/api/web-contents.ts
+--- a/electron/lib/browser/api/web-contents.ts
++++ b/electron/lib/browser/api/web-contents.ts
+@@ -972,6 +972,10 @@
+ };
+ 
+ // Public APIs.
++export function createOwnedGuest(options: Electron.WebPreferences & { session: Electron.Session; initialSurfaceSize: { width: number; height: number } }): Electron.WebContents {
++  return (binding as unknown as { createOwnedGuest(options: object): Electron.WebContents }).createOwnedGuest(options);
++}
++
+ export function create(options = {}): Electron.WebContents {
+   return new (WebContents as any)(options);
+ }
+diff --git a/electron/lib/browser/guest-view-manager.ts b/electron/lib/browser/guest-view-manager.ts
+--- a/electron/lib/browser/guest-view-manager.ts
++++ b/electron/lib/browser/guest-view-manager.ts
+@@ -11,9 +11,14 @@
+ } from '@electron/internal/common/web-view-methods';
+ 
+ import { webContents } from 'electron/main';
++import { randomUUID } from 'node:crypto';
++import { isDeepStrictEqual } from 'node:util';
+ 
+ interface GuestInstance {
+   elementInstanceId: number;
++  bindingId?: string;
++  generation?: number;
++  viewInstanceId?: number;
+   visibilityState?: DocumentVisibilityState;
+   embedder: Electron.WebContents;
+   guest: Electron.WebContents;
+@@ -89,6 +94,9 @@
+   elementInstanceId: number,
+   params: Record<string, any>
+ ) {
++  if (pendingOwnedElements.has(`${embedder.id}-${elementInstanceId}`)) {
++    throw new Error('Destination has a pending owned guest attachment');
++  }
+   const webPreferences = makeWebPreferences(embedder, params);
+   const event = {
+     sender: embedder,
+@@ -217,6 +225,8 @@
+ 
+   if (!guestInstance) return;
+ 
++  if (guestInstance.bindingId) return;
++
+   if (embedder !== guestInstance.embedder) {
+     return;
+   }
+@@ -240,6 +250,8 @@
+   // Forward embedder window visibility change events to guest
+   const onVisibilityChange = function (visibilityState: DocumentVisibilityState) {
+     for (const guestInstance of guestInstances.values()) {
++      // Owned presentation visibility is native and generation-bound.
++      if (guestInstance.bindingId) continue;
+       guestInstance.visibilityState = visibilityState;
+       if (guestInstance.embedder === embedder) {
+         guestInstance.guest._sendInternal(IPC_MESSAGES.GUEST_INSTANCE_VISIBILITY_CHANGE, visibilityState);
+@@ -254,7 +266,11 @@
+     // and the embedder will be invalid in the usual code path.
+     for (const [guestInstanceId, guestInstance] of guestInstances) {
+       if (guestInstance.embedder === embedder) {
+-        detachGuest(embedder, guestInstanceId);
++        if (guestInstance.bindingId) {
++          releaseOwnedGuest(embedder, guestInstanceId, guestInstance.bindingId);
++        } else {
++          detachGuest(embedder, guestInstanceId);
++        }
+       }
+     }
+     // Clear the listeners.
+@@ -382,8 +398,138 @@
+   if (!guestInstance) {
+     throw new Error(`Invalid guestInstanceId: ${guestInstanceId}`);
+   }
++  if (guestInstance.bindingId) {
++    throw new Error('Owned guest methods are main-process operations');
++  }
+   if (guestInstance.guest.hostWebContents !== contents) {
+     throw new Error(`Access denied to guestInstanceId: ${guestInstanceId}`);
+   }
+   return guestInstance.guest;
+ };
++
++
++type OwnedGuest = Electron.WebContents & {
++  isOwnedGuest(): boolean;
++  attachOwnedGuest(token: string, embedder: Electron.WebContents, frameToken: string,
++    validate: () => boolean, commit: () => void): Promise<void>;
++  releaseOwnedGuest(generation: number): boolean;
++  cancelOwnedGuestLease(token: string): boolean;
++};
++const ownedGuestBinding = process._linkedBinding('electron_browser_web_contents') as unknown as {
++  findOwnedGuestLease(token: string, embedder: Electron.WebContents,
++    frameToken: string, generation: number): OwnedGuest | null;
++};
++const pendingOwnedElements = new Map<string, object>();
++const observedOwnedGuests = new WeakSet<Electron.WebContents>();
++
++function removeOwnedBinding(binding: GuestInstance) {
++  if (guestInstances.get(binding.guest.id) !== binding) return;
++  guestInstances.delete(binding.guest.id);
++  const key = `${binding.embedder.id}-${binding.elementInstanceId}`;
++  if (embedderElementsMap.get(key) === binding.guest.id) embedderElementsMap.delete(key);
++  if (!binding.embedder.isDestroyed()) {
++    webViewManager.removeGuest(binding.embedder, binding.guest.id);
++    binding.embedder._sendInternal(
++      `${IPC_MESSAGES.GUEST_VIEW_INTERNAL_DISPATCH_EVENT}-${binding.viewInstanceId}`,
++      '-owned-guest-released', { bindingId: binding.bindingId });
++  }
++}
++
++function releaseOwnedGuest(embedder: Electron.WebContents, id: number, bindingId: string) {
++  const binding = guestInstances.get(id);
++  if (!binding || binding.embedder !== embedder || binding.bindingId !== bindingId) return false;
++  const released = (binding.guest as OwnedGuest).releaseOwnedGuest(binding.generation!);
++  removeOwnedBinding(binding);
++  return released;
++}
++
++function observeOwnedGuest(guest: OwnedGuest) {
++  if (observedOwnedGuests.has(guest)) return;
++  observedOwnedGuests.add(guest);
++  const send = (event: string, props: Record<string, unknown>) => {
++    const binding = guestInstances.get(guest.id);
++    if (binding?.bindingId && !binding.embedder.isDestroyed() &&
++        guest.hostWebContents === binding.embedder) {
++      binding.embedder._sendInternal(
++        `${IPC_MESSAGES.GUEST_VIEW_INTERNAL_DISPATCH_EVENT}-${binding.viewInstanceId}`, event, props);
++    }
++  };
++  for (const event of supportedWebViewEvents) {
++    guest.on(event as any, (_: unknown, ...args: any[]) => {
++      send(event, Object.fromEntries(webViewEvents[event].map((prop, i) => [prop, args[i]])));
++    });
++  }
++  guest.on('-owned-guest-released' as any, (_: unknown, generation: number) => {
++    const binding = guestInstances.get(guest.id);
++    if (binding?.bindingId && binding.generation === generation) removeOwnedBinding(binding);
++  });
++  guest.once('destroyed', () => {
++    const binding = guestInstances.get(guest.id);
++    if (binding?.bindingId) removeOwnedBinding(binding);
++  });
++  guest.on('will-frame-navigate', event => send('will-frame-navigate', {
++    url: event.url, isMainFrame: event.isMainFrame,
++    frameProcessId: event.processId, frameRoutingId: event.routingId
++  }));
++  guest.on('-ipc-message-host' as any, (event: Electron.IpcMainEvent, channel: string, args: any[]) => {
++    send('ipc-message', { frameId: [event.processId, event.frameId], channel, args });
++  });
++}
++
++handleMessage(IPC_MESSAGES.GUEST_VIEW_MANAGER_ADOPT_OWNED_GUEST,
++  async (event, frameToken: string, elementId: number, viewId: number,
++    token: string, generation: number) => {
++    if (!Number.isSafeInteger(elementId) || !Number.isSafeInteger(viewId) ||
++        !Number.isSafeInteger(generation) || generation <= 0 || generation > 0x7fffffff) throw new Error('Invalid owned binding');
++    const embedder = event.sender;
++    const guest = ownedGuestBinding.findOwnedGuestLease(token, embedder, frameToken, generation);
++    if (!guest || !guest.isOwnedGuest()) throw new Error('Invalid owned guest lease');
++    const key = `${embedder.id}-${elementId}`;
++    if (embedderElementsMap.has(key) || pendingOwnedElements.has(key)) {
++      guest.cancelOwnedGuestLease(token);
++      throw new Error('Destination element is already occupied');
++    }
++    const binding: GuestInstance = {
++      elementInstanceId: elementId, viewInstanceId: viewId, generation,
++      bindingId: randomUUID(), guest, embedder
++    };
++    pendingOwnedElements.set(key, binding);
++    const session = guest.session;
++    const initial = structuredClone(guest.getLastWebPreferences() || {});
++    const preferences = { ...structuredClone(initial), session };
++    const attachEvent = { sender: embedder, defaultPrevented: false,
++      preventDefault() { this.defaultPrevented = true; } };
++    try {
++      embedder.emit('will-attach-webview', attachEvent, preferences, {}, { webContents: guest });
++      if (attachEvent.defaultPrevented || !isDeepStrictEqual(preferences, { ...initial, session }) || guest.session !== session) {
++        throw new Error('Owned guest preferences or Session cannot change during attachment');
++      }
++      observeOwnedGuest(guest);
++      watchEmbedder(embedder);
++      await guest.attachOwnedGuest(token, embedder, frameToken,
++        () => !guest.isDestroyed() && !embedder.isDestroyed() &&
++          pendingOwnedElements.get(key) === binding && !embedderElementsMap.has(key),
++        () => {
++          const previous = guestInstances.get(guest.id);
++          if (previous?.bindingId) removeOwnedBinding(previous);
++          guestInstances.set(guest.id, binding);
++          embedderElementsMap.set(key, guest.id);
++          guest.viewInstanceId = viewId;
++          webViewManager.addGuest(guest.id, embedder, guest, preferences);
++        });
++      const stillAttached = () => !guest.isDestroyed() && !embedder.isDestroyed() &&
++        guestInstances.get(guest.id) === binding && guest.hostWebContents === embedder;
++      if (!stillAttached()) throw new Error('Owned presentation withdrawn before completion');
++      embedder.emit('did-attach-webview', { sender: embedder }, guest);
++      if (!stillAttached()) throw new Error('Owned presentation withdrawn during completion');
++      return { guestInstanceId: guest.id, bindingId: binding.bindingId };
++    } catch (error) {
++      if (!guest.isDestroyed()) guest.cancelOwnedGuestLease(token);
++      throw error;
++    } finally {
++      if (pendingOwnedElements.get(key) === binding) pendingOwnedElements.delete(key);
++    }
++  });
++
++handleMessageSync(IPC_MESSAGES.GUEST_VIEW_MANAGER_RELEASE_OWNED_GUEST,
++  (event, id: number, bindingId: string) => releaseOwnedGuest(event.sender, id, bindingId));
+diff --git a/electron/lib/common/ipc-messages.ts b/electron/lib/common/ipc-messages.ts
+--- a/electron/lib/common/ipc-messages.ts
++++ b/electron/lib/common/ipc-messages.ts
+@@ -13,6 +13,8 @@
+ 
+   GUEST_VIEW_INTERNAL_DISPATCH_EVENT = 'GUEST_VIEW_INTERNAL_DISPATCH_EVENT',
+ 
++  GUEST_VIEW_MANAGER_ADOPT_OWNED_GUEST = 'GUEST_VIEW_MANAGER_ADOPT_OWNED_GUEST',
++  GUEST_VIEW_MANAGER_RELEASE_OWNED_GUEST = 'GUEST_VIEW_MANAGER_RELEASE_OWNED_GUEST',
+   GUEST_VIEW_MANAGER_CREATE_AND_ATTACH_GUEST = 'GUEST_VIEW_MANAGER_CREATE_AND_ATTACH_GUEST',
+   GUEST_VIEW_MANAGER_DETACH_GUEST = 'GUEST_VIEW_MANAGER_DETACH_GUEST',
+   GUEST_VIEW_MANAGER_FOCUS_CHANGE = 'GUEST_VIEW_MANAGER_FOCUS_CHANGE',
+diff --git a/electron/lib/renderer/web-view/guest-view-internal.ts b/electron/lib/renderer/web-view/guest-view-internal.ts
+--- a/electron/lib/renderer/web-view/guest-view-internal.ts
++++ b/electron/lib/renderer/web-view/guest-view-internal.ts
+@@ -63,3 +63,19 @@
+ export function propertySet(guestInstanceId: number, name: string, value: any) {
+   return ipcRendererUtils.invokeSync(IPC_MESSAGES.GUEST_VIEW_MANAGER_PROPERTY_SET, guestInstanceId, name, value);
+ }
++
++export function ownedGuestFrameToken(iframe: HTMLIFrameElement): string {
++  const frame = webFrame._findFrameByWindow(iframe.contentWindow!);
++  if (!frame) throw new Error('Owned guest placeholder is not a local frame');
++  return frame.frameToken;
++}
++
++export function adoptOwnedGuest(iframe: HTMLIFrameElement, elementId: number,
++  viewId: number, token: string, generation: number): Promise<{ guestInstanceId: number; bindingId: string }> {
++  return ipcRendererInternal.invoke(IPC_MESSAGES.GUEST_VIEW_MANAGER_ADOPT_OWNED_GUEST,
++    ownedGuestFrameToken(iframe), elementId, viewId, token, generation);
++}
++
++export function releaseOwnedGuest(id: number, bindingId: string) {
++  return ipcRendererUtils.invokeSync(IPC_MESSAGES.GUEST_VIEW_MANAGER_RELEASE_OWNED_GUEST, id, bindingId);
++}
+diff --git a/electron/lib/renderer/web-view/web-view-element.ts b/electron/lib/renderer/web-view/web-view-element.ts
+--- a/electron/lib/renderer/web-view/web-view-element.ts
++++ b/electron/lib/renderer/web-view/web-view-element.ts
+@@ -40,6 +40,50 @@
+       internals.set(this, new WebViewImpl(this, hooks));
+     }
+ 
++    getOwnedGuestFrameToken() {
++      const internal = internals.get(this);
++      if (!internal?.elementAttached || internal.guestInstanceId || this.getAttribute('src')) {
++        throw new Error('Owned guest requires a connected empty placeholder');
++      }
++      internal.ownedPresentation = true;
++      return hooks.guestViewInternal.ownedGuestFrameToken(internal.internalElement);
++    }
++
++    async adoptOwnedGuest(token: string, generation: number) {
++      const internal = internals.get(this);
++      if (!internal?.elementAttached || !internal.ownedPresentation || internal.guestInstanceId || internal.ownedPendingAttachment) {
++        throw new Error('Owned guest placeholder is not ready');
++      }
++      const pending = { epoch: ++internal.ownedAttachmentEpoch, releasedBindings: new Set<string>() };
++      internal.ownedPendingAttachment = pending;
++      try {
++        const result = await hooks.guestViewInternal.adoptOwnedGuest(
++          internal.internalElement, internal.internalInstanceId, internal.viewInstanceId, token, generation);
++        if (!internal.elementAttached || internal.ownedAttachmentEpoch !== pending.epoch ||
++            pending.releasedBindings.has(result.bindingId)) {
++          hooks.guestViewInternal.releaseOwnedGuest(result.guestInstanceId, result.bindingId);
++          if (internal.ownedAttachmentEpoch === pending.epoch) internal.reset();
++          throw new Error('Owned guest placeholder detached during attachment');
++        }
++        internal.guestInstanceId = result.guestInstanceId;
++        internal.ownedBindingId = result.bindingId;
++      } catch (error) {
++        if (internal.ownedAttachmentEpoch === pending.epoch) internal.reset();
++        throw error;
++      } finally {
++        if (internal.ownedPendingAttachment === pending) internal.ownedPendingAttachment = undefined;
++      }
++    }
++
++    releaseOwnedGuest() {
++      const internal = internals.get(this);
++      if (!internal) return;
++      if (internal.guestInstanceId && internal.ownedBindingId) {
++        hooks.guestViewInternal.releaseOwnedGuest(internal.guestInstanceId, internal.ownedBindingId);
++      }
++      internal.reset();
++    }
++
+     getWebContentsId() {
+       const internal = internals.get(this);
+       if (!internal || !internal.guestInstanceId) {
+@@ -76,7 +120,11 @@
+       }
+       hooks.guestViewInternal.deregisterEvents(internal.viewInstanceId);
+       if (internal.guestInstanceId) {
+-        hooks.guestViewInternal.detachGuest(internal.guestInstanceId);
++        if (internal.ownedBindingId) {
++          hooks.guestViewInternal.releaseOwnedGuest(internal.guestInstanceId, internal.ownedBindingId);
++        } else {
++          hooks.guestViewInternal.detachGuest(internal.guestInstanceId);
++        }
+       }
+       internal.elementAttached = false;
+       internal.reset();
+diff --git a/electron/lib/renderer/web-view/web-view-impl.ts b/electron/lib/renderer/web-view/web-view-impl.ts
+--- a/electron/lib/renderer/web-view/web-view-impl.ts
++++ b/electron/lib/renderer/web-view/web-view-impl.ts
+@@ -23,12 +23,16 @@
+   public elementAttached = false;
+   public guestInstanceId?: number;
+   public hasFocus = false;
+-  public internalInstanceId?: number;
++  public internalInstanceId: number;
+   public viewInstanceId: number;
+ 
+   // on* Event handlers.
+   public on: Record<string, any> = {};
+   public internalElement: HTMLIFrameElement;
++  public ownedBindingId?: string;
++  public ownedAttachmentEpoch = 0;
++  public ownedPendingAttachment?: { epoch: number; releasedBindings: Set<string> };
++  public ownedPresentation = false;
+ 
+   public attributes: Map<string, WebViewAttribute>;
+ 
+@@ -44,6 +48,7 @@
+     shadowRoot.appendChild(style);
+     this.attributes = setupWebViewAttributes(this);
+     this.viewInstanceId = getNextId();
++    this.internalInstanceId = getNextId();
+     shadowRoot.appendChild(this.internalElement);
+ 
+     // Provide access to contentWindow.
+@@ -67,6 +72,9 @@
+ 
+   // Resets some state upon reattaching <webview> element to the DOM.
+   reset() {
++    this.ownedAttachmentEpoch++;
++    this.ownedPendingAttachment = undefined;
++    this.ownedBindingId = undefined;
+     // If guestInstanceId is defined then the <webview> has navigated and has
+     // already picked up a partition ID. Thus, we need to reset the initialization
+     // state. However, it may be the case that beforeFirstNavigation is false BUT
+@@ -106,6 +114,7 @@
+   }
+ 
+   createGuest() {
++    if (this.ownedPresentation) throw new Error('Owned guests require a presentation lease');
+     this.internalInstanceId = getNextId();
+     this.hooks.guestViewInternal
+       .createGuest(this.internalElement, this.internalInstanceId, this.buildParams())
+@@ -115,6 +124,14 @@
+   }
+ 
+   dispatchEvent(eventName: string, props: Record<string, any> = {}) {
++    if (eventName === '-owned-guest-released') {
++      if (props.bindingId !== this.ownedBindingId) {
++        // Native release may precede the asynchronous adopt reply.
++        this.ownedPendingAttachment?.releasedBindings.add(props.bindingId);
++        return;
++      }
++      this.reset();
++    }
+     const event = new Event(eventName);
+     Object.assign(event, props);
+     this.webviewNode.dispatchEvent(event);
+@@ -149,6 +166,7 @@
+ 
+   // Updates state upon loadcommit.
+   onLoadCommit(props: Record<string, any>) {
++    if (this.ownedPresentation) return;
+     const oldValue = this.webviewNode.getAttribute(WEB_VIEW_ATTRIBUTES.SRC);
+     const newValue = props.url;
+     if (props.isMainFrame && oldValue !== newValue) {
+diff --git a/electron/shell/browser/api/electron_api_web_contents.cc b/electron/shell/browser/api/electron_api_web_contents.cc
+--- a/electron/shell/browser/api/electron_api_web_contents.cc
++++ b/electron/shell/browser/api/electron_api_web_contents.cc
+@@ -3,7 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "shell/browser/api/electron_api_web_contents.h"
+-
++#include "shell/browser/api/owned_guest_presentation.h"
++
++#include <cmath>
+ #include <limits>
+ #include <list>
+ #include <memory>
+@@ -836,9 +838,12 @@
+ 
+ WebContents::WebContents(v8::Isolate* isolate,
+                          std::unique_ptr<content::WebContents> web_contents,
+-                         Type type)
++                         Type type, bool owned_guest,
++                         const gfx::Size& initial_surface_size)
+     : content::WebContentsObserver(web_contents.get()),
+-      type_(type),
++      owned_guest_(owned_guest),
++      initial_surface_size_(initial_surface_size),
++      type_(owned_guest ? Type::kWebView : type),
+       id_(GetAllWebContents().Add(this))
+ #if BUILDFLAG(ENABLE_PRINTING)
+       ,
+@@ -851,11 +856,17 @@
+   InitWithSessionAndOptions(isolate, std::move(web_contents),
+                             session_->browser_context(),
+                             gin::Dictionary::CreateEmpty(isolate));
++  if (owned_guest_)
++    owned_guest_presentation_ = std::make_unique<OwnedGuestPresentation>(
++        this, initial_surface_size_, true);
+ }
+ 
+ WebContents::WebContents(v8::Isolate* isolate,
+-                         const gin_helper::Dictionary& options)
+-    : id_(GetAllWebContents().Add(this))
++                         const gin_helper::Dictionary& options,
++                         bool owned_guest,
++                         const gfx::Size& initial_surface_size)
++    : owned_guest_(owned_guest), initial_surface_size_(initial_surface_size),
++      id_(GetAllWebContents().Add(this))
+ #if BUILDFLAG(ENABLE_PRINTING)
+       ,
+       print_task_runner_(CreatePrinterHandlerTaskRunner())
+@@ -913,7 +924,13 @@
+   session_ = session;
+ 
+   std::unique_ptr<content::WebContents> web_contents;
+-  if (is_guest()) {
++  if (owned_guest_) {
++    type_ = Type::kWebView;
++    embedder_ = nullptr;
++    content::WebContents::CreateParams params(session->browser_context());
++    params.initially_hidden = true;
++    web_contents = content::WebContents::Create(params);
++  } else if (is_guest()) {
+     scoped_refptr<content::SiteInstance> site_instance =
+         content::SiteInstance::CreateForURL(session->browser_context(),
+                                             GURL("chrome-guest://fake-host"));
+@@ -964,6 +981,9 @@
+ 
+   InitWithSessionAndOptions(isolate, std::move(web_contents),
+                             session->browser_context(), options);
++  if (owned_guest_)
++    owned_guest_presentation_ = std::make_unique<OwnedGuestPresentation>(
++        this, initial_surface_size_, false);
+ }
+ 
+ void WebContents::InitZoomController(content::WebContents* web_contents,
+@@ -1115,6 +1135,7 @@
+ }
+ 
+ WebContents::~WebContents() {
++  owned_guest_presentation_.reset();
+   // DevTools frontend messages use base::Unretained delegate callbacks.
+   // Clear the delegate before other teardown work can trigger callbacks
+   // into this partially destroyed WebContents.
+@@ -1148,7 +1169,7 @@
+ 
+   // For guest view based on OOPIF, the WebContents is released by the embedder
+   // frame, and we need to clear the reference to the memory.
+-  bool not_owned_by_this = is_guest() && attached_;
++  bool not_owned_by_this = is_guest() && attached_ && !owned_guest_;
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+   // And background pages are owned by extensions::ExtensionHost.
+   if (type_ == Type::kBackgroundPage)
+@@ -1176,6 +1197,8 @@
+ }
+ 
+ void WebContents::Destroy() {
++  if (owned_guest_presentation_)
++    owned_guest_presentation_->Shutdown();
+   // The content::WebContents should be destroyed asynchronously when possible
+   // as user may choose to destroy WebContents during an event of it.
+   if (Browser::Get()->is_shutting_down()) {
+@@ -1353,7 +1376,16 @@
+     type = Type::kOffScreen;
+ 
+   v8::HandleScope handle_scope(isolate);
+-  auto api_web_contents = CreateAndTake(isolate, std::move(new_contents), type);
++  if (owned_guest_ && new_contents->GetBrowserContext() != GetBrowserContext()) {
++    if (was_blocked) *was_blocked = true;
++    return nullptr;
++  }
++  auto api_web_contents = CreateAndTake(isolate, std::move(new_contents), type,
++                                       owned_guest_, initial_surface_size_);
++  if (api_web_contents.IsEmpty()) {
++    if (was_blocked) *was_blocked = true;
++    return nullptr;
++  }
+ 
+   // Rebind the paint callback to the child WebContents. The
+   // OffScreenWebContentsView was initially created with the parent's OnPaint
+@@ -2379,6 +2411,8 @@
+ }
+ 
+ void WebContents::WebContentsDestroyed() {
++  if (owned_guest_presentation_)
++    owned_guest_presentation_->Shutdown();
+   // Clear the pointer stored in wrapper.
+   if (GetAllWebContents().Lookup(id_))
+     GetAllWebContents().Remove(id_);
+@@ -2471,6 +2505,8 @@
+   }
+ 
+   content::NavigationController::LoadURLParams params(url);
++  params.should_replace_current_entry =
++      options.ValueOrDefault("replaceCurrentEntry", false);
+ 
+   if (!options.Get("httpReferrer", &params.referrer)) {
+     GURL http_referrer;
+@@ -3780,6 +3816,11 @@
+ 
+ void WebContents::AttachToIframe(content::WebContents* embedder_web_contents,
+                                  std::string embedder_frame_token) {
++  if (owned_guest_) {
++    gin_helper::ErrorThrower{JavascriptEnvironment::GetIsolate()}.ThrowError(
++        "Owned guests require a native presentation lease");
++    return;
++  }
+   auto token = base::Token::FromString(embedder_frame_token);
+   if (!token)
+     return;
+@@ -4664,6 +4705,13 @@
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+       .SetMethod("endFrameSubscription", &WebContents::EndFrameSubscription)
+       .SetMethod("startDrag", &WebContents::StartDrag)
++      .SetMethod("isOwnedGuest", &WebContents::IsOwnedGuest)
++      .SetMethod("createOwnedGuestLease", &WebContents::CreateOwnedGuestLease)
++      .SetMethod("attachOwnedGuest", &WebContents::AttachOwnedGuest)
++      .SetMethod("cancelOwnedGuestLease", &WebContents::CancelOwnedGuestLease)
++      .SetMethod("releaseOwnedGuest", &WebContents::ReleaseOwnedGuest)
++      .SetMethod("setOwnedGuestVisibility", &WebContents::SetOwnedGuestVisibility)
++      .SetMethod("setOwnedGuestPaintLease", &WebContents::SetOwnedGuestPaintLease)
+       .SetMethod("attachToIframe", &WebContents::AttachToIframe)
+       .SetMethod("detachFromOuterFrame", &WebContents::DetachFromOuterFrame)
+       .SetMethod("isOffscreen", &WebContents::IsOffScreen)
+@@ -4753,17 +4801,111 @@
+   return handle;
+ }
+ 
++gin_helper::Handle<WebContents> WebContents::NewOwnedGuest(
++    v8::Isolate* isolate, const gin_helper::Dictionary& options) {
++  if (options.Has("type") || options.Has("embedder") || options.Has("offscreen")) {
++    gin_helper::ErrorThrower{isolate}.ThrowError("Owned guest creation has a fixed native composition type");
++    return {};
++  }
++  api::Session* session = nullptr;
++  if (!OwnedGuestPresentation::IsAvailable() || !options.Get("session", &session) || !session) {
++    gin_helper::ErrorThrower{isolate}.ThrowError(
++        "Owned guest engine requires reviewed retained composition and an explicit Session");
++    return {};
++  }
++  auto size = gin_helper::Dictionary::CreateEmpty(isolate);
++  v8::Local<v8::Value> width_value;
++  v8::Local<v8::Value> height_value;
++  if (!options.Get("initialSurfaceSize", &size) ||
++      !size.Get("width", &width_value) || !width_value->IsNumber() ||
++      !size.Get("height", &height_value) || !height_value->IsNumber()) {
++    gin_helper::ErrorThrower{isolate}.ThrowError("Owned guest requires an explicit initialSurfaceSize");
++    return {};
++  }
++  const double width = width_value.As<v8::Number>()->Value();
++  const double height = height_value.As<v8::Number>()->Value();
++  const auto valid_dimension = [](double value) {
++    return std::isfinite(value) && value > 0 &&
++           value <= std::numeric_limits<int>::max() && std::floor(value) == value;
++  };
++  if (!valid_dimension(width) || !valid_dimension(height)) {
++    gin_helper::ErrorThrower{isolate}.ThrowError("initialSurfaceSize dimensions must be positive exact integers within int range");
++    return {};
++  }
++  auto handle = gin_helper::CreateHandle(isolate, new WebContents(
++      isolate, options, true, gfx::Size(static_cast<int>(width), static_cast<int>(height))));
++  handle->Pin(isolate);
++  v8::TryCatch try_catch(isolate);
++  gin_helper::CallMethod(isolate, handle.get(), "_init");
++  if (try_catch.HasCaught()) {
++    handle->Destroy();
++    node::errors::TriggerUncaughtException(isolate, try_catch);
++    return {};
++  }
++  return handle;
++}
++
++bool WebContents::IsOwnedGuest() const { return owned_guest_; }
++
++std::string WebContents::CreateOwnedGuestLease(WebContents* embedder,
++    const std::string& frame_token, double generation) {
++  if (!owned_guest_presentation_ || !OwnedGuestPresentation::IsValidGeneration(generation))
++    return {};
++  return owned_guest_presentation_->CreateLease(embedder, frame_token, static_cast<int>(generation));
++}
++
++v8::Local<v8::Promise> WebContents::AttachOwnedGuest(v8::Isolate* isolate,
++    const std::string& token, WebContents* embedder, const std::string& frame_token,
++    base::RepeatingCallback<bool()> validate, base::OnceClosure commit) {
++  if (owned_guest_presentation_)
++    return owned_guest_presentation_->Attach(isolate, token, embedder, frame_token,
++                                             std::move(validate), std::move(commit));
++  gin_helper::Promise<void> promise(isolate);
++  promise.RejectWithErrorMessage("Not an owned guest");
++  return promise.GetHandle();
++}
++
++bool WebContents::CancelOwnedGuestLease(const std::string& token) {
++  return owned_guest_presentation_ && owned_guest_presentation_->Cancel(token);
++}
++
++bool WebContents::ReleaseOwnedGuest(double generation) {
++  return owned_guest_presentation_ && OwnedGuestPresentation::IsValidGeneration(generation) &&
++         owned_guest_presentation_->Release(static_cast<int>(generation));
++}
++
++bool WebContents::SetOwnedGuestVisibility(double generation, bool visible) {
++  return owned_guest_presentation_ && OwnedGuestPresentation::IsValidGeneration(generation) &&
++         owned_guest_presentation_->SetVisibility(static_cast<int>(generation), visible);
++}
++
++void WebContents::SetOwnedGuestPaintLease(bool enabled) {
++  if (owned_guest_presentation_)
++    owned_guest_presentation_->SetPaintLease(enabled);
++}
++
+ // static
+ gin_helper::Handle<WebContents> WebContents::CreateAndTake(
+     v8::Isolate* isolate,
+     std::unique_ptr<content::WebContents> web_contents,
+-    Type type) {
++    Type type, bool owned_guest, const gfx::Size& initial_surface_size) {
++  if (owned_guest && initial_surface_size.IsEmpty()) {
++    gin_helper::ErrorThrower{isolate}.ThrowError("Owned popup requires its kind initialSurfaceSize");
++    return {};
++  }
+   gin_helper::Handle<WebContents> handle = gin_helper::CreateHandle(
+-      isolate, new WebContents(isolate, std::move(web_contents), type));
++      isolate, new WebContents(isolate, std::move(web_contents), type,
++                               owned_guest, initial_surface_size));
++  if (owned_guest)
++    handle->Pin(isolate);
+   v8::TryCatch try_catch(isolate);
+   gin_helper::CallMethod(isolate, handle.get(), "_init");
+   if (try_catch.HasCaught()) {
++    if (owned_guest)
++      handle->Destroy();
+     node::errors::TriggerUncaughtException(isolate, try_catch);
++    if (owned_guest)
++      return {};
+   }
+   return handle;
+ }
+@@ -4909,6 +5051,12 @@
+   v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
+   gin_helper::Dictionary dict{isolate, exports};
+   dict.Set("WebContents", WebContents::GetConstructor(isolate, context));
++  dict.SetMethod("createOwnedGuest", &WebContents::NewOwnedGuest);
++  dict.SetMethod("findOwnedGuestLease", [](v8::Isolate* isolate,
++      const std::string& token, WebContents* embedder, const std::string& frame_token, double generation) {
++    auto* guest = electron::api::OwnedGuestPresentation::FindLease(token, embedder, frame_token, generation);
++    return guest ? gin_helper::CreateHandle(isolate, guest) : gin_helper::Handle<WebContents>();
++  });
+   dict.SetMethod("fromId", &WebContentsFromID);
+   dict.SetMethod("fromFrame", &WebContentsFromFrame);
+   dict.SetMethod("fromDevToolsTargetId", &WebContentsFromDevToolsTargetID);
+diff --git a/electron/shell/browser/api/electron_api_web_contents.h b/electron/shell/browser/api/electron_api_web_contents.h
+--- a/electron/shell/browser/api/electron_api_web_contents.h
++++ b/electron/shell/browser/api/electron_api_web_contents.h
+@@ -51,6 +51,7 @@
+ #include "shell/common/gin_helper/wrappable.h"
+ #include "shell/common/web_contents_utility.mojom.h"
+ #include "ui/base/models/image_model.h"
++#include "ui/gfx/geometry/size.h"
+ #include "v8/include/cppgc/persistent.h"
+ 
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+@@ -112,6 +113,7 @@
+ 
+ class BaseWindow;
+ class FrameSubscriber;
++class OwnedGuestPresentation;
+ 
+ // Wrapper around the content::WebContents.
+ class WebContents final : public ExclusiveAccessContext,
+@@ -144,13 +146,28 @@
+       v8::Isolate* isolate,
+       const gin_helper::Dictionary& options);
+ 
++  static gin_helper::Handle<WebContents> NewOwnedGuest(
++      v8::Isolate* isolate, const gin_helper::Dictionary& options);
++  bool IsOwnedGuest() const;
++  std::string CreateOwnedGuestLease(WebContents* embedder,
++      const std::string& frame_token, double generation);
++  v8::Local<v8::Promise> AttachOwnedGuest(v8::Isolate* isolate,
++      const std::string& token, WebContents* embedder,
++      const std::string& frame_token, base::RepeatingCallback<bool()> validate,
++      base::OnceClosure commit);
++  bool CancelOwnedGuestLease(const std::string& token);
++  bool ReleaseOwnedGuest(double generation);
++  void SetOwnedGuestPaintLease(bool enabled);
++  bool SetOwnedGuestVisibility(double generation, bool visible);
++
+   // Create a new V8 wrapper for an existing |web_content|.
+   //
+   // The lifetime of |web_contents| will be managed by this class.
+   static gin_helper::Handle<WebContents> CreateAndTake(
+       v8::Isolate* isolate,
+       std::unique_ptr<content::WebContents> web_contents,
+-      Type type);
++      Type type, bool owned_guest = false,
++      const gfx::Size& initial_surface_size = gfx::Size());
+ 
+   // Get the api::WebContents associated with |web_contents|. Returns nullptr
+   // if there is no associated wrapper.
+@@ -464,6 +481,7 @@
+   WebContents& operator=(const WebContents&) = delete;
+ 
+  private:
++  friend class OwnedGuestPresentation;
+   // Store last emitted favicon URLs to avoid duplicate page-favicon-updated
+   // events
+   base::flat_set<GURL> last_favicon_urls_;
+@@ -472,9 +490,12 @@
+   // Takes over ownership of |web_contents|.
+   WebContents(v8::Isolate* isolate,
+               std::unique_ptr<content::WebContents> web_contents,
+-              Type type);
++              Type type, bool owned_guest = false,
++              const gfx::Size& initial_surface_size = gfx::Size());
+   // Creates a new content::WebContents.
+-  WebContents(v8::Isolate* isolate, const gin_helper::Dictionary& options);
++  WebContents(v8::Isolate* isolate, const gin_helper::Dictionary& options,
++              bool owned_guest = false,
++              const gfx::Size& initial_surface_size = gfx::Size());
+   ~WebContents() override;
+ 
+   // Delete this if garbage collection has not started.
+@@ -783,6 +804,9 @@
+   cppgc::Persistent<api::Debugger> debugger_;
+ 
+   std::unique_ptr<WebViewGuestDelegate> guest_delegate_;
++  bool owned_guest_ = false;
++  const gfx::Size initial_surface_size_;
++  std::unique_ptr<OwnedGuestPresentation> owned_guest_presentation_;
+   std::unique_ptr<FrameSubscriber> frame_subscriber_;
+ 
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+diff --git a/electron/shell/browser/api/electron_api_web_contents_impl.cc b/electron/shell/browser/api/electron_api_web_contents_impl.cc
+--- a/electron/shell/browser/api/electron_api_web_contents_impl.cc
++++ b/electron/shell/browser/api/electron_api_web_contents_impl.cc
+@@ -17,6 +17,8 @@
+ namespace electron::api {
+ 
+ void WebContents::DetachFromOuterFrame() {
++  if (owned_guest_)
++    return;
+   // See detach_webview_frame.patch on how to detach.
+   content::FrameTreeNodeId frame_tree_node_id =
+       static_cast<content::WebContentsImpl*>(web_contents())
+diff --git a/electron/shell/browser/api/electron_api_web_contents_view.cc b/electron/shell/browser/api/electron_api_web_contents_view.cc
+--- a/electron/shell/browser/api/electron_api_web_contents_view.cc
++++ b/electron/shell/browser/api/electron_api_web_contents_view.cc
+@@ -196,6 +196,10 @@
+           return nullptr;
+         }
+ 
++        if (existing_web_contents->IsOwnedGuest()) {
++          args->ThrowTypeError("Owned guest pages use a DOM presentation lease");
++          return nullptr;
++        }
+         if (existing_web_contents->owner_window() != nullptr) {
+           args->ThrowTypeError(
+               "options.webContents is already attached to a window");
+diff --git a/electron/shell/browser/api/owned_guest_presentation.cc b/electron/shell/browser/api/owned_guest_presentation.cc
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_guest_presentation.cc
+@@ -0,0 +1,441 @@
++#include "shell/browser/api/owned_guest_presentation.h"
++
++#include <cmath>
++#include <limits>
++#include <map>
++#include <utility>
++
++#include "base/feature_list.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "base/token.h"
++#include "base/unguessable_token.h"
++#include "components/guest_contents/browser/guest_contents_handle.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_process_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "content/public/common/content_features.h"
++#include "shell/browser/api/electron_api_web_contents.h"
++#include "shell/browser/native_window.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace electron::api {
++namespace {
++auto& Leases() {
++  static base::NoDestructor<
++      std::map<std::string, base::WeakPtr<OwnedGuestPresentation>>> leases;
++  return *leases;
++}
++
++content::RenderFrameHost* ResolveFrame(WebContents* embedder,
++                                      const std::string& frame_token) {
++  if (!embedder || !embedder->web_contents())
++    return nullptr;
++  auto token = base::Token::FromString(frame_token);
++  if (!token)
++    return nullptr;
++  auto value = base::UnguessableToken::Deserialize(token->high(), token->low());
++  if (!value)
++    return nullptr;
++  content::RenderFrameHost* result = nullptr;
++  embedder->web_contents()->ForEachRenderFrameHost(
++      [&](content::RenderFrameHost* frame) {
++        if (frame->GetFrameToken() == blink::LocalFrameToken(*value))
++          result = frame;
++      });
++  if (!result || !result->GetParent() || !result->IsRenderFrameLive() ||
++      result->GetMainFrame() != embedder->web_contents()->GetPrimaryMainFrame() ||
++      content::WebContents::FromRenderFrameHost(result) != embedder->web_contents())
++    return nullptr;
++  return result;
++}
++}
++
++class OwnedGuestPresentation::EmbedderObserver
++    : public content::WebContentsObserver {
++ public:
++  EmbedderObserver(base::WeakPtr<OwnedGuestPresentation> owner,
++                   content::WebContents* embedder, int generation, bool pending)
++      : content::WebContentsObserver(embedder), owner_(owner),
++        generation_(generation), pending_(pending) {}
++  void WebContentsDestroyed() override { Gone(); }
++  void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override {
++    Gone();
++  }
++  void PrimaryPageChanged(content::Page&) override { Gone(); }
++  void OnVisibilityChanged(content::Visibility) override {
++    if (owner_ && !pending_) owner_->UpdateVisibility();
++  }
++  void FrameDeleted(content::FrameTreeNodeId id) override {
++    if (owner_)
++      owner_->FrameGone(generation_, pending_, id);
++  }
++ private:
++  void Gone() {
++    if (owner_)
++      owner_->EmbedderGone(generation_, pending_);
++  }
++  base::WeakPtr<OwnedGuestPresentation> owner_;
++  int generation_;
++  bool pending_;
++};
++
++struct OwnedGuestPresentation::Lease {
++  std::string token;
++  std::string frame_token;
++  base::WeakPtr<WebContents> embedder;
++  content::FrameTreeNodeId frame;
++  content::GlobalRenderFrameHostId primary_frame;
++  int generation;
++  bool consumed = false;
++  std::unique_ptr<EmbedderObserver> observer;
++  std::unique_ptr<gin_helper::Promise<void>> promise;
++  base::RepeatingCallback<bool()> validate;
++  base::OnceClosure commit;
++};
++
++bool OwnedGuestPresentation::IsAvailable() {
++  return base::FeatureList::IsEnabled(features::kAttachUnownedInnerWebContents);
++}
++
++bool OwnedGuestPresentation::IsValidGeneration(double generation) {
++  return std::isfinite(generation) && generation > 0 &&
++         generation <= std::numeric_limits<int>::max() &&
++         std::floor(generation) == generation;
++}
++
++OwnedGuestPresentation::OwnedGuestPresentation(
++    WebContents* owner, const gfx::Size& initial_surface_size,
++    bool preserve_current_size)
++    : owner_(owner), last_surface_size_(initial_surface_size) {
++  CHECK(IsAvailable());
++  CHECK(!initial_surface_size.IsEmpty());
++  auto* contents = owner_->web_contents();
++  CHECK(contents);
++  CHECK(!contents->GetOuterWebContents());
++  guest_contents::GuestContentsHandle::CreateForWebContents(contents);
++  if (preserve_current_size)
++    RememberSurfaceSize(contents);
++  RestoreSurfaceSize(contents, preserve_current_size);
++}
++
++void OwnedGuestPresentation::RememberSurfaceSize(content::WebContents* contents) {
++  auto* view = contents->GetRenderWidgetHostView();
++  auto size = view ? view->GetViewBounds().size() : gfx::Size();
++  if (size.IsEmpty() && !contents->GetOuterWebContents())
++    size = contents->GetSize();
++  if (!size.IsEmpty())
++    last_surface_size_ = size;
++}
++
++void OwnedGuestPresentation::RestoreSurfaceSize(content::WebContents* contents,
++                                                 bool preserve_widget_size) {
++  const auto can_resize = [&] {
++    return !stopped_ && contents && owner_->web_contents() == contents &&
++           !contents->IsBeingDestroyed() && !contents->GetOuterWebContents() &&
++           !current_generation_ && !owner_->attached_ && !owner_->embedder_;
++  };
++  if (!can_resize())
++    return;
++  auto self = weak_factory_.GetWeakPtr();
++  auto* view = contents->GetRenderWidgetHostView();
++  const auto widget_size = preserve_widget_size && view
++                               ? view->GetViewBounds().size() : gfx::Size();
++  contents->Resize(gfx::Rect(last_surface_size_));
++  if (self && can_resize() && !widget_size.IsEmpty() &&
++      contents->GetRenderWidgetHostView() == view) {
++    view->SetSize(widget_size);
++  }
++}
++
++OwnedGuestPresentation::~OwnedGuestPresentation() { Shutdown(); }
++
++bool OwnedGuestPresentation::Matches(WebContents* embedder,
++                                     const std::string& frame_token) const {
++  if (stopped_ || !lease_ || !lease_->embedder ||
++      lease_->embedder.get() != embedder || lease_->frame_token != frame_token ||
++      !owner_->web_contents() || !embedder->web_contents())
++    return false;
++  auto* primary = embedder->web_contents()->GetPrimaryMainFrame();
++  auto* frame = ResolveFrame(embedder, frame_token);
++  return primary && primary->GetGlobalId() == lease_->primary_frame && frame &&
++         frame->GetFrameTreeNodeId() == lease_->frame;
++}
++
++WebContents* OwnedGuestPresentation::FindLease(const std::string& token,
++                                               WebContents* embedder,
++                                               const std::string& frame_token, double generation) {
++  if (!IsValidGeneration(generation)) return nullptr;
++  auto it = Leases().find(token);
++  if (it == Leases().end() || !it->second ||
++      !it->second->Matches(embedder, frame_token) || it->second->lease_->consumed ||
++      it->second->lease_->generation != generation)
++    return nullptr;
++  return it->second->owner_;
++}
++
++std::string OwnedGuestPresentation::CreateLease(WebContents* embedder,
++                                                const std::string& frame_token,
++                                                int generation) {
++  if (stopped_ || !IsAvailable() || generation <= last_generation_ ||
++      !owner_->web_contents() || embedder == owner_)
++    return {};
++  auto* frame = ResolveFrame(embedder, frame_token);
++  if (!frame)
++    return {};
++  if (current_embedder_ && current_embedder_->web_contents() &&
++      current_embedder_->web_contents()->GetBrowserContext() !=
++          embedder->web_contents()->GetBrowserContext())
++    return {};
++  CancelPending("Presentation lease superseded");
++  lease_ = std::make_unique<Lease>();
++  lease_->token = base::UnguessableToken::Create().ToString();
++  lease_->frame_token = frame_token;
++  lease_->embedder = embedder->GetWeakPtr();
++  lease_->frame = frame->GetFrameTreeNodeId();
++  lease_->primary_frame = embedder->web_contents()->GetPrimaryMainFrame()->GetGlobalId();
++  lease_->generation = generation;
++  last_generation_ = generation;
++  lease_->observer = std::make_unique<EmbedderObserver>(
++      weak_factory_.GetWeakPtr(), embedder->web_contents(), generation, true);
++  Leases().emplace(lease_->token, weak_factory_.GetWeakPtr());
++  lease_timer_.Start(FROM_HERE, base::Seconds(60), base::BindOnce(
++      &OwnedGuestPresentation::CancelPending, weak_factory_.GetWeakPtr(),
++      "Presentation lease expired"));
++  return lease_->token;
++}
++
++v8::Local<v8::Promise> OwnedGuestPresentation::Attach(
++    v8::Isolate* isolate, const std::string& token, WebContents* embedder,
++    const std::string& frame_token, base::RepeatingCallback<bool()> validate,
++    base::OnceClosure commit) {
++  gin_helper::Promise<void> promise(isolate);
++  auto result = promise.GetHandle();
++  if (!Matches(embedder, frame_token) || lease_->token != token ||
++      lease_->consumed || !validate || !commit) {
++    promise.RejectWithErrorMessage("Invalid or consumed presentation lease");
++    return result;
++  }
++  lease_->consumed = true;
++  Leases().erase(token);
++  lease_->promise = std::make_unique<gin_helper::Promise<void>>(std::move(promise));
++  lease_->validate = std::move(validate);
++  lease_->commit = std::move(commit);
++  auto* frame = ResolveFrame(embedder, frame_token);
++  frame->PrepareForInnerWebContentsAttach(base::BindOnce(
++      &OwnedGuestPresentation::Prepared, weak_factory_.GetWeakPtr(),
++      lease_->generation));
++  return result;
++}
++
++void OwnedGuestPresentation::Prepared(int generation,
++                                      content::RenderFrameHost* frame) {
++  if (!lease_ || lease_->generation != generation)
++    return;
++  auto destination = lease_->embedder;
++  if (!destination || !destination->web_contents() || !frame ||
++      frame->GetFrameTreeNodeId() != lease_->frame || !frame->IsRenderFrameLive() ||
++      !frame->GetParent() || content::WebContents::FromRenderFrameHost(frame) !=
++                                  destination->web_contents() ||
++      destination->web_contents()->GetPrimaryMainFrame()->GetGlobalId() !=
++          lease_->primary_frame) {
++    CancelPending("Destination frame changed before attachment");
++    return;
++  }
++  const auto prepared_id = frame->GetGlobalId();
++  auto self = weak_factory_.GetWeakPtr();
++  auto validate = lease_->validate;
++  if (!validate.Run()) {
++    if (self)
++      CancelPending("Presentation binding changed before attachment");
++    return;
++  }
++  if (!self || !lease_ || lease_->generation != generation)
++    return;
++  frame = content::RenderFrameHost::FromID(prepared_id);
++  if (!frame || !destination || !destination->web_contents() ||
++      content::WebContents::FromRenderFrameHost(frame) != destination->web_contents()) {
++    CancelPending("Destination disappeared during binding validation");
++    return;
++  }
++  Detach(true);
++  if (!self || !lease_ || lease_->generation != generation)
++    return;
++  frame = content::RenderFrameHost::FromID(prepared_id);
++  if (!frame || !destination || !destination->web_contents() ||
++      !frame->IsRenderFrameLive()) {
++    CancelPending("Page retained without presentation: destination disappeared");
++    return;
++  }
++  auto* handle = guest_contents::GuestContentsHandle::FromWebContents(owner_->web_contents());
++  handle->AttachToOuterWebContents(frame);
++  if (!self) return;
++  if (!lease_ || lease_->generation != generation) {
++    Detach(false);
++    return;
++  }
++  if (!destination || owner_->web_contents()->GetOuterWebContents() !=
++                          destination->web_contents()) {
++    Detach(false);
++    if (self)
++      CancelPending("Page retained without presentation: native attachment failed");
++    return;
++  }
++  current_embedder_ = destination;
++  current_frame_ = lease_->frame;
++  current_generation_ = generation;
++  owner_->embedder_ = destination.get();
++  owner_->attached_ = true;
++  presentation_visible_ = false;
++  auto* relay = NativeWindowRelay::FromWebContents(destination->web_contents());
++  owner_->SetOwnerWindow(relay ? relay->GetNativeWindow() : nullptr);
++  if (!self) return;
++  if (!lease_ || lease_->generation != generation || !destination) {
++    Detach(false);
++    return;
++  }
++  current_observer_ = std::make_unique<EmbedderObserver>(
++      self, destination->web_contents(), generation, false);
++  owner_->web_contents()->WasHidden();
++  if (!self) return;
++  if (!lease_ || lease_->generation != generation) {
++    Detach(false);
++    return;
++  }
++  lease_timer_.Stop();
++  auto completed = std::move(lease_);
++  completed->observer.reset();
++  std::move(completed->commit).Run();
++  if (!self || current_generation_ != generation) {
++    completed->promise->RejectWithErrorMessage("Page presentation withdrawn during commit");
++    return;
++  }
++  completed->promise->Resolve();
++  if (self) owner_->Emit("did-attach");
++}
++
++void OwnedGuestPresentation::CancelPending(const std::string& reason) {
++  if (!lease_)
++    return;
++  lease_timer_.Stop();
++  auto canceled = std::move(lease_);
++  Leases().erase(canceled->token);
++  canceled->observer.reset();
++  if (canceled->promise)
++    canceled->promise->RejectWithErrorMessage(reason);
++}
++
++bool OwnedGuestPresentation::Cancel(const std::string& token) {
++  if (!lease_ || lease_->token != token)
++    return false;
++  CancelPending("Presentation lease canceled");
++  return true;
++}
++
++void OwnedGuestPresentation::Detach(bool notify) {
++  auto self = weak_factory_.GetWeakPtr();
++  auto* contents = owner_->web_contents();
++  auto* old_outer = contents ? contents->GetOuterWebContents() : nullptr;
++  if (contents && !contents->IsBeingDestroyed())
++    RememberSurfaceSize(contents);
++  const int old_generation = current_generation_;
++  current_generation_ = 0;
++  presentation_visible_ = false;
++  current_observer_.reset();
++  current_embedder_.reset();
++  current_frame_ = content::FrameTreeNodeId();
++  owner_->embedder_ = nullptr;
++  owner_->attached_ = false;
++  if (contents)
++    owner_->SetOwnerWindow(nullptr);
++  if (!self) return;
++  if (contents && owner_->web_contents() == contents && !current_generation_ &&
++      contents->GetOuterWebContents() == old_outer) {
++    contents->WasHidden();
++    if (!self) return;
++    if (owner_->web_contents() == contents && !current_generation_ &&
++        contents->GetOuterWebContents() == old_outer) {
++      auto* handle = guest_contents::GuestContentsHandle::FromWebContents(contents);
++      if (handle)
++        handle->DetachFromOuterWebContents();
++      if (!self) return;
++      RestoreSurfaceSize(contents, true);
++    }
++  }
++  if (self && notify && old_generation)
++    owner_->Emit("-owned-guest-released", old_generation);
++}
++
++bool OwnedGuestPresentation::Release(int generation) {
++  if (generation != current_generation_ || generation <= 0)
++    return false;
++  Detach(true);
++  return true;
++}
++
++void OwnedGuestPresentation::EmbedderGone(int generation, bool pending) {
++  if (pending) {
++    if (lease_ && lease_->generation == generation)
++      CancelPending("Destination embedder was withdrawn");
++  } else if (current_generation_ == generation) {
++    Release(generation);
++  }
++}
++
++void OwnedGuestPresentation::FrameGone(int generation, bool pending,
++                                      content::FrameTreeNodeId id) {
++  if ((pending && lease_ && lease_->generation == generation && lease_->frame == id) ||
++      (!pending && current_generation_ == generation && current_frame_ == id))
++    EmbedderGone(generation, pending);
++}
++
++void OwnedGuestPresentation::SetPaintLease(bool enabled) {
++  if (stopped_ || !owner_->web_contents())
++    return;
++  paint_requested_ = enabled;
++  if (!enabled) {
++    paint_lease_.RunAndReset();
++  } else if (!paint_lease_ && !paint_acquiring_) {
++    paint_acquiring_ = true;
++    auto self = weak_factory_.GetWeakPtr();
++    auto lease = owner_->web_contents()->IncrementCapturerCount(gfx::Size(), true, false, false);
++    if (self) {
++      paint_acquiring_ = false;
++      if (!stopped_ && paint_requested_)
++        paint_lease_ = std::move(lease);
++    }
++  }
++}
++
++bool OwnedGuestPresentation::SetVisibility(int generation, bool visible) {
++  if (stopped_ || generation <= 0 || generation != current_generation_)
++    return false;
++  presentation_visible_ = visible;
++  UpdateVisibility();
++  return true;
++}
++
++void OwnedGuestPresentation::UpdateVisibility() {
++  if (stopped_ || !owner_->web_contents()) return;
++  const bool visible = presentation_visible_ && current_embedder_ &&
++      current_embedder_->web_contents() &&
++      current_embedder_->web_contents()->GetVisibility() == content::Visibility::VISIBLE;
++  if (visible)
++    owner_->web_contents()->WasShown();
++  else
++    owner_->web_contents()->WasHidden();
++}
++
++void OwnedGuestPresentation::Shutdown() {
++  if (stopped_)
++    return;
++  stopped_ = true;
++  CancelPending("Owned browser page closed");
++  Detach(false);
++  paint_lease_.RunAndReset();
++  weak_factory_.InvalidateWeakPtrs();
++}
++}
+diff --git a/electron/shell/browser/api/owned_guest_presentation.h b/electron/shell/browser/api/owned_guest_presentation.h
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_guest_presentation.h
+@@ -0,0 +1,80 @@
++#ifndef ELECTRON_SHELL_BROWSER_API_OWNED_GUEST_PRESENTATION_H_
++#define ELECTRON_SHELL_BROWSER_API_OWNED_GUEST_PRESENTATION_H_
++
++#include <memory>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/functional/callback_helpers.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/timer/timer.h"
++#include "content/public/browser/frame_tree_node_id.h"
++#include "shell/common/gin_helper/promise.h"
++#include "ui/gfx/geometry/size.h"
++
++namespace content {
++class RenderFrameHost;
++class WebContents;
++}
++namespace electron::api {
++class WebContents;
++
++class OwnedGuestPresentation {
++ public:
++  OwnedGuestPresentation(WebContents* owner, const gfx::Size& initial_surface_size,
++                         bool preserve_current_size);
++  ~OwnedGuestPresentation();
++  static bool IsAvailable();
++  static bool IsValidGeneration(double generation);
++  static WebContents* FindLease(const std::string& token,
++                                WebContents* embedder,
++                                const std::string& frame_token, double generation);
++  std::string CreateLease(WebContents* embedder,
++                          const std::string& frame_token,
++                          int generation);
++  v8::Local<v8::Promise> Attach(v8::Isolate* isolate,
++                               const std::string& token,
++                               WebContents* embedder,
++                               const std::string& frame_token,
++                               base::RepeatingCallback<bool()> validate,
++                               base::OnceClosure commit);
++  bool Cancel(const std::string& token);
++  bool Release(int generation);
++  void SetPaintLease(bool enabled);
++  bool SetVisibility(int generation, bool visible);
++  void Shutdown();
++
++ private:
++  class EmbedderObserver;
++  struct Lease;
++  bool Matches(WebContents* embedder, const std::string& frame_token) const;
++  void Prepared(int generation, content::RenderFrameHost* frame);
++  void CancelPending(const std::string& reason);
++  void Detach(bool notify);
++  void RememberSurfaceSize(content::WebContents* contents);
++  void RestoreSurfaceSize(content::WebContents* contents,
++                          bool preserve_widget_size);
++  void UpdateVisibility();
++  void EmbedderGone(int generation, bool pending);
++  void FrameGone(int generation, bool pending,
++                 content::FrameTreeNodeId frame_id);
++
++  raw_ptr<WebContents> owner_;
++  gfx::Size last_surface_size_;
++  std::unique_ptr<Lease> lease_;
++  std::unique_ptr<EmbedderObserver> current_observer_;
++  base::WeakPtr<WebContents> current_embedder_;
++  content::FrameTreeNodeId current_frame_;
++  int current_generation_ = 0;
++  int last_generation_ = 0;
++  bool stopped_ = false;
++  bool presentation_visible_ = false;
++  bool paint_requested_ = false;
++  bool paint_acquiring_ = false;
++  base::ScopedClosureRunner paint_lease_;
++  base::OneShotTimer lease_timer_;
++  base::WeakPtrFactory<OwnedGuestPresentation> weak_factory_{this};
++};
++}
++#endif
+diff --git a/electron/spec/api-owned-guest-spec.ts b/electron/spec/api-owned-guest-spec.ts
+new file mode 100644
+--- /dev/null
++++ b/electron/spec/api-owned-guest-spec.ts
+@@ -0,0 +1,232 @@
++import { strict as assert } from 'node:assert';
++import { createHash, randomUUID } from 'node:crypto';
++import { BrowserWindow, nativeImage, session, webContents } from 'electron';
++
++type Guest = Electron.WebContents & {
++  createOwnedGuestLease(embedder: Electron.WebContents, frameToken: string, generation: number): string;
++  cancelOwnedGuestLease(token: string): boolean;
++  releaseOwnedGuest(generation: number): boolean;
++  setOwnedGuestPaintLease(enabled: boolean): void;
++  setOwnedGuestVisibility(generation: number, visible: boolean): boolean;
++};
++const factory = webContents as unknown as {
++  createOwnedGuest(options: Electron.WebPreferences & { session: Electron.Session; initialSurfaceSize: {width: number; height: number} }): Guest;
++};
++
++describe('owned guest presentation', function () {
++  this.timeout(30000);
++  let guest: Guest;
++  const windows: BrowserWindow[] = [];
++  async function outer() {
++    const window = new BrowserWindow({ show: false, webPreferences: {
++      sandbox: true, contextIsolation: true, nodeIntegration: false, webviewTag: true
++    } });
++    windows.push(window);
++    await window.loadURL('data:text/html,' + encodeURIComponent(
++      '<main style="width:400px;height:240px;overflow:hidden">' +
++      '<webview id="page" style="width:1280px;height:720px;transform:scale(.5);transform-origin:0 0"></webview></main>'));
++    const token = await window.webContents.executeJavaScript('document.getElementById("page").getOwnedGuestFrameToken()');
++    return { window, token };
++  }
++  async function attach(destination: Awaited<ReturnType<typeof outer>>, generation: number) {
++    destination.token = await destination.window.webContents.executeJavaScript(
++      'document.getElementById("page").getOwnedGuestFrameToken()');
++    const token = guest.createOwnedGuestLease(destination.window.webContents, destination.token, generation);
++    assert.ok(token);
++    await destination.window.webContents.executeJavaScript(
++      `document.getElementById("page").adoptOwnedGuest(${JSON.stringify(token)}, ${generation})`);
++    return token;
++  }
++  beforeEach(() => {
++    guest = factory.createOwnedGuest({ session: session.fromPartition(`owned-${randomUUID()}`),
++      sandbox: true, nodeIntegration: false, contextIsolation: true,
++      initialSurfaceSize: { width: 1280, height: 720 } });
++  });
++  afterEach(() => {
++    if (guest && !guest.isDestroyed()) guest.destroy();
++    for (const window of windows.splice(0)) if (!window.isDestroyed()) window.destroy();
++  });
++
++  it('retains one document, Session and debugger through transfer and embedder destruction', async () => {
++    guest.debugger.attach('1.3');
++    await guest.loadURL('about:blank');
++    await guest.executeJavaScript('globalThis.identity = { count: 41 }; history.pushState({n:1}, "")');
++    const id = guest.id;
++    const roomSession = guest.session;
++    const a = await outer();
++    await attach(a, 1);
++    const b = await outer();
++    await attach(b, 2);
++    assert.equal(guest.id, id);
++    assert.equal(guest.session, roomSession);
++    assert.ok(guest.debugger.isAttached());
++    assert.equal(await guest.executeJavaScript('++identity.count'), 42);
++    assert.equal(await guest.executeJavaScript('history.state.n'), 1);
++    assert.equal(guest.releaseOwnedGuest(1), false);
++    a.window.destroy();
++    assert.equal(guest.hostWebContents, b.window.webContents);
++    b.window.destroy();
++    assert.equal(guest.isDestroyed(), false);
++    assert.equal(guest.hostWebContents, null);
++    const c = await outer();
++    await attach(c, 3);
++    assert.equal(await guest.executeJavaScript('identity.count'), 42);
++    assert.equal(guest.releaseOwnedGuest(3), true);
++    await attach(c, 4);
++    assert.equal(await guest.executeJavaScript('identity.count'), 42);
++  });
++
++  it('rejects wrong frame/embedder, consumed lease and cancellation without changing page', async () => {
++    const a = await outer();
++    const b = await outer();
++    for (const invalid of [NaN, 1.25, 2 ** 32 + 1]) {
++      assert.equal(guest.createOwnedGuestLease(a.window.webContents, a.token, invalid), '');
++    }
++    const token = guest.createOwnedGuestLease(a.window.webContents, a.token, 1);
++    await assert.rejects(b.window.webContents.executeJavaScript(
++      `document.getElementById("page").adoptOwnedGuest(${JSON.stringify(token)}, 1)`));
++    assert.equal(guest.cancelOwnedGuestLease(token), true);
++    await assert.rejects(a.window.webContents.executeJavaScript(
++      `document.getElementById("page").adoptOwnedGuest(${JSON.stringify(token)}, 1)`));
++    assert.equal(guest.isDestroyed(), false);
++    const liveToken = await attach(a, 2);
++    assert.equal(guest.cancelOwnedGuestLease(liveToken), false);
++    assert.equal(guest.createOwnedGuestLease(b.window.webContents, b.token, 2), '');
++    assert.equal(guest.hostWebContents, a.window.webContents);
++    b.window.webContents.once('did-attach-webview', () => guest.releaseOwnedGuest(3));
++    await assert.rejects(attach(b, 3));
++    assert.equal(guest.isDestroyed(), false);
++    await attach(b, 4);
++    assert.equal(guest.hostWebContents, b.window.webContents);
++  });
++
++  it('retains the exact native popup with its opener Session and independent lifetime', async () => {
++    let accept!: (child: Guest) => void;
++    const opened = new Promise<Guest>(resolve => { accept = resolve; });
++    guest.setWindowOpenHandler(() => ({ action: 'allow', outlivesOpener: true,
++      createWindow: options => {
++        const child = options.webContents as Guest;
++        assert.ok(child);
++        accept(child);
++        return child;
++      }
++    }));
++    await guest.loadURL('about:blank');
++    const roomSession = guest.session;
++    await guest.executeJavaScript('window.open("about:blank").retainedPopupValue = 17');
++    const child = await opened;
++    assert.equal(child.session, roomSession);
++    assert.equal(await child.executeJavaScript('retainedPopupValue'), 17);
++    guest.destroy();
++    guest = child;
++    assert.equal(child.isDestroyed(), false);
++    const destination = await outer();
++    await attach(destination, 1);
++    assert.equal(await child.executeJavaScript('retainedPopupValue'), 17);
++  });
++
++  it('captures before DOM or emulation, then retains the same sized page after detach', async () => {
++    const id = guest.id;
++    const roomSession = guest.session;
++    const windowIds = BrowserWindow.getAllWindows().map(window => window.id);
++    guest.setOwnedGuestPaintLease(true);
++    guest.debugger.attach('1.3');
++    await guest.loadURL('data:text/html,<html><body style="margin:0"></body></html>');
++    await guest.executeJavaScript('globalThis.retainedIdentity = 37');
++    const dimensions = await guest.executeJavaScript(
++      '({width:innerWidth,height:innerHeight,dpr:devicePixelRatio,hidden:document.hidden})');
++    assert.equal(dimensions.width, 1280);
++    assert.equal(dimensions.height, 720);
++    assert.equal(dimensions.hidden, true);
++    assert.equal(guest.hostWebContents, null);
++    const capture = async (color: string, width: number, height: number) => {
++      await guest.executeJavaScript(`document.documentElement.style.background=${JSON.stringify(color)};` +
++        'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
++      const result = await guest.debugger.sendCommand('Page.captureScreenshot', {
++        format: 'png', fromSurface: true, captureBeyondViewport: false
++      });
++      const image = nativeImage.createFromBuffer(Buffer.from(result.data, 'base64'));
++      const dpr = await guest.executeJavaScript('devicePixelRatio');
++      assert.deepEqual(image.getSize(), { width: Math.round(width * dpr), height: Math.round(height * dpr) });
++      const pixel = image.toBitmap().subarray(0, 4);
++      assert.equal(pixel[3], 255);
++      return pixel;
++    };
++    const first = await capture('rgb(220,20,40)', 1280, 720);
++    const second = await capture('rgb(20,200,60)', 1280, 720);
++    assert.notDeepEqual(first.subarray(0, 3), second.subarray(0, 3));
++    assert.deepEqual(BrowserWindow.getAllWindows().map(window => window.id), windowIds);
++    const destination = await outer();
++    await attach(destination, 1);
++    assert.equal(guest.releaseOwnedGuest(1), true);
++    assert.equal(guest.id, id);
++    assert.equal(guest.session, roomSession);
++    assert.equal(guest.hostWebContents, null);
++    assert.equal(await guest.executeJavaScript('retainedIdentity'), 37);
++    assert.deepEqual(await guest.executeJavaScript('[innerWidth,innerHeight]'), [1280, 720]);
++    await capture('rgb(40,60,220)', 1280, 720);
++    await guest.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
++      width: 640, height: 360, deviceScaleFactor: 1, mobile: false
++    });
++    await attach(destination, 2);
++    assert.equal(guest.releaseOwnedGuest(2), true);
++    assert.deepEqual(await guest.executeJavaScript('[innerWidth,innerHeight]'), [640, 360]);
++    await capture('rgb(200,160,40)', 640, 360);
++    assert.equal(destination.window.isVisible(), false);
++    assert.equal(destination.window.isFocused(), false);
++  });
++
++  it('keeps the model viewport and captures fresh hidden native frames without showing an owner', async () => {
++    guest.debugger.attach('1.3');
++    guest.setOwnedGuestPaintLease(true);
++    await guest.loadURL('about:blank');
++    await guest.debugger.sendCommand('Emulation.setDeviceMetricsOverride', {
++      width: 1280, height: 720, deviceScaleFactor: 1, mobile: false
++    });
++    const a = await outer();
++    await attach(a, 1);
++    assert.equal(guest.setOwnedGuestVisibility(1, false), true);
++    assert.deepEqual(await guest.executeJavaScript('[innerWidth, innerHeight]'), [1280, 720]);
++    const hashes: string[] = [];
++    for (const color of ['rgb(200,20,40)', 'rgb(20,200,40)']) {
++      await guest.executeJavaScript(`document.body.style.background=${JSON.stringify(color)};` +
++        'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
++      const capture = await guest.debugger.sendCommand('Page.captureScreenshot', { format: 'png' });
++      hashes.push(createHash('sha256').update(Buffer.from(capture.data, 'base64')).digest('hex'));
++    }
++    assert.notEqual(hashes[0], hashes[1]);
++    assert.equal(a.window.isVisible(), false);
++    assert.equal(a.window.isFocused(), false);
++    assert.equal(await guest.executeJavaScript('document.visibilityState'), 'hidden');
++    guest.setOwnedGuestPaintLease(false);
++  });
++  it('retains the crashed WebContents and replaces only its diagnostic history entry', async () => {
++    await guest.loadURL('data:text/html,' + encodeURIComponent('<title>Earlier page</title><p>Earlier</p>'));
++    await guest.loadURL('data:text/html,' + encodeURIComponent('<title>Failed page</title><p>Failed</p>'));
++    const id = guest.id;
++    const roomSession = guest.session;
++    const entries = guest.navigationHistory.getAllEntries();
++    const before = guest.navigationHistory.getActiveIndex();
++    assert.ok(before > 0);
++    const crashed = new Promise<void>(resolve => guest.once('render-process-gone', () => resolve()));
++    guest.forcefullyCrashRenderer();
++    await crashed;
++    assert.equal(guest.isDestroyed(), false);
++    const diagnostic = 'data:text/html;charset=utf-8,' + encodeURIComponent('<title>This page crashed</title><p>Diagnostic</p>');
++    const options: Electron.LoadURLOptions & { replaceCurrentEntry: boolean } = { replaceCurrentEntry: true };
++    await guest.loadURL(diagnostic, options);
++    assert.equal(guest.id, id);
++    assert.equal(guest.session, roomSession);
++    assert.equal(await guest.executeJavaScript('location.href'), diagnostic);
++    assert.equal(guest.navigationHistory.getActiveIndex(), before);
++    assert.equal(guest.navigationHistory.getAllEntries().length, entries.length);
++    assert.equal(guest.navigationHistory.getAllEntries()[before].url, diagnostic);
++    await new Promise<void>(resolve => {
++      guest.once('did-finish-load', () => resolve());
++      guest.navigationHistory.goBack();
++    });
++    assert.equal(guest.getURL(), entries[before - 1].url);
++    assert.equal(guest.id, id);
++  });
++
++});
+diff --git a/electron/typings/internal-electron.d.ts b/electron/typings/internal-electron.d.ts
+--- a/electron/typings/internal-electron.d.ts
++++ b/electron/typings/internal-electron.d.ts
+@@ -353,6 +353,9 @@
+     public disconnectedCallback?(): void;
+ 
+     // Created in web-view-impl
++    public getOwnedGuestFrameToken(): string;
++    public adoptOwnedGuest(token: string, generation: number): Promise<void>;
++    public releaseOwnedGuest(): void;
+     public getWebContentsId(): number;
+     public capturePage(rect?: Electron.Rectangle): Promise<Electron.NativeImage>;
+   }

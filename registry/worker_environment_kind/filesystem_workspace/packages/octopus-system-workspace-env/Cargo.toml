@@ -1,0 +1,24 @@
+[package]
+name = "octopus-system-workspace-env"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "octopus-workspace-fs-tool"
+path = "src/bin/workspace_fs_tool.rs"
+
+[[bin]]
+name = "octopus-workspace-exec-tool"
+path = "src/bin/workspace_exec_tool.rs"
+
+[[bin]]
+name = "octopus-filesystem-workspace-tool-door-life"
+path = "src/bin/tool_door_life.rs"
+
+[dependencies]
+tokio = { workspace = true }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-system-coder-env = { path = "../../../git_worktree/packages/octopus-system-coder-env" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }

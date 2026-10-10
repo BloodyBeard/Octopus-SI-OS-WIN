@@ -1,0 +1,405 @@
+{
+  "label": "lifecycle.connection.authoring",
+  "schema_version": 1,
+  "installation_effect": "none",
+  "connection_effect": "exact_run_json_and_artifact_binding_only",
+  "connection_id": "example-connection",
+  "connection_artifact": {
+    "id": "lifecycle.connection:example-connection",
+    "content": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "provider_interface": "world_provider_codex",
+  "lifecycle_interface": "system_lifecycle_events",
+  "run_connections": [
+    {
+      "run": "run-codex-example",
+        "roles": ["emitter", "handler_owner"],
+      "connection_artifact_binding": {
+        "id": "lifecycle.connection:example-connection",
+        "content": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "lifecycle_connection_pin": {
+        "schema_version": 1,
+        "connection_id": "example-connection",
+        "lifecycle_interface": "system_lifecycle_events",
+        "artifact": {
+          "id": "lifecycle.connection:example-connection",
+          "content": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "required_formed_grant": {
+        "interfaces": [
+          "system_lifecycle_events",
+          "world_provider_codex",
+          "world_mcp_example",
+          "system_worker_reviewer",
+          "system_coder_env"
+        ],
+        "tools": ["coder.exec"],
+        "mark_outcomes": ["lifecycle.decision.allowed"]
+      },
+      "connected_checkpoint_ids": [
+        "lifecycle_event_output",
+        "lifecycle_event_input",
+        "command_destination",
+        "mcp_destination",
+        "prompt_destination",
+        "agent_destination",
+        "handler_result_output"
+      ],
+      "checkpoints": [
+        {
+          "id": "lifecycle_event_output",
+          "purpose": "lifecycle_event_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.event"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "system_lifecycle_events",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.event"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "lifecycle_event_input",
+          "purpose": "lifecycle_event_input",
+          "interface_binding": {
+            "interface": "system_lifecycle_events",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.event"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "world_provider_codex",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.event"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "command_destination",
+          "purpose": "handler_destination_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["tool.call"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "system_coder_env",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["tool.call"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": [
+            {
+              "mark": "tool.call.allowed",
+              "artifact_label": "tool.call",
+              "verifier": "tool_call_allowed",
+              "params": { "tools": ["coder.exec"] }
+            }
+          ]
+        },
+        {
+          "id": "mcp_destination",
+          "purpose": "handler_destination_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["mcp.operation.request"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "world_mcp_example",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["mcp.operation.request"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "prompt_destination",
+          "purpose": "handler_destination_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.handler.prompt"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "world_provider_codex",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.handler.prompt"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "agent_destination",
+          "purpose": "handler_destination_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.handler.task"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "system_worker_reviewer",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.handler.task"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "handler_result_output",
+          "purpose": "handler_result_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.decision", "lifecycle.handler.output"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "system_lifecycle_events",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.decision", "lifecycle.handler.output"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        }
+      ],
+      "run_record_evidence": {
+        "id": "run.record:run-codex-example",
+        "content": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "run": "run-reviewer-example",
+      "roles": ["agent_destination"],
+      "connection_artifact_binding": {
+        "id": "lifecycle.connection:example-connection",
+        "content": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "lifecycle_connection_pin": {
+        "schema_version": 1,
+        "connection_id": "example-connection",
+        "lifecycle_interface": "system_lifecycle_events",
+        "artifact": {
+          "id": "lifecycle.connection:example-connection",
+          "content": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "required_formed_grant": {
+        "interfaces": [
+          "system_lifecycle_events",
+          "world_provider_codex",
+          "system_worker_reviewer"
+        ],
+        "tools": [],
+        "mark_outcomes": []
+      },
+      "connected_checkpoint_ids": [
+        "agent_task_input",
+        "agent_handler_result_output"
+      ],
+      "checkpoints": [
+        {
+          "id": "agent_task_input",
+          "purpose": "agent_destination_input",
+          "interface_binding": {
+            "interface": "system_worker_reviewer",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.handler.task"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "world_provider_codex",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.handler.task"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        },
+        {
+          "id": "agent_handler_result_output",
+          "purpose": "handler_result_output",
+          "interface_binding": {
+            "interface": "world_provider_codex",
+            "config": {
+              "artifact_policy": {
+                "mode": "allow",
+                "names": ["lifecycle.decision", "lifecycle.handler.output"],
+                "namespaces": []
+              }
+            }
+          },
+          "outbound_interface_bindings": [
+            {
+              "interface": "system_lifecycle_events",
+              "config": {
+                "artifact_policy": {
+                  "mode": "allow",
+                  "names": ["lifecycle.decision", "lifecycle.handler.output"],
+                  "namespaces": []
+                }
+              }
+            }
+          ],
+          "artifact_bindings": [
+            { "id": "lifecycle.connection:example-connection" }
+          ],
+          "required_verified_artifacts": []
+        }
+      ],
+      "run_record_evidence": {
+        "id": "run.record:run-reviewer-example",
+        "content": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    }
+  ],
+  "blocking_checkpoint_derivation": {
+    "event_label": "lifecycle.event",
+    "decision_label": "lifecycle.decision",
+    "mark": "lifecycle.decision.allowed",
+    "verifier": "lifecycle_decision",
+    "decision_interface": "system_lifecycle_events",
+    "decision_outbound_interface": "world_provider_codex"
+  },
+  "evidence": {
+    "connection_payload": {
+      "id": "lifecycle.connection:example-connection",
+      "content": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "authored_run_records": [
+      {
+        "id": "run.record:run-codex-example",
+        "content": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "id": "run.record:run-reviewer-example",
+        "content": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    ],
+    "authored_policy_records": [
+      {
+        "id": "policy.record:run-codex-example",
+        "content": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      {
+        "id": "policy.record:run-reviewer-example",
+        "content": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    ]
+  }
+}

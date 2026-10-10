@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://octopus.local/schemas/client_setup_current.schema.json",
+  "title": "Octopus Current Client Setup",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "operation_id",
+    "plan_digest",
+    "selected_at"
+  ],
+  "properties": {
+    "schema": { "const": "octopus.client_setup_current" },
+    "schema_version": { "const": 1 },
+    "operation_id": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/operationId"
+    },
+    "plan_digest": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/digest"
+    },
+    "selected_at": {
+      "$ref": "https://octopus.local/schemas/client_setup_operation.schema.json#/$defs/timestamp"
+    }
+  },
+  "additionalProperties": false
+}

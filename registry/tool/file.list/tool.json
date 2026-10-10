@@ -1,0 +1,69 @@
+{
+  "id": "file.list",
+  "interface": "system_room",
+  "process": {
+    "bin": "target/debug/octopus-file-read-tool",
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false,
+      "read_argument_paths": [
+        {
+          "pointer": "/path",
+          "within_root_slots": [
+            "run_records_root",
+            "registry_artifact_root",
+            "registry_interface_root",
+            "registry_ee_template_root",
+            "registry_mark_root",
+            "registry_tool_root",
+            "registry_verifier_root",
+            "registry_worker_environment_kind_root",
+            "ee_instances_root"
+          ],
+          "include_parent": false
+        }
+      ]
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "system_room"
+  ],
+  "handler_config": {
+    "operation": "list",
+    "max_entries": 1000
+  },
+  "description": "List one directory within this room's granted roots in filename order. Return next_after for further pages; symlinks are listed without following them.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute path under this room's granted roots."
+      },
+      "after": {
+        "type": "string"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      }
+    },
+    "required": [
+      "path",
+      "limit"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "repository": "https://github.com/lidge-jun/opencodex.git",
+  "tag": "v2.39.0",
+  "commit": "af6113a0381d6fff2e4dce587652825c7eeb6423",
+  "npm_package": "@bitkyc08/opencodex@2.39.0",
+  "npm_tarball_sha1": "4311d761bc55e565008b82941a8567ce052dce1b",
+  "npm_integrity": "sha512-fmWhKzgO0g/2IeE3VV02z7iZurXqF7zFUg/BE4sPzKZjtAWblOFFCWpjnfBhPhrYzyWPu6kAP1zSfnk5bB3ZYQ==",
+  "license_file": "LICENSE.opencodex",
+  "used_surfaces": [
+    "src/responses/parser.ts",
+    "src/bridge.ts",
+    "src/lib/translator-budget.ts",
+    "src/lib/destination-policy.ts",
+    "src/adapters/openai-chat.ts",
+    "src/adapters/openai-responses.ts",
+    "src/adapters/anthropic.ts",
+    "src/adapters/google.ts",
+    "src/adapters/azure.ts",
+    "src/types.ts",
+    "src/server/responses/collaboration.ts#buildToolBridgeMaps"
+  ],
+  "excluded_surfaces": [
+    "src/server/index.ts",
+    "src/server/responses/core.ts",
+    "src/router.ts",
+    "src/adapters/registry.ts",
+    "src/combos",
+    "src/subagent",
+    "src/web-search",
+    "src/images",
+    "src/oauth/store.ts"
+  ]
+}

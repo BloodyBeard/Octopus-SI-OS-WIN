@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_microsoft_teams",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_microsoft_teams",
+  "release_status": "optional",
+  "display": {
+    "name": "Microsoft Teams",
+    "description": "Work with Microsoft Teams chats, channels, meetings, and collaboration.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "users"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_microsoft_teams",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-microsoft-teams-context"
+    }
+  ]
+}

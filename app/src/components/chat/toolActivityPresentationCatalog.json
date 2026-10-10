@@ -1,0 +1,1024 @@
+{
+  "artifact.append": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Append",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "artifact.list": {
+    "kind": "list",
+    "target_kind": "artifact",
+    "conversation_visible": true,
+    "label": "List",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "artifact.read": {
+    "kind": "read",
+    "target_kind": "artifact",
+    "conversation_visible": true,
+    "label": "Read",
+    "target_arguments": [
+      "id"
+    ],
+    "query_arguments": []
+  },
+  "artifact.search": {
+    "kind": "search",
+    "target_kind": "artifact",
+    "conversation_visible": true,
+    "label": "Search",
+    "target_arguments": [],
+    "query_arguments": [
+      "query"
+    ]
+  },
+  "artifact.send": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Send",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "browser.back": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Back",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.click": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Click",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.close": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Close",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.console": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Console",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.cookie_delete": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cookie delete",
+    "target_arguments": [
+      "path",
+      "url"
+    ],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.cookie_set": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cookie set",
+    "target_arguments": [
+      "path",
+      "url"
+    ],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.cookies": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cookies",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.dialog": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Dialog",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.drag": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Drag",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.eval": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Eval",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.forward": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Forward",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.hover": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Hover",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.images": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Images",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.key": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Key",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.navigate": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Navigate",
+    "target_arguments": [
+      "url"
+    ],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.pdf": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Pdf",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.reload": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Reload",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.screenshot": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Screenshot",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.scroll": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Scroll",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.select": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Select",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.snapshot": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Snapshot",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.tab_close": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Tab close",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.tab_new": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Tab new",
+    "target_arguments": [
+      "url"
+    ],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.tab_select": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Tab select",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.tabs": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Tabs",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.type": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Type",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.wait": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Wait",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "code_mode.cancel": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cancel",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "code_mode.resume": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Resume",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "code_mode.run": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Run",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "code_mode.wait": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Wait",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.apply_patch": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Apply patch",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.build": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Run command",
+    "target_arguments": [
+      "command"
+    ],
+    "query_arguments": []
+  },
+  "coder.exec": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Start command",
+    "target_arguments": [
+      "command"
+    ],
+    "query_arguments": []
+  },
+  "coder.grep": {
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Grep",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": [
+      "query"
+    ]
+  },
+  "coder.list_dir": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "List dir",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "coder.read_file": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Read file",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "coder.worktree.abandon": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Worktree abandon",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.worktree.snapshot": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Worktree snapshot",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.write_file": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Write file",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "coder.write_stdin": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Write stdin",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.attach": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Attach",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.exec": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Exec",
+    "target_arguments": [
+      "argv",
+      "cwd"
+    ],
+    "query_arguments": []
+  },
+  "container.file_list": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "File list",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "container.file_read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "File read",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "container.file_write": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "File write",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "container.logs": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Logs",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.remove": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Remove",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.start": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Start",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.status": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Status",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "container.stop": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Stop",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "exec.file_read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "File read",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "exec.file_write": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "File write",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "exec.run": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Run",
+    "target_arguments": [
+      "command"
+    ],
+    "query_arguments": []
+  },
+  "file.write": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Write",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.write.discord_gateway": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Discord gateway",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.write.matrix_gateway": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Matrix gateway",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.write.slack_gateway": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Slack gateway",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.write.telegram_gateway": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Telegram gateway",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.write.whatsapp_gateway": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Whatsapp gateway",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "gui.click": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Click",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.drag": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Drag",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.key": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Key",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.observe": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Observe",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.screenshot": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Screenshot",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.scroll": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Scroll",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.status": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Status",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.type": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Type",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.call_tool": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Call tool",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.cancel_request": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cancel request",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.close": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Close",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.complete": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Complete",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.get_prompt": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Get prompt",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.list_prompts": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List prompts",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.list_resource_templates": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List resource templates",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.list_resources": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List resources",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.list_tools": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List tools",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.ping": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Ping",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.poll_events": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Poll events",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.read_resource": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Read resource",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.send_progress": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Send progress",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.set_logging_level": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Set logging level",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.status": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Status",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.subscribe_resource": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Subscribe resource",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "mcp.unsubscribe_resource": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Unsubscribe resource",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "microphone.capture": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Capture input",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "microphone.list_devices": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List input devices",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "process.list": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "process.read": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Read",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "process.signal": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Signal",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "process.start": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Start",
+    "target_arguments": [
+      "command",
+      "argv"
+    ],
+    "query_arguments": []
+  },
+  "process.terminate": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Terminate",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "process.write": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Write",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.directory_create": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Directory create",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.exec": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Exec",
+    "target_arguments": [
+      "argv",
+      "cwd"
+    ],
+    "query_arguments": []
+  },
+  "remote.file_copy": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "File copy",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.file_delete": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "File delete",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.file_list": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "File list",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.file_read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "File read",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.file_stat": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "File stat",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.file_write": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "File write",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "remote.process_interrupt": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process interrupt",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.process_list": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process list",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.process_read": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process read",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.process_start": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process start",
+    "target_arguments": [
+      "argv",
+      "cwd"
+    ],
+    "query_arguments": []
+  },
+  "remote.process_terminate": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process terminate",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.process_write": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Process write",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "remote.status": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Status",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "speaker.list_devices": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "List output devices",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "speaker.play": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Play output",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "web.extract": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Extract",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "web.search": {
+    "surface": "web",
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Search",
+    "target_arguments": [],
+    "query_arguments": [
+      "query"
+    ]
+  },
+  "workspace.apply_patch": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Apply patch",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "workspace.build": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Run command",
+    "target_arguments": [
+      "command"
+    ],
+    "query_arguments": []
+  },
+  "workspace.exec": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Start command",
+    "target_arguments": [
+      "command"
+    ],
+    "query_arguments": []
+  },
+  "workspace.grep": {
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Grep",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": [
+      "query"
+    ]
+  },
+  "workspace.list_dir": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "List dir",
+    "target_arguments": [
+      "path"
+    ],
+    "result_target_fields": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "workspace.process.list": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "List processes",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "workspace.process.signal": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Signal process",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "workspace.process.terminate": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Terminate process",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "workspace.read_file": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Read file",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "workspace.write_file": {
+    "kind": "file_change",
+    "conversation_visible": true,
+    "label": "Write file",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "workspace.write_stdin": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Write stdin",
+    "target_arguments": [],
+    "query_arguments": []
+  }
+}

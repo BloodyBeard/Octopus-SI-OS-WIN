@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DeliveryVerdict",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "admitted"
+      ],
+      "properties": {
+        "admitted": {
+          "type": "object",
+          "required": [
+            "seq"
+          ],
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "refused"
+      ],
+      "properties": {
+        "refused": {
+          "type": "object",
+          "required": [
+            "detail",
+            "reason"
+          ],
+          "properties": {
+            "detail": true,
+            "reason": {
+              "$ref": "#/definitions/RefusedReason"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "RefusedReason": {
+      "type": "string",
+      "enum": [
+        "no_binding",
+        "policy",
+        "verification_failed",
+        "unknown_interface",
+        "unknown_run",
+        "stale_epoch",
+        "checkpoint_spent",
+        "settled",
+        "malformed"
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "octopus-worker-env-floor"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_worker_env_floor"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+octopus-substrate-contract = { path = "../octopus-substrate-contract" }
+octopus-util-abspath = { path = "../octopus-util-abspath" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+
+[dev-dependencies]
+serde_json.workspace = true

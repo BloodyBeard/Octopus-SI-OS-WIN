@@ -1,0 +1,29 @@
+{
+  "id": "remote_operator.clients.revoke",
+  "request_label": "remote_operator.request",
+  "output_label": "remote_operator.client_catalog",
+  "handler_config": {
+    "operation": "clients.revoke"
+  },
+  "description": "Revoke one exact paired client in one exact environment. The effect is journaled and never retried after an indeterminate interruption.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "environment_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "client_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    },
+    "required": [
+      "environment_id",
+      "client_id"
+    ],
+    "additionalProperties": false
+  }
+}

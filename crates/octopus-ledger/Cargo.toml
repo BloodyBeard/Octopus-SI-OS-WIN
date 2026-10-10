@@ -1,0 +1,23 @@
+[package]
+name = "octopus-ledger"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-policy = { path = "../octopus-policy" }
+# Live-delivery notification ONLY (the await-on-append handle that rides on top of the durable
+# log — the durable truth is still the append-only rows, not this watch). `sync` feature only: no
+# runtime/reactor coupling, so the "durable truth cannot import the live engine" invariant holds —
+# a `watch` is a wake-up edge, not a counter the pure fold reads.
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }

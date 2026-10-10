@@ -1,0 +1,48 @@
+{
+  "schema": "octopus.client_surface",
+  "schema_version": 1,
+  "release_channel": "lab",
+  "id": "voice.weather",
+  "revision": 1,
+  "title": "Weather",
+  "glyph": "weather",
+  "target": {
+    "kind": "voice.widget",
+    "slot": "right",
+    "order": 15,
+    "layout": {
+      "min_width": 180,
+      "preferred_width": 240,
+      "max_width": 360,
+      "min_height": 120,
+      "preferred_height": 160,
+      "max_height": 240,
+      "content_fit": "reflow"
+    }
+  },
+  "data": {
+    "status": "Weather source not connected",
+    "detail": "No forecast has been projected for this voice session."
+  },
+  "render": {
+    "kind": "native",
+    "density": "compact",
+    "root": {
+      "type": "stack",
+      "gap": "xs",
+      "children": [
+        {
+          "type": "text",
+          "value": { "path": "data.status" },
+          "role": "body"
+        },
+        {
+          "type": "text",
+          "value": { "path": "data.detail" },
+          "role": "caption",
+          "tone": "muted"
+        }
+      ]
+    }
+  }
+}

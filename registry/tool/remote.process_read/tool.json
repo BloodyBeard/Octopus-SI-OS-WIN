@@ -1,0 +1,29 @@
+{
+  "id": "remote.process_read",
+  "interface": "system_remote_exec",
+  "process": {
+    "bin": "target/debug/octopus-remote-exec-room-tool",
+    "private_read_subpaths": [{"path": "secrets/remote-exec.auth"}],
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+      "allow_network": true, "allow_local_ipc": false
+    }
+  },
+  "handler_config": { "operation": "process_read" },
+  "supported_worker_environment_kinds": ["remote_exec_server"],
+  "description": "Read replayable sequenced output chunks from a named remote process.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "process_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+      "after_seq": {"type": "integer", "minimum": 0},
+      "max_bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+      "wait_ms": {"type": "integer", "minimum": 0, "maximum": 30000}
+    },
+    "required": ["process_id"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

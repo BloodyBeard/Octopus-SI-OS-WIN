@@ -1,0 +1,50 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_operator_chat",
+  "version": "1.3.0",
+  "product_kind": "application",
+  "product_id": "world_operator_chat",
+  "release_status": "optional",
+  "display": {
+    "name": "Octopus Home",
+    "description": "Creates the exact Home and task interfaces through which you work with Octopus.",
+    "developer": "Octopus",
+    "category": "connector",
+    "icon": "house"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_operator_chat",
+      "primary": true,
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]},{"path":"client.json","fields":[{"pointer":"/run/ee","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/worker","schema":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]*$"}},{"pointer":"/run/context_artifact_bindings","schema":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}}]}]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_interface_authoring",
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_worker_operator_home"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "tool.call.allowed"
+    },
+    {
+      "registry_kind": "verifier",
+      "owner": "tool_call_allowed",
+      "configuration": [{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    }
+  ],
+  "required_packages": [
+    "driver.browser_session",
+    "driver.system_room",
+    "driver.code_mode",
+    "driver.desktop_session",
+    "artifact.codex_context",
+    "world_provider_realtime"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "id": "code_mode.wait",
+  "interface": "system_code_mode",
+  "handler_config": {
+    "operation": "wait"
+  },
+  "process": {
+    "bin": "target/debug/octopus-code-mode-room-tool",
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "code_mode"
+  ],
+  "description": "Advance a live V8 cell without supplying a tool result, returning its next completion, yield, or nested-tool frontier.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "cell_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "yield_time_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 600000
+      }
+    },
+    "required": [
+      "cell_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

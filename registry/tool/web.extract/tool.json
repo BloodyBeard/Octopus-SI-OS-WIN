@@ -1,0 +1,215 @@
+{
+  "id": "web.extract",
+  "interface": "system_web_search",
+  "process": {
+    "bin": "target/debug/octopus-web-search-tool",
+    "inherit_env": [
+      "OCTOPUS_WEB_EXTRACT_URL",
+      "OCTOPUS_WEB_SEARCH_API_KEY",
+      "TAVILY_BASE_URL",
+      "TAVILY_API_KEY",
+      "EXA_BASE_URL",
+      "EXA_API_KEY",
+      "FIRECRAWL_API_URL",
+      "FIRECRAWL_API_KEY",
+      "OCTOPUS_WEB_PROXY"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "web_search"
+  ],
+  "handler_config": {
+    "operation": "extract",
+    "default_provider": "custom",
+    "request_timeout_ms": 60000,
+    "max_response_bytes": 10000000,
+    "proxy_env": "OCTOPUS_WEB_PROXY",
+    "providers": {
+      "custom": {
+        "base_url": "",
+        "base_url_env": "OCTOPUS_WEB_EXTRACT_URL",
+        "path": "",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "OCTOPUS_WEB_SEARCH_API_KEY",
+          "placement": "header",
+          "name": "Authorization",
+          "prefix": "Bearer ",
+          "required": false
+        },
+        "query": {},
+        "body": {
+          "argument_fields": {
+            "urls": "urls",
+            "formats": "formats",
+            "include_raw_content": "include_raw_content"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "content_paths": ["content", "markdown", "text"],
+          "raw_content_paths": ["raw_content", "html"],
+          "error_paths": ["error"],
+          "failure_items_paths": ["failed_results"]
+        },
+        "extraction_mode": "batch",
+        "retry": {}
+      },
+      "tavily": {
+        "base_url": "https://api.tavily.com",
+        "base_url_env": "TAVILY_BASE_URL",
+        "path": "/extract",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "TAVILY_API_KEY",
+          "placement": "body",
+          "name": "api_key",
+          "prefix": "",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "static_values": {
+            "include_images": false
+          },
+          "argument_fields": {
+            "urls": "urls"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "content_paths": ["raw_content", "content"],
+          "raw_content_paths": ["raw_content", "content"],
+          "error_paths": ["error"],
+          "failure_items_paths": ["failed_results", "failed_urls"]
+        },
+        "extraction_mode": "batch",
+        "retry": {}
+      },
+      "exa": {
+        "base_url": "https://api.exa.ai",
+        "base_url_env": "EXA_BASE_URL",
+        "path": "/contents",
+        "method": "POST",
+        "headers": {
+          "x-exa-integration": "octopus"
+        },
+        "auth": {
+          "env": "EXA_API_KEY",
+          "placement": "header",
+          "name": "x-api-key",
+          "prefix": "",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "static_values": {
+            "text": true
+          },
+          "argument_fields": {
+            "urls": "ids"
+          }
+        },
+        "response": {
+          "items_path": "results",
+          "title_paths": ["title"],
+          "url_paths": ["url"],
+          "content_paths": ["text"],
+          "raw_content_paths": ["text"],
+          "error_paths": ["error"],
+          "failure_items_paths": []
+        },
+        "extraction_mode": "batch",
+        "retry": {}
+      },
+      "firecrawl": {
+        "base_url": "https://api.firecrawl.dev",
+        "base_url_env": "FIRECRAWL_API_URL",
+        "path": "/v2/scrape",
+        "method": "POST",
+        "headers": {},
+        "auth": {
+          "env": "FIRECRAWL_API_KEY",
+          "placement": "header",
+          "name": "Authorization",
+          "prefix": "Bearer ",
+          "required": true
+        },
+        "query": {},
+        "body": {
+          "static_values": {
+            "formats": ["markdown", "html"],
+            "onlyMainContent": true
+          },
+          "argument_fields": {
+            "url": "url",
+            "formats": "formats"
+          }
+        },
+        "response": {
+          "items_path": "data",
+          "title_paths": ["metadata.title"],
+          "url_paths": ["metadata.sourceURL", "metadata.url"],
+          "content_paths": ["markdown", "content"],
+          "raw_content_paths": ["html", "rawHtml", "markdown"],
+          "error_paths": ["error"],
+          "failure_items_paths": []
+        },
+        "extraction_mode": "per_url",
+        "retry": {}
+      }
+    }
+  },
+  "description": "Extract bounded document content from one or more HTTP(S) URLs through a declared provider in the formed web-search room. Batch and per-URL execution, auth, request/response mapping, retries and per-URL failures remain package-owned descriptor behavior.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "urls": {
+        "type": "array",
+        "items": {"type": "string", "format": "uri"},
+        "minItems": 1,
+        "maxItems": 50
+      },
+      "provider": {
+        "type": "string",
+        "enum": ["custom", "tavily", "exa", "firecrawl"]
+      },
+      "formats": {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+        "maxItems": 10
+      },
+      "max_chars": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2000000
+      },
+      "include_raw_content": {
+        "type": "boolean"
+      }
+    },
+    "required": ["urls"],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

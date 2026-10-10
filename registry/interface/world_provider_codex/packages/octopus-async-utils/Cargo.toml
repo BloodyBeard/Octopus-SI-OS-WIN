@@ -1,0 +1,16 @@
+[package]
+name = "octopus-async-utils"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio-util = "0.7.18"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
+
+[lib]
+doctest = false

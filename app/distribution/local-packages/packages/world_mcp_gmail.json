@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_gmail",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_gmail",
+  "release_status": "optional",
+  "display": {
+    "name": "Gmail",
+    "description": "Read, draft, organize, and send Gmail.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "mail"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_gmail",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-gmail-context"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "id": "browser.dom_scroll",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "dom_scroll"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Scroll at the current filtered DOM node point, or actual CSS visual viewport center when node_id is omitted, using native synthesizeScrollGesture at speed 8000 with preventFling. Optional target_id addresses only that already-owned page without selecting, creating or focusing it. Requires the declared native browser transport.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "node_id": {
+        "type": "string",
+        "pattern": "^[1-9][0-9]*$",
+        "maxLength": 64,
+        "description": "Current filtered-DOM node_id from browser.dom_snapshot. This is not an accessibility @m ref."
+      },
+      "scroll_x": {
+        "type": "number"
+      },
+      "scroll_y": {
+        "type": "number"
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      }
+    },
+    "required": [
+      "scroll_x",
+      "scroll_y"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

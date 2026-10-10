@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "context": { "mode": "isolated" },
+  "max_source_bytes": 1048576,
+  "max_output_bytes": 8388608,
+  "max_cells": 8,
+  "default_yield_time_ms": 10000,
+  "max_yield_time_ms": 60000,
+  "routes": []
+}

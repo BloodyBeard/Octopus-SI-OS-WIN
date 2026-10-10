@@ -1,0 +1,31 @@
+[package]
+name = "octopus-secrets"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+age = "0.11.1"
+base64 = "0.22.1"
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust"] }
+rand = "0.9"
+regex = "1.12.3"
+schemars = "0.8.22"
+sha2 = "0.10"
+tracing = "0.1.44"
+
+[dev-dependencies]
+keyring = { version = "3.6", default-features = false, features = ["crypto-rust"] }
+pretty_assertions = "1.4.1"
+tempfile = "3.23.0"
+
+[lib]
+doctest = false

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.handler.output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "connection_id",
+    "connection_artifact",
+    "event_id",
+    "emitter_run",
+    "owner_run",
+    "handler_id",
+    "event",
+    "mode",
+    "handler_type",
+    "subject_artifact",
+    "status",
+    "source",
+    "result",
+    "event_artifact"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.handler.output" },
+    "schema_version": { "const": 1 },
+    "connection_id": { "type": "string", "minLength": 1 },
+    "connection_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "event_id": { "type": "string", "pattern": "^lifecycle:[0-9a-f]{64}$" },
+    "emitter_run": { "type": "string", "minLength": 1 },
+    "owner_run": { "type": "string", "minLength": 1 },
+    "handler_id": { "type": "string", "minLength": 1 },
+    "event": {
+      "enum": [
+        "pre_tool_use",
+        "permission_request",
+        "post_tool_use",
+        "pre_compact",
+        "post_compact",
+        "session_start",
+        "session_end",
+        "user_prompt_submit",
+        "subagent_start",
+        "subagent_stop",
+        "stop",
+        "interrupt"
+      ]
+    },
+    "mode": { "const": "async" },
+    "handler_type": { "enum": ["command", "mcp_tool", "prompt", "agent"] },
+    "subject_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "event_artifact": { "$ref": "event.schema.json" },
+    "status": { "enum": ["completed", "failed"] },
+    "source": { "type": "string", "minLength": 1 },
+    "result": {}
+  },
+  "$defs": {
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "content": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

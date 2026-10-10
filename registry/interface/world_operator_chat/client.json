@@ -1,0 +1,109 @@
+{
+  "schema_version": 2,
+  "interface": "world_operator_chat",
+  "executables": {
+    "topology_planner": "target/debug/octopus-operator-chat-topology",
+    "artifact_materializer": "target/debug/octopus-operator-chat-artifact"
+  },
+  "artifact_labels": {
+    "message": "operator.message",
+    "turn_control": "operator.turn.control",
+    "terminal_output": "interface.artifact.output",
+    "error_output": "turn.error",
+    "stream_outputs": [
+      "agent.message.delta",
+      "turn.reasoning",
+      "turn.reasoning.delta",
+      "turn.plan.update",
+      "turn.plan.delta",
+      "turn.token_usage",
+      "turn.exec.command",
+      "turn.exec.output_delta",
+      "turn.exec.terminal_interaction",
+      "turn.file.change",
+      "turn.file.change_delta",
+      "turn.diff.updated",
+      "turn.web_search",
+      "turn.hook.prompt",
+      "turn.mcp.tool_call",
+      "turn.mcp.progress",
+      "turn.mcp.status",
+      "turn.dynamic_tool_call",
+      "turn.collaboration",
+      "turn.subagent.activity",
+      "turn.image.view",
+      "turn.image.generation",
+      "turn.sleep",
+      "turn.review.entered",
+      "turn.review.exited",
+      "turn.context.compaction",
+      "turn.item.started",
+      "turn.started",
+      "turn.completed",
+      "turn.model.rerouted",
+      "turn.model.verification",
+      "turn.auth_recovery.started",
+      "turn.auth_recovery.completed",
+      "turn.warning",
+      "turn.auto_review.started",
+      "turn.auto_review.completed",
+      "turn.operator_request.resolved",
+      "turn.control.acknowledged",
+      "turn.input.acknowledged",
+      "turn.control.failed",
+      "turn.interrupted.result",
+      "account.rate_limits",
+      "hook.result",
+      "goal.status",
+      "operator.approval.request",
+      "operator.elicitation.request",
+      "operator.user_input.request"
+    ],
+    "approval_response": "operator.approval.response",
+    "elicitation_response": "operator.elicitation.response",
+    "user_input_response": "operator.user_input.response",
+    "tool_call": "tool.call",
+    "hidden_activity": [
+      "provider.models.list",
+      "provider.models.catalog",
+      "provider.account.read",
+      "provider.account.snapshot",
+      "provider.account.login.start",
+      "provider.account.login.started",
+      "provider.account.login.status.read",
+      "provider.account.login.status",
+      "provider.account.login.completed",
+      "provider.account.login.cancel",
+      "provider.account.login.cancelled",
+      "provider.account.updated",
+      "provider.operation.error"
+    ]
+  },
+  "authoring": {
+    "source_interface": "system_interface_authoring",
+    "room_interface": "system_room",
+    "tool": "file.write",
+    "result_timeout_ms": 120000
+  },
+  "run": {
+    "interface_prefix": "world_operator_chat_",
+    "run_prefix": "run_operator_chat_",
+    "ee": "ee_operator_interaction",
+    "worker": "system_worker_operator_home",
+    "tool_call_mark": "tool.call.allowed",
+    "tool_call_verifier": "tool_call_allowed",
+    "listen_env": "OCTOPUS_CHAT_LISTEN",
+    "context_artifact_bindings": [
+      {
+        "id": "artifact-worker-role-template"
+      },
+      {
+        "id": "artifact-grounding-system-architecture"
+      }
+    ]
+  },
+  "home_voice": {
+    "provider_interface_id": "world_provider_realtime",
+    "contract_file": "contract.json"
+  }
+}

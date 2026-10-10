@@ -1,0 +1,10 @@
+{
+  "id": "world_slack",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "slack"
+  ],
+  "interface_driver_ref": "slack_life"
+}

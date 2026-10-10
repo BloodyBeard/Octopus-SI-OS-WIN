@@ -1,0 +1,47 @@
+{
+  "id": "browser.filechooser_resume",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "filechooser_resume"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Private browser door continuation for the original verifier-admitted operator approval response. Never model-callable; consumes one exact upload request with current file binding and native document continuity.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {
+        "type": "string",
+        "pattern": "^sha256:[a-f0-9]{64}$"
+      }
+    },
+    "required": [
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

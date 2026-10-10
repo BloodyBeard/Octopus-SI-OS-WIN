@@ -1,0 +1,47 @@
+{
+  "id": "browser.history_resume",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "history_resume"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Private continuation of one verifier-admitted Home history decision. Never model-callable. Reads only the retained exact source/query/epoch under current binding and policy, without a page, Session, network grant, or replay after uncertain completion.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {
+        "type": "string",
+        "pattern": "^sha256:[a-f0-9]{64}$"
+      }
+    },
+    "required": [
+      "request_id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

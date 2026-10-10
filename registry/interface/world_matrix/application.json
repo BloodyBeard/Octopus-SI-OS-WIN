@@ -1,0 +1,12 @@
+{
+  "schema_version": 3,
+  "id": "world_matrix",
+  "name": "Matrix",
+  "description": "Use Matrix rooms and messages in the tasks you choose.",
+  "category": "connector",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "message",
+  "logo": "application-logo.png",
+  "interfaces": ["world_matrix"]
+}

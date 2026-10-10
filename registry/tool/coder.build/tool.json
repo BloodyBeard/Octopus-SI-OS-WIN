@@ -1,0 +1,91 @@
+{
+  "id": "coder.build",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "run_command",
+    "default_timeout_ms": 600000,
+    "max_timeout_ms": 1800000,
+    "default_max_output_bytes": 131072,
+    "max_output_bytes": 1048576,
+    "default_shell": "sh",
+    "allowed_shells": ["sh", "bash", "zsh"],
+    "allow_login_shell": true
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": ["worktree_root"],
+      "optional_read_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["platform_toolchain_root"],
+      "optional_executable_root_slots": ["platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": ["PATH"],
+      "allow_network": true,
+      "allow_local_ipc": true,
+      "allow_sandbox_delegation": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "git_worktree"
+  ],
+  "description": "Run one bounded build or verification command in the invoking run's sandboxed leased worktree and return verifier-ready evidence. A string is a shell script; an array is exact argv. Retained stdout/stderr are tagged exact UTF-8 or base64 with BLAKE3 identities; separate UTF-8-lossy previews are model-readable.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "oneOf": [
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          {
+            "type": "string",
+            "minLength": 1
+          }
+        ],
+        "description": "Exact argv array, or a script string executed by the descriptor-selected shell."
+      },
+      "shell": {
+        "type": "string",
+        "enum": ["sh", "bash", "zsh"],
+        "description": "Shell for a command string. Defaults to sh."
+      },
+      "login": {
+        "type": "boolean",
+        "description": "Use login-shell semantics for a command string. Defaults to true."
+      },
+      "workdir": {
+        "type": "string",
+        "description": "Working directory relative to the leased worktree. Defaults to the worktree root."
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1800000,
+        "description": "Execution deadline in milliseconds. Defaults to 600000."
+      },
+      "max_output_bytes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1048576,
+        "description": "Retained byte ceiling for each stdout/stderr stream. Defaults to 131072; excess middle bytes are drained, the head and tail are preserved, and omitted bytes are reported."
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

@@ -1,0 +1,41 @@
+{
+  "id": "workspace.write_stdin",
+  "interface": "system_workspace_env",
+  "handler_config": {
+    "operation": "write_stdin",
+    "default_yield_time_ms": 10000,
+    "max_yield_time_ms": 30000,
+    "default_max_output_bytes": 65536,
+    "max_output_bytes": 1048576,
+    "max_input_bytes": 65536
+  },
+  "process": {
+    "bin": "target/debug/octopus-workspace-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "workspace_root"],
+      "write_root_slots": ["workspace_root"], "executable_root_slots": ["workspace_root"],
+      "optional_read_root_slots": ["host_filesystem_root", "platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["host_filesystem_root", "platform_toolchain_root"],
+      "optional_executable_root_slots": ["host_filesystem_root", "platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
+      "allow_network": true, "allow_local_ipc": true, "allow_sandbox_delegation": true
+    }
+  },
+  "supported_worker_environment_kinds": ["filesystem_workspace"],
+  "description": "Write UTF-8 bytes to an opaque workspace.exec process or poll it with an empty chars value, then return exact ordered output evidence.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "process_id": {"type": "string", "minLength": 1},
+      "chars": {"type": "string", "maxLength": 65536},
+      "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+      "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576}
+    },
+    "required": ["process_id"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

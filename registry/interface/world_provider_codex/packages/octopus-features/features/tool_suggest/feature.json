@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "tool_suggest",
+  "stage": {
+    "kind": "stable"
+  }
+}

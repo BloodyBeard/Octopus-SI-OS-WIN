@@ -1,0 +1,42 @@
+{
+  "id": "microphone.list_devices",
+  "interface": "system_microphone",
+  "process": {
+    "bin": "target/debug/octopus-audio-device-session-tool",
+    "args": [],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": true
+    }
+  },
+  "handler_config": {
+    "operation": "list_input_devices"
+  },
+  "description": "List input audio devices and their actual default stream configurations through the audio-device worker environment. Unavailable hosts and device configuration failures remain explicit evidence.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "host": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "description": "Optional exact CPAL host name. Omit it to inspect every available host."
+      }
+    },
+    "additionalProperties": false
+  },
+  "is_world_effect": true,
+  "supported_worker_environment_kinds": [
+    "audio_device_session"
+  ]
+}

@@ -1,0 +1,234 @@
+{
+  "id": "world_provider_openai_responses_websocket",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "openai.responses.websocket"
+  ],
+  "interface_driver_config": {
+    "private_config": {
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "process_env_names": [],
+      "model_hidden_tools": [
+        "file.write"
+      ],
+      "model": "gpt-5.6-sol",
+      "base_url_source": "descriptor",
+      "auth_source": "secret",
+      "context_output_labels": [
+        "interface.artifact.output",
+        "provider.reasoning",
+        "provider.native_tool",
+        "provider.tool_results.pending",
+        "tool.call",
+        "turn.error"
+      ],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "provider.reasoning",
+        "provider.native_tool",
+        "provider.tool_results.pending",
+        "tool.call",
+        "turn.error"
+      ],
+      "responses_api": {
+        "operation": {
+          "method": "post",
+          "path": "/v1/responses",
+          "response_mode": "websocket",
+          "sequence_numbers": "required_monotonic",
+          "websocket": {
+            "url_scheme": "http_to_ws_https_to_wss",
+            "request_event_type": "response.create",
+            "connect_timeout_ms": 30000,
+            "write_timeout_ms": 30000,
+            "idle_timeout_ms": 120000,
+            "keepalive_interval_ms": 30000,
+            "keepalive_pong_timeout_ms": 10000,
+            "read_buffer_bytes": 131072,
+            "write_buffer_bytes": 131072,
+            "max_write_buffer_bytes": 134217728,
+            "max_message_bytes": 67108864,
+            "max_frame_bytes": 16777216,
+            "connection_reuse": true,
+            "reconnect_policy": "before_request_only",
+            "resume_policy": "unsupported_fail_closed"
+          }
+        },
+        "request_fields": {
+          "store": false,
+          "reasoning": {
+            "effort": "high",
+            "summary": "auto"
+          },
+          "include": [
+            "reasoning.encrypted_content",
+            "web_search_call.action.sources"
+          ],
+          "prompt_cache_retention": "24h"
+        },
+        "cache": {
+          "mode": "static_prefix_blake3",
+          "field": "prompt_cache_key",
+          "prefix": "pck_",
+          "digest_characters": 24
+        },
+        "retry": {
+          "backoff_ms": 1000,
+          "max_backoff_ms": 8000,
+          "http_statuses": [
+            408,
+            409,
+            425,
+            429,
+            500,
+            502,
+            503,
+            504
+          ]
+        },
+        "model_catalog": {
+          "path": "/v1/models",
+          "request_label": "provider.models.list",
+          "output_label": "provider.models.catalog",
+          "models_pointer": "/data",
+          "id_pointer": "/id"
+        },
+        "function_tools": {
+          "strict": false,
+          "tool_choice": "auto",
+          "parallel_tool_calls": true
+        },
+        "native_tools": [
+          {
+            "type": "web_search"
+          }
+        ],
+        "native_tool_types": [
+          "web_search"
+        ],
+        "native_tool_output_types": [
+          "web_search_call"
+        ],
+        "response_item_types": [
+          "message",
+          "reasoning",
+          "function_call",
+          "web_search_call"
+        ],
+        "response_content_types": [
+          "output_text",
+          "refusal",
+          "encrypted_content"
+        ],
+        "replay": {
+          "scope": "openai-responses-api",
+          "encrypted_reasoning": true,
+          "encrypted_content": true,
+          "assistant_messages": true,
+          "native_tool_items": true,
+          "foreign_encrypted": "drop",
+          "strip_item_ids": [
+            "message",
+            "reasoning",
+            "function_call",
+            "web_search_call"
+          ]
+        },
+        "carrier_policy": {
+          "max_inline_file_bytes": 20971520,
+          "allowed_roles": [
+            "user",
+            "assistant",
+            "system",
+            "developer"
+          ],
+          "allowed_input_item_types": [
+            "message"
+          ],
+          "allowed_content_types": [
+            "input_text",
+            "output_text",
+            "input_image",
+            "input_file",
+            "encrypted_content"
+          ],
+          "allowed_image_details": [
+            "auto",
+            "low",
+            "high"
+          ],
+          "allowed_file_details": [
+            "auto",
+            "low",
+            "high"
+          ],
+          "allowed_image_url_schemes": [
+            "https",
+            "data"
+          ],
+          "allowed_file_url_schemes": [
+            "https"
+          ],
+          "rules": [
+            {
+              "label": "interface.input",
+              "encoding": "json_text",
+              "role": "user",
+              "text_pointer": "/prompt"
+            },
+            {
+              "label": "responses.input",
+              "encoding": "responses_items",
+              "items_pointer": "/items"
+            }
+          ]
+        },
+        "evidence_headers": [
+          "openai-model",
+          "openai-processing-ms",
+          "openai-version",
+          "x-request-id"
+        ],
+        "usage_required": true
+      }
+    },
+    "transport": {
+      "base_url": "https://api.openai.com",
+      "wire": "openai_responses_native",
+      "auth_secret_ref": "secret://world_provider_openai_responses_websocket/OPENAI_API_KEY",
+      "auth_header": "Authorization",
+      "auth_value_prefix": "Bearer ",
+      "headers": {
+        "OpenAI-Beta": "responses_websockets=2026-02-06"
+      },
+      "request_timeout_ms": 600000,
+      "max_response_bytes": 134217728
+    }
+  },
+  "interface_driver_ref": "openai_responses_native",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 5
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": [
+          "gpt-5.6-sol"
+        ]
+      }
+    }
+  }
+}

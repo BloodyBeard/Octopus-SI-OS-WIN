@@ -1,0 +1,55 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "artifact.codex_context",
+  "version": "1.2.0",
+  "product_kind": "artifact",
+  "product_id": "codex_context",
+  "release_status": "optional",
+  "display": {
+    "name": "Codex Context",
+    "description": "Grounding and working-role context used by Codex tasks.",
+    "developer": "Octopus",
+    "category": "context",
+    "icon": "book-open"
+  },
+  "members": [
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-codebase-layout",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-worker-role-template"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-grounding-system-architecture"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "operator.approval"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "operator.input.provided"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-worker-role-operator-home"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-home-task-authoring"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-spawn-literacy"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-home-widget-authoring"
+    }
+  ]
+}

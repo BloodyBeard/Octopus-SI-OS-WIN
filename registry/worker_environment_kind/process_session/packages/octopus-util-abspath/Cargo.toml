@@ -1,0 +1,21 @@
+[package]
+name = "octopus-util-abspath"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+dirs = "6"
+dunce = "1.0.4"
+schemars = "0.8.22"
+ts-rs = { version = "11", features = ["serde-json-impl", "no-serde-warnings"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+pretty_assertions = "1.4.1"
+tempfile = "3.23.0"

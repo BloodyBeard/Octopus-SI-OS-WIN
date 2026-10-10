@@ -1,0 +1,39 @@
+{
+  "id": "process.list",
+  "interface": "system_exec_env",
+  "handler_config": {
+    "operation": "list"
+  },
+  "process": {
+    "bin": "target/debug/octopus-process-room-tool",
+    "inherit_env": [
+      "PATH"
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [
+        "PATH"
+      ],
+      "allow_network": false,
+      "allow_local_ipc": true
+    },
+    "coordinate_root_slots": []
+  },
+  "supported_worker_environment_kinds": [
+    "process_session"
+  ],
+  "description": "Inspect the persistent process and viewer coordinates owned by this worker environment.",
+  "args_schema": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

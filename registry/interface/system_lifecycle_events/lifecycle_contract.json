@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "event_artifact_label": "lifecycle.event",
+  "decision_artifact_label": "lifecycle.decision",
+  "decision_mark": "lifecycle.decision.allowed",
+  "decision_verifier": "lifecycle_decision",
+  "connection": {
+    "artifact_label": "lifecycle.connection",
+    "schema": "connection.schema.json",
+    "example": "connection.example.json",
+    "authoring_schema": "connection-authoring.schema.json",
+    "authoring_example": "connection-authoring.example.json",
+    "installation_effect": "none",
+    "required_run_pin": "interface_state.<provider_interface>.lifecycle_connection",
+    "pin_fields": [
+      "schema_version",
+      "connection_id",
+      "lifecycle_interface",
+      "artifact"
+    ],
+    "required_exact_artifact_binding": true,
+    "required_formed_interface": "system_lifecycle_events"
+  },
+  "emitters": [
+    {
+      "event": "session_start",
+      "owner": "provider thread acquisition",
+      "boundary": "before the first provider turn dispatch"
+    },
+    {
+      "event": "user_prompt_submit",
+      "owner": "provider turn input",
+      "boundary": "before provider turn dispatch"
+    },
+    {
+      "event": "pre_tool_use",
+      "owner": "provider dynamic tool request",
+      "boundary": "before the exact Tool or Interface emission is handed"
+    },
+    {
+      "event": "permission_request",
+      "owner": "provider operator request",
+      "boundary": "before the approval artifact is handed"
+    },
+    {
+      "event": "post_tool_use",
+      "owner": "provider tool or interface result intake",
+      "boundary": "before the result resumes the provider turn"
+    },
+    {
+      "event": "pre_compact",
+      "owner": "provider context-window boundary",
+      "boundary": "after terminal boundary evidence and before summary turn dispatch"
+    },
+    {
+      "event": "post_compact",
+      "owner": "provider run-boundary summary turn",
+      "boundary": "after summary completion and before summary output release"
+    },
+    {
+      "event": "session_end",
+      "owner": "provider run-boundary release",
+      "boundary": "reactive sibling after summary completion"
+    },
+    {
+      "event": "subagent_start",
+      "owner": "provider exact configured system_worker destination",
+      "boundary": "reactive sibling before destination emission"
+    },
+    {
+      "event": "subagent_stop",
+      "owner": "provider exact configured system_worker result intake",
+      "boundary": "before the result resumes the provider turn"
+    },
+    {
+      "event": "stop",
+      "owner": "provider terminal answer",
+      "boundary": "before terminal output release"
+    },
+    {
+      "event": "interrupt",
+      "owner": "provider durable interrupt recovery",
+      "boundary": "reactive sibling when the next provider arrival proves the interruption"
+    }
+  ],
+  "events": [
+    {
+      "name": "pre_tool_use",
+      "control": "blocking_and_reactive",
+      "positive_decision": "allow",
+      "additional_context_artifacts": true,
+      "replacement_artifact": true
+    },
+    {
+      "name": "permission_request",
+      "control": "blocking",
+      "positive_decision": "allow",
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "post_tool_use",
+      "control": "blocking_and_reactive",
+      "positive_decision": "continue",
+      "additional_context_artifacts": true,
+      "replacement_artifact": false
+    },
+    {
+      "name": "pre_compact",
+      "control": "blocking",
+      "positive_decision": "continue",
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "post_compact",
+      "control": "blocking",
+      "positive_decision": "continue",
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "session_start",
+      "control": "blocking_and_reactive",
+      "positive_decision": "continue",
+      "additional_context_artifacts": true,
+      "replacement_artifact": false
+    },
+    {
+      "name": "session_end",
+      "control": "reactive",
+      "positive_decision": null,
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "user_prompt_submit",
+      "control": "blocking_and_reactive",
+      "positive_decision": "continue",
+      "additional_context_artifacts": true,
+      "replacement_artifact": false
+    },
+    {
+      "name": "subagent_start",
+      "control": "reactive",
+      "positive_decision": null,
+      "additional_context_artifacts": true,
+      "replacement_artifact": false
+    },
+    {
+      "name": "subagent_stop",
+      "control": "blocking",
+      "positive_decision": "continue",
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "stop",
+      "control": "blocking",
+      "positive_decision": "continue",
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    },
+    {
+      "name": "interrupt",
+      "control": "reactive",
+      "positive_decision": null,
+      "additional_context_artifacts": false,
+      "replacement_artifact": false
+    }
+  ],
+  "configuration": {
+    "sources": [
+      "installed_interface_package",
+      "worker_interface_ceiling",
+      "ee_policy_chain",
+      "run_authored_exact_bindings_and_checkpoint"
+    ],
+    "composition": "worker_interface_ceiling_intersection_ee_chain_intersection_run_authored_bindings",
+    "identity": "exact_interface_folder_and_content_hash",
+    "resolved_snapshot": "the bound lifecycle.connection contains the selected layered handlers; provider code does not scan ambient hook files",
+    "handler_content_sha256": "sha256 over compact UTF-8 JSON after recursive lexical object-key ordering of the handler destination object",
+    "provider_continuity": "provider-owned replay state is embedded under event.data.provider_continuity before event identity is hashed; lifecycle artifacts never receive an ambient provider field",
+    "managed": "owner_authored_policy_layers_narrow_the_formed_grant",
+    "untrusted_or_modified": "an ungranted, unbound, malformed, or hash-changed package does not acquire authority"
+  },
+  "dispatch": {
+    "sync": {
+      "shape": "required_verified_artifact_on_the_exact_checkpoint_edge",
+      "artifact_label": "lifecycle.decision",
+      "mark": "lifecycle.decision.allowed",
+      "verifier": "lifecycle_decision",
+      "one_physical_continuation": "at most one selected sync handler; multiple sync handlers require an explicit aggregate decision edge",
+      "decision_return_path": "only_the_derived_verified_input_checkpoint_may_return_lifecycle.decision_to_the_emitter_provider",
+      "provider_admission": "the_exact_required_verified_artifact_and_complete_checkpoint_admission_metadata_are_required_before_continuation_release"
+    },
+    "async": {
+      "shape": "ordinary_independent_artifact_movement",
+      "control_effects": false
+    }
+  },
+  "handler_projections": [
+    {
+      "handler_type": "command",
+      "shape": "granted_tool_call_artifact_through_an_exact_worker_environment_interface"
+    },
+    {
+      "handler_type": "mcp_tool",
+      "shape": "artifact_through_an_exact_world_mcp_interface"
+    },
+    {
+      "handler_type": "prompt",
+      "shape": "provider_input_artifact_through_an_exact_provider_binding"
+    },
+  {
+    "handler_type": "agent",
+    "shape": "artifact_through_an_exact_system_worker_pin_into_an_authored_destination_run_checkpoint_then_provider_result_output_to_system_lifecycle_events"
+  }
+  ],
+  "handler_evidence": {
+    "prompt_input_label": "lifecycle.handler.prompt",
+    "agent_input_label": "lifecycle.handler.task",
+    "async_output_label": "lifecycle.handler.output",
+    "sync_output_label": "lifecycle.decision",
+    "correlation": [
+      "connection_artifact",
+      "connection_id",
+      "event_id",
+      "emitter_run",
+      "owner_run",
+      "handler_id",
+      "event",
+      "mode",
+      "handler_type",
+      "subject_artifact",
+      "event_artifact"
+    ]
+  }
+}

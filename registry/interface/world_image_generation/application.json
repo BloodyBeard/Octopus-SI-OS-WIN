@@ -1,0 +1,39 @@
+{
+  "schema_version": 3,
+  "id": "world_image_generation",
+  "name": "Image Generation",
+  "description": "Create images while working in a task.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "image",
+  "logo": "application-logo.png",
+  "interfaces": ["world_image_generation"],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_image_generation",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "API URL",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_image_generation",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

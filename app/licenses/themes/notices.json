@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "name": "Theme reconstruction base: Pierre",
+      "version": "0.0.29",
+      "license": "MIT",
+      "notices": [
+        {
+          "path": "app/licenses/themes/pierre-0.0.29/LICENSE.md",
+          "sha256": "aef11f1ea1092ed19cf5c2ace111cdca883ceabe2a69af2ee7afec648aa5c36d",
+          "url": "https://raw.githubusercontent.com/pierrecomputer/theme/c5420e65d638547a94ad7403e0f6becc4d40d02c/LICENSE.md"
+        }
+      ],
+      "sources": [
+        {
+          "path": "app/src/components/settings/code-themes/upstream/pierre-0.0.29/pierre-dark.json",
+          "sha256": "5f31663876ce1b5a55a868b4bc7040cd34bd51b7f301da170f77189ef94e703d",
+          "url": "https://raw.githubusercontent.com/pierrecomputer/theme/c5420e65d638547a94ad7403e0f6becc4d40d02c/themes/pierre-dark.json",
+          "revision": "c5420e65d638547a94ad7403e0f6becc4d40d02c"
+        },
+        {
+          "path": "app/src/components/settings/code-themes/upstream/pierre-0.0.29/pierre-light.json",
+          "sha256": "e776ab093e286102b1ff70f479fc01e975b0e065102bc0735b8e1a1694c28130",
+          "url": "https://raw.githubusercontent.com/pierrecomputer/theme/c5420e65d638547a94ad7403e0f6becc4d40d02c/themes/pierre-light.json",
+          "revision": "c5420e65d638547a94ad7403e0f6becc4d40d02c"
+        }
+      ]
+    },
+    {
+      "name": "Theme reconstruction base: ray.so",
+      "version": "2e6a32808fb13a9246cac153e53e729def5ea7e8",
+      "license": "MIT",
+      "notices": [
+        {
+          "path": "app/licenses/themes/ray-so/LICENSE",
+          "sha256": "0197aab818ab0421b960910234fcdb568cd6b690237efb387054709c03071f36",
+          "url": "https://raw.githubusercontent.com/raycast/ray-so/2e6a32808fb13a9246cac153e53e729def5ea7e8/LICENSE"
+        }
+      ],
+      "sources": [
+        {
+          "path": "app/licenses/themes/ray-so/create-css-variables-theme.ts.txt",
+          "sha256": "ff14f502d07a0e0974906248736452b0b69b682fdddd70c5eba09a4067ede605",
+          "url": "https://raw.githubusercontent.com/raycast/ray-so/2e6a32808fb13a9246cac153e53e729def5ea7e8/app/(navigation)/(code)/util/theme-css-variables.ts",
+          "revision": "2e6a32808fb13a9246cac153e53e729def5ea7e8"
+        },
+        {
+          "path": "app/src/components/settings/code-themes/upstream/ray-so/token-rules.json",
+          "sha256": "b1ac77588224a3d360f7167d1ec022395f97404ae7cb7bab82ef847bb2017dab",
+          "derivation": "tokenColors from createCssVariablesTheme({}); TypeScript transpilation without runtime imports; no palette supplied",
+          "revision": "2e6a32808fb13a9246cac153e53e729def5ea7e8"
+        }
+      ]
+    }
+  ]
+}

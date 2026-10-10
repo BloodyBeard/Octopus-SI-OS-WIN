@@ -1,0 +1,30 @@
+{
+  "id": "mcp.send_progress",
+  "interface": "system_mcp",
+  "process": {
+    "bin": "target/debug/octopus-mcp-stdio-room-tool",
+    "inherit_env": ["PATH"],
+    "inherit_env_from_interface": ["/interface_driver_config/private_config/process_env_keys"],
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
+      "allow_network": true, "allow_local_ipc": false
+    }
+  },
+  "handler_config": { "operation": "send_progress" },
+  "supported_worker_environment_kinds": ["mcp_stdio_session"],
+  "description": "Send a bounded MCP progress notification for a progress token supplied by the peer.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "progress_token": { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "number" }] },
+      "progress": { "type": "number", "minimum": 0 },
+      "total": { "type": "number", "minimum": 0 },
+      "message": { "type": "string" }
+    },
+    "required": ["progress_token", "progress"],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

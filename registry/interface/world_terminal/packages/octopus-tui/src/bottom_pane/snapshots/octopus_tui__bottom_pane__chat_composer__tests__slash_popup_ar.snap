@@ -1,0 +1,10 @@
+---
+source: interfaces/octopus-codex-tui/src/bottom_pane/chat_composer.rs
+assertion_line: 7030
+expression: terminal.backend()
+---
+"                                                            "
+"› /ar                                                       "
+"                                                            "
+"                                                            "
+"  /archive  archive this session and exit                   "

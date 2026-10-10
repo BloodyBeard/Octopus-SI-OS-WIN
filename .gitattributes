@@ -1,0 +1,12 @@
+* text=auto
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.icns binary
+*.mp4 binary
+*.gif binary
+*.woff2 binary
+*.task binary
+# Preserve original notice bytes used by provenance receipts.
+**/licenses/** -text

@@ -1,0 +1,10 @@
+{
+  "id": "world_discord",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "discord"
+  ],
+  "interface_driver_ref": "discord_life"
+}

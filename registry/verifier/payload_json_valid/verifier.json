@@ -1,0 +1,20 @@
+{
+  "id": "payload_json_valid",
+  "package": "payload_json_valid",
+  "script": "verify.sh",
+  "authority": {
+    "read_root_slots": [],
+    "write_root_slots": [],
+    "executable_root_slots": [],
+    "read_paths": [],
+    "write_paths": [],
+    "executable_paths": [],
+    "executable_commands": ["/bin/sh", "/bin/cat", "python3"],
+    "read_env_paths": [],
+    "write_env_paths": [],
+    "executable_env_paths": [],
+    "allow_network": false,
+    "allow_local_ipc": false
+  },
+  "default_params": {}
+}

@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.connection.authoring",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "installation_effect",
+    "connection_effect",
+    "connection_id",
+    "connection_artifact",
+    "provider_interface",
+    "lifecycle_interface",
+    "run_connections",
+    "blocking_checkpoint_derivation",
+    "evidence"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.connection.authoring" },
+    "schema_version": { "const": 1 },
+    "installation_effect": { "const": "none" },
+    "connection_effect": {
+      "const": "exact_run_json_and_artifact_binding_only"
+    },
+    "connection_id": { "$ref": "#/$defs/non_empty" },
+    "connection_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "provider_interface": { "$ref": "#/$defs/non_empty" },
+    "lifecycle_interface": { "const": "system_lifecycle_events" },
+    "run_connections": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/run_connection" }
+    },
+    "blocking_checkpoint_derivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_label",
+        "decision_label",
+        "mark",
+        "verifier",
+        "decision_interface",
+        "decision_outbound_interface"
+      ],
+      "properties": {
+        "event_label": { "const": "lifecycle.event" },
+        "decision_label": { "const": "lifecycle.decision" },
+        "mark": { "const": "lifecycle.decision.allowed" },
+        "verifier": { "const": "lifecycle_decision" },
+        "decision_interface": { "const": "system_lifecycle_events" },
+        "decision_outbound_interface": { "$ref": "#/$defs/non_empty" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connection_payload", "authored_run_records"],
+      "properties": {
+        "connection_payload": { "$ref": "#/$defs/artifact_ref" },
+        "authored_run_records": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifact_ref" }
+        },
+        "authored_policy_records": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifact_ref" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "non_empty": { "type": "string", "minLength": 1 },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "content": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "artifact_policy": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode"],
+          "properties": { "mode": { "const": "all" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "names", "namespaces"],
+          "properties": {
+            "mode": { "const": "allow" },
+            "names": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/non_empty" }
+            },
+            "namespaces": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/non_empty" }
+            }
+          },
+          "anyOf": [
+            { "properties": { "names": { "type": "array", "minItems": 1 } } },
+            {
+              "properties": {
+                "namespaces": { "type": "array", "minItems": 1 }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interface", "config"],
+      "properties": {
+        "interface": { "$ref": "#/$defs/non_empty" },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_policy"],
+          "properties": {
+            "artifact_policy": { "$ref": "#/$defs/artifact_policy" }
+          }
+        }
+      }
+    },
+    "required_verified_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mark", "artifact_label", "verifier", "params"],
+      "properties": {
+        "mark": { "$ref": "#/$defs/non_empty" },
+        "artifact_label": { "$ref": "#/$defs/non_empty" },
+        "verifier": { "$ref": "#/$defs/non_empty" },
+        "params": { "type": "object" }
+      }
+    },
+    "artifact_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "access": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["read", "change", "create", "delete"],
+          "properties": {
+            "read": { "const": true },
+            "change": { "const": false },
+            "create": { "const": false },
+            "delete": { "const": false }
+          }
+        }
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "purpose",
+        "interface_binding",
+        "outbound_interface_bindings",
+        "artifact_bindings",
+        "required_verified_artifacts"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "purpose": {
+          "enum": [
+            "lifecycle_event_output",
+            "lifecycle_event_input",
+            "handler_destination_output",
+            "agent_destination_input",
+            "handler_result_output"
+          ]
+        },
+        "interface_binding": { "$ref": "#/$defs/binding" },
+        "outbound_interface_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/binding" }
+        },
+        "artifact_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/artifact_binding" }
+        },
+        "required_verified_artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/required_verified_artifact" }
+        }
+      }
+    },
+    "run_connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "roles",
+        "connection_artifact_binding",
+        "lifecycle_connection_pin",
+        "required_formed_grant",
+        "connected_checkpoint_ids",
+        "checkpoints",
+        "run_record_evidence"
+      ],
+      "properties": {
+        "run": { "$ref": "#/$defs/non_empty" },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["emitter", "handler_owner", "agent_destination"]
+          }
+        },
+        "connection_artifact_binding": { "$ref": "#/$defs/artifact_ref" },
+        "lifecycle_connection_pin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "connection_id",
+            "lifecycle_interface",
+            "artifact"
+          ],
+          "properties": {
+            "schema_version": { "const": 1 },
+            "connection_id": { "$ref": "#/$defs/non_empty" },
+            "lifecycle_interface": { "const": "system_lifecycle_events" },
+            "artifact": { "$ref": "#/$defs/artifact_ref" }
+          }
+        },
+        "required_formed_grant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["interfaces", "tools", "mark_outcomes"],
+          "properties": {
+            "interfaces": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "contains": { "const": "system_lifecycle_events" },
+              "items": { "$ref": "#/$defs/non_empty" }
+            },
+            "tools": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/non_empty" }
+            },
+            "mark_outcomes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/non_empty" }
+            }
+          }
+        },
+        "connected_checkpoint_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/non_empty" }
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/checkpoint" }
+        },
+        "run_record_evidence": { "$ref": "#/$defs/artifact_ref" }
+      }
+    }
+  }
+}

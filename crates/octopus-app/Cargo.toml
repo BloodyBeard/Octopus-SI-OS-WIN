@@ -1,0 +1,42 @@
+[package]
+name = "octopus-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "octopus"
+path = "src/main.rs"
+
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-ledger-index = { path = "../octopus-ledger-index" }
+octopus-ledger-store = { path = "../octopus-ledger-store", default-features = false }
+octopus-marks = { path = "../octopus-marks" }
+octopus-policy = { path = "../octopus-policy" }
+octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-runtime = { path = "../octopus-runtime" }
+octopus-ee = { path = "../octopus-ee" }
+octopus-app-server = { path = "../octopus-app-server" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-std", "io-util", "process", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+octopus-interface-transport = { path = "../octopus-interface-transport" }
+octopus-interface-projection = { path = "../octopus-interface-projection" }
+octopus-tool-registry = { path = "../octopus-tool-registry" }
+fs2 = "0.4"
+notify.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
+tempfile = "3"
+octopus-worker-env = { path = "../octopus-worker-env" }
+
+[lints.rust]
+unsafe_code = "forbid"

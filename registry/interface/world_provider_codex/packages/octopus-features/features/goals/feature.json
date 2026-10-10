@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "goals",
+  "stage": {
+    "kind": "stable"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.handler.prompt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "connection_id",
+    "event_id",
+    "handler_id",
+    "prompt",
+    "event",
+    "output_contract"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.handler.prompt" },
+    "schema_version": { "const": 1 },
+    "connection_id": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string", "pattern": "^lifecycle:[0-9a-f]{64}$" },
+    "handler_id": { "type": "string", "minLength": 1 },
+    "prompt": { "type": "string", "minLength": 1 },
+    "event": { "$ref": "event.schema.json" },
+    "output_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "allowed_fields"],
+      "properties": {
+        "decision": { "type": ["string", "null"] },
+        "allowed_fields": {
+          "const": [
+            "decision",
+            "reason",
+            "additional_context_artifacts",
+            "replacement_artifact"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "worker_environment_kind_id": "remote_exec_server",
+  "substrate_family": "remote_exec_server",
+  "door_driver_refs": [
+    "system_remote_exec"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-remote-exec-room-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "instance_config_files": [
+    "remote_exec.json"
+  ],
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "remote_machine",
+    "filesystem",
+    "process_exec",
+    "persistent_process",
+    "binary_carriers",
+    "bounded_env_overrides",
+    "artifact_capture",
+    "live_view"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "restricted"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

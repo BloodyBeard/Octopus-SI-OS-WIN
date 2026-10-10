@@ -1,0 +1,77 @@
+{
+  "worker_environment_kind_id": "git_worktree",
+  "substrate_family": "process_exec",
+  "door_driver_refs": [
+    "system_coder_env"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-coder-exec-tool",
+    "target/debug/octopus-coder-fs-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "filesystem",
+    "process_exec",
+    "git"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [
+      {
+        "path": "repo_root",
+        "access": [
+          "read"
+        ]
+      },
+      {
+        "path": "tool_cache_root",
+        "access": [
+          "read"
+        ]
+      },
+      {
+        "path": "toolchain_root",
+        "access": [
+          "read"
+        ]
+      }
+    ],
+    "write_root_refs": [
+      {
+        "path": "git_common_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "worktree_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "platform_toolchain_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "protected_read_only_subpaths": [
+      {
+        "path": "protected_branch_ref",
+        "access": [
+          "read"
+        ]
+      }
+    ],
+    "network_ceiling": "full"
+  },
+  "lifecycle": {
+    "requires_release": true
+  }
+}

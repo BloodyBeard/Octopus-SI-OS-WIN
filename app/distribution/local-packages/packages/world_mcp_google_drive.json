@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_mcp_google_drive",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_mcp_google_drive",
+  "release_status": "optional",
+  "display": {
+    "name": "Google Drive",
+    "description": "Find and work with files in Google Drive.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "files"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_mcp_google_drive",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-mcp-google-drive-context"
+    }
+  ]
+}

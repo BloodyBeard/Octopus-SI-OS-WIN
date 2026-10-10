@@ -1,0 +1,60 @@
+{
+  "id": "workspace.exec",
+  "interface": "system_workspace_env",
+  "handler_config": {
+    "operation": "start_command",
+    "default_timeout_ms": 120000,
+    "max_timeout_ms": 600000,
+    "default_yield_time_ms": 10000,
+    "max_yield_time_ms": 30000,
+    "default_max_output_bytes": 65536,
+    "max_output_bytes": 1048576,
+    "max_buffered_output_bytes": 4194304,
+    "max_buffered_output_events": 4096,
+    "max_processes_per_worker_environment": 16,
+    "max_input_bytes": 65536,
+    "cleanup_timeout_ms": 10000,
+    "default_shell": "sh",
+    "allowed_shells": ["sh", "bash", "zsh"],
+    "allow_login_shell": true
+  },
+  "process": {
+    "bin": "target/debug/octopus-workspace-exec-tool",
+    "inherit_env": ["HOME", "PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "workspace_root"],
+      "write_root_slots": ["workspace_root"],
+      "executable_root_slots": ["workspace_root"],
+      "optional_read_root_slots": ["host_filesystem_root", "platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "optional_write_root_slots": ["host_filesystem_root", "platform_toolchain_root"],
+      "optional_executable_root_slots": ["host_filesystem_root", "platform_toolchain_root", "tool_cache_root", "toolchain_root"],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": ["git", "sh", "bash", "zsh"],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": ["PATH"],
+      "allow_network": true, "allow_local_ipc": true, "allow_sandbox_delegation": true
+    }
+  },
+  "supported_worker_environment_kinds": ["filesystem_workspace"],
+  "description": "Start one bounded persistent command from the direct workspace or an additional filesystem root explicitly granted to this task, with exact ordered stdout/stderr/PTY chunks and an opaque process id for continuation or control.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "oneOf": [
+          {"type": "array", "items": {"type": "string"}, "minItems": 1},
+          {"type": "string", "minLength": 1}
+        ]
+      },
+      "shell": {"type": "string", "enum": ["sh", "bash", "zsh"]},
+      "login": {"type": "boolean"},
+      "workdir": {"type": "string"},
+      "tty": {"type": "boolean"},
+      "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+      "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000},
+      "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576}
+    },
+    "required": ["command"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

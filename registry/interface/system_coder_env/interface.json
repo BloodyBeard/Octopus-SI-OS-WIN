@@ -1,0 +1,10 @@
+{
+  "id": "system_coder_env",
+  "interface_type": "system",
+  "role": "system",
+  "direction": "bidirectional",
+  "source_names": [
+    "coder_env"
+  ],
+  "interface_driver_ref": "system_coder_env"
+}

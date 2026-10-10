@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feature requests and ideas
+    url: https://github.com/miuuyy/Octopus-SI-OS/discussions/categories/ideas
+    about: Any idea is welcome. Post it in Ideas, or open a pull request.
+  - name: Troubleshooting guide
+    url: https://github.com/miuuyy/Octopus-SI-OS/blob/main/TROUBLESHOOTING.md
+    about: Build, launch, sign-in, setup, and Home failures - where to look first.
+  - name: Private security report
+    url: https://github.com/miuuyy/Octopus-SI-OS/security/advisories/new
+    about: Report credential exposure, sandbox escape, or policy bypass privately.

@@ -1,0 +1,69 @@
+{
+  "id": "cloud_work.task.create",
+  "request_label": "cloud_work.request",
+  "output_label": "cloud_work.status",
+  "handler_config": {
+    "operation": "task.create"
+  },
+  "description": "Create managed cloud work with an explicit environment, branch, prompt, attempt count, and optional caller-bound starting-diff artifact reference. No ambient workspace diff is read.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "environment_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "prompt": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200000
+      },
+      "git_ref": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "attempts": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4,
+        "default": 1
+      },
+      "qa_mode": {
+        "type": "boolean",
+        "default": false
+      },
+      "starting_diff": {
+        "type": "object",
+        "properties": {
+          "artifact_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "unified_diff": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "artifact_ref",
+          "sha256",
+          "unified_diff"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [
+      "environment_id",
+      "prompt",
+      "git_ref"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "id": "system_workspace_env",
+  "interface_type": "system",
+  "role": "system",
+  "direction": "bidirectional",
+  "source_names": ["workspace_env"],
+  "interface_driver_ref": "system_workspace_env"
+}

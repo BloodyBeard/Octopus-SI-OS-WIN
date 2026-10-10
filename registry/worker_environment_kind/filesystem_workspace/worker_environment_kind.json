@@ -1,0 +1,28 @@
+{
+  "worker_environment_kind_id": "filesystem_workspace",
+  "substrate_family": "process_exec",
+  "door_driver_refs": ["system_workspace_env"],
+  "tool_process_bins": [
+    "target/debug/octopus-workspace-exec-tool",
+    "target/debug/octopus-workspace-fs-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": ["exec"],
+  "capabilities": ["filesystem", "process_exec"],
+  "boundary_defaults": {
+    "read_root_refs": [
+      {"path": "workspace_root", "access": ["read"]},
+      {"path": "host_filesystem_root", "access": ["read"]},
+      {"path": "tool_cache_root", "access": ["read"]},
+      {"path": "toolchain_root", "access": ["read"]}
+    ],
+    "write_root_refs": [
+      {"path": "workspace_root", "access": ["read", "write"]},
+      {"path": "host_filesystem_root", "access": ["read", "write"]},
+      {"path": "platform_toolchain_root", "access": ["read", "write"]}
+    ],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "full"
+  },
+  "lifecycle": {"requires_release": false}
+}

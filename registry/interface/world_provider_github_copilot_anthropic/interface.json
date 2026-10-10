@@ -1,0 +1,194 @@
+{
+  "id": "world_provider_github_copilot_anthropic",
+  "interface_type": "world",
+  "role": "provider",
+  "direction": "bidirectional",
+  "source_names": [
+    "provider.github_copilot.anthropic_messages"
+  ],
+  "interface_driver_ref": "github_copilot_anthropic_messages",
+  "interface_policy": {
+    "variables": {
+      "max_attempts": {
+        "reduce": "min",
+        "default": 5
+      },
+      "max_in_flight": {
+        "reduce": "min",
+        "default": 1
+      },
+      "models": {
+        "reduce": "intersection",
+        "default": [
+          "claude-sonnet-4.6"
+        ]
+      }
+    }
+  },
+  "interface_driver_config": {
+    "private_config": {
+      "run_authoring_profile": {
+        "file_write_tool": "file.write",
+        "file_write_label": "tool.call",
+        "file_write_result_label": "file.write.result",
+        "result_timeout_ms": 30000
+      },
+      "process_env_names": [],
+      "model_hidden_tools": [
+        "file.write"
+      ],
+      "model": "claude-sonnet-4.6",
+      "github_copilot": {
+        "model": "claude-sonnet-4.6",
+        "retry_backoff_ms": [
+          1000,
+          2000,
+          4000,
+          8000
+        ],
+        "catalog_filter": {
+          "required_endpoint": "/v1/messages",
+          "required_capability_type": "chat"
+        }
+      },
+      "github_auth": {
+        "raw_token_secret_ref": "secret://world_provider_github_copilot_anthropic/GITHUB_TOKEN",
+        "api_token_secret_ref": "secret://world_provider_github_copilot_anthropic/COPILOT_API_TOKEN",
+        "api_token_expiry_secret_ref": "secret://world_provider_github_copilot_anthropic/COPILOT_API_TOKEN_EXPIRY",
+        "device_state_secret_ref": "secret://world_provider_github_copilot_anthropic/COPILOT_DEVICE_STATE",
+        "oauth": {
+          "client_id": "Ov23li8tweQw6odWQebz",
+          "scope": "read:user",
+          "device_code_url": "https://github.com/login/device/code",
+          "access_token_url": "https://github.com/login/oauth/access_token",
+          "user_agent": "OctopusGitHubCopilotAnthropic/0.1",
+          "poll_safety_margin_seconds": 3
+        },
+        "token_exchange": {
+          "url": "https://api.github.com/copilot_internal/v2/token",
+          "user_agent": "GitHubCopilotChat/0.26.7",
+          "editor_version": "vscode/1.104.1",
+          "refresh_margin_seconds": 120
+        },
+        "request_timeout_ms": 15000,
+        "max_response_bytes": 1048576,
+        "retryable_statuses": [
+          408,
+          425,
+          429,
+          500,
+          502,
+          503,
+          504
+        ]
+      },
+      "context_output_labels": [
+        "interface.artifact.output",
+        "provider.reasoning",
+        "provider.tool_results.pending",
+        "provider.transport.evidence",
+        "provider.usage",
+        "tool.call",
+        "turn.error",
+        "provider.auth.device.code",
+        "provider.auth.status"
+      ],
+      "session_snapshot_labels": [
+        "interface.artifact.output",
+        "provider.tool_results.pending",
+        "turn.error"
+      ],
+      "model_catalog": [
+        {
+          "model": "claude-sonnet-4.6",
+          "display_name": "Claude Sonnet 4.6 via GitHub Copilot",
+          "input_modalities": ["text", "image"],
+          "output_modalities": ["text"],
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            {"effort": "low", "description": "Low reasoning"},
+            {"effort": "medium", "description": "Medium reasoning"},
+            {"effort": "high", "description": "High reasoning"}
+          ],
+          "show_in_picker": true
+        }
+      ],
+      "retry_policy": {
+        "retryable_http_statuses": [
+          408,
+          409,
+          425,
+          429,
+          500,
+          502,
+          503,
+          504
+        ],
+        "backoff_ms": [
+          1000,
+          2000,
+          4000,
+          8000
+        ]
+      },
+      "finish_policy": {
+        "successful_stop_reasons": [
+          "end_turn",
+          "stop_sequence",
+          "tool_use",
+          "pause_turn",
+          "refusal"
+        ],
+        "nonreplayable_stop_reasons": [
+          "max_tokens"
+        ]
+      },
+      "anthropic_messages": {
+        "messages_path": "/v1/messages",
+        "models_path": "/models",
+        "max_tokens": 64000,
+        "stream": true,
+        "input_content_types": [
+          "text",
+          "image",
+          "document"
+        ],
+        "response_content_types": [
+          "text",
+          "thinking",
+          "redacted_thinking",
+          "tool_use"
+        ],
+        "thinking_replay": "verbatim",
+        "request_fields": {
+          "thinking": {
+            "type": "adaptive",
+            "display": "summarized"
+          },
+          "output_config": {
+            "effort": "medium"
+          }
+        }
+      }
+    },
+    "transport": {
+      "base_url": "https://api.githubcopilot.com",
+      "wire": "github_copilot_anthropic_messages",
+      "auth_secret_ref": "secret://world_provider_github_copilot_anthropic/COPILOT_API_TOKEN",
+      "auth_header": "Authorization",
+      "auth_value_prefix": "Bearer ",
+      "headers": {
+        "Copilot-Integration-Id": "vscode-chat",
+        "Editor-Version": "vscode/1.104.1",
+        "Openai-Intent": "conversation-edits",
+        "User-Agent": "OctopusGitHubCopilotAnthropic/0.1",
+        "anthropic-version": "2023-06-01",
+        "x-initiator": "agent"
+      },
+      "request_timeout_ms": 600000,
+      "max_response_bytes": 134217728
+    }
+  }
+}

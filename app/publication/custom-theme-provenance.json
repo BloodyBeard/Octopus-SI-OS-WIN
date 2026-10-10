@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "comparison": "Canonical JSON SHA-256: recursively sorted object keys, array order and values unchanged; full-object equality checked against current source baseline.",
+  "sources": [
+    {
+      "path": "app/src/components/settings/code-themes/upstream/pierre-0.0.29/pierre-dark.json",
+      "sha256": "5f31663876ce1b5a55a868b4bc7040cd34bd51b7f301da170f77189ef94e703d",
+      "url": "https://raw.githubusercontent.com/pierrecomputer/theme/c5420e65d638547a94ad7403e0f6becc4d40d02c/themes/pierre-dark.json",
+      "revision": "c5420e65d638547a94ad7403e0f6becc4d40d02c"
+    },
+    {
+      "path": "app/src/components/settings/code-themes/upstream/pierre-0.0.29/pierre-light.json",
+      "sha256": "e776ab093e286102b1ff70f479fc01e975b0e065102bc0735b8e1a1694c28130",
+      "url": "https://raw.githubusercontent.com/pierrecomputer/theme/c5420e65d638547a94ad7403e0f6becc4d40d02c/themes/pierre-light.json",
+      "revision": "c5420e65d638547a94ad7403e0f6becc4d40d02c"
+    },
+    {
+      "path": "app/licenses/themes/ray-so/create-css-variables-theme.ts.txt",
+      "sha256": "ff14f502d07a0e0974906248736452b0b69b682fdddd70c5eba09a4067ede605",
+      "url": "https://raw.githubusercontent.com/raycast/ray-so/2e6a32808fb13a9246cac153e53e729def5ea7e8/app/(navigation)/(code)/util/theme-css-variables.ts",
+      "revision": "2e6a32808fb13a9246cac153e53e729def5ea7e8"
+    },
+    {
+      "path": "app/src/components/settings/code-themes/upstream/ray-so/token-rules.json",
+      "sha256": "b1ac77588224a3d360f7167d1ec022395f97404ae7cb7bab82ef847bb2017dab",
+      "derivation": "tokenColors from createCssVariablesTheme({}); TypeScript transpilation without runtime imports; no palette supplied",
+      "revision": "2e6a32808fb13a9246cac153e53e729def5ea7e8"
+    }
+  ],
+  "reconstructed_themes": [
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-codex.json",
+      "previous_sha256": "b6a2b4b4ce77e93537a905f48f84db86cc64f166c1f61a700edf9b8faf769c5e",
+      "theme_canonical_sha256": "50c4e670d76548dc340b388f2d7b100100617491a478586c23eabc588be1886d",
+      "loader_file": "app/src/components/settings/code-themes/dark-codex.ts",
+      "base": "pierre-0.0.29"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-raycast.json",
+      "previous_sha256": "23d179473dd347d25b9645e8feaaaa197cda4f3960c276ba7412e8bc60ca40ec",
+      "theme_canonical_sha256": "0c5ca65a4f1531c66ef9e44052d62cbc7a810a5c0fc2326babdf37b728ad3107",
+      "loader_file": "app/src/components/settings/code-themes/dark-raycast.ts",
+      "base": "ray-so"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-codex.json",
+      "previous_sha256": "b75e387dbf7770a75238703d3379085c886289afa5387539fb9ed2b334b36e1d",
+      "theme_canonical_sha256": "3eea841f38f35ecfb50b170c47218d32ae720ca5d430b300150ef51bf6ee5c18",
+      "loader_file": "app/src/components/settings/code-themes/light-codex.ts",
+      "base": "pierre-0.0.29"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-raycast.json",
+      "previous_sha256": "80d3d3f917163ba59411cf73e902d65306c783ede709d28e5c52d7d6c20ce2ea",
+      "theme_canonical_sha256": "fc84b7934e6868ae92ffb55e0841813b00e5c77e79b281ea41babc83bb352b34",
+      "loader_file": "app/src/components/settings/code-themes/light-raycast.ts",
+      "base": "ray-so"
+    }
+  ],
+  "retained_themes": [
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-absolutely.json",
+      "previous_sha256": "3fbc23a35d8a4ac7c8ca4bb39ae52807ed2e2392695b5c1d7d85584a7d3a4c0b",
+      "theme_canonical_sha256": "4fac97912bc473d19329cba091b592fbedc63af9073e5e823b74e8745a8bcd97",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-linear.json",
+      "previous_sha256": "098cc486ef5d347804a37c11d5c8a27fe0041f7bc66a57a844f0bf547a90e018",
+      "theme_canonical_sha256": "14d0abd38f19203ada56680fcbac237f1f65d4a98b04dad6416b295339682d99",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-lobster.json",
+      "previous_sha256": "be101a79bc60340559b5f3c3ee2ed2cb8956d9f8f843c5d101a2e3c3a4fd6f9a",
+      "theme_canonical_sha256": "436c6a5b4e672c94eebeb0d1611345a86bd8899de4ddb6a4f57b2427c5622021",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-matrix.json",
+      "previous_sha256": "7cfda2e52fd3dc09607e633e638d32ba97d51592c0405daa780e146bdfd64a24",
+      "theme_canonical_sha256": "3e9eba1a7b8e725677ac51617203cc200c18b4c63ce8b715f381c7904de3158c",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-notion.json",
+      "previous_sha256": "5c9de6f1af0ccf66e7269b115973de3979f3551b0e854a949366304b912a4ed6",
+      "theme_canonical_sha256": "9ef12100ff077edf79411fb3cfd1da3644630d03f1f699e3186298a2fac5dcf1",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-oscurange.json",
+      "previous_sha256": "78b03ab1751a8a21582c9ab094390c03cfd16f3c3b6a6299b11e3eb548c7c278",
+      "theme_canonical_sha256": "ce1805071ee5a7f68614dcfdf8583dc24698167bc0173aa0c67fb19e59175e60",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-sentry.json",
+      "previous_sha256": "cbf165fb7dc9f2f43544c8ae3e6379654bed14bff0bc54380ebf294ea21e196a",
+      "theme_canonical_sha256": "68ca363ba74e80b70b12748cb55e909b6872eb354ca94cd4a23da67845bfc9b2",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-temple.json",
+      "previous_sha256": "d02f6ecf63dfabf841d1711ded8b1f66f590f18ad73eedaa8db2e2fcbda0d1b7",
+      "theme_canonical_sha256": "121e3e0d3e8e9db8d57af4eeeee697b2a1dd48ee93dab8f97f2d3419ade20c67",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-vercel.json",
+      "previous_sha256": "d6396ae188a446393af21dc117b30e3a69b5866d6f257bbd5f7c3ecd9136d15b",
+      "theme_canonical_sha256": "4b41372f4b4ce3bec7e325857ff330c74d6c41eb8f6fa7841d2baf9e061b3780",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/dark-xcode.json",
+      "previous_sha256": "d7f9a80dd7895ee7ceefc4bd290140c442eb7360e9052972affceaccc0c325f6",
+      "theme_canonical_sha256": "77958fb3bde3c7398b0f628567bfdfd93043a02729fa0f49adaa86c68f510b34",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-absolutely.json",
+      "previous_sha256": "441be36891c7e3386b43dc7abc78f43f997d2214a437f6b08ab3a61860e37ee0",
+      "theme_canonical_sha256": "ccaab1e485a6a1d4cd2b790683095bd82e27aab99db32f2f0542f21edf125a8c",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-linear.json",
+      "previous_sha256": "22c755b83dc79d20c2733ac09dd43fef9dceee1a626480f35af9dbef062a2535",
+      "theme_canonical_sha256": "03daec6daf77b3e483fc5c0504ad4c0c273b7752a71a40f3e1a07d914a571a69",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-notion.json",
+      "previous_sha256": "0dfe9b1dfacbe6a5473df6c2764c34fe9b9e740bbb90c21a4f39290caf0534e1",
+      "theme_canonical_sha256": "75d31912f100e0a66946985f50b5eb9df61ef70d7fc726276088bc989e883622",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-proof.json",
+      "previous_sha256": "1db015d676f729d872838e2d91c800b2a93a213566191f75a2d6d8cd1be1c2b4",
+      "theme_canonical_sha256": "2b5bbc923d07bf4b2d91ff01d1034b8a5b2d0c413df2094253919dcabff4e00b",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-vercel.json",
+      "previous_sha256": "6d94246be63b98d43f9d151d9a76dcfe12d81a2be8f4d627ba23ad33f4252fc3",
+      "theme_canonical_sha256": "d2aa78740220caba38e8b3810d38c3fd7ec17c1468274ca10023a7398b3b5389",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    },
+    {
+      "previous_file": "app/src/components/settings/code-themes/light-xcode.json",
+      "previous_sha256": "5e32a5bebb25d94705b59edb7b31253d085534572b5f04bf1f333fe2afb3feff",
+      "theme_canonical_sha256": "33a3a5f78e3d134aba8534e63ce2e917860eb1a306e078616af01be088df2e66",
+      "status": "complete-upstream-unresolved; retained without new license or authorship claim"
+    }
+  ],
+  "seed_count": 43,
+  "seed_canonical_sha256": "60e74de214a47ba806b3682d4f063dd7e03cb38f53245b0b77f55ff0cc733546",
+  "limitations": [
+    "Appearance parameters preserve existing measured configuration. No upstream license or authorship is assigned to those parameters.",
+    "The sixteen retained themes have no substantiated complete public upstream mapping. Palette resemblance or public scope vocabulary does not establish historical rule-group provenance. Their source remains unchanged.",
+    "Pinned public source and included notices substantiate the reconstruction bases; this receipt is not legal clearance."
+  ],
+  "appearance_parameters": {
+    "path": "app/src/components/settings/code-themes/appearance-parameters.json",
+    "sha256": "f4023b0a86d2ec85842f584a9744067552c3b9d3ae451505ae5c4fc50beae836",
+    "origin": "Existing current-source appearance configuration preserved exactly; no upstream license or authorship claim."
+  },
+  "source_verification": {
+    "pierre_npm_package": "@pierre/theme@0.0.29",
+    "pierre_npm_integrity": "sha512-ZXce2GikoXHNThHdkaxA2X4ISnzSTL/LmKDYaTwqP1bQqENs+l7B+PheF9RsUWgx4GbphW5GU1i1vO4ttAzCUA==",
+    "pierre_npm_tarball_sha256": "2eea36aabd7fdf655e0b101cceb7824c391be0235260f146d3f6618a8eaa0938",
+    "comparison": "Pinned Git source files and MIT notice are byte-identical to exact npm archive members; npm SHA-512 integrity matched.",
+    "ray_so_template": "Pinned source retained with its MIT notice; token-rules.json is the exact tokenColors output of createCssVariablesTheme({})."
+  }
+}

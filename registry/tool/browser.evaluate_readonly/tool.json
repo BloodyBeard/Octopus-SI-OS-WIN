@@ -1,0 +1,92 @@
+{
+  "id": "browser.evaluate_readonly",
+  "interface": "system_browser",
+  "handler_config": {
+    "operation": "evaluate_readonly"
+  },
+  "process": {
+    "bin": "target/debug/octopus-browser-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "secrets/browser-native-host.auth"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": true
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "browser_session"
+  ],
+  "description": "Evaluate a JavaScript function body inside the actual read-only DOM/CSS/range/selection membrane in the exact isolated page/frame. Optional selector supplies element; script returns a bounded JSON projection. This does not fall back to browser.eval. Optional target_id addresses only that already-owned page without selecting, creating or focusing it. Requires the declared native browser transport.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "selector": {
+        "type": "string",
+        "maxLength": 1048576,
+        "minLength": 1
+      },
+      "timeout_ms": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 300000,
+        "description": "Effective locator maximum is 3000ms; sequential typing maximum is 5000ms. Typed clicks separately observe load start for 250ms and completion for at most 3000ms; load_waits reports the actual outcome. Other typed actions do not add a navigation-settling wait."
+      },
+      "script": {
+        "type": "string",
+        "maxLength": 1048576
+      },
+      "target_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256,
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "description": "Exact already-owned page returned by browser.tabs or browser.tab_new. This does not select, show, create, or focus that page."
+      },
+      "selector_mode": {
+        "type": "string",
+        "enum": [
+          "single",
+          "all"
+        ],
+        "description": "all wraps the complete resolved locator element array in the same read-only membrane."
+      }
+    },
+    "required": [
+      "script"
+    ],
+    "additionalProperties": false,
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "selector_mode": {
+              "const": "all"
+            }
+          },
+          "required": [
+            "selector_mode"
+          ]
+        },
+        "then": {
+          "required": [
+            "selector"
+          ]
+        }
+      }
+    ]
+  },
+  "is_world_effect": true
+}

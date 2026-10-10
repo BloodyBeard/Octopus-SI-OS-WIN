@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequiredVerifiedArtifact",
+  "type": "object",
+  "required": [
+    "artifact_label",
+    "mark",
+    "verifier"
+  ],
+  "properties": {
+    "artifact_label": {
+      "type": "string"
+    },
+    "mark": {
+      "type": "string"
+    },
+    "params": {
+      "default": null
+    },
+    "verifier": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

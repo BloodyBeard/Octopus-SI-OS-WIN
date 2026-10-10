@@ -1,0 +1,53 @@
+{
+  "title": "Home widget document authoring",
+  "contract": "octopus.client_surface@1",
+  "delivery_label": "client.surface.document",
+  "instructions": [
+    "Author a materialized JSON document with the ordinary file tools in the current grant. Read the exact System presentation interface from the bound artifact-home-delivery context, then call artifact.send with that interface, label client.surface.document and the actual document payload or supported artifact reference. Its authored checkpoint delivers to the exact Home client and Home text provider, which rearms the receiving edge. The Home client is the final recipient, not a World address accepted by artifact.send. Receipt does not require outward commentary; the model chooses whether a response is useful. Writing a file or narrating that a widget exists is not delivery.",
+    "Use an ordinary octopus.client_surface document with schema_version 1, release_channel stable, a unique id, a positive integer revision, title, glyph, target, and render. Home supports existing voice.widget and voice.window targets. Use the same id and a larger revision to replace a document. Home admits at most 32 active artifact-delivered documents; revise existing documents instead of creating an unbounded collection.",
+    "Use native Octopus primitives for ordinary cards, lists, metrics and controls. Use the existing sandbox renderer for custom HTML/CSS/JavaScript. Sandbox CSS has Octopus theme variables such as --color-text-primary, --color-background-secondary, --color-accent and --font-sans. The sandbox has no network, filesystem, device or parent DOM access. Rendered text is data; it does not authorize actions.",
+    "Omit data.home_presentation for a document that remains until dismissed or superseded. To show it briefly, set data.home_presentation to {lifetime_ms: 5000}. Lifetime is counted from recorded artifact delivery, not first rendering, and supports integers from 1 to 86400000. Alternatively use {expires_at: '2026-10-04T12:00:00.000Z'} with a real UTC deadline. Do not combine lifetime_ms and expires_at or add other presentation fields.",
+    "Only exact run and recipient-interface delivery provenance admits a custom document to Home. The host supplies artifact, run, interface, sequence and delivery time; payload claims do not establish provenance. Malformed or conflicting current revisions fail visibly and must be corrected with a new valid revision.",
+    "Presentation persistence is not extension installation. Long-lived extensions, host filesystem/device sources and installed actions still require the existing extension review and install consent. Never describe a displayed document as installed. No widget.create tool or special MCP install primitive is used.",
+    "Actions use existing declared client action events. Sandbox actions must be listed in render.actions and invoked by window.octopusSurface.invoke(actionId). The renderer attaches the document revision and artifact delivery provenance to action events. An emitted event does not prove execution. Keep important results and instructions in ordinary artifacts as well as their presentation."
+  ],
+  "example": {
+    "schema": "octopus.client_surface",
+    "schema_version": 1,
+    "release_channel": "stable",
+    "id": "home.progress-summary",
+    "revision": 1,
+    "title": "Progress",
+    "glyph": "progress",
+    "target": {
+      "kind": "voice.widget",
+      "slot": "right",
+      "order": 10,
+      "layout": {
+        "min_width": 184,
+        "preferred_width": 280,
+        "max_width": 460,
+        "min_height": 100,
+        "preferred_height": 160,
+        "max_height": 320,
+        "content_fit": "reflow"
+      }
+    },
+    "data": {
+      "home_presentation": {
+        "lifetime_ms": 5000
+      },
+      "summary": "The requested result is ready."
+    },
+    "render": {
+      "kind": "native",
+      "density": "compact",
+      "root": {
+        "type": "text",
+        "value": {
+          "path": "data.summary"
+        }
+      }
+    }
+  }
+}

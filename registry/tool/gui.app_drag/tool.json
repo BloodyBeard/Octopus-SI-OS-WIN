@@ -1,0 +1,118 @@
+{
+  "id": "gui.app_drag",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "app_drag"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [
+      {
+        "path": "desktop-host/connection.json"
+      }
+    ],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Drag between original screenshot pixel coordinates in one exact approved application window. Requires current model control and an unconsumed gui.app_state observation from the same formed room. Observe again after any attempted action; global display references are not accepted.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "grant_request_id": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "app": {
+        "type": "object",
+        "properties": {
+          "host_generation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "app_instance_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "host_generation",
+          "app_instance_id"
+        ],
+        "additionalProperties": false
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "revision": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "window_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "image_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "from_x": {
+        "type": "number",
+        "minimum": 0
+      },
+      "from_y": {
+        "type": "number",
+        "minimum": 0
+      },
+      "to_x": {
+        "type": "number",
+        "minimum": 0
+      },
+      "to_y": {
+        "type": "number",
+        "minimum": 0
+      }
+    },
+    "required": [
+      "grant_request_id",
+      "app",
+      "observation_id",
+      "revision",
+      "control_generation",
+      "window_id",
+      "image_id",
+      "from_x",
+      "from_y",
+      "to_x",
+      "to_y"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,25 @@
+[package]
+name = "octopus-verifiers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "octopus_verifiers"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-marks = { path = "../octopus-marks" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

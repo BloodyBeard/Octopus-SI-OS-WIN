@@ -1,0 +1,48 @@
+{
+  "id": "artifact.append",
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [], "write_root_slots": ["artifact_blobs_root"], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "handler_config": { "operation": "append" },
+  "description": "Create a new artifact payload from JSON data and return its content-addressed ArtifactRef. This does not grant global visibility; later visibility still depends on policy/bindings.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "label": {
+        "type": "string",
+        "description": "Artifact id label to create."
+      },
+      "payload": {
+        "description": "JSON payload to store in the artifact."
+      },
+      "record": {
+        "description": "Alias for payload when appending a single ledger-style record."
+      }
+    },
+    "required": [
+      "label"
+    ],
+    "oneOf": [
+      {
+        "required": [
+          "payload"
+        ]
+      },
+      {
+        "required": [
+          "record"
+        ]
+      }
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

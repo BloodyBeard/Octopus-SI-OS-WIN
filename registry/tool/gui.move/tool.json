@@ -1,0 +1,62 @@
+{
+  "id": "gui.move",
+  "interface": "system_gui",
+  "handler_config": {
+    "operation": "move"
+  },
+  "process": {
+    "bin": "target/debug/octopus-gui-session-tool",
+    "private_read_subpaths": [{"path": "desktop-host/connection.json"}],
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": true,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "desktop_session"
+  ],
+  "description": "Move the pointer to screenshot-pixel coordinates, including hover. Requires current gui.control ownership and a fresh single-use gui.observe observation. Pointer events are not proof of application outcome; observe again.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "x": {
+        "type": "number"
+      },
+      "y": {
+        "type": "number"
+      },
+      "screen_id": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact screen id from gui.status; coordinates use this screenshot pixel domain."
+      },
+      "observation_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "control_generation": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "required": [
+      "x",
+      "y",
+      "screen_id",
+      "observation_id",
+      "control_generation"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

@@ -1,0 +1,24 @@
+.we-desktop-native-viewport {
+  container-type: size;
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  --color-media-background: #000;
+  background: var(--color-media-background);
+  padding-bottom: 3rem;
+}
+.we-desktop-native-frame { position: relative; }
+.we-desktop-native-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition-property: opacity;
+  transition-duration: var(--transition-duration-relaxed);
+  transition-timing-function: var(--ease-enter);
+  opacity: 0;
+}
+.we-desktop-native-frame[data-streaming] img { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .we-desktop-native-frame img { transition: none; } }

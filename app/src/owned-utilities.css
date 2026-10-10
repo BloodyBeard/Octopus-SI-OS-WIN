@@ -1,0 +1,177 @@
+@import "tailwindcss" source(none);
+@source "./**/*.{ts,tsx}";
+
+@custom-variant electron (&:where(:is([data-octopus-window-type="browser"], [data-octopus-window-type="chrome-extension"], [data-octopus-window-type="electron"]) *));
+@custom-variant extension (&:where([data-octopus-window-type="extension"] *));
+
+@theme reference inline {
+  --color-surface: var(--color-surface);
+  --color-surface-secondary: var(--color-surface-secondary);
+  --color-surface-elevated-secondary: var(--color-surface-elevated-secondary);
+  --color-text: var(--color-text);
+  --color-emphasis: var(--color-text-emphasis);
+  --color-secondary: var(--color-text-secondary);
+  --color-tertiary: var(--color-text-tertiary);
+  --color-info: var(--color-text-info);
+  --color-text-info: var(--color-text-info);
+  --color-danger: var(--color-text-danger);
+  --color-text-danger: var(--color-text-danger);
+  --color-text-description: var(--color-text-description);
+  --color-octopus-editor-line-highlight: var(--color-octopus-editor-line-highlight);
+  --color-octopus-git-added: var(--color-octopus-git-added);
+  --color-octopus-git-deleted: var(--color-octopus-git-deleted);
+  --color-octopus-git-modified: var(--color-octopus-git-modified);
+  --color-octopus-git-ignored: var(--color-octopus-git-ignored);
+  --color-border: var(--color-border);
+  --color-ring: var(--color-ring);
+  --color-info-soft: var(--color-background-info-soft);
+  --color-info-solid: var(--color-background-info-solid);
+  --color-primary-soft: var(--color-background-primary-soft);
+  --color-primary-soft-alpha: var(--color-background-primary-soft-alpha);
+  --color-primary-soft-active: var(--color-background-primary-soft-active);
+  --color-primary-ghost-hover: var(--color-background-primary-ghost-hover);
+  --color-background-secondary-soft-alpha: var(--color-background-secondary-soft-alpha);
+  --leading-dense: var(--leading-dense);
+}
+
+@utility text-default {
+  color: var(--color-text);
+}
+
+@utility border-default {
+  border-color: var(--color-border);
+}
+
+@utility border-subtle {
+  border-color: var(--color-border-subtle);
+}
+
+@utility border-primary-outline {
+  border-color: var(--color-border-primary-outline);
+}
+
+@utility pb-row-x {
+  padding-bottom: var(--padding-row-x);
+}
+
+@utility pe-row-y {
+  padding-inline-end: var(--padding-row-y);
+}
+
+@utility icon-leading-slot {
+  --icon-size: var(--icon-leading-size, 16px);
+
+  & svg[viewBox="0 0 16 16"] {
+    width: var(--icon-leading-artwork-size, var(--icon-leading-size, 16px));
+    height: var(--icon-leading-artwork-size, var(--icon-leading-size, 16px));
+  }
+}
+
+@utility sidebar-item {
+  --corner-radius-scale: 1;
+  --octopus-corner-shape: round;
+  --radius-lg: calc(var(--radius-lg-base) * var(--corner-radius-scale));
+  border-radius: var(--radius-lg);
+  corner-shape: var(--octopus-corner-shape);
+
+  @supports (corner-shape: superellipse(1.5)) {
+    --corner-radius-scale: 1.25;
+    --octopus-corner-shape: superellipse(1.5);
+
+    &:where([data-octopus-window-type="browser"] *) {
+      --corner-radius-scale: 1;
+      --octopus-corner-shape: round;
+    }
+  }
+}
+
+@theme inline {
+  --font-sans: var(--font-ui);
+  --font-mono: var(--vscode-editor-font-family, ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
+
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+  --text-4xl: var(--text-4xl);
+  --text-size-chat: var(--octopus-chat-font-size);
+
+  --radius-2xs: calc(0.125rem * var(--corner-scale, 1));
+  --radius-xs: calc(0.25rem * var(--corner-scale, 1));
+  --radius-sm: calc(0.375rem * var(--corner-scale, 1));
+  --radius-md: calc(0.5rem * var(--corner-scale, 1));
+  --radius-lg: calc(0.625rem * var(--corner-scale, 1));
+  --radius-xl: calc(0.75rem * var(--corner-scale, 1));
+  --radius-2xl: calc(1rem * var(--corner-scale, 1));
+  --radius-3xl: calc(1.25rem * var(--corner-scale, 1));
+  --radius-4xl: calc(1.5rem * var(--corner-scale, 1));
+  --radius-token-composer-single-line: calc(var(--spacing) * 5.5);
+  --radius-token-row: var(--row-radius);
+
+  --spacing-toolbar: var(--padding-toolbar);
+  --spacing-panel: var(--padding-panel);
+  --spacing-token-button-composer: calc(var(--spacing) * 7);
+  --spacing-token-button-composer-sm: calc(var(--spacing) * 7);
+  --spacing-token-button-composer-gap: var(--spacing);
+  --spacing-token-sidebar: clamp(240px, 275px, min(520px, calc(100vw - 320px)));
+
+  --height-toolbar: 46px;
+  --height-toolbar-sm: 36px;
+  --height-toolbar-pane: 40px;
+  --height-token-button-composer-gap: var(--spacing-token-button-composer-gap);
+  --height-token-empty-state-page: 26.25rem;
+  --height-token-nav-row: var(--height-token-row);
+  --height-token-settings-row: 4rem;
+
+  --ease-basic: ease;
+  --ease-enter: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-enter-snappy: cubic-bezier(0.23, 1, 0.32, 1);
+  --transition-duration-basic: 150ms;
+  --transition-duration-relaxed: 300ms;
+
+  --color-token-bg-fog: var(--color-background-elevated-secondary);
+  --color-token-bg-primary: var(--color-token-side-bar-background);
+  --color-token-bg-secondary: color-mix(in srgb, var(--color-token-bg-primary) 92%, transparent);
+  --color-token-border: var(--color-border);
+  --color-token-border-default: var(--color-border);
+  --color-token-border-focus: var(--color-border-focus);
+  --color-token-border-heavy: var(--color-border-heavy);
+  --color-token-border-light: var(--color-border-light);
+  --color-token-button-background: var(--color-background-button-primary);
+  --color-token-button-tertiary-foreground: var(--color-text-button-tertiary);
+  --color-token-charts-blue: var(--color-accent-blue);
+  --color-token-charts-green: var(--color-accent-green);
+  --color-token-charts-orange: var(--color-accent-orange);
+  --color-token-charts-purple: var(--color-accent-purple);
+  --color-token-charts-red: var(--color-accent-red);
+  --color-token-checkbox-background: var(--color-background-elevated-primary);
+  --color-token-conversation-body: color-mix(in srgb, var(--color-text-foreground) 60%, transparent);
+  --color-token-description-foreground: var(--vscode-descriptionForeground);
+  --color-token-dropdown-background: var(--color-background-control-opaque);
+  --color-token-error-background: var(--color-background-status-error);
+  --color-token-error-border: var(--color-border-error);
+  --color-token-error-foreground: var(--color-text-error);
+  --color-token-focus: var(--color-border-focus);
+  --color-token-focus-border: var(--color-border-focus);
+  --color-token-foreground: var(--color-text-foreground);
+  --color-token-icon-foreground: var(--color-icon-primary);
+  --color-token-input-background: var(--color-background-control);
+  --color-token-input-border: var(--color-border-heavy);
+  --color-token-input-foreground: var(--color-text-foreground);
+  --color-token-input-placeholder-foreground: var(--color-text-foreground-tertiary);
+  --color-token-list-active-selection-background: var(--color-background-button-secondary);
+  --color-token-list-active-selection-foreground: var(--color-text-foreground);
+  --color-token-list-active-selection-icon-foreground: var(--color-icon-primary);
+  --color-token-list-hover-background: var(--vscode-list-hoverBackground);
+  --color-token-main-surface-primary: var(--color-background-surface);
+  --color-token-muted-foreground: var(--color-text-foreground-tertiary);
+  --color-token-text-code-block-background: var(--color-background-button-secondary);
+  --color-token-text-primary: var(--color-text-foreground);
+  --color-token-text-secondary: color-mix(in srgb, var(--color-token-foreground) 65%, transparent);
+  --color-token-text-tertiary: var(--color-token-description-foreground);
+  --color-token-warning: var(--color-text-warning);
+  --color-token-toolbar-hover-background: var(--color-background-button-secondary-hover);
+}

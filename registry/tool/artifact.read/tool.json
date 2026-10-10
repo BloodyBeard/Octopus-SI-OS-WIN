@@ -1,0 +1,45 @@
+{
+  "id": "artifact.read",
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "handler_config": {
+    "operation": "read",
+    "default_max_bytes": 65536,
+    "max_max_bytes": 1048576
+  },
+  "description": "Read a bounded UTF-8 range from one artifact currently bound to this run. The result reports the exact continuation offset; non-text carriers fail closed so the supporting interface can materialize them.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Visible artifact id or content hash."
+      },
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 4,
+        "maximum": 1048576,
+        "description": "Maximum UTF-8 bytes to return. Defaults to 65536."
+      },
+      "offset_bytes": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "UTF-8 byte offset returned by a previous read. Defaults to 0."
+      }
+    },
+    "required": [
+      "id"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

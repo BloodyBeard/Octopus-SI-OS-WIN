@@ -1,0 +1,7 @@
+{
+  "default_enabled": true,
+  "id": "terminal_resize_reflow",
+  "stage": {
+    "kind": "removed"
+  }
+}

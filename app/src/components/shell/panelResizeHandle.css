@@ -1,0 +1,16 @@
+.panel-resize-handle.pane-resize-handle {
+  user-select: none;
+}
+
+.pane-resize-handle .panel-resize-handle-line {
+  pointer-events: none;
+  transition: none;
+}
+
+.pane-resize-handle:active .panel-resize-handle-line {
+  opacity: 1;
+}
+
+.panel-resize-handle.pane-resize-handle:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--color-ring);
+}

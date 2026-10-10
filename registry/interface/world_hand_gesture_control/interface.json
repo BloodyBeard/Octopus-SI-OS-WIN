@@ -1,0 +1,31 @@
+{
+  "id": "world_hand_gesture_control",
+  "interface_type": "world",
+  "role": "sensor",
+  "direction": "bidirectional",
+  "source_names": [
+    "hand_gesture_control"
+  ],
+  "interface_driver_ref": "hand_gesture_control_life",
+  "interface_driver_config": {
+    "private_config": {
+      "protocol_version": 1,
+      "socket_file": "airhand.sock",
+      "command_label": "hand_gesture_control.command",
+      "command_result_label": "hand_gesture_control.command.result",
+      "failure_label": "hand_gesture_control.boundary.failure",
+      "event_labels": [
+        "hand_gesture_control.lifecycle",
+        "hand_gesture_control.tracking",
+        "hand_gesture_control.gesture",
+        "hand_gesture_control.pointer_effect",
+        "hand_gesture_control.calibration",
+        "hand_gesture_control.training",
+        "hand_gesture_control.permissions"
+      ],
+      "max_wire_bytes": 262144,
+      "max_pending_events": 128,
+      "event_result_history": 256
+    }
+  }
+}

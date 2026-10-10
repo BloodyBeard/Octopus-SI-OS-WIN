@@ -1,0 +1,376 @@
+:root {
+  --blue-50: #e5f3ff;
+  --blue-100: #99ceff;
+  --blue-300: #339cff;
+  --blue-400: #0285ff;
+  --blue-900: #00284d;
+  --gray-0: #fff;
+  --gray-50: #f9f9f9;
+  --gray-75: #f3f3f3;
+  --gray-100: #ededed;
+  --gray-150: #dfdfdf;
+  --gray-300: #afafaf;
+  --gray-500: #5d5d5d;
+  --gray-550: #4f4f4f;
+  --gray-600: #414141;
+  --gray-700: #303030;
+  --gray-750: #282828;
+  --gray-800: #212121;
+  --gray-900: #181818;
+  --gray-1000: #0d0d0d;
+  --green-50: #d9f4e4;
+  --green-300: #40c977;
+  --green-400: #04b84c;
+  --green-500: #00a240;
+  --green-700: #00692a;
+  --green-800: #004f1f;
+  --orange-50: #ffe7d9;
+  --orange-300: #ff8549;
+  --orange-400: #fb6a22;
+  --orange-500: #e25507;
+  --orange-700: #923b0f;
+  --orange-900: #4a2206;
+  --red-50: #ffd9d9;
+  --red-300: #ff6764;
+  --red-400: #fa423e;
+  --red-500: #e02e2a;
+  --red-600: #ba2623;
+  --red-900: #4d100e;
+  --white: #fff;
+
+  /* semantic tokens — dark is the default surface */
+  --color-accent-blue: var(--blue-300);
+  --color-accent-green: var(--green-300);
+  --color-accent-orange: var(--orange-400);
+  --color-accent-purple: var(--purple-300);
+  --color-accent-red: var(--red-300);
+  --color-accent-yellow: var(--yellow-300);
+  --color-background-accent: var(--blue-900);
+  --color-background-accent-active: var(--blue-900);
+  --color-background-accent-hover: var(--blue-900);
+  --color-background-button-primary: var(--gray-1000);
+  --color-background-button-primary-active: #0d0d0d1a;
+  --color-background-button-primary-hover: #0d0d0d0f;
+  --color-background-button-primary-inactive: #0d0d0d08;
+  --color-background-button-secondary: #ffffff0d;
+  --color-background-button-secondary-active: #ffffff1f;
+  --color-background-button-secondary-hover: #ffffff14;
+  --color-background-button-secondary-inactive: #ffffff0a;
+  --color-background-button-tertiary: #ffffff08;
+  --color-background-button-tertiary-active: #ffffff1a;
+  --color-background-button-tertiary-hover: #ffffff12;
+  --color-background-danger-active: #fa423e5c;
+  --color-background-editor-opaque: var(--gray-800);
+  --color-background-elevated-primary: #212121f5;
+  --color-background-elevated-primary-opaque: var(--gray-750);
+  --color-background-elevated-secondary: #ffffff08;
+  --color-background-elevated-secondary-opaque: var(--gray-800);
+  --color-background-status-error: var(--red-900);
+  --color-background-status-success: #04b84c29;
+  --color-background-status-warning: var(--orange-900);
+  --color-background-surface: var(--gray-900);
+  --color-background-surface-under: black;
+  --color-border: #ffffff14;
+  --color-border-error: #fa423e66;
+  --color-border-focus: #339cffb3;
+  --color-border-heavy: #ffffff29;
+  --color-border-light: #ffffff0a;
+  --color-border-warning: #ff854966;
+  --color-decoration-added: var(--green-300);
+  --color-decoration-deleted: var(--red-400);
+  --color-decoration-modified: var(--orange-300);
+  --color-decoration-unchanged: var(--gray-600);
+  --color-editor-added: #40c9773b;
+  --color-editor-deleted: #fa423e3b;
+  --color-icon-accent: var(--blue-300);
+  --color-icon-error: var(--red-300);
+  --color-icon-primary: #ffffffe6;
+  --color-icon-secondary: #ffffffb3;
+  --color-icon-success: var(--green-300);
+  --color-icon-tertiary: #ffffff80;
+  --color-icon-warning: var(--orange-300);
+  --color-simple-scrim: #ffffff1a;
+  --color-text-accent: var(--blue-100);
+  --color-text-button-primary: var(--gray-1000);
+  --color-text-button-secondary: var(--gray-300);
+  --color-text-button-tertiary: var(--gray-500);
+  --color-text-error: var(--red-300);
+  --color-text-foreground: var(--gray-0);
+  --color-text-foreground-secondary: #ffffffb3;
+  --color-text-foreground-tertiary: #ffffff80;
+  --color-text-on-accent: var(--gray-1000);
+  --color-text-success: var(--green-300);
+  --color-text-warning: var(--orange-300);
+}
+
+[data-theme="light"],
+.electron-light {
+  color-scheme: light;
+  --color-accent-blue: var(--blue-300);
+  --color-accent-green: var(--green-500);
+  --color-accent-orange: var(--orange-500);
+  --color-accent-purple: var(--purple-400);
+  --color-accent-red: var(--red-500);
+  --color-accent-yellow: var(--yellow-400);
+  --color-background-accent: var(--blue-50);
+  --color-background-accent-active: var(--blue-50);
+  --color-background-accent-hover: var(--blue-50);
+  --color-background-button-primary: var(--color-text-foreground);
+  --color-background-button-primary-active: var(--color-text-foreground);
+  --color-background-button-primary-hover: var(--color-text-foreground);
+  --color-background-button-primary-inactive: var(--color-text-foreground);
+  --color-background-button-secondary: var(--color-text-foreground);
+  --color-background-button-secondary-active: var(--color-text-foreground);
+  --color-background-button-secondary-hover: var(--color-text-foreground);
+  --color-background-button-secondary-inactive: var(--color-text-foreground);
+  --color-background-button-tertiary: var(--color-text-foreground);
+  --color-background-button-tertiary-active: var(--color-text-foreground);
+  --color-background-button-tertiary-hover: var(--color-text-foreground);
+  --color-background-danger-active: #e02e2ae6;
+  --color-background-editor-opaque: #ededed66;
+  --color-background-elevated-primary: #ffffffb3;
+  --color-background-elevated-primary-opaque: var(--gray-0);
+  --color-background-elevated-secondary: var(--color-text-foreground);
+  --color-background-elevated-secondary-opaque: #ededed66;
+  --color-background-status-error: var(--red-50);
+  --color-background-status-success: #00a24012;
+  --color-background-status-warning: var(--orange-50);
+  --color-background-surface: var(--gray-0);
+  --color-background-surface-under: var(--gray-50);
+  --color-border: var(--color-text-foreground);
+  --color-border-error: #e02e2a26;
+  --color-border-focus: var(--blue-300);
+  --color-border-heavy: var(--color-text-foreground);
+  --color-border-light: var(--color-text-foreground);
+  --color-border-warning: #e2550726;
+  --color-decoration-added: var(--green-500);
+  --color-decoration-deleted: var(--red-600);
+  --color-decoration-modified: var(--orange-700);
+  --color-decoration-unchanged: var(--gray-300);
+  --color-editor-added: #00a24026;
+  --color-editor-deleted: #ba262326;
+  --color-icon-accent: var(--blue-300);
+  --color-icon-error: var(--red-500);
+  --color-icon-primary: var(--color-text-foreground);
+  --color-icon-secondary: var(--color-text-foreground);
+  --color-icon-success: var(--green-500);
+  --color-icon-tertiary: var(--color-text-foreground);
+  --color-icon-warning: var(--orange-500);
+  --color-simple-scrim: #0000001a;
+  --color-text-accent: var(--blue-300);
+  --color-text-button-primary: var(--gray-0);
+  --color-text-button-secondary: var(--color-text-foreground);
+  --color-text-button-tertiary: var(--gray-500);
+  --color-text-error: var(--red-500);
+  --color-text-foreground: #1a1c1f;
+  --color-text-foreground-secondary: var(--color-text-foreground);
+  --color-text-foreground-tertiary: var(--color-text-foreground);
+  --color-text-on-accent: var(--gray-1000);
+  --color-text-success: var(--green-500);
+  --color-text-warning: var(--orange-500);
+}
+
+[data-theme="dark"],
+.electron-dark {
+  color-scheme: dark;
+  --color-accent-blue: var(--blue-300);
+  --color-accent-green: var(--green-300);
+  --color-accent-orange: var(--orange-400);
+  --color-accent-purple: var(--purple-300);
+  --color-accent-red: var(--red-300);
+  --color-accent-yellow: var(--yellow-300);
+  --color-background-accent: var(--blue-900);
+  --color-background-accent-active: var(--blue-900);
+  --color-background-accent-hover: var(--blue-900);
+  --color-background-button-primary: var(--gray-1000);
+  --color-background-button-primary-active: #0d0d0d1a;
+  --color-background-button-primary-hover: #0d0d0d0f;
+  --color-background-button-primary-inactive: #0d0d0d08;
+  --color-background-button-secondary: #ffffff0d;
+  --color-background-button-secondary-active: #ffffff1f;
+  --color-background-button-secondary-hover: #ffffff14;
+  --color-background-button-secondary-inactive: #ffffff0a;
+  --color-background-button-tertiary: #ffffff08;
+  --color-background-button-tertiary-active: #ffffff1a;
+  --color-background-button-tertiary-hover: #ffffff12;
+  --color-background-danger-active: #fa423e5c;
+  --color-background-editor-opaque: var(--gray-800);
+  --color-background-elevated-primary: #212121f5;
+  --color-background-elevated-primary-opaque: var(--gray-750);
+  --color-background-elevated-secondary: #ffffff08;
+  --color-background-elevated-secondary-opaque: var(--gray-800);
+  --color-background-status-error: var(--red-900);
+  --color-background-status-success: #04b84c29;
+  --color-background-status-warning: var(--orange-900);
+  --color-background-surface: var(--gray-900);
+  --color-background-surface-under: black;
+  --color-border: #ffffff14;
+  --color-border-error: #fa423e66;
+  --color-border-focus: #339cffb3;
+  --color-border-heavy: #ffffff29;
+  --color-border-light: #ffffff0a;
+  --color-border-warning: #ff854966;
+  --color-decoration-added: var(--green-300);
+  --color-decoration-deleted: var(--red-400);
+  --color-decoration-modified: var(--orange-300);
+  --color-decoration-unchanged: var(--gray-600);
+  --color-editor-added: #40c9773b;
+  --color-editor-deleted: #fa423e3b;
+  --color-icon-accent: var(--blue-300);
+  --color-icon-error: var(--red-300);
+  --color-icon-primary: #ffffffe6;
+  --color-icon-secondary: #ffffffb3;
+  --color-icon-success: var(--green-300);
+  --color-icon-tertiary: #ffffff80;
+  --color-icon-warning: var(--orange-300);
+  --color-simple-scrim: #ffffff1a;
+  --color-text-accent: var(--blue-100);
+  --color-text-button-primary: var(--gray-1000);
+  --color-text-button-secondary: var(--gray-300);
+  --color-text-button-tertiary: var(--gray-500);
+  --color-text-error: var(--red-300);
+  --color-text-foreground: var(--gray-0);
+  --color-text-foreground-secondary: #ffffffb3;
+  --color-text-foreground-tertiary: #ffffff80;
+  --color-text-on-accent: var(--gray-1000);
+  --color-text-success: var(--green-300);
+  --color-text-warning: var(--orange-300);
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  [data-theme="light"],
+  .electron-light {
+    --color-background-editor-opaque: color-mix(in oklab, var(--gray-100) 40%, transparent);
+    --color-background-elevated-primary: color-mix(in oklab, var(--gray-0) 70%, transparent);
+    --color-background-elevated-secondary: color-mix(in oklab, var(--color-text-foreground) 2%, transparent);
+    --color-background-elevated-secondary-opaque: color-mix(in oklab, var(--gray-100) 40%, transparent);
+    --color-background-button-primary-hover: color-mix(in oklab, var(--color-text-foreground) 8%, transparent);
+    --color-background-button-primary-active: color-mix(in oklab, var(--color-text-foreground) 16%, transparent);
+    --color-background-button-primary-inactive: color-mix(in oklab, var(--color-text-foreground) 24%, transparent);
+    --color-background-button-secondary: color-mix(in oklab, var(--color-text-foreground) 5%, transparent);
+    --color-background-button-secondary-hover: color-mix(in oklab, var(--color-text-foreground) 5%, transparent);
+    --color-background-button-secondary-active: color-mix(in oklab, var(--color-text-foreground) 4%, transparent);
+    --color-background-button-secondary-inactive: color-mix(in oklab, var(--color-text-foreground) 2%, transparent);
+    --color-background-button-tertiary: color-mix(in oklab, var(--color-text-foreground) 0%, transparent);
+    --color-background-button-tertiary-hover: color-mix(in oklab, var(--color-text-foreground) 10%, transparent);
+    --color-background-button-tertiary-active: color-mix(in oklab, var(--color-text-foreground) 20%, transparent);
+    --color-background-status-success: color-mix(in oklab, var(--green-500) 7%, transparent);
+    --color-background-danger-active: color-mix(in oklab, var(--red-500) 90%, transparent);
+    --color-text-foreground-secondary: color-mix(in oklab, var(--color-text-foreground) 70%, transparent);
+    --color-text-foreground-tertiary: color-mix(in oklab, var(--color-text-foreground) 50%, transparent);
+    --color-icon-secondary: color-mix(in oklab, var(--color-text-foreground) 70%, transparent);
+    --color-icon-tertiary: color-mix(in oklab, var(--color-text-foreground) 50%, transparent);
+    --color-border: color-mix(in oklab, var(--color-text-foreground) 8%, transparent);
+    --color-border-heavy: color-mix(in oklab, var(--color-text-foreground) 12%, transparent);
+    --color-border-light: color-mix(in oklab, var(--color-text-foreground) 5%, transparent);
+    --color-border-warning: color-mix(in oklab, var(--orange-500) 15%, transparent);
+    --color-border-error: color-mix(in oklab, var(--red-500) 15%, transparent);
+    --color-editor-added: color-mix(in oklab, var(--green-500) 15%, transparent);
+    --color-editor-deleted: color-mix(in oklab, var(--red-600) 15%, transparent);
+  }
+
+  [data-theme="dark"],
+  .electron-dark {
+    --color-background-elevated-primary: color-mix(in oklab, var(--gray-800) 96%, transparent);
+    --color-background-elevated-secondary: color-mix(in oklab, var(--gray-0) 3%, transparent);
+    --color-background-button-primary-hover: color-mix(in oklab, var(--gray-1000) 6%, transparent);
+    --color-background-button-primary-active: color-mix(in oklab, var(--gray-1000) 10%, transparent);
+    --color-background-button-primary-inactive: color-mix(in oklab, var(--gray-1000) 3%, transparent);
+    --color-background-button-secondary: color-mix(in oklab, var(--gray-0) 5%, transparent);
+    --color-background-button-secondary-hover: color-mix(in oklab, var(--gray-0) 8%, transparent);
+    --color-background-button-secondary-active: color-mix(in oklab, var(--gray-0) 12%, transparent);
+    --color-background-button-secondary-inactive: color-mix(in oklab, var(--gray-0) 4%, transparent);
+    --color-background-button-tertiary: color-mix(in oklab, var(--gray-0) 3%, transparent);
+    --color-background-button-tertiary-hover: color-mix(in oklab, var(--gray-0) 7%, transparent);
+    --color-background-button-tertiary-active: color-mix(in oklab, var(--gray-0) 10%, transparent);
+    --color-background-status-success: color-mix(in oklab, var(--green-400) 16%, transparent);
+    --color-background-danger-active: color-mix(in oklab, var(--red-400) 36%, transparent);
+    --color-text-foreground-secondary: color-mix(in oklab, var(--gray-0) 70%, transparent);
+    --color-text-foreground-tertiary: color-mix(in oklab, var(--gray-0) 50%, transparent);
+    --color-icon-primary: color-mix(in oklab, var(--white) 90%, transparent);
+    --color-icon-secondary: color-mix(in oklab, var(--white) 70%, transparent);
+    --color-icon-tertiary: color-mix(in oklab, var(--white) 50%, transparent);
+    --color-border: color-mix(in oklab, var(--white) 8%, transparent);
+    --color-border-heavy: color-mix(in oklab, var(--white) 16%, transparent);
+    --color-border-light: color-mix(in oklab, var(--white) 4%, transparent);
+    --color-border-warning: color-mix(in oklab, var(--orange-300) 40%, transparent);
+    --color-border-error: color-mix(in oklab, var(--red-400) 40%, transparent);
+    --color-border-focus: color-mix(in oklab, var(--blue-300) 70%, transparent);
+    --color-editor-added: color-mix(in oklab, var(--green-300) 23%, transparent);
+    --color-editor-deleted: color-mix(in oklab, var(--red-400) 23%, transparent);
+  }
+}
+
+/* purple/yellow primitives (charts + accents) + the --color-token-* bridge the
+   codex power-slider builds on, mapped onto our semantic tokens */
+:root {
+  --purple-300: #ad7bf9;
+  --purple-400: #924ff7;
+  --yellow-300: #ffd240;
+  --color-token-charts-blue: var(--color-accent-blue);
+  --color-token-charts-green: var(--color-accent-green);
+  --color-token-charts-orange: var(--color-accent-orange);
+  --color-token-charts-purple: var(--color-accent-purple);
+  --color-token-charts-red: var(--color-accent-red);
+  --color-token-charts-yellow: var(--color-accent-yellow);
+  --color-token-foreground: var(--color-text-foreground);
+  --color-token-border: var(--color-border);
+  --color-token-focus-border: var(--color-border-focus);
+  --color-token-description-foreground: var(--vscode-descriptionForeground);
+  --cursor-interaction: pointer;
+  --color-surface: var(--color-background-surface);
+  --color-surface-secondary: var(--vscode-sideBar-background);
+  --color-surface-tertiary: var(--vscode-editor-background);
+  --color-surface-elevated-secondary: var(--vscode-dropdown-background);
+  --color-text: var(--vscode-foreground);
+  --color-text-primary-solid: var(--vscode-dropdown-background);
+  --color-text-emphasis: var(--vscode-list-activeSelectionForeground, var(--color-text));
+  --color-text-secondary: var(--vscode-foreground);
+  --color-text-tertiary: var(--vscode-descriptionForeground);
+  --color-text-info: var(--vscode-textLink-foreground);
+  --color-text-danger: var(--vscode-errorForeground);
+  --color-text-description: var(--vscode-descriptionForeground);
+  --color-octopus-editor-line-highlight: var(--vscode-editor-lineHighlightBackground, transparent);
+  --color-octopus-git-added: var(--vscode-gitDecoration-addedResourceForeground);
+  --color-octopus-git-deleted: var(--vscode-gitDecoration-deletedResourceForeground);
+  --color-octopus-git-modified: var(--vscode-gitDecoration-modifiedResourceForeground);
+  --color-octopus-git-ignored: var(--vscode-gitDecoration-ignoredResourceForeground);
+  --color-ring: var(--vscode-focusBorder);
+  --color-chart-blue: var(--vscode-charts-blue);
+  --color-chart-purple: var(--vscode-charts-purple);
+  --color-control-thumb-foreground: var(--color-text);
+  --color-border-subtle: var(--color-border-light, var(--vscode-foreground));
+  --color-border-strong: var(--color-border-heavy, var(--vscode-foreground));
+  --color-border-primary-outline: var(--vscode-input-border, var(--color-border-strong));
+  --color-background-info-soft: var(--vscode-editor-selectionBackground);
+  --color-background-info-solid: var(--vscode-charts-blue);
+  --color-background-primary-soft: var(--vscode-input-background);
+  --color-background-primary-solid: var(--vscode-foreground);
+  --color-background-primary-soft-alpha: var(--vscode-foreground);
+  --color-background-primary-soft-active: var(--vscode-list-activeSelectionBackground);
+  --color-background-primary-ghost-hover: var(--vscode-list-hoverBackground);
+  --color-background-secondary-ghost-hover: color-mix(in oklab, #fff 12%, transparent);
+  --color-background-secondary-ghost-active: color-mix(in oklab, #fff 16%, transparent);
+  --color-background-secondary-soft-alpha: var(--vscode-textCodeBlock-background);
+  --icon-leading-size: 16px;
+  --leading-dense: calc(7 / 6);
+  --blur-lg: 16px;
+}
+
+:root[data-theme="light"] {
+  --color-background-secondary-ghost-hover: color-mix(in oklab, #0d0d0d 8%, transparent);
+  --color-background-secondary-ghost-active: color-mix(in oklab, #0d0d0d 12%, transparent);
+}
+
+:root[data-theme="dark"] {
+  --color-control-thumb-foreground: #000;
+}
+
+@supports (color: color-mix(in lab, red, red)) {
+  :root {
+    --color-text-secondary: color-mix(in srgb, var(--vscode-foreground) 65%, transparent);
+    --color-background-primary-soft-alpha: color-mix(in oklab, var(--vscode-foreground) 2.5%, transparent);
+    --color-border-subtle: var(--color-border-light, color-mix(in oklab, var(--vscode-foreground) 5%, transparent));
+    --color-border-strong: var(--color-border-heavy, color-mix(in oklab, var(--vscode-foreground) 12%, transparent));
+  }
+}

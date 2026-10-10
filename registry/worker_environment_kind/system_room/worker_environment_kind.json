@@ -1,0 +1,113 @@
+{
+  "worker_environment_kind_id": "system_room",
+  "substrate_family": "process_exec",
+  "door_driver_refs": [
+    "system_room"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-artifact-bound-tool",
+    "target/debug/octopus-artifact-send-tool",
+    "target/debug/octopus-file-write-tool",
+    "target/debug/octopus-file-read-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "filesystem"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [
+      {
+        "path": "run_records_root",
+        "access": [
+          "read"
+        ]
+      },
+      {
+        "path": "ee_instances_root",
+        "access": [
+          "read"
+        ]
+      }
+    ],
+    "write_root_refs": [
+      {
+        "path": "artifact_blobs_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "run_records_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_interface_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_artifact_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_mark_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_verifier_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_tool_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_worker_environment_kind_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "ee_instances_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      },
+      {
+        "path": "registry_ee_template_root",
+        "access": [
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "denied"
+  },
+  "lifecycle": {
+    "requires_release": false
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "label": "lifecycle.connection",
+  "schema_version": 1,
+  "connection_id": "example-connection",
+  "lifecycle_interface": "system_lifecycle_events",
+  "subagent_interfaces": ["system_worker_reviewer"],
+  "handlers": [
+    {
+      "id": "pre-tool-command",
+      "event": "pre_tool_use",
+      "emitter_run": "run-codex-example",
+      "owner_run": "run-codex-example",
+      "mode": "sync",
+      "order": 0,
+      "enabled": true,
+      "matcher": "^coder\\.exec$",
+      "source": {
+        "layer": "project",
+        "path": "project/hooks.json",
+        "trust": "trusted",
+        "handler_content_sha256": "17e544c465d6d62beb47e02648b4b17bd8dd74110cef528fe1693374a001fc62"
+      },
+      "handler": {
+        "type": "command",
+        "tool": "coder.exec",
+        "arguments": { "command": "${data.command}" },
+        "result_pointer": "/body"
+      }
+    },
+    {
+      "id": "post-tool-mcp",
+      "event": "post_tool_use",
+      "emitter_run": "run-codex-example",
+      "owner_run": "run-codex-example",
+      "mode": "async",
+      "order": 0,
+      "enabled": true,
+      "matcher": "^mcp\\.example",
+      "source": {
+        "layer": "user",
+        "path": "user/hooks.json",
+        "trust": "trusted",
+        "handler_content_sha256": "67404f095309699b07c639de84bfdca3e42f55deb529721ad08d80fd18d2a6bd"
+      },
+      "handler": {
+        "type": "mcp_tool",
+        "interface": "world_mcp_example",
+        "operation": "mcp.example.call_tool",
+        "request_label": "mcp.operation.request",
+        "input": { "arguments": "${data.arguments}" },
+        "result_pointer": "/result"
+      }
+    },
+    {
+      "id": "prompt-submit-review",
+      "event": "user_prompt_submit",
+      "emitter_run": "run-codex-example",
+      "owner_run": "run-codex-example",
+      "mode": "sync",
+      "order": 0,
+      "enabled": true,
+      "source": {
+        "layer": "mdm",
+        "path": "managed/hooks.json",
+        "trust": "managed",
+        "handler_content_sha256": "b0f44422721478f71b8481a65a1966e026868b2ddc40c570cab59cc3a870ce69"
+      },
+      "handler": {
+        "type": "prompt",
+        "provider_interface": "world_provider_codex",
+        "prompt": "Decide ${event} for ${data.summary}"
+      }
+    },
+    {
+      "id": "session-end-reviewer",
+      "event": "session_end",
+      "emitter_run": "run-codex-example",
+      "owner_run": "run-codex-example",
+      "mode": "async",
+      "order": 0,
+      "enabled": true,
+      "source": {
+        "layer": "packaged_defaults",
+        "path": "package/hooks.json",
+        "trust": "trusted",
+        "handler_content_sha256": "590c4072ae66ca5673b94ecd157f142509036f4bc40f7355497e7214011301d0"
+      },
+      "handler": {
+        "type": "agent",
+        "worker_interface": "system_worker_reviewer",
+        "task": "Review ${event} for ${data.summary}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+.oc-octopus-icon-control[data-appearance=sidebar] {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: calc(var(--spacing) * 6); height: calc(var(--spacing) * 6); padding: var(--spacing); border: 1px solid transparent;
+  border-radius: var(--radius-md); corner-shape: var(--octopus-corner-shape); background: transparent; color: color-mix(in oklab, var(--color-token-foreground) 50%, transparent);
+  cursor: var(--cursor-interaction);
+}
+.oc-octopus-icon-control[data-appearance=sidebar]:enabled:hover, .oc-octopus-icon-control[data-appearance=sidebar]:focus-visible { color: var(--color-text); }
+.oc-octopus-icon-control[data-appearance=sidebar]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring); }
+.oc-octopus-icon-control[data-appearance=sidebar] > svg { width: 16px; height: 16px; }
+.oc-octopus-icon-control[data-appearance=compact] {
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  height: 24px; aspect-ratio: 1; padding: 0; gap: var(--spacing);
+  border: 1px solid transparent; border-radius: var(--radius-lg);
+  color: var(--color-text-tertiary); background: transparent; cursor: var(--cursor-interaction); user-select: none;
+}
+.oc-octopus-icon-control[data-appearance=compact]:enabled:hover,
+.oc-octopus-icon-control[data-appearance=compact]:enabled[data-state=open] { background: var(--color-background-primary-ghost-hover); }
+.oc-octopus-icon-control[data-appearance=compact][data-selected=true] { color: var(--color-text-info); background: color-mix(in oklab, var(--color-text-info) 10%, transparent); }
+.oc-octopus-icon-control[data-appearance=compact][data-selected=true]:enabled:hover,
+.oc-octopus-icon-control[data-appearance=compact][data-selected=true]:enabled[data-state=open] { background: color-mix(in oklab, var(--color-text-info) 15%, transparent); }
+.oc-octopus-icon-control[data-appearance=compact]:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--color-ring); }
+
+.oc-octopus-icon-control:disabled { cursor: default; opacity: .4; }
+
+.oc-octopus-icon-control[data-appearance=rail] {
+  position: relative;
+  display: flex;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: var(--cursor-interaction);
+  transition: color .15s ease, background-color .15s ease;
+}
+
+.oc-octopus-icon-control[data-appearance=rail] > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.oc-octopus-icon-control[data-appearance=rail]::before {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--color-background-secondary-ghost-hover);
+  opacity: 0;
+  transition: opacity .15s ease, background-color .15s ease;
+  content: "";
+}
+
+.oc-octopus-icon-control[data-appearance=rail] > * { position: relative; }
+
+.oc-octopus-icon-control[data-appearance=rail]:enabled:hover,
+.oc-octopus-icon-control[data-appearance=rail][data-selected=true],
+.oc-octopus-icon-control[data-appearance=rail][data-state=open] {
+  color: var(--color-text);
+}
+
+.oc-octopus-icon-control[data-appearance=rail]:enabled:hover::before,
+.oc-octopus-icon-control[data-appearance=rail][data-selected=true]::before,
+.oc-octopus-icon-control[data-appearance=rail][data-state=open]::before {
+  opacity: 1;
+}
+
+.oc-octopus-icon-control[data-appearance=rail]:enabled:active {
+  background: transparent;
+}
+
+.oc-octopus-icon-control[data-appearance=rail]:enabled:active::before {
+  background: var(--color-background-secondary-ghost-active);
+}
+
+.oc-octopus-icon-control[data-appearance=rail]:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: -1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-octopus-icon-control[data-appearance=rail],
+  .oc-octopus-icon-control[data-appearance=rail]::before { transition: none; }
+}

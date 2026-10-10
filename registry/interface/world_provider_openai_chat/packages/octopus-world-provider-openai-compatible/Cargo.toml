@@ -1,0 +1,35 @@
+[package]
+name = "octopus-world-provider-openai-compatible"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+name = "octopus_world_provider_openai_compatible"
+path = "src/lib.rs"
+
+[[bin]]
+name = "octopus-world-provider-openai-compatible-life"
+path = "src/bin/life.rs"
+
+[dependencies]
+base64 = "0.22"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+blake3 = "1"
+tokio = { workspace = true }
+
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
+octopus-azure-auth = { path = "../../../world_provider_azure_foundry/packages/octopus-azure-auth" }
+octopus-model-context-render = { path = "../../../world_provider_codex/packages/octopus-model-context-render" }
+octopus-provider-credential-pool = { path = "../octopus-provider-credential-pool" }
+octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-secrets = { path = "../../../world_provider_codex/packages/octopus-secrets" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }

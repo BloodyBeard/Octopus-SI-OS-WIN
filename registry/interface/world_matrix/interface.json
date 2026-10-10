@@ -1,0 +1,10 @@
+{
+  "id": "world_matrix",
+  "interface_type": "world",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": [
+    "matrix"
+  ],
+  "interface_driver_ref": "matrix_life"
+}

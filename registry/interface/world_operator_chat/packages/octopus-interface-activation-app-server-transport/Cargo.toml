@@ -1,0 +1,47 @@
+[package]
+name = "octopus-interface-activation-app-server-transport"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+rust-version = "1.85"
+
+[lib]
+name = "octopus_interface_activation_app_server_transport"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+octopus-app-server-interface = { path = "../octopus-app-server-interface" }
+octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+json-patch.workspace = true
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-policy = { path = "../../../../../crates/octopus-policy" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10"
+url = "2"
+tokio = { workspace = true, features = ["rt", "sync", "net", "fs", "time", "macros", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+# This package owns Unix/WebSocket transport and Home consent execution.
+# Pure wire contracts live in octopus-app-server-interface; checked run evidence
+# belongs to octopus-provider-run-authoring. Provider-specific protocols remain
+# in their declared provider packages.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+tokio-tungstenite = "0.28.0"
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+octopus-util-abspath = { path = "../../../../worker_environment_kind/process_session/packages/octopus-util-abspath" }
+
+[dev-dependencies]
+# The default-bind contract test drives the real activation start (async) against
+# a temp octopus home and asserts the CONVENTIONAL socket is bound when the
+# listen env var is unset (and that the arm stays dormant without the opt-in).
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "net"] }
+tempfile = "3.23.0"

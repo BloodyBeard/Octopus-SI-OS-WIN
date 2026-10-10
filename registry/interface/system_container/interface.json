@@ -1,0 +1,26 @@
+{
+  "id": "system_container",
+  "interface_type": "system",
+  "role": "system",
+  "direction": "bidirectional",
+  "source_names": [
+    "container"
+  ],
+  "interface_driver_ref": "system_container",
+  "interface_driver_config": {
+    "private_config": {
+      "process_env_keys": [
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CONFIG",
+        "DOCKER_API_VERSION",
+        "CONTAINER_HOST",
+        "CONTAINER_CONNECTION",
+        "REGISTRY_AUTH_FILE",
+        "XDG_RUNTIME_DIR"
+      ]
+    }
+  }
+}

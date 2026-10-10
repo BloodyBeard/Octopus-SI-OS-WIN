@@ -1,0 +1,11 @@
+---
+source: interfaces/octopus-codex-tui/src/insert_history.rs
+assertion_line: 937
+expression: "rows.join(\"\\n\")"
+---
+
+
+
+raw-start-aaaaaaaaaa
+aaaaaaaaaaaaaa-tail-
+must-remain

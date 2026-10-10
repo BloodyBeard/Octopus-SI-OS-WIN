@@ -1,0 +1,31 @@
+{
+  "schema": "octopus.client_surface",
+  "schema_version": 1,
+  "release_channel": "lab",
+  "id": "voice.interactive-environment",
+  "revision": 1,
+  "title": "Environment controls",
+  "glyph": "terminal",
+  "target": {
+    "kind": "voice.window",
+    "slot": "right",
+    "order": 40,
+    "size": "standard"
+  },
+  "data": {
+    "caption": "Declared local actions"
+  },
+  "render": {
+    "kind": "sandbox",
+    "initial_height": 176,
+    "html": "<main><small id=caption></small><h2>Worker Environment</h2><p>Open an admitted viewer without giving this sandbox a transport.</p><div><button id=terminal>Terminal</button></div></main>",
+    "css": "main{padding:16px}small{color:var(--color-text-tertiary)}h2{margin:5px 0 3px;font-size:17px}p{margin:0 0 14px;color:var(--color-text-secondary);line-height:1.4}div{display:flex;gap:8px}button{border:1px solid var(--color-border-primary);border-radius:8px;background:var(--color-background-secondary);color:var(--color-text-primary);padding:6px 10px;font:inherit;cursor:pointer}button:hover{filter:brightness(1.08)}",
+    "javascript": "caption.textContent=octopusSurface.data.caption;terminal.onclick=()=>octopusSurface.invoke('open-terminal')",
+    "actions": {
+      "open-terminal": {
+        "event": "client.command",
+        "payload": { "command": "open_terminal" }
+      }
+    }
+  }
+}

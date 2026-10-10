@@ -1,0 +1,38 @@
+{
+  "id": "workspace.grep",
+  "interface": "system_workspace_env",
+  "handler_config": {
+    "operation": "grep",
+    "max_scanned_files": 50000,
+    "max_scanned_bytes": 268435456,
+    "deadline_ms": 30000,
+    "max_line_bytes": 1048576
+  },
+  "process": {
+    "bin": "target/debug/octopus-workspace-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "workspace_root"],
+      "write_root_slots": [], "executable_root_slots": [],
+      "optional_read_root_slots": ["host_filesystem_root"],
+      "read_paths": [], "write_paths": [], "executable_paths": [], "executable_commands": [],
+      "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+      "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["filesystem_workspace"],
+  "description": "Search text by regular expression or fuzzy paths inside the formed workspace or an additional filesystem root explicitly granted to this task under descriptor-owned file, byte, deadline, and line-memory ceilings.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string", "minLength": 1},
+      "mode": {"type": "string", "enum": ["content", "path"]},
+      "path": {"type": "string"},
+      "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
+      "case_sensitive": {"type": "boolean"}
+    },
+    "required": ["query"],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

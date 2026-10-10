@@ -1,0 +1,30 @@
+.task-actions-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  pointer-events: none;
+}
+
+.task-actions-menu {
+  position: fixed;
+  width: 244px;
+  overflow: auto;
+  outline: none;
+  pointer-events: auto;
+}
+
+.task-actions-separator {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--color-token-border);
+}
+
+.task-action-shortcut {
+  flex-shrink: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.task-actions-menu .oc-menu-item[aria-expanded="true"] {
+  background: var(--color-background-primary-ghost-hover);
+}

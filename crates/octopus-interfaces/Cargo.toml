@@ -1,0 +1,20 @@
+[package]
+name = "octopus-interfaces"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+async-trait.workspace = true
+libc = "0.2.182"
+tempfile = "3.23.0"
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-marks = { path = "../octopus-marks" }
+octopus-policy = { path = "../octopus-policy" }

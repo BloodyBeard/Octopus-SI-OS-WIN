@@ -1,0 +1,18 @@
+[package]
+name = "octopus-worker-env"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-interfaces = { path = "../octopus-interfaces" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,10 @@
+{
+  "id": "project",
+  "goal_class": "Carry one named project outcome inside the operator space under its narrowed policy.",
+  "allowed_interfaces": null,
+  "allowed_worker_environment_kinds": null,
+  "allowed_child_ee_templates": [
+    "project"
+  ],
+  "bootstrap_root": false
+}

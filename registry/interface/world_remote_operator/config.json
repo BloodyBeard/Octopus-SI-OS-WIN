@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "transport": {
+    "base_url_env": "REMOTE_OPERATOR_BASE_URL",
+    "auth_token_env": "REMOTE_OPERATOR_AUTH_TOKEN",
+    "auth_kind_env": "REMOTE_OPERATOR_AUTH_KIND",
+    "account_id_env": "REMOTE_OPERATOR_ACCOUNT_ID",
+    "server_name_env": "REMOTE_OPERATOR_SERVER_NAME",
+    "installation_id_env": "REMOTE_OPERATOR_INSTALLATION_ID",
+    "request_timeout_ms": 30000,
+    "max_response_bytes": 8388608,
+    "user_agent": "octopus-remote-operator/1"
+  },
+  "protocol": {
+    "version": "3",
+    "segment_target_bytes": 102400,
+    "segment_max_bytes": 153600,
+    "reassembled_max_bytes": 104857600,
+    "segment_count_max": 1024,
+    "assembly_count_max": 128,
+    "outbound_buffer_max": 4096,
+    "connect_timeout_ms": 30000,
+    "enable_ready_timeout_ms": 10000,
+    "ping_interval_ms": 10000,
+    "pong_timeout_ms": 60000,
+    "shutdown_timeout_ms": 5000,
+    "reconnect_backoff_ms": 1000,
+    "reconnect_backoff_cap_ms": 30000,
+    "token_refresh_skew_ms": 300000,
+    "body_preview_bytes": 4096
+  },
+  "contract": {
+    "accepted_labels": [
+      "remote_operator.request"
+    ],
+    "max_client_id_chars": 512,
+    "max_stream_id_chars": 512,
+    "max_pairing_code_chars": 1024,
+    "max_clients_limit": 100,
+    "operation_catalog_dir": "operations"
+  },
+  "driver_ipc": {
+    "ledger_batch_size": 64,
+    "idle_sleep_ms": 100,
+    "verdict_timeout_ms": 30000,
+    "max_cached_manifest_bytes": 1048576,
+    "max_outbound_payload_bytes": 268435456,
+    "ledger_fallback_max_line_bytes": 8388608
+  }
+}

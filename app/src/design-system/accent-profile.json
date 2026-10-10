@@ -1,0 +1,25 @@
+{
+  "theme": "black",
+  "light": {
+    "accent": "#3a83f7",
+    "text": "#2c67c5",
+    "soft": "#e8f3fe",
+    "submitBackground": "#000000",
+    "submitText": "#ffffff",
+    "userMessageBackground": "#000000",
+    "userMessageText": "#ffffff",
+    "selection": "#afafaf66",
+    "attributionHighlight": "#afafaf66"
+  },
+  "dark": {
+    "accent": "#3a83f7",
+    "text": "#2c67c5",
+    "soft": "#133463",
+    "submitBackground": "#ffffff",
+    "submitText": "#000000",
+    "userMessageBackground": "rgb(50 50 50 / 85%)",
+    "userMessageText": "#ffffff",
+    "selection": "#41414166",
+    "attributionHighlight": "#41414166"
+  }
+}

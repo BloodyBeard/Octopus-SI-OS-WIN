@@ -1,0 +1,46 @@
+[package]
+name = "octopus-code-mode-room"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+octopus-code-mode-engine = { path = "../octopus-code-mode-engine" }
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+libc = "0.2.182"
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+
+octopus-provider-run-authoring = { path = "../../../../interface/world_provider_ollama/packages/octopus-provider-run-authoring" }
+
+
+[dev-dependencies]
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-interface-activation-app-server-transport = { path = "../../../../interface/world_operator_chat/packages/octopus-interface-activation-app-server-transport" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+futures = { version = "0.3", default-features = false }
+tokio-tungstenite = "0.28.0"
+sha2 = "0.10"
+octopus-marks = { path = "../../../../../crates/octopus-marks" }
+octopus-verifiers = { path = "../../../../../crates/octopus-verifiers" }
+octopus-system-gui-env = { path = "../../../desktop_session/packages/octopus-system-gui-env" }
+octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime", features = ["owner-contract-tests"] }
+blake3.workspace = true
+tempfile = "3"
+
+octopus-policy = { path = "../../../../../crates/octopus-policy" }
+fs2 = "0.4"
+json-patch.workspace = true

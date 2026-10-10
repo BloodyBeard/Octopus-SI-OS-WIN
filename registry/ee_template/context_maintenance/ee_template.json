@@ -1,0 +1,23 @@
+{
+  "id": "context_maintenance",
+  "goal_class": "Maintain durable context artifacts under policy: consolidate, deduplicate, and update only explicitly bound evidence without inventing a separate memory subsystem.",
+  "allowed_tools": [
+    "artifact.read",
+    "artifact.list",
+    "artifact.search",
+    "artifact.append"
+  ],
+  "allowed_interfaces": [
+    "system_context"
+  ],
+  "allowed_worker_environment_kinds": [
+    "system_room"
+  ],
+  "hard_blocked_tools": [],
+  "allowed_child_ee_templates": [],
+  "bootstrap_root": false,
+  "allowed_root_slots": [
+    "run_records_root",
+    "registry_interface_root"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "worker_environment_kind_id": "audio_device_session",
+  "substrate_family": "audio_device",
+  "door_driver_refs": [
+    "audio_device"
+  ],
+  "tool_process_bins": [
+    "target/debug/octopus-audio-device-session-tool"
+  ],
+  "worker_consent": "explicit_ceiling",
+  "supported_executor_kinds": [
+    "exec"
+  ],
+  "capabilities": [
+    "audio_capture",
+    "audio_device_inventory",
+    "audio_playback",
+    "local_hardware_io",
+    "media_artifact_capture"
+  ],
+  "boundary_defaults": {
+    "read_root_refs": [],
+    "write_root_refs": [],
+    "protected_read_only_subpaths": [],
+    "network_ceiling": "denied"
+  },
+  "lifecycle": {
+    "requires_release": false
+  }
+}

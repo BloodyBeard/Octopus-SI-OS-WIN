@@ -1,0 +1,23 @@
+[package]
+name = "octopus-runtime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-marks = { path = "../octopus-marks" }
+octopus-policy = { path = "../octopus-policy" }
+octopus-interfaces = { path = "../octopus-interfaces" }
+# runtime IS the mechanism plane — it is the body, so tokio/async are allowed here
+# (the purity fence lives in octopus-policy (L3), which this crate calls but never
+# re-implements). spec_octopus-runtime.md §1.
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }

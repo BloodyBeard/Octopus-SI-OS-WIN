@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "octopus://system_lifecycle_events/lifecycle.decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "label",
+    "schema_version",
+    "connection_id",
+    "connection_artifact",
+    "event_id",
+    "emitter_run",
+    "owner_run",
+    "handler_id",
+    "event",
+    "mode",
+    "decision",
+    "handler_type",
+    "subject_artifact",
+    "event_artifact"
+  ],
+  "properties": {
+    "label": { "const": "lifecycle.decision" },
+    "schema_version": { "const": 1 },
+    "connection_id": { "$ref": "#/$defs/non_empty" },
+    "connection_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "event_id": {
+      "type": "string",
+      "pattern": "^lifecycle:[0-9a-f]{64}$"
+    },
+    "emitter_run": { "$ref": "#/$defs/non_empty" },
+    "owner_run": { "$ref": "#/$defs/non_empty" },
+    "handler_id": { "$ref": "#/$defs/non_empty" },
+    "event": {
+      "enum": [
+        "pre_tool_use",
+        "permission_request",
+        "post_tool_use",
+        "pre_compact",
+        "post_compact",
+        "session_start",
+        "user_prompt_submit",
+        "subagent_stop",
+        "stop"
+      ]
+    },
+    "mode": { "const": "sync" },
+    "decision": { "enum": ["allow", "continue", "deny", "block", "stop"] },
+    "handler_type": { "enum": ["command", "mcp_tool", "prompt", "agent"] },
+    "subject_artifact": { "$ref": "#/$defs/artifact_ref" },
+    "event_artifact": { "$ref": "event.schema.json" },
+    "reason": { "$ref": "#/$defs/non_empty" },
+    "additional_context_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/artifact_ref" }
+    },
+    "replacement_artifact": { "$ref": "#/$defs/artifact_ref" }
+  },
+  "$defs": {
+    "non_empty": { "type": "string", "minLength": 1 },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "content"],
+      "properties": {
+        "id": { "$ref": "#/$defs/non_empty" },
+        "content": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}

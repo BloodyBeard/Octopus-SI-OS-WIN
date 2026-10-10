@@ -1,0 +1,24 @@
+[package]
+name = "octopus-ledger-store"
+edition = "2024"
+version.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+name = "octopus_ledger_store"
+path = "src/lib.rs"
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+octopus-ledger = { path = "../octopus-ledger" }
+octopus-descriptors = { path = "../octopus-descriptors" }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+tempfile = "3.23.0"

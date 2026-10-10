@@ -1,0 +1,37 @@
+{
+  "id": "remote_operator.pairing.status",
+  "request_label": "remote_operator.request",
+  "output_label": "remote_operator.pairing",
+  "handler_config": {
+    "operation": "pairing.status"
+  },
+  "description": "Check whether one exact pairing code or one exact manual pairing code was claimed. Supplying both or neither fails closed.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "pairing_code": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "manual_pairing_code": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      }
+    },
+    "oneOf": [
+      {
+        "required": [
+          "pairing_code"
+        ]
+      },
+      {
+        "required": [
+          "manual_pairing_code"
+        ]
+      }
+    ],
+    "additionalProperties": false
+  }
+}

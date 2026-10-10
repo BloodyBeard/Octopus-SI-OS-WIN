@@ -1,0 +1,891 @@
+diff --git a/electron/BUILD.gn b/electron/BUILD.gn
+--- a/electron/BUILD.gn
++++ b/electron/BUILD.gn
+@@ -579,7 +579,13 @@
+     sources += filenames.lib_sources_win
+   }
+   if (is_mac) {
+-    sources += filenames.lib_sources_mac
++    sources += filenames.lib_sources_mac + [
++      "shell/browser/api/owned_download_history.cc",
++      "shell/browser/api/owned_download_history.h",
++      "shell/browser/api/owned_download_history_binding.cc",
++      "shell/browser/api/owned_download_history_binding.h",
++    ]
++    deps += [ "//components/history/core/browser", "//components/history/content/browser", "//components/url_formatter", "//sql" ]
+   }
+   if (is_posix) {
+     sources += filenames.lib_sources_posix
+diff --git a/electron/lib/browser/api/session.ts b/electron/lib/browser/api/session.ts
+--- a/electron/lib/browser/api/session.ts
++++ b/electron/lib/browser/api/session.ts
+@@ -4,7 +4,7 @@
+ 
+ import { net } from 'electron/main';
+ 
+-const { fromPartition, fromPath, Session } = process._linkedBinding('electron_browser_session');
++const { fromPartition, fromPath, openOwnedDownloadHistory, Session } = process._linkedBinding('electron_browser_session');
+ const { isDisplayMediaSystemPickerAvailable } = process._linkedBinding('electron_browser_desktop_capturer');
+ 
+ // Fake video window that activates the native system picker
+@@ -117,6 +117,7 @@
+ );
+ 
+ export default {
++  openOwnedDownloadHistory,
+   fromPartition,
+   fromPath,
+   get defaultSession() {
+diff --git a/electron/shell/browser/api/electron_api_download_item.cc b/electron/shell/browser/api/electron_api_download_item.cc
+--- a/electron/shell/browser/api/electron_api_download_item.cc
++++ b/electron/shell/browser/api/electron_api_download_item.cc
+@@ -184,6 +184,11 @@
+   if (!CheckAlive())
+     return false;
+   return download_item_->HasUserGesture();
++}
++
++std::string DownloadItem::GetGUID() const {
++  if (!CheckAlive()) return "";
++  return download_item_->GetGuid();
+ }
+ 
+ std::string DownloadItem::GetFilename() const {
+@@ -284,6 +289,7 @@
+       .SetMethod("getPercentComplete", &DownloadItem::GetPercentComplete)
+       .SetMethod("getMimeType", &DownloadItem::GetMimeType)
+       .SetMethod("hasUserGesture", &DownloadItem::HasUserGesture)
++      .SetMethod("getGUID", &DownloadItem::GetGUID)
+       .SetMethod("getFilename", &DownloadItem::GetFilename)
+       .SetMethod("getContentDisposition", &DownloadItem::GetContentDisposition)
+       .SetMethod("getURL", &DownloadItem::GetURL)
+diff --git a/electron/shell/browser/api/electron_api_download_item.h b/electron/shell/browser/api/electron_api_download_item.h
+--- a/electron/shell/browser/api/electron_api_download_item.h
++++ b/electron/shell/browser/api/electron_api_download_item.h
+@@ -73,6 +73,7 @@
+   int GetPercentComplete() const;
+   std::string GetMimeType() const;
+   bool HasUserGesture() const;
++  std::string GetGUID() const;
+   std::string GetFilename() const;
+   std::string GetContentDisposition() const;
+   const GURL& GetURL() const;
+diff --git a/electron/shell/browser/api/electron_api_session.cc b/electron/shell/browser/api/electron_api_session.cc
+--- a/electron/shell/browser/api/electron_api_session.cc
++++ b/electron/shell/browser/api/electron_api_session.cc
+@@ -3,6 +3,10 @@
+ // found in the LICENSE file.
+ 
+ #include "shell/browser/api/electron_api_session.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "shell/browser/api/owned_download_history_binding.h"
++#endif
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -597,6 +601,9 @@
+ }
+ 
+ void Session::Dispose() {
++#if BUILDFLAG(IS_MAC)
++  owned_download_history_.reset();
++#endif
+   if (keep_alive_) {
+     browser_context()->GetDownloadManager()->RemoveObserver(this);
+ 
+@@ -608,6 +615,37 @@
+ #endif
+   }
+ }
++
++#if BUILDFLAG(IS_MAC)
++v8::Local<v8::Promise> Session::ConfigureOwnedDownloadHistory(
++    const base::FilePath& directory) {
++  gin_helper::Promise<base::DictValue> promise(isolate_);
++  auto handle = promise.GetHandle();
++  if (owned_download_history_ && directory != owned_download_history_directory_) {
++    promise.RejectWithErrorMessage("Session download history cannot change its owner"); return handle;
++  }
++  if (!owned_download_history_) {
++    owned_download_history_ = AcquireOwnedDownloadHistory(isolate_, directory);
++    if (!owned_download_history_) {
++      promise.RejectWithErrorMessage("Owned download history engine is unavailable"); return handle;
++    }
++    owned_download_history_directory_ = directory;
++  }
++  owned_download_history_->Ready(OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++v8::Local<v8::Promise> Session::RecordOwnedDownloadHistory(
++    std::string guid, std::string metadata) {
++  gin_helper::Promise<base::DictValue> promise(isolate_);
++  auto handle = promise.GetHandle();
++  if (!owned_download_history_) {
++    promise.RejectWithErrorMessage("Session has no owned download history"); return handle;
++  }
++  auto* item = browser_context()->GetDownloadManager()->GetDownloadByGuid(guid);
++  owned_download_history_->Record(item, std::move(metadata), OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++#endif
+ 
+ void Session::OnDownloadCreated(content::DownloadManager* manager,
+                                 download::DownloadItem* item) {
+@@ -1786,6 +1824,10 @@
+ void Session::FillObjectTemplate(v8::Isolate* isolate,
+                                  v8::Local<v8::ObjectTemplate> templ) {
+   gin::ObjectTemplateBuilder(isolate, GetClassName(), templ)
++#if BUILDFLAG(IS_MAC)
++      .SetMethod("configureOwnedDownloadHistory", &Session::ConfigureOwnedDownloadHistory)
++      .SetMethod("recordOwnedDownloadHistory", &Session::RecordOwnedDownloadHistory)
++#endif
+       .SetMethod("resolveHost", &Session::ResolveHost)
+       .SetMethod("resolveProxy", &Session::ResolveProxy)
+       .SetMethod("getCacheSize", &Session::GetCacheSize)
+@@ -1929,6 +1971,9 @@
+            Session::GetConstructor(isolate, context, &Session::kWrapperInfo));
+   dict.SetMethod("fromPartition", &FromPartition);
+   dict.SetMethod("fromPath", &FromPath);
++#if BUILDFLAG(IS_MAC)
++  dict.SetMethod("openOwnedDownloadHistory", &electron::api::OpenOwnedDownloadHistory);
++#endif
+ }
+ 
+ }  // namespace
+diff --git a/electron/shell/browser/api/electron_api_session.h b/electron/shell/browser/api/electron_api_session.h
+--- a/electron/shell/browser/api/electron_api_session.h
++++ b/electron/shell/browser/api/electron_api_session.h
+@@ -5,14 +5,17 @@
+ #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SESSION_H_
+ #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SESSION_H_
+ 
++#include <memory>
+ #include <optional>
+ #include <string>
+ #include <vector>
+ 
++#include "base/files/file_path.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/values.h"
++#include "build/build_config.h"
+ #include "content/public/browser/download_manager.h"
+ #include "electron/buildflags/buildflags.h"
+ #include "gin/weak_cell.h"
+@@ -60,6 +63,7 @@
+ 
+ namespace api {
+ 
++class OwnedDownloadHistory;
+ class NetLog;
+ class WebRequest;
+ 
+@@ -120,6 +124,10 @@
+ 
+   // Methods.
+   void Dispose();
++#if BUILDFLAG(IS_MAC)
++  v8::Local<v8::Promise> ConfigureOwnedDownloadHistory(const base::FilePath& directory);
++  v8::Local<v8::Promise> RecordOwnedDownloadHistory(std::string guid, std::string metadata);
++#endif
+   v8::Local<v8::Promise> ResolveHost(
+       std::string host,
+       std::optional<network::mojom::ResolveHostParametersPtr> params);
+@@ -220,6 +228,10 @@
+   v8::TracedReference<v8::Value> service_worker_context_;
+   cppgc::Member<api::WebRequest> web_request_;
+ 
++#if BUILDFLAG(IS_MAC)
++  std::shared_ptr<OwnedDownloadHistory> owned_download_history_;
++  base::FilePath owned_download_history_directory_;
++#endif
+   raw_ptr<v8::Isolate> isolate_;
+ 
+   // The client id to enable the network throttler.
+diff --git a/electron/shell/browser/api/owned_download_history.cc b/electron/shell/browser/api/owned_download_history.cc
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_download_history.cc
+@@ -0,0 +1,322 @@
++#include "shell/browser/api/owned_download_history.h"
++
++#include <algorithm>
++#include <cerrno>
++#include <limits>
++#include <optional>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <utility>
++#include <vector>
++
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/i18n/case_conversion.h"
++#include "base/i18n/string_search.h"
++#include "base/json/json_reader.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/thread_pool.h"
++#include "components/download/public/common/download_item.h"
++#include "components/history/content/browser/download_conversions.h"
++#include "components/history/core/browser/download_database.h"
++#include "components/history/core/browser/download_row.h"
++#include "components/url_formatter/url_formatter.h"
++#include "sql/database.h"
++#include "sql/statement.h"
++#include "sql/transaction.h"
++
++namespace electron::api {
++namespace {
++using Result = OwnedDownloadHistory::Result;
++Result Error(std::string message) { return {.error = std::move(message)}; }
++Result Done() { Result result; result.value.Set("ok", true); return result; }
++bool ValidMetadata(const std::string& metadata) {
++  return metadata.size() <= 16 * 1024 * 1024 &&
++         base::JSONReader::ReadDict(metadata, base::JSON_PARSE_RFC).has_value();
++}
++history::DownloadRow NativeRow(download::DownloadItem* item) {
++  history::DownloadRow row;
++  row.guid = item->GetGuid();
++  row.current_path = item->GetFullPath();
++  row.target_path = item->GetTargetFilePath();
++  row.url_chain = item->GetUrlChain();
++  row.referrer_url = item->GetReferrerUrl();
++  row.embedder_download_data = item->GetSerializedEmbedderDownloadData();
++  row.tab_url = item->GetTabUrl();
++  row.tab_referrer_url = item->GetTabReferrerUrl();
++  row.mime_type = item->GetMimeType();
++  row.original_mime_type = item->GetOriginalMimeType();
++  row.start_time = item->GetStartTime();
++  row.end_time = item->GetEndTime();
++  row.etag = item->GetETag();
++  row.last_modified = item->GetLastModifiedTime();
++  row.received_bytes = item->GetReceivedBytes();
++  row.total_bytes = item->GetTotalBytes();
++  row.state = history::ToHistoryDownloadState(item->GetState());
++  row.danger_type = history::ToHistoryDownloadDangerType(item->GetDangerType());
++  row.interrupt_reason = history::ToHistoryDownloadInterruptReason(item->GetLastReason());
++  row.hash = item->GetHash();
++  row.opened = item->GetOpened();
++  row.last_access_time = item->GetLastAccessTime();
++  row.transient = item->IsTransient();
++  row.download_slice_info = history::GetHistoryDownloadSliceInfos(*item);
++  return row;
++}
++bool MatchesQuery(const history::DownloadRow& row, const std::u16string& needle) {
++  if (needle.empty()) return true;
++  const auto contains = [&needle](const std::u16string& candidate) {
++    return base::i18n::StringSearchIgnoringCaseAndAccents(needle, candidate, nullptr, nullptr);
++  };
++  if (!row.url_chain.empty()) {
++    const auto& first = row.url_chain.front();
++    const auto& last = row.url_chain.back();
++    if (contains(base::UTF8ToUTF16(first.spec())) || contains(url_formatter::FormatUrl(first)) ||
++        contains(base::UTF8ToUTF16(last.spec())) || contains(url_formatter::FormatUrl(last))) return true;
++  }
++  if (contains(row.target_path.LossyDisplayName())) return true;
++  const auto filename = row.target_path.BaseName().value();
++  return base::IsStringUTF8(filename) && contains(base::UTF8ToUTF16(filename));
++}
++std::string State(history::DownloadState state) {
++  switch (state) {
++    case history::DownloadState::IN_PROGRESS: return "in_progress";
++    case history::DownloadState::COMPLETE: return "complete";
++    case history::DownloadState::CANCELLED: return "canceled";
++    case history::DownloadState::INTERRUPTED: return "interrupted";
++    default: return "invalid";
++  }
++}
++}
++
++class OwnedDownloadHistory::Database : private history::DownloadDatabase {
++ public:
++  explicit Database(const base::FilePath& directory)
++      : history::DownloadDatabase(
++            history::ToHistoryDownloadInterruptReason(download::DOWNLOAD_INTERRUPT_REASON_NONE),
++            history::ToHistoryDownloadInterruptReason(download::DOWNLOAD_INTERRUPT_REASON_CRASH)),
++        db_("History") {
++    struct stat root{};
++    if (!directory.IsAbsolute() || base::MakeAbsoluteFilePath(directory) != directory ||
++        lstat(directory.value().c_str(), &root) || !S_ISDIR(root.st_mode) ||
++        root.st_uid != getuid() || (root.st_mode & 0777) != 0700) {
++      error_ = "Native download history requires a canonical private owner directory";
++      return;
++    }
++    const auto file = directory.AppendASCII("history.sqlite");
++    struct stat old{};
++    const bool exists = lstat(file.value().c_str(), &old) == 0;
++    if ((!exists && errno != ENOENT) ||
++        (exists && (!S_ISREG(old.st_mode) || old.st_uid != getuid() || (old.st_mode & 0777) != 0600))) {
++      error_ = "Native download history is not a private regular file";
++      return;
++    }
++    db_.set_error_callback(base::BindRepeating(
++        [](Database* owner, int code, sql::Statement*) {
++          owner->error_ = "Native download database error " + base::NumberToString(code);
++        }, base::Unretained(this)));
++    if (!db_.Open(file) || !base::SetPosixFilePermissions(file, 0600)) {
++      error_ = "Native download history could not be opened";
++      return;
++    }
++    if (exists) {
++      if (!db_.DoesTableExist("owned_history_version")) {
++        error_ = "Native download history does not identify its owned schema";
++        return;
++      }
++      sql::Statement version(db_.GetUniqueStatement("SELECT version FROM owned_history_version"));
++      if (!version.Step() || version.ColumnInt(0) != 1 || version.Step() || !version.Succeeded()) {
++        error_ = "Native download history schema differs";
++        return;
++      }
++    }
++    sql::Transaction transaction(&db_);
++    if (!transaction.Begin() || !InitDownloadTable() ||
++        (!exists && (!db_.Execute("CREATE TABLE owned_history_version(version INTEGER NOT NULL)") ||
++                     !db_.Execute("INSERT INTO owned_history_version VALUES(1)") ||
++                     !db_.Execute("CREATE TABLE owned_download_metadata(guid TEXT PRIMARY KEY NOT NULL, data TEXT NOT NULL, filename TEXT NOT NULL)") ||
++                     !db_.Execute("CREATE UNIQUE INDEX owned_download_guid ON downloads(guid)"))) ||
++        !db_.DoesTableExist("owned_download_metadata") || !transaction.Commit()) {
++      error_ = "Native download history schema could not be initialized";
++      return;
++    }
++    std::vector<history::DownloadRow> rows;
++    QueryDownloads(&rows);
++  }
++  ~Database() { db_.reset_error_callback(); }
++  Result Ready() { return error_.empty() ? Done() : Error(error_); }
++  Result Record(history::DownloadRow row, std::string filename, std::string metadata) {
++    if (!error_.empty()) return Error(error_);
++    if (row.guid.empty() || !ValidMetadata(metadata)) return Error("Native download metadata is invalid");
++    sql::Transaction transaction(&db_);
++    if (!transaction.Begin()) return Error("Native download transaction could not start");
++    const auto existing = Find(row.guid);
++    if (!error_.empty()) return Error(error_);
++    row.id = existing ? *existing : history::ToHistoryDownloadId(GetNextDownloadId());
++    if (row.id == history::kInvalidDownloadId || !(existing ? UpdateDownload(row) : CreateDownload(row)))
++      return Error("Native download row could not be saved");
++    sql::Statement metadata_write(db_.GetUniqueStatement(
++        "INSERT INTO owned_download_metadata(guid,data,filename) VALUES(?,?,?) "
++        "ON CONFLICT(guid) DO UPDATE SET data=excluded.data,filename=excluded.filename"));
++    metadata_write.BindString(0, row.guid);
++    metadata_write.BindString(1, metadata);
++    metadata_write.BindString(2, filename);
++    if (!metadata_write.Run() || !transaction.Commit()) return Error("Native download metadata could not be saved");
++    return Ready();
++  }
++  Result Update(std::string guid, std::string metadata) {
++    if (!error_.empty()) return Error(error_);
++    if (!ValidMetadata(metadata) || !Find(guid)) return Error("Native download metadata has no recorded GUID");
++    sql::Statement update(db_.GetUniqueStatement("UPDATE owned_download_metadata SET data=? WHERE guid=?"));
++    update.BindString(0, metadata); update.BindString(1, guid);
++    if (!update.Run() || db_.GetLastChangeCount() != 1) return Error("Native download metadata changed owner");
++    return Ready();
++  }
++  Result Search(std::string text, int offset, int limit) {
++    if (!error_.empty()) return Error(error_);
++    if (offset < 0 || limit < 0 || text.size() > 16 * 1024 * 1024) return Error("Native history query is invalid");
++    std::vector<history::DownloadRow> rows;
++    QueryDownloads(&rows);
++    if (!error_.empty()) return Error(error_);
++    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
++      return a.start_time != b.start_time ? a.start_time > b.start_time : a.guid < b.guid;
++    });
++    std::map<std::string, std::pair<std::string, std::string>> metadata_rows;
++    sql::Statement data(db_.GetUniqueStatement("SELECT guid,data,filename FROM owned_download_metadata"));
++    while (data.Step()) {
++      const auto guid = data.ColumnString(0), metadata = data.ColumnString(1);
++      if (guid.empty() || !ValidMetadata(metadata) || !metadata_rows.emplace(guid, std::make_pair(metadata, data.ColumnString(2))).second)
++        return Error("Stored native download metadata is invalid");
++    }
++    if (!data.Succeeded() || metadata_rows.size() != rows.size()) return Error("Native download history row ownership differs");
++    const auto needle = base::i18n::ToLower(base::UTF8ToUTF16(text));
++    base::ListValue output;
++    size_t skipped = 0;
++    bool more = false;
++    for (const auto& row : rows) {
++      auto found = metadata_rows.find(row.guid);
++      if (found == metadata_rows.end()) return Error("Native download row has no owned metadata");
++      const auto& [metadata, filename] = found->second;
++      if (!MatchesQuery(row, needle)) continue;
++      if (skipped++ < static_cast<size_t>(offset)) continue;
++      if (limit && output.size() >= static_cast<size_t>(limit)) { more = true; break; }
++      if (!ValidMetadata(metadata)) return Error("Stored native download metadata is invalid");
++      base::DictValue native;
++      native.Set("guid", row.guid); native.Set("filename", filename); native.Set("state", State(row.state));
++      native.Set("received_bytes", base::NumberToString(row.received_bytes));
++      native.Set("total_bytes", base::NumberToString(row.total_bytes));
++      native.Set("interrupt_reason", base::NumberToString(row.interrupt_reason));
++      native.Set("current_path", row.current_path.AsUTF8Unsafe()); native.Set("target_path", row.target_path.AsUTF8Unsafe());
++      native.Set("started_at_ms", row.start_time.InMillisecondsFSinceUnixEpoch());
++      native.Set("ended_at_ms", row.end_time.InMillisecondsFSinceUnixEpoch());
++      base::ListValue chain; for (const auto& url : row.url_chain) chain.Append(url.spec());
++      native.Set("url_chain", std::move(chain));
++      base::DictValue record; record.Set("native", std::move(native)); record.Set("metadata", metadata);
++      output.Append(std::move(record));
++    }
++    if (!error_.empty()) return Error(error_);
++    Result result; result.value.Set("text", text); result.value.Set("offset", offset);
++    result.value.Set("hasMore", more); result.value.Set("records", std::move(output)); return result;
++  }
++  Result Remove(std::string guid) {
++    if (!error_.empty()) return Error(error_);
++    const auto id = Find(guid);
++    if (!error_.empty()) return Error(error_);
++    if (!id) { Result result; result.value.Set("removed", false); return result; }
++    sql::Statement state(db_.GetUniqueStatement("SELECT state FROM downloads WHERE id=?"));
++    state.BindInt64(0, history::DownloadIdToInt(*id));
++    if (!state.Step() || state.ColumnInt(0) == history::DownloadStateToInt(history::DownloadState::IN_PROGRESS))
++      return Error("Active native download cannot be removed from history");
++    sql::Transaction transaction(&db_);
++    if (!transaction.Begin()) return Error("Native history removal could not start");
++    RemoveDownload(*id);
++    sql::Statement remove(db_.GetUniqueStatement("DELETE FROM owned_download_metadata WHERE guid=?"));
++    remove.BindString(0, guid);
++    if (!remove.Run() || !error_.empty() || !transaction.Commit()) return Error("Native history removal was not committed");
++    Result result; result.value.Set("removed", true); return result;
++  }
++  Result Clear() {
++    if (!error_.empty()) return Error(error_);
++    std::vector<history::DownloadRow> rows; QueryDownloads(&rows);
++    sql::Transaction transaction(&db_);
++    if (!error_.empty() || !transaction.Begin()) return Error("Native history clear could not start");
++    uint32_t count = 0;
++    for (const auto& row : rows) {
++      if (row.state == history::DownloadState::IN_PROGRESS) continue;
++      RemoveDownload(row.id);
++      sql::Statement remove(db_.GetUniqueStatement("DELETE FROM owned_download_metadata WHERE guid=?"));
++      remove.BindString(0, row.guid);
++      if (!remove.Run() || !error_.empty()) return Error("Native history clear failed");
++      ++count;
++    }
++    if (!transaction.Commit()) return Error("Native history clear was not committed");
++    Result result; result.value.Set("removed", static_cast<double>(count)); return result;
++  }
++ private:
++  sql::Database& GetDB() override { return db_; }
++  std::optional<history::DownloadId> Find(const std::string& guid) {
++    sql::Statement statement(db_.GetUniqueStatement("SELECT id FROM downloads WHERE guid=?"));
++    statement.BindString(0, guid);
++    if (!statement.Step()) return std::nullopt;
++    history::DownloadId id;
++    if (!history::ConvertIntToDownloadId(statement.ColumnInt64(0), &id)) { error_ = "Native download history contains an invalid row identity"; return std::nullopt; }
++    return id;
++  }
++  sql::Database db_;
++  std::string error_;
++};
++
++OwnedDownloadHistory::OwnedDownloadHistory(const base::FilePath& directory)
++    : database_(base::ThreadPool::CreateSequencedTaskRunner(
++          {base::MayBlock(), base::TaskPriority::USER_VISIBLE, base::TaskShutdownBehavior::BLOCK_SHUTDOWN}), directory) {}
++OwnedDownloadHistory::~OwnedDownloadHistory() { Shutdown(); }
++uint64_t OwnedDownloadHistory::Pending(Reply reply) {
++  if (replies_.size() >= 1024) { std::move(reply).Run(Error("Native download history request queue is full")); return 0; }
++  if (stopped_ || next_request_ == std::numeric_limits<uint64_t>::max()) {
++    std::move(reply).Run(Error("Native download history owner is closed")); return 0;
++  }
++  const uint64_t request = ++next_request_; replies_.emplace(request, std::move(reply)); return request;
++}
++void OwnedDownloadHistory::Complete(uint64_t request, Result result) {
++  auto found = replies_.find(request); if (found == replies_.end()) return;
++  auto reply = std::move(found->second); replies_.erase(found); std::move(reply).Run(std::move(result));
++}
++void OwnedDownloadHistory::Ready(Reply reply) {
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Ready).Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Record(download::DownloadItem* item, std::string metadata, Reply reply) {
++  if (!item) { std::move(reply).Run(Error("Native download item is no longer alive")); return; }
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Record).WithArgs(NativeRow(item), item->GetFileNameToReportUser().AsUTF8Unsafe(), std::move(metadata))
++      .Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Update(std::string guid, std::string metadata, Reply reply) {
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Update).WithArgs(std::move(guid), std::move(metadata))
++      .Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Search(std::string text, int offset, int limit, Reply reply) {
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Search).WithArgs(std::move(text), offset, limit)
++      .Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Remove(std::string guid, Reply reply) {
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Remove).WithArgs(std::move(guid))
++      .Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Clear(Reply reply) {
++  auto request = Pending(std::move(reply)); if (!request) return;
++  database_.AsyncCall(&Database::Clear).Then(base::BindOnce(&OwnedDownloadHistory::Complete, weak_factory_.GetWeakPtr(), request));
++}
++void OwnedDownloadHistory::Flush(Reply reply) { Ready(std::move(reply)); }
++void OwnedDownloadHistory::Shutdown() {
++  if (stopped_) return;
++  stopped_ = true; weak_factory_.InvalidateWeakPtrs();
++  auto replies = std::move(replies_);
++  for (auto& [request, reply] : replies) std::move(reply).Run(Error("Native download history owner closed before confirmation"));
++  database_.Reset();
++}
++}
+diff --git a/electron/shell/browser/api/owned_download_history.h b/electron/shell/browser/api/owned_download_history.h
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_download_history.h
+@@ -0,0 +1,45 @@
++#ifndef ELECTRON_SHELL_BROWSER_API_OWNED_DOWNLOAD_HISTORY_H_
++#define ELECTRON_SHELL_BROWSER_API_OWNED_DOWNLOAD_HISTORY_H_
++
++#include <map>
++#include <memory>
++#include <string>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/threading/sequence_bound.h"
++#include "base/values.h"
++
++namespace download { class DownloadItem; }
++namespace electron::api {
++class OwnedDownloadHistory {
++ public:
++  struct Result {
++    base::DictValue value;
++    std::string error;
++  };
++  using Reply = base::OnceCallback<void(Result)>;
++  explicit OwnedDownloadHistory(const base::FilePath& directory);
++  ~OwnedDownloadHistory();
++  void Ready(Reply reply);
++  void Record(download::DownloadItem* item, std::string metadata, Reply reply);
++  void Update(std::string guid, std::string metadata, Reply reply);
++  void Search(std::string text, int offset, int limit, Reply reply);
++  void Remove(std::string guid, Reply reply);
++  void Clear(Reply reply);
++  void Flush(Reply reply);
++  void Shutdown();
++
++ private:
++  class Database;
++  uint64_t Pending(Reply reply);
++  void Complete(uint64_t request, Result result);
++  base::SequenceBound<Database> database_;
++  std::map<uint64_t, Reply> replies_;
++  uint64_t next_request_ = 0;
++  bool stopped_ = false;
++  base::WeakPtrFactory<OwnedDownloadHistory> weak_factory_{this};
++};
++}
++#endif
+diff --git a/electron/shell/browser/api/owned_download_history_binding.cc b/electron/shell/browser/api/owned_download_history_binding.cc
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_download_history_binding.cc
+@@ -0,0 +1,135 @@
++#include "shell/browser/api/owned_download_history_binding.h"
++
++#include <map>
++#include <memory>
++#include <utility>
++
++#include "base/check.h"
++#include "base/functional/bind.h"
++#include "base/no_destructor.h"
++#include "content/public/browser/browser_thread.h"
++#include "electron/buildflags/buildflags.h"
++#include "gin/arguments.h"
++#include "gin/per_isolate_data.h"
++#include "shell/browser/browser.h"
++#include "shell/common/gin_converters/value_converter.h"
++#include "shell/common/gin_helper/dictionary.h"
++
++namespace electron::api {
++namespace {
++class HistoryOwners final : public gin::PerIsolateData::DisposeObserver {
++ public:
++  explicit HistoryOwners(v8::Isolate* isolate) {
++    gin::PerIsolateData::From(isolate)->AddDisposeObserver(this);
++  }
++  static auto& All() {
++    static base::NoDestructor<std::map<v8::Isolate*, std::unique_ptr<HistoryOwners>>> owners;
++    return *owners;
++  }
++  void OnBeforeDispose(v8::Isolate*) override {}
++  void OnDisposed() override {}
++  void OnBeforeMicrotasksRunnerDispose(v8::Isolate* isolate) override {
++    closing = true;
++    for (auto& [directory, history] : histories) history->Shutdown();
++    histories.clear();
++    gin::PerIsolateData::From(isolate)->RemoveDisposeObserver(this);
++    All().erase(isolate);
++  }
++  bool closing = false;
++  std::map<base::FilePath, std::shared_ptr<OwnedDownloadHistory>> histories;
++};
++struct Reader {
++  std::shared_ptr<OwnedDownloadHistory> history;
++  bool closed = false;
++};
++using ReaderRef = std::shared_ptr<Reader>;
++using Promise = gin_helper::Promise<base::DictValue>;
++bool CheckReader(const ReaderRef& reader, Promise& promise) {
++  if (!reader->closed) return true;
++  promise.RejectWithErrorMessage("Native download history reader is closed");
++  return false;
++}
++v8::Local<v8::Promise> Search(ReaderRef reader, base::DictValue query,
++                              gin::Arguments* args) {
++  Promise promise(args->isolate()); auto handle = promise.GetHandle();
++  if (!CheckReader(reader, promise)) return handle;
++  const auto* text = query.FindString("text");
++  const auto offset = query.FindInt("offset"), limit = query.FindInt("maxResults");
++  if (query.size() != 3 || !text || !offset || !limit || *offset < 0 || *limit < 0) {
++    promise.RejectWithErrorMessage("Native download history query is invalid"); return handle;
++  }
++  reader->history->Search(*text, *offset, *limit, OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++v8::Local<v8::Promise> Update(ReaderRef reader, std::string guid,
++                              std::string metadata, gin::Arguments* args) {
++  Promise promise(args->isolate()); auto handle = promise.GetHandle();
++  if (CheckReader(reader, promise)) reader->history->Update(std::move(guid), std::move(metadata), OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++v8::Local<v8::Promise> Remove(ReaderRef reader, std::string guid,
++                              gin::Arguments* args) {
++  Promise promise(args->isolate()); auto handle = promise.GetHandle();
++  if (CheckReader(reader, promise)) reader->history->Remove(std::move(guid), OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++v8::Local<v8::Promise> Clear(ReaderRef reader, gin::Arguments* args) {
++  Promise promise(args->isolate()); auto handle = promise.GetHandle();
++  if (CheckReader(reader, promise)) reader->history->Clear(OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++v8::Local<v8::Promise> Flush(ReaderRef reader, gin::Arguments* args) {
++  Promise promise(args->isolate()); auto handle = promise.GetHandle();
++  if (CheckReader(reader, promise)) reader->history->Flush(OwnedDownloadHistoryReply(std::move(promise)));
++  return handle;
++}
++gin_helper::Dictionary ReaderObject(v8::Isolate* isolate, ReaderRef reader) {
++  auto object = gin_helper::Dictionary::CreateEmpty(isolate);
++  object.SetMethod("search", base::BindRepeating(&Search, reader));
++  object.SetMethod("update", base::BindRepeating(&Update, reader));
++  object.SetMethod("remove", base::BindRepeating(&Remove, reader));
++  object.SetMethod("clear", base::BindRepeating(&Clear, reader));
++  object.SetMethod("flush", base::BindRepeating(&Flush, reader));
++  object.SetMethod("close", base::BindRepeating([](ReaderRef owner) { owner->closed = true; }, reader));
++  return object;
++}
++}
++
++std::shared_ptr<OwnedDownloadHistory> AcquireOwnedDownloadHistory(
++    v8::Isolate* isolate, const base::FilePath& directory) {
++  DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
++  if (!BUILDFLAG(ENABLE_OWNED_GUEST_EMBEDDER)) return nullptr;
++  auto& owner = HistoryOwners::All()[isolate];
++  if (!owner) owner = std::make_unique<HistoryOwners>(isolate);
++  if (owner->closing) return nullptr;
++  auto& history = owner->histories[directory];
++  if (!history) history = std::make_shared<OwnedDownloadHistory>(directory);
++  return history;
++}
++OwnedDownloadHistory::Reply OwnedDownloadHistoryReply(Promise promise) {
++  return base::BindOnce([](Promise value, OwnedDownloadHistory::Result result) {
++    if (!result.error.empty()) value.RejectWithErrorMessage(result.error);
++    else value.Resolve(result.value);
++  }, std::move(promise));
++}
++v8::Local<v8::Promise> OpenOwnedDownloadHistory(
++    const base::FilePath& directory, gin::Arguments* args) {
++  gin_helper::Promise<gin_helper::Dictionary> promise(args->isolate());
++  auto handle = promise.GetHandle();
++  if (!electron::Browser::Get()->is_ready()) {
++    promise.RejectWithErrorMessage("Native download history requires app readiness"); return handle;
++  }
++  auto reader = std::make_shared<Reader>();
++  reader->history = AcquireOwnedDownloadHistory(args->isolate(), directory);
++  if (!reader->history) { promise.RejectWithErrorMessage("Owned download history engine is unavailable"); return handle; }
++  reader->history->Ready(base::BindOnce(
++      [](ReaderRef reader, gin_helper::Promise<gin_helper::Dictionary> value,
++         OwnedDownloadHistory::Result result) {
++        if (!result.error.empty()) { value.RejectWithErrorMessage(result.error); return; }
++        v8::HandleScope scope(value.isolate());
++        v8::Context::Scope context(value.GetContext());
++        value.Resolve(ReaderObject(value.isolate(), std::move(reader)));
++      }, reader, std::move(promise)));
++  return handle;
++}
++}
+diff --git a/electron/shell/browser/api/owned_download_history_binding.h b/electron/shell/browser/api/owned_download_history_binding.h
+new file mode 100644
+--- /dev/null
++++ b/electron/shell/browser/api/owned_download_history_binding.h
+@@ -0,0 +1,17 @@
++#ifndef ELECTRON_SHELL_BROWSER_API_OWNED_DOWNLOAD_HISTORY_BINDING_H_
++#define ELECTRON_SHELL_BROWSER_API_OWNED_DOWNLOAD_HISTORY_BINDING_H_
++
++#include <memory>
++#include "shell/browser/api/owned_download_history.h"
++#include "shell/common/gin_helper/promise.h"
++
++namespace gin { class Arguments; }
++namespace electron::api {
++std::shared_ptr<OwnedDownloadHistory> AcquireOwnedDownloadHistory(
++    v8::Isolate* isolate, const base::FilePath& directory);
++v8::Local<v8::Promise> OpenOwnedDownloadHistory(
++    const base::FilePath& directory, gin::Arguments* args);
++OwnedDownloadHistory::Reply OwnedDownloadHistoryReply(
++    gin_helper::Promise<base::DictValue> promise);
++}
++#endif
+diff --git a/electron/spec/api-owned-guest-spec.ts b/electron/spec/api-owned-guest-spec.ts
+--- a/electron/spec/api-owned-guest-spec.ts
++++ b/electron/spec/api-owned-guest-spec.ts
+@@ -2,6 +2,10 @@
+ import { createHash, randomUUID } from 'node:crypto';
+ import { createServer } from 'node:http';
+ import { once } from 'node:events';
++import { promises as fs } from 'node:fs';
++import { tmpdir } from 'node:os';
++import * as path from 'node:path';
++import { spawn } from 'node:child_process';
+ import { BrowserWindow, nativeImage, session, webContents } from 'electron';
+ 
+ type Guest = Electron.WebContents & {
+@@ -264,4 +268,103 @@
+     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+   });
+ 
++  it('retains actual download GUID and SQLite rows across a fresh engine process without recreating a page', async function () {
++    this.timeout(90000);
++    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'owned-native-history-')));
++    await fs.chmod(root, 0o700);
++    const store = path.join(root, 'history'); await fs.mkdir(store, { mode: 0o700 });
++    const script = path.join(root, 'history-child.cjs');
++    const server = createServer((_request, response) => {
++      response.setHeader('Content-Type', 'application/octet-stream');
++      response.setHeader('Content-Disposition', 'attachment; filename="native-history.bin"');
++      response.end('owned native bytes');
++    });
++    server.listen(0, '127.0.0.1'); await once(server, 'listening');
++    const endpoint = `http://127.0.0.1:${(server.address() as {port: number}).port}/example%20download`;
++    await fs.writeFile(script, `
++'use strict';
++const { app, session, webContents } = require('electron');
++const fs = require('node:fs/promises');
++const path = require('node:path');
++const assert = require('node:assert/strict');
++const { randomUUID } = require('node:crypto');
++const [phase, root, endpoint] = process.argv.slice(2);
++const store = path.join(root, 'history'), output = path.join(root, 'Résumé report.bin');
++const profile = path.join(root, 'profile-' + phase);
++require('node:fs').mkdirSync(profile, {mode:0o700}); app.setPath('userData', profile);
++app.on('window-all-closed', () => {});
++app.whenReady().then(async () => {
++  if (phase === 'write') {
++    const room = session.fromPartition('history-' + randomUUID());
++    await room.configureOwnedDownloadHistory(store);
++    const guest = webContents.createOwnedGuest({ session: room, sandbox: true, nodeIntegration: false, contextIsolation: true, initialSurfaceSize: {width:1280,height:720} });
++    const completed = new Promise((resolve, reject) => room.once('will-download', (_event, item, origin) => {
++      try {
++        assert.equal(origin, guest); item.setSavePath(output);
++        const guid = item.getGUID(); assert.ok(guid);
++        const started = room.recordOwnedDownloadHistory(guid, JSON.stringify({phase:'active'}));
++        started.catch(reject);
++        item.once('done', (_event, state) => {
++          try {
++            assert.equal(state, 'completed'); assert.equal(item.getGUID(), guid);
++            const terminal = room.recordOwnedDownloadHistory(guid, JSON.stringify({phase:'complete'}));
++            Promise.all([started, terminal]).then(() => resolve(guid), reject);
++          } catch (error) { reject(error); }
++        });
++      } catch (error) { reject(error); }
++    }));
++    const navigation = guest.loadURL(endpoint).catch(error => { if (error.code !== 'ERR_ABORTED') throw error; });
++    const guid = await completed; await navigation;
++    const reader = await session.openOwnedDownloadHistory(store); await reader.flush();
++    const first = await reader.search({text:endpoint,offset:0,maxResults:100});
++    assert.equal(first.records.length, 1); assert.equal(first.records[0].native.guid, guid);
++    assert.equal(first.records[0].native.state, 'complete');
++    reader.close(); guest.destroy();
++    await fs.writeFile(path.join(root,'write.json'), JSON.stringify({guid,record:first.records[0]}), {flag:'wx',mode:0o600});
++  } else {
++    const original = JSON.parse(await fs.readFile(path.join(root,'write.json'),'utf8'));
++    const count = webContents.getAllWebContents().length;
++    const reader = await session.openOwnedDownloadHistory(store);
++    const result = await reader.search({text:'',offset:0,maxResults:100});
++    assert.equal(result.records.length,1); assert.equal(result.records[0].native.guid,original.guid);
++    assert.equal(result.records[0].native.state,'complete');
++    assert.equal(JSON.parse(result.records[0].metadata).phase,'complete');
++    assert.equal((await reader.search({text:'resume REPORT',offset:0,maxResults:100})).records[0].native.guid,original.guid);
++    assert.equal((await reader.search({text:'example download',offset:0,maxResults:100})).records[0].native.guid,original.guid);
++    assert.equal((await reader.search({text:'report resume',offset:0,maxResults:100})).records.length,0);
++    assert.equal(webContents.getAllWebContents().length,count);
++    assert.equal('resume' in reader,false);
++    await assert.rejects(reader.update(randomUUID(),'{}'),/recorded GUID/);
++    assert.equal((await fs.readFile(path.join(store,'history.sqlite'))).subarray(0,16).toString(),'SQLite format 3\\0');
++    assert.equal((await reader.remove(original.guid)).removed,true);
++    assert.equal((await reader.search({text:'',offset:0,maxResults:100})).records.length,0);
++    assert.equal(await fs.readFile(output,'utf8'),'owned native bytes');
++    await reader.flush(); reader.close(); await assert.rejects(reader.flush(),/closed/);
++    await fs.writeFile(path.join(root,'read.json'),JSON.stringify({guid:original.guid,pageCount:count}),{flag:'wx',mode:0o600});
++  }
++  app.quit();
++}).catch(error => { process.stderr.write(String(error.stack || error)); app.exit(1); });
++`, { flag: 'wx', mode: 0o600 });
++    const child = (phase: string) => new Promise<void>((resolve, reject) => {
++      const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE; delete env.NODE_OPTIONS;
++      const process_ = spawn(process.execPath, [script, phase, root, endpoint], { env, stdio: ['ignore', 'pipe', 'pipe'] });
++      let output = '', failure: Error | null = null;
++      const stop = (message: string) => { failure ??= new Error(message); process_.kill('SIGKILL'); };
++      const timer = setTimeout(() => stop('native history child deadline'), 30000);
++      const collect = (bytes: Buffer) => { output += bytes.toString(); if (Buffer.byteLength(output) > 1024 * 1024) stop('native history child output bound'); };
++      process_.stdout.on('data', collect); process_.stderr.on('data', collect);
++      process_.once('error', error => { failure = error; });
++      process_.once('close', code => { clearTimeout(timer); if (failure || code !== 0) reject(failure ?? new Error(output)); else resolve(); });
++    });
++    try {
++      await child('write'); await child('read');
++      const written = JSON.parse(await fs.readFile(path.join(root, 'write.json'), 'utf8'));
++      const read = JSON.parse(await fs.readFile(path.join(root, 'read.json'), 'utf8'));
++      assert.equal(read.guid, written.guid);
++    } finally {
++      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
++      await fs.rm(root, { recursive: true, force: true });
++    }
++  });
++
+ });
+diff --git a/electron/typings/internal-electron.d.ts b/electron/typings/internal-electron.d.ts
+--- a/electron/typings/internal-electron.d.ts
++++ b/electron/typings/internal-electron.d.ts
+@@ -78,8 +78,24 @@
+     _countExternalRequests(): number;
+   }
+ 
++  interface OwnedDownloadHistoryReader {
++    search(query: {text: string; offset: number; maxResults: number}): Promise<{text: string; offset: number; hasMore: boolean; records: Array<{native: {guid: string; filename: string; state: string; received_bytes: string; total_bytes: string; interrupt_reason: string; current_path: string; target_path: string; started_at_ms: number; ended_at_ms: number; url_chain: string[]}; metadata: string}>}>;
++    update(guid: string, metadata: string): Promise<{ok: boolean}>;
++    remove(guid: string): Promise<{removed: boolean}>;
++    clear(): Promise<{removed: number}>;
++    flush(): Promise<{ok: boolean}>;
++    close(): void;
++  }
++  namespace Session {
++    function openOwnedDownloadHistory(directory: string): Promise<OwnedDownloadHistoryReader>;
++  }
+   interface Session {
+     _init(): void;
++    configureOwnedDownloadHistory(directory: string): Promise<{ok: boolean}>;
++    recordOwnedDownloadHistory(guid: string, metadata: string): Promise<{ok: boolean}>;
++  }
++  interface DownloadItem {
++    getGUID(): string;
+   }
+ 
+   interface TouchBar {

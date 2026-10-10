@@ -1,0 +1,31 @@
+{
+  "id": "coder.worktree.diff",
+  "interface": "system_coder_env",
+  "handler_config": {
+    "operation": "worktree_diff",
+    "max_diff_bytes": 16777216,
+    "max_changed_paths": 20000
+  },
+  "process": {
+    "bin": "target/debug/octopus-coder-fs-tool",
+    "inherit_env": ["PATH"],
+    "authority": {
+      "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],
+      "write_root_slots": ["git_common_root", "worktree_root"],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": ["git"],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["git_worktree"],
+  "description": "Return the bounded complete tracked, staged, and untracked unified diff with digest and changed-path evidence for the isolated run worktree.",
+  "args_schema": {"type": "object", "properties": {}, "additionalProperties": false},
+  "is_world_effect": false
+}
