@@ -49,6 +49,8 @@ pub struct OperatorChatPlanRequest {
     pub registry_root: PathBuf,
     pub ee_instances_root: PathBuf,
     #[serde(default)]
+    pub ee_policy_root: Option<PathBuf>,
+    #[serde(default)]
     pub run_records_root: Option<PathBuf>,
     pub write_hash_algorithm: WriteHashAlgorithm,
     #[serde(default)]
@@ -454,7 +456,11 @@ pub fn plan_operator_chat_topology(
     let config = load_client_config(&interface_root)?;
     let selection = resolve_run_selection(request, &config)?;
 
-    let chain = resolve_live_ee_policy_chain(ee_instances_root, &EeId::new(&selection.ee_id))
+    let ee_policy_root = match request.ee_policy_root.as_deref() {
+        Some(root) => require_absolute("ee_policy_root", root)?,
+        None => ee_instances_root,
+    };
+    let chain = resolve_live_ee_policy_chain(ee_policy_root, &EeId::new(&selection.ee_id))
         .map_err(|error| error.to_string())?;
     if selection.surface_role == "home" {
         if chain.len() != 1 {
@@ -6452,6 +6458,7 @@ mod tests {
         let request = OperatorChatPlanRequest {
             registry_root: registry_root.clone(),
             ee_instances_root: ee_dir.path().to_path_buf(),
+            ee_policy_root: None,
             run_records_root: Some(ee_dir.path().join("runs")),
             write_hash_algorithm: WriteHashAlgorithm::Sha256,
             interface_private_state_root: None,
@@ -7265,8 +7272,15 @@ mod tests {
                 parent = ee_id;
             }
             validate_octopus_os_authoring_profile(&inherited, None).unwrap();
-            let plan = plan_operator_chat_topology(&make_request(&inherited, role, id)).expect("actual Home/task chain forms the declared Browser/CU defaults");
+            let mut request = make_request(&inherited, role, id);
+            request.ee_policy_root = Some(ee_root.to_path_buf());
+            request.ee_instances_root = ee_root.join("published-ee-instances");
+            let plan = plan_operator_chat_topology(&request).expect("actual Home/task chain forms the declared Browser/CU defaults");
             if role == "home" {
+                let delivery: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
+                    .find(|write| write.tag == format!("artifact:artifact-home-delivery-{id}")).unwrap().content).unwrap();
+                assert_eq!(delivery["delivery"]["authoring"]["ee_instances_root"], serde_json::json!(request.ee_instances_root));
+                assert!(delivery["text"].as_str().unwrap().contains(&request.ee_instances_root.display().to_string()));
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
                 for label in ["client.surface.document", "client.action", "realtime.session.update"] {
@@ -7423,7 +7437,7 @@ mod tests {
         let registry_root = overlay.as_path();
         println!("browser planner source overlay retained at {}", registry_root.display());
         let mut request = OperatorChatPlanRequest {
-            registry_root:registry_root.into(), ee_instances_root:ee_root.into(), run_records_root:Some(ee_root.join("runs")),
+            registry_root:registry_root.into(), ee_instances_root:ee_root.into(), ee_policy_root:None, run_records_root:Some(ee_root.join("runs")),
             write_hash_algorithm:WriteHashAlgorithm::Sha256, interface_private_state_root:None,
             chat_id:"browser_persistent_identity".into(), provider_interface_id:"world_provider_codex".into(),
             model:None, reasoning_effort:None, service_tier:None, ee_id:Some("ee_operator_space".into()),
@@ -7587,6 +7601,7 @@ mod tests {
         let mut request = OperatorChatPlanRequest {
             registry_root,
             ee_instances_root: ee_dir.path().to_path_buf(),
+            ee_policy_root: None,
             run_records_root: Some(ee_dir.path().join("runs")),
             write_hash_algorithm: WriteHashAlgorithm::Blake3,
             interface_private_state_root: Some(private_root.path().to_path_buf()),

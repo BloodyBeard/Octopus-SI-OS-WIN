@@ -17,6 +17,7 @@ export type GlyphName =
   | "dashboard"
   | "registry"
   | "metrics"
+  | "usage"
   | "dollar"
   | "chat"
   | "interfaces"
@@ -164,6 +165,7 @@ const glyphPackByName: Record<GlyphName, GlyphPackName> = {
   dashboard: "shell",
   registry: "shell",
   metrics: "shell",
+  usage: "shell",
   dollar: "shell",
   interfaces: "shell",
   topology: "shell",

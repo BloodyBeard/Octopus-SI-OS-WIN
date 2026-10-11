@@ -122,10 +122,13 @@ async function setupEvidence(root) {
   assert.equal((await readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot })).status, "not_configured");
   const pack = { id: "test-pack", name: "Test Pack", manifest_digest: "a".repeat(64), components: [
     { package_id: "provider", source_digest: "b".repeat(64), selection: "included", product_kind: "application", product_id: "provider" },
-  ], workspace_setup: { home: { provider_interface_id: "provider", worker_interface_id: "system_worker_test", context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [{ package_id: "provider", default_for_new_tasks: true }] } };
+  ], workspace_setup: { home: { provider_interface_id: "provider", worker_interface_id: "system_worker_test", context_artifact_bindings: [], selected_worker_environment_kinds: [] },
+    task: { worker_interface_id: "system_worker_task_test", context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [{ package_id: "provider", default_for_new_tasks: true }] } };
   const plan = compileSetupPlan(pack, { operationId: "cli_fixture_12345678", workspaceName: "Work", workspaceGoal: "Work",
     projects: [{ name: "First Project" }], model: "fixture-model", reasoningEffort: "low", recommended: [] });
   assert.equal(plan.workspace.request.home.providerInterfaceId, "provider");
+  assert.equal(plan.workspace.request.task.workerInterfaceId, "system_worker_task_test");
+  assert.notEqual(plan.workspace.request.task.workerInterfaceId, plan.workspace.request.home.workerInterfaceId);
   assert.deepEqual(plan.workspace.project_defaults[0].project_keys, ["project-1"]);
   const owners = Object.fromEntries(["packages", "extensions", "workspace", "provider"].map((step) => [step, {
     probe: async () => step === "extensions" ? [] : null,

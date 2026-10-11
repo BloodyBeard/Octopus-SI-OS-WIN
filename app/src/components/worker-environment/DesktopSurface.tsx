@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { WorkerEnvironmentProjection, WorkerEnvironmentSurfaceProjection } from "../../data/topology";
 import { OcButton, OcSelect } from "../../design-system/components";
-import { Glyph } from "../IconGlyphs";
-import { OctopusNoteLine } from "../OctopusSurface";
+import { Glyph, type GlyphName } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import { LiveSurfaceEmpty, ManualRoomControlWarning, dataText } from "./RunEnvironmentSurfacePrimitives";
 import type { DesktopEvidence, DesktopSurfaceRequest } from "./desktopSurfaceModel";
 import { desktopEvidenceRevision, resolveDesktopViewEvidence } from "./desktopSurfaceModel";
@@ -57,7 +57,7 @@ export function DesktopSurface({ active = true, environment, surface }: {
         const nextRevision = desktopEvidenceRevision(latest);
         if (revision !== nextRevision) { setEvidence(latest); revision = nextRevision; }
         setError("");
-        if (!screenId && result.evidence.screens.length === 1) setScreenId(result.evidence.screens[0].id);
+        if (!screenId && result.evidence.screens.length >= 1) setScreenId(result.evidence.screens[0].id);
         timer = setTimeout(() => void read(), 67);
       } catch (failure) {
         if (generation.current === current && requestGeneration.current === readGeneration) { latest = null; revision = ""; setEvidence(null); setError(failure instanceof Error ? failure.message : String(failure)); }
@@ -124,34 +124,51 @@ export function DesktopSurface({ active = true, environment, surface }: {
   const state = mode === "stopped" ? "Computer use stopped" : error ? "View interrupted" : mode === "human" ? "You have control"
     : controlling ? "Worker has control" : mode === "model" ? "Another room has control"
       : evidence?.status === "permission_required" ? "Screen permission required" : evidence ? "Observing" : "Connecting to desktop";
+  const screens = evidence?.screens || [];
+  const missingPermissions = evidence ? [
+    evidence.permissions.screen_capture ? "" : "Screen Recording",
+    evidence.permissions.accessibility ? "" : "Accessibility",
+  ].filter(Boolean) : [];
+  const permissionLabel = missingPermissions.length ? `${missingPermissions.join(" and ")} required` : "";
+  const permissionButton = permissionLabel ? (
+    <OcButton disabled={openingPermissions || !window.octopusTransport?.openDesktopPermissions} onClick={() => void openPermissions()} size="sm" variant="secondary">{permissionLabel}</OcButton>
+  ) : null;
   return (
     <div className="we-browser-shell" data-control={mode || "unknown"}>
       <div className="we-browser-toolbar">
         <span aria-live="polite" className="mr-auto flex items-center gap-2 text-sm text-token-description-foreground"><Glyph name="desktop" size={14} />{state}</span>
-        <OcSelect label="Display" disabled={busy} onChange={setScreenId} value={screenId} placeholder="Choose a display" options={(evidence?.screens || []).map((screen) => ({value:screen.id,label:`Display ${screen.id} · ${screen.pixel_width} × ${screen.pixel_height}`}))} />
-        <OcButton disabled={openingPermissions || !window.octopusTransport?.openDesktopPermissions} onClick={() => void openPermissions()} size="sm" variant="ghost">macOS permissions</OcButton>
-        <div className="we-browser-history"><OcButton disabled={busy} onClick={() => setRefresh((value) => value + 1)} size="sm" variant="ghost">Refresh</OcButton>
-        <OcButton disabled={!image} onClick={() => void frame.current?.requestFullscreen().catch((failure) => setError(String(failure)))} size="sm" variant="ghost">Expand</OcButton></div>
+        {image ? permissionButton : null}
+        {screens.length > 1 ? <OcSelect label="Display" disabled={busy} onChange={setScreenId} value={screenId} placeholder="Choose a display" options={screens.map((screen) => ({value:screen.id,label:`Display ${screen.id} · ${screen.pixel_width} × ${screen.pixel_height}`}))} /> : null}
+        <div className="we-browser-history">
+          <DesktopToolbarButton disabled={busy} glyph="refresh" label="Refresh" onClick={() => setRefresh((value) => value + 1)} />
+          {image ? <DesktopToolbarButton glyph="expand" label="Expand" onClick={() => void frame.current?.requestFullscreen().catch((failure) => setError(String(failure)))} /> : null}
+          {mode === "human" || mode === "stopped"
+            ? <DesktopToolbarButton disabled={busy || surface.readOnly} glyph="resume" label="Release control" onClick={() => void control("release_control")} selected />
+            : <DesktopToolbarButton disabled={busy || surface.readOnly || !evidence} glyph="hand" label="Take control" onClick={() => setWarning(true)} />}
+          <DesktopToolbarButton disabled={pendingControl === "stop" || surface.readOnly || (mode === "stopped" && !busy)} glyph="stop" label="Stop computer use" onClick={() => void control("stop")} />
+        </div>
       </div>
       {error ? <div className="we-browser-control-error" role="alert">{error} Refresh to check the connection again.</div> : null}
-      {evidence && (!evidence.permissions.screen_capture || !evidence.permissions.accessibility) ? (
-        <OctopusNoteLine>macOS permissions: Screen Recording {evidence.permissions.screen_capture ? "allowed" : "required"}; Accessibility {evidence.permissions.accessibility ? "allowed" : "required"}. Open macOS permissions to review the native helper and continue in System Settings. App approval and desktop control are separate.</OctopusNoteLine>
-      ) : null}
       <div className="we-desktop-native-viewport" ref={frame}>
         <div className="we-desktop-native-frame" style={image ? {width:`min(100cqw, ${100*image.width/image.height}cqh)`,height:`min(100cqh, ${100*image.height/image.width}cqw)`} : {width:"100%",height:"100%"}} data-streaming={(image && loadedFrame === image.sha256) || undefined}>
         {image ? <img alt={`Display ${observation.screen.id}, observed ${new Date(observation.captured_at_unix_ms).toLocaleTimeString()}`} onLoad={() => setLoadedFrame(image.sha256)} onError={invalidFrame} draggable={false} src={`data:${image.media_type};base64,${image.data_base64}`} />
-          : <LiveSurfaceEmpty glyph="desktop" title={screenId ? "Waiting for a desktop frame" : "Choose a display"} detail="Frames come directly from this room. Viewing does not acquire control or start the desktop executor." />}
+          : permissionLabel ? <div className="we-desktop-permission">
+            <LiveSurfaceEmpty glyph="desktop" title="Allow Octopus to see this Mac" detail={`${missingPermissions.join(" and ")} ${missingPermissions.length > 1 ? "are" : "is"} off in System Settings. Viewing never takes control.`} />
+            {permissionButton}
+          </div>
+          : <LiveSurfaceEmpty glyph="desktop" title={screenId || !evidence ? "Waiting for the screen" : "Choose a display"} detail="Viewing never takes control of the Mac." />}
         {observation?.focus ? <span className="absolute inset-x-0 top-full flex h-12 items-center justify-center px-4 text-center text-sm text-token-description-foreground">{observation.focus.app_id}</span> : null}
       </div>
-      </div>
-      <div className="we-browser-toolbar">
-        <span className="mr-auto text-xs text-token-description-foreground">{mode === "human" ? "Use your Mac normally. Worker input is paused until you release control." : "Input actions require a fresh observation and exclusive room ownership."}</span>
-        {mode === "human" || mode === "stopped" ? (
-          <OcButton disabled={busy || surface.readOnly} onClick={() => void control("release_control")} size="sm" variant="secondary">Release control</OcButton>
-        ) : <OcButton disabled={busy || surface.readOnly || !evidence} onClick={() => setWarning(true)} size="sm" variant="secondary">Take control</OcButton>}
-        <OcButton disabled={pendingControl === "stop" || surface.readOnly || (mode === "stopped" && !busy)} onClick={() => void control("stop")} size="sm" variant="secondary">Stop computer use</OcButton>
       </div>
       <ManualRoomControlWarning glyph="desktop" onCancel={() => setWarning(false)} onContinue={() => void control("take_control")} open={warning} title="Take control of the desktop" />
     </div>
   );
+}
+
+function DesktopToolbarButton({ disabled = false, glyph, label, onClick, selected = false }: {
+  disabled?: boolean; glyph: GlyphName; label: string; onClick: () => void; selected?: boolean;
+}) {
+  return <ShellTooltip label={label}><button aria-label={label} aria-pressed={selected || undefined} className="we-browser-control" disabled={disabled} onClick={onClick} type="button">
+    <Glyph name={glyph} size={16} />
+  </button></ShellTooltip>;
 }

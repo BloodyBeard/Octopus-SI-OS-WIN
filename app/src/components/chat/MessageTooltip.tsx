@@ -1,5 +1,9 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Children, cloneElement, createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type HTMLAttributes, type ReactElement, type ReactNode, type Ref, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
+import "./messageTooltip.css";
+
+const TooltipTriggerContext = createContext(false);
+type TooltipTriggerProps = HTMLAttributes<HTMLElement> & { disabled?: boolean; ref?: Ref<HTMLElement> };
 
 type Anchor = {
   side: "bottom" | "top" | "right" | "left";
@@ -15,8 +19,10 @@ type Anchor = {
   y: number;
 };
 
-export function MessageTooltip({ children, delayMs, label, onActivate, variant = "default", side = "top", disabled = false }: {
+export function MessageTooltip({ children, asChild = false, className, delayMs, label, onActivate, variant = "default", side = "top", disabled = false }: {
   children: ReactNode;
+  asChild?: boolean;
+  className?: string;
   delayMs?: number;
   label: ReactNode;
   onActivate?: () => void;
@@ -24,9 +30,20 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
   side?: "top" | "right" | "bottom";
   disabled?: boolean;
 }) {
+  const nested = useContext(TooltipTriggerContext);
+  const child = asChild ? Children.only(children) as ReactElement<TooltipTriggerProps> : null;
+  const inactive = disabled || nested || Boolean(child?.props.disabled) || !label;
   const resolvedDelayMs = delayMs ?? 700;
   const tooltipId = useId();
-  const triggerRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const childRef = child?.props.ref;
+  const setTriggerRef = useCallback((node: HTMLElement | null) => {
+    triggerRef.current = node;
+    if (typeof childRef === "function") {
+      const cleanup = childRef(node);
+      if (cleanup) return () => { triggerRef.current = null; cleanup(); };
+    } else if (childRef) childRef.current = node;
+  }, [childRef]);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<number | null>(null);
   const interactionRef = useRef({ focus: false, hoverLatched: false });
@@ -64,12 +81,12 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
   const openImmediately = useCallback(() => {
     clearTimer();
     openEpochRef.current += 1;
-    if (disabled || !tooltipInteractionActive(interactionRef.current) || document.visibilityState === "hidden") return;
+    if (inactive || !tooltipInteractionActive(interactionRef.current) || document.visibilityState === "hidden") return;
     setAnchor(measureAnchor());
-  }, [clearTimer, disabled, measureAnchor]);
+  }, [clearTimer, inactive, measureAnchor]);
 
   const scheduleOpen = useCallback(() => {
-    if (disabled || anchor || timerRef.current !== null) return;
+    if (inactive || anchor || timerRef.current !== null) return;
     const openEpoch = ++openEpochRef.current;
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
@@ -80,7 +97,7 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
       ) return;
       setAnchor(measureAnchor());
     }, resolvedDelayMs);
-  }, [anchor, disabled, measureAnchor, resolvedDelayMs]);
+  }, [anchor, inactive, measureAnchor, resolvedDelayMs]);
 
   const close = useCallback(() => {
     openEpochRef.current += 1;
@@ -93,7 +110,12 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
     clearTimer();
   }, [clearTimer]);
 
-  useEffect(() => { if (disabled) close(); }, [close, disabled]);
+  useEffect(() => {
+    if (inactive) {
+      interactionRef.current = { focus: false, hoverLatched: false };
+      close();
+    }
+  }, [close, inactive]);
 
   useLayoutEffect(() => {
     const tooltip = tooltipRef.current;
@@ -186,52 +208,73 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
       : anchor.viewportHeight - anchor.triggerBottom - 10)
     : 0;
 
+  const triggerProps: HTMLAttributes<HTMLElement> = {
+    "aria-describedby": anchor && !inactive ? tooltipId : undefined,
+    onBlur: () => {
+      interactionRef.current.focus = false;
+      close();
+    },
+    onClick: (event) => {
+      if (!onActivate) return;
+      event.stopPropagation();
+      onActivate();
+    },
+    onClickCapture: close,
+    onFocus: (event) => {
+      const focusVisible = event.target instanceof Element && event.target.matches(":focus-visible");
+      interactionRef.current.focus = focusVisible;
+      if (focusVisible) openImmediately();
+    },
+    onKeyDown: onActivate ? (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+      onActivate();
+    } : undefined,
+    onPointerLeave: () => {
+      interactionRef.current.hoverLatched = false;
+      close();
+    },
+    onPointerMove: (event) => {
+      if (inactive || event.pointerType === "touch" || interactionRef.current.hoverLatched) return;
+      interactionRef.current.hoverLatched = true;
+      scheduleOpen();
+    },
+    onPointerDown: (event) => {
+      if (onActivate) event.stopPropagation();
+    },
+    onPointerDownCapture: close,
+    role: onActivate ? "link" : undefined,
+    tabIndex: variant === "activity-target" ? 0 : undefined,
+  };
+  const trigger = child ? cloneElement(child, {
+    ...triggerProps,
+    className: [child.props.className, className].filter(Boolean).join(" ") || undefined,
+    "aria-describedby": [child.props["aria-describedby"], triggerProps["aria-describedby"]].filter(Boolean).join(" ") || undefined,
+    onBlur: composeHandlers(child.props.onBlur, triggerProps.onBlur),
+    onClick: composeHandlers(child.props.onClick, triggerProps.onClick),
+    onClickCapture: composeHandlers(child.props.onClickCapture, triggerProps.onClickCapture),
+    onFocus: composeHandlers(child.props.onFocus, triggerProps.onFocus),
+    onKeyDown: composeHandlers(child.props.onKeyDown, triggerProps.onKeyDown),
+    onPointerLeave: composeHandlers(child.props.onPointerLeave, triggerProps.onPointerLeave),
+    onPointerMove: composeHandlers(child.props.onPointerMove, triggerProps.onPointerMove),
+    onPointerDown: composeHandlers(child.props.onPointerDown, triggerProps.onPointerDown),
+    onPointerDownCapture: composeHandlers(child.props.onPointerDownCapture, triggerProps.onPointerDownCapture),
+    ref: setTriggerRef,
+    role: child.props.role ?? triggerProps.role,
+    tabIndex: child.props.tabIndex ?? triggerProps.tabIndex,
+  }) : <span
+    {...triggerProps}
+    className={`chat-tooltip-trigger${variant === "activity-target" ? " is-activity-target" : ""}${className ? ` ${className}` : ""}`}
+    data-agent-activity-file-link={variant === "activity-target" ? true : undefined}
+    ref={setTriggerRef}
+  >{children}</span>;
+
   return (
-    <span
-      className={`chat-tooltip-trigger${variant === "activity-target" ? " is-activity-target" : ""}`}
-      aria-describedby={anchor ? tooltipId : undefined}
-      data-agent-activity-file-link={variant === "activity-target" ? true : undefined}
-      onBlur={() => {
-        interactionRef.current.focus = false;
-        close();
-      }}
-      onClick={(event) => {
-        if (!onActivate) return;
-        event.stopPropagation();
-        onActivate();
-      }}
-      onClickCapture={close}
-      onFocus={(event) => {
-        const focusVisible = event.target instanceof Element && event.target.matches(":focus-visible");
-        interactionRef.current.focus = focusVisible;
-        if (focusVisible) openImmediately();
-      }}
-      onKeyDown={onActivate ? (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-        onActivate();
-      } : undefined}
-      onPointerLeave={() => {
-        interactionRef.current.hoverLatched = false;
-        close();
-      }}
-      onPointerMove={(event) => {
-        if (event.pointerType === "touch" || interactionRef.current.hoverLatched) return;
-        interactionRef.current.hoverLatched = true;
-        scheduleOpen();
-      }}
-      onPointerDown={(event) => {
-        if (onActivate) event.stopPropagation();
-      }}
-      onPointerDownCapture={close}
-      ref={triggerRef}
-      role={onActivate ? "link" : undefined}
-      tabIndex={variant === "activity-target" ? 0 : undefined}
-    >
-      {children}
-      {anchor && !disabled
+    <TooltipTriggerContext.Provider value={nested || Boolean(label)}>
+      {trigger}
+      {anchor && !inactive
         ? createPortal(
             <div
               className={`chat-tooltip${variant !== "default" ? ` is-${variant}` : ""}`}
@@ -251,8 +294,14 @@ export function MessageTooltip({ children, delayMs, label, onActivate, variant =
             document.body,
           )
         : null}
-    </span>
+    </TooltipTriggerContext.Provider>
   );
+}
+
+function composeHandlers<E extends SyntheticEvent>(original?: (event: E) => void, tooltip?: (event: E) => void) {
+  if (!original) return tooltip;
+  if (!tooltip) return original;
+  return (event: E) => { original(event); tooltip(event); };
 }
 
 function tooltipInteractionActive(interaction: { focus: boolean; hoverLatched: boolean }): boolean {

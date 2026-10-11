@@ -120,6 +120,44 @@
         "system_room"
       ]
     },
+    "task": {
+      "worker_interface_id": "system_worker_operator_task",
+      "context_artifact_bindings": [
+        {
+          "id": "artifact-worker-role-template"
+        },
+        {
+          "id": "artifact-grounding-system-architecture"
+        },
+        {
+          "id": "artifact-codebase-layout"
+        },
+        {
+          "id": "artifact-code-mode-browser-prelude"
+        },
+        {
+          "id": "artifact-code-mode-cua-prelude"
+        },
+        {
+          "id": "artifact-worker-role-operator-task"
+        },
+        {
+          "id": "artifact-home-task-authoring"
+        },
+        {
+          "id": "artifact-spawn-literacy"
+        },
+        {
+          "id": "artifact-home-widget-authoring"
+        }
+      ],
+      "selected_worker_environment_kinds": [
+        "browser_session",
+        "code_mode",
+        "desktop_session",
+        "system_room"
+      ]
+    },
     "project_defaults": [
       {
         "package_id": "world_provider_codex",

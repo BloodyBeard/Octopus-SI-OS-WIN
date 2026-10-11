@@ -28,6 +28,7 @@ async function assertPackMembers() {
   assert.deepEqual(operator.members.map(member => `${member.registry_kind}/${member.owner}`).sort(), [
     "interface/system_interface_authoring",
     "interface/system_worker_operator_home",
+    "interface/system_worker_operator_task",
     "interface/world_operator_chat",
     "mark/tool.call.allowed",
     "verifier/tool_call_allowed",
@@ -262,6 +263,7 @@ async function run(preparedExecutable) {
     }
 
     const home = installedPack.workspace_setup.home;
+    const task = installedPack.workspace_setup.task;
     const plan = await planOperatorChatSurface({
       octopusHome: () => octopusHomeRoot,
       installationRoot: () => root,
@@ -317,7 +319,7 @@ async function run(preparedExecutable) {
       cycle: "freshprojectcycle00000001",
       providerInterfaceId: home.provider_interface_id,
       providerModel: "gpt-5.6-sol",
-      workerInterfaceId: plan.authoringProfile.worker_choice_interface,
+      workerInterfaceId: task.worker_interface_id,
       eeId: "ee_project_preflight",
       clientSurfaceRole: "task",
       doorHostSlots: plan.authoringProfile.door_host_slots,
@@ -332,12 +334,14 @@ async function run(preparedExecutable) {
         outboundInterfaceIds: ["system_room"],
         requiredVerifiedArtifacts: [linkedResultRequirement],
       }],
-      contextArtifactBindings: plan.authoringProfile.context_artifact_bindings ?? [],
-      selectedWorkerEnvironmentKinds: plan.authoringProfile.selected_worker_environment_kinds ?? [],
+      contextArtifactBindings: task.context_artifact_bindings,
+      selectedWorkerEnvironmentKinds: task.selected_worker_environment_kinds,
     });
     assert.equal(taskPlan.clientSurfaceRole, "task");
     assert.equal(taskPlan.authoringProfile.ee_id, "ee_project_preflight");
-    assert.equal(taskPlan.authoringProfile.worker_choice_interface, home.worker_interface_id);
+    assert.equal(taskPlan.authoringProfile.worker_choice_interface, task.worker_interface_id);
+    assert.ok(taskPlan.authoringProfile.context_artifact_bindings.some((binding) => binding.id === "artifact-worker-role-operator-task"));
+    assert.ok(!taskPlan.authoringProfile.context_artifact_bindings.some((binding) => binding.id === "artifact-worker-role-operator-home"));
     assert.deepEqual(
       taskPlan.authoringProfile.external_inputs[0].required_verified_artifacts,
       [{
@@ -430,10 +434,12 @@ async function boundedAgentPresetFixture(executable) {
     });
     const choice = { packId: pack.id, expectedPackManifestDigest: pack.manifest_digest, presetId: recipe.id, projectKeys: ["desktop"], providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort };
     const homeRecipe = pack.workspace_setup.home;
+    const taskRecipe = pack.workspace_setup.task;
     const request = {
       action: "initialize_workspace", operationId: "cu_preset_workspace_001",
       root: { key: "root", templateName: "existence", name: "Desktop work", goal: "Operate desktop tasks" },
       home: { name: "Home", providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort, workerInterfaceId: homeRecipe.worker_interface_id, doorHostSlots: {}, contextArtifactBindings: homeRecipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: homeRecipe.selected_worker_environment_kinds },
+      task: { workerInterfaceId: taskRecipe.worker_interface_id, contextArtifactBindings: taskRecipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds },
       projects: [{ key: "desktop", parentKey: "root", templateName: "project", name: "Desktop", goal: "Desktop tasks", presentation: { icon: "folder", color: "blue" } }],
       agentPresets: [choice],
     };
@@ -467,7 +473,8 @@ async function boundedAgentPresetFixture(executable) {
     await assert.rejects(check.validatePlannedHomeOwnership(validationRoots, nativeHomePlan, planWrites, tampered), /snapshot differs from its exact source evidence/);
     const catalogFile = await readClientAgentCatalog(home);
     assert.equal(catalogFile.document.agents.length, 1);
-    assert.equal(catalogFile.document.project_sources[0].source_worker_interface, homeRecipe.worker_interface_id);
+    assert.equal(catalogFile.document.project_sources.length, 2);
+    assert.ok(catalogFile.document.project_sources.every(source => source.source_worker_interface === taskRecipe.worker_interface_id));
     const agent = catalogFile.document.agents[0];
     const sidecarPath = path.join(active, "interface", workspace.homeInterfaceId, "octopus_os.json");
     const sidecar = JSON.parse(await fs.readFile(sidecarPath));

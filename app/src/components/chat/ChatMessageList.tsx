@@ -23,6 +23,8 @@ import { dynamicToolGlyph, dynamicToolOperationLabel, dynamicToolPresentation, d
 import { conversationTraceAdmission, isFinalAssistantResponse } from "./conversationTrace";
 import { commandActivityModel, commandOutcomeLabel, commandResultBody } from "./commandActivityModel";
 import { readProjection } from "../../projectionClient";
+import { appToast } from "../../toasts";
+import type { ArtifactReference } from "../artifacts/types";
 import { AssistantDirectiveSurfaces } from "./AssistantDirectiveSurfaces";
 import { projectAssistantDirectives, type AssistantVisualizationTarget } from "./assistantDirectives";
 import {
@@ -34,6 +36,7 @@ import {
 } from "./threadVirtualizer";
 
 const WorkingPatchDiff = lazy(() => import("./WorkingPatchDiff"));
+const TraceArtifactWorkbench = lazy(() => import("../artifacts/ArtifactWorkbench").then((module) => ({ default: module.ArtifactWorkbench })));
 
 type Props = {
   activityPresentation?: "conversation" | "ledger";
@@ -238,6 +241,9 @@ export function ChatMessageList({
     turnKey: string;
   } | null>(null);
   const [scrolledFromLatest, setScrolledFromLatest] = useState(false);
+  const [scrollbarActive, setScrollbarActive] = useState(false);
+  const [scrollbarAwayFromLatest, setScrollbarAwayFromLatest] = useState(false);
+  const scrollbarTimerRef = useRef<number | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [unseenMessageCount, setUnseenMessageCount] = useState(0);
   const reducedMotion = useShouldReduceMotion();
@@ -268,7 +274,19 @@ export function ChatMessageList({
     stableHeaderEdgeScrollChange(scrolled);
   }, [stableHeaderEdgeScrollChange]);
 
+  function revealScrollbar() {
+    setScrollbarActive(true);
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+    scrollbarTimerRef.current = window.setTimeout(() => {
+      scrollbarTimerRef.current = null;
+      setScrollbarActive(false);
+    }, 600);
+  }
+
   useLayoutEffect(() => {
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
+    scrollbarTimerRef.current = null;
+    setScrollbarActive(false);
     if (scrollFrameRef.current !== null) {
       window.cancelAnimationFrame(scrollFrameRef.current);
       scrollFrameRef.current = null;
@@ -289,6 +307,7 @@ export function ChatMessageList({
     setActiveUserMessageId("");
     setVirtualRevealRequest(null);
     setScrolledFromLatest(restoreDistance > 0);
+    setScrollbarAwayFromLatest(restoreDistance > 1);
     setShowScrollToLatest(restoreDistance > THREAD_SCROLL_LATEST_BUTTON_THRESHOLD_PX);
     setUnseenMessageCount(0);
     const list = listRef.current;
@@ -356,7 +375,9 @@ export function ChatMessageList({
     if (!list) return;
     updateHeaderEdgeScroll();
     const distanceFromLatest = reverseScrollDistance(list);
+    setScrollbarAwayFromLatest(!programmaticLatestScrollRef.current && distanceFromLatest > 1);
     const intentIsCurrent = performance.now() <= userScrollIntentUntilRef.current;
+    if (intentIsCurrent) revealScrollbar();
     if (programmaticLatestScrollRef.current && distanceFromLatest > 1) {
       lastScrollDistanceRef.current = distanceFromLatest;
       pinnedRef.current = true;
@@ -398,6 +419,7 @@ export function ChatMessageList({
   }
 
   useEffect(() => () => {
+    if (scrollbarTimerRef.current !== null) window.clearTimeout(scrollbarTimerRef.current);
     if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
     if (latestScrollAnimationFrameRef.current !== null) {
       window.cancelAnimationFrame(latestScrollAnimationFrameRef.current);
@@ -644,10 +666,11 @@ export function ChatMessageList({
     latestScrollAnimationFrameRef.current = window.requestAnimationFrame(step);
   }
 
-  function stopProgrammaticLatestScroll(detachFromLatest = false) {
+  function stopProgrammaticLatestScroll(detachFromLatest = false, scrolling = true) {
+    if (scrolling) revealScrollbar();
+    userScrollIntentUntilRef.current = performance.now() + THREAD_USER_SCROLL_INTENT_WINDOW_MS;
     if (detachFromLatest) {
       pinnedRef.current = false;
-      userScrollIntentUntilRef.current = performance.now() + THREAD_USER_SCROLL_INTENT_WINDOW_MS;
     }
     programmaticLatestScrollRef.current = false;
     if (latestScrollAnimationFrameRef.current !== null) {
@@ -665,6 +688,7 @@ export function ChatMessageList({
       />
       <div
         className={`octopus-chat-scroll thread-scroll-container h-full overflow-x-hidden overflow-y-auto [overflow-anchor:none] [scroll-padding-bottom:var(--thread-scroll-padding-bottom,0px)] electron:[scrollbar-gutter:stable_both-edges] pt-(--thread-content-top-inset) [container-name:thread-content] [container-type:inline-size] [&:has([data-thread-scroll-footer='true']:focus-within)]:[scroll-padding-bottom:0px] flex flex-col-reverse focus:outline-none${scrolledFromLatest ? " is-scrolled" : ""}${dragOver ? " is-drag-over" : ""}`}
+        data-scrollbar-visible={scrollbarAwayFromLatest || scrollbarActive || undefined}
         onDragLeave={dropEnabled ? onDragLeave : undefined}
         onDragOver={dropEnabled ? onDragOver : undefined}
         onDrop={dropEnabled ? onDrop : undefined}
@@ -688,6 +712,7 @@ export function ChatMessageList({
         }}
         onPointerDown={(event) => stopProgrammaticLatestScroll(
           event.pointerType === "mouse" && event.target === event.currentTarget,
+          event.target === event.currentTarget,
         )}
         onScroll={onScroll}
         onTouchCancel={() => { touchStartRef.current = null; }}
@@ -2029,9 +2054,7 @@ function AssistantEventContent({ find, message, onOpenAssistantReview, onOpenAss
       const copy = presentation.kind === "read" && presentation.target && presentation.pathLabel ? (
         <CadencedShimmerText active={active} highlight={label}>
           <span className="octopus-activity-action">{action}</span>{presentation.targetKind === "artifact" ? " artifact " : " "}
-          <MessageTooltip label={<code>{presentation.target}</code>} onActivate={presentation.path ? () => onOpenFile(presentation.path, presentation.exactToolId) : undefined} variant="activity-target">
-            <span className="octopus-activity-detail octopus-activity-file-target">{presentation.pathLabel}</span>
-          </MessageTooltip>
+          <TraceReadTarget message={message} presentation={presentation} onOpenFile={onOpenFile} />
         </CadencedShimmerText>
       ) : (
         <CadencedShimmerText active={active} highlight={label}>
@@ -2192,6 +2215,77 @@ function AssistantResponseContent({ find, message, onOpenAssistantReview, onOpen
     </>
   );
   return streamingChrome ? <div className="octopus-assistant-streaming min-w-0">{content}</div> : content;
+}
+
+function TraceReadTarget({ message, presentation, onOpenFile }: {
+  message: ChatRenderMessage;
+  presentation: DynamicToolPresentation;
+  onOpenFile: Props["onOpenFile"];
+}) {
+  const [reference, setReference] = useState<ArtifactReference | null>(null);
+  const [pending, setPending] = useState(false);
+  const attempt = useRef(0);
+  useEffect(() => {
+    setReference(null);
+    setPending(false);
+    return () => { attempt.current += 1; };
+  }, [message.artifactId, message.interfaceId, message.runId, presentation.target]);
+
+  async function openArtifact() {
+    if (pending) return;
+    const request = ++attempt.current;
+    setPending(true);
+    try {
+      if (!message.artifactId || !message.runId || !message.interfaceId) throw new Error("This read has no exact admitted artifact coordinates.");
+      const response = await readProjection<ArtifactActivityBytes>("projection.artifact.bytes.read", {
+        artifact_id: message.artifactId,
+        interface_id: message.interfaceId,
+        run_id: message.runId,
+      });
+      if (request !== attempt.current) return;
+      setReference(traceReadArtifactReference(message, presentation, response));
+    } catch (error) {
+      if (request === attempt.current) appToast.warning(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (request === attempt.current) setPending(false);
+    }
+  }
+
+  return <>
+    <MessageTooltip label={<code>{presentation.target}</code>} onActivate={presentation.targetKind === "artifact"
+      ? () => void openArtifact()
+      : presentation.path ? () => onOpenFile(presentation.path, presentation.exactToolId) : undefined} variant="activity-target">
+      <span aria-busy={pending || undefined} className="octopus-activity-detail octopus-activity-file-target">{presentation.pathLabel}</span>
+    </MessageTooltip>
+    {reference ? <Suspense fallback={null}><TraceArtifactWorkbench reference={reference} presentation="overlay" onClose={() => setReference(null)} /></Suspense> : null}
+  </>;
+}
+
+function traceReadArtifactReference(message: ChatRenderMessage, presentation: DynamicToolPresentation, response: ArtifactActivityBytes): ArtifactReference {
+  if (response.artifact_id !== message.artifactId || response.run_id !== message.runId || response.interface_id !== message.interfaceId) {
+    throw new Error("The read artifact coordinates do not match the selected trace.");
+  }
+  const data = eventRecord(decodeJsonArtifactPayload(response.base64));
+  const body = eventRecord(data.body);
+  const callId = eventString(message.eventData?.call_id);
+  if (!callId || data.call_id !== callId || data.tool !== presentation.exactToolId || data.ok !== true
+    || body.result !== "artifact_read" || body.id !== presentation.target || typeof body.text !== "string") {
+    throw new Error("The admitted read result does not match this artifact target.");
+  }
+  const offset = body.offset_bytes;
+  const count = body.bytes_read;
+  const total = body.artifact_size_bytes;
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(count) || !Number.isSafeInteger(total)
+    || (offset as number) < 0 || (count as number) < 0 || (total as number) < 0
+    || (offset as number) + (count as number) > (total as number)
+    || new TextEncoder().encode(body.text).length !== count || typeof body.truncated !== "boolean") {
+    throw new Error("The admitted artifact read has invalid byte coordinates.");
+  }
+  return {
+    artifactId: message.artifactId!, runId: message.runId, interfaceId: message.interfaceId,
+    label: `${presentation.pathLabel}${offset !== 0 || body.truncated ? " (read excerpt)" : ""}`,
+    source: "message", inlinePayload: body.text,
+  };
 }
 
 function WebSearchActivity({ active, detail }: { active: boolean; detail: string }) {

@@ -11,6 +11,7 @@
   "interfaces": [
     "world_operator_chat",
     "system_interface_authoring",
-    "system_worker_operator_home"
+    "system_worker_operator_home",
+    "system_worker_operator_task"
   ]
 }

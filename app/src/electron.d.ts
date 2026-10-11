@@ -1474,6 +1474,7 @@ export type OctopusOsWorkspaceMutationRequest =
         contextArtifactBindings: Array<{ id: string }>;
         selectedWorkerEnvironmentKinds: string[];
       };
+      task: import("./onboarding/workspaceSetup").WorkspaceInitializeRequest["task"];
       projects: Array<{
         key: string;
         parentKey: "root" | string;

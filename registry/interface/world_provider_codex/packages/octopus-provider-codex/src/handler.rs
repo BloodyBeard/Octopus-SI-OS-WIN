@@ -4027,17 +4027,48 @@ pub(crate) fn codex_session_snapshot_labels(
     private_config_string_set(&config.private_config, "session_snapshot_labels")
 }
 
-pub(crate) fn is_operator_continuity_input(
+pub(crate) fn is_provider_turn_input(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
 ) -> Result<bool, InterfaceDriverError> {
-    if input.read_artifact_manifest()?.label == OPERATOR_MESSAGE_LABEL { return Ok(true); }
-    Ok(admitted_peer_message(input, descriptor.interface_driver_config.as_ref()
-        .and_then(|config| config.private_config.get("input_intake")))?
-        .is_some_and(|peer| peer.action != PeerAction::Interrupt))
+    let manifest = input.read_artifact_manifest()?;
+    let config = descriptor.interface_driver_config.as_ref().ok_or_else(|| {
+        InterfaceDriverError::FailedClosed("provider descriptor has no driver configuration".into())
+    })?;
+    if let Some(peer) = admitted_peer_message(input, config.private_config.get("input_intake"))? {
+        return Ok(peer.action != PeerAction::Interrupt);
+    }
+    if is_explicit_turn_control_label(&manifest.label)
+        || manifest.label == PROVIDER_MODELS_LIST_LABEL
+        || is_undeclared_provider_operation(&manifest.label, false)
+        || configured_provider_operation(&config.private_config, &manifest.label)?.is_some()
+        || provider_operations_from_private_config(&config.private_config)?
+            .and_then(|operations| operations.thread_compact_start)
+            .is_some_and(|operation| operation.request_label == manifest.label)
+    {
+        return Ok(false);
+    }
+    let bytes = input.read_artifact_payload()?;
+    if decode_lifecycle_inbound(&manifest.label, &bytes)
+        .map_err(InterfaceDriverError::Protocol)?.is_some()
+    {
+        return Ok(false);
+    }
+    if manifest.label == OPERATOR_MESSAGE_LABEL { return Ok(true); }
+    let mut names = input.interface_affordance_specs()?.iter()
+        .map(|spec| spec.name.as_str().to_string()).collect();
+    let operations = extract_interface_operation_affordances(input, &mut names, &mut Vec::new())?;
+    let source = input.metadata()?.checkpoint_binding_policy.as_ref()
+        .map(|binding| &binding.inbound.interface);
+    if !operations.is_empty() && source.is_none() {
+        return Err(InterfaceDriverError::FailedClosed(
+            "provider input has no admitted checkpoint binding snapshot".into(),
+        ));
+    }
+    Ok(matches!(decode_provider_input(&bytes, &manifest.label, source, &operations, None)?, ProviderInput::Turn(_)))
 }
 
-pub(crate) fn recover_operator_turn_continuity(
+pub(crate) fn recover_provider_turn_continuity(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
     resolved_session_snapshot: Option<&ProviderInvocationSessionSnapshot>,
@@ -4046,9 +4077,9 @@ pub(crate) fn recover_operator_turn_continuity(
 ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
     let manifest = input.read_artifact_manifest()?;
     let peer = admitted_peer_message(input, descriptor.interface_driver_config.as_ref().and_then(|c| c.private_config.get("input_intake")))?;
-    if manifest.label != OPERATOR_MESSAGE_LABEL && peer.as_ref().is_none_or(|message| message.action == PeerAction::Interrupt) {
+    if !is_provider_turn_input(descriptor, input)? {
         return Err(InterfaceDriverError::FailedClosed(format!(
-            "deferred provider turn source '{}' is not an operator message",
+            "deferred provider turn source '{}' is not a new provider turn",
             manifest.label
         )));
     }
@@ -4211,6 +4242,66 @@ fn provider_operations_from_private_config(
     Ok(Some(operations))
 }
 
+fn configured_provider_operation(
+    private_config: &serde_json::Map<String, serde_json::Value>,
+    label: &str,
+) -> Result<Option<ProviderOperation>, InterfaceDriverError> {
+    let Some(operations) = provider_operations_from_private_config(private_config)? else {
+        return Ok(None);
+    };
+    Ok([
+        (
+            ProviderOperation::AccountLoginStart,
+            operations.account_login_start.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountLoginCancel,
+            operations.account_login_cancel.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountLoginStatusRead,
+            operations.account_login_status_read.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountLogout,
+            operations.account_logout.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountRead,
+            operations.account_read.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountRateLimitsRead,
+            operations.account_rate_limits_read.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountRateLimitResetConsume,
+            operations
+                .account_rate_limit_reset_consume
+                .request_label
+                .as_str(),
+        ),
+        (
+            ProviderOperation::AccountUsageRead,
+            operations.account_usage_read.request_label.as_str(),
+        ),
+        (
+            ProviderOperation::AccountWorkspaceMessagesRead,
+            operations
+                .account_workspace_messages_read
+                .request_label
+                .as_str(),
+        ),
+        (
+            ProviderOperation::CapabilitiesRead,
+            operations.capabilities_read.request_label.as_str(),
+        ),
+    ]
+    .into_iter()
+    .find_map(|(operation, request_label)| (request_label == label).then_some(operation)))
+}
+
+
 impl CodexAppServerInterfaceDriver {
     pub fn interface_driver_ref(&self) -> &str {
         CODEX_APP_SERVER_INTERFACE_DRIVER_REF
@@ -4224,59 +4315,7 @@ impl CodexAppServerInterfaceDriver {
         &self,
         label: &str,
     ) -> Result<Option<ProviderOperation>, InterfaceDriverError> {
-        let Some(operations) = self.provider_operations()? else {
-            return Ok(None);
-        };
-        Ok([
-            (
-                ProviderOperation::AccountLoginStart,
-                operations.account_login_start.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountLoginCancel,
-                operations.account_login_cancel.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountLoginStatusRead,
-                operations.account_login_status_read.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountLogout,
-                operations.account_logout.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountRead,
-                operations.account_read.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountRateLimitsRead,
-                operations.account_rate_limits_read.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountRateLimitResetConsume,
-                operations
-                    .account_rate_limit_reset_consume
-                    .request_label
-                    .as_str(),
-            ),
-            (
-                ProviderOperation::AccountUsageRead,
-                operations.account_usage_read.request_label.as_str(),
-            ),
-            (
-                ProviderOperation::AccountWorkspaceMessagesRead,
-                operations
-                    .account_workspace_messages_read
-                    .request_label
-                    .as_str(),
-            ),
-            (
-                ProviderOperation::CapabilitiesRead,
-                operations.capabilities_read.request_label.as_str(),
-            ),
-        ]
-        .into_iter()
-        .find_map(|(operation, request_label)| (request_label == label).then_some(operation)))
+        configured_provider_operation(&self.interface_private_config, label)
     }
 
     fn configured_thread_compact_request(&self, label: &str) -> Result<bool, InterfaceDriverError> {
@@ -10124,19 +10163,11 @@ struct InterfaceOperationCatalogEntry {
     output_label: String,
 }
 
-fn extract_native_affordance_catalog(
+fn extract_interface_operation_affordances(
     input: &InterfaceInvocationEnvelope,
-    hidden_tools: &[String],
-    namespace: &NativeToolNamespace,
-    run_affordances: Option<&RunAffordances>,
-    private_config: &serde_json::Map<String, serde_json::Value>,
-) -> Result<NativeAffordanceCatalog, InterfaceDriverError> {
-    let mut specs = extract_native_affordances_from_invocation(input, hidden_tools)?;
-    let mut names = input
-        .interface_affordance_specs()?
-        .iter()
-        .map(|spec| spec.name.as_str().to_string())
-        .collect::<BTreeSet<_>>();
+    names: &mut BTreeSet<String>,
+    specs: &mut Vec<DynamicToolSpec>,
+) -> Result<BTreeMap<String, InterfaceOperationAffordance>, InterfaceDriverError> {
     let allowed_interfaces = input
         .metadata()
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?
@@ -10264,6 +10295,23 @@ fn extract_native_affordance_catalog(
             }
         }
     }
+    Ok(interface_operations)
+}
+
+fn extract_native_affordance_catalog(
+    input: &InterfaceInvocationEnvelope,
+    hidden_tools: &[String],
+    namespace: &NativeToolNamespace,
+    run_affordances: Option<&RunAffordances>,
+    private_config: &serde_json::Map<String, serde_json::Value>,
+) -> Result<NativeAffordanceCatalog, InterfaceDriverError> {
+    let mut specs = extract_native_affordances_from_invocation(input, hidden_tools)?;
+    let mut names = input
+        .interface_affordance_specs()?
+        .iter()
+        .map(|spec| spec.name.as_str().to_string())
+        .collect::<BTreeSet<_>>();
+    let interface_operations = extract_interface_operation_affordances(input, &mut names, &mut specs)?;
     if let Some(affordances) = run_affordances {
         for affordance in affordances.affordances() {
             if !names.insert(affordance.name.as_str().to_string()) {
@@ -17955,7 +18003,21 @@ mod tests {
         };
         let descriptor: InterfaceDescriptor =
             serde_json::from_str(include_str!("../../../interface.json")).unwrap();
-        assert!(!is_operator_continuity_input(&descriptor, &catalog_envelope).unwrap());
+        assert!(!is_provider_turn_input(&descriptor, &catalog_envelope).unwrap());
+        let unsupported_bytes = b"{}";
+        let unsupported = InterfaceInvocationEnvelope {
+            artifact: ArtifactRef {
+                id: octopus_descriptors::ArtifactId::new("undeclared-provider-operation"),
+                content: octopus_ledger::ContentHash::of_bytes(unsupported_bytes),
+            },
+            artifact_file: InterfaceArtifactFile::write(
+                temp.path().join("undeclared-operation"), "provider.account.unknown", unsupported_bytes,
+            ).unwrap(),
+            artifact_binding_payloads: catalog_envelope.artifact_binding_payloads.clone(),
+            metadata: catalog_envelope.metadata.clone(),
+        };
+        assert!(!is_provider_turn_input(&descriptor, &unsupported).unwrap(),
+            "an undeclared operation must reach its canonical refusal without waiting for a tool result");
         let (catalog_output, _catalog_output_rx) = ProviderOutputStream::channel();
         let blocked_catalog = driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {

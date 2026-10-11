@@ -374,8 +374,12 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     ResizeObserver: class { observe() {} disconnect() {} } });
   document.hasFocus = () => true; // JSDOM has no window focus; model a focused client for Escape restoration.
   const modalFocus = load("src/design-system/modalFocus.ts");
+  const shellTooltip = load("src/components/shell/ShellTooltip.tsx", {
+    "../chat/MessageTooltip": load("src/components/chat/MessageTooltip.tsx"),
+  });
   const menuComponents = load("src/design-system/components.tsx", { "./OcDropdown": {}, "./modalFocus": modalFocus,
-    "../components/IconGlyphs": { Glyph: empty }, "../components/navigation/OctopusSpinner": { OctopusSpinner: empty } });
+    "../components/IconGlyphs": { Glyph: empty }, "../components/navigation/OctopusSpinner": { OctopusSpinner: empty },
+    "../components/shell/ShellTooltip": shellTooltip });
   const dropdown = load("src/design-system/OcDropdown.tsx", { "./components": menuComponents, "./modalFocus": modalFocus });
   const keydown = async (target, key, modifiers = {}) => {
     const event = new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
@@ -388,6 +392,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     "../../appearance": { useAppearance: () => ({}) }, "../../runtimeFormat": { copyText: noop },
     "../../design-system/components": { OcButton: empty, OcDialog: empty, OcDialogFooter: empty, OcDialogHeader: empty },
     "../IconGlyphs": { Glyph: empty }, "./markdownPresentation": markdown,
+    "../shell/ShellTooltip": shellTooltip,
   });
   for (const compactHeadings of [false, true, false]) {
     await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: "# Heading", compactHeadings })));
@@ -516,7 +521,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     "../../clientActions": commands,
     "../../clientPreferences": { useClientPreferences: () => ({ sendShortcut }) },
     "./ProjectedFilePicker": { ProjectedFilePicker: empty }, "./ComposerUtilityBar": { ComposerUtilityBar: empty },
-    "./MessageTooltip": { MessageTooltip: (props) => props.children },
+    "../shell/ShellTooltip": shellTooltip,
     "./RichComposerEditor": { RichComposerEditor: ({ onKeyDown }) => React.createElement("textarea", { onKeyDown: (event) => onKeyDown(event.nativeEvent, event.currentTarget) }) },
   }).ChatComposer;
   let sends = 0, stops = 0, queued = 0;

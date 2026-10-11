@@ -68,6 +68,16 @@ const glyphs = {
         </>
       ),
     },
+  usage: {
+      viewBox: "0 0 20 20",
+      node: (
+        <>
+          <path {...strokeProps} d="M3.6 14.2a6.9 6.9 0 1 1 12.8 0" />
+          <path {...strokeProps} d="M10 11.6l3-3.9" />
+          <circle cx="10" cy="11.6" r="1.15" fill="currentColor" />
+        </>
+      ),
+    },
   metrics: {
       node: (
         <>

@@ -41,6 +41,10 @@
     },
     {
       "registry_kind": "artifact",
+      "owner": "artifact-worker-role-operator-task"
+    },
+    {
+      "registry_kind": "artifact",
       "owner": "artifact-home-task-authoring"
     },
     {

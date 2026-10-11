@@ -734,21 +734,21 @@ function validatePackWorkspaceSetup(pack, packageById) {
   const driverNames = new Set(componentPackages
     .filter((manifest) => manifest.product_kind === "driver")
     .map((manifest) => manifest.product_id));
-  const home = pack.workspace_setup.home;
   for (const [field, interfaceId] of [
-    ["provider_interface_id", home.provider_interface_id],
-    ["worker_interface_id", home.worker_interface_id],
+    ["home.provider_interface_id", pack.workspace_setup.home.provider_interface_id],
+    ["home.worker_interface_id", pack.workspace_setup.home.worker_interface_id],
+    ["task.worker_interface_id", pack.workspace_setup.task.worker_interface_id],
   ]) {
     if (!interfaceOwners.has(interfaceId)) {
-      throw new Error(`Application Pack '${pack.id}' workspace_setup.home.${field} is not supplied by a component`);
+      throw new Error(`Application Pack '${pack.id}' workspace_setup.${field} is not supplied by a component`);
     }
   }
-  for (const binding of home.context_artifact_bindings) {
+  for (const binding of [...pack.workspace_setup.home.context_artifact_bindings, ...pack.workspace_setup.task.context_artifact_bindings]) {
     if (!artifactOwners.has(binding.id)) {
       throw new Error(`Application Pack '${pack.id}' workspace context artifact '${binding.id}' is not supplied by a component`);
     }
   }
-  for (const kind of home.selected_worker_environment_kinds) {
+  for (const kind of [...pack.workspace_setup.home.selected_worker_environment_kinds, ...pack.workspace_setup.task.selected_worker_environment_kinds]) {
     if (!driverNames.has(kind)) {
       throw new Error(`Application Pack '${pack.id}' workspace worker environment '${kind}' is not supplied by a Driver component`);
     }

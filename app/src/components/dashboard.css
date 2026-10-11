@@ -1,0 +1,74 @@
+.topbar .topology-mode-toggle {
+  width: max-content;
+  max-width: none;
+  flex: none;
+  overflow: visible;
+}
+
+.dashboard-label {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.dashboard-label > .chat-tooltip-trigger {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dashboard-label .dashboard-label-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-tooltip-label {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.topology-shell .env-head strong,
+.topology-shell .env-run-main strong,
+.topology-shell .env-checkpoint-required-row strong {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+
+.topology-shell .env-checkpoint-required-row small {
+  display: flex;
+  min-width: 0;
+  max-width: 40%;
+  align-items: center;
+  gap: 3px;
+}
+
+.dashboard-svg-label-content {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: baseline;
+  line-height: 14px;
+}
+
+.dashboard-svg-label-content.is-centered {
+  justify-content: center;
+}
+
+.wp-zone .dashboard-svg-label {
+  color: var(--text-soft);
+  font-size: var(--ui-font-11, 11px);
+}
+
+.wp-run .dashboard-svg-label {
+  color: var(--copy-dim);
+  font-size: var(--ui-font-10, 10px);
+}
+
+.wp-world-dot .dashboard-svg-label {
+  color: rgba(153, 206, 255, 0.9);
+  font-size: var(--ui-font-10, 10px);
+}

@@ -17,6 +17,7 @@ const KINDS = {
 async function main() {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-"));
   try {
+    await rendererPlanAdmission(path.join(temporary, "renderer"));
     await coldPresetLoader(path.join(temporary, "cold-preset"));
     await normalLifecycle(path.join(temporary, "normal"));
     await explicitSignInBoundary(path.join(temporary, "sign-in"));
@@ -30,6 +31,64 @@ async function main() {
     await refuseCorruptOperation(path.join(temporary, "corrupt"));
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function rendererPlanAdmission(root) {
+  const ts = require("typescript");
+  const app = path.resolve(__dirname, "..");
+  const source = async (file) => fs.readFile(path.join(app, file), "utf8");
+  const extract = (text, name, scope) => {
+    const tree = ts.createSourceFile("source.tsx", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const node = tree.statements.find((value) => ts.isFunctionDeclaration(value) && value.name?.text === name);
+    assert.ok(node, name);
+    const code = ts.transpileModule("return (" + node.getText(tree).replace(/^export\s+/, "") + ");", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    return Function(...Object.keys(scope), code)(...Object.values(scope));
+  };
+  const module = { exports: {} };
+  const code = ts.transpileModule(await source("src/onboarding/workspaceSetup.ts"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  Function("module", "exports", "crypto", code)(module, module.exports, crypto.webcrypto);
+  const renderer = module.exports;
+  const { readLocalPackageCatalog } = require("../electron/localPackages.cjs");
+  const catalog = await readLocalPackageCatalog({ sourceRegistryRoot: path.join(app, "../registry"),
+    libraryRoot: path.join(app, "distribution/local-packages"), activeRegistryRoot: path.join(root, "registry"), stateRoot: path.join(root, "package-state") });
+  assert.deepEqual(catalog.errors, []);
+  const native = catalog.packs.find((entry) => entry.id === "codex");
+  assert.ok(native);
+  const components = native.components.map((entry) => ({
+    packageId: entry.package_id, sourceDigest: entry.source_digest, productKind: entry.product_kind, productId: entry.product_id,
+  }));
+  const pack = { id: native.id, manifestDigest: native.manifest_digest, components,
+    recipe: { ...native.workspace_setup.home, task: native.workspace_setup.task,
+      project_defaults: native.workspace_setup.project_defaults, agent_presets: native.workspace_setup.agent_presets } };
+  const main = await source("electron/main.cjs");
+  const stableClientSetupJson = extract(main, "stableClientSetupJson", {});
+  const admit = extract(main, "requireClientSetupPack", { createHash: crypto.createHash, stableClientSetupJson });
+  const compile = extract(await source("src/components/onboarding/WorkspaceSetupGate.tsx"), "compileClientSetupPlanWithDigest", {
+    compileWorkspaceInitializeRequest: renderer.compileWorkspaceInitializeRequest, DIGEST: /^[a-f0-9]{64}$/, ProductSetupError: Error,
+  });
+  const draft = renderer.createWorkspaceSetupDraft("custom");
+  Object.assign(draft, { providerModel: "gpt-6-astra", reasoningEffort: "high", serviceTier: "ultrafast" });
+  const selection = { packageIds: components.map((entry) => entry.packageId),
+    selectedRecommended: native.components.filter((entry) => entry.selection === "recommended").map((entry) => entry.package_id),
+    extensions: (native.extensions ?? []).map((entry) => ({ extensionId: entry.extension_id, version: "1.0.0", sourceDigest: "sha256:" + "3".repeat(64), desiredState: "available" })),
+    projectKeysByPackage: Object.fromEntries(components.map((entry) => [entry.packageId, draft.projects.map((project) => project.key)])) };
+  const request = renderer.compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
+  const plan = compile(draft, pack, selection, await renderer.workspaceInitializeRequestDigest(request));
+  assert.equal(admit({ packs: [native] }, plan), native);
+  for (const mutate of [
+    (request) => { delete request.task; },
+    (request) => { request.task.workerInterfaceId = request.home.workerInterfaceId; },
+    (request) => { request.task.contextArtifactBindings = []; },
+    (request) => { request.task.selectedWorkerEnvironmentKinds = []; },
+  ]) {
+    const invalid = structuredClone(plan);
+    mutate(invalid.workspace.request);
+    assert.throws(() => admit({ packs: [native] }, invalid), /workspace recipe/);
+    if (invalid.workspace.request.task) {
+      invalid.workspace.request_digest = await renderer.workspaceInitializeRequestDigest(invalid.workspace.request);
+      assert.throws(() => admit({ packs: [native] }, invalid), /workspace recipe/);
+    }
   }
 }
 
@@ -59,7 +118,8 @@ async function coldPresetLoader(root) {
   await write(path.join(roots.libraryRoot, "packs", "fixture.json"), {
     schema: "octopus.local_application_pack", schema_version: 1, id: "fixture", version: "1.0.0", name: "Fixture", description: "Cold planner fixture.",
     components: [{ package_id: "world_operator_chat", selection: "included", reason: "Planner owner." }],
-    workspace_setup: { selection: "included", home: { provider_interface_id: provider, worker_interface_id: worker, context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [], agent_presets: [recipe] },
+    workspace_setup: { selection: "included", home: { provider_interface_id: provider, worker_interface_id: worker, context_artifact_bindings: [], selected_worker_environment_kinds: [] },
+      task: { worker_interface_id: worker, context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [], agent_presets: [recipe] },
   });
   const catalog = await readLocalPackageCatalog(roots);
   assert.deepEqual(catalog.errors, []);

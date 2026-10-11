@@ -45,7 +45,9 @@ export function accountResetTime(resetsAt: number | null, durationMins: number |
 }
 
 export function accountPlanLabel(plan: string | null | undefined): string {
-  return plan?.trim() ? plan.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Plan unavailable";
+  const value = plan?.trim();
+  if (!value) return "Plan unavailable";
+  return value === "promax" ? "Pro Max" : value.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 export function accountRemainingLabel(remaining: number | null, suffix = "left"): string {

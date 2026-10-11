@@ -2780,7 +2780,8 @@ async function planOperatorChatTopology({
   }
   const request = JSON.stringify({
     registry_root: registryRoot,
-    ee_instances_root: eeInstancesRoot,
+    ee_instances_root: await resolveEeInstancesRoot(octopusHome),
+    ee_policy_root: eeInstancesRoot,
     run_records_root: await resolveRunRecordsRoot(octopusHome),
     write_hash_algorithm: "sha256",
     interface_private_state_root: path.join(octopusHome, "interfaces"),

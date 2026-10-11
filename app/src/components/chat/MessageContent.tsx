@@ -20,6 +20,7 @@ import { useAppearance } from "../../appearance";
 import { OcButton, OcDialog, OcDialogFooter, OcDialogHeader } from "../../design-system/components";
 import { copyText } from "../../runtimeFormat";
 import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import type { HighlightedCode } from "./highlightCode";
 import { MARKDOWN_REMARK_PLUGINS, prepareStreamingMarkdown } from "./markdownPresentation";
 import "katex/dist/katex.min.css";
@@ -603,15 +604,16 @@ function TableBlock({ children, markdownSource }: { children: ReactNode; markdow
       <div className="octopus-markdown-table-wrapper group relative" data-markdown-table tabIndex={-1}>
         <table className="octopus-markdown-text octopus-markdown-table">{children}</table>
         <div className="absolute end-0 top-0 select-none" data-markdown-copy="exclude">
-          <button
-            aria-label={copied ? "Copied" : "Copy table"}
-            className="border-token-border no-drag cursor-interaction m-1 flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm justify-center p-0.5 group-[:not(:hover):not(:focus-within)]:pointer-events-none group-[:not(:hover):not(:focus-within)]:opacity-0"
-            onClick={copyTable}
-            title={copied ? "Copied" : "Copy table"}
-            type="button"
-          >
-            <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={16} />
-          </button>
+          <ShellTooltip label={copied ? "Copied" : "Copy table"}>
+            <button
+              aria-label={copied ? "Copied" : "Copy table"}
+              className="border-token-border no-drag cursor-interaction m-1 flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm justify-center p-0.5 group-[:not(:hover):not(:focus-within)]:pointer-events-none group-[:not(:hover):not(:focus-within)]:opacity-0"
+              onClick={copyTable}
+              type="button"
+            >
+              <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={16} />
+            </button>
+          </ShellTooltip>
         </div>
       </div>
     </div>
@@ -687,15 +689,16 @@ function MermaidBlock({ value }: { value: string }) {
         >
           Source
         </button>
-        <button
-          aria-label={copied ? "Copied" : "Copy diagram source"}
-          className="no-drag cursor-interaction rounded-md p-1 hover:bg-token-list-hover-background focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border"
-          onClick={() => void copyText(value).then((didCopy) => setCopied(didCopy))}
-          title={copied ? "Copied" : "Copy diagram source"}
-          type="button"
-        >
-          <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={15} />
-        </button>
+        <ShellTooltip label={copied ? "Copied" : "Copy diagram source"}>
+          <button
+            aria-label={copied ? "Copied" : "Copy diagram source"}
+            className="no-drag cursor-interaction rounded-md p-1 hover:bg-token-list-hover-background focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border"
+            onClick={() => void copyText(value).then((didCopy) => setCopied(didCopy))}
+            type="button"
+          >
+            <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={15} />
+          </button>
+        </ShellTooltip>
       </div>
       {sourceOpen ? <CodeBlock language="mermaid" value={value} /> : null}
       {!sourceOpen ? (
@@ -757,31 +760,33 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
         <div className="ml-auto flex shrink-0 items-center">
           <div className="flex items-center gap-px">
             {userControlledWrap ? (
-              <button
-                aria-label={shouldWrap ? "Disable word wrap" : "Enable word wrap"}
-                aria-pressed={shouldWrap}
-                className={`border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm items-center justify-center p-0.5${shouldWrap ? " hover:text-token-foreground" : ""}`}
-                onClick={() => setCodeBlockWordWrap(!shouldWrap)}
-                title={shouldWrap ? "Disable word wrap" : "Enable word wrap"}
-                type="button"
-              >
-                {shouldWrap
-                  ? <WrapDisabledIcon className="icon-2xs" />
-                  : <WrapEnabledIcon className="icon-2xs" />}
-              </button>
+              <ShellTooltip label={shouldWrap ? "Disable word wrap" : "Enable word wrap"}>
+                <button
+                  aria-label={shouldWrap ? "Disable word wrap" : "Enable word wrap"}
+                  aria-pressed={shouldWrap}
+                  className={`border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm items-center justify-center p-0.5${shouldWrap ? " hover:text-token-foreground" : ""}`}
+                  onClick={() => setCodeBlockWordWrap(!shouldWrap)}
+                  type="button"
+                >
+                  {shouldWrap
+                    ? <WrapDisabledIcon className="icon-2xs" />
+                    : <WrapEnabledIcon className="icon-2xs" />}
+                </button>
+              </ShellTooltip>
             ) : null}
-          <button
-            aria-label={copied ? "Copied" : "Copy code"}
-            className={`border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm items-center justify-center p-0.5${copied ? " text-token-foreground" : ""}`}
-            onClick={() => {
-              copyText(value);
-              setCopied(true);
-            }}
-            title={copied ? "Copied" : "Copy code"}
-            type="button"
-          >
-            <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={16} />
-          </button>
+          <ShellTooltip label={copied ? "Copied" : "Copy code"}>
+            <button
+              aria-label={copied ? "Copied" : "Copy code"}
+              className={`border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full electron:rounded-md text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent electron:p-1 electron:[&>svg]:icon-sm items-center justify-center p-0.5${copied ? " text-token-foreground" : ""}`}
+              onClick={() => {
+                copyText(value);
+                setCopied(true);
+              }}
+              type="button"
+            >
+              <Glyph className="icon-xs" name={copied ? "check" : "copy"} size={16} />
+            </button>
+          </ShellTooltip>
           </div>
         </div>
       </div>

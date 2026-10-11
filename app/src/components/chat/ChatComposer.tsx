@@ -14,7 +14,7 @@ import { ComposerUtilityBar } from "./ComposerUtilityBar";
 import type { ChatExecutionContext, ChatWorkerEnvironmentRoom } from "../../chatRuns";
 import type { ClientAgentDefinition } from "../../agentPresets";
 import type { TaskAccessMode } from "./taskAccess";
-import { MessageTooltip } from "./MessageTooltip";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import { OcDropdown } from "../../design-system/OcDropdown";
 import "./queue.css";
 import { RichComposerEditor, type RichComposerEditorHandle } from "./RichComposerEditor";
@@ -466,16 +466,17 @@ export function ChatComposer({
 
                 {voiceLayoutActive ? (
                   <div className="composer-voice-footer mb-2 flex items-center gap-2 px-2">
-                    <button
-                      aria-label="Cancel dictation"
-                      className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
-                      disabled={dictation.isTranscribing}
-                      onClick={dictation.abortDictation}
-                      title="Cancel dictation"
-                      type="button"
-                    >
-                      <Glyph className="icon-xs" name="close" size={16} />
-                    </button>
+                    <ShellTooltip label="Cancel dictation">
+                      <button
+                        aria-label="Cancel dictation"
+                        className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
+                        disabled={dictation.isTranscribing}
+                        onClick={dictation.abortDictation}
+                        type="button"
+                      >
+                        <Glyph className="icon-xs" name="close" size={16} />
+                      </button>
+                    </ShellTooltip>
                     <div
                       className="composer-waveform-wrap justify-center text-base text-token-text-tertiary select-none"
                       role={dictation.isTranscribing ? "status" : undefined}
@@ -484,45 +485,48 @@ export function ChatComposer({
                         ? <span>Transcribing</span>
                         : <canvas className="composer-waveform" ref={dictation.waveformCanvasRef} />}
                     </div>
-                    <button
-                      aria-label="Stop dictation"
-                      className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
-                      disabled={dictation.isTranscribing}
-                      onClick={() => dictation.stopDictation("insert")}
-                      title="Stop dictation"
-                      type="button"
-                    >
-                      <Glyph className="icon-xs" name="stop" size={16} />
-                    </button>
-                    <button
-                      aria-label="Transcribe and send"
-                      className={`bg-token-foreground focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full p-0.5 transition-opacity focus-visible:outline-2${dictation.isTranscribing ? " cursor-default opacity-50" : ""}`}
-                      disabled={dictation.isTranscribing}
-                      onClick={() => dictation.stopDictation("send")}
-                      title="Transcribe and send"
-                      type="button"
-                    >
-                      <Glyph className="icon-xs text-token-dropdown-background" name="send" size={16} />
-                    </button>
+                    <ShellTooltip label="Stop dictation">
+                      <button
+                        aria-label="Stop dictation"
+                        className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
+                        disabled={dictation.isTranscribing}
+                        onClick={() => dictation.stopDictation("insert")}
+                        type="button"
+                      >
+                        <Glyph className="icon-xs" name="stop" size={16} />
+                      </button>
+                    </ShellTooltip>
+                    <ShellTooltip label="Transcribe and send">
+                      <button
+                        aria-label="Transcribe and send"
+                        className={`bg-token-foreground focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full p-0.5 transition-opacity focus-visible:outline-2${dictation.isTranscribing ? " cursor-default opacity-50" : ""}`}
+                        disabled={dictation.isTranscribing}
+                        onClick={() => dictation.stopDictation("send")}
+                        type="button"
+                      >
+                        <Glyph className="icon-xs text-token-dropdown-background" name="send" size={16} />
+                      </button>
+                    </ShellTooltip>
                   </div>
                 ) : (
                 <div className="composer-footer grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-2 py-1 select-none">
                   <div className="flex min-w-0 items-center gap-2">
                     <div className="composer-context-anchor">
-                      <button
-                        aria-expanded={contextMenuOpen}
-                        aria-label="Add files and more"
-                        className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
-                        data-composer-navigation-target="add-context"
-                        data-state={contextMenuOpen ? "open" : "closed"}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => setContextMenuOpen((open) => !open)}
-                        ref={contextTriggerRef}
-                        title="Add files and more"
-                        type="button"
-                      >
-                        <Glyph className="icon-xs text-token-text-primary" name="plus" size={16} />
-                      </button>
+                      <ShellTooltip label="Add files and more" disabled={contextMenuOpen}>
+                        <button
+                          aria-expanded={contextMenuOpen}
+                          aria-label="Add files and more"
+                          className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
+                          data-composer-navigation-target="add-context"
+                          data-state={contextMenuOpen ? "open" : "closed"}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => setContextMenuOpen((open) => !open)}
+                          ref={contextTriggerRef}
+                          type="button"
+                        >
+                          <Glyph className="icon-xs text-token-text-primary" name="plus" size={16} />
+                        </button>
+                      </ShellTooltip>
                     </div>
                   </div>
 
@@ -557,23 +561,26 @@ export function ChatComposer({
                         />
                         {editingQueuedTurn ? <button className="composer-queue-action" type="button" onClick={onCancelQueuedEdit}>Cancel edit</button> : null}
                         {turnOpen && hasSubmissionPayload && onInterrupt ? (
-                          <button aria-label="Stop" className="composer-queue-action is-icon" disabled={interruptPending} onClick={onInterrupt} title="Stop" type="button">
-                            <Glyph name="stop" size={16} />
-                          </button>
+                          <ShellTooltip label="Stop">
+                            <button aria-label="Stop" className="composer-queue-action is-icon" disabled={interruptPending} onClick={onInterrupt} type="button">
+                              <Glyph name="stop" size={16} />
+                            </button>
+                          </ShellTooltip>
                         ) : null}
                         {variant === "home" && !isSubmitting && !stopAvailable && !resumeActionAvailable && !hasSubmissionPayload ? (
-                          <button
-                            aria-label="Open Voice"
-                            className="focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full bg-token-foreground p-0.5 transition-opacity focus-visible:outline-2 disabled:cursor-default disabled:opacity-50"
-                            disabled={voiceStartDisabled || !onVoiceStart}
-                            onClick={onVoiceStart}
-                            title="Open Voice"
-                            type="button"
-                          >
-                            <Glyph className="icon-xs text-token-dropdown-background" name="voiceMode" size={16} />
-                          </button>
+                          <ShellTooltip label="Open Voice">
+                            <button
+                              aria-label="Open Voice"
+                              className="focus-visible:outline-token-button-background cursor-interaction size-token-button-composer flex items-center justify-center rounded-full bg-token-foreground p-0.5 transition-opacity focus-visible:outline-2 disabled:cursor-default disabled:opacity-50"
+                              disabled={voiceStartDisabled || !onVoiceStart}
+                              onClick={onVoiceStart}
+                              type="button"
+                            >
+                              <Glyph className="icon-xs text-token-dropdown-background" name="voiceMode" size={16} />
+                            </button>
+                          </ShellTooltip>
                         ) : (
-                          <MessageTooltip label={submitTooltip}>
+                          <ShellTooltip label={submitTooltip} disabled={sendMenuOpen}>
                             <button
                               aria-busy={submitPending || undefined}
                               aria-label={submitAccessibleName}
@@ -594,7 +601,6 @@ export function ChatComposer({
                                 if (submitDisabled) return;
                                 stopAvailable ? onInterrupt?.() : resumeActionAvailable ? onResume?.() : onSubmit();
                               }}
-                              title={submitTooltip}
                               type="button"
                             >
                               {submitPending
@@ -605,7 +611,7 @@ export function ChatComposer({
                                     size={resumeActionAvailable ? 20 : 16}
                                   />}
                             </button>
-                          </MessageTooltip>
+                          </ShellTooltip>
                         )}
                       </div>
                     </div>
@@ -797,43 +803,44 @@ function DictationButton({
   };
 
   return (
-    <button
-      aria-label={canRetry ? "Retry dictation" : "Dictate"}
-      className="composer-round-button"
-      disabled={isTranscribing}
-      onClick={() => {
-        if (suppressClickRef.current) {
-          suppressClickRef.current = false;
-          return;
-        }
-        if (canRetry) onRetry();
-        else void onStart();
-      }}
-      onPointerCancel={releaseHold}
-      onPointerDown={(event) => {
-        if (event.button !== 0 || canRetry || isTranscribing) return;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        holdTimerRef.current = window.setTimeout(() => {
-          holdTimerRef.current = null;
-          holdStartedRef.current = true;
-          releaseRequestedRef.current = false;
-          const start = onStart();
-          startPromiseRef.current = start;
-          void start.finally(() => {
-            startPromiseRef.current = null;
-            if (releaseRequestedRef.current) {
-              releaseRequestedRef.current = false;
-              onStop();
-            }
-          });
-        }, 150);
-      }}
-      onPointerUp={releaseHold}
-      title={canRetry ? "Retry dictation" : "Click to dictate or hold"}
-      type="button"
-    >
-      {isTranscribing ? <span className="composer-spinner" /> : <Glyph className="icon-xs text-token-text-primary" name={canRetry ? "retry" : "microphone"} size={16} />}
-    </button>
+    <ShellTooltip label={canRetry ? "Retry dictation" : "Click to dictate or hold"} disabled={isTranscribing}>
+      <button
+        aria-label={canRetry ? "Retry dictation" : "Dictate"}
+        className="composer-round-button"
+        disabled={isTranscribing}
+        onClick={() => {
+          if (suppressClickRef.current) {
+            suppressClickRef.current = false;
+            return;
+          }
+          if (canRetry) onRetry();
+          else void onStart();
+        }}
+        onPointerCancel={releaseHold}
+        onPointerDown={(event) => {
+          if (event.button !== 0 || canRetry || isTranscribing) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          holdTimerRef.current = window.setTimeout(() => {
+            holdTimerRef.current = null;
+            holdStartedRef.current = true;
+            releaseRequestedRef.current = false;
+            const start = onStart();
+            startPromiseRef.current = start;
+            void start.finally(() => {
+              startPromiseRef.current = null;
+              if (releaseRequestedRef.current) {
+                releaseRequestedRef.current = false;
+                onStop();
+              }
+            });
+          }, 150);
+        }}
+        onPointerUp={releaseHold}
+        type="button"
+      >
+        {isTranscribing ? <span className="composer-spinner" /> : <Glyph className="icon-xs text-token-text-primary" name={canRetry ? "retry" : "microphone"} size={16} />}
+      </button>
+    </ShellTooltip>
   );
 }
 

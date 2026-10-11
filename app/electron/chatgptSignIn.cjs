@@ -11,6 +11,7 @@ function createChatgptSignIn(options) {
   let idleTimer = null;
   let authBusy = false;
   let authGeneration = 0;
+  let accountNotificationGeneration = 0;
   const logins = new Map();
 
   function nativeAuthStamp(codexHome) {
@@ -59,9 +60,10 @@ function createChatgptSignIn(options) {
     }
     fs.accessSync(binary, fs.constants.X_OK);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+    const env = { ...process.env, CODEX_HOME: codexHome, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "octopus_desktop" };
     const child = spawn(binary, ["app-server"], {
       cwd: codexHome,
-      env: { ...process.env, CODEX_HOME: codexHome },
+      env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     const server = { child, binary, codexHome, authStamp, closed: false, nextId: 1, pending: new Map(), buffer: "", stderr: "", ready: null };
@@ -128,8 +130,10 @@ function createChatgptSignIn(options) {
             }
           }
         }
-        if (message.method === "account/updated" && !authBusy && ![...logins.values()].some((login) => login.state === "pending")) {
-          publishAccountChange();
+        if (message.method === "account/updated" && server === appServer && !server.closed
+          && !authBusy && ![...logins.values()].some((login) => login.state === "pending")) {
+          accountNotificationGeneration += 1;
+          options.onAccountChanged?.();
         }
       }
     });
@@ -199,6 +203,7 @@ function createChatgptSignIn(options) {
   async function rateLimits() {
     const server = await ensureAppServer();
     const generation = authGeneration;
+    const notificationGeneration = accountNotificationGeneration;
     const authStamp = nativeAuthStamp(server.codexHome);
     try {
       const before = await readAccount(server);
@@ -206,6 +211,7 @@ function createChatgptSignIn(options) {
       const response = await server.request("account/rateLimits/read");
       const after = await readAccount(server);
       if (generation !== authGeneration || authStamp !== nativeAuthStamp(server.codexHome)
+        || (authStamp === null && notificationGeneration !== accountNotificationGeneration)
         || JSON.stringify(before) !== JSON.stringify(after)) {
         throw new Error("ChatGPT account changed while loading usage. Refresh and try again.");
       }

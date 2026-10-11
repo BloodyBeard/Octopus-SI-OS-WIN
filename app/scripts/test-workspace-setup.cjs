@@ -53,6 +53,13 @@ async function main() {
     assert.deepEqual(await fs.readdir(path.join(refusedHome, "state", "runs")), []);
     assert.deepEqual(await fs.readdir(path.join(refusedRegistry, "interface")), []);
     assert.equal((await readWorkspaceSetupState({ octopusHomeRoot: refusedHome, registryRoot: refusedRegistry })).status, "not_configured");
+    const undeclaredTaskRequest = { ...refusedRequest }; delete undeclaredTaskRequest.task;
+    await assert.rejects(initializeWorkspace({
+      octopusHomeRoot: refusedHome, registryRoot: refusedRegistry, request: undeclaredTaskRequest,
+      planOperatorSurface: () => { throw new Error("missing Task source must refuse before planning"); },
+    }), /Workspace setup request.*task/);
+    assert.deepEqual(await fs.readdir(path.join(refusedHome, "state", "ee_instances")), ["ee_existence.json"]);
+    assert.deepEqual(await fs.readdir(path.join(refusedRegistry, "interface")), []);
     const plannerCalls = [];
     const planOperatorSurface = async (input) => {
       plannerCalls.push({
@@ -73,11 +80,11 @@ async function main() {
     assert.equal(first.changed, true);
     assert.equal(first.action, "initialize_workspace");
     assert.equal(first.projects.length, 3);
-    assert.equal(plannerCalls.length, 4);
-    assert.deepEqual(plannerCalls.map((call) => call.role), ["home", "task", "task", "task"]);
+    assert.equal(plannerCalls.length, 5);
+    assert.deepEqual(plannerCalls.map((call) => call.role), ["home", "task", "task", "task", "task"]);
     assert.equal(plannerCalls[0].eeId, first.rootEeId);
     assert.deepEqual(
-      plannerCalls.slice(1).map((call) => call.eeId).sort(),
+      plannerCalls.slice(2).map((call) => call.eeId).sort(),
       first.projects.map((project) => project.eeId).sort(),
     );
     assert.deepEqual(
@@ -93,18 +100,24 @@ async function main() {
     const sidecar = JSON.parse(await fs.readFile(homeSidecarPath, "utf8"));
     assert.equal(sidecar.presentation.name, "Founder");
     assert.equal(sidecar.presentation.projects.length, 3);
-    assert.equal(sidecar.task_authoring_profiles.length, 3);
-    assert.equal(sidecar.task_authoring_profiles[0].worker_choice_interface, "system_worker_coder_max");
+    assert.equal(sidecar.task_authoring_profiles.length, 4);
+    const rootTaskProfile = sidecar.task_authoring_profiles.find((profile) => profile.ee_id === first.rootEeId);
+    assert.equal(rootTaskProfile.worker_choice_interface, request.task.workerInterfaceId);
+    assert.notEqual(rootTaskProfile.worker_choice_interface, sidecar.authoring_profile.worker_choice_interface);
+    assert.deepEqual(rootTaskProfile.context_artifact_bindings, request.task.contextArtifactBindings);
+    assert.ok(sidecar.task_authoring_profiles.every((profile) => profile.worker_choice_interface === request.task.workerInterfaceId));
     const state = await readWorkspaceSetupState({ octopusHomeRoot, registryRoot });
     assert.equal(state.status, "configured");
     assert.equal(state.receipt.root_ee_id, first.rootEeId);
     const second = await initializeWorkspace({ octopusHomeRoot, registryRoot, request, planOperatorSurface });
     assert.equal(second.changed, false);
     assert.equal(second.receiptDigest, first.receiptDigest);
-    assert.equal(plannerCalls.length, 4);
+    assert.equal(plannerCalls.length, 5);
     const voiceContext = { run_id: "voice_run", control_interface_id: "voice_control", provider_id: "voice_provider", delegation_interface_id: "voice_return" };
     sidecar.voice_context = voiceContext;
-    sidecar.authoring_profile.payload_artifact_bindings = [{ id: "attachment:project-context", content: Array(32).fill(7) }];
+    sidecar.authoring_profile.payload_artifact_bindings = [{ id: "attachment:home-context", content: Array(32).fill(9) }];
+    rootTaskProfile.payload_artifact_bindings = [{ id: "attachment:project-context", content: Array(32).fill(7) }];
+    rootTaskProfile.external_relays = [{ checkpoint_id: "task_exact_return", interface_id: "system_return_task_exact", outbound_interface_ids: ["world_operator_chat_exact_recipient"] }];
     await fs.writeFile(homeSidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`);
     const configuredRootPath = path.join(octopusHomeRoot, "state", "ee_instances", `${first.rootEeId}.json`);
     const configuredRoot = JSON.parse(await fs.readFile(configuredRootPath, "utf8"));
@@ -112,6 +125,23 @@ async function main() {
     configuredRoot.policy_narrowing = { allowed_worker_environment_kinds: ["git_worktree"] };
     await fs.writeFile(configuredRootPath, `${JSON.stringify(configuredRoot, null, 2)}\n`);
     let projectScope = await fixtureProjectScope(octopusHomeRoot, registryRoot, first);
+    await fs.writeFile(homeSidecarPath, `${JSON.stringify({ ...sidecar,
+      task_authoring_profiles: sidecar.task_authoring_profiles.filter((profile) => profile.ee_id !== first.rootEeId),
+    }, null, 2)}\n`);
+    const missingSourceScope = await fixtureProjectScope(octopusHomeRoot, registryRoot, first);
+    const missingSourceBytes = await fs.readFile(homeSidecarPath, "utf8");
+    const missingSourceEes = (await fs.readdir(path.join(octopusHomeRoot, "state", "ee_instances"))).sort();
+    await assert.rejects(mutateWorkspaceProject({
+      octopusHomeRoot, registryRoot, scope: missingSourceScope,
+      planOperatorSurface: () => { throw new Error("missing Task source must not fall back to Home"); },
+      request: { action: "create_project", operationId: "project_missing_source_12345678",
+        workspace: fixtureWorkspaceIdentity(missingSourceScope), parentEeId: first.rootEeId,
+        expectedParentDigest: missingSourceScope.environments.find((environment) => environment.eeId === first.rootEeId).recordDigest,
+        templateName: "project", name: "Missing source", goal: "Missing source", presentation: { icon: "circle", color: "gray" } },
+    }), /exact Agent source profiles/);
+    assert.deepEqual((await fs.readdir(path.join(octopusHomeRoot, "state", "ee_instances"))).sort(), missingSourceEes);
+    assert.equal(await fs.readFile(homeSidecarPath, "utf8"), missingSourceBytes);
+    await fs.writeFile(homeSidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`);
     await fs.writeFile(homeSidecarPath, `${JSON.stringify({ ...sidecar, voice_context: { ...voiceContext, provider_id: "../escape" } }, null, 2)}\n`);
     const invalidVoiceScope = await fixtureProjectScope(octopusHomeRoot, registryRoot, first);
     await assert.rejects(mutateWorkspaceProject({
@@ -175,7 +205,9 @@ async function main() {
     assert.deepEqual(updatedSidecar.voice_context, voiceContext);
     assert.equal(updatedSidecar.presentation.projects.at(-1).ee_id, createdProject.eeId);
     assert.equal(updatedSidecar.task_authoring_profiles.at(-1).ee_id, createdProject.eeId);
-    assert.deepEqual(updatedSidecar.task_authoring_profiles.at(-1).payload_artifact_bindings, sidecar.authoring_profile.payload_artifact_bindings);
+    assert.equal(updatedSidecar.task_authoring_profiles.at(-1).worker_choice_interface, request.task.workerInterfaceId);
+    assert.deepEqual(updatedSidecar.task_authoring_profiles.at(-1).payload_artifact_bindings, rootTaskProfile.payload_artifact_bindings);
+    assert.deepEqual(updatedSidecar.task_authoring_profiles.at(-1).external_relays, rootTaskProfile.external_relays);
     const repeatedCreate = await mutateWorkspaceProject({
       octopusHomeRoot,
       registryRoot,
@@ -977,10 +1009,12 @@ async function verifyTaskArchive(temporary) {
   await createFixture(fixtureHome, path.join(fixtureHome, "registry"));
   const home = await fs.realpath(fixtureHome), registry = await fs.realpath(path.join(home, "registry"));
   const request = setupRequest("workspace_archive_12345678");
-  const workerRoot = path.join(registry, "interface", request.home.workerInterfaceId);
-  await fs.mkdir(workerRoot, { recursive: true });
-  await fs.writeFile(path.join(workerRoot, "interface.json"), JSON.stringify({ id: request.home.workerInterfaceId, interface_type: "system", role: "worker", direction: "bidirectional", source_names: ["fixture"] }));
-  await fs.writeFile(path.join(workerRoot, "policy.json"), JSON.stringify({ id: request.home.workerInterfaceId, role_artifacts: [], ceiling: { interfaces: [], tools: [], wek: [], mark_outcomes: [], hard_blocked_tools: [] } }));
+  for (const workerId of [request.home.workerInterfaceId, request.task.workerInterfaceId]) {
+    const workerRoot = path.join(registry, "interface", workerId);
+    await fs.mkdir(workerRoot, { recursive: true });
+    await fs.writeFile(path.join(workerRoot, "interface.json"), JSON.stringify({ id: workerId, interface_type: "system", role: "worker", direction: "bidirectional", source_names: ["fixture"] }));
+    await fs.writeFile(path.join(workerRoot, "policy.json"), JSON.stringify({ id: workerId, role_artifacts: [], ceiling: { interfaces: [], tools: [], wek: [], mark_outcomes: [], hard_blocked_tools: [] } }));
+  }
   const workspace = await initializeWorkspace({ octopusHomeRoot: home, registryRoot: registry, request,
     planOperatorSurface: (input) => fixturePlan(home, registry, input) });
   const plan = await fixturePlan(home, registry, { eeInstancesRoot: path.join(home, "state", "ee_instances"),
@@ -1756,7 +1790,7 @@ async function verifyFreshAgentRecipe(temporary) {
     assert.deepEqual(profile.context_artifact_bindings.map((row) => row.id), sourcePolicy.role_artifacts);
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(registry, "interface", agent.worker_interface, "policy.json"))), { ...sourcePolicy, id: agent.worker_interface });
     assert.deepEqual(JSON.parse(await fs.readFile(templatePath)).allowed_interfaces, [sourceInterface.id, agent.worker_interface].sort());
-    assert.equal(catalog.document.project_sources.find((row) => row.project_ee_id === agent.project_ee_id).source_worker_interface, request.home.workerInterfaceId);
+    assert.equal(catalog.document.project_sources.find((row) => row.project_ee_id === agent.project_ee_id).source_worker_interface, request.task.workerInterfaceId);
     assert.equal((await fs.readdir(path.join(home, "state", "runs"))).length, 1);
   }
 }
@@ -1779,8 +1813,9 @@ async function verifyExistingRootAttachment(temporary) {
   const planOperatorSurface = async (input) => {
     assert.equal(await fs.readFile(path.join(input.eeInstancesRoot, "ee_existence.json"), "utf8"), before);
     assert.equal(input.request.eeId, root.ee_id);
-    assert.equal(input.request.workerInterfaceId, request.home.workerInterfaceId);
-    assert.deepEqual(input.request.selectedWorkerEnvironmentKinds, request.home.selectedWorkerEnvironmentKinds);
+    const selected = input.request.clientSurfaceRole === "home" ? request.home : request.task;
+    assert.equal(input.request.workerInterfaceId, selected.workerInterfaceId);
+    assert.deepEqual(input.request.selectedWorkerEnvironmentKinds, selected.selectedWorkerEnvironmentKinds);
     return fixturePlan(octopusHomeRoot, registryRoot, input);
   };
   const options = { octopusHomeRoot, registryRoot, request, planOperatorSurface };
@@ -1857,7 +1892,9 @@ async function verifyRootFirstSetup(temporary) {
   Object.assign(draft, { spaceName: "Chosen space", spaceGoal: "Chosen root goal", providerModel: "fixture-model", reasoningEffort: "high" });
   const recipe = setupRequest("recipe_root_12345678").home;
   const request = compileWorkspaceInitializeRequest(draft, { provider_interface_id: recipe.providerInterfaceId, worker_interface_id: recipe.workerInterfaceId,
-    context_artifact_bindings: recipe.contextArtifactBindings, selected_worker_environment_kinds: recipe.selectedWorkerEnvironmentKinds, project_defaults: [] });
+    context_artifact_bindings: recipe.contextArtifactBindings, selected_worker_environment_kinds: recipe.selectedWorkerEnvironmentKinds, project_defaults: [],
+    task: { worker_interface_id: setupRequest("recipe_root_12345678").task.workerInterfaceId,
+      context_artifact_bindings: [], selected_worker_environment_kinds: ["git_worktree"] } });
   assert.deepEqual(request.root, { key: "root", templateName: "existence", name: draft.spaceName, goal: draft.spaceGoal });
   const home = path.join(await fs.realpath(temporary), "root-first"), registry = path.join(home, "registry");
   await createFixture(home, registry);
@@ -1920,7 +1957,7 @@ async function fixturePlan(octopusHomeRoot, registryRoot, { eeInstancesRoot, req
     assert.equal(rootRecord.parent_ee_id, null, "Home must live directly in the root Existence EE; select its actual root EE");
     const template = JSON.parse(await fs.readFile(path.join(registryRoot, "ee_template", rootRecord.template_name, "ee_template.json")));
     assert.equal(template.bootstrap_root, true, "Home requires the declared bootstrap-root EE");
-  } else {
+  } else if (rootRecord.parent_ee_id !== null) {
     const parent = JSON.parse(await fs.readFile(path.join(eeInstancesRoot, `${rootRecord.parent_ee_id}.json`)));
     const template = JSON.parse(await fs.readFile(path.join(registryRoot, "ee_template", parent.template_name, "ee_template.json")));
     assert.ok(template.allowed_child_ee_templates.includes(rootRecord.template_name));
@@ -1943,6 +1980,9 @@ async function fixturePlan(octopusHomeRoot, registryRoot, { eeInstancesRoot, req
     door_host_slots: request.doorHostSlots ?? {},
     ...(request.contextArtifactBindings?.length ? { context_artifact_bindings: request.contextArtifactBindings } : {}),
     ...(request.payloadArtifactBindings?.length ? { payload_artifact_bindings: request.payloadArtifactBindings } : {}),
+    ...(request.externalRelays?.length ? { external_relays: request.externalRelays.map((route) => ({
+      checkpoint_id: route.checkpointId, interface_id: route.interfaceId, outbound_interface_ids: route.outboundInterfaceIds,
+    })) } : {}),
     ...(request.selectedWorkerEnvironmentKinds?.length
       ? { selected_worker_environment_kinds: request.selectedWorkerEnvironmentKinds }
       : {}),
@@ -2118,6 +2158,11 @@ function setupRequest(operationId) {
       reasoningEffort: "high",
       doorHostSlots: {},
       contextArtifactBindings: [{ id: "artifact-grounding-system-architecture" }],
+      selectedWorkerEnvironmentKinds: ["git_worktree"],
+    },
+    task: {
+      workerInterfaceId: "system_worker_fixture_task",
+      contextArtifactBindings: [{ id: "artifact-worker-role-operator-task" }],
       selectedWorkerEnvironmentKinds: ["git_worktree"],
     },
     projects: [

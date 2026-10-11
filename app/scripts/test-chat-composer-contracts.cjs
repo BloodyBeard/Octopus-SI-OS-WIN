@@ -80,7 +80,8 @@ assert.match(composer, /const submitDisabled = stopAvailable \|\| resumeActionAv
 assert.match(composer, /onClick=\{\(\) => \{\s*if \(submitDisabled\) return;\s*stopAvailable \? onInterrupt\?\.\(\) : resumeActionAvailable \? onResume\?\.\(\) : onSubmit\(\);\s*\}\}/);
 assert.match(composer, /name=\{stopAvailable \? "stop" : resumeActionAvailable \? "resume"/);
 assert.match(composer, /aria-label=\{submitAccessibleName\}/);
-assert.match(composer, /title=\{submitTooltip\}/);
+assert.match(composer, /<ShellTooltip label=\{submitTooltip\}/);
+assert.doesNotMatch(composer, /title=\{submitTooltip\}/);
 const queueStyles = source("src/components/chat/queue.css");
 assert.match(composer, /className="composer-primary-action /);
 assert.match(queueStyles, /\.composer-primary-action \{\s*background-color: var\(--color-background-composer-primary\);\s*color: var\(--color-text-composer-primary\);/);

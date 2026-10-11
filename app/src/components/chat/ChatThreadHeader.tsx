@@ -61,21 +61,22 @@ export function ChatThreadHeader({
           >
             {activeRun ? (
               <>
-                <button
-                  aria-label={`Open recent tasks. Current task: ${activeTitle}`}
-                  className="thread-header-title-button min-w-0 flex-1 truncate !px-0 !py-0 text-left text-sm text-token-foreground hover:opacity-80 electron:font-medium"
-                  data-thread-title
-                  onPointerDown={mode === "pane" ? compactTab?.onPointerDown : undefined}
-                  onClick={() => dispatchClientCommand("open_command_menu", "surface")}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    dispatchOpenClientTaskActionsMenu(activeRun.runId, event.currentTarget, { x: event.clientX, y: event.clientY });
-                  }}
-                  title={activeTitle}
-                  type="button"
-                >
-                  <span className="thread-header-title-text block truncate">{activeTitle}</span>
-                </button>
+                <ShellTooltip className="min-w-0 max-w-full" label={activeTitle}>
+                  <button
+                    aria-label={`Open recent tasks. Current task: ${activeTitle}`}
+                    className="thread-header-title-button min-w-0 flex-1 truncate !px-0 !py-0 text-left text-sm text-token-foreground hover:opacity-80 electron:font-medium"
+                    data-thread-title
+                    onPointerDown={mode === "pane" ? compactTab?.onPointerDown : undefined}
+                    onClick={() => dispatchClientCommand("open_command_menu", "surface")}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      dispatchOpenClientTaskActionsMenu(activeRun.runId, event.currentTarget, { x: event.clientX, y: event.clientY });
+                    }}
+                    type="button"
+                  >
+                    <span className="thread-header-title-text block truncate">{activeTitle}</span>
+                  </button>
+                </ShellTooltip>
               </>
             ) : null}
           </div>
@@ -126,17 +127,18 @@ export function ChatThreadHeaderActions({
 >) {
   const summaryLabel = summaryDisplayMode === "overlay" ? "Toggle summary" : "Toggle pinned summary";
   const summaryTrigger = activeRun ? (
-    <button
-      aria-label={summaryLabel}
-      aria-pressed={summaryOpen}
-      className={`${TOOLBAR_BUTTON}${summaryOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
-      data-task-summary-trigger="true"
-      onClick={() => onSummaryOpenChange(!summaryOpen)}
-      title={summaryLabel}
-      type="button"
-    >
-      <Glyph className="icon-xs" name="taskSummary" size={16} />
-    </button>
+    <ShellTooltip disabled={summaryOpen} label={summaryLabel}>
+      <button
+        aria-label={summaryLabel}
+        aria-pressed={summaryOpen}
+        className={`${TOOLBAR_BUTTON}${summaryOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
+        data-task-summary-trigger="true"
+        onClick={() => onSummaryOpenChange(!summaryOpen)}
+        type="button"
+      >
+        <Glyph className="icon-xs" name="taskSummary" size={16} />
+      </button>
+    </ShellTooltip>
   ) : null;
 
   return (
@@ -164,16 +166,17 @@ export function ChatThreadHeaderActions({
       ) : null}
       {pinnedContextCount > 0 ? (
         <div className="chat-thread-header-action-slot no-drag pointer-events-auto flex shrink-0 items-center gap-px">
-          <button
-            aria-label={pinnedContextOpen ? "Close pinned context" : "Open pinned context"}
-            aria-pressed={pinnedContextOpen}
-            className={`${TOOLBAR_BUTTON}${pinnedContextOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
-            onClick={() => onPinnedContextOpenChange(!pinnedContextOpen)}
-            title={`${pinnedContextCount} pinned context ${pinnedContextCount === 1 ? "item" : "items"}`}
-            type="button"
-          >
-            <Glyph className="icon-xs" name="pin" size={16} />
-          </button>
+          <ShellTooltip label={`${pinnedContextCount} pinned context ${pinnedContextCount === 1 ? "item" : "items"}`}>
+            <button
+              aria-label={pinnedContextOpen ? "Close pinned context" : "Open pinned context"}
+              aria-pressed={pinnedContextOpen}
+              className={`${TOOLBAR_BUTTON}${pinnedContextOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
+              onClick={() => onPinnedContextOpenChange(!pinnedContextOpen)}
+              type="button"
+            >
+              <Glyph className="icon-xs" name="pin" size={16} />
+            </button>
+          </ShellTooltip>
         </div>
       ) : null}
       {summaryTrigger ? (

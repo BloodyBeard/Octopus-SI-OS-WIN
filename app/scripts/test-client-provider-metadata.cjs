@@ -16,7 +16,7 @@ test("desktop setup and paginated model discovery work without a Home, socket, o
 const fs = require('node:fs');
 const readline = require('node:readline');
 let signedIn = false;
-const row = model => ({model,displayName:model,description:'',defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'}]});
+const row = model => ({model,displayName:model,description:'',defaultReasoningEffort:'high',supportedReasoningEfforts:[{reasoningEffort:'high'}],serviceTiers:[{id:'priority',name:'Fast',description:'Fast'},{id:'ultrafast',name:'Ultra Fast',description:'Ultra Fast'}],defaultServiceTier:null});
 readline.createInterface({input:process.stdin}).on('line', line => {
   const {id, method, params} = JSON.parse(line);
   fs.appendFileSync(${JSON.stringify(methods)}, JSON.stringify(method)+'\\n');
@@ -52,6 +52,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const catalog = await service.models({ providerInterfaceId: "provider" });
     assert.deepEqual(catalog.models.map((row) => row.model), ["second"]);
     assert.deepEqual(catalog.models[0].supportedReasoningEfforts, ["high"]);
+    assert.deepEqual(catalog.models[0].serviceTiers.map((tier) => tier.id), ["priority", "ultrafast"]);
     await assert.rejects(service.models({ providerInterfaceId: "../provider" }), /Invalid provider/);
     const calls = (await fs.readFile(methods, "utf8")).trim().split("\n").map(JSON.parse);
     assert.equal(calls.filter((method) => method === "model/list").length, 2);
@@ -96,11 +97,12 @@ test("catalogue shares native account only, preserves exact OpenCodex models, an
   let selectedRoot = root, calls = 0;
   const row = model => ({ model, displayName: model, supportedReasoningEfforts: ["high"], defaultReasoningEffort: "high", showInPicker: true });
   const nativeModels = [row("live-model"), row("outside-policy")];
+  nativeModels[0].serviceTiers = [{ id: "priority", name: "Fast", description: "Fast" }, { id: "ultrafast", name: "Ultra Fast", description: "Ultra Fast" }];
   const native = { id: "native", runtimeHandlerRef: "codex_app_server", models: [row("stale-model")] };
   const custom = { id: "custom", runtimeHandlerRef: "codex_app_server", models: [row("stale-custom-model")] };
   const other = { id: "other", runtimeHandlerRef: "other", models: [row("other-model")] };
-  const write = async (id, config, allowed) => {
-    const folder = path.join(root, "interface", id);
+  const write = async (id, config, allowed, registry = root) => {
+    const folder = path.join(registry, "interface", id);
     await fs.mkdir(folder, { recursive: true });
     await fs.writeFile(path.join(folder, "interface.json"), JSON.stringify({ id, interface_type: "world", role: "provider",
       interface_driver_ref: "codex_app_server", interface_driver_config: config, interface_policy: { variables: { models: { default: allowed } } } }));
@@ -117,6 +119,23 @@ test("catalogue shares native account only, preserves exact OpenCodex models, an
     assert.equal(calls, 1);
     assert.deepEqual(providers.map(provider => provider.models.map(model => model.model)), [["live-model"], ["custom-model"], ["other-model"]]);
     await service.catalog([custom]); assert.equal(calls, 1);
+    const installedRoot = path.join(root, "installed");
+    const setupMetadata = createClientProviderMetadata({ registryRoot: () => installedRoot, sourceRegistryRoot: () => root,
+      accountClient: () => ({ models: async () => nativeModels }) });
+    const setup = { packs: [{ id: "setup", workspace_setup: { home: { provider_interface_id: "native" } },
+      components: [{ product_id: "native", materialized: false, partially_materialized: false }], setup_provider: native }] };
+    const sourceSetup = await setupMetadata.setupCatalog(setup);
+    assert.deepEqual(sourceSetup.packs[0].setup_provider.models[0].serviceTiers, nativeModels[0].serviceTiers);
+    assert.deepEqual(setup.packs[0].setup_provider.models, native.models, "discovery must not mutate the static pack projection");
+    await assert.rejects(fs.access(installedRoot), { code: "ENOENT" });
+    setup.packs[0].components[0].partially_materialized = true;
+    const unavailableSetup = (await setupMetadata.setupCatalog(setup)).packs[0].setup_provider;
+    assert.deepEqual(unavailableSetup.models, []);
+    assert.match(unavailableSetup.modelCatalogError, /ENOENT/, "an installed owner must not silently reuse source catalogue evidence");
+    await write("native", nativeConfig(), ["outside-policy"], installedRoot);
+    assert.deepEqual((await setupMetadata.setupCatalog(setup)).packs[0].setup_provider.models.map((model) => model.model), ["outside-policy"]);
+    setup.packs[0].setup_provider = { ...native, id: "unbound" };
+    await assert.rejects(setupMetadata.setupCatalog(setup), /no exact provider catalogue owner/);
     await assert.rejects(service.setupOwner.probe({ provider: { interface_id: "custom" } }), /does not use the desktop/);
     validateProviderModelSelection(providers, { providerInterfaceId: "custom", providerModel: "custom-model", reasoningEffort: "high" });
     for (const selection of [{ providerInterfaceId: "native", providerModel: "custom-model", reasoningEffort: "high" },

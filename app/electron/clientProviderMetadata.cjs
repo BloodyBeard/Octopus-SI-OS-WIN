@@ -16,9 +16,9 @@ async function readCodexProvider(registryRoot, id) {
   return descriptor;
 }
 
-function createClientProviderMetadata({ registryRoot, accountClient, reference }) {
-  async function catalog(providers) {
-    const root = registryRoot();
+function createClientProviderMetadata({ registryRoot, sourceRegistryRoot, accountClient, reference }) {
+  async function catalog(providers, selectedRegistryRoot = registryRoot) {
+    const root = selectedRegistryRoot();
     let nativeModels;
     const result = await Promise.all(providers.map(async (provider) => {
       if (provider.runtimeHandlerRef !== "codex_app_server") return provider;
@@ -40,11 +40,31 @@ function createClientProviderMetadata({ registryRoot, accountClient, reference }
         return { ...provider, models: [], modelCatalogError: error instanceof Error ? error.message : String(error) };
       }
     }));
-    if (registryRoot() !== root) throw new Error("Provider catalogue scope changed during discovery.");
+    if (selectedRegistryRoot() !== root) throw new Error("Provider catalogue scope changed during discovery.");
     return result;
   }
   return {
     catalog,
+    async setupCatalog(localPackages) {
+      const activeRoot = registryRoot();
+      const sourceRoot = sourceRegistryRoot();
+      const packs = await Promise.all(localPackages.packs.map(async (pack) => {
+        if (pack.workspace_setup === undefined) return pack;
+        const id = pack.workspace_setup.home.provider_interface_id;
+        const owners = pack.components.filter((component) => component.product_id === id);
+        if (owners.length !== 1 || pack.setup_provider?.id !== id) {
+          throw new Error(`Setup pack '${pack.id}' has no exact provider catalogue owner.`);
+        }
+        const selectedRoot = owners[0].materialized === true || owners[0].partially_materialized === true
+          ? registryRoot : sourceRegistryRoot;
+        const [provider] = await catalog([pack.setup_provider], selectedRoot);
+        return { ...pack, setup_provider: provider };
+      }));
+      if (registryRoot() !== activeRoot || sourceRegistryRoot() !== sourceRoot) {
+        throw new Error("Setup provider catalogue scope changed during discovery.");
+      }
+      return { ...localPackages, packs };
+    },
     setupOwner: {
       async probe(plan) {
         const id = plan.provider.interface_id;

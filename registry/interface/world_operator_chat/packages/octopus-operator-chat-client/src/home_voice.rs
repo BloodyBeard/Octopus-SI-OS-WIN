@@ -366,7 +366,7 @@ pub(super) fn wire(
         .ok_or("Home text provider has no topology")?
         .push(json!(delegation));
 
-    let templates = vec![
+    let mut templates = vec![
         route(
             BoundCheckpointRole::Stable,
             &voice.context.control_interface_id,
@@ -433,8 +433,17 @@ pub(super) fn wire(
             value["interface_state"][&voice.context.provider_id]["run_authoring_binding"].clone(),
         )
         .map_err(|e| e.to_string())?;
+        let static_seeds: Vec<octopus_descriptors::ArtifactId> = serde_json::from_value(
+            value["interface_state"][&voice.context.control_interface_id]["static_artifact_bindings"].clone(),
+        ).map_err(|e| format!("Home voice Run has no valid original static seeds; explicit topology repair is required: {e}"))?;
+        if static_seeds.is_empty() {
+            return Err("Home voice Run lacks its original static seeds; explicit topology repair is required".into());
+        }
         let mut expected = templates;
         for cp in &mut expected {
+            if cp.include_context {
+                cp.static_artifact_bindings = static_seeds.clone();
+            }
             if cp.role == BoundCheckpointRole::AuthoringCall {
                 for requirement in &mut cp.required_verified_artifacts {
                     requirement.params["metadata_matches"][0]["payload"] =
@@ -452,7 +461,7 @@ pub(super) fn wire(
             || bound.checkpoints != expected
             || bound.writer_run.is_none()
             || value["interface_state"][&voice.context.control_interface_id]
-                != json!({"home_run":identity.run_id,"home_interface":identity.chat_interface_id})
+                != json!({"home_run":identity.run_id,"home_interface":identity.chat_interface_id,"static_artifact_bindings":static_seeds})
         {
             return Err(
                 "Home voice Run differs from its exact independent execution contract".into(),
@@ -467,10 +476,18 @@ pub(super) fn wire(
     if path.try_exists().map_err(|e| e.to_string())? {
         return Err("Home voice Run already exists without its declared Home binding".into());
     }
+    for template in &mut templates {
+        if template.include_context {
+            template.static_artifact_bindings = context_ids
+                .iter()
+                .map(|id| octopus_descriptors::ArtifactId::new(id))
+                .collect();
+        }
+    }
     let mut record = json!({
         "id":voice.context.run_id,"ee":identity.ee_id,"worker":identity.worker_interface_id,
         "trace":format!("trace:{}",voice.context.run_id),"status":"idle",
-        "interface_state":{&voice.context.control_interface_id:{"home_run":identity.run_id,"home_interface":identity.chat_interface_id}},
+        "interface_state":{&voice.context.control_interface_id:{"home_run":identity.run_id,"home_interface":identity.chat_interface_id,"static_artifact_bindings":context_ids}},
         "checkpoints":[],"active_checkpoints":[]
     });
     let mut frontier = Vec::new();

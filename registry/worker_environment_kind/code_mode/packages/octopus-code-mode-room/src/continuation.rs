@@ -19,6 +19,11 @@ const RECORD_BYTES: usize = 96 * 1024 * 1024;
 const MANIFEST_BYTES: u64 = 1024 * 1024;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static INSTALL_PUBLICATION_BARRIER: std::cell::RefCell<Option<std::sync::Arc<std::sync::Barrier>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OriginalRun {
@@ -808,9 +813,10 @@ pub fn record_install(root: &Path, installed: &InstalledHandoff) -> Result<(), S
     {
         return Err("code mode installed handoff has invalid evidence".into());
     }
-    create_record(
+    publish_record(
         &root.join(format!("{}.installed.json", installed.after_hash)),
         installed,
+        true,
     )
 }
 
@@ -1297,6 +1303,10 @@ pub fn prepare_record(path: &Path, value: &impl Serialize) -> Result<(), String>
 }
 
 pub fn create_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    publish_record(path, value, false)
+}
+
+fn publish_record(path: &Path, value: &impl Serialize, exact_existing: bool) -> Result<(), String> {
     let parent = path.parent().ok_or("code mode record has no parent")?;
     validate_directory(parent)?;
     let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
@@ -1316,23 +1326,58 @@ pub fn create_record(path: &Path, value: &impl Serialize) -> Result<(), String> 
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-    let outcome: Result<(), String> = (|| {
+    let outcome: Result<bool, String> = (|| {
         file.write_all(&bytes).map_err(|e| e.to_string())?;
         file.sync_all().map_err(|e| e.to_string())?;
+        if exact_existing {
+            #[cfg(test)]
+            INSTALL_PUBLICATION_BARRIER.with(|slot| {
+                if let Some(barrier) = slot.borrow_mut().take() { barrier.wait(); }
+            });
+            return match rename_record_exclusive(&temporary, path) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(error) => Err(format!("code mode immutable record {} could not be published: {error}", path.display())),
+            };
+        }
         std::fs::hard_link(&temporary, path).map_err(|e| {
             format!(
                 "code mode immutable record {} could not be published: {e}",
                 path.display()
             )
         })?;
-        Ok(())
+        Ok(false)
     })();
-    let removal = std::fs::remove_file(&temporary).map_err(|e| e.to_string());
-    outcome?;
+    let removal = if matches!(&outcome, Ok(true)) { Ok(()) } else {
+        std::fs::remove_file(&temporary).map_err(|e| e.to_string())
+    };
+    let moved = outcome?;
     removal?;
+    if exact_existing && !moved && read_record_bytes(path)? != bytes {
+        return Err(format!("code mode prospective record {} conflicts with its immutable bytes", path.display()));
+    }
     File::open(parent)
         .and_then(|file| file.sync_all())
         .map_err(|e| e.to_string())
+}
+
+fn rename_record_exclusive(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+        let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+        #[cfg(target_os = "macos")]
+        let status = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        let status = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, source.as_ptr(), libc::AT_FDCWD, target.as_ptr(), libc::RENAME_NOREPLACE) };
+        if status == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (source, target);
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic exclusive installation publication is unsupported on this platform"))
+    }
 }
 
 impl ContinuationContext {

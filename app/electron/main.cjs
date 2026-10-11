@@ -1211,7 +1211,9 @@ function requireClientSetupPack(catalog, plan) {
     throw new Error(`Client setup Application Pack '${plan.pack.id}' Extension closure does not match its immutable plan.`);
   }
   const recipe = pack.workspace_setup?.home;
+  const taskRecipe = pack.workspace_setup?.task;
   const requestHome = plan.workspace.request?.home;
+  const requestTask = plan.workspace.request?.task;
   const selectedPackageIds = new Set(expectedPackages);
   const expectedProjectDefaults = (pack.workspace_setup?.project_defaults ?? [])
     .filter((entry) => selectedPackageIds.has(entry.package_id))
@@ -1263,17 +1265,24 @@ function requireClientSetupPack(catalog, plan) {
       ...(requestHome ?? {}),
       reasoningEffort: requestHome?.reasoningEffort ?? "",
     },
+    task: requestTask,
     projects: plan.workspace.request?.projects,
     ...(plan.workspace.request?.agentPresets?.length ? { agentPresets: plan.workspace.request.agentPresets } : {}),
   };
   if (
     !recipe
+    || !taskRecipe
     || plan.provider.interface_id !== recipe.provider_interface_id
     || requestHome?.providerInterfaceId !== recipe.provider_interface_id
     || requestHome?.workerInterfaceId !== recipe.worker_interface_id
     || typeof requestHome?.providerModel !== "string" || !requestHome.providerModel.trim()
     || stableClientSetupJson(requestHome?.contextArtifactBindings ?? []) !== stableClientSetupJson(recipe.context_artifact_bindings)
     || stableClientSetupJson(requestHome?.selectedWorkerEnvironmentKinds ?? []) !== stableClientSetupJson(recipe.selected_worker_environment_kinds)
+    || stableClientSetupJson(requestTask) !== stableClientSetupJson({
+      workerInterfaceId: taskRecipe.worker_interface_id,
+      contextArtifactBindings: taskRecipe.context_artifact_bindings,
+      selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds,
+    })
     || stableClientSetupJson(plannedProjectDefaultContract) !== stableClientSetupJson(expectedProjectDefaults)
     || plannedProjectDefaults.some((entry) => entry.project_keys.some((projectKey) => !requestProjectKeys.has(projectKey)))
     || plan.workspace.request_digest !== createHash("sha256").update(stableClientSetupJson(canonicalWorkspaceRequest)).digest("hex")
@@ -1312,6 +1321,7 @@ async function clientSetupExtensionProof(plan) {
 function getClientProviderMetadata() {
   return createClientProviderMetadata({
     registryRoot: () => path.join(resolveOctopusHome(), "registry"),
+    sourceRegistryRoot: resolveLocalPackageRegistry,
     accountClient: getChatgptSignIn,
     reference: clientSetupReference,
   });
@@ -1705,7 +1715,7 @@ function createWindow(inheritedAccessToken = "", options = {}) {
     transparent: isMac,
     ...(isMac ? {
       trafficLightPosition: nativeTrafficLightPosition(appZoomFactor),
-      vibrancy: "menu",
+      vibrancy: "under-window",
       visualEffectState: "active",
     } : {}),
     webPreferences: {
@@ -2370,6 +2380,7 @@ function startClientQuitCleanup() {
 }
 
 function closeClientResources() {
+  chatgptSignIn?.dispose();
   clearGlobalDictationShortcut();
   cdpViewerManager?.closeAll();
   processViewerManager?.closeAll();
@@ -2693,7 +2704,6 @@ function getChatgptSignIn() {
         }
       },
     });
-    app.once("before-quit", () => chatgptSignIn?.dispose());
   }
   return chatgptSignIn;
 }
@@ -3471,6 +3481,11 @@ ipcMain.handle("octopus:projection-read", async (_event, token, request) => {
   if (profile === "live") await prepareLiveProjectionRead();
   const result = await getProjectionStore(profile).read(request);
   if (profile === "live") scheduleNativeDesktopPresentations();
+  if (profile === "live" && request.method === "projection.operator.os.local_packages") {
+    const catalog = await getClientProviderMetadata().setupCatalog(result);
+    getClientAccessController().requireSession(token, [profile]);
+    return catalog;
+  }
   return result;
 });
 
@@ -4668,11 +4683,11 @@ function applyWindowBackdrop(win, force = false) {
   const physicalHeight = bounds.height * scaleFactor;
   const oversized = Math.max(physicalWidth, physicalHeight) >= 3840
     && Math.min(physicalWidth, physicalHeight) >= 2160;
-  const opaqueSurface = !translucent || !win.isFocused() || oversized;
+  const opaqueSurface = !translucent || oversized;
   if (!force && windowBackdropModes.get(win) === opaqueSurface) return;
   if (!opaqueSurface) {
     win.setBackgroundColor("#00000000");
-    win.setVibrancy("menu");
+    win.setVibrancy("under-window");
   } else {
     win.setBackgroundColor(nativeTheme.shouldUseDarkColors ? "#000000" : "#f9f9f9");
     win.setVibrancy(null);

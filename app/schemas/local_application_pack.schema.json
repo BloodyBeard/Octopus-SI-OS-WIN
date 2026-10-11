@@ -56,7 +56,7 @@
     },
     "workspace_setup": {
       "type": "object",
-      "required": ["selection", "home", "project_defaults"],
+      "required": ["selection", "home", "task", "project_defaults"],
       "properties": {
         "selection": { "enum": ["included", "recommended"] },
         "home": {
@@ -89,6 +89,16 @@
               "uniqueItems": true,
               "items": { "$ref": "#/$defs/id" }
             }
+          },
+          "additionalProperties": false
+        },
+        "task": {
+          "type": "object",
+          "required": ["worker_interface_id", "context_artifact_bindings", "selected_worker_environment_kinds"],
+          "properties": {
+            "worker_interface_id": { "$ref": "#/$defs/id" },
+            "context_artifact_bindings": { "$ref": "#/properties/workspace_setup/properties/home/properties/context_artifact_bindings" },
+            "selected_worker_environment_kinds": { "$ref": "#/properties/workspace_setup/properties/home/properties/selected_worker_environment_kinds" }
           },
           "additionalProperties": false
         },

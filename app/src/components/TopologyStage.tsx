@@ -4,6 +4,7 @@ import type { DashboardFilters, DashboardScope, DashboardTopologyMode } from "..
 import { Glyph } from "./IconGlyphs";
 import { WorldProjection } from "./WorldProjection";
 import { SystemArtifactTransfers, useArtifactTransfers } from "./ArtifactTransferAnimation";
+import { DashboardLabel, DashboardTooltip } from "./DashboardLabel";
 import { useAppErrorToast } from "../toasts";
 
 // Two scopes, two honest pictures (owner):
@@ -480,6 +481,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
             <span><i className="dot red" />Run</span>
             <span><i className="dot blue" />{viewMode === "zones" ? "Interface route set" : "Interface"}</span>
             <span><i className="line solid" />Interface binding</span>
+            <TransferBurstLegend />
           </div>
           <div className="legend-stats">
             {stats.map((item) => <span key={item}>{item}</span>)}
@@ -501,9 +503,9 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
               <span className="stage-breadcrumb-item" key={crumb.id}>
                 <i className="crumb-sep" aria-hidden="true">/</i>
                 {index === breadcrumb.length - 1 ? (
-                  <em className="crumb-current" aria-current="location" title={crumb.name}>{crumb.name}</em>
+                  <em className="crumb-current" aria-current="location"><DashboardLabel text={crumb.name} /></em>
                 ) : (
-                  <button type="button" title={crumb.name} onClick={() => setLevelId(crumb.id)}>{crumb.name}</button>
+                  <button type="button" onClick={() => setLevelId(crumb.id)}><DashboardLabel text={crumb.name} /></button>
                 )}
               </span>
             ))}
@@ -591,7 +593,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
                           data-topology-interactive="true"
                           onClick={() => onSelect({ kind: "environment", id: zone.id })}
                           type="button"
-                        ><span>{zone.name}</span></button>
+                        ><DashboardLabel text={zone.name} /></button>
                       </div>
                     ))}
                     {zoneLayout.runNodes.map((node) => {
@@ -656,6 +658,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
           <span><i className="dot blue" />Interface</span>
           <span><i className="dot yellow" />In progress</span>
           <span><i className="dot red" />Blocked</span>
+          <TransferBurstLegend />
         </div>
         <div className="legend-stats">
           {stats.map((item) => <span key={item}>{item}</span>)}
@@ -663,6 +666,12 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
       </div>
     </section>
   );
+}
+
+function TransferBurstLegend() {
+  return <DashboardTooltip text="Repeated traffic is grouped by run and interface pair. The first movement in each direction anchors its burst; newer repeats join that burst. Related steps keep recorded order with a 300 ms pause. Independent paths animate together. Only recent paths animate; full movement history stays in the ledger.">
+    <span>Latest transfer bursts</span>
+  </DashboardTooltip>;
 }
 
 // The reference card (owner's screenshot): identity, goal, runs with their checkpoint
@@ -710,7 +719,7 @@ const EnvironmentCard = memo(function EnvironmentCard({
     >
       <div className="env-head">
         <span className="env-icon"><Glyph name="ee" size={20} /></span>
-        <strong>{env.name}</strong>
+        <strong><DashboardLabel text={env.name} /></strong>
         {childCount > 0 ? (
           <button
             className="env-child-chip"
@@ -800,18 +809,16 @@ function RunNodeCard({
       <div className="env-head">
         <span className="env-icon" data-projection-interface={run.worker} data-projection-anchor="worker"><Glyph name="dashboard" size={20} /></span>
         <span className="run-card-title">
-          <strong>{run.worker}.run</strong>
-          <small><i className={`status-dot ${runTone(run)}`} />{run.statusLabel} · {env.name}</small>
+          <strong><DashboardLabel text={`${run.worker}.run`} /></strong>
+          <small><i className={`status-dot ${runTone(run)}`} />{run.statusLabel} · <DashboardLabel text={env.name} /></small>
         </span>
       </div>
 
       <div className="run-card-checkpoint-strip" aria-hidden="true">
         {checkpointStrip.map((checkpoint) => (
-          <span
+          <DashboardTooltip text={`${checkpoint.label} · ${titleCase(checkpoint.status)}`} key={checkpoint.id}><span
             className={`checkpoint-dot ${checkpointTone(checkpoint.status) === "green" ? "is-made" : "is-ephemeral"}`}
-            title={`${checkpoint.label} · ${titleCase(checkpoint.status)}`}
-            key={checkpoint.id}
-          />
+          /></DashboardTooltip>
         ))}
       </div>
 
@@ -879,7 +886,7 @@ function CheckpointAsRunBlock({
       <div className="env-run-row">
         <div className="env-run-main is-static">
           <i className={`status-dot ${checkpointTone(checkpoint.status)}`} />
-          <strong>{checkpoint.label || `Checkpoint ${index + 1}`}</strong>
+          <strong><DashboardLabel text={checkpoint.label || `Checkpoint ${index + 1}`} /></strong>
           <em className={`env-status-word is-${checkpointTone(checkpoint.status)}`}>{titleCase(checkpoint.status)}</em>
         </div>
         <CheckpointInterface checkpoint={checkpoint} onSelect={onSelect} />
@@ -902,8 +909,8 @@ function RequiredVerifiedArtifactList({ checkpoint }: { checkpoint: CheckpointRo
       {rows.map((row) => (
         <div className="env-checkpoint-required-row" key={`${checkpoint.id}:${row.mark}`}>
           <i className={`status-dot ${requiredVerifiedArtifactTone(row.outcome)}`} />
-          <strong>{row.mark}</strong>
-          {row.verifier ? <small>via {row.verifier}</small> : null}
+          <strong><DashboardLabel text={row.mark} /></strong>
+          {row.verifier ? <small>via <DashboardLabel text={row.verifier} /></small> : null}
           <em className={`env-status-word is-${requiredVerifiedArtifactTone(row.outcome)}`}>{titleCase(row.outcome)}</em>
         </div>
       ))}
@@ -947,7 +954,7 @@ function RunBlock({
           }}
         >
           <i className={`status-dot ${runTone(run)}`} />
-          <strong data-projection-interface={run.worker} data-projection-anchor="worker">{run.worker}.run</strong>
+          <strong data-projection-interface={run.worker} data-projection-anchor="worker"><DashboardLabel text={`${run.worker}.run`} /></strong>
           <em className={`env-status-word is-${runTone(run)}`}>{run.statusLabel}</em>
         </button>
         {run.checkpoints.length ? (
@@ -1002,12 +1009,11 @@ function CheckpointBlock({ checkpoint, index, projectionVisible, onSelect }: { c
 function CheckpointInterface({ checkpoint, onSelect, visible = true }: { checkpoint: CheckpointRow; onSelect: (selection: SelectionRef) => void; visible?: boolean }) {
   if (!checkpoint.interfaceName) return null;
   return (
-    <button
+    <DashboardTooltip text={`Interface: ${checkpoint.interfaceName}`}><button
       className="env-checkpoint-interface"
       data-projection-interface={visible ? checkpoint.interfaceName : undefined}
       data-projection-checkpoint={checkpoint.id}
       type="button"
-      title={`interface: ${checkpoint.interfaceName}`}
       aria-label={`Open interface ${checkpoint.interfaceName}`}
       onClick={(event) => {
         event.stopPropagation();
@@ -1015,7 +1021,7 @@ function CheckpointInterface({ checkpoint, onSelect, visible = true }: { checkpo
       }}
     >
       <i className="status-dot blue" />
-    </button>
+    </button></DashboardTooltip>
   );
 }
 

@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
 import type { EnvironmentNode, InterfaceSummary, SelectionRef } from "../data/topology";
 import { ArtifactTransferSegments, type ArtifactTransfer, type TransferPoint, type TransferTrajectory } from "./ArtifactTransferAnimation";
+import { compactDashboardLabel, DashboardSvgLabel, DashboardTooltip } from "./DashboardLabel";
 
 // The two-layer projection (owner's reference): the SYSTEM surface below carries the zones
 // — Execution Environments as nested AREAS (zones inside zones), each holding its runs as
@@ -212,21 +213,22 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
               }}
               key={dot.id}
             >
-              <title>{mode === "routeSets" ? `${dot.id}\n${dot.members.join("\n")}` : dot.id}</title>
               <circle cx={dot.point.x} cy={dot.point.y} r={7} />
               <circle className="wp-world-dot-core" cx={dot.point.x} cy={dot.point.y} r={3.2} />
-              <text x={dot.point.x} y={dot.point.y - 16} textAnchor="middle">{dot.label}</text>
+              <DashboardSvgLabel text={dot.label}
+                tooltip={mode === "routeSets" ? `${dot.id}\n${dot.members.join("\n")}` : dot.id}
+                x={dot.point.x} y={dot.point.y - 16} centered />
             </g>
           ))}
         </g>
       </svg>
 
       <div className="world-controls" role="group" aria-label="Projection controls">
-        <button type="button" title="Rotate left" aria-label="Rotate left" onClick={() => setYawDeg((yaw) => yaw - 15)}>⟲</button>
-        <button type="button" title="Rotate right" aria-label="Rotate right" onClick={() => setYawDeg((yaw) => yaw + 15)}>⟳</button>
-        <button type="button" title="Zoom out" aria-label="Zoom out" onClick={() => setZoom((current) => clamp(current / 1.2, MIN_ZOOM, MAX_ZOOM))}>−</button>
-        <button type="button" title="Zoom in" aria-label="Zoom in" onClick={() => setZoom((current) => clamp(current * 1.2, MIN_ZOOM, MAX_ZOOM))}>+</button>
-        <button type="button" title="Reset view" aria-label="Reset view" onClick={() => { setYawDeg(DEFAULT_YAW); setPitchDeg(DEFAULT_PITCH); setZoom(DEFAULT_ZOOM); }}>⌂</button>
+        <DashboardTooltip text="Rotate left"><button type="button" aria-label="Rotate left" onClick={() => setYawDeg((yaw) => yaw - 15)}>⟲</button></DashboardTooltip>
+        <DashboardTooltip text="Rotate right"><button type="button" aria-label="Rotate right" onClick={() => setYawDeg((yaw) => yaw + 15)}>⟳</button></DashboardTooltip>
+        <DashboardTooltip text="Zoom out"><button type="button" aria-label="Zoom out" onClick={() => setZoom((current) => clamp(current / 1.2, MIN_ZOOM, MAX_ZOOM))}>−</button></DashboardTooltip>
+        <DashboardTooltip text="Zoom in"><button type="button" aria-label="Zoom in" onClick={() => setZoom((current) => clamp(current * 1.2, MIN_ZOOM, MAX_ZOOM))}>+</button></DashboardTooltip>
+        <DashboardTooltip text="Reset view"><button type="button" aria-label="Reset view" onClick={() => { setYawDeg(DEFAULT_YAW); setPitchDeg(DEFAULT_PITCH); setZoom(DEFAULT_ZOOM); }}>⌂</button></DashboardTooltip>
       </div>
 
       {scene.worldNodes.length === 0 ? (
@@ -522,7 +524,7 @@ function ZoneShape({ zone, project, selected, onSelect }: {
       }}
     >
       <polygon points={points.map((point) => `${point.x},${point.y}`).join(" ")} />
-      <text x={labelPoint.x} y={labelPoint.y}>{zone.env.name}</text>
+      <DashboardSvgLabel text={zone.env.name} x={labelPoint.x} y={labelPoint.y} width={Math.min(180, zone.width - 32)} />
     </g>
   );
 }
@@ -574,7 +576,8 @@ function zoneRuns(
       >
         <circle className="wp-run-dot" cx={point.x} cy={point.y} r={8} />
         <circle className="wp-run-core" cx={point.x} cy={point.y} r={3.4} />
-        <text x={point.x} y={point.y + 20} textAnchor="middle">{run.run.worker}</text>
+        <DashboardSvgLabel text={run.run.worker} tooltip={`${run.run.worker}\n${run.run.id}`}
+          x={point.x} y={point.y + 20} centered width={RUN_CELL - 8} limit={18} />
       </g>
     );
   });
@@ -596,7 +599,7 @@ function compactWorldInterfaceLabel(name: string): string {
   const withoutAxis = name.replace(/^world_/, "");
   const instance = /^(.*)_([0-9a-f]{32})$/.exec(withoutAxis);
   const label = instance ? `${instance[1]} · ${instance[2].slice(0, 6)}` : withoutAxis;
-  return label.length > 26 ? `${label.slice(0, 25)}…` : label;
+  return compactDashboardLabel(label);
 }
 
 function descriptorString(descriptor: Record<string, unknown>, field: string): string {

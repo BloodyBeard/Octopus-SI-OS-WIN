@@ -293,6 +293,10 @@ export function WorkspaceSetupGate({ accessProfile, children }: Props) {
       setDraftState({ draft: null, error: "" });
     }).catch((error) => {
       console.error("Workspace setup apply failed", error);
+      void window.octopusTransport?.logClientEvent?.({
+        level: "error", event: "workspace.setup.failed",
+        message: error instanceof Error ? error.message : String(error),
+      }).catch(() => {});
       setApplyState({
         state: "failed",
         label: "Setup needs attention",
@@ -355,6 +359,10 @@ export function WorkspaceSetupGate({ accessProfile, children }: Props) {
       });
     }).catch((error) => {
       console.error("Saved client setup could not resume", error);
+      void window.octopusTransport?.logClientEvent?.({
+        level: "error", event: "workspace.setup.resume_failed",
+        message: error instanceof Error ? error.message : String(error),
+      }).catch(() => {});
       setApplyState({
         state: "failed",
         label: "Setup needs attention",
@@ -959,9 +967,9 @@ function buildCatalog(
     catalog,
     pack,
     error: "",
-    warning: localPackages.errors.length || extensions.errors.length
+    warning: pack.setupProvider?.modelCatalogError || (localPackages.errors.length || extensions.errors.length
       ? "Some optional local capability records could not be verified."
-      : "",
+      : ""),
   };
 }
 
@@ -1383,6 +1391,7 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
   const row = record(value, `workspace Application Pack ${index + 1}`);
   const setup = record(row.workspace_setup, `workspace Application Pack ${index + 1} setup`);
   const home = record(setup.home, `workspace Application Pack ${index + 1} Home recipe`);
+  const task = record(setup.task, `workspace Application Pack ${index + 1} Task recipe`);
   const components = array(row.components, `workspace Application Pack ${index + 1} components`).map((value, componentIndex) => {
     const component = record(value, `workspace pack component ${componentIndex + 1}`);
     return {
@@ -1432,6 +1441,13 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
     extensions,
     setupProvider: row.setup_provider == null ? null : parseSetupProvider(row.setup_provider),
     recipe: {
+      task: {
+        worker_interface_id: id(task.worker_interface_id, "workspace Task worker"),
+        context_artifact_bindings: array(task.context_artifact_bindings, "workspace Task context").map((value) => ({
+          id: id(record(value, "workspace Task context binding").id, "workspace Task context id"),
+        })),
+        selected_worker_environment_kinds: array(task.selected_worker_environment_kinds, "workspace Task environments").map((value) => id(value, "workspace Task environment")),
+      },
       provider_interface_id: id(home.provider_interface_id, "workspace Home provider"),
       worker_interface_id: id(home.worker_interface_id, "workspace Home worker"),
       context_artifact_bindings: contextArtifactBindings,
@@ -1450,6 +1466,8 @@ function parseSetupProvider(value: unknown): OctopusProviderInterface {
     descriptorPath: text(provider.descriptorPath, "setup provider path"), sourceNames: stringArray(provider.sourceNames, "provider sources"),
     model: text(provider.model, "provider selected model"), reasoningEffort: typeof provider.reasoningEffort === "string" ? provider.reasoningEffort : "",
     serviceTier: typeof provider.serviceTier === "string" ? provider.serviceTier : "",
+    modelCatalogError: provider.modelCatalogError === undefined || provider.modelCatalogError === ""
+      ? "" : text(provider.modelCatalogError, "provider catalogue error"),
     supportedReasoningEfforts: stringArray(provider.supportedReasoningEfforts, "provider reasoning efforts"),
     models: array(provider.models, "provider models").map((value) => {
       const model = record(value, "provider model");

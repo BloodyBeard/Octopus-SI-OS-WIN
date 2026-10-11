@@ -551,10 +551,20 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const [secondaryDashboardFilters, setSecondaryDashboardFilters] = useState<DashboardFilters>(defaultDashboardFilters);
   const [homeViewMode, setHomeViewMode] = useState<HomeViewMode>("voice");
   const [homeWidgetsOpen, setHomeWidgetsOpen] = useState(false);
-  const markActivity = useMarkActivity(accessProfile, runtimeHost.home, clientWindow.primary, activeNavigationSection === "inbox");
+  const [secondaryHomeViewMode, setSecondaryHomeViewMode] = useState<HomeViewMode>("voice");
+  const homeChatIdentityReady = Boolean(homeRunId && homeChatWorkspace.activeRunId === homeRunId
+    && homeChatWorkspace.activeRun?.runId === homeRunId && homeChatWorkspace.activeRun.clientSurfaceRole === "home");
+  const visibleChatRunIds = useMemo(() => settingsOpen ? [] : [
+    !primaryPaneBlocked && activeSurface?.rendererKind === "builtin.chat" && primaryRunIdentityReady ? primarySurfaceTarget.runId : "",
+    !primaryPaneBlocked && activeSurface?.rendererKind === "builtin.voice" && homeViewMode === "activity" && homeChatIdentityReady ? homeRunId : "",
+    secondaryPaneOpen && secondarySurface?.rendererKind === "builtin.chat" && secondaryRunIdentityReady ? secondaryChatWorkspace.activeRunId : "",
+    secondaryPaneOpen && secondarySurface?.rendererKind === "builtin.voice" && secondaryHomeViewMode === "activity" && homeChatIdentityReady ? homeRunId : "",
+  ].filter(Boolean), [settingsOpen, primaryPaneBlocked, activeSurface?.rendererKind, primaryRunIdentityReady, primarySurfaceTarget.runId,
+    homeViewMode, homeChatIdentityReady, homeRunId, secondaryPaneOpen, secondarySurface?.rendererKind,
+    secondaryRunIdentityReady, secondaryChatWorkspace.activeRunId, secondaryHomeViewMode]);
+  const markActivity = useMarkActivity(accessProfile, runtimeHost.home, clientWindow.primary, activeNavigationSection === "inbox", visibleChatRunIds);
   const [activitySelection, setActivitySelection] = useState<MarkActivityItem | null>(null);
   const [secondaryMovementSelection, setSecondaryMovementSelection] = useState<MarkActivityItem | null>(null);
-  const [secondaryHomeViewMode, setSecondaryHomeViewMode] = useState<HomeViewMode>("voice");
   useEffect(() => { setActivitySelection(null); setSecondaryMovementSelection(null); }, [accessProfile, runtimeHost.home]);
   const [commandMenuOpen, setCommandMenuOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(true);
@@ -2353,6 +2363,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         chatRunsLoading={chatWorkspace.loadingRuns}
         homeRunId={homeRunId}
         inboxUnreadCount={markActivity.unreadCount}
+        inboxArrivalId={markActivity.arrivalId}
         activityContent={<MarkActivityView activity={markActivity} activeId={activitySelection?.id ?? ""} onSelect={selectInboxItem} />}
         dashboardPinnedSurfaceIds={dashboardPinnedSurfaceIds}
         agentPinnedChatIds={agentPinnedChatIds}
@@ -2416,7 +2427,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         onPrimaryPaneBlockedChange={setPrimaryPaneBlocked}
         onSecondaryPaneOpenChange={setSecondaryPaneOpen}
         onSecondaryTaskPaneWidthPercentChange={(secondaryTaskPaneWidthPercent) => setClientPreferences({ secondaryTaskPaneWidthPercent })}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={(section) => { setSettingsOpen(true); if (section) selectSettingsSection(section); }}
         onLogOut={onLogOut}
         onSearch={() => setCommandMenuOpen(true)}
         onSidebarWidthChange={setSidebarWidth}

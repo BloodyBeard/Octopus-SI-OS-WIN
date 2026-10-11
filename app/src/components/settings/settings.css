@@ -118,6 +118,7 @@
 }
 
 .settings-provider-select { width: min(320px, 42vw); }
+.settings-provider-select .oc-select { margin-inline-start: auto; }
 .settings-control-wide { width: 260px; }
 .settings-slider-control { width: 230px; }
 .settings-choice-group { width: 234px; }

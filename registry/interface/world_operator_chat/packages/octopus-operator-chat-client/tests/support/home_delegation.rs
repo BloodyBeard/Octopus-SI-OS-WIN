@@ -4,9 +4,11 @@ use octopus_app_server::{
     build_embedded_spine,
 };
 use octopus_interfaces::InterfaceArtifactFile;
-use octopus_ledger::{
-    Endpoint, InMemoryBlobs, InMemoryLog, LiveMovementLog, MovementKind, MovementLog, Seq,
-};
+use octopus_ledger::{Endpoint, LiveMovementLog, MovementKind, MovementLog, Seq};
+use octopus_ledger_store::{DurableBlobs, DurableLog};
+use octopus_interface_transport::{InterfaceHostIoLimits, InterfaceLiftContext};
+use octopus_provider_run_authoring::ProviderHandoffSession;
+use octopus_world_pyecho_life_runtime::LedgerTailReader;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +34,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
         "chat_id":"home_returns","provider_interface_id":"world_provider_codex","ee_id":"ee_existence",
         "worker_interface_id":"system_worker_operator_home","client_surface_role":"home","cycle":"first",
         "selected_worker_environment_kinds":["system_room"],
+        "context_artifact_bindings":[{"id":"artifact-code-mode-browser-prelude"},{"id":"artifact-code-mode-cua-prelude"}],
         "conversation":{"ledger_offset":0,"artifact_bindings":[],"pinned_artifact_bindings":[],"pinned_context_items":[],"continued_from":null}
     })).unwrap();
     let plan = plan_operator_chat_topology(&request).unwrap();
@@ -48,6 +51,11 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     let voice_path = runs.join(format!("{}.json", voice["run_id"].as_str().unwrap()));
     let voice_before = std::fs::read(&voice_path).unwrap();
     let voice_record = RunRecord::from_bytes(&voice_before).unwrap();
+    let voice_templates = voice_record.interface_state[&voice["provider_id"].as_str().unwrap().into()]["run_authoring_binding"]["checkpoints"]
+        .as_array().unwrap();
+    let voice_template = voice_templates.iter().find(|cp| cp["role"] == "stable").unwrap();
+    assert!(voice_template["static_artifact_bindings"].as_array().unwrap().contains(&json!("artifact-code-mode-browser-prelude")));
+    assert!(voice_template["static_artifact_bindings"].as_array().unwrap().contains(&json!("artifact-code-mode-cua-prelude")));
     assert!(home["interface_state"].get(voice["provider_id"].as_str().unwrap()).is_none());
     assert!(voice_record.interface_state.get(&plan.model_interface_id.clone().into()).is_none());
     let sidecar: Value = serde_json::from_slice(
@@ -81,7 +89,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     )
     .unwrap();
     assert_ne!(writer["interface"], plan.authoring_environment_interface_id);
-    let blobs: SharedBlobs = Arc::new(Mutex::new(InMemoryBlobs::new()));
+    let blobs: SharedBlobs = Arc::new(Mutex::new(DurableBlobs::open(root.join("ledger/blobs")).unwrap()));
     let embedded = build_embedded_spine(SpineRootConfig {
         registry_root: registry.clone(),
         run: plan.run_id.clone().into(),
@@ -92,7 +100,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     })
     .await
     .unwrap();
-    let mut log = LiveMovementLog::new(InMemoryLog::new());
+    let mut log = LiveMovementLog::new(DurableLog::open(root.join("ledger/movements.jsonl")).unwrap());
     let mut handle = SharedBlobHandle::new(blobs);
     let input = InterfaceArtifactFile::write(
         root.join("operator"),
@@ -209,6 +217,28 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     let mut next = request;
     next.cycle = "next".into();
     next.existing_run_record = Some(home.clone());
+    for replace in [false, true] {
+        let mut altered: Value = serde_json::from_slice(&voice_before).unwrap();
+        let seeds = altered["interface_state"][voice["provider_id"].as_str().unwrap()]["run_authoring_binding"]["checkpoints"][0]["static_artifact_bindings"].as_array_mut().unwrap();
+        let index = seeds.iter().position(|id| id == "artifact-code-mode-browser-prelude").unwrap();
+        if replace {
+            seeds[index] = json!("forged-static-seed");
+            for cp in altered["checkpoints"].as_array_mut().unwrap() {
+                for binding in cp["artifact_bindings"].as_array_mut().unwrap() {
+                    if binding["id"] == "artifact-code-mode-browser-prelude" { binding["id"] = json!("forged-static-seed"); }
+                }
+            }
+        } else { seeds.remove(index); }
+        let bytes = serde_json::to_vec(&altered).unwrap();
+        octopus_provider_run_authoring::provider_context_bindings(&RunRecord::from_bytes(&bytes).unwrap(), &voice["provider_id"].as_str().unwrap().into()).unwrap();
+        std::fs::write(&voice_path, bytes).unwrap();
+        assert!(plan_operator_chat_topology(&next).unwrap_err().contains("Home voice Run differs from its exact independent execution contract"));
+    }
+    let mut legacy: Value = serde_json::from_slice(&voice_before).unwrap();
+    legacy["interface_state"][voice["control_interface_id"].as_str().unwrap()].as_object_mut().unwrap().remove("static_artifact_bindings");
+    std::fs::write(&voice_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(plan_operator_chat_topology(&next).unwrap_err().contains("explicit topology repair is required"));
+    std::fs::write(&voice_path, &voice_before).unwrap();
     let continued = plan_operator_chat_topology(&next).unwrap();
     for write in continued.interface_writes.iter().chain(&continued.run_writes) {
         install(write);
@@ -439,6 +469,25 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
         .invocation_metadata
         .grant;
     assert!(voice_grant.tools.is_empty(), "Voice delegates work; its writer executes under a separate Run grant");
+    let voice_metadata = &admission.admission.records.iter().flat_map(|record| &record.outbound_transfers)
+        .find(|out| out.to_interface.as_str() == voice["provider_id"].as_str().unwrap()).unwrap().invocation_metadata;
+    assert_eq!(voice_template["static_artifact_bindings"], json!(voice_metadata.artifact_binding_refs.iter().map(|artifact| artifact.id.as_str()).collect::<Vec<_>>()));
+    let provider: InterfaceId = voice["provider_id"].as_str().unwrap().into();
+    let descriptor = load_interface_descriptor(&registry.join("interface"), provider.as_str()).unwrap();
+    let (sender, _arrivals) = tokio::sync::mpsc::channel(1);
+    let mut ctx = InterfaceLiftContext::unprivileged(provider.clone(), registry.join("interface").join(provider.as_str()), Some(descriptor),
+        root.join("voice-provider"), root.join("ledger/movements.jsonl"), root.join("ledger/blobs"), root.join("ledger/index.sqlite"),
+        BTreeMap::from([("run_records_root".into(), runs.clone())]), sender, Default::default());
+    std::fs::create_dir(&ctx.var_dir).unwrap();
+    ctx.root_slots.insert("interface_hand_in_root".into(), root.join("hand-in"));
+    ctx.root_slots.insert("app_server_control_root".into(), root.join("control"));
+    ctx.host_io_limits = Some(InterfaceHostIoLimits {max_control_frame_bytes:1<<20,max_manifest_bytes:1<<20,max_payload_bytes:1<<26,max_stderr_bytes:1024});
+    let mut reader = LedgerTailReader::open(&ctx).unwrap();
+    let rows = reader.read_new().unwrap();
+    let source = rows.iter().find(|row| row.movement.artifact.as_ref().is_some_and(|artifact| artifact.id.as_str().starts_with("realtime.session.offer:"))).unwrap();
+    let input = reader.envelope(source).unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&input).unwrap();
+    ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx, ctx.descriptor_snapshot.as_ref().unwrap(), &voice_record.id, &input, source.movement.seq.0, &pinned).unwrap();
     assert!(!voice_grant.interfaces.contains(&plan.model_interface_id.clone().into()));
     assert!(admission.admission.records.iter().flat_map(|r| &r.outbound_transfers)
         .filter(|out| out.to_interface.as_str() == voice["provider_id"].as_str().unwrap())

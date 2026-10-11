@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAppearance } from "../../appearance";
 import { copyText } from "../../runtimeFormat";
 import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import { octopusDiffRawUnsafeCss } from "../settings/octopusDiffUnsafeCss";
 import { octopusDiffThemeName, registerOctopusDiffThemes } from "../settings/octopusDiffThemes";
 
@@ -79,7 +80,7 @@ export default function WorkingPatchDiff({ added, changeKind, deleted, patch, pa
   return (
     <div className="activity-file-patch">
       <div className="activity-file-patch-header">
-        <span title={path}>{path.split("/").at(-1) || path}</span>
+        <ShellTooltip label={path}><span className="min-w-0 truncate">{path.split("/").at(-1) || path}</span></ShellTooltip>
         <span className="activity-file-patch-actions">
           {added !== undefined || deleted !== undefined ? (
             <span className="activity-file-stats">
@@ -87,21 +88,22 @@ export default function WorkingPatchDiff({ added, changeKind, deleted, patch, pa
               <i>−{deleted ?? 0}</i>
             </span>
           ) : null}
-          <button
-            aria-label={copied ? "Copied diff" : "Copy diff"}
-            className="activity-file-diff-copy"
-            onClick={() => {
-              void copyText(parsed.patch).then((didCopy) => {
-                setCopied(didCopy);
-                if (!didCopy) return;
-                window.setTimeout(() => setCopied(false), 1_500);
-              }).catch(() => setCopied(false));
-            }}
-            title={copied ? "Copied" : "Copy diff"}
-            type="button"
-          >
-            <Glyph name={copied ? "check" : "copy"} size={12} />
-          </button>
+          <ShellTooltip label={copied ? "Copied" : "Copy diff"}>
+            <button
+              aria-label={copied ? "Copied diff" : "Copy diff"}
+              className="activity-file-diff-copy"
+              onClick={() => {
+                void copyText(parsed.patch).then((didCopy) => {
+                  setCopied(didCopy);
+                  if (!didCopy) return;
+                  window.setTimeout(() => setCopied(false), 1_500);
+                }).catch(() => setCopied(false));
+              }}
+              type="button"
+            >
+              <Glyph name={copied ? "check" : "copy"} size={12} />
+            </button>
+          </ShellTooltip>
         </span>
       </div>
       <div className="activity-file-patch-content">

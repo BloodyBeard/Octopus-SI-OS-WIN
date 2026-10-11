@@ -185,7 +185,8 @@ async function consentRecipeFixture() {
     const packFile = path.join(roots.libraryRoot, "packs", "test-pack.json");
     const pack = JSON.parse(await fs.readFile(packFile, "utf8"));
     pack.workspace_setup = { selection: "included", home: { provider_interface_id: "world_test_provider",
-      worker_interface_id: "world_test_provider", context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [] };
+      worker_interface_id: "world_test_provider", context_artifact_bindings: [], selected_worker_environment_kinds: [] },
+      task: { worker_interface_id: "world_test_provider", context_artifact_bindings: [], selected_worker_environment_kinds: [] }, project_defaults: [] };
     await writeJson(packFile, pack);
     const ordinary = await readLocalPackageCatalog(roots);
     assert.ok(ordinary.packs.some((entry) => entry.id === pack.id), JSON.stringify(ordinary.errors));

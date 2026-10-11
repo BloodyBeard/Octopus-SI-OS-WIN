@@ -69,6 +69,7 @@ export type WorkspaceSetupIntent = {
 
 export type WorkspaceSetupHomeRecipe = {
   agent_presets?: WorkspaceSetupAgentPreset[];
+  task: WorkspaceSetupTaskRecipe;
   provider_interface_id: string;
   worker_interface_id: string;
   context_artifact_bindings: Array<{ id: string }>;
@@ -77,6 +78,12 @@ export type WorkspaceSetupHomeRecipe = {
     package_id: string;
     default_for_new_tasks: boolean;
   }>;
+};
+
+export type WorkspaceSetupTaskRecipe = {
+  worker_interface_id: string;
+  context_artifact_bindings: Array<{ id: string }>;
+  selected_worker_environment_kinds: string[];
 };
 
 export type WorkspaceSetupAgentPreset = {
@@ -120,6 +127,11 @@ export type WorkspaceInitializeRequest = {
   serviceTier?: string;
     workerInterfaceId: string;
     doorHostSlots: Record<string, Record<string, string>>;
+    contextArtifactBindings: Array<{ id: string }>;
+    selectedWorkerEnvironmentKinds: string[];
+  };
+  task: {
+    workerInterfaceId: string;
     contextArtifactBindings: Array<{ id: string }>;
     selectedWorkerEnvironmentKinds: string[];
   };
@@ -314,6 +326,7 @@ export function compileWorkspaceInitializeRequest(
       "selected_worker_environment_kinds",
       "project_defaults",
       "agent_presets",
+      "task",
     ],
     "Workspace Home recipe",
     ["agent_presets"],
@@ -337,6 +350,22 @@ export function compileWorkspaceInitializeRequest(
   const selectedWorkerEnvironmentKinds = recipe.selected_worker_environment_kinds.map((kind, index) => (
     requiredId(kind, `Workspace Home worker environment ${index + 1}`)
   ));
+  const taskRecipe = exactRecord(recipe.task, ["worker_interface_id", "context_artifact_bindings", "selected_worker_environment_kinds"], "Workspace Task recipe");
+  if (!Array.isArray(taskRecipe.context_artifact_bindings) || !Array.isArray(taskRecipe.selected_worker_environment_kinds)) {
+    throw new Error("Workspace Task recipe requires context and worker environment arrays");
+  }
+  const task = {
+    workerInterfaceId: requiredId(taskRecipe.worker_interface_id, "Workspace Task worker"),
+    contextArtifactBindings: taskRecipe.context_artifact_bindings.map((value, index) => {
+      const binding = exactRecord(value, ["id"], `Workspace Task context ${index + 1}`);
+      return { id: requiredId(binding.id, `Workspace Task context ${index + 1}`) };
+    }),
+    selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds.map((value, index) => requiredId(value, `Workspace Task environment ${index + 1}`)),
+  };
+  if (new Set(task.contextArtifactBindings.map((binding) => binding.id)).size !== task.contextArtifactBindings.length
+    || new Set(task.selectedWorkerEnvironmentKinds).size !== task.selectedWorkerEnvironmentKinds.length) {
+    throw new Error("Workspace Task recipe repeats a binding");
+  }
   const projectDefaults = recipe.project_defaults.map((value, index) => {
     const row = exactRecord(
       value,
@@ -375,6 +404,7 @@ export function compileWorkspaceInitializeRequest(
       contextArtifactBindings,
       selectedWorkerEnvironmentKinds,
     },
+    task,
     projects: intent.projects,
     ...(agentPresets.length ? { agentPresets } : {}),
   };
@@ -389,6 +419,7 @@ export async function workspaceInitializeRequestDigest(request: WorkspaceInitial
       reasoningEffort: request.home.reasoningEffort,
       serviceTier: request.home.serviceTier,
     },
+    task: request.task,
     projects: request.projects,
     ...(request.agentPresets?.length ? { agentPresets: request.agentPresets } : {}),
   };

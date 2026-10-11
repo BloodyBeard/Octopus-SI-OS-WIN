@@ -596,6 +596,10 @@ fn build_child_command(config: &SpawnConfig) -> Command {
     let mut command = Command::new(&config.bin);
     command
         .args(&config.args)
+        .env(
+            "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+            &config.initialize_params.client_info.name,
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -948,7 +952,7 @@ mod tests {
             "curated home must NOT carry AGENTS.md (the owner persona must be gone)"
         );
 
-        let config = SpawnConfig {
+        let mut config = SpawnConfig {
             bin: "codex".to_string(),
             args: vec!["app-server".to_string()],
             cwd: Some(std::path::PathBuf::from("/tmp")),
@@ -958,8 +962,17 @@ mod tests {
             channel_capacity: 256,
         };
 
+        config.initialize_params.client_info.name = "octopus-spawn-test".to_string();
         let command = build_child_command(&config);
         let std_command = command.as_std();
+        let originator_env = std_command
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new("CODEX_INTERNAL_ORIGINATOR_OVERRIDE"))
+            .and_then(|(_, v)| v);
+        assert_eq!(
+            originator_env,
+            Some(OsStr::new(&config.initialize_params.client_info.name))
+        );
         let codex_home_env = std_command
             .get_envs()
             .find(|(k, _)| *k == OsStr::new("CODEX_HOME"))

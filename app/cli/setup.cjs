@@ -318,6 +318,8 @@ function compileSetupPlan(pack, choices) {
   const projectKeys = choices.projects.map((row, index) => row.key ?? `project-${index + 1}`);
   if (new Set(projectKeys).size !== projectKeys.length) throw new Error("Project keys must be unique.");
   const recipe = pack.workspace_setup.home;
+  const taskRecipe = pack.workspace_setup.task;
+  if (!taskRecipe) throw new Error("The Application Pack has no declared Task recipe.");
   const projects = choices.projects.map((row, index) => ({
     key: projectKeys[index], parentKey: row.parentKey ?? "root", templateName: "project",
     name: humanText(row.name, "Project name", 80), goal: humanText(row.goal ?? row.name, "Project goal", 240),
@@ -340,6 +342,8 @@ function compileSetupPlan(pack, choices) {
     home: { name: "Home", providerInterfaceId: recipe.provider_interface_id, providerModel: choices.model,
       workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort, doorHostSlots: {},
       contextArtifactBindings: recipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: recipe.selected_worker_environment_kinds },
+    task: { workerInterfaceId: taskRecipe.worker_interface_id, contextArtifactBindings: taskRecipe.context_artifact_bindings,
+      selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds },
     projects, ...(agentPresets.length ? { agentPresets } : {}),
   };
   const defaults = pack.workspace_setup.project_defaults.flatMap((entry) => {

@@ -45,7 +45,7 @@ async fn selected_home_deferred_continuity_preserves_exact_evidence() {
     let turn = load_deferred_provider_turns(&ctx, &descriptor).unwrap().remove(&seq).unwrap().turn;
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
     let snapshot = bound_operator_session_snapshot(&ctx, &descriptor, &turn).unwrap();
-    let bound = recover_operator_turn_continuity(
+    let bound = recover_provider_turn_continuity(
         &descriptor, &turn.envelope, snapshot.as_ref().map(|(_, snapshot)| snapshot), &run, &pinned,
     ).unwrap();
     let session = ProviderHandoffSession::new(&ctx).unwrap();

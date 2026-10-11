@@ -8,6 +8,7 @@ import {
 import "../icon-glyphs/voice";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import type { VoiceSession } from "./useVoiceSession";
 import { formatCallDuration, voicePresentation } from "./voicePresentation";
 import "./voice.css";
@@ -133,38 +134,41 @@ export function VoiceCallPuck({
       ref={rootRef}
       role="group"
       style={position ? { left: position.left, top: position.top } : undefined}
-      title="Open Home"
     >
       <VoiceCallWaveform
         accessProfile={accessProfile}
         muted={muted}
         session={session}
       />
-      <button aria-label="Open Home call" className="voice-call-puck-copy" onClick={onOpenHome} type="button">
-        <span className="voice-call-puck-timer">{session.startedAtMs > 0 ? formatCallDuration(elapsedMs) : "–:––"}</span>
-        <span className="voice-call-puck-status" role="status">{state.title}</span>
-      </button>
-      <button
-        aria-label={muted ? "Unmute" : "Mute"}
-        aria-pressed={muted}
-        className="voice-call-puck-action"
-        disabled={!state.canMute}
-        onClick={session.toggleMute}
-        title={muted ? "Unmute" : "Mute"}
-        type="button"
-      >
-        <Glyph name={muted ? "microphoneOff" : "microphone"} size={18} />
-      </button>
-      <button
-        aria-label="End call"
-        className="voice-call-puck-action is-end"
-        disabled={!state.canEnd}
-        onClick={() => { void session.end(); }}
-        title="End call; tasks keep running"
-        type="button"
-      >
-        <Glyph name="phoneEnd" size={18} />
-      </button>
+      <ShellTooltip label="Open Home">
+        <button aria-label="Open Home call" className="voice-call-puck-copy" onClick={onOpenHome} type="button">
+          <span className="voice-call-puck-timer">{session.startedAtMs > 0 ? formatCallDuration(elapsedMs) : "–:––"}</span>
+          <span className="voice-call-puck-status" role="status">{state.title}</span>
+        </button>
+      </ShellTooltip>
+      <ShellTooltip disabled={!state.canMute} label={muted ? "Unmute" : "Mute"}>
+        <button
+          aria-label={muted ? "Unmute" : "Mute"}
+          aria-pressed={muted}
+          className="voice-call-puck-action"
+          disabled={!state.canMute}
+          onClick={session.toggleMute}
+          type="button"
+        >
+          <Glyph name={muted ? "microphoneOff" : "microphone"} size={18} />
+        </button>
+      </ShellTooltip>
+      <ShellTooltip disabled={!state.canEnd} label="End call; tasks keep running">
+        <button
+          aria-label="End call"
+          className="voice-call-puck-action is-end"
+          disabled={!state.canEnd}
+          onClick={() => { void session.end(); }}
+          type="button"
+        >
+          <Glyph name="phoneEnd" size={18} />
+        </button>
+      </ShellTooltip>
     </div>
   );
 }

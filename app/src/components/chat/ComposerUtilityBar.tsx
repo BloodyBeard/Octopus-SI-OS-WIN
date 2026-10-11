@@ -6,6 +6,7 @@ import type { ChatApplicationChoice, ChatExecutionContext, ChatWorkerEnvironment
 import { AgentPresetLogo } from "../agent/AgentPresetLogo";
 import { Glyph } from "../IconGlyphs";
 import type { TaskAccessMode } from "./taskAccess";
+import { ShellTooltip } from "../shell/ShellTooltip";
 
 const CHIP_BUTTON_CLASS = "border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-foreground/5 data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer-sm px-1.5 py-0 text-sm leading-[18px] composer-utility-label min-w-0 items-center";
 const CHIP_FOREGROUND_CLASS = "text-token-text-primary [&_svg]:size-4 [&_svg]:text-current";
@@ -417,17 +418,18 @@ function ProjectClearSlot({
       onPointerEnter={() => setSuppressed(false)}
       onPointerLeave={() => setSuppressed(false)}
     >
-      <button
-        aria-label="Don't work in a project"
-        className={`${CLEAR_BUTTON_CLASS}${active ? ` ${CLEAR_BUTTON_AVAILABLE_CLASS}` : ""}`}
-        data-clear-project-button=""
-        disabled={!active}
-        onClick={onClear}
-        title="Don't work in a project"
-        type="button"
-      >
-        <ClearProjectIcon aria-hidden className="size-4" />
-      </button>
+      <ShellTooltip className="pointer-events-none absolute inset-y-0 left-0 z-10 aspect-square" disabled={!active} label="Don't work in a project">
+        <button
+          aria-label="Don't work in a project"
+          className={`${CLEAR_BUTTON_CLASS}${active ? ` ${CLEAR_BUTTON_AVAILABLE_CLASS}` : ""}`}
+          data-clear-project-button=""
+          disabled={!active}
+          onClick={onClear}
+          type="button"
+        >
+          <ClearProjectIcon aria-hidden className="size-4" />
+        </button>
+      </ShellTooltip>
       {children}
     </div>
   );
@@ -511,41 +513,43 @@ function UtilityBarDropdown({
 
   return (
     <>
-      <button
-        aria-disabled={disabled || undefined}
-        aria-expanded={open}
-        aria-haspopup="menu"
-        className={triggerVariant === "embedded"
-          ? "composer-agent-selector-trigger composer-utility-label no-drag flex min-w-0 cursor-interaction items-center gap-1 border-0 bg-transparent px-1.5 !pr-0 py-0 text-sm leading-[18px] text-token-text-tertiary select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-          : CHIP_BUTTON_CLASS}
-        data-composer-navigation-target={navigationTarget}
-        data-state={open ? "open" : "closed"}
-        disabled={disabled}
-        onClick={(event) => {
-          if (event.detail !== 0) return;
-          setQuery("");
-          setOpen((current) => !current);
-        }}
-        onPointerDown={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          setQuery("");
-          setOpen((current) => !current);
-        }}
-        ref={triggerRef}
-        title={title}
-        type="button"
-      >
-        <ChipLabel
-          categoryLabel={categoryLabel}
-          collapse={collapse}
-          icon={icon}
-          iconMarked={iconMarked}
-          indicator={indicator}
-          value={value}
-          valueClassName={valueClassName}
-        />
-      </button>
+      <ShellTooltip className="min-w-0" label={title} disabled={open}>
+        <button
+          aria-label={title}
+          aria-disabled={disabled || undefined}
+          aria-expanded={open}
+          aria-haspopup="menu"
+          className={triggerVariant === "embedded"
+            ? "composer-agent-selector-trigger composer-utility-label no-drag flex min-w-0 cursor-interaction items-center gap-1 border-0 bg-transparent px-1.5 !pr-0 py-0 text-sm leading-[18px] text-token-text-tertiary select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            : CHIP_BUTTON_CLASS}
+          data-composer-navigation-target={navigationTarget}
+          data-state={open ? "open" : "closed"}
+          disabled={disabled}
+          onClick={(event) => {
+            if (event.detail !== 0) return;
+            setQuery("");
+            setOpen((current) => !current);
+          }}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            setQuery("");
+            setOpen((current) => !current);
+          }}
+          ref={triggerRef}
+          type="button"
+        >
+          <ChipLabel
+            categoryLabel={categoryLabel}
+            collapse={collapse}
+            icon={icon}
+            iconMarked={iconMarked}
+            indicator={indicator}
+            value={value}
+            valueClassName={valueClassName}
+          />
+        </button>
+      </ShellTooltip>
       {open && anchor ? createPortal(
         <div
           className={`composer-utility-menu fixed ${MENU_CONTENT_CLASS}`}
@@ -699,21 +703,24 @@ function UtilityBarItem({
   title?: string;
   onSelect: () => void;
 }) {
+  const tooltip = title ?? (typeof label === "string" ? label : "");
   return (
-    <button className={`${MENU_ITEM_BASE} ${MENU_ITEM_INTERACTIVE} w-full [&>span]:gap-1.5`} onClick={onSelect} role="menuitem" title={title ?? (typeof label === "string" ? label : undefined)} type="button">
-      <span className={subText ? MENU_ITEM_CONTENT_SUBTEXT : MENU_ITEM_CONTENT}>
-        <span className={`inline-flex size-4 items-center justify-center leading-none [&_svg]:size-4 ${MENU_ITEM_ICON}`}>{icon}</span>
-        {subText ? (
-          <span className="flex min-w-0 flex-1 flex-col">
-            <span className="min-w-0 truncate text-left">{label}</span>
-            <span className="min-w-0 truncate text-left text-token-text-secondary">{subText}</span>
-          </span>
-        ) : (
-          <span className="flex-1 min-w-0 truncate text-left">{label}</span>
-        )}
-        {selected ? <span className="inline-flex items-center justify-center leading-none"><Glyph className={`icon-2xs ${MENU_ITEM_ICON}`} name="check" size={12} /></span> : null}
-      </span>
-    </button>
+    <ShellTooltip className="w-full min-w-0" disabled={!tooltip} label={tooltip}>
+      <button className={`${MENU_ITEM_BASE} ${MENU_ITEM_INTERACTIVE} w-full [&>span]:gap-1.5`} onClick={onSelect} role="menuitem" type="button">
+        <span className={subText ? MENU_ITEM_CONTENT_SUBTEXT : MENU_ITEM_CONTENT}>
+          <span className={`inline-flex size-4 items-center justify-center leading-none [&_svg]:size-4 ${MENU_ITEM_ICON}`}>{icon}</span>
+          {subText ? (
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="min-w-0 truncate text-left">{label}</span>
+              <span className="min-w-0 truncate text-left text-token-text-secondary">{subText}</span>
+            </span>
+          ) : (
+            <span className="flex-1 min-w-0 truncate text-left">{label}</span>
+          )}
+          {selected ? <span className="inline-flex items-center justify-center leading-none"><Glyph className={`icon-2xs ${MENU_ITEM_ICON}`} name="check" size={12} /></span> : null}
+        </span>
+      </button>
+    </ShellTooltip>
   );
 }
 

@@ -96,6 +96,11 @@ export function useChatCapabilityCatalog(
   }, [projectionStructureGeneration, refreshProviderInterfaces]);
 
   useEffect(() => {
+    if (accessProfile !== "live" || !enabled) return;
+    return window.octopusTransport?.onChatgptAccountChanged?.(() => { void refreshProviderInterfaces(); });
+  }, [accessProfile, enabled, refreshProviderInterfaces]);
+
+  useEffect(() => {
     return subscribeClientChatProjects(accessProfile, () => {
       setProjectPresentationGeneration((generation) => generation + 1);
     });

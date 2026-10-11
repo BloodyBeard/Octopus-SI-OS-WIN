@@ -5,7 +5,7 @@ import type { VoicePhase } from "./useVoiceSession";
 
 export type VoiceOrbActivity =
   | { source: "preview" }
-  | { source: "live"; speakingLevel: number; thinkingLevel: number };
+  | { source: "live"; listeningLevel: number; speakingLevel: number; thinkingLevel: number };
 
 type Props = {
   activity: VoiceOrbActivity;
@@ -177,7 +177,7 @@ vec4 shadeWaveField(
   float waveActivity = max(thinking, speaking);
   float thoughtPresence = smoothstep(0.0, 0.16, waveActivity);
   float thoughtActivity = smoothstep(0.08, 0.72, waveActivity);
-  float speechAmplitude = 1.0 + saturate(speaking) * 0.42;
+  float speechAmplitude = 1.0 + saturate(speaking) * 0.06;
   float restingCrest = -0.045 + sin(normalizedPoint.x * 2.18 + 0.62) * 0.052;
   float activeCrest = waveCrest(normalizedPoint.x, layer, thoughtTime) * speechAmplitude;
   float crest = mix(restingCrest, activeCrest, thoughtActivity);
@@ -514,7 +514,7 @@ void main() {
   vec3 bodyBase = mix(vec3(bodyLuminance), frostBody, lightSurface);
   vec3 body = mix(bodyBase, bodyBase * vec3(1.2, 0.72, 0.74), u_error * 0.52);
 
-  float waveTime = u_thought_time + u_speech_time * 2.4;
+  float waveTime = u_thought_time + u_speech_time;
   vec4 membraneBack = shadeWaveField(point, 0.0, 0.42, waveTime, u_thinking, u_speaking, waveTint, antialias);
   vec4 membraneUpper = shadeWaveField(point, 1.0, 0.76, waveTime, u_thinking, u_speaking, waveTint, antialias);
   vec4 membraneMiddle = shadeWaveField(point, 2.0, 0.94, waveTime, u_thinking, u_speaking, waveTint, antialias);
@@ -699,7 +699,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       renderPixelRatio = pixelRatio;
       const probeWidth = sizeProbeRef.current?.current?.clientWidth ?? 0;
       const shortestCssSide = Math.min(rect.width, rect.height);
-      measuredSphere = probeWidth > 0 && shortestCssSide > 0 ? (probeWidth * 0.235) / shortestCssSide : 0;
+      measuredSphere = probeWidth > 0 && shortestCssSide > 0 ? Math.min(0.36, (probeWidth * 0.285) / shortestCssSide) : 0;
       const width = Math.max(1, Math.round(rect.width * pixelRatio));
       const height = Math.max(1, Math.round(rect.height * pixelRatio));
       const cleared = canvas.width !== width || canvas.height !== height;
@@ -741,8 +741,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       }
       const seconds = staticScene ? 3.7 : now / 1000;
       const next = resolveActivity(frame.activity, frame.phase, seconds);
-      smoothThinking = approach(smoothThinking, next.thinking, elapsed, next.thinking > smoothThinking ? 6 : 3.4);
-      smoothSpeaking = approach(smoothSpeaking, next.speaking, elapsed, next.speaking > smoothSpeaking ? 14 : 7);
+      smoothThinking = approach(smoothThinking, next.thinking, elapsed, next.thinking > smoothThinking ? 6 : 1.5);
+      smoothSpeaking = approach(smoothSpeaking, next.speaking, elapsed, next.speaking > smoothSpeaking ? 14 : 2.6);
       if (!staticScene) {
         thoughtTime += elapsed * smoothThinking * 1.8;
         speechTime += elapsed * smoothSpeaking * 1.35;
@@ -932,9 +932,10 @@ function requiredUniform(gl: WebGL2RenderingContext, program: WebGLProgram, name
 function resolveActivity(activity: VoiceOrbActivity, phase: VoicePhase, time: number): ResolvedActivity {
   if (activity.source === "live") {
     const speaking = clampUnit(clampUnit(activity.speakingLevel) * 1.8);
+    const listening = phase === "listening" ? clampUnit(activity.listeningLevel * 1.6) * 0.6 : 0;
     return {
       speaking,
-      thinking: clampUnit(activity.thinkingLevel),
+      thinking: Math.max(clampUnit(activity.thinkingLevel), listening),
     };
   }
   if (phase === "error") return { speaking: 0, thinking: 0 };

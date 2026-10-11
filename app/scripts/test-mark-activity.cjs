@@ -80,12 +80,12 @@ function storageWindow(disk = new Map()) {
   return window;
 }
 
-function mountedActivity({ disk, initialReadFailure = false, primary = true, types = null, mode = "always", activityMode = "all", open = true } = {}) {
+function mountedActivity({ disk, initialReadFailure = false, primary = true, types = null, mode = "always", activityMode = "all", open = true, visibleChatRunIds = [] } = {}) {
   const window = storageWindow(disk);
   window.readFailure = initialReadFailure;
   global.window = window;
   const host = hookHost(), requests = [], notifications = [];
-  const props = { profile: "operator", home: "/test/home", primary, open };
+  const props = { profile: "operator", home: "/test/home", primary, open, visibleChatRunIds };
   let generation = 0;
   const preferences = { markNotifications: mode, markActivityMode: activityMode, markActivityTypes: types, notificationSound: "silent" };
   const hook = load("src/components/activity/useMarkActivity.ts", {
@@ -96,7 +96,7 @@ function mountedActivity({ disk, initialReadFailure = false, primary = true, typ
     "../../projectionLive": { useProjectionGeneration: () => generation },
     "./markActivity": activity,
   }).useMarkActivity;
-  host.mount(() => hook(props.profile, props.home, props.primary, props.open));
+  host.mount(() => hook(props.profile, props.home, props.primary, props.open, props.visibleChatRunIds));
   return Object.assign(host, {
     window, props, preferences, requests, notifications,
     refresh() { generation++; return host.update(); },
@@ -148,6 +148,69 @@ function attentionRow(seq, kind = "message", patch = {}) {
     seq, created_at_ms: Date.now(), ...patch };
 }
 const attentionSet = (...rows) => ({ chats: [{ run_id: "run-test", agent_id: "agent-test", agent_name: "Actual Agent", agent_icon: "curious", agent_color: "emerald" }], activity: rows });
+
+test("visible conversation coordinates include only exposed task or Home text panes", () => {
+  const relative = "src/components/shell/OperatorShell.tsx";
+  const parsed = ts.createSourceFile(relative, fs.readFileSync(path.join(appRoot, relative), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const owner = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "OperatorShell");
+  const declarations = owner.body.statements.filter(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(d => ["homeChatIdentityReady", "visibleChatRunIds"].includes(d.name.getText(parsed))));
+  assert.equal(declarations.length, 2);
+  const visible = load(relative, {}, `export function visible(deps: any) {
+    const {settingsOpen, primaryPaneBlocked, activeSurface, primaryRunIdentityReady, primarySurfaceTarget, homeViewMode, homeRunId, homeChatWorkspace, secondaryPaneOpen, secondarySurface, secondaryRunIdentityReady, secondaryChatWorkspace, secondaryHomeViewMode} = deps;
+    const useMemo = (read: any) => read(); ${declarations.map(node => node.getText(parsed)).join("\n")} return visibleChatRunIds;
+  }`).visible;
+  const base = {settingsOpen:false, primaryPaneBlocked:false, activeSurface:{rendererKind:"builtin.chat"}, primaryRunIdentityReady:true, primarySurfaceTarget:{runId:"task-primary"}, homeViewMode:"voice", homeRunId:"home-exact", homeChatWorkspace:{activeRunId:"home-exact", activeRun:{runId:"home-exact", clientSurfaceRole:"home"}}, secondaryPaneOpen:false, secondarySurface:{rendererKind:"builtin.chat"}, secondaryRunIdentityReady:true, secondaryChatWorkspace:{activeRunId:"task-secondary"}, secondaryHomeViewMode:"voice"};
+  assert.deepEqual(visible(base), ["task-primary"]);
+  assert.deepEqual(visible({...base, secondaryPaneOpen:true}), ["task-primary", "task-secondary"]);
+  assert.deepEqual(visible({...base, activeSurface:{rendererKind:"builtin.voice"}}), []);
+  const home = {...base, activeSurface:{rendererKind:"builtin.voice"}, homeViewMode:"activity"};
+  assert.deepEqual(visible(home), ["home-exact"]);
+  assert.deepEqual(visible({...home, primaryPaneBlocked:true}), []);
+  assert.deepEqual(visible({...home, homeChatWorkspace:{...base.homeChatWorkspace, activeRunId:"previous-home"}}), []);
+  assert.deepEqual(visible({...home, homeChatWorkspace:{...base.homeChatWorkspace, activeRun:{runId:"home-exact", clientSurfaceRole:"task"}}}), []);
+  const secondary = {...base, activeSurface:{rendererKind:"builtin.files"}, secondaryPaneOpen:true, secondarySurface:{rendererKind:"builtin.voice"}, secondaryHomeViewMode:"activity"};
+  assert.deepEqual(visible(secondary), ["home-exact"]);
+  assert.deepEqual(visible({...secondary, secondaryHomeViewMode:"voice"}), []);
+  assert.deepEqual(visible({...secondary, secondaryPaneOpen:false}), []);
+  assert.deepEqual(visible({...secondary, settingsOpen:true}), []);
+  assert.match(fs.readFileSync(path.join(appRoot, "src/components/shell/HomeSurface.tsx"), "utf8"), /homeViewMode === "activity"[\s\S]*?activityOpen \? \([\s\S]*?<HomeActivityContent/);
+});
+
+test("visible focused chats persist reads without new Inbox attention; unfocused arrivals still notify", async () => {
+  const previousDocument = global.document;
+  const document = new EventTarget();
+  let focused = true;
+  Object.assign(document, { hasFocus: () => focused, visibilityState: "visible" });
+  global.document = document;
+  const h = mountedActivity({ visibleChatRunIds: ["run-test"], activityMode: "attention" });
+  try {
+    await h.respond(marks(), undefined, undefined, attentionSet());
+    h.refresh(); await h.respond(marks(), undefined, undefined, attentionSet(attentionRow(60)));
+    assert.equal(h.value.unreadCount, 0);
+    assert.equal(h.value.read.has("attention:60"), true);
+    assert.equal(h.notifications.length, 0);
+    assert.equal(h.value.arrivalId, "");
+    focused = false; h.window.dispatchEvent(new Event("blur")); h.flush();
+    h.refresh(); await h.respond(marks(), undefined, undefined, attentionSet(attentionRow(60), attentionRow(61)));
+    assert.equal(h.value.unreadCount, 1);
+    assert.equal(h.notifications.length, 1);
+    const arrivalId = h.value.arrivalId;
+    assert.ok(arrivalId.endsWith("attention:61"));
+    h.refresh(); await h.respond(marks(), undefined, undefined, attentionSet(attentionRow(60), attentionRow(61)));
+    assert.equal(h.value.arrivalId, arrivalId);
+    focused = true; h.window.dispatchEvent(new Event("focus")); h.flush();
+    assert.equal(h.value.unreadCount, 0);
+    assert.equal(h.value.read.has("attention:61"), true);
+    focused = false; h.window.dispatchEvent(new Event("blur"));
+    h.props.home = "/other/home"; h.props.visibleChatRunIds = []; h.update();
+    await h.respond(marks(), undefined, undefined, attentionSet(attentionRow(75)));
+    assert.equal(h.value.unreadCount, 1);
+    assert.equal(h.value.arrivalId, "", "history in a different Home must not replay the prior pulse");
+    h.refresh(); await h.respond(marks(), undefined, undefined, attentionSet(attentionRow(75), attentionRow(76)));
+    assert.ok(h.value.arrivalId.startsWith(readKey("operator", "/other/home")));
+    assert.ok(h.value.arrivalId.endsWith("attention:76"));
+  } finally { h.close(); global.document = previousDocument; }
+});
 
 test("attention defaults and exact additional mark selection preserve actual identities and reject unsafe icons", () => {
   const prefs = load("src/clientPreferences.ts", {}, fs.readFileSync(path.join(appRoot, "src/clientPreferences.ts"), "utf8") + "\nexport { normalizePreferences as auditNormalize };");

@@ -495,8 +495,8 @@ async function verifyBootSourceContract() {
   assert.doesNotMatch(projectionLiveSource, /onRuntimeHostState/);
   assert.match(runtimeTopologySource, /onRuntimeHostState\?\.\(\(state\) => \{[\s\S]*?clientRuntimeHostObservation\(state\)[\s\S]*?liveProjectionStatus\(next\)/);
   assert.match(mainSource, /backgroundColor: isMac \? "#00000000" : "#181818"/);
-  assert.match(mainSource, /transparent: isMac,[\s\S]*?vibrancy: "menu",[\s\S]*?visualEffectState: "active"/);
-  assert.match(mainSource, /const translucent = appearance\?\.translucent !== false;[\s\S]*?win\.setVibrancy\("menu"\)[\s\S]*?windowBackdropModes\.set\(win, opaqueSurface\)/);
+  assert.match(mainSource, /transparent: isMac,[\s\S]*?vibrancy: "under-window",[\s\S]*?visualEffectState: "active"/);
+  assert.match(mainSource, /const translucent = appearance\?\.translucent !== false;[\s\S]*?const opaqueSurface = !translucent \|\| oversized;[\s\S]*?win\.setVibrancy\("under-window"\)[\s\S]*?windowBackdropModes\.set\(win, opaqueSurface\)/);
   assert.match(launchSource, /<OctopusTerminal id="terminal-panel-launch" session=\{session\} \/>/);
   assert.match(launchSource, /if \(!leaving \|\| phase === "greeting"\) return;/);
   assert.equal(launchSource.includes(["launch", "terminal", "header"].join("-")), false);

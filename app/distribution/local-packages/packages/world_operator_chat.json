@@ -30,6 +30,10 @@
       "owner": "system_worker_operator_home"
     },
     {
+      "registry_kind": "interface",
+      "owner": "system_worker_operator_task"
+    },
+    {
       "registry_kind": "mark",
       "owner": "tool.call.allowed"
     },

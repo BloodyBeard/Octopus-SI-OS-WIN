@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import type {
   AssistantCodeCommentDirective,
   AssistantInlineVisualizationDirective,
@@ -110,7 +111,7 @@ function InlineVisualization({ onOpen, path, target }: { onOpen: () => void; pat
       <header className="flex min-h-10 items-center gap-2 border-b border-token-border px-3 py-2">
         <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-token-list-hover-background text-token-description-foreground"><Glyph name="insights" size={14} /></span>
         <span className="min-w-0 flex-1"><strong className="block truncate text-sm font-medium">{label || "Interactive visualization"}</strong><span className="block truncate text-xs text-token-description-foreground">Interactive visualization</span></span>
-        <button aria-label={`Open ${path} in Files`} className="flex size-7 cursor-interaction items-center justify-center rounded-lg text-token-description-foreground outline-none hover:bg-token-list-hover-background hover:text-token-foreground focus-visible:ring-1 focus-visible:ring-token-focus-border" onClick={onOpen} title="Open in Files" type="button"><Glyph name="openExternal" size={13} /></button>
+        <ShellTooltip label="Open in Files"><button aria-label={`Open ${path} in Files`} className="flex size-7 cursor-interaction items-center justify-center rounded-lg text-token-description-foreground outline-none hover:bg-token-list-hover-background hover:text-token-foreground focus-visible:ring-1 focus-visible:ring-token-focus-border" onClick={onOpen} type="button"><Glyph name="openExternal" size={13} /></button></ShellTooltip>
       </header>
       {state === "loading" ? (
         <div className="flex h-60 items-center justify-center gap-2 text-sm text-token-description-foreground"><Glyph className="is-spinning" name="refresh" size={14} />Loading visualization…</div>

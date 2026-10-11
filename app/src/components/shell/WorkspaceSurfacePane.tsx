@@ -15,6 +15,7 @@ import { WorkspacePaneHeaderActionsProvider } from "./WorkspacePaneHeaderActions
 import { secondaryPaneUsesTabStrip } from "./paneChromeOwnership";
 import { useWindowPaneControlsHost } from "./WindowPaneControls";
 import { useWorkspacePanePresentation } from "./WorkspacePaneManager";
+import { ShellTooltip } from "./ShellTooltip";
 import "./workspacePaneLauncher.css";
 
 export type WorkspacePaneTab = PaneTabPresentation & {
@@ -224,18 +225,18 @@ export function WorkspacePaneLauncher({ actions, onAction }: {
         {actions.length === 0 ? (
           <span className="workspace-pane-launcher-empty">No tabs are available for this task</span>
         ) : visibleActions.map((action) => (
-            <button
-              key={action.id}
-              aria-label={action.title}
-              className="workspace-pane-launcher-item"
-              onClick={() => onAction(action.id)}
-              type="button"
-              title={action.title}
-            >
-              <Glyph className="icon-xs shrink-0" name={action.glyph} size={16} />
-              <span>{action.title}</span>
-              {action.shortcut ? <kbd className="workspace-pane-shortcut">{action.shortcut}</kbd> : null}
-            </button>
+            <ShellTooltip className="min-w-0" key={action.id} label={action.title} shortcut={action.shortcut}>
+              <button
+                aria-label={action.title}
+                className="workspace-pane-launcher-item"
+                onClick={() => onAction(action.id)}
+                type="button"
+              >
+                <Glyph className="icon-xs shrink-0" name={action.glyph} size={16} />
+                <span>{action.title}</span>
+                {action.shortcut ? <kbd className="workspace-pane-shortcut">{action.shortcut}</kbd> : null}
+              </button>
+            </ShellTooltip>
         ))}
         {moreActions.length ? <button
           aria-expanded={moreOpen}

@@ -363,12 +363,13 @@ test("provider validation waits for a successful registry read and leaves repair
 });
 
 test("opening Settings from Account preserves the destination's initial focus", async () => {
+  let live = false;
   const { OcDropdown } = load("src/design-system/OcDropdown.tsx", {
     "./modalFocus": modal,
     "./components": { OcMenuSurface: ({ surfaceRef, surface, ...props }) => React.createElement("div", { ...props, ref: surfaceRef }) },
   });
   const { AccountRailButton } = load("src/components/shell/AccountRailButton.tsx", {
-    "../../account/useChatgptAccount": { useChatgptAccount: (enabled) => { assert.equal(enabled, false); return { account: null, action: "idle", loading: false }; } },
+    "../../account/useChatgptAccount": { useChatgptAccount: (enabled) => { assert.equal(enabled, live); return { account: null, action: "idle", loading: false }; } },
     "../../account/useChatgptUsage": { useChatgptUsage: (_account, enabled) => { assert.equal(enabled, false); return { value: null, loading: false, error: "" }; } },
     "../../account/chatgptUsageModel": load("src/account/chatgptUsageModel.ts"),
     "../account/AccountLogoutDialog": { AccountLogoutDialog: ({ open }) => { assert.equal(open, false); return null; } },
@@ -376,7 +377,7 @@ test("opening Settings from Account preserves the destination's initial focus", 
     "../../design-system/OcDropdown": { OcDropdown },
     "../../design-system/components": { OcMenuItem: ({ label, leadingIcon, trailing, ...props }) => React.createElement("button", props, label) },
     "../../keyboardShortcuts": { formatKeyboardShortcuts: () => "", useKeyboardShortcuts: () => ({}) },
-    "../chat/MessageTooltip": { MessageTooltip: ({ children }) => children },
+    "../chat/MessageTooltip": load("src/components/chat/MessageTooltip.tsx"),
   });
   function Shell() {
     const [settings, setSettings] = React.useState(false);
@@ -385,7 +386,7 @@ test("opening Settings from Account preserves the destination's initial focus", 
       settings && React.createElement("input", { autoFocus: true, id: "settings-search" }),
     );
   }
-  const { host } = await mount(React.createElement(Shell));
+  const { host, root } = await mount(React.createElement(Shell));
   await act(async () => host.querySelector("button").click());
   await act(async () => document.querySelector('[role="menuitem"]').click());
   assert.equal(document.activeElement, host.querySelector("input"));
@@ -393,6 +394,12 @@ test("opening Settings from Account preserves the destination's initial focus", 
   await act(async () => host.querySelector("button").click());
   await act(async () => document.querySelector('[role="menuitem"]').click());
   assert.equal(document.activeElement, host.querySelector("input"));
+  live = true;
+  await act(async () => root.render(React.createElement(AccountRailButton, { accessProfile: "live", runtimeHost: { available: true, ready: true, phase: "ready" }, onOpenSettings() {}, onLogOut() {} })));
+  const dot = host.querySelector(".navigation-rail-account-status");
+  assert.equal(dot.parentElement.className, "navigation-rail-account"); assert.equal(dot.hasAttribute("title"), false);
+  await act(async () => { dot.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true })); await new Promise(resolve => setTimeout(resolve, 330)); });
+  assert.equal(document.querySelectorAll('[role="tooltip"]').length, 1); assert.equal(document.querySelector('[role="tooltip"]').textContent, "Runtime connected");
 });
 
 test("context menus retain keyboard position across projection updates and restore focus on Escape", async () => {

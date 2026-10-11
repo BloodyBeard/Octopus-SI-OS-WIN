@@ -21,6 +21,7 @@ import { MessageContent } from "../chat/MessageContent";
 import type { ChatAttachmentView, ChatRenderMessage, ChatToolPresentationIndex } from "../chat/types";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { Glyph, type GlyphName } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import { ChatComposer } from "../chat/ChatComposer";
 import type { ProjectedFileSource } from "../chat/ProjectedFilePicker";
 import { AirHandVoiceController } from "./AirHandVoiceController";
@@ -111,6 +112,8 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     session.getOutputMeterSnapshot,
     session.getOutputMeterSnapshot,
   );
+
+  const inputMeter = useSyncExternalStore(session.subscribeMeter, session.getMeterSnapshot, session.getMeterSnapshot);
 
   const boundRunId = homeRunId;
   const homeProjectionLoading = accessProfile === "live"
@@ -445,6 +448,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     ? { source: "preview" as const }
     : {
         source: "live" as const,
+        listeningLevel: inputMeter.level,
         speakingLevel: outputMeter.level,
         thinkingLevel: session.providerActivity || workspace.busy || workspace.submitting ? 1 : 0,
       };
@@ -671,10 +675,12 @@ function VoiceSessionTitle({ editable, onChange, title }: {
       transition={{ duration: 0.18, ease: [0.2, 0, 0, 1] }}
     >
       {editable ? (
-        <button aria-label="Rename Home" onClick={() => setEditing(true)} title="Rename Home" type="button">
-          <span>{title}</span>
-          <Glyph className="icon-xs" name="edit" size={16} />
-        </button>
+        <ShellTooltip label="Rename Home">
+          <button aria-label="Rename Home" onClick={() => setEditing(true)} type="button">
+            <span>{title}</span>
+            <Glyph className="icon-xs" name="edit" size={16} />
+          </button>
+        </ShellTooltip>
       ) : <span>{title}</span>}
     </motion.h1>
   );

@@ -7,7 +7,11 @@ import os from 'node:os';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 const app=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output=await fs.mkdtemp(path.join(os.tmpdir(), 'octopus-model-menu-dom-'));
-await build({stdin:{contents:`import './src/components/icon-glyphs/shell'; export {ProviderModelPicker} from './src/components/chat/ProviderModelPicker'; export * as React from 'react'; export {createRoot} from 'react-dom/client';`,resolveDir:app,sourcefile:'selector-tests.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',outfile:path.join(output,'components.mjs'),loader:{'.css':'empty'},plugins:[{name:'test-motion-preference',setup(b){b.onResolve({filter:/appearance$/},()=>({path:'appearance',namespace:'test-preferences'}));b.onLoad({filter:/.*/,namespace:'test-preferences'},()=>({contents:`export function useShouldReduceMotion(){return ${process.env.MODEL_PICKER_REDUCED_MOTION!=='false'};}`,loader:'js'}));}}],define:{'process.env.NODE_ENV':'"development"'},logLevel:'silent'});
+await build({stdin:{contents:`import './src/components/icon-glyphs/shell'; export {ProviderModelPicker} from './src/components/chat/ProviderModelPicker'; export {OcButton,OcIconButton,OcSelect,OcStatus} from './src/design-system/components'; export {MessageTooltip} from './src/components/chat/MessageTooltip'; export {ShellTooltip} from './src/components/shell/ShellTooltip'; export * as React from 'react'; export {createRoot} from 'react-dom/client';`,resolveDir:app,sourcefile:'selector-tests.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',outfile:path.join(output,'components.mjs'),loader:{'.css':'empty'},plugins:[{name:'test-motion-preference',setup(b){b.onResolve({filter:/appearance$/},()=>({path:'appearance',namespace:'test-preferences'}));b.onLoad({filter:/.*/,namespace:'test-preferences'},()=>({contents:`export function useShouldReduceMotion(){return ${process.env.MODEL_PICKER_REDUCED_MOTION!=='false'};}`,loader:'js'}));}}],define:{'process.env.NODE_ENV':'"development"'},logLevel:'silent'});
+const sharedAssets=await build({stdin:{contents:`export {OcIconButton} from './src/design-system/components';`,resolveDir:app,sourcefile:'shared-controls.tsx',loader:'tsx'},bundle:true,platform:'browser',format:'esm',outfile:path.join(output,'shared.mjs'),write:false,metafile:true,logLevel:'silent'});
+const startupCss=sharedAssets.outputFiles.find(f=>f.path.endsWith('.css')).text;
+assert.ok(Object.keys(sharedAssets.metafile.inputs).some(f=>f.endsWith('/messageTooltip.css')));assert.ok(Object.keys(sharedAssets.metafile.inputs).every(f=>!f.endsWith('/chat.css')));assert.equal(startupCss.match(/\.chat-tooltip\s*\{/g).length,1);assert.match(startupCss,/\.chat-tooltip \{\s*position: fixed/);assert.match(startupCss,/\.chat-tooltip\.is-shell/);
+console.log('PASS shared-control-only startup bundles base and shell tooltip CSS exactly once without loading chat');
 const dom=new JSDOM('<!doctype html><html><body><div id="root"></div><button id="outside">Outside</button></body></html>',{url:'http://localhost',pretendToBeVisual:true});
 const {window:w}=dom;
 for(const key of ['window','document','Node','NodeFilter','HTMLElement','HTMLInputElement','HTMLTextAreaElement','HTMLButtonElement','Element','SVGElement','ShadowRoot','CustomEvent','Event','MutationObserver','getComputedStyle','navigator'])Object.defineProperty(globalThis,key,{value:key==='window'?w:typeof w[key]==='function'&&key==='getComputedStyle'?w[key].bind(w):w[key],configurable:true});
@@ -32,6 +36,7 @@ function rect(e){
  if(e.hasAttribute('data-provider-picker-anchor'))return {x:anchorLeft,y:anchorTop,width:68,height:18};
  if(e.hasAttribute('data-provider-picker-placeholder'))return {x:anchorLeft,y:anchorTop,width:78,height:18};
  if(e.hasAttribute('data-provider-picker-menu'))return {x:0,y:0,width:Math.min(254,Number.parseFloat(e.style.maxWidth)||254),height:e.dataset.view==='advanced'?240:96};
+ if(e.classList.contains('chat-tooltip')){const width=100,height=20,side=e.dataset.side;return {x:Number.parseFloat(e.style.left)+(side==='right'?8:side==='left'?-width-8:-width/2),y:Number.parseFloat(e.style.top)+(side==='bottom'?2:side==='top'?-height-2:-height/2),width,height};}
  return {x:0,y:0,width:100,height:20};
 }
 function box(e){const r=rect(e);if(e.hasAttribute('data-provider-picker-menu')){r.width*=popupScale;r.height*=popupScale;}return {...r,left:r.x,top:r.y,right:r.x+r.width,bottom:r.y+r.height,toJSON(){return r}}}
@@ -40,7 +45,7 @@ for(const name of ['offsetWidth','clientWidth','scrollWidth'])Object.definePrope
 for(const name of ['offsetHeight','clientHeight','scrollHeight'])Object.defineProperty(w.HTMLElement.prototype,name,{configurable:true,get(){return rect(this).height}});
 Object.defineProperties(w,{innerWidth:{value:1200,writable:true},innerHeight:{value:800,writable:true}});
 const errors=[];w.addEventListener('error',e=>errors.push(e.error));
-const {React,createRoot,ProviderModelPicker}=await import(pathToFileURL(path.join(output,'components.mjs')).href);
+const {React,createRoot,ProviderModelPicker,OcButton,OcIconButton,OcSelect,OcStatus,MessageTooltip,ShellTooltip}=await import(pathToFileURL(path.join(output,'components.mjs')).href);
 const {act}=React;const root=createRoot(document.getElementById('root'));let refresh=0;const selected=[];
 const model=(model,displayName,efforts)=>({model,displayName,showInPicker:true,supportedReasoningEfforts:efforts,defaultReasoningEffort:'high'});
 const models=[model('gpt-6-astra','GPT-6 Astra',['high','xhigh','max','ultra']),model('gpt-5.6-sol','GPT-5.6 Sol',['low','medium','high','xhigh','ultra'])];
@@ -50,7 +55,7 @@ const bootstrapProps={providers:[],providerInterfaceId:provider.id,providerModel
 const renderPicker=props=>act(async()=>{root.render(React.createElement(React.StrictMode,null,React.createElement(ProviderModelPicker,props)));});
 await renderPicker(bootstrapProps);
 assert.ok(document.querySelector('[data-provider-picker-trigger]').disabled);
-assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/Loading model/);
+assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/Loading…/);
 await renderPicker({...bootstrapProps,loading:false});
 assert.match(document.querySelector('[data-provider-picker-trigger]').textContent,/unavailable/);
 await renderPicker({...bootstrapProps,loading:false,providers:[provider],activeProvider:provider,reasoningEffort:'stale-effort'});
@@ -81,6 +86,9 @@ console.log('PASS opening scale animation does not move the popup anchor');
 await send(q('[data-model-picker-view-toggle]'),'click');assert.equal(view(),'advanced');assert.ok(q('[role="menu"]'));console.log('PASS list toggle keeps menu open');
 const rows=[...document.querySelectorAll('[role="menuitemradio"]')];
 await act(async()=>rows[0].focus());
+assert.equal(rows[0].querySelectorAll('button, [tabindex]').length,0);assert.equal(rows[0].querySelector('[title]'),null);
+assert.equal(rows[0].getAttribute('aria-description'),provider.id+' · gpt-6-astra');
+assert.ok(q('[role="tooltip"].is-shell'));assert.equal(q('[role="tooltip"].is-shell').textContent,provider.id+' · gpt-6-astra');
 await send(rows[1],'pointermove');assert.equal(document.activeElement,rows[1]);
 assert.equal(rows[0].tabIndex,-1);assert.equal(rows[1].tabIndex,0);
 await send(rows[0],'pointermove',{pointerType:'touch'});assert.equal(document.activeElement,rows[1]);
@@ -158,18 +166,61 @@ const speeds=[{id:'priority',name:'Fast',description:'Declared Fast'},{id:'ultra
 const tierProvider={...provider,models:models.map(m=>({...m,serviceTiers:speeds,defaultServiceTier:'ultrafast'}))};
 const tierProps={...bootstrapProps,loading:false,providers:[tierProvider],activeProvider:tierProvider,onServiceTierChange:id=>chosenTiers.push(id)};
 await renderPicker(tierProps);
-assert.equal(trigger().dataset.selectedServiceTier,'ultrafast');assert.match(trigger().textContent,/Ultra Fast/);
+assert.equal(trigger().dataset.selectedServiceTier,'ultrafast');assert.match(trigger().getAttribute('aria-label'),/Ultra Fast/);assert.doesNotMatch(trigger().textContent,/Ultra Fast/);
 await send(trigger(),'keydown',{key:'ArrowDown'});
-assert.deepEqual([...document.querySelectorAll('[data-service-tier]')].map(e=>[e.dataset.serviceTier,e.textContent.trim()]),[['default','Standard'],['priority','Fast'],['ultrafast','Ultra Fast']]);
-await act(async()=>q('[data-reasoning-slider]').focus());await send(document.activeElement,'keydown',{key:'ArrowDown'});
-assert.equal(document.activeElement.dataset.serviceTier,'default');await send(document.activeElement,'keydown',{key:'ArrowDown'});
-assert.equal(document.activeElement.dataset.serviceTier,'priority');await send(document.activeElement,'keydown',{key:'Enter'});assert.deepEqual(chosenTiers,['priority']);
+if(q('[data-provider-picker-menu]').dataset.view!=='advanced')await act(async()=>q('[data-model-picker-view-toggle]').click());
+assert.equal(q('[data-provider-picker-menu]').dataset.view,'advanced');assert.equal(q('[data-service-tier]'),null);
+assert.match(q('[data-speed-row]').textContent,/Speed\s*Ultra Fast/);await act(async()=>q('[data-speed-row]').click());
+assert.deepEqual([...document.querySelectorAll('[data-service-tier]')].map(e=>[e.dataset.serviceTier,e.dataset.textValue]),[['default','Standard'],['priority','Fast'],['ultrafast','Ultra Fast']]);
+assert.match(q('[data-service-tier="priority"]').textContent,/Declared Fast/);assert.equal(q('[data-service-tier="ultrafast"]').getAttribute('aria-checked'),'true');
+await act(async()=>q('[data-service-tier="priority"]').click());assert.deepEqual(chosenTiers,['priority']);assert.equal(q('[data-service-tier]'),null);assert.equal(document.activeElement,q('[data-speed-row]'));
 await renderPicker({...tierProps,serviceTier:'default'});assert.equal(trigger().dataset.selectedServiceTier,'default');
-assert.equal(q('[data-service-tier="default"]').getAttribute('aria-checked'),'true');
+await act(async()=>q('[data-speed-row]').click());assert.equal(q('[data-service-tier="default"]').getAttribute('aria-checked'),'true');
+await send(q('[data-service-tier="default"]'),'keydown',{key:'ArrowLeft'});assert.equal(q('[data-service-tier]'),null);
 const fastProvider={...tierProvider,models:tierProvider.models.map(m=>({...m,serviceTiers:speeds.slice(0,1),defaultServiceTier:null}))};
 await renderPicker({...tierProps,providers:[fastProvider],activeProvider:fastProvider,serviceTier:'ultrafast'});
-assert.match(trigger().getAttribute('aria-label'),/ultrafast · unavailable/);assert.match(q('.provider-model-speed-panel').textContent,/ultrafast · unavailable/);assert.equal(q('[data-service-tier="ultrafast"]'),null);assert.deepEqual(chosenTiers,['priority']);
-await send(trigger(),'keydown',{key:'Escape'});console.log('PASS declared Fast/Ultra Fast defaults, keyboard choice, explicit Standard and unsupported tier preservation');
+assert.match(trigger().getAttribute('aria-label'),/ultrafast · unavailable/);assert.match(q('[data-speed-row]').textContent,/ultrafast · unavailable/);
+await act(async()=>q('[data-speed-row]').click());assert.equal(q('[data-service-tier="ultrafast"]'),null);assert.deepEqual(chosenTiers,['priority']);
+await send(trigger(),'keydown',{key:'Escape'});console.log('PASS Speed row and submenu: declared tiers, descriptions, choice, explicit Standard and unsupported tier preservation');
+const renderControl=control=>act(async()=>root.render(React.createElement(React.StrictMode,null,control)));
+const tooltipWait=()=>act(async()=>{await new Promise(r=>setTimeout(r,230))});
+const controlRef=React.createRef(),controlCalls=[];
+for(const appearance of ['default','sidebar','compact','rail']){
+ await renderControl(React.createElement(OcIconButton,{appearance,glyph:'settings',label:'Settings',className:'fixture-control',buttonRef:controlRef,'aria-describedby':'existing-help',onClick:()=>controlCalls.push('click'),onKeyDown:e=>controlCalls.push(e.key),onFocus:()=>controlCalls.push('focus')}));
+ const button=q('#root > button');assert.ok(button);assert.equal(controlRef.current,button);assert.equal(button.hasAttribute('title'),false);assert.ok(button.classList.contains('fixture-control'));assert.equal(button.classList.contains('chat-tooltip-trigger'),false);
+ await send(button,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"].is-shell').textContent,'Settings');assert.equal(document.querySelectorAll('[role="tooltip"]').length,1);
+ assert.equal(button.getAttribute('aria-describedby'),`existing-help ${q('[role="tooltip"]').id}`);await send(button,'pointerout',{relatedTarget:document.getElementById('outside')});assert.equal(q('[role="tooltip"]'),null);assert.equal(button.getAttribute('aria-describedby'),'existing-help');
+ await act(async()=>button.focus());assert.equal(q('[role="tooltip"].is-shell').textContent,'Settings');await send(button,'keydown',{key:'Enter'});await send(button,'click');assert.equal(q('[role="tooltip"]'),null);await act(async()=>document.getElementById('outside').focus());
+}
+assert.equal(controlCalls.filter(v=>v==='click').length,4);assert.equal(controlCalls.filter(v=>v==='Enter').length,4);assert.equal(controlCalls.filter(v=>v==='focus').length,4);
+console.log('PASS all icon appearances keep direct-child button/ref/classes and composed hover/focus/click/keyboard handlers');
+for(const props of [{title:''},{disabled:true}]){
+ await renderControl(React.createElement(OcIconButton,{glyph:'settings',label:'Settings',...props}));const button=q('#root > button');assert.ok(button);assert.equal(button.hasAttribute('title'),false);await send(button,'pointermove');await tooltipWait();await act(async()=>button.focus());assert.equal(q('[role="tooltip"]'),null);
+}
+await renderControl(React.createElement(OcIconButton,{glyph:'settings',label:'Settings'}));await send(q('#root > button'),'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"].is-shell').textContent,'Settings');
+for(const disabled of [false,true]){
+ await renderControl(React.createElement(MessageTooltip,{label:'Outer rail help',delayMs:0,disabled},React.createElement(OcIconButton,{appearance:'rail',glyph:'settings',label:'Inner primitive help'})));
+ const button=q('#root > .chat-tooltip-trigger > button');assert.ok(button);assert.equal(button.hasAttribute('title'),false);await send(button,'pointermove');await tooltipWait();assert.equal(document.querySelectorAll('[role="tooltip"]').length,disabled?0:1);if(!disabled)assert.equal(q('[role="tooltip"]').textContent,'Outer rail help');
+}
+console.log('PASS explicit opt-out, disabled controls and existing rail wrapper suppress native/duplicate tooltips');
+let attached=0,released=0;
+const callbackRef=node=>{assert.ok(node instanceof HTMLButtonElement);attached++;return()=>released++};
+const titledButton=(title='Call closure details')=>React.createElement(OcButton,{buttonRef:callbackRef,title,onClick:()=>controlCalls.push('retry')},'Retry closure');
+await renderControl(titledButton());const retry=q('#root > button'),before=attached;assert.ok(retry);assert.equal(retry.hasAttribute('title'),false);await send(retry,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"].is-shell').textContent,'Call closure details');
+await renderControl(titledButton());assert.equal(q('#root > button'),retry);assert.equal(attached,before);await send(retry,'click');assert.equal(controlCalls.at(-1),'retry');assert.equal(q('[role="tooltip"]'),null);
+await renderControl(titledButton(''));await send(retry,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"]'),null);await renderControl(titledButton());assert.equal(q('#root > button'),retry);assert.equal(attached,before);await send(retry,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"]').textContent,'Call closure details');
+await renderControl(React.createElement(OcStatus,{label:'Ready',detail:'Runtime is connected',className:'fixture-status'}));assert.equal(released,attached);const status=q('#root > .fixture-status');assert.ok(status);assert.equal(status.hasAttribute('title'),false);await send(status,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"].is-shell').textContent,'Runtime is connected');
+console.log('PASS explicit button/status help and React19 callback-ref cleanup without layout wrappers');
+const optionSelections=[];
+await renderControl(React.createElement(OcSelect,{label:'Speaker',title:'External headphones',value:'a',options:[{value:'a',label:'A'},{value:'disabled',label:'Disabled',disabled:true},{value:'b',label:'B'}],description:'Selection help',onChange:value=>optionSelections.push(value)}));
+const select=q('#root > .oc-select-field > button');assert.ok(select);assert.equal(select.hasAttribute('title'),false);const support=select.getAttribute('aria-describedby');await send(select,'pointermove');await tooltipWait();assert.equal(q('[role="tooltip"].is-shell').textContent,'External headphones');assert.ok(select.getAttribute('aria-describedby').startsWith(support+' '));
+await send(select,'keydown',{key:'ArrowDown'});assert.equal(q('[role="tooltip"]'),null);assert.equal(select.getAttribute('aria-expanded'),'true');assert.equal(select.getAttribute('aria-describedby'),support);assert.equal(select.getAttribute('aria-controls'),q('[data-oc-dropdown]').id);assert.equal(document.activeElement.getAttribute('aria-label'),'A');
+await send(document.activeElement,'keydown',{key:'End'});assert.equal(document.activeElement.getAttribute('aria-label'),'B');await send(document.activeElement,'keydown',{key:'Enter'});assert.deepEqual(optionSelections,['b']);assert.equal(q('[data-oc-dropdown]'),null);assert.equal(document.activeElement,select);
+await send(select,'keydown',{key:'ArrowDown'});await send(document.activeElement,'keydown',{key:'Escape'});assert.equal(q('[data-oc-dropdown]'),null);assert.equal(document.activeElement,select);assert.equal(select.getAttribute('aria-expanded'),'false');
+for(const props of [{disabled:true,title:'Speaker details'},{title:''}]){await renderControl(React.createElement(OcSelect,{label:'Speaker',value:'a',options:[{value:'a',label:'A'}],onChange:()=>{},...props}));const button=q('#root > .oc-select-field > button');await send(button,'pointermove');await tooltipWait();assert.equal(button.hasAttribute('title'),false);assert.equal(q('[role="tooltip"]'),null);if(props.disabled){await send(button,'keydown',{key:'ArrowDown'});assert.equal(q('[data-oc-dropdown]'),null);}}
+console.log('PASS select retains direct button anchor, support description, keyboard selection/Escape and focus restoration');
+await renderControl(React.createElement(ShellTooltip,{asChild:true,label:'Captured action'},React.createElement('button',{onClickCapture:e=>e.stopPropagation()},'Action')));const captured=q('#root > button');await act(async()=>captured.focus());assert.equal(q('[role="tooltip"]').textContent,'Captured action');await send(captured,'click');assert.equal(q('[role="tooltip"]'),null);
+console.log('PASS trigger capture dismissal survives caller stopPropagation');
 await act(async()=>root.unmount());await tick();assert.deepEqual(errors,[]);assert.equal(document.querySelector('[data-provider-picker-menu]'),null);assert.equal([...observers].reduce((n,o)=>n+o.targets.size,0),0);console.log('PASS strict replay/unmount cleanup; no DOM errors or leaked observers');
 w.close();for(const channel of channels){channel.port1.close();channel.port2.close();}
 await fs.rm(output,{recursive:true});

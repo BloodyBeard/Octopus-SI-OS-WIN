@@ -10204,8 +10204,8 @@ impl RunAuthoringConfig {
                 for value in [writer.owner.as_str(),writer.source.as_str(),writer.door.as_str(),&writer.tool,&writer.call_label,&writer.result_label] { non_empty_string(value,"external owner writer")?; }
             }
             if !checkpoint.static_artifact_bindings.is_empty() {
-                if (checkpoint.include_context && checkpoint.role != RunAuthoringCheckpointRole::ProviderToolOutput) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
-                    return Err(format!("run_authoring {owner} static artifacts require an explicit non-context input or tool output"));
+                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
+                    return Err(format!("run_authoring {owner} static artifacts require a declared stable input, non-context input or tool output"));
                 }
                 let mut ids = BTreeSet::new();
                 for id in &checkpoint.static_artifact_bindings {
@@ -15523,6 +15523,17 @@ mod tests {
     #[test]
     fn context_free_provider_outputs_keep_only_mandatory_role_bindings() {
         let config = config_with_tool_routes(&[("coder", &["coder.exec"])]);
+        let mut seeded = config.clone();
+        let stable = seeded.checkpoints.iter().position(|checkpoint| checkpoint.role == RunAuthoringCheckpointRole::Stable).unwrap();
+        seeded.checkpoints[stable].static_artifact_bindings = vec![ArtifactId::new("declared-seed")];
+        seeded.validate(&seeded.provider_interface, &seeded.run).unwrap();
+        seeded.checkpoints[stable].static_artifact_bindings.push(ArtifactId::new("declared-seed"));
+        assert!(seeded.validate(&seeded.provider_interface, &seeded.run).is_err());
+        for role in [RunAuthoringCheckpointRole::ProviderArtifactOutput, RunAuthoringCheckpointRole::AuthoringCall, RunAuthoringCheckpointRole::AuthoringResult] {
+            let mut invalid = config.clone();
+            invalid.checkpoints.iter_mut().find(|checkpoint| checkpoint.role == role).unwrap().static_artifact_bindings = vec![ArtifactId::new("forbidden-seed")];
+            assert!(invalid.validate(&invalid.provider_interface, &invalid.run).is_err());
+        }
         let tool = config
             .checkpoints
             .iter()

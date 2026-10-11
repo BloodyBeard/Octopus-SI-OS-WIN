@@ -63,23 +63,3 @@ export function AccountUsageSections({ state, signedIn, accountUnavailable = fal
     </p>
   </AccountSection>)}</>;
 }
-
-export function AccountUsageCompact({ state }: { state: UsageViewState }) {
-  if (!state.value) return state.loading || state.error ? <UsageNotice state={state} /> : null;
-  const groups = accountUsageGroups(state.value);
-  if (!groups.length) return null;
-  return <div className="account-menu-usage" role="group" aria-label="Usage remaining">
-    <div className="account-menu-usage-heading">Usage remaining</div>
-    <div className="account-usage-compact">
-      {groups.map((group) => <div className="account-usage-compact-group" key={group.key}>
-        {group.limit.limitName ? <span className="account-usage-compact-name">{group.label} limit:</span> : null}
-        {group.windows.filter((row) => row.reported).map((row) => <div className="account-usage-compact-row" key={row.key}>
-          <span>{row.compactLabel}</span>
-          <span title={accountResetTime(row.resetsAt, row.durationMins)}>{accountRemainingLabel(row.remaining, "") .trim()}
-            {row.resetsAt !== null ? <> · {accountResetTime(row.resetsAt).replace(/^Resets /, "")}</> : null}
-          </span>
-        </div>)}
-      </div>)}
-    </div>
-  </div>;
-}

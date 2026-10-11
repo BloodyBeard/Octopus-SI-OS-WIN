@@ -16,6 +16,7 @@ function load(relative) {
   if(specifier.endsWith('.css'))return {};
   if(specifier.endsWith('design-system/components'))return {OcButton:({children,size,variant,...props})=>React.createElement('button',props,children),OcSelect:({options,label,onChange,placeholder,...props})=>React.createElement('select',{...props,'aria-label':label,onChange:e=>onChange(e.target.value)},React.createElement('option',{value:''},placeholder),options.map(o=>React.createElement('option',{key:o.value,value:o.value},o.label)))};
   if(specifier.endsWith('IconGlyphs'))return {Glyph:()=>null};
+  if(specifier.endsWith('shell/ShellTooltip'))return {ShellTooltip:({children})=>children};
   if(specifier.endsWith('OctopusSurface'))return {OctopusNoteLine:({children})=>React.createElement('p',null,children)};
   if(specifier.endsWith('RunEnvironmentSurfacePrimitives'))return {LiveSurfaceEmpty:({title,detail})=>React.createElement('div',null,title,detail),dataText:()=>'',ManualRoomControlWarning:({open,onContinue})=>open?React.createElement('button',{onClick:onContinue},'Confirm control'):null};
   if(!specifier.startsWith('.'))return require(specifier);
@@ -45,7 +46,7 @@ test('actual desktop component keeps evidence and busy state scoped to attachmen
  let environment={id:'room-a',runId:'run-a'}; const surface={id:'desktop',mode:'direct',viewerUrl:'http://localhost/view',readOnly:false};
  const render=async(active=true)=>React.act(async()=>root.render(React.createElement(DesktopSurface,{environment,surface,active})));
  const tick=async()=>React.act(async()=>new Promise(resolve=>setTimeout(resolve,85)));
- const text=()=>w.document.body.textContent; const button=label=>[...w.document.querySelectorAll('button')].find(b=>b.textContent===label);
+ const text=()=>w.document.body.textContent; const button=label=>[...w.document.querySelectorAll('button')].find(b=>b.textContent===label||b.getAttribute('aria-label')===label);
  const click=async label=>React.act(async()=>button(label).dispatchEvent(new w.MouseEvent('click',{bubbles:true})));
  try {
   await render();await tick(); assert(w.document.querySelector('img')); assert.match(text(),/Worker has control/);

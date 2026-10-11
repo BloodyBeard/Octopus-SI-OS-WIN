@@ -1599,7 +1599,7 @@ enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, Deta
 
 fn exact_install_does_not_claim_later_state(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
-    path: &Path, call: &AdmittedDelivery, result: &AdmittedDelivery,
+    path: &Path, durable: &Path, call: &AdmittedDelivery, result: &AdmittedDelivery,
     peer: &octopus_provider_run_authoring::CheckedRunWriter,
 ) {
     use octopus_provider_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, CheckedRunInstall,
@@ -1624,6 +1624,51 @@ fn exact_install_does_not_claim_later_state(
         reader
     };
     let exact = checked_run_install(&mut fresh(), path, &install, &writers).unwrap();
+    let recorded = super::continuation::InstalledHandoff {
+        before_hash: ContentHash::of_bytes(&exact.before).to_hex(),
+        after_hash: ContentHash::of_bytes(&exact.after).to_hex(),
+        source_seq: call.seq,
+        source_artifact: install.call.artifact.clone(),
+        result_seq: result.seq,
+        result_artifact: install.result.artifact.clone(),
+    };
+    let record_path = durable.join(format!("{}.installed.json", recorded.after_hash));
+    assert_eq!(super::continuation::read_record::<super::continuation::InstalledHandoff>(&record_path).unwrap(), recorded);
+    let stored = std::fs::read(&record_path).unwrap();
+    super::continuation::record_install(durable, &recorded).unwrap();
+    let concurrent = durable.join("concurrent-install");
+    std::fs::create_dir(&concurrent).unwrap();
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&concurrent, std::fs::Permissions::from_mode(0o700)).unwrap(); }
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|scope| {
+        let mut writers = Vec::new();
+        for _ in 0..2 {
+            let (root, value, barrier) = (&concurrent, &recorded, barrier.clone());
+            writers.push(scope.spawn(move || {
+                super::continuation::INSTALL_PUBLICATION_BARRIER.with(|slot| *slot.borrow_mut() = Some(barrier));
+                super::continuation::record_install(root, value)
+            }));
+        }
+        for writer in writers { writer.join().unwrap().unwrap(); }
+    });
+    let concurrent_path = concurrent.join(record_path.file_name().unwrap());
+    assert_eq!(std::fs::read(&concurrent_path).unwrap(), stored);
+    assert_eq!(super::continuation::read_record::<super::continuation::InstalledHandoff>(&concurrent_path).unwrap(), recorded);
+    assert_eq!(std::fs::read_dir(&concurrent).unwrap().count(), 1);
+    for field in ["before_hash", "source_seq", "source_artifact", "result_seq", "result_artifact"] {
+        let mut different = recorded.clone();
+        match field {
+            "before_hash" => different.before_hash = ContentHash::of_bytes(b"foreign preimage").to_hex(),
+            "source_seq" => different.source_seq -= 1,
+            "source_artifact" => different.source_artifact.id = ArtifactId::new("foreign call"),
+            "result_seq" => different.result_seq += 1,
+            "result_artifact" => different.result_artifact.content = ContentHash::of_bytes(b"foreign result"),
+            _ => unreachable!(),
+        }
+        assert!(super::continuation::record_install(durable, &different).unwrap_err().contains("conflicts with its immutable bytes"), "accepted changed {field}");
+    }
+    assert_eq!(std::fs::read(&record_path).unwrap(), stored);
     let mut alias = writer.clone(); alias.owner = InterfaceId::new("another_owner");
     assert!(checked_run_install(&mut fresh(), path, &install, &[writer, alias]).unwrap_err().contains("ambiguous writer"));
     struct LaterSnapshot<'a> { reader:FileCheckedRunReader<'a>, result:octopus_ledger::Movement, bytes:Vec<u8>, hash:ContentHash }
@@ -2147,7 +2192,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
                 let refused: Value = serde_json::from_slice(&peer_result.file.read_payload_bytes().unwrap()).unwrap();
                 assert_eq!(refused["ok"], false);
                 assert_eq!(refused["error"]["code"], "file_write_incomplete");
-                exact_install_does_not_claim_later_state(&ctx, &target_path, call, result, coauthor);
+                exact_install_does_not_claim_later_state(&ctx, &target_path, &durable, call, result, coauthor);
             }
             let next = envelope(&root, 301, "code_mode.run", json!({"script":"globalThis.cuaDocs = await prelude.cua.documentation(); text(typeof cuaDocs);", "yield_time_ms":1000}));
             Box::pin(admission.model_call(&next.artifact_file)).await.unwrap();

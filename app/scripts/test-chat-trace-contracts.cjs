@@ -1007,12 +1007,12 @@ assert.match(messageTooltip, /openEpoch !== openEpochRef\.current/);
 assert.doesNotMatch(messageTooltip, /autoUpdateFrameRef/);
 assert.match(messageTooltip, /const interactionRef = useRef\(\{ focus: false, hoverLatched: false \}\);/);
 assert.doesNotMatch(messageTooltip, /onPointerEnter=/);
-assert.match(messageTooltip, /onPointerMove=\{\(event\) => \{\s*if \(event\.pointerType === "touch" \|\| interactionRef\.current\.hoverLatched\) return;\s*interactionRef\.current\.hoverLatched = true;\s*scheduleOpen\(\);/);
-assert.match(messageTooltip, /onPointerLeave=\{\(\) => \{\s*interactionRef\.current\.hoverLatched = false;\s*close\(\);/);
-assert.match(messageTooltip, /onBlur=\{\(\) => \{\s*interactionRef\.current\.focus = false;\s*close\(\);/);
-assert.match(messageTooltip, /onClick=\{\(event\) => \{\s*if \(!onActivate\) return;\s*event\.stopPropagation\(\);\s*onActivate\(\);/);
-assert.match(messageTooltip, /onClickCapture=\{close\}/);
-assert.match(messageTooltip, /onPointerDownCapture=\{close\}/);
+assert.match(messageTooltip, /onPointerMove: \(event\) => \{\s*if \(inactive \|\| event\.pointerType === "touch" \|\| interactionRef\.current\.hoverLatched\) return;\s*interactionRef\.current\.hoverLatched = true;\s*scheduleOpen\(\);/);
+assert.match(messageTooltip, /onPointerLeave: \(\) => \{\s*interactionRef\.current\.hoverLatched = false;\s*close\(\);/);
+assert.match(messageTooltip, /onBlur: \(\) => \{\s*interactionRef\.current\.focus = false;\s*close\(\);/);
+assert.match(messageTooltip, /onClick: \(event\) => \{\s*if \(!onActivate\) return;\s*event\.stopPropagation\(\);\s*onActivate\(\);/);
+assert.match(messageTooltip, /onClickCapture: close/);
+assert.match(messageTooltip, /onPointerDownCapture: close/);
 assert.doesNotMatch(messageTooltip, /onClick=\{onActivate \?/);
 assert.match(messageTooltip, /window\.addEventListener\("blur", close\);[\s\S]*?document\.addEventListener\("scroll", close, true\);/);
 const tooltipCloseStart = messageTooltip.indexOf("const close = useCallback");
@@ -1179,7 +1179,8 @@ async function verifyTranscriptLayout() {
   const previousNavigator = Object.getOwnPropertyDescriptor(global, "navigator");
   Object.defineProperty(global, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(global, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
-  const frames = new Map(), completions = [];
+  const frames = new Map(), completions = [], artifactReads = [], artifactErrors = [];
+  let artifactResponse;
   let frameId = 0;
   window.requestAnimationFrame = (callback) => (frames.set(++frameId, callback), frameId);
   window.cancelAnimationFrame = (id) => frames.delete(id);
@@ -1190,7 +1191,10 @@ async function verifyTranscriptLayout() {
     Glyph: ({ name }) => React.createElement("span", { "data-glyph": name }),
     CadencedShimmerText: ({ children, className, active }) => React.createElement("span", { className, "data-active": Boolean(active) }, children),
     MessageContent: ({ text }) => React.createElement("p", null, text),
-    MessageTooltip: ({ children, label, onActivate }) => React.createElement("span", { "data-tooltip-target": label?.props?.children, "data-activates-file": Boolean(onActivate) }, children),
+    MessageTooltip: ({ children, label, onActivate }) => React.createElement("span", { "data-tooltip-target": label?.props?.children, "data-activates-file": Boolean(onActivate), onClick: onActivate }, children),
+    readProjection: async (method, params) => { assert.equal(method, "projection.artifact.bytes.read"); artifactReads.push(params); return artifactResponse; },
+    appToast: { warning: (error) => artifactErrors.push(error) },
+    TraceArtifactWorkbench: ({ reference }) => React.createElement("div", { "data-artifact-preview": reference.artifactId }, reference.inlinePayload),
     motion: { div: ({ animate, initial, transition, onAnimationComplete, ...props }) => {
       React.useEffect(() => { if (onAnimationComplete) completions.push(onAnimationComplete); }, [animate?.height]);
       return React.createElement("div", { ...props, style: { ...props.style, ...animate } });
@@ -1222,7 +1226,7 @@ async function verifyTranscriptLayout() {
   }
   assert.match(parseWorkingPatch("not a diff", "report.md", "update").error, /one recorded file diff/);
   assert.ok(parseWorkingPatch("--- a\n+++ a\n@@ -1 +1 @@\n-old\n+new\n--- b\n+++ b\n@@ -1 +1 @@\n-old\n+new\n", "a", "update").error);
-  const events = renderModule(messageList, ["AssistantEventContent", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult"], { ...scope, ...turn });
+  const events = renderModule(messageList, ["AssistantEventContent", "TraceReadTarget", "traceReadArtifactReference", "decodeJsonArtifactPayload", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult"], { ...scope, ...turn });
   const fileActivity = renderModule(messageList, ["FileChangeActivity", "activityPathLabel"], {
     ...scope,
     InlineUnifiedDiff: ({ diff }) => React.createElement("pre", null, diff),
@@ -1291,11 +1295,21 @@ async function verifyTranscriptLayout() {
     await render([], false); await render([operation, read]);
     assert.equal(query(".octopus-agent-activity-body"), null, "streamed groups mount collapsed just like history");
     const artifactId = `docs.guide.md:${"a".repeat(64)}`;
-    await render([message("artifact", "dynamic_tool", "", { tool: "artifact.read", call_id: "artifact", status: "completed", arguments: { id: artifactId }, _activity_origin: { interface_role: "provider" } })], false);
+    const artifactMessage = { ...message("artifact", "dynamic_tool", "", { tool: "artifact.read", call_id: "artifact", status: "completed", arguments: { id: artifactId }, _activity_origin: { interface_role: "provider" } }), artifactId: "receipt:exact-read", runId: "run-test", interfaceId: "provider-test" };
+    const readResult = { tool: "artifact.read", call_id: "artifact", ok: true, body: { result: "artifact_read", id: artifactId, text: "Historical content", artifact_size_bytes: 18, offset_bytes: 0, bytes_read: 18, truncated: false } };
+    artifactResponse = { artifact_id: artifactMessage.artifactId, run_id: artifactMessage.runId, interface_id: artifactMessage.interfaceId, base64: Buffer.from(JSON.stringify(readResult)).toString("base64") };
+    await render([artifactMessage], false);
     await click(query(".octopus-agent-activity-toggle"));
     assert.deepEqual(rowText(), ["Read artifact docs.guide.md"]);
     assert.equal(query("[data-tooltip-target]").getAttribute("data-tooltip-target"), artifactId);
-    assert.equal(query("[data-tooltip-target]").getAttribute("data-activates-file"), "false", "artifact identity must not become a filesystem link");
+    assert.equal(query("[data-tooltip-target]").getAttribute("data-activates-file"), "true");
+    await click(query("[data-tooltip-target]"));
+    assert.deepEqual(artifactReads, [{ artifact_id: "receipt:exact-read", run_id: "run-test", interface_id: "provider-test" }]);
+    assert.equal(query("[data-artifact-preview]").textContent, "Historical content");
+    assert.deepEqual(artifactErrors, []);
+    const artifactPresentation = toolPresentation.dynamicToolPresentation(artifactMessage, {});
+    assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, run_id: "another-run" }), /coordinates/);
+    assert.throws(() => events.traceReadArtifactReference(artifactMessage, artifactPresentation, { ...artifactResponse, base64: Buffer.from(JSON.stringify({ ...readResult, body: { ...readResult.body, id: "different-artifact" } })).toString("base64") }), /target/);
     const navigation = message("navigate", "dynamic_tool", "", {
       tool: `browser.navigate__${workspaceToolSuffix}`, call_id: "navigate", status: "completed",
       arguments: { url: "https://example.org/path" }, ok: false,

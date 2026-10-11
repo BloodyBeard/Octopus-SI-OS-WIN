@@ -89,7 +89,7 @@
     "interface_prefix": "world_operator_chat_",
     "run_prefix": "run_operator_chat_",
     "ee": "ee_operator_interaction",
-    "worker": "system_worker_operator_home",
+    "worker": "system_worker_operator_task",
     "tool_call_mark": "tool.call.allowed",
     "tool_call_verifier": "tool_call_allowed",
     "listen_env": "OCTOPUS_CHAT_LISTEN",

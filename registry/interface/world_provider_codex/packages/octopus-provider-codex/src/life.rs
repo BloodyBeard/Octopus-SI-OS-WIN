@@ -28,10 +28,10 @@ use crate::handler::{
     codex_session_snapshot_labels, decode_inflight_turn_control,
     exact_interrupted_control_continuity, exact_interrupted_result_source, exact_interrupted_result_payload,
     interrupted_result_closure_ref, interrupted_result_closure_payload, interrupted_turn_identity, is_explicit_turn_control_label,
-    is_admitted_peer_interrupt, is_operator_continuity_input,
+    is_admitted_peer_interrupt, is_provider_turn_input,
     is_inflight_turn_control_candidate_label, materialize_incompatible_continuity_turn_error,
     materialize_turn_control_result,
-    recover_operator_turn_continuity, reconcile_operator_session_continuity, reconcile_delivered_interrupted_continuity, recovered_failed_result_source, terminal_failure_continuity,
+    recover_provider_turn_continuity, reconcile_operator_session_continuity, reconcile_delivered_interrupted_continuity, recovered_failed_result_source, terminal_failure_continuity,
     codex_projection_output_labels,
     validate_codex_projection_descriptor_contract, validate_durable_interrupted_continuity,
 };
@@ -974,9 +974,7 @@ async fn codex_life(
                 envelope,
                 seq: own.movement.seq.0,
             };
-            if is_inflight_turn_control_candidate_label(&manifest.label)
-                && !is_explicit_turn_control_label(&manifest.label)
-            {
+            if matches!(is_provider_turn_input(&descriptor, &turn.envelope), Ok(true)) {
                 match operator_turn_requires_deferral_with_context(&ctx, &descriptor, &handoff_session, &run, &turn).await {
                     Ok(true) => {
                         persist_deferred_provider_turn(&ctx, &run, &turn)?;
@@ -3102,12 +3100,8 @@ fn deferred_turn_from_journal(
     if let Some(DeferredProviderTurnRelease::SessionRebase { rebased_session_carrier, .. }) = &journal.release {
         validate_artifact_admission(ctx, &run, journal.source_movement_seq, rebased_session_carrier)?;
     }
-    let manifest = envelope.artifact_file.read_manifest().map_err(|error| error.to_string())?;
-    if is_explicit_turn_control_label(&manifest.label)
-        || !matches!(decode_admitted_turn_control(ctx, descriptor, &envelope).map_err(|error| error.to_string())?,
-            Some(CodexTurnControl::Steer { .. } | CodexTurnControl::Inject { .. }))
-    {
-        return Err(format!("deferred provider turn journal '{}' does not preserve one operator message", path.display()));
+    if !is_provider_turn_input(descriptor, &envelope).map_err(|error| error.to_string())? {
+        return Err(format!("deferred provider turn journal '{}' does not preserve a new provider turn", path.display()));
     }
     Ok(DeferredProviderTurn {
         run, turn: QueuedTurn { envelope, seq: journal.source_movement_seq }, release: journal.release.clone(),
@@ -3263,7 +3257,7 @@ fn operator_turn_requires_deferral(
     turn: &QueuedTurn,
 ) -> Result<bool, String> {
     let source_snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
-    let continuity = recover_operator_turn_continuity(
+    let continuity = recover_provider_turn_continuity(
         descriptor,
         &turn.envelope,
         source_snapshot.as_ref().map(|(_, snapshot)| snapshot),
@@ -3294,7 +3288,7 @@ async fn operator_turn_requires_deferral_with_context(
     }
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
     let snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
-    let bound = recover_operator_turn_continuity(
+    let bound = recover_provider_turn_continuity(
         descriptor, &turn.envelope, snapshot.as_ref().map(|(_, snapshot)| snapshot), run, &pinned,
     ).map_err(|error| error.to_string())?;
     if !bound.as_ref().is_some_and(codex_continuity_waits_for_result) {
@@ -3326,7 +3320,7 @@ async fn prepare_deferred_provider_turn(
     }
     let source_snapshot = bound_operator_session_snapshot(ctx, descriptor, &deferred.turn)?;
     let source_session_carrier = source_snapshot.as_ref().map(|(carrier, _)| carrier.clone());
-    let source_continuity = recover_operator_turn_continuity(
+    let source_continuity = recover_provider_turn_continuity(
         descriptor,
         &deferred.turn.envelope,
         source_snapshot.as_ref().map(|(_, snapshot)| snapshot),
@@ -3698,7 +3692,7 @@ fn rebase_deferred_provider_turn(
         &snapshot,
         &selected,
     )?;
-    let continuity = recover_operator_turn_continuity(descriptor, &envelope, Some(&snapshot), run, &ctx.pinned_run_record_bytes(&envelope)?)
+    let continuity = recover_provider_turn_continuity(descriptor, &envelope, Some(&snapshot), run, &ctx.pinned_run_record_bytes(&envelope)?)
         .map_err(|error| error.to_string())?;
     Ok((
         QueuedTurn {
@@ -5474,10 +5468,10 @@ async fn drive_turn_with_retries(
         let live_stream_root = ctx.interface_var_dir().join("streams");
         let current_run_record = handoff.current_run_record_bytes().await;
         let current_session_context = handoff.current_session_context_artifacts().await;
-        let reconciled_result_continuity = match is_operator_continuity_input(descriptor, &turn.envelope) {
+        let reconciled_result_continuity = match is_provider_turn_input(descriptor, &turn.envelope) {
             Ok(true) => {
             let snapshot = bound_operator_session_snapshot(ctx, descriptor, &turn)?;
-            let bound = recover_operator_turn_continuity(descriptor, &turn.envelope,
+            let bound = recover_provider_turn_continuity(descriptor, &turn.envelope,
                 snapshot.as_ref().map(|(_, snapshot)| snapshot), run, &pinned_run_record)
                 .map_err(|error| error.to_string())?;
             let deferred = load_deferred_provider_turns(ctx, descriptor)?;
@@ -8154,6 +8148,10 @@ mod tests {
 
     #[tokio::test]
     async fn pending_result_releases_the_same_deferred_operator_message_once() {
+        for (label, payload) in [
+            ("operator.message", json!({"prompt": "next task", "message_id": "message-a"})),
+            ("client.surface.document", json!({"schema": "octopus.client_surface", "id": "widget-a", "revision": 1})),
+        ] {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let descriptor = descriptor();
@@ -8222,8 +8220,8 @@ mod tests {
         let settled_ref = cache_artifact(&ctx, &settled);
         let message = artifact(
             &root.join("message"),
-            "operator.message",
-            json!({"prompt": "next task", "message_id": "message-a"}),
+            label,
+            payload.clone(),
         );
         let message_ref = cache_artifact(&ctx, &message);
         let mut metadata = runtime_metadata();
@@ -8275,6 +8273,7 @@ mod tests {
             ],
         );
 
+        assert!(is_provider_turn_input(&descriptor, &turn.envelope).unwrap());
         assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn).unwrap());
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
@@ -8313,6 +8312,8 @@ mod tests {
             panic!("the exact pending result must release the queued message")
         };
         assert_eq!(rebased.seq, 2);
+        assert_eq!(rebased.envelope.artifact_file.read_manifest().unwrap().label, label);
+        assert_eq!(rebased.envelope.artifact_file.read_payload_bytes().unwrap(), turn.envelope.artifact_file.read_payload_bytes().unwrap());
         assert_eq!(rebased.envelope.artifact, message_ref);
         assert_eq!(rebased.envelope.artifact_binding_payloads.len(), 1);
         assert_eq!(
@@ -8381,7 +8382,7 @@ mod tests {
             original.seq = seq;
             let pinned = ctx.pinned_run_record_bytes(&original.envelope).unwrap();
             let snapshot = bound_operator_session_snapshot(&ctx, &descriptor, &original).unwrap();
-            assert_eq!(recover_operator_turn_continuity(&descriptor, &original.envelope,
+            assert_eq!(recover_provider_turn_continuity(&descriptor, &original.envelope,
                 snapshot.as_ref().map(|(_, snapshot)| snapshot), &run, &pinned).unwrap(), Some(interrupted.clone()));
             let private = checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
                 &interrupted, &result_source, &closure, &current).unwrap();
@@ -8412,6 +8413,7 @@ mod tests {
         wrong.movement_seq = 4;
         assert!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
             &interrupted, &result_source, &wrong, &current).is_err());
+        }
     }
 
     #[tokio::test]

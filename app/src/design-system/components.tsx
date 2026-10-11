@@ -21,6 +21,7 @@ import { OcDropdown } from "./OcDropdown";
 import { containModalFocus, isolateModalLayer, isTopmostModal, restoreModalFocus } from "./modalFocus";
 import { Glyph, type GlyphName } from "../components/IconGlyphs";
 import { OctopusSpinner } from "../components/navigation/OctopusSpinner";
+import { ShellTooltip } from "../components/shell/ShellTooltip";
 import "./oc-menu.css";
 
 export type OcTone = "neutral" | "accent" | "success" | "warning" | "danger" | "muted";
@@ -280,9 +281,10 @@ export function OcButton({
   className,
   children,
   type = "button",
+  title,
   ...props
 }: OcButtonProps) {
-  return (
+  const button = (
     <button
       ref={buttonRef}
       className={cx(
@@ -305,6 +307,7 @@ export function OcButton({
       {trailingIcon ? <Glyph name={trailingIcon} size={size === "xs" ? 12 : 14} /> : null}
     </button>
   );
+  return <ShellTooltip asChild disabled={props.disabled || !title} label={title ?? ""}>{button}</ShellTooltip>;
 }
 
 export type OcAnimatedActionSlotProps = {
@@ -364,19 +367,19 @@ export function OcIconButton({
   size = "sm",
   className,
   type = "button",
+  title,
   ...props
 }: OcIconButtonProps) {
-  if (appearance !== "default") return <button
+  const tooltipLabel = title ?? label;
+  const button = appearance !== "default" ? <button
     {...props}
     aria-label={label}
     className={cx("oc-octopus-icon-control no-drag", className)}
     data-appearance={appearance}
     data-selected={selected || undefined}
     ref={buttonRef}
-    title={props.title ?? label}
     type={type}
-  ><Glyph name={glyph} className={appearance === "rail" ? "icon-md" : "icon-xs"} size={appearance === "rail" ? 20 : 16} /></button>;
-  return (
+  ><Glyph name={glyph} className={appearance === "rail" ? "icon-md" : "icon-xs"} size={appearance === "rail" ? 20 : 16} /></button> : (
     <button
       ref={buttonRef}
       aria-label={label}
@@ -391,12 +394,12 @@ export function OcIconButton({
       data-oc-control="icon-button"
       data-state={selected ? "selected" : undefined}
       {...props}
-      title={props.title ?? label}
       type={type}
     >
       <Glyph name={glyph} size={size === "xs" ? 12 : 15} />
     </button>
   );
+  return <ShellTooltip asChild disabled={props.disabled || !tooltipLabel} label={tooltipLabel}>{button}</ShellTooltip>;
 }
 
 export type OcSegmentedOption<T extends string> = {
@@ -558,10 +561,10 @@ type OcStatusProps = {
 
 export function OcStatus({ label, detail, tone = "neutral", className }: OcStatusProps) {
   return (
-    <span className={cx("oc-status", `oc-tone-${tone}`, className)} title={detail} data-oc-status>
+    <ShellTooltip asChild disabled={!detail} label={detail ?? ""}><span className={cx("oc-status", `oc-tone-${tone}`, className)} aria-description={detail} data-oc-status>
       <span aria-hidden="true" className="oc-status__dot" />
       <span className="oc-status__label">{label}</span>
-    </span>
+    </span></ShellTooltip>
   );
 }
 
@@ -805,6 +808,7 @@ export function OcSelect<T extends string>({
   className,
   id,
   disabled,
+  title,
   ...selectProps
 }: OcSelectProps<T>) {
   const generatedId = useId();
@@ -817,7 +821,7 @@ export function OcSelect<T extends string>({
   return (
     <div className={cx("oc-field", "oc-select-field", stretch && "w-full", disabled && "is-disabled", className)}>
       <span className={cx("oc-field__label", !showLabel && "oc-visually-hidden")} id={`${selectId}-label`}>{label}</span>
-      <button
+      <ShellTooltip asChild disabled={disabled || open || !title} label={title ?? ""}><button
         aria-labelledby={`${selectId}-label`}
         aria-describedby={supportId}
         aria-expanded={open}
@@ -834,14 +838,13 @@ export function OcSelect<T extends string>({
         id={selectId}
         onClick={() => setOpen((current) => !current)}
         ref={triggerRef}
-        title={typeof selectProps.title === "string" ? selectProps.title : undefined}
         type="button"
       >
         <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
           {selected?.label ?? placeholder ?? "Select"}
         </span>
         <Glyph className="icon-2xs shrink-0 text-tertiary" name="chevronDown" size={14} />
-      </button>
+      </button></ShellTooltip>
       <OcDropdown anchorRef={triggerRef} open={open} onOpenChange={setOpen} align="end" contentWidth="menuWide" aria-label={typeof label === "string" ? label : undefined}>
         <div className="max-h-80 overflow-y-auto">
           {options.map((option) => <OcMenuItem

@@ -56,6 +56,7 @@ type Props = {
   chatRunsLoading: boolean;
   homeRunId: string;
   inboxUnreadCount: number;
+  inboxArrivalId?: string;
   activityContent: ReactNode;
   dashboardPinnedSurfaceIds: string[];
   agentPinnedChatIds: string[];
@@ -97,7 +98,7 @@ type Props = {
   onPrimaryPaneBlockedChange: (blocked: boolean) => void;
   onSecondaryPaneOpenChange: (open: boolean) => void;
   onSecondaryTaskPaneWidthPercentChange: (width: number) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: string) => void;
   onLogOut: () => void;
   onSearch: () => void;
   onSidebarWidthChange: (width: number) => void;
@@ -124,6 +125,7 @@ export function AppShell({
   chatRunsLoading,
   homeRunId,
   inboxUnreadCount,
+  inboxArrivalId,
   activityContent,
   dashboardPinnedSurfaceIds,
   agentPinnedChatIds,
@@ -348,6 +350,7 @@ export function AppShell({
         activeSection={navigationSection}
         surfaces={surfaces}
         unreadCount={inboxUnreadCount}
+        arrivalId={inboxArrivalId}
         runtimeHost={runtimeHost}
         onNavigate={(section) => {
           onNavigationChange(section);

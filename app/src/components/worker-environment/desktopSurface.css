@@ -22,3 +22,6 @@
 }
 .we-desktop-native-frame[data-streaming] img { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .we-desktop-native-frame img { transition: none; } }
+
+.we-desktop-permission { display: flex; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.we-desktop-permission > .oc-empty-state { flex: none; height: auto; min-height: 0; padding-block: 0 12px; }

@@ -87,6 +87,34 @@ function fixture() {
 }
 const reply = (win, allowClose, payload = win.requests().at(-1)) => win.bridge.resolveClientWindowClose({ ...payload, allowClose });
 
+test("a pending quit keeps account reads alive until approved resource cleanup", () => {
+  const app = Object.assign(new EventEmitter(), { getVersion: () => "test" });
+  app.on("before-quit", (attempt) => attempt.preventDefault());
+  let disposed = 0;
+  const account = { dispose: () => { disposed += 1; } };
+  const declarations = main.statements.filter((node) => ts.isFunctionDeclaration(node)
+    && ["getChatgptSignIn", "closeClientResources"].includes(node.name?.text));
+  assert.equal(declarations.length, 2);
+  const lifecycle = Function("app", "createChatgptSignIn", `
+    let chatgptSignIn = null;
+    const resolveOperatorCodexHome = () => "/fixture/codex", resolveOctopusHome = () => "/fixture/home";
+    const clearGlobalDictationShortcut = () => {};
+    const cdpViewerManager = null, processViewerManager = null, clientSurfaceDocumentStore = null,
+      clientExtensionStore = null, clientArtifactStreamStore = null, clientAttachmentStagingStore = null;
+    const projectionStores = new Map();
+    ${declarations.map((node) => node.getText(main)).join("\n")}
+    return { getChatgptSignIn, closeClientResources };
+  `)(app, () => account);
+  assert.equal(lifecycle.getChatgptSignIn(), account);
+  const pending = event();
+  app.emit("before-quit", pending);
+  assert.equal(pending.defaultPrevented, true);
+  assert.equal(disposed, 0);
+  assert.equal(lifecycle.getChatgptSignIn(), account);
+  lifecycle.closeClientResources();
+  assert.equal(disposed, 1);
+});
+
 test("actual preload and main handlers bind single-use close to exact sender, token and generation", async () => {
   const f = fixture(), a = f.add(1, false), b = f.add(2);
   a.guard = await a.bridge.registerClientWindowCloseGuard(); assert.equal(a.guard.generation, 1);

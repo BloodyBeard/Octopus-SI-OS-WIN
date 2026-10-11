@@ -96,7 +96,8 @@ async function initializeWorkspace(options) {
         projects: request.projects,
         providerInterfaceId: request.home.providerInterfaceId,
         providerModel: request.home.providerModel,
-        rootAuthoringProfile: plan.authoringProfile,
+        homeAuthoringProfile: plan.authoringProfile,
+        task: request.task,
       });
       for (const choice of request.agentPresets ?? []) {
         if (typeof options.planAgentPreset !== "function") throw new Error("Workspace Agent preset planner is unavailable");
@@ -711,13 +712,11 @@ async function planProjectCreate(roots, scope, request, planOperatorSurface) {
   }
   const sidecar = await readMutableWorkspaceSidecar(roots, scope, request.workspace.expectedHomeSidecarDigest);
   const agentCatalog = await requireWorkspaceAgentCatalog(roots);
-  const sourceProfile = parent.eeId === scope.rootEeId
-    ? sidecar.value.authoring_profile
-    : exactProjectAgentSourceProfile(
-        sidecar.value.task_authoring_profiles,
-        agentCatalog.document,
-        parent.eeId,
-      );
+  const sourceProfile = exactProjectAgentSourceProfile(
+    sidecar.value.task_authoring_profiles,
+    agentCatalog.document,
+    parent.eeId,
+  );
   if (sidecar.value.task_authoring_profiles.some((profile) => profile?.ee_id === eeId)) {
     throw new Error(`Workspace Home already contains an authoring profile for '${eeId}'`);
   }
@@ -858,7 +857,7 @@ async function planProjectPresentationUpdate(roots, scope, request) {
     throw new Error("Workspace Project presentation must cover every current Project exactly once");
   }
   const sidecar = await readMutableWorkspaceSidecar(roots, scope, request.workspace.expectedHomeSidecarDigest);
-  const profileIds = [...new Set(sidecar.value.task_authoring_profiles.map((profile) => requiredId(profile?.ee_id, "Workspace Project authoring profile EE")))].sort();
+  const profileIds = [...new Set(sidecar.value.task_authoring_profiles.map((profile) => requiredId(profile?.ee_id, "Workspace Project authoring profile EE")))].filter((eeId) => eeId !== scope.rootEeId).sort();
   const existingPresentationIds = sidecar.value.presentation.projects.map((project) => requiredId(project?.ee_id, "Workspace Project presentation EE")).sort();
   if (stableJson(profileIds) !== stableJson(projectIds) || stableJson(existingPresentationIds) !== stableJson(projectIds)) {
     throw new Error("Workspace Project presentation cannot update an incomplete Home topology");
@@ -973,20 +972,21 @@ function projectWrite(destination, beforeDigest, content, tag, publishBarrier) {
 }
 
 function parseInitializeRequest(value) {
-  const request = exactObject(value, ["action", "operationId", "root", "home", "projects", "agentPresets"], ["operationId", "root", "home", "projects"], "Workspace setup request");
+  const request = exactObject(value, ["action", "operationId", "root", "home", "task", "projects", "agentPresets"], ["operationId", "root", "home", "task", "projects"], "Workspace setup request");
   if (request.action !== undefined && request.action !== "initialize_workspace") {
     throw new Error("Workspace setup request has an invalid action");
   }
   const operationId = requiredOperationId(request.operationId);
   const root = parseRootIntent(request.root);
   const home = parseHomeIntent(request.home);
+  const task = parseTaskIntent(request.task);
   if (!Array.isArray(request.projects) || request.projects.length > 24) {
     throw new Error("Workspace setup projects must be an array with at most 24 entries");
   }
   const projects = request.projects.map(parseProjectIntent);
   validateProjectIntents(projects);
   const agentPresets = parseAgentPresetChoices(request.agentPresets, new Set(projects.map((project) => project.key)));
-  const canonicalRequest = { operationId, root, home, projects, ...(agentPresets.length ? { agentPresets } : {}) };
+  const canonicalRequest = { operationId, root, home, task, projects, ...(agentPresets.length ? { agentPresets } : {}) };
   return {
     ...canonicalRequest,
     digest: sha256(Buffer.from(stableJson(canonicalRequest))),
@@ -1063,6 +1063,16 @@ function parseHomeIntent(value) {
       "Home selected worker environments",
       true,
     ),
+  };
+}
+
+function parseTaskIntent(value) {
+  const task = exactObject(value, ["workerInterfaceId", "contextArtifactBindings", "selectedWorkerEnvironmentKinds"],
+    ["workerInterfaceId", "contextArtifactBindings", "selectedWorkerEnvironmentKinds"], "Workspace Task source");
+  return {
+    workerInterfaceId: requiredId(task.workerInterfaceId, "Task source worker interface"),
+    contextArtifactBindings: parseArtifactBindings(task.contextArtifactBindings),
+    selectedWorkerEnvironmentKinds: parseUniqueIds(task.selectedWorkerEnvironmentKinds, "Task source worker environments"),
   };
 }
 
@@ -1288,9 +1298,21 @@ async function preflightInitialWorkspaceProjects({
   projects,
   providerInterfaceId,
   providerModel,
-  rootAuthoringProfile,
+  homeAuthoringProfile,
+  task,
 }) {
-  const profiles = new Map([["root", structuredClone(rootAuthoringProfile)]]);
+  const rootProfile = {
+    ee_id: materialized.rootEeId,
+    worker_choice_interface: task.workerInterfaceId,
+    door_host_slots: parseDoorHostSlots(homeAuthoringProfile.door_host_slots),
+    ...(task.contextArtifactBindings.length ? { context_artifact_bindings: structuredClone(task.contextArtifactBindings) } : {}),
+    ...(task.selectedWorkerEnvironmentKinds.length ? { selected_worker_environment_kinds: [...task.selectedWorkerEnvironmentKinds] } : {}),
+  };
+  await preflightProjectTaskSurface({
+    authoringProfile: rootProfile, eeId: materialized.rootEeId, eeInstancesRoot, operationId,
+    planOperatorSurface, projectKey: "root", providerInterfaceId, providerModel,
+  });
+  const profiles = new Map([["root", rootProfile]]);
   const remaining = new Map(projects.map((project) => [project.key, project]));
   while (remaining.size) {
     const ready = projects.filter((project) => remaining.has(project.key) && profiles.has(project.parentKey));
@@ -1312,7 +1334,6 @@ async function preflightInitialWorkspaceProjects({
       remaining.delete(project.key);
     }
   }
-  profiles.delete("root");
   return profiles;
 }
 
@@ -1489,11 +1510,11 @@ async function admitWorkspaceAgentWorkers(roots, writes, agentPlans) {
 
 function workspaceAgentCatalog(request, materialized, projectProfiles) {
   const catalog = emptyClientAgentCatalog();
-  catalog.project_sources = request.projects.map((project) => {
+  catalog.project_sources = [{ key: "root" }, ...request.projects].map((project) => {
     const profile = projectProfiles.get(project.key);
     if (!profile) throw new Error(`Workspace Project '${project.key}' has no Agent source worker`);
     return {
-      project_ee_id: requiredMapValue(materialized.projectEeIds, project.key),
+      project_ee_id: project.key === "root" ? materialized.rootEeId : requiredMapValue(materialized.projectEeIds, project.key),
       source_worker_interface: requiredId(
         profile.worker_choice_interface,
         `Workspace Project '${project.key}' Agent source worker`,
@@ -1925,7 +1946,7 @@ function workspaceHomeSidecar(content, request, materialized, plan, projectProfi
     || voiceContext !== undefined && stableJson(sidecar.voice_context) !== stableJson(voiceContext)) {
     throw new Error("Home sidecar voice context differs from its exact execution Run");
   }
-  const taskAuthoringProfiles = request.projects.map((project) => {
+  const taskAuthoringProfiles = [{ key: "root" }, ...request.projects].map((project) => {
     const profile = projectProfiles.get(project.key);
     if (!profile) throw new Error(`Workspace Project '${project.key}' has no verified authoring profile`);
     return structuredClone(profile);

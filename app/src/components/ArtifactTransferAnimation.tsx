@@ -5,6 +5,8 @@ import { hasProjectionBridge, readProjection } from "../projectionClient";
 import { subscribeProjectionChanges } from "../projectionLive";
 
 export const ARTIFACT_TRANSFER_DURATION_MS = 500;
+export const ARTIFACT_TRANSFER_GAP_MS = 300;
+export const ARTIFACT_TRANSFER_PATH_LIMIT = 48;
 const TRANSFER_KINDS = ["ArtifactMoved", "InterfaceArrival", "InterfaceOutbound"];
 
 export type ArtifactTransfer = {
@@ -14,11 +16,64 @@ export type ArtifactTransfer = {
   to: string;
   runId: string;
   checkpointId: string;
+  traceId?: string;
+  movementCount?: number;
+  firstSequence?: number;
+  lastSequence?: number;
   startedAt: number;
 };
 
 export type TransferPoint = { x: number; y: number };
 export type TransferTrajectory = { transfer: ArtifactTransfer; points: TransferPoint[] };
+
+export function scheduleArtifactTransfers(current: ArtifactTransfer[], batch: Omit<ArtifactTransfer, "startedAt">[], now: number): ArtifactTransfer[] {
+  type PendingTransfer = Omit<ArtifactTransfer, "startedAt">;
+  type Path = { anchor?: ArtifactTransfer; pending: Map<string, PendingTransfer>; lastSequence: number };
+  const paths = new Map<string, Path>();
+  const interval = ARTIFACT_TRANSFER_DURATION_MS + ARTIFACT_TRANSFER_GAP_MS;
+  const pathFor = (transfer: PendingTransfer) => {
+    const key = JSON.stringify([transfer.runId, [transfer.from, transfer.to].sort()]);
+    let path = paths.get(key);
+    if (!path) {
+      path = { pending: new Map(), lastSequence: transfer.lastSequence ?? transfer.sequence };
+      paths.set(key, path);
+    }
+    path.lastSequence = Math.max(path.lastSequence, transfer.lastSequence ?? transfer.sequence);
+    return path;
+  };
+  const coalesce = (transfer: PendingTransfer) => {
+    const path = pathFor(transfer);
+    const direction = JSON.stringify([transfer.from, transfer.to]);
+    const previous = path.pending.get(direction);
+    const first = !previous || transfer.sequence < previous.sequence ? transfer : previous;
+    path.pending.set(direction, {
+      ...first,
+      movementCount: (previous?.movementCount ?? (previous ? 1 : 0)) + (transfer.movementCount ?? 1),
+      firstSequence: Math.min(previous?.firstSequence ?? previous?.sequence ?? transfer.sequence,
+        transfer.firstSequence ?? transfer.sequence),
+      lastSequence: Math.max(previous?.lastSequence ?? previous?.sequence ?? transfer.sequence,
+        transfer.lastSequence ?? transfer.sequence),
+    });
+  };
+  for (const transfer of current) {
+    if (now >= transfer.startedAt + interval) continue;
+    if (transfer.startedAt <= now) pathFor(transfer).anchor = transfer;
+    else coalesce(transfer);
+  }
+  for (const transfer of batch) coalesce(transfer);
+  return [...paths.values()]
+    .sort((left, right) => right.lastSequence - left.lastSequence)
+    .slice(0, ARTIFACT_TRANSFER_PATH_LIMIT)
+    .flatMap((path) => {
+      let startedAt = Math.max(now, path.anchor ? path.anchor.startedAt + interval : now);
+      const pending = [...path.pending.values()].sort((left, right) => left.sequence - right.sequence);
+      return [...(path.anchor ? [path.anchor] : []), ...pending.map((transfer) => {
+        const scheduled = { ...transfer, startedAt };
+        startedAt += interval;
+        return scheduled;
+      })];
+    }).sort((left, right) => left.sequence - right.sequence);
+}
 
 type MovementPage = {
   movements: Array<Record<string, unknown>>;
@@ -66,6 +121,7 @@ export async function readArtifactTransferBatch(cursor: number | null) {
         to: text(to.id),
         runId: text(row.raw_run_id),
         checkpointId: text(runtime.checkpoint),
+        traceId: text(row.trace),
       });
     }
     const older = page.next_before_seq;
@@ -102,10 +158,7 @@ export function useArtifactTransfers(projection: ProjectionStatus) {
           setError("");
           if (batch.transfers.length) {
             const now = window.performance.now();
-            setTransfers((current) => [
-              ...current.filter((transfer) => now - transfer.startedAt < ARTIFACT_TRANSFER_DURATION_MS),
-              ...batch.transfers.map((transfer) => ({ ...transfer, startedAt: now })),
-            ]);
+            setTransfers((current) => scheduleArtifactTransfers(current, batch.transfers, now));
           }
         } catch (failure) {
           if (!cancelled) setError(failure instanceof Error ? failure.message : String(failure));
@@ -193,7 +246,9 @@ export function ArtifactTransferSegments({ transfers, resolve }: {
       {segments.map(({ transfer, segment }) => (
         <path className="artifact-transfer-segment" stroke={`url(#${prefix}-${transfer.sequence})`}
           d={segment.map((point, index) => `${index ? "L" : "M"}${point.x},${point.y}`).join(" ")}
-          data-movement-id={transfer.id} key={transfer.sequence} />
+          data-movement-id={transfer.id} data-movement-count={transfer.movementCount ?? 1}
+          data-first-sequence={transfer.firstSequence ?? transfer.sequence} data-last-sequence={transfer.lastSequence ?? transfer.sequence}
+          key={transfer.sequence} />
       ))}
     </g>
   );

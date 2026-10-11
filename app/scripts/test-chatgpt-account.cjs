@@ -31,18 +31,23 @@ const usageModel = loadTs("account/chatgptUsageModel.ts");
 const usageViews = loadTs("components/account/AccountUsage.tsx", {
   "../../account/chatgptUsageModel": usageModel, "../../design-system/components": ui,
   "../navigation/OctopusSpinner": { OctopusSpinner: () => null },
+  "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
 });
 const logoutView = loadTs("components/account/AccountLogoutDialog.tsx", { "../../design-system/components": ui });
 const emptyUsage = { identity: null, value: null, loading: false, error: "" };
 
-function nativeFixture() {
+function nativeFixture(env = {}) {
   let home = "/native", persisted = { type: "chatgpt", email: "first@example.test", planType: "pro" }, stamp = 1n, changes = 0;
   const children = [], calls = [];
   const control = { refuseLogout: false, quotaError: "", quotaHook: null };
   const module = { exports: {} };
-  const fileSystem = { constants: { X_OK: 1 }, accessSync() {}, mkdirSync() {}, statSync() { return { dev: 1n, ino: 1n, size: stamp, mtimeNs: stamp, ctimeNs: stamp }; } };
+  const fileSystem = { constants: { X_OK: 1 }, accessSync() {}, mkdirSync() {}, statSync() {
+    if (control.authMissing) throw Object.assign(new Error("Missing"), { code: "ENOENT" });
+    return { dev: 1n, ino: 1n, size: stamp, mtimeNs: stamp, ctimeNs: stamp };
+  } };
   const spawn = (_binary, _args, options) => {
     const child = new EventEmitter();
+    child.spawnEnv = options.env;
     child.cachedAccount = persisted;
     child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
     child.stdout.setEncoding = child.stderr.setEncoding = () => {};
@@ -68,7 +73,7 @@ function nativeFixture() {
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgptSignIn.cjs"), "utf8"), {
     module, require: (name) => name === "node:fs" ? fileSystem : name === "node:child_process" ? { spawn } : require(name),
-    process: { env: {} }, URL, setTimeout, clearTimeout,
+    process: { env }, URL, setTimeout, clearTimeout,
   });
   const client = module.exports.createChatgptSignIn({ codexBinary: () => "/fixture/codex", codexHome: () => home,
     octopusHome: () => "/home", version: () => "test", openExternal: async () => {}, onAccountChanged: () => { changes += 1; } });
@@ -81,6 +86,21 @@ function nativeFixture() {
     } };
 }
 
+test("native account discovery owns its client identity and credential Home", async () => {
+  const inherited = { CODEX_HOME: "/other-client", CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "other-client",
+    HTTPS_PROXY: "https://proxy.example.test" };
+  const fixture = nativeFixture(inherited);
+  try {
+    await fixture.client.account();
+    const env = fixture.children[0].spawnEnv;
+    assert.equal(env.CODEX_HOME, "/native");
+    assert.equal(env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, "octopus_desktop");
+    assert.equal(env.HTTPS_PROXY, inherited.HTTPS_PROXY);
+    assert.equal(inherited.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, "other-client");
+    assert.equal(fixture.calls.find((call) => call.method === "initialize").params.clientInfo.name, env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE);
+  } finally { fixture.client.dispose(); }
+});
+
 test("native identity, plan, named limits, logout and login replacement use one credential scope", async () => {
   const fixture = nativeFixture(), { client } = fixture;
   try {
@@ -88,6 +108,14 @@ test("native identity, plan, named limits, logout and login replacement use one 
     const usage = await client.rateLimits();
     assert.deepEqual(Object.keys(usage.rateLimitsByLimitId), ["core", "extra"]);
     assert.equal(usage.rateLimitsByLimitId.core.primary.usedPercent, 25);
+    fixture.control.quotaHook = (child) => child.stdout.emit("data", JSON.stringify({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } }) + "\n");
+    const quotaReads = fixture.calls.filter((call) => call.method === "account/rateLimits/read").length;
+    assert.equal((await client.rateLimits()).rateLimits.primary.usedPercent, 25);
+    assert.equal(fixture.calls.filter((call) => call.method === "account/rateLimits/read").length, quotaReads + 1);
+    fixture.control.authMissing = true;
+    await assert.rejects(client.rateLimits(), /account changed/);
+    fixture.control.authMissing = false;
+    fixture.control.quotaHook = null;
     fixture.control.quotaError = "Offline";
     await assert.rejects(client.rateLimits(), /Offline/);
     assert.equal((await client.account()).signedIn, true);
@@ -231,6 +259,7 @@ test("usage preserves multiple buckets, unknown windows, zero remaining and rese
   assert.equal(groups[0].windows[1].reported, false);
   assert.equal(accountRemainingLabel(75.3), "75% left");
   assert.equal(accountRemainingLabel(null), "Unavailable");
+  assert.equal(usageModel.accountPlanLabel("promax"), "Pro Max");
   assert.equal(accountResetTime(null), "Reset time unavailable");
   const date = new Date(2000000000000), now = date.getTime() - 3_600_000;
   assert.equal(accountResetTime(2000000000, 300, now), `Resets ${new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(date)}`);
@@ -339,6 +368,20 @@ test("sign-in copy completion belongs to the current URL and mounted attempt", a
 });
 
 test("account menu prefers top placement and retains viewport collision handling", () => {
+  let account = { ...signedIn, planType: "promax" };
+  const { AccountRailButton } = loadTs("components/shell/AccountRailButton.tsx", {
+    react: { ...React, useState: () => [true, () => {}], useLayoutEffect: () => {} },
+    "../../design-system/components": ui, "../../design-system/OcDropdown": { OcDropdown: ({ children }) => React.createElement("div", null, children) },
+    "../../keyboardShortcuts": { useKeyboardShortcuts: () => ({}), formatKeyboardShortcuts: () => "" },
+    "../../account/useChatgptAccount": { useChatgptAccount: () => ({ account, loading: false, action: "idle" }) },
+    "../../account/useChatgptUsage": { useChatgptUsage: () => emptyUsage }, "../../account/chatgptUsageModel": usageModel,
+        "../chat/MessageTooltip": { MessageTooltip: ({ children }) => children },
+  });
+  const menu = () => renderToStaticMarkup(React.createElement(AccountRailButton, { accessProfile: "live", runtimeHost: {}, onLogOut() {}, onOpenSettings() {} }));
+  assert.match(menu(), /Account: Administrator/); assert.match(menu(), /<small>ChatGPT Pro Max<\/small>/);
+  assert.doesNotMatch(menu(), /first@example.test/); assert.ok(menu().indexOf("Settings") < menu().indexOf("Usage"));
+  assert.doesNotMatch(menu(), /Log out of ChatGPT|Usage remaining|Using ChatGPT/);
+  account = null; assert.match(menu(), /Administrator/); assert.match(menu(), /ChatGPT unavailable/);
   const { dropdownPlacement } = loadTs("design-system/OcDropdown.tsx", { "./components": ui, "./modalFocus": {} }, "\nexport { dropdownPlacement };\n");
   const anchor = { left: 24, right: 64, top: 350, bottom: 390 };
   const top = dropdownPlacement(anchor, 240, 120, 1000, 800, "start", 6, 0, "top");

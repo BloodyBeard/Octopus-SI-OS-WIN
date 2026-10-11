@@ -8,6 +8,7 @@ import { useRuntimeTopology } from "../../runtimeTopology";
 import { appToast } from "../../toasts";
 import { useClientSurfaceDocuments } from "../../client-surfaces/useClientSurfaceDocuments";
 import { Glyph } from "../IconGlyphs";
+import { ShellTooltip } from "../shell/ShellTooltip";
 import { defaultWorkerEnvironmentPaneTarget } from "../worker-environment/workerEnvironmentPane";
 import { MessageContent } from "./MessageContent";
 import "./chat.css";
@@ -100,12 +101,12 @@ export function TaskMonitorWindow({ accessProfile }: { accessProfile: OctopusCli
     <main className="task-monitor-window">
       <header className="task-monitor-titlebar">
         <div className="task-monitor-titlebar-left">
-          <button aria-label="Dismiss Task Monitor" onClick={closeWindow} title="Dismiss" type="button"><Glyph name="close" size={15} /></button>
+          <ShellTooltip label="Dismiss"><button aria-label="Dismiss Task Monitor" onClick={closeWindow} type="button"><Glyph name="close" size={15} /></button></ShellTooltip>
         </div>
         <div className="task-monitor-titlebar-title"><span>{run?.title || "Task Monitor"}</span></div>
         <div className="task-monitor-titlebar-actions">
-          <button aria-pressed={pinned} className={pinned ? "is-active" : ""} onClick={togglePinned} title={pinned ? "Stop keeping on top" : "Keep on top"} type="button"><Glyph name="pin" size={15} /></button>
-          <button onClick={openMain} title="Open in main window" type="button"><Glyph name="openExternal" size={15} /></button>
+          <ShellTooltip label={pinned ? "Stop keeping on top" : "Keep on top"}><button aria-label={pinned ? "Stop keeping on top" : "Keep on top"} aria-pressed={pinned} className={pinned ? "is-active" : ""} onClick={togglePinned} type="button"><Glyph name="pin" size={15} /></button></ShellTooltip>
+          <ShellTooltip label="Open in main window"><button aria-label="Open in main window" onClick={openMain} type="button"><Glyph name="openExternal" size={15} /></button></ShellTooltip>
         </div>
       </header>
 

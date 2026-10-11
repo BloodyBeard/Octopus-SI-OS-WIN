@@ -13,6 +13,7 @@ export function NavigationRail({
   activeSection,
   surfaces,
   unreadCount,
+  arrivalId,
   runtimeHost,
   onNavigate,
   onOpenSettings,
@@ -23,9 +24,10 @@ export function NavigationRail({
   activeSection: ClientNavigationSection;
   surfaces: readonly ClientSurfaceDescriptor[];
   unreadCount: number;
+  arrivalId?: string;
   runtimeHost: RuntimeHostView;
   onNavigate: (section: ClientNavigationSection) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (section?: string) => void;
   onLogOut: () => void;
 }) {
   return (
@@ -46,6 +48,7 @@ export function NavigationRail({
               />
             </MessageTooltip>
             {destination.id === "inbox" && unreadCount > 0 ? <span className="navigation-rail-unread" aria-hidden="true" /> : null}
+            {destination.id === "inbox" && unreadCount > 0 && arrivalId ? <span className="navigation-rail-arrival" key={arrivalId} aria-hidden="true" /> : null}
           </div>
         ))}
       </div>

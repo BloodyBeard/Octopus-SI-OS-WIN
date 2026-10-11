@@ -74,14 +74,14 @@
 }
 
 .voice-session-heading h1 > span,
-.voice-session-heading h1 > button {
+.voice-session-heading h1 button {
   display: flex;
   max-width: min(520px, calc(100cqw - 48px));
   min-width: 0;
   align-items: center;
 }
 
-.voice-session-heading h1 > button {
+.voice-session-heading h1 button {
   position: relative;
   padding: 3px 0;
   border: 0;
@@ -94,19 +94,19 @@
   line-height: inherit;
 }
 
-.voice-session-heading h1 > button:hover {
+.voice-session-heading h1 button:hover {
   background: transparent;
 }
 
-.voice-session-heading h1 > button > span,
-.voice-session-heading h1 > span {
+.voice-session-heading h1 button > span,
+.voice-session-heading h1 > span:not(.chat-tooltip-trigger) {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.voice-session-heading h1 > button svg {
+.voice-session-heading h1 button svg {
   position: absolute;
   top: 50%;
   left: calc(100% + 5px);
@@ -116,8 +116,8 @@
   transition: opacity 100ms ease;
 }
 
-.voice-session-heading h1 > button:hover svg,
-.voice-session-heading h1 > button:focus-visible svg {
+.voice-session-heading h1 button:hover svg,
+.voice-session-heading h1 button:focus-visible svg {
   opacity: 1;
 }
 
@@ -807,6 +807,11 @@
 
 .voice-call-puck.is-dragging {
   cursor: grabbing;
+}
+
+.voice-call-puck > .chat-tooltip-trigger {
+  flex: none;
+  align-items: center;
 }
 
 .voice-call-puck-waveform {
@@ -2420,10 +2425,6 @@
   animation: home-call-fade 320ms cubic-bezier(.2, .7, .3, 1) both;
 }
 
-.home-call__caption.is-assistant {
-  color: var(--voice-text);
-}
-
 .home-call__caption-speaker {
   color: var(--voice-text-muted);
 }
@@ -2476,8 +2477,13 @@
   gap: 12px;
   max-height: min(40cqh, 300px);
   padding: 10px 14px 16px;
+  border: 0;
+  border-radius: var(--radius-xl, 12px);
+  background: var(--color-surface-elevated-secondary, var(--voice-surface));
+  box-shadow: 0 0 0 .5px var(--color-border-overlay, var(--voice-border)), var(--shadow-popover-overlay, var(--shadow-lg));
   overflow-y: auto;
   overscroll-behavior: contain;
+  animation: none;
 }
 
 .home-call__devices-heading {

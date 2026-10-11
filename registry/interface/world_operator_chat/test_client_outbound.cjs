@@ -646,7 +646,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const request = JSON.parse(input);
-  if (!fs.existsSync(path.join(request.ee_instances_root, \`\${request.ee_id}.json\`))) {
+  if (!fs.existsSync(path.join(request.ee_policy_root, \`\${request.ee_id}.json\`))) {
     process.stderr.write(\`planner missing EE '\${request.ee_id}'\`);
     process.exit(2);
   }
@@ -1744,7 +1744,8 @@ test("author-only surface planning returns validated topology without committing
     fixture.ledgerBytes,
   );
   const plannerRequest = JSON.parse(await fs.promises.readFile(fixture.capturePath, "utf8"));
-  assert.equal(plannerRequest.ee_instances_root, fixture.eeInstancesRoot);
+  assert.equal(plannerRequest.ee_policy_root, fixture.eeInstancesRoot);
+  assert.equal(plannerRequest.ee_instances_root, path.join(root, "state", "ee_instances"));
   assert.equal(plannerRequest.existing_run_record, null);
   assert.equal(Object.hasOwn(plannerRequest, "text"), false);
   assert.equal(Object.hasOwn(plannerRequest, "attachments"), false);
