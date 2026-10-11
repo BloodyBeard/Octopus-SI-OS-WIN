@@ -124,7 +124,20 @@ impl BrowserRoom {
             || body["sha256"].as_str() != Some(format!("{:x}", Sha256::digest(&payload)).as_str()) {
             return Err("download publication differs from the retained completed bytes".into());
         }
-        let artifact = InterfaceArtifactFile::write(&root, &label, &payload).map_err(|error| error.to_string())?;
+        let renamed = octopus_interfaces::InterfaceArtifactManifest {
+            label: label.clone(), payload_path: manifest.payload_path,
+            payload_content_hash: Some(hash.clone()),
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&renamed).map_err(|error| error.to_string())?;
+        let artifact = InterfaceArtifactFile::store_manifest_bounded(
+            &root, &manifest_bytes, self.environment.host_io_limits.max_manifest_bytes,
+            self.environment.host_io_limits.max_payload_bytes,
+        ).map_err(|error| error.to_string())?;
+        if artifact.read_payload_bytes().map_err(|error| error.to_string())? != payload {
+            return Err("download payload changed while its output manifest was published".into());
+        }
+        std::fs::File::open(&root).and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("download output directory cannot be synced: {error}"))?;
         let pinned = artifact.read_manifest_bounded(self.environment.host_io_limits.max_manifest_bytes).map_err(|error| error.to_string())?;
         let content = octopus_descriptors::DescriptorHash::of_bytes(&pinned.manifest_bytes);
         let reference = octopus_interfaces::ArtifactRef {

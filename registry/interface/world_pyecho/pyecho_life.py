@@ -12,7 +12,6 @@ from octopus_content_hash import octopus_content_hash
 INTERFACE_ID = os.environ["OCTOPUS_INTERFACE_ID"]
 VAR_DIR = os.path.abspath(os.environ["OCTOPUS_VAR_DIR"])
 MOVEMENTS_JSONL = os.path.abspath(os.environ["OCTOPUS_MOVEMENTS_JSONL"])
-BLOBS_DIR = os.path.abspath(os.environ["OCTOPUS_BLOBS_DIR"])
 CURSOR_PATH = os.path.join(VAR_DIR, "ledger-cursor.json")
 PAYLOADS_DIR = os.path.join(VAR_DIR, "payloads")
 RECEIPTS_DIR = os.path.join(VAR_DIR, "receipts")
@@ -310,9 +309,10 @@ def next_movement(cursor):
 
 
 def materialize_payload(content):
+    blobs_dir = os.path.abspath(os.environ["OCTOPUS_BLOBS_DIR"])
     manifest_hash = content_hexdigest(content)
     manifest = stable_read(
-        os.path.join(BLOBS_DIR, manifest_hash),
+        os.path.join(blobs_dir, manifest_hash),
         IO_LIMITS["max_manifest_bytes"],
         "cached artifact manifest",
     )
@@ -329,7 +329,7 @@ def materialize_payload(content):
     if not isinstance(payload_hash, str) or re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None:
         raise ValueError("pyecho cached artifact manifest has invalid payload_content_hash")
     payload = stable_read(
-        os.path.join(BLOBS_DIR, payload_hash),
+        os.path.join(blobs_dir, payload_hash),
         IO_LIMITS["max_payload_bytes"],
         "cached artifact payload",
     )

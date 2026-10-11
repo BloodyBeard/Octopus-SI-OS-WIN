@@ -25,6 +25,7 @@ export type WorkspaceSetupCapability = {
 export type WorkspaceSetupDraft = {
   providerModel?: string;
   reasoningEffort?: string;
+  serviceTier?: string;
   schemaVersion: 1;
   operationId: string;
   preset: WorkspaceSetupPreset;
@@ -98,6 +99,7 @@ export type WorkspaceAgentPresetChoice = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
 };
 
 export type WorkspaceInitializeRequest = {
@@ -115,6 +117,7 @@ export type WorkspaceInitializeRequest = {
     providerInterfaceId: string;
     providerModel: string;
     reasoningEffort: string;
+  serviceTier?: string;
     workerInterfaceId: string;
     doorHostSlots: Record<string, Record<string, string>>;
     contextArtifactBindings: Array<{ id: string }>;
@@ -216,6 +219,7 @@ export function replaceWorkspaceSetupPreset(
     ...next,
     operationId: draft.operationId,
     ...(draft.providerModel !== undefined ? { providerModel: draft.providerModel } : {}),
+    ...(draft.serviceTier !== undefined ? { serviceTier: draft.serviceTier } : {}),
     ...(draft.reasoningEffort !== undefined ? { reasoningEffort: draft.reasoningEffort } : {}),
     capabilities: draft.capabilities.map((capability) => ({ ...capability, projectKeys: [] })),
   });
@@ -224,9 +228,9 @@ export function replaceWorkspaceSetupPreset(
 export function validateWorkspaceSetupDraft(value: unknown): WorkspaceSetupDraft {
   const record = exactRecord(
     value,
-    ["schemaVersion", "operationId", "preset", "step", "spaceName", "spaceGoal", "projects", "capabilities", "updatedAt", "providerModel", "reasoningEffort"],
+    ["schemaVersion", "operationId", "preset", "step", "spaceName", "spaceGoal", "projects", "capabilities", "updatedAt", "providerModel", "reasoningEffort", "serviceTier"],
     "Workspace setup draft",
-    ["providerModel", "reasoningEffort"],
+    ["providerModel", "reasoningEffort", "serviceTier"],
   );
   if (record.schemaVersion !== 1) throw new Error("Workspace setup draft has an unsupported schema version");
   const preset = requiredPreset(record.preset);
@@ -242,6 +246,7 @@ export function validateWorkspaceSetupDraft(value: unknown): WorkspaceSetupDraft
   if (!Array.isArray(record.capabilities)) throw new Error("Workspace setup capabilities must be an array");
   const capabilities = record.capabilities.map((capability, index) => parseCapability(capability, index));
   validateCapabilities(capabilities, new Set(projects.map((project) => project.key)));
+  if (record.serviceTier !== undefined && (typeof record.serviceTier !== "string" || record.serviceTier.trim() !== record.serviceTier || record.serviceTier.length > 80 || /[\u0000-\u001f\u007f]/.test(record.serviceTier))) throw new Error("Invalid service tier");
   if (record.reasoningEffort !== undefined && (typeof record.reasoningEffort !== "string" || record.reasoningEffort.length > 80)) throw new Error("Invalid reasoning effort");
   return {
     schemaVersion: 1,
@@ -254,6 +259,7 @@ export function validateWorkspaceSetupDraft(value: unknown): WorkspaceSetupDraft
     capabilities,
     updatedAt,
     ...(record.providerModel !== undefined ? { providerModel: requiredText(record.providerModel, "Selected model", 256) } : {}),
+    ...(record.serviceTier !== undefined ? { serviceTier: record.serviceTier as string } : {}),
     ...(record.reasoningEffort !== undefined ? { reasoningEffort: record.reasoningEffort as string } : {}),
   };
 }
@@ -353,7 +359,7 @@ export function compileWorkspaceInitializeRequest(
     const capability = value.capabilities.find((entry) => entry.id === preset.component_package_id && entry.selected);
     if (!capability?.projectKeys.length) return [];
     if (!pack || !/^[a-f0-9]{64}$/.test(pack.manifestDigest)) throw new Error("Agent presets require an exact pack snapshot");
-    return [{ packId: pack.id, expectedPackManifestDigest: pack.manifestDigest, presetId: preset.id, projectKeys: [...capability.projectKeys].sort(), providerInterfaceId: preset.provider_interface_id, providerModel: requiredText(value.providerModel, "Selected model", 256), reasoningEffort: value.reasoningEffort ?? "" }];
+    return [{ packId: pack.id, expectedPackManifestDigest: pack.manifestDigest, presetId: preset.id, projectKeys: [...capability.projectKeys].sort(), providerInterfaceId: preset.provider_interface_id, providerModel: requiredText(value.providerModel, "Selected model", 256), serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "" }];
   }).sort((a, b) => `${a.packId}\0${a.presetId}`.localeCompare(`${b.packId}\0${b.presetId}`));
   return {
     action: "initialize_workspace",
@@ -363,7 +369,7 @@ export function compileWorkspaceInitializeRequest(
       name: "Home",
       providerInterfaceId: requiredId(recipe.provider_interface_id, "Workspace Home provider"),
       providerModel: requiredText(value.providerModel, "Selected model", 256),
-      reasoningEffort: value.reasoningEffort ?? "",
+      serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "",
       workerInterfaceId: requiredId(recipe.worker_interface_id, "Workspace Home worker"),
       doorHostSlots: {},
       contextArtifactBindings,
@@ -381,6 +387,7 @@ export async function workspaceInitializeRequestDigest(request: WorkspaceInitial
     home: {
       ...request.home,
       reasoningEffort: request.home.reasoningEffort,
+      serviceTier: request.home.serviceTier,
     },
     projects: request.projects,
     ...(request.agentPresets?.length ? { agentPresets: request.agentPresets } : {}),

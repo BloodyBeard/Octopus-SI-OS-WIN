@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
 import type { EnvironmentNode, InterfaceSummary, SelectionRef } from "../data/topology";
+import { ArtifactTransferSegments, type ArtifactTransfer, type TransferPoint, type TransferTrajectory } from "./ArtifactTransferAnimation";
 
 // The two-layer projection (owner's reference): the SYSTEM surface below carries the zones
 // — Execution Environments as nested AREAS (zones inside zones), each holding its runs as
@@ -10,11 +11,12 @@ import type { EnvironmentNode, InterfaceSummary, SelectionRef } from "../data/to
 //
 // Everything drawn is projected truth: zones/runs from the EE projection, world dots from
 // registered world interfaces, lines only where a run actually binds that world interface.
-// No decorative movement — that lives in the Event Log.
 
 type Props = {
   environments: EnvironmentNode[];
   registeredWorldInterfaces: InterfaceSummary[];
+  interfaceIndex: Record<string, InterfaceSummary>;
+  transfers: ArtifactTransfer[];
   mode: "instances" | "routeSets";
   selected: SelectionRef | null;
   onSelect: (selection: SelectionRef) => void;
@@ -57,7 +59,7 @@ const WORLD_GRID_GAP_Y = 104;
 const WORLD_SURFACE_PAD = 86;
 const WORLD_SURFACE_MIN_HALF = 280;
 
-export function WorldProjection({ environments, registeredWorldInterfaces, mode, selected, onSelect }: Props) {
+export function WorldProjection({ environments, registeredWorldInterfaces, interfaceIndex, transfers, mode, selected, onSelect }: Props) {
   const [yawDeg, setYawDeg] = useState(DEFAULT_YAW);
   const [pitchDeg, setPitchDeg] = useState(DEFAULT_PITCH);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
@@ -187,6 +189,18 @@ export function WorldProjection({ environments, registeredWorldInterfaces, mode,
           ) : null}
 
           {scene.zones.flatMap((zone) => zoneRoutes(zone, project, worldDotByName))}
+          <ArtifactTransferSegments transfers={transfers} resolve={() => worldArtifactTrajectories(
+            transfers,
+            scene.zones.flatMap((zone) => zone.runs.map((run) => ({
+              id: run.run.id,
+              worker: run.run.worker,
+              interfaces: run.run.interfaces.map((iface) => iface.name),
+              world: run.world,
+              point: project(run.x, run.y, 0),
+            }))),
+            worldDotByName,
+            interfaceIndex,
+          )} />
           {scene.zones.flatMap((zone) => zoneRuns(zone, project, selected, onSelect))}
 
           {worldDots.map((dot) => (
@@ -220,6 +234,57 @@ export function WorldProjection({ environments, registeredWorldInterfaces, mode,
       ) : null}
     </div>
   );
+}
+
+type TransferRunPoint = {
+  id: string;
+  worker: string;
+  interfaces: string[];
+  world: string[];
+  point: TransferPoint;
+};
+
+export function worldArtifactTrajectories(
+  transfers: ArtifactTransfer[],
+  runs: TransferRunPoint[],
+  worldDots: Map<string, { point: TransferPoint }>,
+  interfaces: Record<string, InterfaceSummary>,
+): TransferTrajectory[] {
+  const runsById = new Map(runs.map((run) => [run.id, run]));
+  const workers = new Map<string, TransferRunPoint[]>();
+  for (const run of runs) {
+    const members = workers.get(run.worker) ?? [];
+    members.push(run);
+    workers.set(run.worker, members);
+  }
+  return transfers.flatMap((transfer) => {
+    const owner = runsById.get(transfer.runId);
+    if (!owner) return [];
+    const endpoint = (id: string) => {
+      const iface = interfaces[id];
+      if (iface?.type === "world") {
+        const dot = worldDots.get(id);
+        return dot && owner.world.includes(id) ? { point: dot.point, radius: 7, world: true } : null;
+      }
+      if (iface?.type !== "system") return null;
+      if (owner.worker === id) return { point: owner.point, radius: 8, world: false };
+      if (iface.descriptor.role === "worker") {
+        const members = workers.get(id) ?? [];
+        return members.length === 1 ? { point: members[0].point, radius: 8, world: false } : null;
+      }
+      return owner.interfaces.includes(id) ? { point: owner.point, radius: 8, world: false } : null;
+    };
+    const from = endpoint(transfer.from);
+    const to = endpoint(transfer.to);
+    if (!from || !to) return [];
+    const middle = from.world && to.world ? owner.point : null;
+    const points = [
+      trimToCircle(middle ?? to.point, from.point, from.radius),
+      ...(middle ? [middle] : []),
+      trimToCircle(middle ?? from.point, to.point, to.radius),
+    ];
+    return [{ transfer, points }];
+  });
 }
 
 // ---------------------------------------------------------------------------------------

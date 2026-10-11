@@ -1,0 +1,385 @@
+#!/usr/bin/env node
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const { parseArgs } = require("node:util");
+
+const HELP = `Octopus — your agentic operating system, in the terminal
+
+  octopus [prompt]                 Open the interactive client
+  octopus resume [task|last|home]  Continue an existing task
+  octopus exec <prompt>            Start a task and wait for its result
+  octopus send <task> <prompt>     Send a follow-up and wait
+  octopus watch <task>             Follow work already in progress
+  octopus tasks                   Show tasks from this Home
+  octopus history <task>           Read its transcript
+  octopus inspect <run-id>         Inspect recorded checkpoint and transfer evidence
+  octopus projects                Show Projects and Agents
+  octopus project create <name>   Create a Project with the parent's policy
+  octopus project policies        Show policies available to a parent Project
+  octopus agent create <name>     Create an Agent with an explicit model
+  octopus models                  Show available permitted models
+  octopus answer <task> <request>  Answer a pending question
+  octopus stop <task>              Ask the task to stop
+  octopus rename <task> <title>    Rename a task
+  octopus archive <task>           Archive a settled task
+  octopus restore <task>           Restore an archived task
+  octopus delete <task> --yes       Delete a settled task; retain recorded evidence
+  octopus export <task> <file>     Save a transcript (new file only)
+  octopus download <task> <attachment-id> <file>  Save an admitted attachment
+  octopus setup                    Set up a new Home interactively
+  octopus up                       Start or join the shared runtime
+  octopus status                   Inspect runtime and Home readiness
+
+Options:
+  --home <path>                   The same Home used by the desktop client
+  --project <id> --agent <id>      Choose the Project and named Agent
+  --provider <id> --model <id>     Explicit provider/model selection
+  --effort <level>                Reasoning effort offered by that model
+  --policy <id>                  Installed policy for a new Project
+  --attach <path>                 Attach a file or folder; repeatable
+  --json                          JSON results; NDJSON for streamed work
+  --no-wait                       Return the input admission receipt
+  --timeout <seconds>             Stop waiting at a deadline, leave task running
+  --output-last-message <file>    Write the final reply to a new file
+  --archived                      List archived tasks
+  --yes                           Confirm task deletion
+  --answer <json>                 Structured answer to a pending request
+  --decision <choice>             Approval choice (accept/decline/cancel)
+  --bundle <path>                 Explicit compatible runtime distribution
+  -h, --help                      Show this help
+
+Use 'exec -' or 'send <task> -' to read a prompt from stdin.
+In chat: /help, /new, /tasks, /project, /agent, /model, /attach, /stop.
+CLI exit leaves the shared runtime and admitted work running.
+`;
+
+function argumentsFor(argv) {
+  const result = parseArgs({
+    args: argv, allowPositionals: true, strict: true,
+    options: {
+      help: { type: "boolean", short: "h" }, version: { type: "boolean", short: "v" },
+      home: { type: "string" }, bundle: { type: "string" },
+      project: { type: "string" }, agent: { type: "string" },
+      provider: { type: "string" }, model: { type: "string" }, effort: { type: "string" }, policy: { type: "string" },
+      attach: { type: "string", multiple: true, default: [] },
+      json: { type: "boolean", default: false }, "no-wait": { type: "boolean", default: false },
+      timeout: { type: "string" }, "output-last-message": { type: "string" },
+      archived: { type: "boolean", default: false },
+      yes: { type: "boolean", default: false },
+      answer: { type: "string" }, decision: { type: "string" },
+      "workspace-name": { type: "string" },
+      "project-name": { type: "string" }, "pack": { type: "string" },
+      "non-interactive": { type: "boolean", default: false },
+      "sign-in": { type: "boolean", default: false },
+    },
+  });
+  const seconds = result.values.timeout === undefined ? 0 : Number(result.values.timeout);
+  if (!Number.isFinite(seconds) || seconds < 0 || seconds > 86_400) throw new Error("--timeout must be between 0 and 86400 seconds.");
+  return { ...result, timeoutMs: seconds * 1000 };
+}
+
+async function main(argv = process.argv.slice(2), io = process) {
+  let client;
+  let environment;
+  let json = false;
+  let signalHandler;
+  try {
+    const parsed = argumentsFor(argv);
+    const flags = parsed.values;
+    json = flags.json;
+    if (flags.help) { io.stdout.write(commandHelp(parsed.positionals)); return 0; }
+    if (flags.version) { io.stdout.write(`Octopus ${require("../package.json").version}\n`); return 0; }
+    if (Number(process.versions.node.split(".")[0]) < 24) throw new Error("Octopus CLI needs Node.js 24 or newer. Set OCTOPUS_NODE to that Node executable.");
+    try { await fs.access(path.join(__dirname, "../build/cli/shared.cjs")); }
+    catch (error) { if (error.code === "ENOENT") throw new Error("Build the terminal client first: npm --prefix app run build:cli"); throw error; }
+    const { createEnvironment } = require("./environment.cjs");
+    environment = createEnvironment({ home: flags.home, bundle: flags.bundle });
+    const selection = {
+      projectId: flags.project, agentId: flags.agent,
+      providerId: flags.provider, model: flags.model, effort: flags.effort,
+      files: flags.attach,
+    };
+    const words = [...parsed.positionals];
+    const known = new Set(["chat", "resume", "exec", "send", "watch", "tasks", "history", "inspect", "projects", "models", "answer", "stop", "rename", "archive", "restore", "delete", "export", "setup", "up", "status", "agent", "project", "download"]);
+    const command = known.has(words[0]) ? words.shift() : "chat";
+    const report = (value) => {
+      if (json) io.stdout.write(`${JSON.stringify(value)}\n`);
+      else io.stdout.write(`${safeText(presentResult(value))}\n`);
+    };
+    if (command === "status") { report(await environment.status()); return 0; }
+    if (command === "up") {
+      report(await environment.start({ onProgress: (value) => progress(io, json, value.phase.replaceAll("_", " ")) }));
+      return 0;
+    }
+    let terminal;
+    if (command === "chat" || command === "resume" || command === "setup") {
+      if (!io.stdin.isTTY || !io.stdout.isTTY) {
+        if (!(command === "setup" && flags["non-interactive"])) throw new Error("Interactive Octopus needs a terminal. Use 'exec', 'send', or '--non-interactive' setup for automation.");
+      }
+      terminal = require("./terminal.cjs");
+    }
+    if (command === "setup") {
+      const ui = terminal?.createSetupUI ? terminal.createSetupUI({ input: io.stdin, output: io.stdout }) : setupUI(io);
+      try {
+        report(await environment.setup({
+          ui, nonInteractive: flags["non-interactive"], packId: flags.pack,
+          workspaceName: flags["workspace-name"], projectName: flags["project-name"],
+          model: flags.model, reasoningEffort: flags.effort,
+          signIn: flags["non-interactive"] ? flags["sign-in"] : true, recommended: [],
+        }));
+      } finally { ui.close?.(); }
+      return 0;
+    }
+    if (command === "chat" || command === "resume") {
+      const runtime = await environment.start({ onProgress: (value) => progress(io, false, value.phase.replaceAll("_", " ")) });
+      if (!runtime.clientReady) {
+        const ui = setupUI(io);
+        try { await environment.setup({ ui, recommended: [] }); }
+        finally { ui.close(); }
+      }
+    }
+    const { createClient } = require("./client.cjs");
+    client = createClient(environment);
+    if (command === "chat" || command === "resume") {
+      const run = command === "resume" ? await client.task(words.shift() || "last") : null;
+      return await terminal.runInteractive(client, {
+        ...selection, input: io.stdin, output: io.stdout,
+        runId: run?.id, initialPrompt: words.join(" "),
+      }) ?? 0;
+    }
+    if (command === "tasks") { report(await client.tasks({ archived: flags.archived, search: words.join(" ") })); return 0; }
+    if (command === "projects") { report((await client.contexts()).projects); return 0; }
+    if (command === "models") { report(await client.models(selection)); return 0; }
+    if (command === "history") { report(await client.history(required(words.shift(), "task"))); return 0; }
+    if (command === "inspect") {
+      const selected = required(words.shift(), "exact run id");
+      const runId = ["home", "last"].includes(selected) ? (await client.task(selected)).id : selected;
+      const inspection = await require("./inspection.cjs").inspectRun(client, runId);
+      if (json) report(inspection);
+      else io.stdout.write(`${safeText(presentInspection(inspection))}\n`);
+      return 0;
+    }
+    if (command === "stop") { report(await client.stop(required(words.shift(), "task"))); return 0; }
+    if (command === "rename") { report(await client.rename(required(words.shift(), "task"), required(words.join(" "), "title"))); return 0; }
+    if (command === "archive" || command === "restore") { report(await client.archive(required(words.shift(), "task"), command === "archive")); return 0; }
+    if (command === "delete") {
+      if (!flags.yes) throw new Error("Task deletion removes its active record and private interfaces. Use --yes to confirm; recorded evidence is retained.");
+      report(await client.deleteTask(required(words.shift(), "task"))); return 0;
+    }
+    if (command === "agent") {
+      if (words.shift() !== "create") throw new Error("Use 'agent create <name> --project <id> --provider <id> --model <id> --effort <level>'.");
+      report(await client.createAgent({ ...selection, name: required(words.join(" "), "Agent name") })); return 0;
+    }
+    if (command === "project") {
+      const action = words.shift();
+      if (action === "policies") { report(await client.projectPolicies(flags.project)); return 0; }
+      if (action !== "create") throw new Error("Use 'project create <name>' or 'project policies'.");
+      report(await client.createProject({ name: required(words.join(" "), "Project name"), parentId: flags.project, policy: flags.policy })); return 0;
+    }
+    if (command === "answer") {
+      const task = required(words.shift(), "task");
+      const request = required(words.shift(), "request id");
+      const answer = flags.answer === undefined ? { decision: required(flags.decision, "--answer or --decision") } : JSON.parse(flags.answer);
+      report(await client.respond(task, request, answer)); return 0;
+    }
+    if (command === "download") {
+      report(await client.saveAttachment(required(words.shift(), "task"), required(words.shift(), "attachment id"), required(words.shift(), "destination")));
+      return 0;
+    }
+    if (command === "export") {
+      const entries = await client.history(required(words.shift(), "task"));
+      const destination = path.resolve(required(words.shift(), "destination"));
+      await fs.writeFile(destination, presentResult(entries), { flag: "wx", mode: 0o600 });
+      report({ path: destination, messages: entries.length }); return 0;
+    }
+    let submitted;
+    let runId;
+    if (command === "watch") {
+      const task = await client.task(required(words.shift(), "task"));
+      runId = task.id;
+    } else {
+      if (command === "send") runId = (await client.task(required(words.shift(), "task"))).id;
+      const prompt = words.join(" ");
+      const text = prompt === "-" ? await stdinText(io.stdin) : prompt;
+      if (!text && !selection.files.length) throw new Error("Provide a prompt or --attach a file.");
+      submitted = await client.send({ ...selection, runId, text });
+      runId = submitted.runId;
+      if (json) report({ type: "admitted", runId, messageId: submitted.messageId, afterSeq: submitted.afterSeq });
+      else progress(io, false, `Task ${runId}`);
+      if (flags["no-wait"]) { if (!json) report({ runId, status: "admitted" }); return 0; }
+    }
+    const controller = new AbortController();
+    let interrupted = false;
+    signalHandler = () => { interrupted = true; controller.abort(); };
+    process.on("SIGINT", signalHandler);
+    const deadline = parsed.timeoutMs ? setTimeout(() => controller.abort(), parsed.timeoutMs) : null;
+    const messages = new Map();
+    const renderer = createEventRenderer(io);
+    let lastMessage = "";
+    let failed = false;
+    let completed = false;
+    let stopped = false;
+    let pending = false;
+    try {
+      for await (const event of client.follow(runId, { ...submitted, signal: controller.signal })) {
+        if (json) report(event);
+        else renderer(event);
+        if (event.type === "message" && event.entry?.role === "assistant" && ["message", "message_delta"].includes(event.entry.kind)) {
+          messages.set(event.entry.id, event.entry.text);
+          lastMessage = event.entry.text || lastMessage;
+        }
+        if (event.type === "delta" && event.role === "assistant" && messages.has(event.id)) {
+          const text = messages.get(event.id) + event.text;
+          messages.set(event.id, text);
+          lastMessage = text;
+        }
+        if (event.type === "status" && event.terminal && event.correlated) {
+          completed = true;
+          failed = event.state === "failed";
+          stopped = event.interrupted === true;
+        }
+        if (event.type === "request" && event.status !== "resolved") { pending = true; break; }
+      }
+    } finally { if (deadline) clearTimeout(deadline); }
+    if (interrupted) { progress(io, json, `Detached. Task ${runId} continues; use 'octopus stop ${runId}' to stop it.`); return 130; }
+    if (controller.signal.aborted) { report({ type: "timeout", runId, status: "still_running" }); return 124; }
+    if (pending) { if (!json) progress(io, false, `An answer is required. Resume ${runId} or use 'octopus answer'.`); return 3; }
+    if (!completed) throw new Error("Following ended without a recorded completion. Use 'watch' or 'history' to inspect the task.");
+    if (flags["output-last-message"]) await fs.writeFile(path.resolve(flags["output-last-message"]), lastMessage, { flag: "wx", mode: 0o600 });
+    if (json) report({ type: "result", runId, status: failed ? "failed" : stopped ? "stopped" : "completed", text: lastMessage });
+    else io.stdout.write("\n");
+    return failed ? 1 : stopped ? 130 : 0;
+  } catch (error) {
+    if (json) io.stdout.write(`${JSON.stringify({ type: "error", code: error.code || "cli_error", message: error.message })}\n`);
+    else io.stderr.write(`Octopus: ${safeText(String(error.message))}\n`);
+    return 1;
+  } finally {
+    if (signalHandler) process.removeListener("SIGINT", signalHandler);
+    await client?.close();
+    environment?.close();
+  }
+}
+
+function setupUI(io) {
+  const readline = require("node:readline/promises");
+  const rl = readline.createInterface({ input: io.stdin, output: io.stdout });
+  return {
+    async ask({ prompt, defaultValue }) {
+      const answer = await rl.question(safeText(`${prompt}${defaultValue ? ` [${defaultValue}]` : ""}: `));
+      return answer || defaultValue || "";
+    },
+    async choose({ prompt, choices, defaultValue }) {
+      io.stdout.write(safeText(`\n${prompt}\n${choices.map((row, index) => `  ${index + 1}. ${row.label}${row.description ? ` — ${row.description}` : ""}`).join("\n")}\n`));
+      for (;;) {
+        const answer = await rl.question(`Choose${defaultValue ? " (Enter for default)" : ""}: `);
+        if (!answer && defaultValue !== undefined) return defaultValue;
+        const selected = choices[Number(answer) - 1];
+        if (selected) return selected.value;
+        io.stdout.write("Enter one of the listed numbers.\n");
+      }
+    },
+    openExternal(url) { io.stdout.write(safeText(`\nOpen this address to sign in:\n${url}\n`)); },
+    progress(value) { progress(io, false, value.label || value.phase || String(value)); },
+    close() { rl.close(); },
+  };
+}
+
+function createEventRenderer(io) {
+  const printed = new Map();
+  const activities = new Map();
+  let lastId = "";
+  return (event) => {
+    if (event.type === "status" && event.correlated && event.state === "stopping") {
+      progress(io, false, "Stop acknowledged. Waiting for the current operation to report its result.");
+      return;
+    }
+    if (event.type === "status" && event.terminal && event.correlated && event.interrupted) {
+      progress(io, false, event.entry?.kind === "interrupted_result" ? "Stopped." : "Stop acknowledged.");
+      return;
+    }
+    if (event.entry && !require("./presentation.cjs").isConversationEntry(event.entry)) return;
+    if (event.type === "delta") {
+      if (lastId !== event.id) io.stdout.write("\n");
+      io.stdout.write(safeText(event.text || ""));
+      printed.set(event.id, (printed.get(event.id) || "") + (event.text || ""));
+      lastId = event.id;
+    } else if (event.type === "message" && event.entry?.text) {
+      const { id, text } = event.entry;
+      const previous = printed.get(id) || "";
+      if (text !== previous) {
+        const suffix = text.startsWith(previous) && lastId === id;
+        io.stdout.write(suffix ? safeText(text.slice(previous.length)) : `\n${safeText(text)}`);
+        printed.set(id, text);
+        lastId = id;
+      }
+    } else if (event.type === "activity") {
+      const detail = [
+        `${event.title || "Working"}${event.status ? ` · ${event.status}` : ""}${Number.isInteger(event.exitCode) ? ` · exit ${event.exitCode}` : ""}`,
+        event.script || event.command,
+        event.output || [event.stdout, event.stderr].filter(Boolean).join("\n"),
+        event.sections?.some((section) => section.stream === "error") ? null : event.failure,
+        ...(event.notices || []),
+      ].filter(Boolean).join("\n");
+      if (activities.get(event.id) !== detail) progress(io, false, detail);
+      activities.set(event.id, detail);
+    } else if (event.type === "request" && event.status !== "resolved") {
+      io.stderr.write(`\n${safeText(event.entry?.text || "Input required")}\n${safeText(JSON.stringify({ requestId: event.requestId || event.payload?.request_id, kind: event.kind, request: event.payload }))}\n`);
+    } else if (event.type === "error") progress(io, false, event.text || "Task failed");
+  };
+}
+
+function safeText(text) { return require("./presentation.cjs").safeText(text); }
+
+function commandHelp(words) {
+  if (words[0] === "project") return `Octopus Projects\n\n  octopus project create "Project name" [--project <parent-id>] [--policy <id>]\n  octopus project policies [--project <parent-id>] [--json]\n\nNew Projects use their parent's policy unless an allowed policy is selected.\nUse 'octopus projects' to find existing Project IDs.\n`;
+  if (words[0] === "agent") return `Octopus Agents\n\n  octopus agent create "Agent name" --project <id> --provider <id> --model <id> --effort <level>\n\nUse 'octopus projects --json' for Project IDs and 'octopus models --project <id> --json'\nfor the exact permitted provider, model, and reasoning choices.\nThe Agent uses that Project's configured Applications and Drivers.\n`;
+  if (words[0] === "setup") return `Octopus setup\n\n  octopus setup [--home <path>]\n  octopus setup --home <path> --non-interactive --pack <id> --workspace-name <name>\n    --project-name <name> --model <id> --effort <level>\n\nInteractive setup lists installed choices and guides provider sign-in.\nNoninteractive setup requires existing provider sign-in. Configured Homes are preserved.\n`;
+  return HELP;
+}
+
+function presentResult(value) {
+  if (Array.isArray(value) && value.every((row) => row.role && row.kind)) {
+    const { entryRows } = require("./presentation.cjs");
+    return value.flatMap((row) => entryRows(row, 100, { outputRows: Number.MAX_SAFE_INTEGER }).map((line) => line.text)).join("\n");
+  }
+  if (Array.isArray(value)) return value.map((row) => row.text !== undefined
+    ? `${row.role || row.kind || ""}\n${row.text}`
+    : `${row.id || row.model || ""}  ${row.title || row.name || row.displayName || ""}${row.state ? `  ${row.state}` : ""}${row.agents ? `\n${row.agents.map((agent) => `  ${agent.id}  ${agent.name}  ${agent.model || "choose model"}`).join("\n")}` : ""}`).join("\n");
+  return JSON.stringify(value, null, 2);
+}
+
+function progress(io, json, text) {
+  io.stderr.write(`${safeText(String(text))}\n`);
+}
+
+function presentInspection(value) {
+  const active = value.checkpoints.filter((checkpoint) => checkpoint.active);
+  const lines = [value.runId, `${active.length} active checkpoints · ${value.outstanding.length} requirements without an exact recorded mark`];
+  for (const wait of value.outstanding) lines.push(`  ${wait.artifactLabel || "Unknown artifact"} → ${wait.mark || "Unknown mark"} (${wait.state})\n    ${wait.checkpointId}`);
+  lines.push(`${value.relay.candidates.length} recorded outbound transfers match active interface bindings.`);
+  if (!value.coverage.runProjectionStable) lines.push("The run changed during inspection; read again for a consistent view.");
+  lines.push("This shows recorded evidence. Current admission and policy remain runtime decisions.");
+  return lines.join("\n");
+}
+
+function required(value, label) {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required. See --help.`);
+  return value;
+}
+
+async function stdinText(input) {
+  const parts = [];
+  let length = 0;
+  for await (const chunk of input) {
+    length += Buffer.byteLength(chunk);
+    if (length > 4 * 1024 * 1024) throw new Error("The stdin prompt exceeds 4 MiB; attach the file instead.");
+    parts.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(parts).toString("utf8");
+}
+
+if (require.main === module) main().then((code) => { process.exitCode = code; }).catch((error) => {
+  process.stderr.write(`Octopus cleanup failed: ${error.message}\n`); process.exitCode = 1;
+});
+
+module.exports = { main, argumentsFor, HELP, createEventRenderer };

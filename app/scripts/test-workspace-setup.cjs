@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createProjectionStore, mutateOctopusOsWorkspace } = require("../electron/projection.cjs");
+const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const {
   initializeWorkspace,
   mutateWorkspaceProject,
@@ -21,6 +22,7 @@ async function main() {
     await verifyExistingRootAttachment(temporary);
     await verifyRootFirstSetup(temporary);
     await verifyFreshAgentRecipe(temporary);
+    await verifyPreludeSnapshotSetup(temporary);
     const fixtureHomeRoot = path.join(temporary, "home");
     const fixtureRegistryRoot = path.join(fixtureHomeRoot, "registry");
     await createFixture(fixtureHomeRoot, fixtureRegistryRoot);
@@ -699,6 +701,59 @@ async function main() {
   }
 }
 
+async function verifyPreludeSnapshotSetup(temporary) {
+  const home = path.join(await fs.realpath(temporary), "prelude-snapshot-setup"), registry = path.join(home, "registry");
+  await createFixture(home, registry);
+  const { blake3 } = require("@noble/hashes/blake3");
+  const canonical = (value) => JSON.stringify(value, function (_key, entry) {
+    return entry && !Array.isArray(entry) && typeof entry === "object"
+      ? Object.fromEntries(Object.keys(entry).sort().map((key) => [key, entry[key]])) : entry;
+  });
+  const pin = (value) => [...blake3(Buffer.from(canonical(value)))];
+  const sourceId = "artifact-code-mode-browser-prelude", snapshotId = `${sourceId}__source__setup`;
+  const sourceBytes = await fs.readFile(path.join(__dirname, "../../registry/artifact", sourceId, "artifact.json"));
+  const sourcePath = path.join(registry, "artifact", sourceId, "artifact.json"), snapshotPath = path.join(registry, "artifact", snapshotId, "artifact.json");
+  await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+  const request = setupRequest("snapshot_setup_12345678"); request.projects = [];
+  let mode;
+  const options = { octopusHomeRoot: home, registryRoot: registry, request, planOperatorSurface: async (input) => {
+    const plan = await fixturePlan(home, registry, input);
+    const source = { id: sourceId, content: pin(JSON.parse(sourceBytes)) };
+    const sourceSha = crypto.createHash("sha256").update(sourceBytes).digest("hex");
+    let wrapper = { id: snapshotId, run: plan.runId, source: structuredClone(source), source_sha256: sourceSha, source_content: sourceBytes.toString("utf8") };
+    if (mode === "id") wrapper.id = "other_snapshot";
+    if (mode === "run") wrapper.run = "other_run";
+    if (mode === "source") wrapper.source.id = "other_source";
+    if (mode === "source_sha256") wrapper.source_sha256 = "0".repeat(64);
+    if (mode === "source_content") wrapper.source_content += " ";
+    if (mode === "source_pin") { source.content[0] ^= 1; wrapper.source = structuredClone(source); }
+    if (mode === "legacy_copy") wrapper = JSON.parse(sourceBytes);
+    const snapshot = { id: snapshotId, content: pin(wrapper) };
+    if (mode === "snapshot_pin") snapshot.content[0] ^= 1;
+    if (mode === "current_source") await fs.appendFile(sourcePath, " ");
+    const runWrite = plan.writes.find((write) => write.tag === `run:${plan.runId}`), run = JSON.parse(runWrite.content);
+    run.interface_state[plan.modelInterfaceId] = { prelude_sources: [{ source, snapshot, source_sha256: sourceSha }] };
+    runWrite.content = JSON.stringify(run);
+    plan.writes.push(write(snapshotPath, JSON.stringify(wrapper, null, 2), `artifact:${snapshotId}`));
+    if (mode === "legacy_copy") assert.deepEqual(source.content, snapshot.content);
+    else assert.notDeepEqual(source.content, snapshot.content);
+    return plan;
+  } };
+  for (mode of ["id", "run", "source", "source_sha256", "source_content", "source_pin", "snapshot_pin", "legacy_copy", "current_source"]) {
+    await fs.writeFile(sourcePath, sourceBytes);
+    await assert.rejects(initializeWorkspace(options), /Home prelude (snapshot|source)/);
+    await assert.rejects(fs.stat(snapshotPath), /ENOENT/);
+    assert.deepEqual(await fs.readdir(path.join(home, "state", "runs")), []);
+  }
+  mode = null; await fs.writeFile(sourcePath, sourceBytes);
+  const result = await initializeWorkspace(options), saved = JSON.parse(await fs.readFile(snapshotPath));
+  assert.equal(saved.id, snapshotId); assert.equal(saved.run, result.homeRunId);
+  assert.deepEqual(Buffer.from(saved.source_content), sourceBytes);
+  assert.deepEqual(await fs.readFile(sourcePath), sourceBytes);
+  assert.equal((await initializeWorkspace(options)).changed, false);
+  console.log("workspace prelude snapshot: wrapper identity, both content pins, original bytes, source drift and replay passed");
+}
+
 async function verifyLinkedTaskRemoval(temporary) {
   const home = path.join(temporary, "task-removal"), registry = path.join(home, "registry");
   const run = path.join(home, "state/runs/task.json"), owned = path.join(home, "interfaces/provider");
@@ -722,6 +777,46 @@ async function verifyLinkedTaskRemoval(temporary) {
   await assert.rejects(fs.lstat(run), /ENOENT/);
   await assert.rejects(fs.lstat(owned), /ENOENT/);
   assert.equal(await fs.readFile(target, "utf8"), content);
+  for (const mode of ["retired", "unpaired", "referenced", "replaced", "descriptor_changed"]) {
+    const currentHome = path.join(temporary, `task-removal-${mode}`), currentRegistry = path.join(currentHome, "registry");
+    await createFixture(currentHome, currentRegistry);
+    const runPath = path.join(currentHome, "state/runs/task.json");
+    const state = path.join(currentHome, "interfaces/provider");
+    const descriptor = path.join(currentRegistry, "interface/provider");
+    await fs.mkdir(state, { recursive: true }); await fs.mkdir(descriptor, { recursive: true });
+    await fs.mkdir(path.dirname(runPath), { recursive: true });
+    await fs.writeFile(runPath, "{}\n");
+    await fs.writeFile(path.join(descriptor, "interface.json"), '{"id":"provider"}\n');
+    await fs.writeFile(path.join(state, "ledger-cursor.json"), '{"seq":1}\n');
+    await fs.symlink(target, path.join(state, "auth.json"));
+    if (mode === "referenced") await fs.writeFile(path.join(currentHome, "state/runs/other.json"), '{"interface_state":{"provider":{}}}\n');
+    const removal = async (destination) => {
+      const identity = await fs.lstat(destination);
+      return { destination, type: "directory", expectedDev: identity.dev, expectedIno: identity.ino, tag: destination };
+    };
+    const plan = { ...options.plan, operationId: `task_remove_${mode}_12345678`,
+      writes: [{ ...options.plan.writes[0], destination: runPath }],
+      removals: [...(mode === "unpaired" ? [] : [await removal(descriptor)]), await removal(state)] };
+    const unlink = fs.unlink;
+    fs.unlink = async (candidate) => {
+      await unlink(candidate);
+      if (candidate !== runPath) return;
+      if (mode === "replaced") {
+        await fs.rename(state, `${state}-other`); await fs.mkdir(state);
+      }
+      if (mode === "descriptor_changed") await fs.writeFile(path.join(descriptor, "interface.json"), '{"id":"changed"}\n');
+      await fs.writeFile(path.join(state, "ledger-cursor.json"), '{"seq":2}\n');
+    };
+    try {
+      const commit = commitClientAuthoringTransaction({ octopusHomeRoot: currentHome, registryRoot: currentRegistry, plan });
+      if (mode === "retired") {
+        await commit;
+        await recoverWorkspaceTransactions({ octopusHomeRoot: currentHome, registryRoot: currentRegistry });
+        await assert.rejects(fs.lstat(state), /ENOENT/);
+      } else await assert.rejects(commit, /identity changed|still referenced/);
+      assert.equal(await fs.readFile(target, "utf8"), content);
+    } finally { fs.unlink = unlink; }
+  }
 }
 
 async function verifyOperatorChatStatusProjection(temporary) {
@@ -917,7 +1012,7 @@ async function verifyTaskArchive(temporary) {
     writer_required_verified_artifacts: original.checkpoints[4].required_verified_artifacts,
     profile: { file_write_tool: toolId, file_write_label: writer.call_label, file_write_result_label: writer.result_label, result_timeout_ms: 30000 },
     provider_profile: { file_write_tool: "file.write.authoring", file_write_label: "tool.call", file_write_result_label: "file.write.authoring.result", result_timeout_ms: 30000 },
-    input_label: "provider.peer.input", artifact_bindings: [] };
+    input_label: "provider.peer.input", notification_action: "followup", artifact_bindings: [] };
   const intake = { id: intakeId, interface_type: "system", role: "service", direction: "bidirectional", source_names: ["input"],
     interface_driver_ref: "checked_input_intake", interface_driver_config: { private_config: { input_intake: declaration } } };
   await fs.writeFile(intakePath, JSON.stringify(intake));
@@ -937,7 +1032,9 @@ async function verifyTaskArchive(temporary) {
     commitClientAuthoring: (mutation) => commitClientAuthoringTransaction({ octopusHomeRoot: home, registryRoot: registry, plan: {
       operationId: `task_archive_contract_${operations++}`, label: mutation.label,
       writes: mutation.writes.map((write) => ({ destination: write.file, expectedBeforeDigest: write.beforeDigest,
-        content: `${JSON.stringify(write.next, null, 2)}\n`, tag: "task", publishBarrier: write.file === mutation.publishBarrierPath })), removals: [],
+        content: write.next === null ? null : `${JSON.stringify(write.next, null, 2)}\n`, tag: "task", publishBarrier: write.file === mutation.publishBarrierPath })),
+      removals: (mutation.removals ?? []).map((entry) => ({ destination: entry.path, type: entry.type,
+        expectedDev: entry.dev, expectedIno: entry.ino, tag: entry.label })),
     } }),
   };
   const mutate = async (archived, overrides = {}) => {
@@ -1019,6 +1116,145 @@ async function verifyTaskArchive(temporary) {
     assert.equal(restoredChat.archived, false); assert.equal(restoredChat.writable, true);
     assert.equal(operations, 2);
     console.log("task archive: checked writes, admission frontier, retained history, explicit restore and drift refusals passed");
+    for (const interfaceId of [intakeId, doorId]) await fs.writeFile(path.join(registry, "interface", interfaceId, "octopus_os.json"), JSON.stringify({
+      schema_version: 1, workspace: "octopus_os", interface: interfaceId, owner_interface: plan.chatInterfaceId, component: "worker_environment_door", surface_role: "task",
+    }));
+    const applicationId = "world_amendment_fixture", applicationRoot = path.join(registry, "interface", applicationId);
+    await fs.mkdir(applicationRoot);
+    await fs.writeFile(path.join(applicationRoot, "interface.json"), JSON.stringify({ id: applicationId,
+      interface_type: "world", role: "sensor", direction: "inbound", source_names: ["fixture"] }));
+    await fs.writeFile(path.join(applicationRoot, "application.json"), JSON.stringify({ schema_version: 3,
+      id: applicationId, name: "Fixture", description: "Fixture", category: "connector", developer: "Fixture",
+      version: "1", logo: "icon.svg", interfaces: [applicationId] }));
+    store.invalidate(false);
+    const amendmentScope = await read("projection.operator.os.scope");
+    amendmentScope.environments.find((row) => row.ee_id === original.ee).formed_envelope.allowed_interfaces.push(applicationId);
+    const amendmentWriterFile = path.join(home, "state", "runs", "amendment_writer.json");
+    const genesis = { id: "amendment_writer", ee: original.ee, worker: original.worker, trace: "trace:amendment_writer",
+      status: "idle", checkpoints: [], active_checkpoints: [], interface_state: {} };
+    const genesisBytes = `${JSON.stringify(Object.fromEntries(Object.entries(genesis).sort(([a], [b]) => a.localeCompare(b))))}\n`, retainedRun = await fs.readFile(runFile, "utf8");
+    await mutateOctopusOsWorkspace(registry, home, amendmentScope,
+      { action: "configure_task_application", runId: plan.runId, expectedDigest: await digest(), applicationId, connected: true },
+      { ...hooks, planTaskApplicationAmendment: async () => ({ removals: [], writes: [
+        { filePath: amendmentWriterFile, expectedBeforeHash: null, content: genesisBytes },
+        { filePath: runFile, expectedBeforeHash: await digest(), content: retainedRun },
+      ] }), commitClientAuthoring: (request) => commitProjectionClientAuthoring(home, registry, request) });
+    assert.equal(await fs.readFile(amendmentWriterFile, "utf8"), genesisBytes);
+    assert.equal(await fs.readFile(runFile, "utf8"), retainedRun);
+    assert.deepEqual(await read("projection.operator.chat.messages", { run_id: plan.runId }), messagesBefore);
+    await fs.unlink(amendmentWriterFile); await fs.rm(applicationRoot, { recursive: true });
+    const writerId = "declared_task_writer", writerIds = new Set(["cp_intake_call", "cp_intake_result"]);
+    const writerCheckpoints = original.checkpoints.filter((cp) => writerIds.has(cp.id)).map((cp) => ({
+      ...structuredClone(cp), run: writerId, trace: `trace:${writerId}:${cp.id}`,
+    }));
+    const initialWriter = { id: writerId, ee: original.ee, worker: original.worker, trace: `trace:${writerId}`, status: "idle",
+      interface_state: { [intakeId]: { file_writer_target: { run: plan.runId, provider: intakeId, source: intakeId, door: doorId, generation: 0 } } },
+      checkpoints: writerCheckpoints, active_checkpoints: [...writerIds].sort() };
+    const writerFile = path.join(home, "state", "runs", `${writerId}.json`);
+    const writerRun = structuredClone(initialWriter);
+    writerRun.interface_state[intakeId].file_writer_target.generation = 2;
+    writerRun.checkpoints.forEach((cp) => { cp.id = `${cp.id}_2`; cp.trace = `trace:${writerId}:${cp.id}`; });
+    writerRun.active_checkpoints = writerRun.checkpoints.map((cp) => cp.id);
+    await fs.writeFile(writerFile, JSON.stringify(writerRun));
+    original.checkpoints = original.checkpoints.filter((cp) => !writerIds.has(cp.id));
+    original.active_checkpoints = original.active_checkpoints.filter((id) => !writerIds.has(id));
+    original.interface_state[intakeId].owned_checkpoint_ids = ["cp_intake_input"];
+    original.interface_state[intakeId].frontier_checkpoint_ids = [];
+    original.interface_state[intakeId].writer_run = { run: writerId, initial_record: initialWriter, initial_record_format: "compact", role_artifact_bindings: [] };
+    await writeRun(original);
+    const movablePolicy = JSON.parse(await fs.readFile(policyPath));
+    movablePolicy.ceiling.wek = [];
+    await fs.writeFile(policyPath, JSON.stringify(movablePolicy));
+    for (const targetEeId of [workspace.projects[1].eeId, workspace.projects[0].eeId]) {
+      store.invalidate(false);
+      const moveScope = await read("projection.operator.os.scope");
+      const ceiling = JSON.parse(await fs.readFile(policyPath)).ceiling;
+      Object.assign(moveScope.environments.find((row) => row.ee_id === targetEeId).formed_envelope, {
+        allowed_interfaces: [...new Set([...plan.requiredInterfaceIds, original.worker, intakeId, doorId])],
+        allowed_tools: ceiling.tools, allowed_worker_environment_kinds: ceiling.wek,
+      });
+      await mutateOctopusOsWorkspace(registry, home, moveScope,
+        { action: "move_task", runId: plan.runId, expectedDigest: await digest(), targetEeId }, hooks);
+      const moved = JSON.parse(await fs.readFile(runFile)), movedWriter = JSON.parse(await fs.readFile(writerFile));
+      assert.equal(moved.ee, targetEeId); assert.equal(movedWriter.ee, targetEeId);
+      assert.equal(moved.interface_state[intakeId].writer_run.initial_record.ee, targetEeId);
+      assert.deepEqual(movedWriter.checkpoints, writerRun.checkpoints);
+    }
+    const { blake3 } = require("@noble/hashes/blake3");
+    const canonical = (value) => JSON.stringify(value, function (_key, entry) {
+      return entry && !Array.isArray(entry) && typeof entry === "object"
+        ? Object.fromEntries(Object.keys(entry).sort().map((key) => [key, entry[key]])) : entry;
+    });
+    const artifact = async (body) => {
+      const file = path.join(registry, "artifact", body.id, "artifact.json");
+      await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(body));
+      return { id: body.id, content: [...blake3(Buffer.from(canonical(body)))] };
+    };
+    const shared = { id: "shared_source", schema_version: 1, module_source: "source bytes" };
+    const source = await artifact(shared), sourceContent = JSON.stringify(shared);
+    const sourceSha = crypto.createHash("sha256").update(sourceContent).digest("hex");
+    const snapshot = await artifact({ id: "retained_source", run: plan.runId, source, source_sha256: sourceSha, source_content: sourceContent });
+    const preludeBody = { id: "private_prelude", run: plan.runId, owner_interface: doorId, schema_version: 1, module_source: "compiled", exports: [] };
+    const prelude = await artifact(preludeBody);
+    const topology = await artifact({ id: "private_topology", run: plan.runId, worker: plan.workerInterfaceId, owner_interface: doorId, prelude_artifact: prelude });
+    await fs.writeFile(path.join(registry, "interface", doorId, "code_mode.json"), JSON.stringify({
+      context: { mode: "persistent", prelude_artifact: prelude }, handoff: { topology_artifact: topology },
+    }));
+    original.interface_state[doorId] = { prelude_sources: [{ source, snapshot, source_sha256: sourceSha }] };
+    await writeRun(original);
+    const unrelatedFile = path.join(registry, "artifact", "private_prelude_unrelated", "artifact.json");
+    await artifact({ id: "private_prelude_unrelated", text: "unrelated" });
+    const payloadFile = path.join(registry, "artifact", prelude.id, "retained.payload");
+    await fs.writeFile(payloadFile, "retained payload evidence");
+    const blobFile = path.join(home, "ledger", "retained.blob"); await fs.writeFile(blobFile, "retained blob evidence");
+    const ledgerBefore = await fs.readFile(ledger, "utf8");
+    const remove = async (extraHooks = {}) => {
+      store.invalidate(false);
+      return mutateOctopusOsWorkspace(registry, home, await read("projection.operator.os.scope"),
+        { action: "delete_task", runId: plan.runId, expectedDigest: await digest() }, { ...hooks, ...extraHooks });
+    };
+    const writerEnvironmentId = `we_${"b".repeat(32)}`;
+    const formationFile = path.join(home, "interfaces", doorId, "worker-environments", writerEnvironmentId, "worker_environment.json");
+    await fs.mkdir(path.dirname(formationFile), { recursive: true });
+    const writerFormation = { schema_version: 5, lifecycle: "active", formation: {
+      worker_environment_id: writerEnvironmentId, run: writerId, ee: original.ee,
+      worker: original.worker, door_interface: doorId, requires_release: false,
+    } };
+    for (const invalid of [{ run: "another_run" }, { ee: "unrelated_ee" }, { requires_release: true }]) {
+      await fs.writeFile(formationFile, JSON.stringify({ ...writerFormation, formation: { ...writerFormation.formation, ...invalid } }));
+      await assert.rejects(remove(), /does not belong to task|cannot be deleted before/);
+    }
+    await fs.writeFile(formationFile, JSON.stringify(writerFormation));
+    const sharedPath = path.join(registry, "artifact", shared.id, "artifact.json");
+    await fs.writeFile(sharedPath, JSON.stringify({ ...shared, reference: prelude.id }));
+    await assert.rejects(remove(), /task topology is still referenced/); await artifact(shared);
+    const otherRun = path.join(home, "state", "runs", "another_run.json");
+    await fs.writeFile(otherRun, JSON.stringify({ id: "another_run", reference: writerId }));
+    await assert.rejects(remove(), /referenced by run/);
+    await fs.writeFile(otherRun, JSON.stringify({ id: "another_run", context: { id: snapshot.id } }));
+    await assert.rejects(remove(), /referenced by run/); await fs.unlink(otherRun);
+    await fs.writeFile(writerFile, JSON.stringify({ ...writerRun, ee: "unrelated_ee" }));
+    await assert.rejects(remove(), /drifted from its declared generation/); await fs.writeFile(writerFile, JSON.stringify(writerRun));
+    await artifact({ ...preludeBody, run: "another_run" });
+    await assert.rejects(remove(), /drifted identity, ownership or content/); await artifact(preludeBody);
+    const preludePath = path.join(registry, "artifact", prelude.id, "artifact.json");
+    await assert.rejects(remove({ releaseTaskWorkerEnvironments: async () => {
+      await fs.writeFile(preludePath, JSON.stringify({ ...preludeBody, module_source: "changed" }));
+      return { runId: plan.runId, expectedDigest: await digest(), releasedWorkerEnvironmentIds: [] };
+    } }), /drifted identity, ownership or content/); await artifact(preludeBody);
+    assert.equal(operations, 4);
+    const deleted = await remove();
+    assert.deepEqual(deleted.removedRuns, [plan.runId, writerId].sort());
+    await assert.rejects(fs.stat(writerFile), /ENOENT/);
+    assert.deepEqual(deleted.removedArtifacts, [prelude.id, topology.id, snapshot.id].sort());
+    for (const id of deleted.removedArtifacts) await assert.rejects(fs.stat(path.join(registry, "artifact", id, "artifact.json")), /ENOENT/);
+    await assert.rejects(fs.stat(runFile), /ENOENT/);
+    assert.equal(await fs.readFile(sharedPath, "utf8"), sourceContent);
+    assert.equal(JSON.parse(await fs.readFile(unrelatedFile)).text, "unrelated");
+    assert.equal(await fs.readFile(payloadFile, "utf8"), "retained payload evidence");
+    assert.equal(await fs.readFile(blobFile, "utf8"), "retained blob evidence");
+    assert.equal(await fs.readFile(ledger, "utf8"), ledgerBefore);
+    console.log("task deletion: exact artifact ownership, shared references, drift and retained evidence passed");
   } finally { store.close(); }
 }
 
@@ -1684,16 +1920,21 @@ async function fixturePlan(octopusHomeRoot, registryRoot, { eeInstancesRoot, req
     assert.equal(rootRecord.parent_ee_id, null, "Home must live directly in the root Existence EE; select its actual root EE");
     const template = JSON.parse(await fs.readFile(path.join(registryRoot, "ee_template", rootRecord.template_name, "ee_template.json")));
     assert.equal(template.bootstrap_root, true, "Home requires the declared bootstrap-root EE");
-  } else assert.equal(rootRecord.template_name, "project");
+  } else {
+    const parent = JSON.parse(await fs.readFile(path.join(eeInstancesRoot, `${rootRecord.parent_ee_id}.json`)));
+    const template = JSON.parse(await fs.readFile(path.join(registryRoot, "ee_template", parent.template_name, "ee_template.json")));
+    assert.ok(template.allowed_child_ee_templates.includes(rootRecord.template_name));
+  }
   const runId = `run_operator_chat_${request.chatId}`;
   const chatInterfaceId = `world_operator_chat_${request.chatId}`;
   const modelInterfaceId = `${request.providerInterfaceId}_${request.chatId}`;
   const workerChoiceInterfaceId = request.workerInterfaceId;
   const workerInterfaceId = `${workerChoiceInterfaceId}_${request.chatId}`;
   const toolId = `file.write__authoring_${request.chatId}`;
-  const intakeId = "system_service_input_5c4a3a35e6f2f0f23f7bb5ae";
-  const writerId = "system_input_writer_5c4a3a35e6f2f0f23f7bb5ae";
-  const inputToolId = "file.write.input_5c4a3a35e6f2f0f23f7bb5ae";
+  const privateId = crypto.createHash("sha256").update(request.chatId).digest("hex").slice(0, 24);
+  const intakeId = `system_service_input_${privateId}`;
+  const writerId = `system_input_writer_${privateId}`;
+  const inputToolId = `file.write.input_${privateId}`;
   const requiredInterfaceIds = [chatInterfaceId, modelInterfaceId, workerInterfaceId, intakeId, writerId].sort();
   const requiredToolIds = [toolId, inputToolId].sort();
   const authoringProfile = {
@@ -1772,6 +2013,7 @@ async function fixturePlan(octopusHomeRoot, registryRoot, { eeInstancesRoot, req
     workerInterfaceId,
     clientSurfaceRole,
     reasoningEffort: request.reasoningEffort ?? "high",
+    serviceTier: request.serviceTier ?? "",
     authoringProfile,
     requiredInterfaceIds,
     requiredToolIds,
@@ -1898,7 +2140,51 @@ function deterministicId(prefix, operationId, key) {
   return `${prefix}_${crypto.createHash("sha256").update(`${operationId}\u0000${key}`).digest("hex").slice(0, 24)}`;
 }
 
-const execution = process.argv[2] === "task-archive"
+async function verifyProjectPolicies() {
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-project-policy-test-"))), registry = path.join(home, "registry");
+  try {
+    await createFixture(home, registry);
+    const planOperatorSurface = (input) => fixturePlan(home, registry, input);
+    const workspace = await initializeWorkspace({ octopusHomeRoot: home, registryRoot: registry, request: setupRequest("policy_setup_12345678"), planOperatorSurface });
+    await writeTemplate(registry, "existence", ["project", "operator_space", "existence"]);
+    const scope = await fixtureProjectScope(home, registry, workspace);
+    const request = { action: "create_project", operationId: "policy_create_12345678", workspace: fixtureWorkspaceIdentity(scope), parentEeId: workspace.rootEeId,
+      expectedParentDigest: scope.environments.find((row) => row.eeId === workspace.rootEeId).recordDigest,
+      templateName: "operator_space", name: "General work", goal: "A concrete goal", presentation: { icon: "folder", color: "blue" } };
+    const options = { octopusHomeRoot: home, registryRoot: registry, scope, request, planOperatorSurface };
+    const before = await fs.readdir(path.join(home, "state/ee_instances"));
+    await assert.rejects(mutateWorkspaceProject({ ...options, request: { ...request, templateName: "missing" } }), /does not allow/);
+    await assert.rejects(mutateWorkspaceProject({ ...options, request: { ...request, templateName: "existence" } }), /bootstrap-root/);
+    await writeTemplate(registry, "existence", ["project"]);
+    await assert.rejects(mutateWorkspaceProject(options), /no longer allows/);
+    await writeTemplate(registry, "existence", ["project", "operator_space", "existence"]);
+    await assert.rejects(mutateWorkspaceProject({ ...options, planOperatorSurface: async () => { throw new Error("formed child policy refusal"); } }), /formed child policy refusal/);
+    assert.deepEqual(await fs.readdir(path.join(home, "state/ee_instances")), before);
+    await assert.rejects(mutateWorkspaceProject({ ...options, planOperatorSurface: async (input) => {
+      const plan = await planOperatorSurface(input); await writeTemplate(registry, "operator_space", []); return plan;
+    } }), /policy changed during creation/);
+    await writeTemplate(registry, "operator_space", ["project"]);
+    const created = await mutateWorkspaceProject(options);
+    const child = JSON.parse(await fs.readFile(path.join(home, "state/ee_instances", `${created.eeId}.json`)));
+    assert.equal(child.template_name, "operator_space"); assert.equal(child.parent_ee_id, workspace.rootEeId);
+    assert.equal((await mutateWorkspaceProject(options)).changed, false);
+    const health = await readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot: registry });
+    assert.equal(health.status, "configured", health.errors.join("; "));
+    await fs.writeFile(path.join(home, "state/ee_instances/ee_unreceipted.json"), JSON.stringify({ ...child, ee_id: "ee_unreceipted" }));
+    const orphaned = await readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot: registry });
+    assert.equal(orphaned.status, "degraded"); assert.match(orphaned.errors.join("; "), /operator spaces without receipts: ee_unreceipted/);
+    console.log("project policy authoring: admitted preset, refusal, drift and replay passed");
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+}
+
+const execution = process.argv[2] === "task-removal"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-task-removal-test-")).then(async (temporary) => {
+    try { await verifyLinkedTaskRemoval(await fs.realpath(temporary)); }
+    finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
+  : process.argv[2] === "project-policy"
+  ? verifyProjectPolicies()
+  : process.argv[2] === "task-archive"
   ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-task-archive-test-")).then(async (temporary) => {
       try { await verifyTaskArchive(temporary); } finally { await fs.rm(temporary, { recursive: true, force: true }); }
     })

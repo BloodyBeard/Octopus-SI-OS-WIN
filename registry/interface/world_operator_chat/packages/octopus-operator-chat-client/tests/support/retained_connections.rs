@@ -14,7 +14,7 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
         std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
     };
     let apply = |plan: &OperatorChatPlan| {
-        for edit in &plan.interface_writes {
+        for edit in plan.interface_writes.iter().chain(&plan.run_writes) {
             if let Some(expected) = &edit.expected_before_hash {
                 assert_eq!(expected, &format!("{:x}", Sha256::digest(std::fs::read(&edit.path).unwrap())));
             }
@@ -23,7 +23,7 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
         }
     };
     let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ee,"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ee,"run_records_root":dir.path().join("runs"),"write_hash_algorithm":"sha256",
         "chat_id":"retained_peer","provider_interface_id":"world_provider_ollama",
         "ee_id":"ee_operator_space","worker_interface_id":"system_worker_coder_max",
         "client_surface_role":"task","cycle":"first",
@@ -73,7 +73,8 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
     prior["interface_state"][&first.model_interface_id]["frontier_checkpoint_ids"].as_array_mut().unwrap().push(json!("peer_output"));
     prior["checkpoints"].as_array_mut().unwrap().push(json!({"id":"peer_output","run":first.run_id,"trace":"peer-trace","epoch":0,"interface_binding":incoming,"outbound_interface_bindings":[outgoing],"artifact_bindings":[{"id":"peer-role"},{"id":"peer-source"}],"required_verified_artifacts":[]}));
     prior["active_checkpoints"].as_array_mut().unwrap().push(json!("peer_output"));
-    let mut neighbor = prior["checkpoints"].as_array().unwrap().iter().find(|cp|cp["id"].as_str().unwrap().starts_with("cp_provider_authoring_")).unwrap().clone();
+    let mut neighbor = prior["interface_state"][&first.model_interface_id]["run_authoring_binding"]["writer_run"]["initial_record"]["checkpoints"][0].clone();
+    neighbor["run"] = json!(first.run_id);
     neighbor["id"] = json!("independent_neighbor");
     neighbor["interface_binding"] = json!(AuthoredInterfaceBinding::all("system_worker_flash".into()));
     neighbor["outbound_interface_bindings"] = json!([]);

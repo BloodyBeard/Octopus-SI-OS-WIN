@@ -403,6 +403,7 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
                 pending.source.seq.0,
                 &pending.delivery.source_artifact,
                 evidence.next_seq.saturating_sub(1),
+                limits.max_payload_bytes,
             )?;
             state
                 .pending
@@ -414,7 +415,7 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
         }
         let pending_edit = pending.edit.as_ref().ok_or("input edit disappeared")?;
         if !validated_edit {
-            pending_edit.validate(&config, &path, pending.source.seq.0, &pending.delivery.source_artifact)?;
+            pending_edit.validate(&config, &path, pending.source.seq.0, &pending.delivery.source_artifact, limits.max_payload_bytes)?;
             validated_edit = true;
         }
         let chain = checked_provider_run_advance(
@@ -523,6 +524,7 @@ async fn run(ctx: InterfaceLiftContext) -> Result<(), String> {
                 &current,
                 evidence.next_seq.saturating_sub(1),
                 &chain,
+                limits.max_payload_bytes,
             )?;
             state
                 .pending

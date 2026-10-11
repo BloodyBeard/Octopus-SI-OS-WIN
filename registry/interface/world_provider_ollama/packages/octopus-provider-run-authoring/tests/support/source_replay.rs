@@ -1,6 +1,42 @@
 use super::*;
 
 #[test]
+#[ignore = "requires explicitly selected read-only installation evidence"]
+fn selected_home_exact_checked_install() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let call_seq = std::env::var("OCTOPUS_REPLAY_CALL").unwrap().parse::<u64>().unwrap();
+    let result_seq = std::env::var("OCTOPUS_REPLAY_RESULT").unwrap().parse::<u64>().unwrap();
+    let movements = home.join("ledger/movements.jsonl");
+    let blobs = home.join("ledger/blobs");
+    let scratch = tempfile::tempdir().unwrap();
+    let index = scratch.path().join("index.sqlite");
+    let evidence = CheckedRunEvidence { movements_path: &movements, ledger_index_path: &index,
+        blobs_dir: &blobs, max_control_frame_bytes: 1_048_576,
+        max_manifest_bytes: 1_048_576, max_payload_bytes: 268_435_456 };
+    let mut reader = FileCheckedRunReader::open(&evidence, Some(call_seq - 1)).unwrap();
+    let call = reader.admitted_movement(call_seq).unwrap().unwrap();
+    let result = reader.admitted_movement(result_seq).unwrap().unwrap();
+    let (manifest, bytes) = reader.artifact(call.artifact.as_ref().unwrap()).unwrap();
+    let (result_manifest, _) = reader.artifact(result.artifact.as_ref().unwrap()).unwrap();
+    let payload: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&bytes).unwrap();
+    let runtime = call.runtime().unwrap();
+    let declaration = reader.snapshot(&ContentHash::from_hex(runtime.run_record_hash.as_ref().unwrap()).unwrap()).unwrap();
+    let Endpoint::Interface(source) = &call.from;
+    let Endpoint::Interface(door) = &call.to;
+    let Endpoint::Interface(owner) = &result.to;
+    let writer = CheckedRunWriter { owner:owner.clone(), source:source.clone(), door:door.clone(),
+        tool:payload.tool, call_label:manifest.label, result_label:result_manifest.label };
+    let path = home.join("state/runs").join(format!("{}.json", runtime.run));
+    let proof = CheckedRunInstall { call: ConsentEvidenceRef { movement_seq:call_seq, artifact:call.artifact.clone().unwrap() },
+        result: ConsentEvidenceRef { movement_seq:result_seq, artifact:result.artifact.clone().unwrap() } };
+    let checked = checked_declared_run_install(&evidence, &path, &declaration, &proof, vec![writer]).unwrap();
+    assert_eq!(checked.call, call);
+    assert_eq!(checked.result, result);
+    assert_eq!(ContentHash::of_bytes(&checked.before).to_hex(), payload.arguments["expected_before_hash"]);
+    assert_eq!(ContentHash::of_bytes(&checked.after).to_hex(), payload.arguments["expected_after_hash"]);
+}
+
+#[test]
 #[ignore = "requires explicitly selected read-only historical ledger evidence"]
 fn selected_ledger_checked_authoring_history() {
     let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
@@ -209,7 +245,19 @@ async fn selected_home_failed_source_rearms_its_consumed_input() {
         before.active_checkpoints.contains(checkpoint), after.active_checkpoints.contains(checkpoint),
     );
     assert!(authored.pending_handoff.terminal && authored.pending_handoff.source_without_context);
-    assert_eq!(after.active_checkpoints.contains(checkpoint), !state.consumed_input && before.active_checkpoints.contains(checkpoint));
+    if let Some(template) = &state.consumed_context_free_independent_input {
+        assert!(canonical.is_none(), "{}", canonical.unwrap());
+        assert!(!after.active_checkpoints.contains(checkpoint));
+        let rearmed = after.checkpoints.iter().filter(|candidate| {
+            after.active_checkpoints.contains(&candidate.id)
+                && checkpoint_record_matches_template(candidate, template, &run)
+        }).collect::<Vec<_>>();
+        assert_eq!(rearmed.len(), 1);
+        assert_eq!(rearmed[0].artifact_bindings, before.checkpoint(checkpoint).unwrap().artifact_bindings);
+        assert_ne!(rearmed[0].id, *checkpoint);
+    } else {
+        assert_eq!(after.active_checkpoints.contains(checkpoint), !state.consumed_input && before.active_checkpoints.contains(checkpoint));
+    }
     assert_eq!(current_context_artifacts(&after, &failed.config).unwrap(), state.context_artifacts);
     assert_eq!(std::fs::read(home.join("state/runs").join(format!("{run}.json"))).unwrap(), state.run_record_bytes);
 }

@@ -656,6 +656,21 @@
   margin: 0;
 }
 
+.home-response-empty > h2 {
+  color: var(--color-token-foreground);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  line-height: 1.2;
+  white-space: pre-wrap;
+}
+
+.home-response-empty > p {
+  color: var(--color-token-text-secondary);
+  font-size: var(--text-base);
+  font-weight: 400;
+  line-height: 1.5;
+}
+
 .voice-orb-probe {
   position: absolute;
   width: var(--voice-orb-size);

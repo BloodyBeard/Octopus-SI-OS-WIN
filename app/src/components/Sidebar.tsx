@@ -50,6 +50,7 @@ import { AgentPresetDialog } from "./agent/AgentPresetDialog";
 import { AgentPresetLogo } from "./agent/AgentPresetLogo";
 import { PROJECT_ICON_OPTIONS, ProjectLogo } from "./project/ProjectLogo";
 import { DEFAULT_PROJECT_COLOR, PROJECT_COLOR_OPTIONS } from "../design-system/projectColors";
+import { allowedProjectPolicies, type ProjectPolicyOption } from "../shell/projectPolicyOptions";
 import {
   dispatchOpenClientTaskActionsMenu,
   dispatchRenameClientTask,
@@ -73,6 +74,9 @@ type Props = {
   agentExecutionContexts: ChatExecutionContext[];
   agentDefinitions: readonly ClientAgentDefinition[];
   agentProviderInterfaces: OctopusProviderInterface[];
+  agentModelsLoading: boolean;
+  agentModelError: string;
+  onRefreshAgentModels: () => Promise<void>;
   surfaceErrors: string[];
   runtimeHost: RuntimeHostView;
   onSurfaceChange: (surfaceId: string) => void;
@@ -135,6 +139,9 @@ export function Sidebar({
   agentExecutionContexts,
   agentDefinitions,
   agentProviderInterfaces,
+  agentModelsLoading,
+  agentModelError,
+  onRefreshAgentModels,
   surfaceErrors,
   runtimeHost,
   onSurfaceChange,
@@ -189,6 +196,9 @@ export function Sidebar({
               agentDefinitions={agentDefinitions}
               runtimeHome={runtimeHost.home}
               providerInterfaces={agentProviderInterfaces}
+              modelsLoading={agentModelsLoading}
+              modelError={agentModelError}
+              onRefreshModels={onRefreshAgentModels}
               surfaces={surfaces}
               onChatOrderIdsChange={onAgentChatOrderIdsChange}
               onPinnedChatIdsChange={onAgentPinnedChatIdsChange}
@@ -221,6 +231,9 @@ function TaskNavigation({
   agentDefinitions,
   runtimeHome,
   providerInterfaces,
+  modelsLoading,
+  modelError,
+  onRefreshModels,
   surfaces,
   onChatOrderIdsChange,
   onPinnedChatIdsChange,
@@ -245,6 +258,9 @@ function TaskNavigation({
   agentDefinitions: readonly ClientAgentDefinition[];
   runtimeHome: string;
   providerInterfaces: OctopusProviderInterface[];
+  modelsLoading: boolean;
+  modelError: string;
+  onRefreshModels: () => Promise<void>;
   surfaces: ClientSurfaceDescriptor[];
   onChatOrderIdsChange: (runIds: string[]) => void;
   onPinnedChatIdsChange: (runIds: string[]) => void;
@@ -524,16 +540,14 @@ function TaskNavigation({
       ? projectWorkspace.rootAllowedChildTemplateIds
       : dialogParent?.allowedChildTemplateIds ?? []
     : [];
-  const dialogTemplateOptions = dialogTemplateIds.map((id) => (
-    projectWorkspace.templates.find((template) => template.id === id) ?? { id, label: id, description: "" }
-  ));
+  const dialogTemplateOptions = allowedProjectPolicies(projectWorkspace.templates, dialogTemplateIds);
   const canCreateRootProject = accessProfile !== "live" || Boolean(
-    projectWorkspace.rootContext && projectWorkspace.rootAllowedChildTemplateIds.length > 0,
+    projectWorkspace.rootContext && allowedProjectPolicies(projectWorkspace.templates, projectWorkspace.rootAllowedChildTemplateIds).length > 0,
   );
   const rootProjectUnavailableReason = projectWorkspace.loading
     ? "Loading project policies…"
     : !canCreateRootProject
-      ? "The root execution environment allows no child EE templates"
+      ? "The parent has no installed policy available for a new project"
       : undefined;
   const deletingProject = deletingProjectId ? projectById.get(deletingProjectId) ?? null : null;
   const deletingProjectScopeIds = deletingProject ? clientProjectScopeIds(projects, deletingProject.id) : null;
@@ -851,6 +865,9 @@ function TaskNavigation({
         presets={agentDefinitions}
         projects={projects}
         providers={providerInterfaces}
+        modelsLoading={modelsLoading}
+        modelError={modelError}
+        onRefreshModels={onRefreshModels}
         readOnly={accessProfile !== "live"}
         onCancel={() => setAgentDialog(null)}
         onDelete={deleteAgent}
@@ -1064,7 +1081,7 @@ function ProjectDialog({
   parent: ProjectDialogParent | null;
   runtimeBacked: boolean;
   submitLabel: string;
-  templateOptions: Array<{ id: string; label: string; description: string }>;
+  templateOptions: ProjectPolicyOption[];
   title: string;
   onCancel: () => void;
   onSubmit: (value: ProjectDialogValue) => Promise<void>;
@@ -1075,24 +1092,31 @@ function ProjectDialog({
   const [color, setColor] = useState<string>(PROJECT_COLOR_OPTIONS[0]);
   const [templateName, setTemplateName] = useState("");
   const [submissionError, setSubmissionError] = useState("");
-  const templateOptionKey = templateOptions.map((option) => (
-    `${option.id}\u0000${option.label}\u0000${option.description}`
-  )).join("\u0001");
+  const templateOptionKey = templateOptions.map((option) => option.id).join("\u0001");
+  const selectedPolicy = templateOptions.find((option) => option.id === templateName);
   useEffect(() => {
     if (!open) return;
     setName(initialName);
     setIcon((PROJECT_ICON_OPTIONS as readonly string[]).includes(initialIcon) ? initialIcon : PROJECT_ICON_OPTIONS[0]);
     setColor(initialColor || DEFAULT_PROJECT_COLOR);
-    setTemplateName(creating && templateOptions.length === 1 ? templateOptions[0].id : "");
+    setTemplateName(creating ? templateOptions.find((option) => option.inheritsParentPolicy)?.id
+      ?? (templateOptions.length === 1 ? templateOptions[0].id : "") : "");
     setSubmissionError("");
-  }, [creating, initialColor, initialIcon, initialName, open, templateOptionKey]);
+  }, [creating, initialColor, initialIcon, initialName, open, parent?.eeId]);
+
+  useEffect(() => {
+    if (!open || !creating) return;
+    setTemplateName((current) => templateOptions.some((option) => option.id === current) ? current
+      : templateOptions.find((option) => option.inheritsParentPolicy)?.id
+        ?? (templateOptions.length === 1 ? templateOptions[0].id : ""));
+  }, [creating, open, templateOptionKey]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy) return;
     const value = name.trim();
     if (!value) return;
-    if (runtimeBacked && creating && (!templateName || !parent?.eeId)) return;
+    if (runtimeBacked && creating && (!selectedPolicy || !parent?.eeId)) return;
     setSubmissionError("");
     try {
       await onSubmit({ name: value, icon, color, templateName });
@@ -1113,7 +1137,7 @@ function ProjectDialog({
             <OcDialogHeader className="p-0 pb-3" closeDisabled={busy} onClose={onCancel} title={title} titleId="octopus-project-name-title" />
             {runtimeBacked && creating ? (
               <div className="flex w-full flex-col gap-2 pt-3 first:pt-0">
-                <span className="text-base text-token-foreground">Parent execution environment</span>
+                <span className="text-base text-token-foreground">Parent project</span>
                 <div className="flex min-w-0 items-center gap-3 rounded-xl border border-token-border bg-token-main-surface-primary px-3 py-2.5">
                   <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-token-foreground/5 text-token-icon-foreground">
                     <Glyph name="folder" size={16} />
@@ -1121,7 +1145,7 @@ function ProjectDialog({
                   <span className="flex min-w-0 flex-1 flex-col">
                     <span className="truncate text-base text-token-foreground">{parent?.displayName || "Unavailable"}</span>
                     <span className="truncate text-sm text-token-description-foreground">
-                      {parent ? `${parent.eeId} · ${parent.templateName}` : "Choose a valid parent before creating this project"}
+                      {parent ? "This project stays within its parent’s permissions" : "Choose a valid parent before creating this project"}
                     </span>
                   </span>
                 </div>
@@ -1155,11 +1179,11 @@ function ProjectDialog({
               <div className="flex w-full flex-col gap-2 pt-3 first:pt-0">
                 <OcSelect
                   id="octopus-project-template"
-                  label="Execution environment policy"
+                  label="Project policy"
                   onChange={setTemplateName}
                   options={templateOptions.map((option) => ({
                     value: option.id,
-                    label: policyTemplateLabel(option.id),
+                    label: option.label,
                     description: option.description || undefined,
                   }))}
                   placeholder="Choose a policy"
@@ -1167,11 +1191,16 @@ function ProjectDialog({
                   stretch
                   value={templateName}
                 />
-                <p className="text-sm leading-5 text-token-description-foreground">
-                  {templateName
-                    ? `Source: registry/ee_template/${templateName}. Its policy is narrowed by the parent execution-environment chain.`
-                    : "Choose one of the child EE templates allowed by the selected parent."}
-                </p>
+                {selectedPolicy ? (
+                  <details className="text-sm leading-5 text-token-description-foreground">
+                    <summary className="cursor-pointer">Policy source and limits</summary>
+                    <p className="mt-2 break-words">Source: {selectedPolicy.source}</p>
+                    <p>{selectedPolicy.inheritsParentPolicy
+                      ? "Access follows the parent’s policy through the existing Project template. Nested projects use that same template."
+                      : selectedPolicy.goal}</p>
+                    <p>All parent restrictions still apply. Creation is checked against the formed child policy.</p>
+                  </details>
+                ) : <p className="text-sm leading-5 text-token-description-foreground">Choose an installed policy allowed by the parent.</p>}
               </div>
             ) : null}
             <div className="flex w-full flex-col pt-3 first:pt-0">
@@ -1179,7 +1208,7 @@ function ProjectDialog({
                 <Glyph className="icon-base mr-3 shrink-0 text-token-description-foreground" name="lightbulb" size={21} />
                 <p className="text-sm text-pretty text-token-description-foreground">
                   {runtimeBacked && creating
-                    ? `This creates one child execution environment under ${parent?.displayName || "the selected parent"}. The project name becomes its goal; the template and parent chain form its policy.`
+                    ? `Tasks in this project stay within ${parent?.displayName || "the parent"}’s permissions. A preset can restrict them further; it never grants extra access.`
                     : "Projects group tasks around one goal. Select a project to focus its tasks; select it again to see everything."}
                 </p>
               </aside>
@@ -1187,7 +1216,7 @@ function ProjectDialog({
             {submissionError ? <p className="mt-3 rounded-xl bg-token-error-background/20 px-3 py-2 text-sm text-token-error-foreground" role="alert">{submissionError}</p> : null}
             <OcDialogFooter className="min-h-0 border-0 px-0 pb-0 pt-3">
                 <OcButton
-                  disabled={busy || !name.trim() || (runtimeBacked && creating && (!templateName || !parent?.eeId))}
+                  disabled={busy || !name.trim() || (runtimeBacked && creating && (!selectedPolicy || !parent?.eeId))}
                   type="submit"
                   variant="primary"
                 >
@@ -1197,11 +1226,6 @@ function ProjectDialog({
           </form>
     </OcDialog>
   );
-}
-
-function policyTemplateLabel(value: string): string {
-  const words = value.trim().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
-  return words ? words[0].toLocaleUpperCase() + words.slice(1) : value;
 }
 
 function FadeLabel({ className, text }: { className?: string; text: string }) {

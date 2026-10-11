@@ -1280,6 +1280,10 @@ pub fn decode_code_mode_door_artifact(
         if let Some(call) = &call {
             let config = load_config()?;
             config.validate(ctx.owner_interface().as_str())?;
+            if config.handoff.is_some() {
+                let topology = config.resolve_owner_topology(envelope)?;
+                continuation::validate_admitted_coauthor(ctx, envelope, &topology)?;
+            }
             if config
                 .continuation
                 .as_ref()

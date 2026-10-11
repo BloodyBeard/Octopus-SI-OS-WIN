@@ -315,6 +315,7 @@ impl AdmittedConsentArtifact {
 }
 
 impl octopus_provider_run_authoring::CheckedRunEvidenceReader for ConsentEvidenceReader {
+    fn max_payload_bytes(&self) -> u64 { self.max_payload_bytes }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         ConsentEvidenceReader::movement(self, seq).map(Some)
     }

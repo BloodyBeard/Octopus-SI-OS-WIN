@@ -16,6 +16,7 @@ export type QueuedChatTurn = {
   providerBoundInterfaceId?: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   endpoint: string;
   createdAtMs: number;
   queuedAfterSeq?: number;

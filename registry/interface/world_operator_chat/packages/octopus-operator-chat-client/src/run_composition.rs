@@ -91,6 +91,8 @@ pub struct RunCompositionRequest {
     pub provider_interface_id: String,
     pub model: String,
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub authoring: CompositionAuthoring,
     pub communication: CompositionCommunication,
     pub selected_worker_environment_kinds: Vec<String>,
@@ -148,6 +150,8 @@ pub struct RunCompositionPlan {
     pub return_interface_ids: Vec<String>,
     pub model: String,
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub descriptor_writes: Vec<PlannedClientWrite>,
     pub run_write: PlannedClientWrite,
     pub required_interface_ids: Vec<String>,
@@ -196,6 +200,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &request.provider_interface_id,
         &request.model,
         &request.reasoning_effort,
+        request.service_tier.as_deref(),
         &topology,
     )?;
     if let Some(selection) = &request.communication.output_selection {
@@ -517,6 +522,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         return_interface_ids: request.communication.return_interface_ids.clone(),
         model: provider.model,
         reasoning_effort: provider.reasoning_effort,
+        service_tier: provider.service_tier,
         descriptor_writes: writes,
         run_write,
         required_interface_ids,

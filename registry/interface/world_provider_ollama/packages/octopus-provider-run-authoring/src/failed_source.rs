@@ -315,6 +315,69 @@ impl ProviderHandoffSession {
 }
 
 impl ProviderOutputHandoff {
+    pub(super) fn validate_refused_source_handoff(
+        &self,
+        record: &RunRecord,
+        pending: &PendingHandoff,
+    ) -> Result<(), String> {
+        if !self.failed_source || !pending.terminal || pending.source_without_context
+            || pending.source_movement_seq != self.source_movement_seq || pending.items.is_empty()
+        {
+            return Err("failed source cannot supersede this pending handoff".into());
+        }
+        validate_pending_items_are_active(record, &self.config.provider_interface, pending)?;
+        let references = pending.items.iter().map(|item| {
+            load_pending_artifact(&self.var_dir, item).map(|(_, reference)| reference)
+        }).collect::<Result<Vec<_>, _>>()?;
+        let limits = self.ctx.required_host_io_limits()?;
+        let evidence = CheckedRunEvidence {
+            movements_path: &self.ctx.movements_path,
+            ledger_index_path: &self.ctx.ledger_index_path,
+            blobs_dir: &self.ctx.blobs_dir,
+            max_control_frame_bytes: limits.max_control_frame_bytes,
+            max_manifest_bytes: limits.max_manifest_bytes,
+            max_payload_bytes: limits.max_payload_bytes,
+        };
+        let mut reader = FileCheckedRunReader::open(&evidence, Some(self.source_movement_seq))?;
+        let mut refused = BTreeSet::new();
+        while let Some(movement) = reader.movement(reader.next_seq)? {
+            if movement.seq.0 <= self.source_movement_seq || movement.run() != Some(&record.id) {
+                continue;
+            }
+            let Some(index) = references.iter().position(|reference| movement.artifact.as_ref() == Some(reference)) else { continue; };
+            if movement.from != Endpoint::Interface(self.config.provider_interface.clone()) { continue; }
+            if matches!(movement.kind, MovementKind::InterfaceArrival | MovementKind::InterfaceOutbound) {
+                return Err("failed source pending artifact already has admitted movement evidence".into());
+            }
+            if movement.kind != MovementKind::DeliveryRefused { continue; }
+            let runtime = movement.runtime().ok_or("pending refusal has no exact runtime coordinate")?;
+            let item = &pending.items[index];
+            if runtime.checkpoint != item.checkpoint.id || runtime.epoch != item.checkpoint.epoch { continue; }
+            if runtime.interface != self.config.provider_interface || runtime.worker != record.worker
+                || runtime.ee != record.ee || movement.to != Endpoint::Interface(record.worker.clone())
+                || !matches!(movement.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict()), Some(DeliveryVerdict::Refused { .. }))
+            {
+                return Err("pending refusal changed its exact interface or run scope".into());
+            }
+            let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+                .ok_or("pending refusal has no pinned run snapshot")?;
+            let bytes = reader.snapshot(&hash)?;
+            if ContentHash::of_bytes(&bytes) != hash { return Err("pending refusal snapshot integrity mismatch".into()); }
+            let snapshot = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+            if snapshot.id != record.id || snapshot.worker != record.worker || snapshot.ee != record.ee
+                || persisted_pending_handoff(&snapshot, &self.config.provider_interface)?.as_ref() != Some(pending)
+            {
+                return Err("pending refusal does not prove the current exact handoff".into());
+            }
+            validate_pending_items_are_active(&snapshot, &self.config.provider_interface, pending)?;
+            refused.insert(index);
+        }
+        if refused.len() != pending.items.len() {
+            return Err("failed source pending handoff has no exact refusal for every artifact".into());
+        }
+        Ok(())
+    }
+
     pub async fn hand_failed_source(
         &self,
         emission: ProviderEmission,
@@ -333,21 +396,18 @@ impl ProviderOutputHandoff {
                 .map_err(Unavailable)?
                 .filter(|pending| pending.source_movement_seq == self.source_movement_seq);
             if let Some(pending) = pending {
-                if !pending.terminal || !pending.source_without_context {
-                    return Err(Unavailable(format!(
-                        "failed provider source {} already carries its own pending handoff",
-                        self.source_movement_seq
-                    )));
+                if pending.terminal && pending.source_without_context {
+                    return self
+                        .hand_pending_items(&pending, &state.run_record_bytes)
+                        .await
+                        .map_err(Interrupted)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| {
+                            Interrupted("failed provider source pending handoff is empty".to_string())
+                        });
                 }
-                return self
-                    .hand_pending_items(&pending, &state.run_record_bytes)
-                    .await
-                    .map_err(Interrupted)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        Interrupted("failed provider source pending handoff is empty".to_string())
-                    });
+                self.validate_refused_source_handoff(&record, &pending).map_err(Unavailable)?;
             }
             let identity =
                 artifact_identity(&emission.artifact, &self.var_dir).map_err(Unavailable)?;

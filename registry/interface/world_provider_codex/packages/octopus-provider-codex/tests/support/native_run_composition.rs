@@ -33,6 +33,7 @@ fn creation_uses_admitted_coordinates_after_the_authoring_frontier_advances() {
                 client_template_interface_id:None,
                 output_selection:None, ee_id:request.ee_id, worker_template_interface_id:request.worker_template_interface_id,
                 provider_interface_id:request.provider_interface_id, model:request.model, reasoning_effort:request.reasoning_effort,
+                service_tier:None,
                 authoring:request.authoring, worker_environment_kinds:request.selected_worker_environment_kinds,
                 tools:request.selected_tools, door_host_slots:request.door_host_slots, context_artifacts:vec![],
                 return_interface_ids:vec![], return_to_source:true,

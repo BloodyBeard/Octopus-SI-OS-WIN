@@ -6,6 +6,8 @@
   where your data lives.
 - [Desktop client](client.md) - Home, Tasks, voice, gestures, Applications,
   Drivers, Extensions, and where packages come from.
+- [Terminal client](cli.md) - interactive chat, shared tasks, setup, and commands
+  for scripts and other agents.
 - [Troubleshooting](../TROUBLESHOOTING.md) - where to look when something
   fails.
 - [Security model](security-model.md) - what stands between a model's output

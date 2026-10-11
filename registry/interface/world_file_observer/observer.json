@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "interface": "world_file_observer",
+  "poll_interval_ms": 500,
+  "read_roots": [],
+  "files": []
+}

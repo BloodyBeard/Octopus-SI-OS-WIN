@@ -9,6 +9,7 @@ const MAX_DIRECTORY_ENTRIES = 2_000;
 const MAX_DIRECTORY_TEXT_BYTES = 12 * 1024 * 1024;
 const MAX_DIRECTORY_FILE_TEXT_BYTES = 1024 * 1024;
 const MAX_STAGE_CHUNK_BYTES = 4 * 1024 * 1024;
+const MAX_ATTACHMENT_PREVIEW_BYTES = 40 * 1024 * 1024;
 const ATTACHMENT_STAGE_TTL_MS = 5 * 60 * 1000;
 
 async function selectClientAttachments(dialog, browserWindow, request, staging) {
@@ -371,6 +372,52 @@ function createClientAttachmentStagingStore({ root }) {
     if (failures.length) throw new AggregateError(failures, "Attachment staging cleanup failed.");
   }
 
+  async function readPreview(owner, input) {
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || Object.keys(input).sort().join(",") !== "contentHash,id"
+      || typeof input.id !== "string" || input.id.trim() !== input.id
+      || typeof input.contentHash !== "string" || !/^[0-9a-f]{64}$/.test(input.contentHash)) {
+      throw new Error("Attachment preview requires an exact stage id and contentHash.");
+    }
+    const entry = owned(ready, owner, input.id);
+    const current = () => {
+      if (ready.get(input.id) !== entry || entry.expiresAt <= Date.now()) throw new Error("Attachment stage is unavailable.");
+    };
+    current();
+    if (input.contentHash !== entry.contentHash) throw new Error("Attachment preview contentHash does not match its stage.");
+    if (!/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(entry.type)) throw new Error("Attachment preview requires a valid MIME type.");
+    if (entry.size > MAX_ATTACHMENT_PREVIEW_BYTES) throw new Error(`Attachment exceeds the ${MAX_ATTACHMENT_PREVIEW_BYTES} byte preview boundary.`);
+    const stat = await fs.promises.lstat(entry.payloadPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Attachment stage is not a regular file.");
+    const handle = await fs.promises.open(entry.payloadPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    let preview;
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || before.size !== entry.size || before.uid !== process.getuid()) {
+        throw new Error("Attachment stage no longer matches its captured file and size.");
+      }
+      const buffer = Buffer.alloc(entry.size + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+      }
+      const after = await handle.stat();
+      if (offset !== entry.size || after.size !== entry.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+        throw new Error("Attachment stage changed while it was being read.");
+      }
+      const bytes = buffer.subarray(0, entry.size);
+      const contentHash = createHash("sha256").update(bytes).digest("hex");
+      if (contentHash !== entry.contentHash) throw new Error("Attachment stage no longer matches its captured content hash.");
+      preview = { base64: bytes.toString("base64"), mimeType: entry.type, contentHash, size: bytes.byteLength };
+    } finally {
+      await handle.close();
+    }
+    current();
+    return preview;
+  }
+
   async function consume(owner, input) {
     const id = requiredString(input?.id, "attachment stage id");
     sweepExpired();
@@ -410,7 +457,7 @@ function createClientAttachmentStagingStore({ root }) {
     }
   }
 
-  return { abort, abortAll, abortOwner, append, begin, consume, discard, finalize, stageBytes, stageFile, sweepExpired };
+  return { abort, abortAll, abortOwner, append, begin, consume, discard, finalize, readPreview, stageBytes, stageFile, sweepExpired };
 }
 
 function ipcBytes(value) {

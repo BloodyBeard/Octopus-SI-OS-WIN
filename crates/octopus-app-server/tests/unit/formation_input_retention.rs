@@ -149,9 +149,14 @@ fn registry_observation_requires_stability_and_propagates_read_failures() {
         ((1..=8).collect(), "after 4 attempts", 4),
         (vec![0], "before load failed", 0),
         (vec![1, 0], "after load failed", 1),
+        (vec![u128::MAX, 1, 2, 2, 2], "ok", 2),
+        (vec![1, u128::MAX, 2, 2], "ok", 2),
+        (vec![u128::MAX, 1, 1], "malformed", 1),
+        (vec![u128::MAX; 4], "after 4 attempts", 0),
     ] {
         let mut reads = reads.into_iter().map(|digest| match digest {
             0 => Err(std::io::Error::other("unreadable")),
+            u128::MAX => Err(std::io::Error::new(std::io::ErrorKind::NotFound, "enumerated descriptor was removed")),
             digest => Ok(RegistryDescriptorFingerprint {
                 file_count: 1,
                 digest,

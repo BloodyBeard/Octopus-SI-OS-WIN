@@ -2,8 +2,16 @@ use super::*;
 
 pub fn checked_failed_run_write(
     evidence: &CheckedRunEvidence<'_>, writer: &CheckedRunWriter,
-    edit: &CheckedRunEdit, call_seq: u64,
-) -> Result<Option<Movement>, String> {
+    edit: &CheckedRunEdit, call_seq: u64, coauthors: Vec<CheckedRunWriter>,
+) -> Result<Option<Movement>, CheckedRunError> {
+    failed_run_write_evidence(evidence, writer, edit, call_seq, coauthors)
+        .map(|proof| proof.map(|(movement, _)| movement))
+}
+
+fn failed_run_write_evidence(
+    evidence: &CheckedRunEvidence<'_>, writer: &CheckedRunWriter,
+    edit: &CheckedRunEdit, call_seq: u64, mut coauthors: Vec<CheckedRunWriter>,
+) -> Result<Option<(Movement, Vec<u8>)>, CheckedRunError> {
     let mut reader = FileCheckedRunReader::open(evidence, call_seq.checked_sub(1))?;
     let call = loop {
         let row = reader.movement(reader.next_seq)?.ok_or("failed write has no admitted call")?;
@@ -21,6 +29,7 @@ pub fn checked_failed_run_write(
         || runtime.run != intended.id || runtime.ee != intended.ee || runtime.worker != intended.worker
         || manifest.label != writer.call_label || envelope.tool != writer.tool || envelope.correlation_id != edit.correlation_id
         || envelope.arguments.path != edit.path || envelope.arguments.patch != edit.patch
+        || envelope.arguments.json_format != edit.json_format
         || envelope.arguments.expected_before_hash != edit.before_hash || envelope.arguments.expected_after_hash != edit.after_hash
         || !metadata.grant.tools.contains(&writer.tool) || metadata.grant.hard_blocked_tools.contains(&writer.tool)
         || !metadata.grant.interfaces.contains(&writer.door.to_string()) || metadata.verification_failure.is_some() {
@@ -42,7 +51,21 @@ pub fn checked_failed_run_write(
         let runtime = movement.runtime().ok_or("failed write result has no run coordinate")?;
         if runtime.ee != intended.ee || runtime.worker != intended.worker { return Err("failed write result changed its run scope".into()); }
         let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex).ok_or("failed write result has no pinned snapshot")?;
-        let snapshot = reader.snapshot(&hash)?;
+        let snapshot = if movement.kind == MovementKind::DeliveryRefused {
+            let admitted = call.runtime().and_then(|runtime| runtime.run_record_hash.as_deref())
+                .and_then(ContentHash::from_hex).ok_or("failed write call has no admitted preimage")?;
+            let before = reader.snapshot(&admitted)?;
+            if ContentHash::of_bytes(&before) != admitted {
+                return Err("failed write call differs from its exact admitted preimage".into());
+            }
+            coauthors.push(writer.clone());
+            let snapshot = checked_declared_run_snapshot(evidence, &edit.path, &before, call_seq,
+                &hash.to_hex(), movement.seq.0, coauthors)?;
+            validate_unchanged_admitted_checkpoint(&before, &snapshot, &runtime.checkpoint)?;
+            snapshot
+        } else {
+            reader.snapshot(&hash)?
+        };
         if ContentHash::of_bytes(&snapshot) != hash { return Err("failed write result snapshot integrity mismatch".into()); }
         let record = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
         let checkpoint = record.checkpoint(&runtime.checkpoint).ok_or("failed write result checkpoint absent")?;
@@ -66,7 +89,7 @@ pub fn checked_failed_run_write(
                 return Err("failed write result is not admitted on its owner edge".into());
             }
         }
-        return Ok(Some(movement));
+        return Ok(Some((movement, snapshot)));
     }
 }
 
@@ -114,6 +137,7 @@ pub(super) fn rejected_write(
         result_label: config.file_write_result_label.clone(),
     };
     let edit = CheckedRunEdit {
+        json_format: authored.json_format,
         path: ctx
             .root_slot("run_records_root")?
             .canonicalize()
@@ -166,7 +190,7 @@ fn rejected_write_through(
     let mut reader =
         FileCheckedRunReader::open(&evidence, Some(authored.pending_handoff.source_movement_seq))?;
     let template = config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
-    let mut pending = None;
+    let mut pending: Option<(u64, bool, PathBuf, octopus_descriptors::EeId)> = None;
     let mut rejected = None;
     loop {
         let seq = reader.next_seq;
@@ -176,6 +200,54 @@ fn rejected_write_through(
         let Some(movement) = reader.movement(seq)? else {
             break;
         };
+        if movement.kind == MovementKind::DeliveryRefused
+            && movement.from == Endpoint::Interface(template.interface().clone())
+            && movement.run() == Some(&config.run)
+        {
+            let (manifest, payload) = reader.artifact(movement.artifact.as_ref()
+                .ok_or("refused authoring result has no artifact")?)?;
+            if manifest.label != config.file_write_result_label { continue; }
+            let result: ToolResultArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+            if result.correlation_id.as_deref() != Some(&authored.correlation_id) { continue; }
+            let Some((call_seq, exact, path, _)) = pending.take() else { continue; };
+            if !exact { continue; }
+            let writer = CheckedRunWriter {
+                owner: config.provider_interface.clone(), source: config.authoring_source_interface.clone(),
+                door: template.interface().clone(), tool: config.file_write_tool.clone(),
+                call_label: config.file_write_label.clone(), result_label: config.file_write_result_label.clone(),
+            };
+            let edit = CheckedRunEdit {
+        json_format: authored.json_format,
+                path: ctx.root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
+                    .join(format!("{}.json", config.run)),
+                before_hash: authored.before_hash.clone(), after_hash: authored.after_hash.clone(),
+                correlation_id: authored.correlation_id.clone(), content: authored.content.clone(), patch: authored.patch.clone(),
+            };
+            let (failed, snapshot) = match failed_run_write_evidence(&evidence, &writer, &edit, call_seq, Vec::new()) {
+                Ok(Some(proof)) => proof,
+                Ok(None) | Err(CheckedRunError::AwaitingResults { .. }) => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            if path != edit.path || failed != movement {
+                return Err("refused authoring result does not prove its exact failed write".into());
+            }
+            let before = reader.snapshot(&before_hash)?;
+            if ContentHash::of_bytes(&before) != before_hash { return Err("refused authoring preimage failed integrity".into()); }
+            let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
+            let checkpoint = active_checkpoint_for_role(&original, config, RunAuthoringCheckpointRole::AuthoringResult)?;
+            let runtime = movement.runtime().ok_or("refused authoring result has no run coordinate")?;
+            if runtime.checkpoint != checkpoint.id || runtime.epoch != checkpoint.epoch.0 {
+                return Err("refused authoring result changed its original return checkpoint".into());
+            }
+            validate_unchanged_admitted_checkpoint(&before, &snapshot, &checkpoint.id)?;
+            rejected = Some(RejectedWrite {
+                result_seq: movement.seq.0,
+                evidence: RejectionEvidence::ToolResult {
+                    call_seq, error: result.error.ok_or("refused authoring result has no error")?,
+                },
+            });
+            continue;
+        }
         if movement.kind != MovementKind::InterfaceOutbound {
             continue;
         }
@@ -234,7 +306,7 @@ fn rejected_write_through(
                     "rejected authoring call was not admitted under its exact writer".into(),
                 );
             }
-            let exact = call.arguments.patch == authored.patch
+            let exact = call.arguments.json_format == authored.json_format && call.arguments.patch == authored.patch
                 && call.arguments.expected_before_hash == authored.before_hash
                 && call.arguments.expected_after_hash == authored.after_hash;
             pending = Some((
@@ -408,6 +480,7 @@ fn checked_edit_verification_failure_with_reader(
             || call.correlation_id != edit.correlation_id
             || call.arguments.path != edit.path
             || call.arguments.patch != edit.patch
+            || call.arguments.json_format != edit.json_format
             || call.arguments.expected_before_hash != edit.before_hash
             || call.arguments.expected_after_hash != edit.after_hash
         {
@@ -649,11 +722,25 @@ fn keyed_checkpoints(
     Ok(by_id)
 }
 
+pub(super) fn validate_rebased_authored_run(
+    before: &[u8],
+    current: &[u8],
+    previous: &AuthoredRun,
+    next: &AuthoredRun,
+    config: &RunAuthoringConfig,
+) -> Result<(), String> {
+    if rebase_authored_run(before, current, previous, config, next.json_format)? != *next {
+        return Err("provider authoring retry changed its original intent or independent write evidence".into());
+    }
+    Ok(())
+}
+
 pub(super) fn rebase_authored_run(
     before: &[u8],
     current: &[u8],
     authored: &AuthoredRun,
     config: &RunAuthoringConfig,
+    json_format: Option<JsonFormat>,
 ) -> Result<AuthoredRun, String> {
     if ContentHash::of_bytes(before).to_hex() != authored.before_hash {
         return Err("authoring retry lost the original exact preimage".into());
@@ -662,7 +749,7 @@ pub(super) fn rebase_authored_run(
     let observed = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
     let extension = if original.interface_state.get(&config.provider_interface)
         != observed.interface_state.get(&config.provider_interface) {
-        output_connections::extension(&original, current, config)?
+        output_connections::extension(before, current, config)?
     } else { None };
     let protected = extension.as_ref().map_or(current, |extension| extension.protected.as_slice());
     let actual = RunRecord::from_bytes(protected).map_err(|error| error.to_string())?;
@@ -752,8 +839,7 @@ pub(super) fn rebase_authored_run(
     if let Some(extension) = extension {
         extension.restore(&mut merged, &config.provider_interface)?;
     }
-    let mut content = serde_json::to_string_pretty(&merged).map_err(|error| error.to_string())?;
-    content.push('\n');
+    let content = String::from_utf8(json_format.unwrap_or(JsonFormat::Pretty).encode(&merged)?).map_err(|error| error.to_string())?;
     let candidate = RunRecord::from_bytes(content.as_bytes()).map_err(|error| error.to_string())?;
     validate_pending_items_are_active(
         &candidate,
@@ -769,7 +855,8 @@ pub(super) fn rebase_authored_run(
         &merged,
     );
     rebased.content = content;
-    if apply_run_json_patch(current, &rebased.patch, &rebased.after_hash)? != rebased.content {
+    rebased.json_format = json_format;
+    if apply_run_json_patch(current, &rebased.patch, &rebased.after_hash, rebased.json_format)? != rebased.content {
         return Err("authoring retry did not reconstruct its exact planned bytes".into());
     }
     Ok(rebased)

@@ -10,6 +10,7 @@ name = "octopus_ledger_store"
 path = "src/lib.rs"
 
 [dependencies]
+octopus-file-storage = { path = "../octopus-file-storage" }
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,10 @@
+{
+  "id": "world_file_observer",
+  "interface_type": "world",
+  "role": "sensor",
+  "direction": "inbound",
+  "source_names": [
+    "file.observation"
+  ],
+  "interface_driver_ref": "file_observer_life"
+}

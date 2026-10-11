@@ -297,7 +297,7 @@ async function rendererChecks(mode = "owned") {
   const saved = Object.fromEntries(["window", "document", "navigator", "IS_REACT_ACT_ENVIRONMENT"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, navigator: dom.window.navigator, IS_REACT_ACT_ENVIRONMENT: true })) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
   const { createRoot } = require("react-dom/client");
-  const calls = [], listeners = new Set();
+  const calls = [], listeners = new Set(), menus = [];
   const data = { target_id: "target", engine_handle: "engine", host_generation: "generation", browser_context_id: "context", formation_pin: "pin", url: "https://page.test/" };
   let current, holdAcknowledgement = null;
   let downloads = { sequence: 0, downloads: [], unacknowledgedIds: [], error: null, preferences: { directory: null, promptForLocation: false } };
@@ -314,6 +314,8 @@ async function rendererChecks(mode = "owned") {
     dom.window.HTMLElement.prototype.releaseOwnedGuest = function () { nativeAttached = false; calls.push(["native-release"]); };
   }
   dom.window.octopusTransport = {
+    showClientContextMenu(request) { calls.push(["menu", request]); return new Promise((resolve, reject) => menus.push({ request, resolve, reject })); },
+    async cancelClientContextMenu(request) { calls.push(["menu-cancel", request]); return { cancelled: true }; },
     async prepareNativeBrowserViewer(request) { calls.push(["prepare", request]); if (mode === "owned") assert.equal(request.frameToken, "native-frame"); else assert.match(request.frameToken, /^[a-f0-9-]{36}$/); current = { engine, attachmentId: request.attachmentId, mountGeneration: 11, hostGeneration: "generation", protocol: "browser.native.v1", presentationProtocol: engine.presentationProtocol, presentationPhase: mode === "owned" ? "prepared" : "attached", viewportSequence: 0, modelViewport: { revision: 0, emulatedSize: null }, modelActive: false, modelTurnKey: "0", cursor: null, workerEnvironmentId: "room", run: "run", ee: "ee", surfaceId: "surface", targetId: "target", engineHandle: "engine", browserContextId: "context", connected: true, visible: false, readOnly: false, loading: false, url: data.url, title: "Page", canGoBack: true, canGoForward: false, zoomFactor: 1 }; return { adoptionToken: mode === "owned" ? "lease" : null, hostGeneration: "generation", mountGeneration: 11, state: current }; },
     async acknowledgeNativeBrowserViewer(request) { assert.equal(nativeAttached, mode === "owned"); calls.push(["ack", request]); if (holdAcknowledgement) return holdAcknowledgement(request); return (current = { ...current, viewportSequence: request.viewportSequence, presentationPhase: "ready", visible: request.visible }); },
     async syncNativeBrowserViewer(request) { assert.equal(request.mountGeneration, 11); assert.equal(request.hostGeneration, "generation"); calls.push(["sync", request]); return (current = { ...current, viewportSequence: request.viewportSequence, visible: request.visible }); },
@@ -375,8 +377,20 @@ async function rendererChecks(mode = "owned") {
   const root = createRoot(dom.window.document.getElementById("root"));
   const props = { active: true, environment: { id: "room", runId: "run", lifecycle: "active" }, surface: { id: "surface", mode: "direct", protocol: "browser.native.v1", readOnly: false, data } };
   const settleLayout = () => React.act(async () => { await new Promise((resolve) => dom.window.requestAnimationFrame(() => dom.window.requestAnimationFrame(() => dom.window.requestAnimationFrame(resolve)))); });
+  const openBrowserMenu = async () => {
+    await React.act(async () => dom.window.document.querySelector('[aria-label="More browser actions"]').click()); await settleLayout();
+    assert.equal(current.visible, true, "native popup must preserve the rendered page");
+    assert.equal(dom.window.document.querySelector('[role="menu"][aria-label="Browser actions"]'), null);
+    assert.equal(dom.window.document.querySelector('[aria-label="More browser actions"]').getAttribute("aria-expanded"), "true");
+    return menus.at(-1);
+  };
+  const selectBrowserMenu = (pending, id) => React.act(async () => pending.resolve({ requestId: pending.request.requestId, id }));
+  const publish = () => { for (const listener of listeners) listener({ type: "state", attachmentId: current.attachmentId, hostGeneration: current.hostGeneration, mountGeneration: current.mountGeneration, state: current }); };
   const checkClosedPage = async () => {
+    const pendingMenu = await openBrowserMenu(), actionCount = calls.filter(([type]) => type === "action").length;
     await React.act(async () => { for (const listener of listeners) listener({ type: "error", attachmentId: current.attachmentId, hostGeneration: current.hostGeneration, mountGeneration: current.mountGeneration, error: { code: "presentation_unavailable", message: "Connection failed" } }); });
+    assert.ok(calls.some(([type, request]) => type === "menu-cancel" && request.requestId === pendingMenu.request.requestId));
+    await selectBrowserMenu(pendingMenu, "zoom-in"); assert.equal(calls.filter(([type]) => type === "action").length, actionCount);
     assert.match(dom.window.document.querySelector('[role="status"]').textContent, /Browser unavailable/);
     await React.act(async () => [...dom.window.document.querySelectorAll('button')].find(button => button.textContent === 'Try again').click()); await settleLayout();
     const before = calls.filter(([type]) => type === "prepare").length;
@@ -392,6 +406,27 @@ async function rendererChecks(mode = "owned") {
     const guestElement = dom.window.document.querySelector("webview"); assert.ok(guestElement);
     assert.equal(dom.window.document.querySelector("iframe, canvas"), null);
     const layout = calls.find(([type]) => type === "ack")[1];
+    current = { ...current, modelActive: true }; await React.act(async () => publish()); await settleLayout();
+    assert.equal(dom.window.document.querySelector(".we-browser-status"), null, "model activity must not add a browser banner");
+    const staleMenu = await openBrowserMenu(), actionsBefore = calls.filter(([type]) => type === "action").length;
+    assert.ok(staleMenu.request.items.find(item => item.id === "zoom").submenu.every(item => item.enabled));
+    current = { ...current, readOnly: true }; await React.act(async () => publish());
+    assert.ok(calls.some(([type, request]) => type === "menu-cancel" && request.requestId === staleMenu.request.requestId));
+    await selectBrowserMenu(staleMenu, "zoom-in"); assert.equal(calls.filter(([type]) => type === "action").length, actionsBefore);
+    assert.match(dom.window.document.querySelector(".we-browser-status").textContent, /Read-only browser/);
+    const lockedMenu = await openBrowserMenu();
+    assert.ok(lockedMenu.request.items.find(item => item.id === "zoom").submenu.every(item => !item.enabled));
+    assert.equal(lockedMenu.request.items.find(item => item.id === "find").enabled, true);
+    await selectBrowserMenu(lockedMenu, "zoom-in"); assert.equal(calls.filter(([type]) => type === "action").length, actionsBefore);
+    await React.act(async () => [...dom.window.document.querySelectorAll("button")].find(button => button.textContent === "Dismiss").click());
+    current = { ...current, readOnly: false }; await React.act(async () => publish()); await settleLayout();
+    const failedMenu = await openBrowserMenu(); await React.act(async () => failedMenu.reject(new Error("Popup unavailable")));
+    assert.equal(dom.window.document.querySelector('[aria-label="More browser actions"]').getAttribute("aria-expanded"), "false");
+    assert.match(dom.window.document.querySelector('[role="alert"]').textContent, /Popup unavailable/);
+    await React.act(async () => [...dom.window.document.querySelectorAll("button")].find(button => button.textContent === "Dismiss").click());
+    await selectBrowserMenu(await openBrowserMenu(), "zoom-out");
+    assert.equal(calls.at(-1)[1].action, "zoom"); assert.equal(calls.at(-1)[1].params.zoomFactor, 0.9);
+    assert.equal(calls.at(-1)[1].attachmentId, current.attachmentId);
     if (mode === "standard") {
       const clipped = dom.window.document.createElement("div"), stage = clipped.appendChild(dom.window.document.createElement("div")); clipped.style.overflowX = "hidden";
       const measured = { x: 478.5714416503906, y: 200.68080139160156, width: 431.0044860839844, height: 366.02679443359375 }; clipped.getBoundingClientRect = () => ({ left: 477.8571472167969, right: 909.5758972167969, top: 83.99553680419922, bottom: 566.7076034545898 }); dom.window.devicePixelRatio = 1.4;
@@ -410,8 +445,7 @@ async function rendererChecks(mode = "owned") {
       assert.equal(calls.some(([type]) => type === "native-adopt" || type === "native-release"), false);
       assert.ok(calls.some(([type, request]) => type === "download" && request.action === "snapshot"));
       assert.equal(dom.window.document.querySelector('button[aria-label^="Downloads"]'), null);
-      await React.act(async () => dom.window.document.querySelector('[aria-label="More browser actions"]').click());
-      await React.act(async () => [...dom.window.document.querySelectorAll('[role="menuitem"]')].find(item => item.textContent === "Browser details").click());
+      await selectBrowserMenu(await openBrowserMenu(), "details");
       assert.ok(dom.window.document.querySelector("details").textContent.includes("Standard Chromium"));
       await React.act(async () => { dom.window.document.querySelector("details").open = false; await new Promise(resolve => setTimeout(resolve, 0)); });
       for (const role of ["menu", "dialog"]) {
@@ -423,7 +457,7 @@ async function rendererChecks(mode = "owned") {
       const clip = dom.window.document.getElementById("root");
       await React.act(async () => clip.setAttribute("inert", "")); await settleLayout(); assert.equal(current.visible, false);
       await React.act(async () => clip.removeAttribute("inert")); await settleLayout(); assert.equal(current.visible, true);
-      await React.act(async () => { for (const listener of listeners) listener({ type: "command", attachmentId: current.attachmentId, hostGeneration: current.hostGeneration, mountGeneration: current.mountGeneration, command: "find" }); }); await settleLayout();
+      await selectBrowserMenu(await openBrowserMenu(), "find"); await settleLayout();
       const find = dom.window.document.querySelector('input[aria-label="Find in page"]');
       assert.equal(dom.window.getComputedStyle(find.form).position, "static"); assert.equal(dom.window.document.activeElement, find); assert.equal(current.visible, true);
       await React.act(async () => { Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set.call(find, "needle"); find.dispatchEvent(new dom.window.Event("input", { bubbles: true })); });
@@ -443,8 +477,7 @@ async function rendererChecks(mode = "owned") {
       assert.equal(calls.findLast(([type]) => type === "ack")[1].stageBounds.width, 640); assert.equal(dom.window.document.querySelector('[role="alert"]'), null);
       pageLeft = dom.window.innerWidth; dom.window.dispatchEvent(new dom.window.Event("resize")); await settleLayout(); assert.equal(current.visible, false); assert.equal(calls.findLast(([type]) => type === "sync")[1].stageBounds.width, 0);
       pageLeft = 30; dom.window.dispatchEvent(new dom.window.Event("resize")); await settleLayout(); assert.equal(current.visible, true);
-      await React.act(async () => dom.window.document.querySelector('button[aria-label="More browser actions"]').click());
-      await React.act(async () => [...dom.window.document.querySelectorAll('button')].find(button => button.textContent === "Downloads").click());
+      await selectBrowserMenu(await openBrowserMenu(), "downloads");
       await settleLayout();
       const panel = dom.window.document.querySelector('[role="dialog"][aria-label="Downloads"]');
       assert.ok(panel); assert.ok(panel.textContent.includes("No downloads yet"));

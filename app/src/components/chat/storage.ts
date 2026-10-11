@@ -14,6 +14,7 @@ export type PersistedChatDraft = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   applicationIds: string[];
   driverNames: string[];
   accessMode: TaskAccessMode;
@@ -34,6 +35,7 @@ export type PersistedQueuedChatTurn = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   endpoint: string;
   createdAtMs: number;
   status: "queued" | "sending" | "accepted" | "unknown" | "failed";
@@ -69,12 +71,13 @@ export function loadChatSettings(profile: OctopusClientAccessProfile): ChatSetti
       providerModel: typeof parsed.providerModel === "string"
         ? parsed.providerModel.trim()
         : "",
+      serviceTier: typeof parsed.serviceTier === "string" ? parsed.serviceTier : "",
       reasoningEffort: typeof parsed.reasoningEffort === "string"
         ? parsed.reasoningEffort.trim()
         : "",
     };
   } catch {
-    return { providerInterfaceId: "", providerModel: "", reasoningEffort: "" };
+    return { providerInterfaceId: "", providerModel: "", reasoningEffort: "", serviceTier: "" };
   }
 }
 
@@ -87,6 +90,7 @@ export function saveChatSettings(
     providerInterfaceId: settings.providerInterfaceId?.trim() ?? current.providerInterfaceId,
     providerModel: settings.providerModel?.trim() ?? current.providerModel,
     reasoningEffort: settings.reasoningEffort?.trim() ?? current.reasoningEffort,
+    serviceTier: settings.serviceTier ?? current.serviceTier,
   }));
   window.dispatchEvent(new CustomEvent(chatSettingsChangedEvent(profile)));
 }
@@ -108,6 +112,7 @@ export function loadChatDrafts(profile: OctopusClientAccessProfile, scope = "mai
       const workerInterfaceId = boundedString(candidate.workerInterfaceId, 320);
       const providerInterfaceId = typeof candidate.providerInterfaceId === "string" ? candidate.providerInterfaceId.trim() : "";
       const providerModel = typeof candidate.providerModel === "string" ? candidate.providerModel.trim() : "";
+      const serviceTier = typeof candidate.serviceTier === "string" ? candidate.serviceTier : "";
       const reasoningEffort = typeof candidate.reasoningEffort === "string" ? candidate.reasoningEffort.trim() : "";
       const applicationIds = boundedStringList(candidate.applicationIds, 320);
       const driverNames = boundedStringList(candidate.driverNames, 320);
@@ -118,7 +123,7 @@ export function loadChatDrafts(profile: OctopusClientAccessProfile, scope = "mai
         : 0;
       if (!key || seen.has(key) || (!messageId && !text.trim() && !continuation && !agentPresetId)) return [];
       seen.add(key);
-      return [{ key, messageId, messageHadAttachments, text, agentPresetId, eeId, workerInterfaceId, providerInterfaceId, providerModel, reasoningEffort, applicationIds, driverNames, accessMode, continuation, updatedAtMs }];
+      return [{ key, messageId, messageHadAttachments, text, agentPresetId, eeId, workerInterfaceId, providerInterfaceId, providerModel, reasoningEffort, serviceTier, applicationIds, driverNames, accessMode, continuation, updatedAtMs }];
     }).sort((left, right) => right.updatedAtMs - left.updatedAtMs).slice(0, 100);
   } catch {
     return [];
@@ -159,6 +164,7 @@ export function loadQueuedChatTurns(profile: OctopusClientAccessProfile, scope =
       const workerInterfaceId = boundedString(candidate.workerInterfaceId, 320);
       const providerInterfaceId = boundedString(candidate.providerInterfaceId, 320);
       const providerModel = boundedString(candidate.providerModel, 320);
+      const serviceTier = typeof candidate.serviceTier === "string" ? candidate.serviceTier : "";
       const reasoningEffort = boundedString(candidate.reasoningEffort, 80);
       const endpoint = boundedString(candidate.endpoint, 2_048);
       const createdAtMs = typeof candidate.createdAtMs === "number" && Number.isFinite(candidate.createdAtMs)
@@ -169,7 +175,7 @@ export function loadQueuedChatTurns(profile: OctopusClientAccessProfile, scope =
       const hadAttachments = candidate.hadAttachments === true;
       if (!id || !messageId || !runKey || seen.has(id) || (!text.trim() && !hadAttachments)) return [];
       seen.add(id);
-      return [{ id, messageId, runKey, text, eeId, workerInterfaceId, providerInterfaceId, providerModel, reasoningEffort, endpoint, createdAtMs, status, error, hadAttachments }];
+      return [{ id, messageId, runKey, text, eeId, workerInterfaceId, providerInterfaceId, providerModel, reasoningEffort, serviceTier, endpoint, createdAtMs, status, error, hadAttachments }];
     });
   } catch {
     return [];

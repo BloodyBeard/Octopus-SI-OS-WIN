@@ -6,7 +6,7 @@ import type { OctopusProviderInterface, OctopusProviderModel } from "../../elect
 import { useShouldReduceMotion } from "../../appearance";
 import { subscribeClientCommands } from "../../clientActions";
 import { Glyph } from "../IconGlyphs";
-import { providerModels, providerReasoningEfforts, providerSelectedModel } from "./chatWorkspaceCapabilities";
+import { providerModels, providerReasoningEfforts, providerSelectedModel, providerServiceTiers, providerSelectedServiceTier } from "./chatWorkspaceCapabilities";
 import "./providerModelPicker.css";
 
 type Props = {
@@ -17,8 +17,10 @@ type Props = {
   providerModel: string;
   interfaceLocked?: boolean;
   reasoningEffort: string;
+  serviceTier?: string;
   onModelChange: (providerInterfaceId: string, providerModel: string, reasoningEffort?: string) => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
+  onServiceTierChange?: (serviceTier: string) => void;
   onRefreshModels?: () => void;
   listenToGlobalCommands?: boolean;
 };
@@ -26,8 +28,9 @@ type ModelOption = { provider: OctopusProviderInterface; model: OctopusProviderM
 
 function displayName(option: ModelOption, options: ModelOption[]): string {
   const name = (option.model.displayName || option.model.model).replace(/^gpt[-\s]+/i, "");
-  return options.some((other) => other.provider.id !== option.provider.id && other.model.model === option.model.model)
-    ? name + " · " + (option.provider.label || option.provider.id) : name;
+  const duplicate = options.some((other) => other.provider.id !== option.provider.id && other.model.model === option.model.model);
+  const sameLabel = options.some((other) => other.provider.id !== option.provider.id && other.provider.label === option.provider.label && other.model.model === option.model.model);
+  return duplicate ? name + " · " + (sameLabel ? option.provider.id : option.provider.label || option.provider.id) : name;
 }
 function effortLabel(effort: string): string {
   return ({ low: "Light", xhigh: "Extra High" } as Record<string, string>)[effort] || (effort ? effort[0].toUpperCase() + effort.slice(1) : "Power");
@@ -35,7 +38,7 @@ function effortLabel(effort: string): string {
 
 export function ProviderModelPicker({
   providers, activeProvider, loading = false, providerInterfaceId, providerModel, interfaceLocked = false,
-  reasoningEffort, onModelChange, onReasoningEffortChange, onRefreshModels, listenToGlobalCommands = true,
+  reasoningEffort, serviceTier = "", onModelChange, onReasoningEffortChange, onServiceTierChange, onRefreshModels, listenToGlobalCommands = true,
 }: Props) {
   const id = useId();
   const reducedMotion = useShouldReduceMotion();
@@ -57,13 +60,14 @@ export function ProviderModelPicker({
   const [tooltip, setTooltip] = useState(false);
   const [menuView, setMenuView] = useState<"simple" | "advanced">("simple");
   const options = useMemo(() => (interfaceLocked ? activeProvider ? [activeProvider] : [] : providers)
-    .flatMap((provider) => providerModels(provider).map((model) => ({ provider, model })))
-    .filter(({ provider, model }) => provider.id === "world_provider_codex"
-      || provider.id === "world_provider_openrouter" && model.model === "z-ai/glm-5.3-flash"),
+    .flatMap((provider) => providerModels(provider).map((model) => ({ provider, model }))),
   [activeProvider, interfaceLocked, providers]);
   const activeModel = activeProvider ? providerSelectedModel(activeProvider, providerModel) : null;
   const selectedEffort = reasoningEffort || activeModel?.defaultReasoningEffort || "";
   const efforts = activeProvider && activeModel ? providerReasoningEfforts(activeProvider, activeModel.model) : [];
+  const tiers = activeProvider && activeModel ? providerServiceTiers(activeProvider, activeModel.model) : [];
+  const selectedTier = activeProvider ? providerSelectedServiceTier(activeProvider, providerModel, serviceTier) : "default";
+  const tierLabel = tiers.find((tier) => tier.id === selectedTier)?.name ?? selectedTier + " · unavailable";
   const unavailableLabel = loading ? "Loading model…" : providerModel ? providerModel + " · unavailable" : "Select model";
   const modelLabel = activeProvider && activeModel ? displayName({ provider: activeProvider, model: activeModel }, options) : unavailableLabel;
   const disabled = options.length === 0;
@@ -128,7 +132,7 @@ export function ProviderModelPicker({
     const observer = new ResizeObserver(measure);
     observer.observe(simplePanel.current); observer.observe(advancedPanel.current);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); };
-  }, [open, options.length, modelLabel, selectedEffort]);
+  }, [open, options.length, modelLabel, selectedEffort, selectedTier, tiers.length]);
 
   useLayoutEffect(() => {
     const popup = open ? menuRef.current : tooltip ? tooltipRef.current : null;
@@ -225,7 +229,7 @@ export function ProviderModelPicker({
   };
   const menuKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
-    const items = [...event.currentTarget.querySelectorAll<HTMLElement>(view === "advanced" ? "[role=menuitemradio]" : "[role=menuitem], [role=slider]")];
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>(view === "advanced" ? "[role=menuitemradio]" : "[role=menuitem], [role=slider], [data-service-tier]")];
     const current = items.indexOf(document.activeElement as HTMLElement);
     if (event.key === "Tab") {
       event.preventDefault();
@@ -265,9 +269,9 @@ export function ProviderModelPicker({
 
   return <div className="provider-model-picker" data-provider-picker>
     <button ref={triggerRef} type="button" className="provider-model-trigger" data-provider-picker-trigger
-      data-selected-reasoning-effort={selectedEffort} aria-haspopup="menu" aria-expanded={open}
+      data-selected-reasoning-effort={selectedEffort} data-selected-service-tier={selectedTier} aria-haspopup="menu" aria-expanded={open}
       aria-controls={open ? id + "-menu" : undefined} aria-describedby={tooltip ? id + "-tooltip" : undefined}
-      aria-label={"Select model: " + modelLabel + (selectedEffort ? ", " + effortText : "")} disabled={disabled}
+      aria-label={"Select model: " + modelLabel + (selectedEffort ? ", " + effortText : "") + (onServiceTierChange ? ", " + tierLabel : "")} disabled={disabled}
       onPointerEnter={(event) => { if (event.pointerType !== "touch") showTooltip(); }} onPointerLeave={() => { tooltipSuppressed.current = false; hideTooltip(); }} onFocus={showTooltip} onBlur={() => { tooltipSuppressed.current = false; hideTooltip(); }}
       onPointerDown={(event) => { if (event.button === 0 && !event.ctrlKey) { keyboardOpen.current = false; if (!openRef.current) event.preventDefault(); openRef.current ? closeMenu() : openMenu(); } }}
       onClick={(event) => { if (event.detail === 0) { keyboardOpen.current = false; openRef.current ? closeMenu() : openMenu(); } }}
@@ -276,7 +280,8 @@ export function ProviderModelPicker({
       }}>
       <span ref={placeholderRef} className="provider-model-placeholder" aria-hidden="true" data-provider-picker-placeholder>Select model</span>
       <span ref={anchorRef} className="provider-model-trigger-label" data-provider-picker-anchor style={{ minWidth: triggerSizing?.minimum }}>
-        <span>{open && view === "simple" ? "Select model" : effortAvailable ? modelLabel : activeModel?.displayName || unavailableLabel}</span>{!(open && view === "simple") && effortAvailable ? <span className="provider-model-trigger-effort" data-maximum={selectedEffort === "ultra" || undefined}>{effortLabel(selectedEffort)}</span> : null}
+        <span>{open && view === "simple" ? "Select model" : modelLabel}</span>{!(open && view === "simple") && effortAvailable ? <span className="provider-model-trigger-effort" data-maximum={selectedEffort === "ultra" || undefined}>{effortLabel(selectedEffort)}</span> : null}
+        {!(open && view === "simple") && onServiceTierChange && selectedTier !== "default" ? <span className="provider-model-trigger-effort">{tierLabel}</span> : null}
       </span>
       <span className="provider-model-trigger-chevron" aria-hidden="true" />
     </button>
@@ -319,9 +324,21 @@ export function ProviderModelPicker({
           onClick={() => selectModel(option)} onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectModel(option); }
           }}>
-          <span>{displayName(option, options)}</span>{option.provider.id === providerInterfaceId && option.model.model === providerModel ? <Glyph name="check" size={16} className="provider-model-check" /> : null}
+          <span title={option.provider.id + " · " + option.model.model}>{displayName(option, options)}</span>{option.provider.id === providerInterfaceId && option.model.model === providerModel ? <Glyph name="check" size={16} className="provider-model-check" /> : null}
         </button>)}
       </div></div></div>
+      {onServiceTierChange && activeModel ? <div className="provider-model-speed-panel">
+        <span className="provider-model-section-label">Speed · {tierLabel}</span>
+        {tiers.map((tier) => <button type="button" role="menuitemradio" tabIndex={-1}
+          className="provider-model-option" key={tier.id} data-service-tier={tier.id}
+          aria-checked={selectedTier === tier.id} title={tier.description}
+          onPointerMove={focusHoveredItem} onPointerLeave={leaveItem}
+          onClick={() => onServiceTierChange(tier.id)} onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onServiceTierChange(tier.id); }
+          }}>
+          <span>{tier.name}</span>{selectedTier === tier.id ? <Glyph name="check" size={16} className="provider-model-check" /> : null}
+        </button>)}
+      </div> : null}
     </div>, document.body) : null}
   </div>;
 }

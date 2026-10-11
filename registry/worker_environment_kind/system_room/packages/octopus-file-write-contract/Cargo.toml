@@ -1,0 +1,14 @@
+[package]
+name = "octopus-file-write-contract"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+blake3.workspace = true
+base64 = "0.22"
+flate2 = "1"
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }

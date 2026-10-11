@@ -98,7 +98,7 @@ assert.match(modelPicker, /providerModelPicker\.css/);
 assert.doesNotMatch(modelPicker, /model-picker\/source|source\/index\.js/);
 assert.doesNotMatch(modelPicker, /uniqueModelProviders|function modelValue\(provider/);
 assert.match(modelPicker, /const disabled = options\.length === 0/);
-assert.match(modelPicker, /name \+ " · " \+ \(option\.provider\.label \|\| option\.provider\.id\)/);
+assert.match(modelPicker, /name \+ " · " \+ \(sameLabel \? option\.provider\.id : option\.provider\.label \|\| option\.provider\.id\)/);
 assert.doesNotMatch(modelPicker, /providerModel[^\n]*\.split\s*\(/);
 assert.match(capabilityCatalog, /if \(!enabled\) \{[\s\S]*?setProviderInterfaces\(\[\]\);[\s\S]*?setProviderInterfacesLoaded\(false\);/);
 assert.match(projectionClient, /readRuntimeProviderInterfaces\([\s\S]*?if \(bridge\?\.providerInterfaces\) \{\s*return bridge\.providerInterfaces\(\);/);
@@ -118,12 +118,15 @@ assert.match(operatorChatClient, /return `\$\{JSON\.stringify\(selectedProviderD
 assert.doesNotMatch(operatorChatClient, /provider selection requires a coupled topology amendment/);
 const modelRefresh = sourceBetween(workspace, "  const refreshProviderModels = useCallback(", "  const executionContextReady");
 assert.doesNotMatch(modelRefresh, /runtimeReady|turnOpen|writable|runId|interfaceId:/);
-assert.match(modelRefresh, /runtimeHandlerRef !== "codex_app_server"/);
-assert.match(modelRefresh, /catalog\.providerInterfaceId !== resolvedProviderInterfaceId/);
-assert.match(workspace, /\[refreshKey\]: catalog/);
-assert.doesNotMatch(workspace, /catch\(\(failure\) => \{[\s\S]{0,160}setProviderModelCatalogs/);
+assert.match(modelRefresh, /accessProfile === "live" && enabled/);
+assert.match(modelRefresh, /await refreshProviderInterfaces\(\)/);
+assert.doesNotMatch(workspace, /providerModelCatalogs|setProviderModelCatalogs/);
+assert.doesNotMatch(modelPicker, /world_provider_codex|world_provider_openrouter|z-ai\//);
+assert.match(agentDialog, /providerModels\(formed\)\.map/);
+assert.match(agentDialog, /setProviderModel\(preset\.providerModel\)/);
+assert.match(workspace, /setProviderModel\(preset\.providerModel\)/);
 assert.match(workspace, /function chooseProviderModel\(nextProviderInterfaceId: string, nextProviderModel: string, requestedEffort\?: string\)/);
-assert.match(workspace, /setProviderModel\(\(current\) => current\.trim\(\) \|\| providerDefaultModel\(activeProvider\)\?\.model \|\| ""\);/);
+assert.doesNotMatch(workspace, /setProviderModel\(\(current\) => current\.trim\(\) \|\| providerDefaultModel\(activeProvider\)/);
 assert.doesNotMatch(workspace, /providerModels\(activeProvider\)\.find\([\s\S]{0,160}\?\? providerDefaultModel\(activeProvider\)/);
 assert.match(workspace, /activeRunIdRef\.current && nextProviderInterfaceId !== resolvedProviderInterfaceId/);
 assert.match(workspace, /providerModel: claimed\.providerModel/);
@@ -203,7 +206,7 @@ assert.match(ownedUtilities, /--color-token-warning: var\(--color-text-warning\)
 const agentReadiness = sourceBetween(
   workspace,
   "const clientAgentSelectionReady = Boolean(",
-  ");\n  useEffect(() => {",
+  ");\n  const fullAccessUnavailableReason",
 );
 assert.match(agentReadiness, /selectedClientAgent\.projectEeId === eeId/);
 assert.match(agentReadiness, /selectedClientAgent\.workerInterfaceId === workerInterfaceId/);

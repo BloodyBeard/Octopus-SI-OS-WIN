@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use octopus_code_mode_room::config::{
@@ -11,8 +13,8 @@ use octopus_code_mode_room::continuation::{
 };
 use octopus_descriptors::CheckpointId;
 use octopus_interfaces::InterfaceArtifactFile;
-use octopus_ledger::ContentHash;
-use octopus_provider_run_authoring::{CheckedRunEdit, RunAuthoringProfile};
+use octopus_ledger::{ContentHash, Endpoint, Movement, MovementKind};
+use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunEvidenceReader, RunAuthoringProfile};
 use octopus_tool_door_runtime::notify::{RecursiveMode, Watcher};
 use octopus_tool_door_runtime::{
     DeliveryVerdict, InterfaceLiftContext, LedgerTailReader, ToolDoorOutputCallback,
@@ -24,6 +26,8 @@ use serde_json::{Value, json};
 pub struct OwnerHandoff {
     states: tokio::sync::Mutex<BTreeMap<PathBuf, OwnerState>>,
     changed: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    json_format: Option<octopus_provider_run_authoring::JsonFormat>,
 }
 
 struct OwnerState {
@@ -34,6 +38,16 @@ struct OwnerState {
     initial_source: octopus_ledger::Movement,
     idle: bool,
     generated_artifacts: Vec<octopus_provider_run_authoring::generated_artifacts::GeneratedArtifact>,
+}
+
+struct OwnerOutputAuthority {
+    source: ToolDoorOutputSource,
+    installed_output: Option<Value>,
+}
+
+enum NativeFailureOutput {
+    Closed(DeliveryVerdict),
+    Return(OwnerOutputAuthority),
 }
 
 enum ApplicationChange {
@@ -53,7 +67,14 @@ impl OwnerHandoff {
         Arc::new(Self {
             states: tokio::sync::Mutex::new(BTreeMap::new()),
             changed: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            json_format: Some(octopus_provider_run_authoring::JsonFormat::Compact),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_json_format(json_format: Option<octopus_provider_run_authoring::JsonFormat>) -> Arc<Self> {
+        Arc::new(Self { states: tokio::sync::Mutex::new(BTreeMap::new()), changed: Arc::new(tokio::sync::Notify::new()), json_format })
     }
 
     pub fn callback(self: &Arc<Self>) -> ToolDoorOutputCallback {
@@ -64,11 +85,81 @@ impl OwnerHandoff {
         })
     }
 
-    async fn output(
+    fn output<'a>(
+        &'a self,
+        ctx: &'a InterfaceLiftContext,
+        mut source: ToolDoorOutputSource,
+        artifact: InterfaceArtifactFile,
+    ) -> Pin<Box<dyn Future<Output = Result<DeliveryVerdict, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let authority = match Self::prepare_native_failure_output(ctx, &mut source, &artifact)? {
+                Some(NativeFailureOutput::Closed(verdict)) => return Ok(verdict),
+                Some(NativeFailureOutput::Return(authority)) => Some(authority),
+                None => None,
+            };
+            self.output_future(ctx, source, artifact, authority).await
+        })
+    }
+
+    fn prepare_native_failure_output(
+        ctx: &InterfaceLiftContext,
+        source: &mut ToolDoorOutputSource,
+        artifact: &InterfaceArtifactFile,
+    ) -> Result<Option<NativeFailureOutput>, String> {
+        let limits = ctx.owner_io_limits()?;
+        let captured = artifact.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|e| e.to_string())?;
+        if captured.manifest.label.ends_with(".result") {
+            let result: ToolResultArtifact = serde_json::from_slice(&captured.payload_bytes).map_err(|e| e.to_string())?;
+            if result.error.as_ref().is_some_and(|error|
+                ["tool_effect_indeterminate", "tool_process_failure"].contains(&error.code.as_str())) {
+                let seq = result.error.as_ref().and_then(|error| error.details.as_ref())
+                    .and_then(|details| details.get("source_movement_seq")).and_then(Value::as_u64);
+                if result.ok || result.body.is_some() || result.label != captured.manifest.label
+                    || seq != Some(source.movement.seq.0) {
+                    return Err("native owner failure changed its immutable source".into());
+                }
+                let config = Self::failure_config(ctx)?;
+                if !matches!(config.context, CodeModeContext::Isolated) {
+                    let topology = config.resolve_owner_topology(&source.envelope)?;
+                    let (edge, delivered) = Self::delivered_result(ctx, source, &topology, &result)?;
+                    if let Some(delivered) = delivered {
+                        return Ok(Some(NativeFailureOutput::Closed(DeliveryVerdict::refused(octopus_interfaces::RefusedReason::CheckpointSpent,
+                            json!({"source_movement_seq":source.movement.seq.0,
+                                "recorded_result_movement_seq":delivered.seq.0,"recorded_result_artifact":delivered.artifact})))));
+                    }
+                    if source.formation.is_none() {
+                        source.formation = Some(Self::retained_failure_formation(ctx, &config, source)?);
+                    }
+                    let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx,
+                        &source.formation.as_ref().ok_or("native failure has no retained room")?.worker_environment_id)?;
+                    let reader = LedgerTailReader::open_named(ctx, "code-mode-owner-output")?;
+                    let authority = Self::recorded_install_authority(ctx, &reader, &root, &config, source)?;
+                    let authority = Self::installed_failure_authority(ctx, &reader, &root, &topology, &edge,
+                        &authority.source, &continuation::artifact_ref(artifact)?.content.to_hex())?.unwrap_or(authority);
+                    return Ok(Some(NativeFailureOutput::Return(authority)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn output_future<'a>(
+        &'a self,
+        ctx: &'a InterfaceLiftContext,
+        source: ToolDoorOutputSource,
+        artifact: InterfaceArtifactFile,
+        authority: Option<OwnerOutputAuthority>,
+    ) -> Pin<Box<dyn Future<Output = Result<DeliveryVerdict, String>> + Send + 'a>> {
+        Box::pin(self.output_with_authority(ctx, source, artifact, authority))
+    }
+
+    async fn output_with_authority(
         &self,
         ctx: &InterfaceLiftContext,
         source: ToolDoorOutputSource,
         artifact: InterfaceArtifactFile,
+        authority: Option<OwnerOutputAuthority>,
     ) -> Result<DeliveryVerdict, String> {
         let config: CodeModeConfig = serde_json::from_slice(
             &octopus_interfaces::read_artifact_carrier_file_bounded(
@@ -83,6 +174,7 @@ impl OwnerHandoff {
             return ctx.owner_hand_arrival(artifact).await;
         }
         let topology = config.resolve_owner_topology(&source.envelope)?;
+        continuation::validate_admitted_coauthor(ctx, &source.envelope, &topology)?;
         let formation = source
             .formation
             .as_ref()
@@ -104,6 +196,20 @@ impl OwnerHandoff {
         });
         if state.config != config || state.topology != topology {
             return Err("code mode output changed its admitted owner topology".into());
+        }
+        let installed_output = authority.as_ref().and_then(|authority| authority.installed_output.clone());
+        if let Some(authority) = authority {
+            let authority = authority.source;
+            let current = authority.envelope.runtime().map_err(|e| e.to_string())?;
+            if authority.formation != source.formation || current.run != runtime.run
+                || current.ee != runtime.ee || current.worker != runtime.worker
+                || authority.movement.to != Endpoint::Interface(ctx.owner_interface().clone())
+                || config.resolve_owner_topology(&authority.envelope)? != topology {
+                return Err("owner output authority changed its exact admitted scope".into());
+            }
+            continuation::validate_admitted_coauthor(ctx, &authority.envelope, &topology)?;
+            continuation::reconcile_checked_provider_advance(ctx, &root, &config, Some(&authority.envelope))?;
+            state.authority = authority;
         }
         if let Some(installed) = continuation::reconcile_checked_provider_advance(ctx,&root,&config,None)? {
             state.expected_hash = installed.after_hash;
@@ -273,16 +379,24 @@ impl OwnerHandoff {
                 state.topology.model_output.clone()
             }
         };
-        self.install(
-            ctx,
-            &root,
-            state,
-            &edge,
-            &artifact_ref.content.to_hex(),
-            &captured.manifest.label,
-            None,
-        )
-        .await?;
+        if let Some(output) = installed_output {
+            let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+                &ctx.owner_root_slot("run_records_root")?.join(format!("{}.json", state.topology.run)),
+                ctx.owner_io_limits()?.max_payload_bytes,
+            ).map_err(|e| e.to_string())?;
+            let current: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let id = output.get("id").ok_or("recorded owner output lost its checkpoint identity")?;
+            if (edge != state.topology.model_output && edge != state.topology.receipt)
+                || output.get("interface_binding") != Some(&json!(edge.binding.inbound))
+                || output.get("outbound_interface_bindings") != Some(&json!(edge.binding.outbound))
+                || !current.get("checkpoints").and_then(Value::as_array).is_some_and(|checkpoints|
+                    checkpoints.iter().filter(|checkpoint| checkpoint.get("id") == Some(id)).eq([&output]))
+                || !current.get("active_checkpoints").and_then(Value::as_array).is_some_and(|active| active.contains(id)) {
+                return Err("recorded owner output changed its installed checkpoint".into());
+            }
+        } else {
+            self.install(ctx, &root, state, &edge, &artifact_ref.content.to_hex(), &captured.manifest.label, None).await?;
+        }
         let verdict = ctx.owner_hand_arrival(delivered_artifact).await?;
         if terminal && matches!(verdict, DeliveryVerdict::Admitted { .. }) {
             let readiness = state.topology.readiness.clone();
@@ -645,7 +759,18 @@ impl OwnerHandoff {
                 .ok_or("authoring lost room formation")?
                 .worker_environment_id
         );
-        let edit = CheckedRunEdit::prepare(run_path.clone(), &current, next, correlation)?;
+        let proposal = root.join(format!("{generation}.edit.json"));
+        #[cfg(not(test))]
+        let json_format = Some(octopus_provider_run_authoring::JsonFormat::Compact);
+        #[cfg(test)]
+        let json_format = self.json_format;
+        let json_format = if proposal.try_exists().map_err(|error| error.to_string())? {
+            continuation::read_record::<CheckedRunEdit>(&proposal)?.json_format
+        } else if root.join(format!("{generation}.authoring-result.json")).try_exists().map_err(|error| error.to_string())? {
+            return Err("code mode authoring result has no durable edit proposal; settle the incomplete historical authoring under its original contract".into());
+        } else { json_format };
+        let edit = CheckedRunEdit::prepare_with_format(run_path.clone(), &current, next, correlation, json_format)?;
+        continuation::prepare_record(&proposal, &edit)?;
         for call in &pending {
             let route = state
                 .topology
@@ -666,7 +791,7 @@ impl OwnerHandoff {
             )?;
         }
         if edge == &state.topology.readiness {
-            continuation::create_record(
+            continuation::prepare_record(
                 &root.join(format!("{}.wake-pin.json", edit.after_hash)),
                 &ReturnBoundary {
                     checkpoint: output_id.clone(),
@@ -693,9 +818,8 @@ impl OwnerHandoff {
             &edit.after_hash,
             edit.content.len(),
         )?;
-        continuation::create_record(&root.join(format!("{generation}.edit.json")), &edit)?;
         let artifact = edit.materialize(&root.join("authoring-artifacts"), &profile)?;
-        let call_artifact = continuation::artifact_ref(&artifact)?;
+        let call_payload = artifact.read_payload_bytes().map_err(|e| e.to_string())?;
         let file_door = state
             .topology
             .authoring_result
@@ -717,15 +841,37 @@ impl OwnerHandoff {
             movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
             max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
         };
+        let admitted_call = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, call_seq)?;
+        if admitted_call.kind != octopus_ledger::MovementKind::InterfaceOutbound
+            || admitted_call.from != octopus_ledger::Endpoint::Interface(ctx.owner_interface().clone())
+            || admitted_call.to != octopus_ledger::Endpoint::Interface(file_door.clone()) {
+            return Err("owner write receipt does not name its exact admitted emission".into());
+        }
+        let call_artifact = admitted_call.artifact.ok_or("owner write receipt has no artifact")?;
+        let admitted_file = InterfaceArtifactFile::new(ctx.owner_blobs_dir().join(call_artifact.content.to_hex()))
+            .map_err(|e| e.to_string())?.with_payload_cache_root(ctx.owner_blobs_dir());
+        if continuation::artifact_ref(&admitted_file)? != call_artifact
+            || admitted_file.read_payload_bytes_bounded(limits.max_payload_bytes).map_err(|e| e.to_string())? != call_payload {
+            return Err("owner write receipt changed its exact call bytes".into());
+        }
         let writer = octopus_provider_run_authoring::CheckedRunWriter {
             owner: ctx.owner_interface().clone(), source: ctx.owner_interface().clone(), door: file_door.clone(),
             tool: profile.file_write_tool.clone(), call_label: profile.file_write_label.clone(), result_label: profile.file_write_result_label.clone(),
         };
         let result = tokio::time::timeout(timeout, async {
             loop {
-                if let Some(refused) = octopus_provider_run_authoring::checked_failed_run_write(&evidence, &writer, &edit, call_seq)? {
-                    continuation::create_record(&root.join(format!("{generation}.refused.json")), &refused)?;
-                    return Ok(None);
+                match octopus_provider_run_authoring::checked_failed_run_write(&evidence, &writer, &edit, call_seq,
+                    state.topology.coauthor.iter().cloned().collect()) {
+                    Ok(Some(refused)) => {
+                        continuation::create_record(&root.join(format!("{generation}.refused.json")), &refused)?;
+                        return Ok(None);
+                    }
+                    Ok(None) => {},
+                    Err(octopus_provider_run_authoring::CheckedRunError::AwaitingResults { .. }) => {
+                        reader.wait_for_change(&cancel).await?;
+                        continue;
+                    }
+                    Err(error) => return Err(String::from(error)),
                 }
                 let rows = reader.read_new_uncommitted_limit(256)?;
                 for own in &rows {
@@ -848,6 +994,524 @@ impl OwnerHandoff {
         }
     }
 
+    fn failure_config(ctx: &InterfaceLiftContext) -> Result<CodeModeConfig, String> {
+        let config: CodeModeConfig = serde_json::from_slice(&octopus_interfaces::read_artifact_carrier_file_bounded(
+            &ctx.interface_registry_dir().join("code_mode.json"), 1024 * 1024,
+        ).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        config.validate(ctx.owner_interface().as_str())?;
+        Ok(config)
+    }
+
+    fn delivered_result(
+        ctx: &InterfaceLiftContext,
+        source: &ToolDoorOutputSource,
+        topology: &CodeModeOwnerTopology,
+        result: &ToolResultArtifact,
+    ) -> Result<(OwnerCheckpoint, Option<Movement>), String> {
+        let limits = ctx.owner_io_limits()?;
+        let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let runtime = source.envelope.runtime().map_err(|e| e.to_string())?;
+        let provider = Endpoint::Interface(topology.model_output.binding.outbound[0].interface.clone());
+        let owner = Endpoint::Interface(ctx.owner_interface().clone());
+        if source.movement.kind != MovementKind::InterfaceOutbound || source.movement.to != owner
+            || source.movement.artifact.as_ref() != Some(&source.envelope.artifact)
+            || source.movement.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                != Some(source.envelope.metadata().map_err(|e| e.to_string())?)
+            || octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, source.movement.seq.0)? != source.movement {
+            return Err("recorded owner failure changed its exact admitted source".into());
+        }
+        let (call, edge, receipt_root) = if source.envelope.read_artifact_manifest().map_err(|e| e.to_string())?.label == "tool.call" {
+            let call: ToolCallArtifact = serde_json::from_slice(&source.envelope.read_artifact_payload_bounded(limits.max_payload_bytes)
+                .map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            if source.movement.from != provider {
+                return Err("recorded owner failure differs from its original admitted call".into());
+            }
+            (call, topology.model_output.clone(), None)
+        } else {
+            let (call, root) = continuation::historical_continuation_call(ctx, &source.envelope, &source.movement)?;
+            (call, topology.receipt.clone(), Some(root))
+        };
+        if call.tool != result.tool || result.correlation_id.is_none() || call.correlation_id != result.correlation_id
+            || result.label != format!("{}.result", call.tool) {
+            return Err("recorded owner failure differs from its original admitted call".into());
+        }
+        let target = Endpoint::Interface(edge.binding.outbound[0].interface.clone());
+        let mut prior = octopus_provider_run_authoring::FileCheckedRunReader::open(&evidence, Some(source.movement.seq.0))?;
+        while let Some(movement) = prior.movement(prior.next_sequence())? {
+            if movement.seq <= source.movement.seq || movement.kind != MovementKind::InterfaceOutbound
+                || movement.from != owner || movement.to != target { continue; }
+            let coordinates = movement.runtime().ok_or("recorded owner output has no admitted scope")?;
+            if coordinates.run != runtime.run || coordinates.ee != runtime.ee || coordinates.worker != runtime.worker { continue; }
+            let output = movement.artifact.as_ref().ok_or("recorded owner output has no artifact")?;
+            let (manifest, bytes) = prior.artifact(output)?;
+            if manifest.label != result.label { continue; }
+            let delivered: ToolResultArtifact = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if delivered.tool == result.tool && delivered.correlation_id == result.correlation_id {
+                if delivered.label != manifest.label { return Err("recorded owner output changed its result label".into()); }
+                if let Some(root) = &receipt_root {
+                    let receipt: Value = continuation::read_record(&root.join(format!("{}.receipt.json", output.content.to_hex())))?;
+                    if receipt != json!({"artifact":output,"source_seq":source.movement.seq.0}) {
+                        return Err("recorded internal result changed its exact original source receipt".into());
+                    }
+                }
+                return Ok((edge, Some(movement)));
+            }
+        }
+        Ok((edge, None))
+    }
+
+    fn retained_failure_formation(
+        ctx: &InterfaceLiftContext,
+        config: &CodeModeConfig,
+        source: &ToolDoorOutputSource,
+    ) -> Result<octopus_worker_env::WorkerEnvironmentFormation, String> {
+        if source.envelope.read_artifact_manifest().map_err(|e| e.to_string())?.label == "tool.call" {
+            continuation::retained_output_formation(ctx, config, &source.envelope, source.movement.seq.0)
+        } else {
+            continuation::retained_continuation_formation(ctx, config, &source.envelope, &source.movement)
+        }
+    }
+
+    fn recorded_install_authority(
+        ctx: &InterfaceLiftContext,
+        reader: &LedgerTailReader,
+        root: &Path,
+        config: &CodeModeConfig,
+        source: &ToolDoorOutputSource,
+    ) -> Result<OwnerOutputAuthority, String> {
+        continuation::reconcile_checked_provider_advance(ctx, root, config, Some(&source.envelope))?;
+        let topology = config.resolve_owner_topology(&source.envelope)?;
+        let runtime = source.envelope.runtime().map_err(|e| e.to_string())?;
+        let limits = ctx.owner_io_limits()?;
+        let path = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?
+            .join(format!("{}.json", topology.run));
+        let current = octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string())?;
+        let hash = runtime.run_record_hash.as_deref().ok_or("recorded failure source lost its Run snapshot")?;
+        let pinned = octopus_interfaces::read_artifact_carrier_file_bounded(&ctx.owner_blobs_dir().join(hash), limits.max_payload_bytes)
+            .map_err(|e| e.to_string())?;
+        if ContentHash::of_bytes(&pinned).to_hex() != hash { return Err("recorded failure source Run integrity mismatch".into()); }
+        if octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pinned, &current, &runtime.checkpoint).is_ok() {
+            return Ok(OwnerOutputAuthority { source: source.clone(), installed_output: None });
+        }
+        let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let checkpoint = Self::authoring_frontier(&pinned, &topology)?;
+        let mut anchor = None;
+        for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_name().to_str().is_some_and(|name| name.ends_with(".installed.json")) { continue; }
+            let installed: InstalledHandoff = continuation::read_record(&entry.path())?;
+            if installed.result_seq >= source.movement.seq.0 { continue; }
+            let result = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, installed.result_seq)?;
+            if result.runtime().is_none_or(|runtime| runtime.checkpoint != checkpoint) { continue; }
+            let transition = octopus_provider_run_authoring::checked_declared_run_install(&evidence, &path, &pinned,
+                &octopus_provider_run_authoring::CheckedRunInstall {
+                    call: octopus_provider_run_authoring::ConsentEvidenceRef { movement_seq: installed.source_seq, artifact: installed.source_artifact },
+                    result: octopus_provider_run_authoring::ConsentEvidenceRef { movement_seq: installed.result_seq, artifact: installed.result_artifact },
+                }, topology.coauthor.iter().cloned().collect())?;
+            let selected = Self::checked_owner_authority(ctx, reader, root, config, &topology, source, &transition, &evidence)?;
+            let observed = octopus_provider_run_authoring::checked_declared_run_snapshot(&evidence, &path,
+                &transition.after, transition.call.seq.0, hash, source.movement.seq.0,
+                topology.coauthor.iter().cloned().collect()).map_err(String::from)?;
+            if observed != pinned { return Err("retained owner anchor differs from the source's exact snapshot".into()); }
+            octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.after, &pinned, &checkpoint)?;
+            if anchor.replace((transition, selected)).is_some() {
+                return Err("retained owner source has ambiguous installed authority".into());
+            }
+        }
+        let (anchor, authority) = anchor.ok_or("recorded owner failure has no faithful retained installed authority")?;
+        let cancellation = ctx.owner_cancel();
+        let selected = continuation::checked_recovery_observation(
+            || octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string()),
+            |current| {
+                let transitions = octopus_provider_run_authoring::checked_declared_run_advance(&evidence, &path,
+                    &anchor.after, current, anchor.call.seq.0, topology.coauthor.iter().cloned().collect())?;
+                let mut selected = authority.clone();
+                for transition in transitions {
+                    let checkpoint = &selected.envelope.runtime().map_err(|e| e.to_string())?.checkpoint;
+                    if octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.before, &transition.after, checkpoint).is_ok() {
+                        continue;
+                    }
+                    if Self::authoring_frontier(&transition.before, &topology)? != *checkpoint {
+                        return Err("owner succession lost its exact prior frontier".into());
+                    }
+                    let successor = Self::checked_owner_authority(ctx, reader, root, config, &topology, source, &transition, &evidence)?;
+                    Self::validate_owner_succession(ctx, reader, root, config, &topology, &selected, &transition, &evidence)?;
+                    selected = successor;
+                }
+                let runtime = selected.envelope.runtime().map_err(|e| e.to_string())?;
+                let pin = Self::authority_snapshot(ctx, &selected)?;
+                octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pin, current, &runtime.checkpoint)?;
+                Ok(selected)
+            },
+            || cancellation.is_cancelled(),
+        )?;
+        Ok(OwnerOutputAuthority { source: selected, installed_output: None })
+    }
+
+    fn authoring_frontier(bytes: &[u8], topology: &CodeModeOwnerTopology) -> Result<CheckpointId, String> {
+        let record: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        let state = record.get("interface_state").and_then(|state| state.get(&topology.owner_interface))
+            .ok_or("owner authority has no retained interface state")?;
+        let frontier: Vec<String> = serde_json::from_value(state.get("frontier_checkpoint_ids").cloned()
+            .ok_or("owner authority has no retained frontier")?).map_err(|e| e.to_string())?;
+        let owned = state.get("owned_checkpoint_ids").and_then(Value::as_array).ok_or("owner authority has no owned checkpoints")?;
+        let active = record.get("active_checkpoints").and_then(Value::as_array).ok_or("owner authority has no active checkpoints")?;
+        let checkpoints = record.get("checkpoints").and_then(Value::as_array).ok_or("owner authority has no checkpoints")?;
+        if frontier.len() != 2 || frontier[0] == frontier[1]
+            || frontier.iter().any(|id| !owned.contains(&json!(id)) || !active.contains(&json!(id))) {
+            return Err("owner authority is not an exact active owned frontier".into());
+        }
+        let matches = checkpoints.iter().filter(|checkpoint|
+            checkpoint.get("id").and_then(Value::as_str).is_some_and(|id| frontier.iter().any(|owned| owned == id))
+            && checkpoint.get("interface_binding") == Some(&json!(topology.authoring_result.binding.inbound))
+            && checkpoint.get("outbound_interface_bindings") == Some(&json!(topology.authoring_result.binding.outbound))
+            && checkpoint.get("required_verified_artifacts") == Some(&json!([]))
+            && checkpoint.get("epoch") == Some(&json!(0))).collect::<Vec<_>>();
+        let [checkpoint] = matches.as_slice() else { return Err("owner authority has no unique declared authoring result".into()); };
+        Ok(CheckpointId::new(checkpoint["id"].as_str().ok_or("owner authority checkpoint has no id")?))
+    }
+
+    fn authority_snapshot(ctx: &InterfaceLiftContext, source: &ToolDoorOutputSource) -> Result<Vec<u8>, String> {
+        let hash = source.envelope.runtime().map_err(|e| e.to_string())?.run_record_hash.as_deref()
+            .ok_or("owner authority has no admitted snapshot")?;
+        let pin = ContentHash::from_hex(hash).filter(|pin| pin.to_hex() == hash).ok_or("owner authority snapshot hash is not canonical")?;
+        let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&ctx.owner_blobs_dir().join(hash),
+            ctx.owner_io_limits()?.max_payload_bytes).map_err(|e| e.to_string())?;
+        if ContentHash::of_bytes(&bytes) != pin { return Err("owner authority snapshot integrity mismatch".into()); }
+        Ok(bytes)
+    }
+
+    fn checked_owner_authority(
+        ctx: &InterfaceLiftContext, reader: &LedgerTailReader, root: &Path, config: &CodeModeConfig,
+        topology: &CodeModeOwnerTopology, source: &ToolDoorOutputSource,
+        transition: &octopus_provider_run_authoring::CheckedRunTransition,
+        evidence: &octopus_provider_run_authoring::CheckedRunEvidence<'_>,
+    ) -> Result<ToolDoorOutputSource, String> {
+        if transition.writer.owner != *ctx.owner_interface() || transition.writer.source != *ctx.owner_interface()
+            || transition.writer.door != topology.authoring_result.binding.inbound.interface || transition.writer.tool != topology.file_write_tool {
+            return Err("retained failure authority changed its exact owner writer".into());
+        }
+        let after_hash = ContentHash::of_bytes(&transition.after).to_hex();
+        let installed: InstalledHandoff = continuation::read_record(&root.join(format!("{after_hash}.installed.json")))?;
+        if installed != (InstalledHandoff {
+            before_hash: ContentHash::of_bytes(&transition.before).to_hex(), after_hash,
+            source_seq: transition.call.seq.0, source_artifact: transition.call.artifact.clone().ok_or("owner write has no artifact")?,
+            result_seq: transition.result.seq.0, result_artifact: transition.result.artifact.clone().ok_or("owner result has no artifact")?,
+        }) { return Err("retained failure authority changed its checked installation".into()); }
+        let mut artifacts = octopus_provider_run_authoring::FileCheckedRunReader::open(evidence, None)?;
+        let (_, payload) = artifacts.artifact(transition.call.artifact.as_ref().ok_or("owner write has no artifact")?)?;
+        let call: ToolCallArtifact = serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+        let correlation = call.correlation_id.as_deref().ok_or("owner succession has no authoring correlation")?;
+        let formation = source.formation.as_ref().ok_or("owner succession has no retained formation")?;
+        let prefix = format!("code-mode-authoring:{}:", formation.worker_environment_id);
+        let generation = correlation.strip_prefix(&prefix).filter(|key| ContentHash::from_hex(key).is_some_and(|hash| hash.to_hex() == *key))
+            .ok_or("owner succession changed its exact formation or generation")?;
+        let edit: CheckedRunEdit = continuation::read_record(&root.join(format!("{generation}.edit.json")))?;
+        let path = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?.join(format!("{}.json", topology.run));
+        let expected = CheckedRunEdit::prepare_with_format(path, &transition.before,
+            serde_json::from_slice(&transition.after).map_err(|e| e.to_string())?, correlation.to_owned(), edit.json_format)?;
+        if call.arguments != edit.arguments()? || serde_json::to_value(&edit).map_err(|e| e.to_string())? != serde_json::to_value(expected).map_err(|e| e.to_string())? {
+            return Err("owner succession differs from its full immutable edit proposal".into());
+        }
+        let envelope = reader.envelope_for_movement(&transition.result)?;
+        let runtime = envelope.runtime().map_err(|e| e.to_string())?;
+        let original = source.envelope.runtime().map_err(|e| e.to_string())?;
+        if runtime.run != original.run || runtime.ee != original.ee || runtime.worker != original.worker
+            || runtime.checkpoint.as_str() != format!("code_mode_{generation}_{}", topology.authoring_result.name)
+            || Self::authoring_frontier(&transition.after, topology)? != runtime.checkpoint
+            || config.resolve_owner_topology(&envelope)? != *topology
+            || !continuation::validate_historical_authoring_result(ctx, &envelope, &transition.result)? {
+            return Err("owner succession changed its exact installed return boundary".into());
+        }
+        use octopus_code_mode_room::config::ResolvedContext;
+        let (ResolvedContext::Persistent { artifact: old_artifact, payload: old_payload, .. },
+             ResolvedContext::Persistent { artifact, payload, .. }) = (config.resolve_context(&source.envelope)?, config.resolve_context(&envelope)?) else {
+            return Err("owner succession lost its persistent context".into());
+        };
+        if artifact != old_artifact || payload != old_payload { return Err("owner succession changed its immutable prelude".into()); }
+        continuation::validate_admitted_coauthor(ctx, &envelope, topology)?;
+        Ok(ToolDoorOutputSource { movement: transition.result.clone(), envelope, formation: source.formation.clone() })
+    }
+
+    fn validate_owner_succession(
+        ctx: &InterfaceLiftContext, reader: &LedgerTailReader, root: &Path, config: &CodeModeConfig,
+        topology: &CodeModeOwnerTopology, selected: &ToolDoorOutputSource,
+        transition: &octopus_provider_run_authoring::CheckedRunTransition,
+        evidence: &octopus_provider_run_authoring::CheckedRunEvidence<'_>,
+    ) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Receipt { artifact: octopus_interfaces::ArtifactRef, source_seq: u64 }
+        let mut artifacts = octopus_provider_run_authoring::FileCheckedRunReader::open(evidence, None)?;
+        let (_, payload) = artifacts.artifact(transition.call.artifact.as_ref().ok_or("owner write has no artifact")?)?;
+        let body: ToolCallArtifact = serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+        let formation = selected.formation.as_ref().ok_or("owner succession has no formation")?;
+        let before_hash = ContentHash::of_bytes(&transition.before).to_hex();
+        let mut proven = false;
+        for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_name().to_str().is_some_and(|name| name.ends_with(".receipt.json")) { continue; }
+            let receipt: Receipt = continuation::read_record(&entry.path())?;
+            let emission = receipt.artifact.content.to_hex();
+            if entry.file_name().to_str() != Some(format!("{emission}.receipt.json").as_str()) {
+                return Err("owner succession receipt changed its immutable artifact identity".into());
+            }
+            for (edge, emission, authority_seq) in [(&topology.receipt, emission.clone(), receipt.source_seq),
+                (&topology.readiness, format!("{emission}-idle"), selected.movement.seq.0)] {
+                let generation = continuation::digest(&json!({"before":before_hash,"emission":emission,"edge":edge,"source_seq":authority_seq}))?;
+                if body.correlation_id.as_deref() != Some(format!("code-mode-authoring:{}:{generation}", formation.worker_environment_id).as_str()) { continue; }
+                if receipt.source_seq >= transition.call.seq.0 { return Err("owner succession receipt has no earlier admitted cause".into()); }
+                let movement = octopus_provider_run_authoring::generated_artifacts::read_movement(evidence, receipt.source_seq)?;
+                let envelope = reader.envelope_for_movement(&movement)?;
+                let cause_formation = continuation::retained_continuation_formation(ctx, config, &envelope, &movement)?;
+                if cause_formation != *formation || octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &cause_formation.worker_environment_id)? != root {
+                    return Err("owner succession cause changed its immutable formation".into());
+                }
+                let cause = ToolDoorOutputSource { movement, envelope, formation: Some(cause_formation) };
+                let mut artifacts = octopus_provider_run_authoring::FileCheckedRunReader::open(evidence, Some(receipt.source_seq))?;
+                let (manifest, payload) = artifacts.artifact(&receipt.artifact)?;
+                let output: ToolResultArtifact = serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+                if manifest.label != output.label { return Err("owner succession output receipt changed its exact label".into()); }
+                let (output_edge, delivered) = Self::delivered_result(ctx, &cause, topology, &output)?;
+                if output_edge != topology.receipt || delivered.as_ref().is_some_and(|row| row.artifact.as_ref() != Some(&receipt.artifact)) {
+                    return Err("owner succession output differs from its exact internal receipt".into());
+                }
+                let authority = if edge == &topology.readiness {
+                    let delivered = delivered.ok_or("owner readiness succession has no admitted output receipt")?;
+                    let output_runtime = delivered.runtime().ok_or("owner succession output has no checkpoint")?;
+                    let selected_runtime = selected.envelope.runtime().map_err(|e| e.to_string())?;
+                    let prefix = selected_runtime.checkpoint.as_str().strip_suffix(&format!("_{}", topology.authoring_result.name))
+                        .ok_or("owner readiness lost its installed authoring result")?;
+                    if delivered.seq <= selected.movement.seq || delivered.seq >= transition.call.seq
+                        || output_runtime.checkpoint.as_str() != format!("{prefix}_{}", topology.receipt.name) {
+                        return Err("owner readiness did not follow its selected installed output".into());
+                    }
+                    let output_checkpoint = output_runtime.checkpoint.clone();
+                    let delivered_source = ToolDoorOutputSource { envelope: reader.envelope_for_movement(&delivered)?, movement: delivered, formation: selected.formation.clone() };
+                    octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&Self::authority_snapshot(ctx, selected)?,
+                        &Self::authority_snapshot(ctx, &delivered_source)?, &output_checkpoint)?;
+                    selected
+                } else { &cause };
+                let runtime = authority.envelope.runtime().map_err(|e| e.to_string())?;
+                let call_runtime = transition.call.runtime().ok_or("owner succession write has no admitted coordinate")?;
+                if call_runtime.checkpoint != runtime.checkpoint || call_runtime.epoch != runtime.epoch {
+                    return Err("owner succession write did not use its actual admitted cause".into());
+                }
+                octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&Self::authority_snapshot(ctx, authority)?,
+                    &transition.before, &runtime.checkpoint)?;
+                if proven { return Err("owner succession has ambiguous immutable output receipts".into()); }
+                proven = true;
+            }
+        }
+        if !proven { return Err("owner succession has no exact admitted cause and immutable output receipt".into()); }
+        Ok(())
+    }
+
+    fn installed_failure_authority(
+        ctx: &InterfaceLiftContext,
+        reader: &LedgerTailReader,
+        root: &Path,
+        topology: &CodeModeOwnerTopology,
+        edge: &OwnerCheckpoint,
+        failure: &ToolDoorOutputSource,
+        emission: &str,
+    ) -> Result<Option<OwnerOutputAuthority>, String> {
+        use octopus_provider_run_authoring::{CheckedRunInstall, ConsentEvidenceRef};
+        let runtime = failure.envelope.runtime().map_err(|e| e.to_string())?;
+        let limits = ctx.owner_io_limits()?;
+        let hash = runtime.run_record_hash.as_deref().ok_or("owner failure has no pinned Run")?;
+        let pin = ContentHash::from_hex(hash).filter(|pin| pin.to_hex() == hash)
+            .ok_or("owner failure has a noncanonical Run snapshot hash")?;
+        let pinned = octopus_interfaces::read_artifact_carrier_file_bounded(
+            &ctx.owner_blobs_dir().join(hash),
+            limits.max_payload_bytes,
+        ).map_err(|e| e.to_string())?;
+        if ContentHash::of_bytes(&pinned) != pin { return Err("owner failure Run snapshot integrity mismatch".into()); }
+        let path = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?
+            .join(format!("{}.json", topology.run));
+        let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let mut selected = None;
+        for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_name().to_str().is_some_and(|name| name.ends_with(".installed.json")) { continue; }
+            let installed: InstalledHandoff = continuation::read_record(&entry.path())?;
+            if installed.source_seq <= failure.movement.seq.0 { continue; }
+            let generation = continuation::digest(&json!({"before":installed.before_hash,
+                "emission":emission,"edge":edge,"source_seq":failure.movement.seq.0}))?;
+            let proposal = root.join(format!("{generation}.edit.json"));
+            if !proposal.try_exists().map_err(|e| e.to_string())? { continue; }
+            let edit: CheckedRunEdit = continuation::read_record(&proposal)?;
+            let transition = octopus_provider_run_authoring::checked_declared_run_install(&evidence, &path, &pinned,
+                &CheckedRunInstall {
+                    call: ConsentEvidenceRef { movement_seq: installed.source_seq, artifact: installed.source_artifact.clone() },
+                    result: ConsentEvidenceRef { movement_seq: installed.result_seq, artifact: installed.result_artifact.clone() },
+                }, topology.coauthor.iter().cloned().collect())?;
+            let correlation = format!("code-mode-authoring:{}:{generation}", failure.formation.as_ref()
+                .ok_or("owner failure lost its formation")?.worker_environment_id);
+            let expected = CheckedRunEdit::prepare_with_format(path.clone(), &transition.before,
+                serde_json::from_slice(&transition.after).map_err(|e| e.to_string())?, correlation, edit.json_format)?;
+            if transition.writer.owner != *ctx.owner_interface() || transition.writer.source != *ctx.owner_interface()
+                || transition.writer.door != topology.authoring_result.binding.inbound.interface
+                || transition.writer.tool != topology.file_write_tool
+                || edit.before_hash != installed.before_hash || edit.after_hash != installed.after_hash
+                || serde_json::to_value(&edit).map_err(|e| e.to_string())? != serde_json::to_value(expected).map_err(|e| e.to_string())? {
+                return Err("recorded owner output differs from its exact prepared checked write".into());
+            }
+            octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pinned, &transition.before, &runtime.checkpoint)?;
+            let call_runtime = transition.call.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                .and_then(|metadata| metadata.runtime()).ok_or("recorded owner write lost its admitted authority")?;
+            if call_runtime.checkpoint != runtime.checkpoint || call_runtime.epoch != runtime.epoch {
+                return Err("recorded owner output used another admitted authority".into());
+            }
+            let envelope = reader.envelope_for_movement(&transition.result)?;
+            let result_runtime = envelope.runtime().map_err(|e| e.to_string())?;
+            if result_runtime.checkpoint.as_str() != format!("code_mode_{generation}_{}", topology.authoring_result.name)
+                || result_runtime.epoch != 0 {
+                return Err("recorded owner output has another checked result checkpoint".into());
+            }
+            let after: Value = serde_json::from_slice(&transition.after).map_err(|e| e.to_string())?;
+            let output_id = format!("code_mode_{generation}_{}", edge.name);
+            let output = after.get("checkpoints").and_then(Value::as_array)
+                .and_then(|checkpoints| checkpoints.iter().find(|checkpoint| checkpoint.get("id").and_then(Value::as_str) == Some(output_id.as_str())))
+                .ok_or("recorded owner output has no prepared output checkpoint")?.clone();
+            if output.get("epoch").and_then(Value::as_u64) != Some(0) || output.get("required_verified_artifacts") != Some(&json!([]))
+                || output.get("interface_binding") != Some(&json!(edge.binding.inbound))
+                || output.get("outbound_interface_bindings") != Some(&json!(edge.binding.outbound)) {
+                return Err("recorded owner output changed its prepared output binding".into());
+            }
+            if selected.replace(OwnerOutputAuthority {
+                source: ToolDoorOutputSource { movement: transition.result, envelope, formation: failure.formation.clone() },
+                installed_output: Some(output),
+            }).is_some() { return Err("recorded owner failure has ambiguous installed outputs".into()); }
+        }
+        Ok(selected)
+    }
+
+    pub(crate) fn reconcile_failure<'a>(
+        &'a self,
+        ctx: &'a InterfaceLiftContext,
+        reader: &'a mut LedgerTailReader,
+        failure: &'a Movement,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+        let owner = Endpoint::Interface(ctx.owner_interface().clone());
+        let refused = failure.kind == MovementKind::DeliveryRefused && failure.from == owner;
+        if !refused && (failure.kind != MovementKind::InterfaceOutbound || failure.from != owner || failure.to != owner) {
+            return Ok(());
+        }
+        if refused && !matches!(failure.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict()),
+            Some(octopus_ledger::DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::CheckpointSpent, .. })) {
+            return Ok(());
+        }
+        let limits = ctx.owner_io_limits()?;
+        let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let reference = failure.artifact.as_ref().ok_or("recorded owner failure lost its artifact")?;
+        let file = InterfaceArtifactFile::new(ctx.owner_blobs_dir().join(reference.content.to_hex()))
+            .map_err(|e| e.to_string())?.with_payload_cache_root(ctx.owner_blobs_dir());
+        if continuation::artifact_ref(&file)? != *reference { return Err("recorded owner failure changed its exact artifact".into()); }
+        let captured = file.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes).map_err(|e| e.to_string())?;
+        if !captured.manifest.label.ends_with(".result") { return Ok(()); }
+        let result: ToolResultArtifact = serde_json::from_slice(&captured.payload_bytes).map_err(|e| e.to_string())?;
+        let Some(error) = result.error.as_ref().filter(|error|
+            ["tool_effect_indeterminate", "tool_process_failure"].contains(&error.code.as_str())) else { return Ok(()); };
+        if octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, failure.seq.0)? != *failure {
+            return Err("recorded owner failure differs from its durable evidence".into());
+        }
+        let source_seq = error.details.as_ref().and_then(|details| details.get("source_movement_seq"))
+            .and_then(Value::as_u64).filter(|seq| *seq < failure.seq.0)
+            .ok_or("recorded owner failure has no causally earlier source")?;
+        if result.ok || result.body.is_some() || result.label != captured.manifest.label {
+            return Err("recorded owner failure has a contradictory result body".into());
+        }
+        let source = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, source_seq)?;
+        let input = reader.envelope_for_movement(&source)?;
+        let runtime = input.runtime().map_err(|e| e.to_string())?;
+        let failed_runtime = failure.runtime().ok_or("recorded owner failure has no exact refused or admitted scope")?;
+        if runtime.run != failed_runtime.run || runtime.ee != failed_runtime.ee || runtime.worker != failed_runtime.worker
+            || failed_runtime.interface != *ctx.owner_interface()
+            || (refused && failure.to != Endpoint::Interface(runtime.worker.clone())) {
+            return Err("recorded owner failure differs from its original admitted call".into());
+        }
+        let config = Self::failure_config(ctx)?;
+        if matches!(config.context, CodeModeContext::Isolated) { return Ok(()); }
+        let topology = config.resolve_owner_topology(&input)?;
+        let mut output_source = ToolDoorOutputSource { movement: source, envelope: input, formation: None };
+        let (edge, delivered) = Self::delivered_result(ctx, &output_source, &topology, &result)?;
+        if let Some(delivered) = delivered {
+            if refused || delivered.artifact.as_ref() == Some(reference) { return Ok(()); }
+            return Err("recorded owner failure conflicts with an already delivered result".into());
+        }
+        if refused {
+            let hash = failed_runtime.run_record_hash.as_deref().ok_or("recorded refusal lost its observed Run hash")?;
+            let original_hash = output_source.envelope.runtime().map_err(|error| error.to_string())?
+                .run_record_hash.as_deref().ok_or("recorded failure source lost its admitted Run pin")?;
+            let original = octopus_interfaces::read_artifact_carrier_file_bounded(
+                &ctx.owner_blobs_dir().join(original_hash), limits.max_payload_bytes).map_err(|error| error.to_string())?;
+            if ContentHash::of_bytes(&original).to_hex() != original_hash {
+                return Err("recorded failure source Run integrity mismatch".into());
+            }
+            let path = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
+                .join(format!("{}.json", topology.run));
+            let cancel = ctx.owner_cancel();
+            let bytes = loop {
+                if cancel.is_cancelled() { return Err("recorded failure proof was cancelled".into()); }
+                match octopus_provider_run_authoring::checked_declared_run_snapshot(&evidence, &path,
+                    &original, source_seq, hash, failure.seq.0, topology.coauthor.iter().cloned().collect()) {
+                    Ok(bytes) => break bytes,
+                    Err(octopus_provider_run_authoring::CheckedRunError::AwaitingResults { .. }) => {
+                        reader.wait_for_change(&cancel).await?;
+                    }
+                    Err(error) => return Err(String::from(error)),
+                }
+            };
+            if ContentHash::of_bytes(&bytes).to_hex() != hash { return Err("recorded refusal Run integrity mismatch".into()); }
+            let record: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            let checkpoint = record.get("checkpoints").and_then(Value::as_array).and_then(|checkpoints|
+                checkpoints.iter().find(|checkpoint| checkpoint.get("id") == Some(&json!(failed_runtime.checkpoint))))
+                .ok_or("recorded refusal lost its exact output checkpoint")?;
+            if checkpoint.get("epoch") != Some(&json!(failed_runtime.epoch))
+                || checkpoint.get("interface_binding") != Some(&json!(edge.binding.inbound))
+                || checkpoint.get("outbound_interface_bindings") != Some(&json!(edge.binding.outbound)) {
+                return Err("recorded refusal differs from its exact owner output".into());
+            }
+        }
+        let formation = Self::retained_failure_formation(ctx, &config, &output_source)?;
+        output_source.formation = Some(formation.clone());
+        let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &formation.worker_environment_id)?;
+        let authority_source = if refused {
+            Self::recorded_install_authority(ctx, reader, &root, &config, &output_source)?.source
+        } else {
+            ToolDoorOutputSource { movement: failure.clone(), envelope: reader.envelope_for_movement(failure)?, formation: Some(formation) }
+        };
+        let artifact = InterfaceArtifactFile::store_manifest_bounded(ctx.interface_var_dir().join("failure-artifacts"),
+            &captured.manifest_bytes, limits.max_manifest_bytes, limits.max_payload_bytes).map_err(|e| e.to_string())?;
+        if continuation::artifact_ref(&artifact)? != *reference
+            || artifact.read_payload_bytes_bounded(limits.max_payload_bytes).map_err(|e| e.to_string())? != captured.payload_bytes {
+            return Err("recorded owner failure changed during private output materialization".into());
+        }
+        let authority = match Self::installed_failure_authority(ctx, reader, &root, &topology, &edge, &authority_source, &reference.content.to_hex())? {
+            Some(authority) => authority,
+            None => OwnerOutputAuthority { source: authority_source, installed_output: None },
+        };
+        match self.output_future(ctx, output_source, artifact, Some(authority)).await? {
+            DeliveryVerdict::Admitted { .. } => Ok(()),
+            refused => Err(format!("recorded owner failure return was refused: {refused:?}")),
+        }
+        })
+    }
+
     pub async fn observe(self: Arc<Self>, ctx: InterfaceLiftContext) -> Result<(), String> {
         let watch_root = ctx.interface_var_dir();
         let changed = Arc::clone(&self.changed);
@@ -871,10 +1535,15 @@ impl OwnerHandoff {
             .watch(&watch_root, RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
         let cancel = ctx.owner_cancel();
+        let mut reader = LedgerTailReader::open_named(&ctx, "code-mode-owner-failure-return")?;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            for own in reader.read_new_uncommitted_with_refusals_limit(256)? {
+                self.reconcile_failure(&ctx, &mut reader, &own.movement).await?;
+                reader.commit_through(&own)?;
+            }
             {
                 let mut states = self.states.lock().await;
                 for (root, state) in states.iter_mut() {
@@ -919,7 +1588,7 @@ impl OwnerHandoff {
                     "owner readiness observation failed after reconciliation: {error}"
                 ));
             }
-            tokio::select! { _ = cancel.cancelled() => return Ok(()), _ = &mut notified => {} }
+            tokio::select! { _ = cancel.cancelled() => return Ok(()), _ = &mut notified => {}, changed = reader.wait_for_change(&cancel) => changed? }
         }
     }
 }

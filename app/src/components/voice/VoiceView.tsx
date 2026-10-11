@@ -265,7 +265,9 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       || left.document.title.localeCompare(right.document.title)
   )), [builtInSurfaces, homeSurfaces.documents]);
   const surfaceVisible = (surface: AdmittedClientSurfaceDocument) => surface.sourceExtensionId
-    ? !hiddenSurfaceIds.has(surface.document.id)
+    ? hiddenSurfaceIds !== null
+      && !hiddenSurfaceIds.has(surface.document.id)
+      && (!installedWidgetIdsHydratedRef.current || previousInstalledWidgetIdsRef.current.has(surface.document.id))
     : visibleHomeSurfaceIds.has(homeSurfaceIdentity(surface));
   const visibleSurfaces = allSurfaces.filter(surfaceVisible);
   const leftSurfaces = visibleSurfaces.filter((surface) => (
@@ -294,22 +296,22 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   }, [session, speakerEnabled, storageKeys.speaker]);
 
   useEffect(() => {
+    if (hiddenSurfaceIds === null || !installedWidgetsReady) return;
     window.localStorage.setItem(storageKeys.hiddenSurfaces, JSON.stringify([...hiddenSurfaceIds]));
-  }, [hiddenSurfaceIds, storageKeys.hiddenSurfaces]);
+  }, [hiddenSurfaceIds, installedWidgetsReady, storageKeys.hiddenSurfaces]);
 
   useEffect(() => {
     if (!installedWidgetsReady) return;
     const previous = previousInstalledWidgetIdsRef.current;
     const newlyInstalled = installedWidgetIds.filter((id) => !previous.has(id));
-    previousInstalledWidgetIdsRef.current = new Set(installedWidgetIds);
-    if (!installedWidgetIdsHydratedRef.current) {
-      installedWidgetIdsHydratedRef.current = true;
-      return;
-    }
-    if (!newlyInstalled.length) return;
+    const hydrated = installedWidgetIdsHydratedRef.current;
+    previousInstalledWidgetIdsRef.current = new Set([...previous, ...installedWidgetIds]);
+    installedWidgetIdsHydratedRef.current = true;
     setHiddenSurfaceIds((current) => {
+      if (current === null) return new Set(installedWidgetIds);
+      if (!hydrated || !newlyInstalled.length) return current;
       const next = new Set(current);
-      newlyInstalled.forEach((id) => next.delete(id));
+      newlyInstalled.forEach((id) => next.add(id));
       return next;
     });
   }, [installedWidgetIds, installedWidgetsReady]);
@@ -423,7 +425,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       return;
     }
     setHiddenSurfaceIds((current) => {
-      const next = new Set(current);
+      const next = new Set(current === null ? installedWidgetIds : current);
       if (visible) next.delete(surface.document.id);
       else next.add(surface.document.id);
       return next;
@@ -473,7 +475,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       <HomeWidgetsControl
         accessProfile={accessProfile}
         errors={homeSurfaces.errors}
-        hasHiddenSurfaces={Boolean(hiddenSurfaceIds.size || homeSurfaces.dismissed.size || homeSurfaces.errors.length)}
+        hasHiddenSurfaces={allSurfaces.some((surface) => !surfaceVisible(surface)) || Boolean(homeSurfaces.errors.length)}
         onOpenChange={setWidgetsMenuOpen}
         onShowAll={() => { setHiddenSurfaceIds(new Set()); homeSurfaces.restoreAll(); }}
         onSurfaceVisibleChange={setSurfaceVisible}
@@ -828,8 +830,8 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
               </article>
             ) : quiet || loading ? null : (
               <div className="home-response-empty" key="empty">
-                <h2 className="heading-xl font-normal whitespace-pre-wrap text-token-foreground">{homeInterfaceReady ? "What would you like to do?" : "Home is not available yet"}</h2>
-                <p className="text-base text-token-text-secondary">{homeInterfaceReady ? "Talk to Home or send a message." : "The Home connection has not been projected."}</p>
+                <h2>{homeInterfaceReady ? "What would you like to do?" : "Home is not available yet"}</h2>
+                <p>{homeInterfaceReady ? "Talk to Home or send a message." : "The Home connection has not been projected."}</p>
               </div>
             )}
           </div>
@@ -927,6 +929,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           onProviderModelChange={workspace.setProviderModel}
           onProviderModelsRefresh={workspace.refreshProviderModels}
           onReasoningEffortChange={workspace.setReasoningEffort}
+          onServiceTierChange={workspace.chooseServiceTier}
           onRemoveAttachment={workspace.removeAttachment}
           onResolvePausedQueueSubmission={workspace.resolvePausedQueueSubmission}
           onSubmit={workspace.submit}
@@ -940,6 +943,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           projectedFileSources={projectedFileSources}
           pausedQueueSubmissionCount={workspace.pausedQueueSubmissionCount}
           reasoningEffort={workspace.reasoningEffort}
+          serviceTier={workspace.serviceTier}
           resumeAvailable={workspace.resumeAvailable}
           isSubmitting={workspace.submitting}
           submissionMode={workspace.turnOpen ? "steer" : "send"}
@@ -1384,13 +1388,14 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
   return fallback;
 }
 
-function readStoredStringSet(key: string): Set<string> {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(key) || "[]");
-    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []);
-  } catch {
-    return new Set();
+function readStoredStringSet(key: string): Set<string> | null {
+  const raw = window.localStorage.getItem(key);
+  if (raw === null) return null;
+  const value: unknown = JSON.parse(raw);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error("Saved Home widget visibility is malformed");
   }
+  return new Set(value);
 }
 
 function voiceStorageKeys(accessProfile: OctopusClientAccessProfile) {

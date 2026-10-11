@@ -63,6 +63,7 @@ export type ClientPreferences = Readonly<{
 
 export const clientSettingsSections = [
   "general",
+  "account",
   "appearance",
   "voice-audio",
   "gestures",

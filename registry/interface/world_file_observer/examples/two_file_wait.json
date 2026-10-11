@@ -1,0 +1,186 @@
+{
+  "registry/interface/world_file_observer_example/interface.json": {
+    "id": "world_file_observer_example",
+    "interface_type": "world",
+    "role": "sensor",
+    "direction": "inbound",
+    "source_names": [
+      "file.observation"
+    ],
+    "interface_driver_ref": "file_observer_life"
+  },
+  "registry/interface/world_file_observer_example/life.json": {
+    "processes": [
+      {
+        "bin": "python3",
+        "args": [
+          {
+            "repository_file": "registry/interface/world_file_observer/file_observer_life.py"
+          },
+          {
+            "repository_file": "registry/interface/world_pyecho/pyecho_life.py"
+          }
+        ],
+        "required_files": [
+          "registry/interface/world_file_observer/file_observer_life.py",
+          "registry/interface/world_file_observer/file_observer.py",
+          "registry/interface/world_pyecho/pyecho_life.py",
+          "registry/interface/world_pyecho/octopus_content_hash.py"
+        ],
+        "env": {
+          "PYTHONDONTWRITEBYTECODE": "1"
+        },
+        "inherit_env": [
+          "PATH"
+        ],
+        "io_limits": {
+          "max_control_frame_bytes": 1048576,
+          "max_stderr_bytes": 262144,
+          "max_manifest_bytes": 1048576,
+          "max_payload_bytes": 1048576
+        },
+        "authority": {
+          "read_root_slots": [],
+          "write_root_slots": [],
+          "executable_root_slots": [],
+          "read_paths": [
+            "/private/tmp/octopus-file-observer-example"
+          ],
+          "write_paths": [],
+          "executable_paths": [],
+          "executable_commands": [
+            "python3"
+          ],
+          "read_env_paths": [],
+          "write_env_paths": [],
+          "executable_env_paths": [],
+          "allow_network": false,
+          "allow_local_ipc": false
+        },
+        "read_handles": [
+          "ledger"
+        ]
+      }
+    ]
+  },
+  "registry/interface/world_file_observer_example/observer.json": {
+    "schema_version": 1,
+    "interface": "world_file_observer_example",
+    "poll_interval_ms": 500,
+    "read_roots": [
+      "/private/tmp/octopus-file-observer-example"
+    ],
+    "files": [
+      {
+        "id": "first",
+        "path": "/private/tmp/octopus-file-observer-example/first.txt",
+        "label": "file.first.observed",
+        "max_bytes": 65536
+      },
+      {
+        "id": "second",
+        "path": "/private/tmp/octopus-file-observer-example/second.txt",
+        "label": "file.second.observed",
+        "max_bytes": 65536
+      }
+    ]
+  },
+  "registry/interface/system_worker_file_observer_example/interface.json": {
+    "id": "system_worker_file_observer_example",
+    "interface_type": "system",
+    "role": "worker",
+    "direction": "bidirectional",
+    "source_names": [
+      "file.observation.wait"
+    ]
+  },
+  "registry/interface/system_worker_file_observer_example/policy.json": {
+    "id": "system_worker_file_observer_example",
+    "ceiling": {
+      "interfaces": [
+        "world_file_observer_example",
+        "system_worker_file_observer_example"
+      ],
+      "tools": [],
+      "wek": [],
+      "mark_outcomes": [
+        "world_file_observer_example.first.observed",
+        "world_file_observer_example.second.observed"
+      ],
+      "hard_blocked_tools": []
+    },
+    "role_artifacts": []
+  },
+  "registry/mark/world_file_observer_example.first.observed/mark.json": {
+    "id": "world_file_observer_example.first.observed",
+    "package": "world_file_observer_example",
+    "class": "success"
+  },
+  "registry/mark/world_file_observer_example.second.observed/mark.json": {
+    "id": "world_file_observer_example.second.observed",
+    "package": "world_file_observer_example",
+    "class": "success"
+  },
+  "ee_instances/ee_file_observer_example.json": {
+    "ee_id": "ee_file_observer_example",
+    "template_name": "operator_interaction",
+    "parent_ee_id": "ee_existence",
+    "goal": "Observe one content snapshot from each declared file through verified artifact arrivals.",
+    "config": {},
+    "policy_narrowing": {
+      "allowed_interfaces": [
+        "world_file_observer_example",
+        "system_worker_file_observer_example"
+      ],
+      "allowed_tools": [],
+      "allowed_worker_environment_kinds": [],
+      "allowed_mark_outcomes": [
+        "world_file_observer_example.first.observed",
+        "world_file_observer_example.second.observed"
+      ]
+    }
+  },
+  "runs/run_file_observer_example.json": {
+    "id": "run_file_observer_example",
+    "ee": "ee_file_observer_example",
+    "worker": "system_worker_file_observer_example",
+    "trace": "trace:run_file_observer_example",
+    "status": "running",
+    "interface_state": {},
+    "active_checkpoints": [
+      "await_files"
+    ],
+    "checkpoints": [
+      {
+        "id": "await_files",
+        "run": "run_file_observer_example",
+        "trace": "trace:run_file_observer_example:await_files",
+        "epoch": 0,
+        "interface_binding": {
+          "interface": "world_file_observer_example",
+          "config": {
+            "artifact_policy": {
+              "mode": "all"
+            }
+          }
+        },
+        "outbound_interface_bindings": [],
+        "artifact_bindings": [],
+        "required_verified_artifacts": [
+          {
+            "mark": "world_file_observer_example.first.observed",
+            "artifact_label": "file.first.observed",
+            "verifier": "artifact_exists",
+            "params": {}
+          },
+          {
+            "mark": "world_file_observer_example.second.observed",
+            "artifact_label": "file.second.observed",
+            "verifier": "artifact_exists",
+            "params": {}
+          }
+        ]
+      }
+    ]
+  }
+}

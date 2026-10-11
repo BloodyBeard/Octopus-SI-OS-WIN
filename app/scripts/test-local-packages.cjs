@@ -201,6 +201,76 @@ async function consentRecipeFixture() {
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
+async function cloneIsolationFixture() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-clone-install-")));
+  const nativeFiles = require("../electron/nativeFiles.cjs"), original = nativeFiles.cloneFile;
+  const syncFs = require("node:fs"), crypto = require("node:crypto");
+  try {
+    const roots = await createFixture(root);
+    const relative = path.join("interface", "world_test_provider", "payload.bin");
+    const source = path.join(roots.sourceRegistryRoot, relative), target = path.join(roots.activeRegistryRoot, relative);
+    const bytes = crypto.randomBytes(8 * 1024 * 1024);
+    await fs.writeFile(source, bytes, { mode: 0o750 });
+    const catalog = await readLocalPackageCatalog(roots);
+    const request = { packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { "application.test_provider": packageRecord(catalog).source_digest } };
+    nativeFiles.cloneFile = () => { throw Object.assign(new Error("clone unsupported"), { code: "ENOTSUP" }); };
+    await assert.rejects(applyLocalApplicationPack({ ...roots, ...request, operationId: "clone_refused_001" }), /clone unsupported/);
+    assert.deepEqual(await transactionEntries(roots), []);
+    assert.equal(await fs.access(target).then(() => true, () => false), false);
+    nativeFiles.cloneFile = original;
+    await applyLocalApplicationPack({ ...roots, ...request, operationId: "clone_install_001" });
+    const second = { ...roots, ...rootsFor(path.join(root, "second")), sourceRegistryRoot: roots.sourceRegistryRoot, libraryRoot: roots.libraryRoot };
+    await applyLocalApplicationPack({ ...second, ...request, operationId: "clone_sibling_001" });
+    const sibling = path.join(second.activeRegistryRoot, relative);
+    const allocations = () => {
+      const probe = spawnSync("/usr/bin/python3", ["-c", `
+import ctypes,json,os,struct,sys
+class A(ctypes.Structure):
+ _fields_=[('count',ctypes.c_ushort),('reserved',ctypes.c_ushort),('common',ctypes.c_uint32),('volume',ctypes.c_uint32),('directory',ctypes.c_uint32),('file',ctypes.c_uint32),('extended',ctypes.c_uint32)]
+get=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True).getattrlist
+get.argtypes=[ctypes.c_char_p,ctypes.POINTER(A),ctypes.c_void_p,ctypes.c_size_t,ctypes.c_uint32]
+rows=[]
+for path in sys.argv[1:]:
+ attrs=A(5,0,0x80000000,0,0,0,0x1108);buf=ctypes.create_string_buffer(128)
+ if get(os.fsencode(path),ctypes.byref(attrs),buf,128,0x21): raise OSError(ctypes.get_errno(),path)
+ length,common,volume,directory,file,extended=struct.unpack_from('<IIIIII',buf)
+ if length!=44 or extended!=0x1108: raise RuntimeError('APFS clone attributes unavailable')
+ private,clone_id,refs=struct.unpack_from('<QQI',buf,24);s=os.stat(path)
+ rows.append(dict(logical=s.st_size,allocated=s.st_blocks*512,private=private,clone_id=clone_id,refs=refs,inode=s.st_ino,nlink=s.st_nlink))
+print(json.dumps(rows))
+`, source, target, sibling], { encoding: "utf8" });
+      assert.equal(probe.status, 0, probe.stderr);
+      return JSON.parse(probe.stdout);
+    };
+    const before = allocations();
+    assert.equal(new Set(before.map(row => row.inode)).size, 3);
+    assert.equal(new Set(before.map(row => row.clone_id)).size, 1);
+    for (const row of before) { assert.equal(row.private, 0); assert.equal(row.nlink, 1); assert.equal(row.logical, bytes.length); assert.ok(row.refs >= 3); }
+    assert.equal((await fs.stat(target)).mode & 0o777, 0o750);
+    const input = await fs.open(source, "r"), parent = await fs.open(path.dirname(target), "r");
+    try { assert.throws(() => original(input.fd, parent.fd, path.basename(target)), /File exists/); }
+    finally { await input.close(); await parent.close(); }
+    const handle = await fs.open(target, "r+");
+    try { await handle.write(Buffer.from([bytes[0] ^ 0xff]), 0, 1, 0); await handle.sync(); }
+    finally { await handle.close(); }
+    assert.deepEqual(await fs.readFile(source), bytes);
+    assert.deepEqual(await fs.readFile(sibling), bytes);
+    assert.notDeepEqual(await fs.readFile(target), bytes);
+    const after = allocations();
+    assert.ok(after[1].private > 0);
+    const third = { ...roots, ...rootsFor(path.join(root, "third")), sourceRegistryRoot: roots.sourceRegistryRoot, libraryRoot: roots.libraryRoot };
+    nativeFiles.cloneFile = (fd, directory, name) => {
+      if (name === "payload.bin") syncFs.writeFileSync(source, Buffer.alloc(bytes.length, 0x23));
+      return original(fd, directory, name);
+    };
+    await assert.rejects(applyLocalApplicationPack({ ...third, ...request, operationId: "clone_drift_001" }), /source changed while copying/);
+    assert.deepEqual(await transactionEntries(third), []);
+    assert.equal(await fs.access(path.join(third.activeRegistryRoot, relative)).then(() => true, () => false), false);
+    assert.deepEqual(await fs.readFile(sibling), bytes);
+    process.stdout.write(`APFS package clone fixture: ${JSON.stringify({ before, after })}\n`);
+  } finally { nativeFiles.cloneFile = original; await fs.rm(root, { recursive: true, force: true }); }
+}
+
 async function run() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-local-packages-"));
   try {
@@ -621,9 +691,10 @@ if (process.argv[2] === "--child") {
     process.exitCode = 1;
   });
 } else {
-  (process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : run()).then(async () => {
-    if (process.argv[2] !== "--consent-recipe") await require("./test-package-ownership.cjs").runPackageOwnership();
-    if (process.argv[2] !== "--consent-recipe") await require("./test-configuration-diagnostics.cjs").runConfigurationDiagnostics();
+  (process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
+    if (!process.argv[2]) await cloneIsolationFixture();
+    if (!process.argv[2]) await require("./test-package-ownership.cjs").runPackageOwnership();
+    if (!process.argv[2]) await require("./test-configuration-diagnostics.cjs").runConfigurationDiagnostics();
     process.stdout.write("local package lifecycle contract passed\n");
   }).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);

@@ -1,4 +1,4 @@
-fn exercise_independent_provider_owner(handoff: &ProviderOutputHandoff, initial: &[u8]) {
+fn exercise_independent_provider_owner(handoff: &ProviderOutputHandoff, initial: &[u8]) -> Vec<u8> {
     let mut owner = handoff.clone();
     owner.config.provider_interface = InterfaceId::new("world_independent_provider");
     owner.config.authoring_source_interface = InterfaceId::new("system_independent_writer_source");
@@ -162,6 +162,7 @@ fn exercise_independent_provider_owner(handoff: &ProviderOutputHandoff, initial:
         validate_checked_owner_transition(&changed).is_err(),
         "another provider frontier/state remains protected"
     );
+    before
 }
 
 fn exercise_peer_verified_input_lifecycle(

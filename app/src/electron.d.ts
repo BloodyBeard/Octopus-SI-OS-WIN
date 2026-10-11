@@ -63,6 +63,7 @@ declare global {
       selectClientAttachments(request: OctopusClientAttachmentSelectionRequest): Promise<OctopusClientAttachmentSelection>;
       stageDroppedAttachments(files: readonly File[]): Promise<OctopusClientAttachmentSelection & { fileIndices: number[] }>;
       discardClientAttachmentStages(handles: readonly OctopusClientAttachmentStageHandle[]): Promise<void>;
+      readClientAttachmentPreview(request: { id: string; contentHash: string }): Promise<{ base64: string; mimeType: string; contentHash: string; size: number }>;
       beginClientAttachmentStage(request: OctopusClientAttachmentStageBeginRequest): Promise<OctopusClientAttachmentStageHandle>;
       appendClientAttachmentStage(request: OctopusClientAttachmentStageAppendRequest): Promise<OctopusClientAttachmentStageProgress>;
       finalizeClientAttachmentStage(request: OctopusClientAttachmentStageFinalizeRequest): Promise<OctopusClientAttachmentStageHandle>;
@@ -138,8 +139,11 @@ declare global {
       defaults(): Promise<OctopusTransportDefaults>;
       providerInterfaces(): Promise<OctopusProviderInterfacesResponse>;
       bootStatus(): Promise<OctopusRuntimeHostState>;
-      chatgptAccount(): Promise<{ signedIn: boolean }>;
-      chatgptSignInStart(): Promise<{ loginId: string }>;
+      chatgptAccount(): Promise<OctopusChatgptAccount>;
+      chatgptRateLimits(): Promise<OctopusChatgptUsage>;
+      chatgptLogout(): Promise<OctopusChatgptAccount>;
+      onChatgptAccountChanged(listener: () => void): () => void;
+      chatgptSignInStart(): Promise<{ loginId: string; authUrl: string }>;
       chatgptSignInStatus(loginId: string): Promise<{ state: "pending" | "completed" | "failed"; error: string }>;
       chatgptSignInCancel(loginId: string): Promise<{ cancelled: boolean }>;
       openLaunchTerminal(request: OctopusTerminalResizeRequest): Promise<OctopusTerminalSnapshot>;
@@ -1260,6 +1264,33 @@ export type OctopusRuntimeEndpointValidation = {
   error?: string;
 };
 
+export type OctopusChatgptAccount = {
+  signedIn: boolean;
+  authType: "chatgpt" | "apiKey" | "amazonBedrock" | null;
+  email: string | null;
+  planType: string | null;
+  credentialHome: string;
+  octopusHome: string | null;
+};
+
+export type OctopusChatgptLimit = {
+  limitId: string | null;
+  limitName: string | null;
+  primary: OctopusProviderRateLimitWindow | null;
+  secondary: OctopusProviderRateLimitWindow | null;
+  credits: { hasCredits: boolean; unlimited: boolean; balance: string | null } | null;
+  individualLimit: { limit: string; used: string; remainingPercent: number; resetsAt: number } | null;
+  planType: string | null;
+  rateLimitReachedType: string | null;
+  spendControlReached: boolean | null;
+};
+
+export type OctopusChatgptUsage = {
+  rateLimits: OctopusChatgptLimit;
+  rateLimitsByLimitId: Record<string, OctopusChatgptLimit> | null;
+  observedAtMs: number;
+};
+
 export type OctopusProviderInterface = {
   id: string;
   label: string;
@@ -1268,8 +1299,10 @@ export type OctopusProviderInterface = {
   sourceNames: string[];
   model?: string;
   reasoningEffort?: string;
+  serviceTier?: string;
   supportedReasoningEfforts: string[];
   models: OctopusProviderModel[];
+  modelCatalogError?: string;
   preferred?: boolean;
   rateLimits?: OctopusProviderRateLimits;
 };
@@ -1282,6 +1315,14 @@ export type OctopusProviderModel = {
   supportedReasoningEfforts: string[];
   showInPicker: boolean;
   isDefault: boolean;
+  serviceTiers?: OctopusModelServiceTier[];
+  defaultServiceTier?: string | null;
+};
+
+export type OctopusModelServiceTier = {
+  id: string;
+  name: string;
+  description: string;
 };
 
 export type OctopusProviderModelsRefreshRequest = {
@@ -1428,6 +1469,7 @@ export type OctopusOsWorkspaceMutationRequest =
         providerModel: string;
         workerInterfaceId: string;
         reasoningEffort?: string;
+  serviceTier?: string;
         doorHostSlots: Record<string, Record<string, string>>;
         contextArtifactBindings: Array<{ id: string }>;
         selectedWorkerEnvironmentKinds: string[];
@@ -1452,7 +1494,7 @@ export type OctopusOsWorkspaceMutationRequest =
       };
       parentEeId: string;
       expectedParentDigest: string;
-      templateName: "project";
+      templateName: string;
       name: string;
       goal: string;
       presentation: { icon: string; color: string };
@@ -1469,6 +1511,7 @@ export type OctopusOsWorkspaceMutationRequest =
       providerInterfaceId: string;
       providerModel: string;
       reasoningEffort: string;
+      serviceTier?: string;
     }
   | {
       action: "create_agent_template";
@@ -1485,7 +1528,9 @@ export type OctopusOsWorkspaceMutationRequest =
       name: string;
       icon: string;
       providerInterfaceId: string;
+      providerModel: string;
       reasoningEffort: string;
+      serviceTier?: string;
       applicationIds: string[];
       driverNames: string[];
     }
@@ -1497,7 +1542,9 @@ export type OctopusOsWorkspaceMutationRequest =
       name: string;
       icon: string;
       providerInterfaceId: string;
+      providerModel: string;
       reasoningEffort: string;
+      serviceTier?: string;
       applicationIds: string[];
       driverNames: string[];
       expectedClientTemplateDigest: string;
@@ -1786,6 +1833,7 @@ export type OctopusChatTurnRequest = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort?: string;
+  serviceTier?: string;
   eeId?: string;
   workerInterfaceId?: string;
   doorHostSlots?: Record<string, Record<string, string>>;

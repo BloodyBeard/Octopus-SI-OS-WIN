@@ -4,7 +4,8 @@ import { OperatorShell } from "./components/shell/OperatorShell";
 import { WelcomeOverlay } from "./components/onboarding/WelcomeOverlay";
 import { PasswordGate } from "./components/onboarding/PasswordGate";
 import { ChatGptSignInGate } from "./components/onboarding/ChatGptSignInGate";
-import { chatgptSignInAvailable, chatgptSignInCompleted } from "./onboarding/chatgptSignIn";
+import { chatgptSignInAvailable } from "./onboarding/chatgptSignIn";
+import { useChatgptAccount } from "./account/useChatgptAccount";
 import { StateMorphDotCloud } from "./components/onboarding/MorphVideoDotCloud";
 import { LaunchTerminal } from "./components/onboarding/LaunchTerminal";
 import { WorkspaceSetupGate } from "./components/onboarding/WorkspaceSetupGate";
@@ -37,7 +38,6 @@ const LOCK_TOUCH_ID_FRAME_SCALES = [1, 2 / 3];
 export function App() {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(() => initializeOnboarding());
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
-  const [chatgptReady, setChatgptReady] = useState(() => !chatgptSignInAvailable() || chatgptSignInCompleted());
   const [access, setAccess] = useState<OctopusClientAccessStatus | null>(null);
   const [accessError, setAccessError] = useState("");
   const runtimeHost = useRuntimeHost();
@@ -49,6 +49,8 @@ export function App() {
   const primaryWindowControls = windowMode ? null : <TrafficLights />;
   const welcomeMode = useMemo(() => new URLSearchParams(window.location.search).get("welcome"), []);
   const showWelcome = !welcomeDismissed && (onboardingState.completed !== true || welcomeMode === "1");
+  const chatgpt = useChatgptAccount(Boolean(access && access.profile !== "lab" && (!showWelcome || windowMode)));
+  const accountGateRequired = chatgptSignInAvailable() && !chatgpt.account?.signedIn;
   const [runtimeHasBeenReady, setRuntimeHasBeenReady] = useState(runtimeHost.ready);
   const launchGate = access?.profile !== "lab"
     && runtimeHost.available
@@ -99,6 +101,10 @@ export function App() {
         <AppToastViewport />
       </>
     );
+  }
+
+  if (windowMode && access.authenticated && access.profile === "live" && accountGateRequired) {
+    return <><ChatGptSignInGate /><AppToastViewport /></>;
   }
 
   if (windowMode === "quick-task") {
@@ -153,8 +159,8 @@ export function App() {
     );
   }
 
-  if (!chatgptReady && access.profile !== "lab") {
-    return <>{primaryWindowControls}<ChatGptSignInGate onDone={() => setChatgptReady(true)} /><AppToastViewport /></>;
+  if (accountGateRequired && access.profile !== "lab") {
+    return <>{primaryWindowControls}<ChatGptSignInGate /><AppToastViewport /></>;
   }
 
   if (access.profile !== "lab" && runtimeHost.available && runtimeHost.phase === "probing" && !runtimeHasBeenReady) {

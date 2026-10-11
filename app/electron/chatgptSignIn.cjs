@@ -1,5 +1,6 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
+const path = require("node:path");
 
 const LOGIN_TIMEOUT_MS = 300_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -8,7 +9,29 @@ const IDLE_STOP_MS = 20_000;
 function createChatgptSignIn(options) {
   let appServer = null;
   let idleTimer = null;
+  let authBusy = false;
+  let authGeneration = 0;
   const logins = new Map();
+
+  function nativeAuthStamp(codexHome) {
+    try {
+      const stat = fs.statSync(path.join(codexHome, "auth.json"), { bigint: true });
+      return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  function requireCurrentScope(server) {
+    if (server !== appServer || server.closed || server.codexHome !== options.codexHome()
+      || server.binary !== options.codexBinary()) throw new Error("ChatGPT account scope changed. Refresh and try again.");
+  }
+
+  function publishAccountChange() {
+    authGeneration += 1;
+    options.onAccountChanged?.();
+  }
 
   function scheduleIdleStop() {
     if (idleTimer) clearTimeout(idleTimer);
@@ -26,17 +49,22 @@ function createChatgptSignIn(options) {
   }
 
   function ensureAppServer() {
-    if (appServer && !appServer.closed) return appServer.ready;
     const binary = options.codexBinary();
-    fs.accessSync(binary, fs.constants.X_OK);
     const codexHome = options.codexHome();
+    const authStamp = nativeAuthStamp(codexHome);
+    if (appServer && !appServer.closed) {
+      if (appServer.binary === binary && appServer.codexHome === codexHome
+        && (appServer.authStamp === authStamp || [...logins.values()].some((login) => login.server === appServer && login.state === "pending"))) return appServer.ready;
+      dispose();
+    }
+    fs.accessSync(binary, fs.constants.X_OK);
     fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
     const child = spawn(binary, ["app-server"], {
       cwd: codexHome,
       env: { ...process.env, CODEX_HOME: codexHome },
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const server = { child, closed: false, nextId: 1, pending: new Map(), buffer: "", stderr: "", ready: null };
+    const server = { child, binary, codexHome, authStamp, closed: false, nextId: 1, pending: new Map(), buffer: "", stderr: "", ready: null };
     appServer = server;
     const fail = (error) => {
       server.closed = true;
@@ -77,11 +105,31 @@ function createChatgptSignIn(options) {
         }
         if (message.method === "account/login/completed") {
           const login = logins.get(String(message.params?.loginId ?? ""));
-          if (login) {
-            Object.assign(login, message.params?.success === true
-              ? { state: "completed", error: "" }
-              : { state: "failed", error: String(message.params?.error || "Sign-in did not complete") });
+          if (login?.server === server && login.state === "pending" && !login.verifying) {
+            if (message.params?.success !== true) {
+              clearTimeout(login.timer);
+              Object.assign(login, { state: "failed", error: String(message.params?.error || "Sign-in did not complete") });
+            } else {
+              login.verifying = true;
+              const generation = authGeneration;
+              void readAccount(server, true).then((value) => {
+                if (login.state !== "pending" || generation !== authGeneration) return;
+                if (!value.signedIn) throw new Error("ChatGPT sign-in finished without an authorized account.");
+                server.authStamp = nativeAuthStamp(server.codexHome);
+                clearTimeout(login.timer);
+                Object.assign(login, { state: "completed", error: "" });
+                publishAccountChange();
+              }).catch((error) => {
+                if (login.state !== "pending") return;
+                clearTimeout(login.timer);
+                Object.assign(login, { state: "failed", error: error.message });
+                publishAccountChange();
+              }).finally(scheduleIdleStop);
+            }
           }
+        }
+        if (message.method === "account/updated" && !authBusy && ![...logins.values()].some((login) => login.state === "pending")) {
+          publishAccountChange();
         }
       }
     });
@@ -105,38 +153,123 @@ function createChatgptSignIn(options) {
   }
 
   function dispose() {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
     const server = appServer;
     appServer = null;
     if (server && !server.closed) {
       server.closed = true;
+      for (const waiter of server.pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("Codex account connection was closed."));
+      }
+      server.pending.clear();
+      for (const login of logins.values()) {
+        if (login.server !== server || login.state !== "pending") continue;
+        clearTimeout(login.timer);
+        Object.assign(login, { state: "failed", error: "ChatGPT account connection was closed." });
+      }
       server.child.kill("SIGTERM");
     }
   }
 
+  async function readAccount(server, refreshToken = false) {
+    const response = await server.request("account/read", { refreshToken });
+    requireCurrentScope(server);
+    if (!response || !Object.hasOwn(response, "account") || (response.account !== null
+      && !["chatgpt", "apiKey", "amazonBedrock"].includes(response.account?.type))) {
+      throw new Error("ChatGPT returned an invalid account response.");
+    }
+    const native = response.account;
+    if (native?.type === "chatgpt" && ((native.email != null && typeof native.email !== "string")
+      || (native.planType != null && typeof native.planType !== "string"))) throw new Error("ChatGPT returned invalid account identity.");
+    return {
+      signedIn: native?.type === "chatgpt", authType: native?.type ?? null,
+      email: native?.type === "chatgpt" ? native.email ?? null : null,
+      planType: native?.type === "chatgpt" ? native.planType ?? null : null,
+      credentialHome: server.codexHome, octopusHome: options.octopusHome?.() ?? null,
+    };
+  }
+
   async function account() {
+    try { return await readAccount(await ensureAppServer()); }
+    finally { scheduleIdleStop(); }
+  }
+
+  async function rateLimits() {
     const server = await ensureAppServer();
-    const response = await server.request("account/read", { refreshToken: false });
-    scheduleIdleStop();
-    return { signedIn: response?.account?.type === "chatgpt" };
+    const generation = authGeneration;
+    const authStamp = nativeAuthStamp(server.codexHome);
+    try {
+      const before = await readAccount(server);
+      if (!before.signedIn) throw new Error("Sign in with ChatGPT to see usage limits.");
+      const response = await server.request("account/rateLimits/read");
+      const after = await readAccount(server);
+      if (generation !== authGeneration || authStamp !== nativeAuthStamp(server.codexHome)
+        || JSON.stringify(before) !== JSON.stringify(after)) {
+        throw new Error("ChatGPT account changed while loading usage. Refresh and try again.");
+      }
+      if (!validLimit(response?.rateLimits)
+        || (response.rateLimitsByLimitId != null && (typeof response.rateLimitsByLimitId !== "object" || Array.isArray(response.rateLimitsByLimitId)
+          || !Object.values(response.rateLimitsByLimitId).every(validLimit)))) {
+        throw new Error("ChatGPT returned invalid usage limits.");
+      }
+      return { rateLimits: response.rateLimits, rateLimitsByLimitId: response.rateLimitsByLimitId ?? null, observedAtMs: Date.now() };
+    } finally { scheduleIdleStop(); }
+  }
+
+  function validLimit(limit) {
+    if (!limit || typeof limit !== "object" || Array.isArray(limit)) return false;
+    for (const key of ["limitId", "limitName", "planType", "rateLimitReachedType"]) {
+      if (limit[key] != null && typeof limit[key] !== "string") return false;
+    }
+    for (const key of ["primary", "secondary"]) {
+      const window = limit[key];
+      if (window != null && (typeof window !== "object" || !Number.isFinite(window.usedPercent)
+        || (window.windowDurationMins != null && !Number.isFinite(window.windowDurationMins))
+        || (window.resetsAt != null && !Number.isFinite(window.resetsAt)))) return false;
+    }
+    const credits = limit.credits;
+    if (credits != null && (typeof credits.hasCredits !== "boolean" || typeof credits.unlimited !== "boolean"
+      || (credits.balance != null && typeof credits.balance !== "string"))) return false;
+    const individual = limit.individualLimit;
+    if (individual != null && (typeof individual.limit !== "string" || typeof individual.used !== "string"
+      || !Number.isFinite(individual.remainingPercent) || !Number.isFinite(individual.resetsAt))) return false;
+    return limit.spendControlReached == null || typeof limit.spendControlReached === "boolean";
   }
 
   async function start() {
-    const server = await ensureAppServer();
-    const response = await server.request("account/login/start", { type: "chatgpt" });
-    if (response?.type !== "chatgpt" || typeof response.loginId !== "string" || typeof response.authUrl !== "string") {
-      throw new Error("ChatGPT sign-in returned an unexpected response");
+    if (authBusy || [...logins.values()].some((login) => login.state === "pending")) {
+      throw new Error("A ChatGPT account change is already in progress.");
     }
-    const authUrl = new URL(response.authUrl);
-    if (authUrl.protocol !== "https:") throw new Error("ChatGPT sign-in returned an unsafe address");
-    const login = { state: "pending", error: "" };
-    logins.set(response.loginId, login);
-    setTimeout(() => {
-      if (login.state !== "pending") return;
-      Object.assign(login, { state: "failed", error: "Sign-in was not finished in the browser in time" });
-      void server.request("account/login/cancel", { loginId: response.loginId }).catch(() => {});
-    }, LOGIN_TIMEOUT_MS).unref();
-    await options.openExternal(authUrl.toString());
-    return { loginId: response.loginId };
+    authBusy = true;
+    authGeneration += 1;
+    try {
+      const server = await ensureAppServer();
+      requireCurrentScope(server);
+      const response = await server.request("account/login/start", { type: "chatgpt" });
+      requireCurrentScope(server);
+      if (response?.type !== "chatgpt" || typeof response.loginId !== "string" || typeof response.authUrl !== "string") {
+        throw new Error("ChatGPT sign-in returned an unexpected response");
+      }
+      const authUrl = new URL(response.authUrl);
+      if (authUrl.protocol !== "https:") throw new Error("ChatGPT sign-in returned an unsafe address");
+      const login = { state: "pending", error: "", server, verifying: false, timer: null };
+      logins.set(response.loginId, login);
+      login.timer = setTimeout(() => {
+        if (login.state !== "pending") return;
+        Object.assign(login, { state: "failed", error: "Sign-in was not finished in the browser in time" });
+        void server.request("account/login/cancel", { loginId: response.loginId }).catch((error) => {
+          login.error += `. Cancellation failed: ${error.message}`;
+        }).finally(() => { publishAccountChange(); scheduleIdleStop(); });
+      }, LOGIN_TIMEOUT_MS).unref();
+      try { await options.openExternal(authUrl.toString()); }
+      catch (error) {
+        await cancel(response.loginId);
+        throw error;
+      }
+      return { loginId: response.loginId, authUrl: authUrl.toString() };
+    } finally { authBusy = false; scheduleIdleStop(); }
   }
 
   function status(loginId) {
@@ -148,10 +281,33 @@ function createChatgptSignIn(options) {
   async function cancel(loginId) {
     const login = logins.get(String(loginId ?? ""));
     if (!login || login.state !== "pending") return { cancelled: false };
+    const server = login.server;
+    requireCurrentScope(server);
+    const response = await server.request("account/login/cancel", { loginId: String(loginId) });
+    if (!["canceled", "notFound"].includes(response?.status)) throw new Error("ChatGPT did not confirm sign-in cancellation.");
+    clearTimeout(login.timer);
     Object.assign(login, { state: "failed", error: "Sign-in was cancelled" });
-    const server = await ensureAppServer();
-    await server.request("account/login/cancel", { loginId: String(loginId) }).catch(() => {});
-    return { cancelled: true };
+    publishAccountChange();
+    scheduleIdleStop();
+    return { cancelled: response.status === "canceled" };
+  }
+
+  async function logout() {
+    if (authBusy) throw new Error("A ChatGPT account change is already in progress.");
+    authBusy = true;
+    authGeneration += 1;
+    try {
+      for (const [loginId, login] of logins) {
+        if (login.state === "pending") await cancel(loginId);
+      }
+      const server = await ensureAppServer();
+      await server.request("account/logout");
+      const value = await readAccount(server);
+      if (value.signedIn) throw new Error("ChatGPT still reports a signed-in account after logout. Refresh and try again.");
+      server.authStamp = nativeAuthStamp(server.codexHome);
+      publishAccountChange();
+      return value;
+    } finally { authBusy = false; scheduleIdleStop(); }
   }
 
   async function models() {
@@ -178,9 +334,15 @@ function createChatgptSignIn(options) {
             description: typeof model.description === "string" ? model.description : "",
             defaultReasoningEffort: model.defaultReasoningEffort, supportedReasoningEfforts: efforts,
             showInPicker: model.hidden !== true, isDefault: model.isDefault === true,
+            ...require("./providerModelTiers.cjs").modelServiceTiers(model.serviceTiers, model.defaultServiceTier, `Codex model '${model.model}'`),
           });
         }
-        if (response.nextCursor === null) return result;
+        if (response.nextCursor === null) {
+          if (server !== appServer || server.codexHome !== options.codexHome() || server.binary !== options.codexBinary()) {
+            throw new Error("Codex account scope changed during model discovery.");
+          }
+          return result;
+        }
         if (typeof response.nextCursor !== "string" || !response.nextCursor || cursors.has(response.nextCursor)) {
           throw new Error("Codex returned an invalid or repeated model-list cursor.");
         }
@@ -193,7 +355,7 @@ function createChatgptSignIn(options) {
     }
   }
 
-  return { account, start, status, cancel, dispose, models };
+  return { account, rateLimits, start, status, cancel, logout, dispose, models };
 }
 
 module.exports = { createChatgptSignIn };

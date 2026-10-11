@@ -1,0 +1,290 @@
+{
+  "id": "client.mcp",
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "system_room"
+  ],
+  "handler_config": {
+    "operation": "mcp",
+    "mcp": {
+      "protocol_version": "2025-11-25",
+      "server_name": "octopus",
+      "server_version": "1",
+      "tools": [
+        {
+          "name": "list_artifacts",
+          "description": "List artifacts currently bound to this run. Memory, persona, context, media, and session files appear here only if policy already made their ArtifactRefs visible.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string",
+                "description": "Optional exact artifact id label filter."
+              },
+              "id_prefix": {
+                "type": "string",
+                "description": "Optional artifact id prefix filter."
+              }
+            },
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "artifact",
+            "handler_config": {
+              "operation": "list"
+            }
+          }
+        },
+        {
+          "name": "read_artifact",
+          "description": "Read a bounded UTF-8 range from one artifact currently bound to this run. The result reports the exact continuation offset; non-text carriers fail closed so the supporting interface can materialize them.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Visible artifact id or content hash."
+              },
+              "max_bytes": {
+                "type": "integer",
+                "minimum": 4,
+                "maximum": 1048576,
+                "description": "Maximum UTF-8 bytes to return. Defaults to 65536."
+              },
+              "offset_bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "UTF-8 byte offset returned by a previous read. Defaults to 0."
+              }
+            },
+            "required": [
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "artifact",
+            "handler_config": {
+              "operation": "read",
+              "default_max_bytes": 65536,
+              "max_max_bytes": 1048576
+            }
+          }
+        },
+        {
+          "name": "search_artifacts",
+          "description": "Search text surfaces of artifacts currently bound to this run. Results never include artifacts outside the run binding.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Text query to search for."
+              },
+              "label": {
+                "type": "string",
+                "description": "Optional exact artifact id label filter."
+              },
+              "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum matching lines to return."
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "artifact",
+            "handler_config": {
+              "operation": "search"
+            }
+          }
+        },
+        {
+          "name": "publish_widget",
+          "description": "Create or update an Octopus client widget or document. Use the exact System presentation interface from the bound Home delivery artifact. The result proves artifact admission, not rendering or extension installation. Same document id with a larger revision updates it. Read the bound artifact-home-widget-authoring contract for native/sandbox documents.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "interface": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact granted System presentation interface, never a guessed Home/client World address."
+              },
+              "document": {
+                "type": "object",
+                "required": [
+                  "schema",
+                  "schema_version",
+                  "release_channel",
+                  "id",
+                  "revision",
+                  "title",
+                  "glyph",
+                  "target",
+                  "render"
+                ],
+                "properties": {
+                  "schema": {
+                    "const": "octopus.client_surface"
+                  },
+                  "schema_version": {
+                    "const": 1
+                  },
+                  "release_channel": {
+                    "const": "stable"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "glyph": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "object",
+                    "required": [
+                      "kind"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "voice.widget",
+                          "voice.window",
+                          "workspace.surface",
+                          "worker_environment.surface"
+                        ]
+                      }
+                    }
+                  },
+                  "render": {
+                    "type": "object",
+                    "required": [
+                      "kind"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "native",
+                          "sandbox"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "interface",
+              "document"
+            ],
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "emit",
+            "label": "client.surface.document",
+            "payload_argument": "document"
+          }
+        },
+        {
+          "name": "open_client_surface",
+          "description": "Request navigation to an existing visible Octopus client surface using its exact surface_id. Use the bound Home delivery System presentation interface. Only the receiving Home client can apply this presentation action. Admission is not proof that a client has rendered it; unavailable or hidden surfaces refuse visibly. Does not execute external URLs, files, commands, or task mutations.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "interface": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "octopus.client_action"
+                  },
+                  "schema_version": {
+                    "const": 1
+                  },
+                  "action": {
+                    "const": "open_surface"
+                  },
+                  "surface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "schema",
+                  "schema_version",
+                  "action",
+                  "surface_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "interface",
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "emit",
+            "label": "client.action",
+            "payload_argument": "action"
+          }
+        }
+      ]
+    }
+  },
+  "description": "Octopus client MCP. Call with method tools/list to discover its descriptor-owned catalogue, or method tools/call and params {name, arguments}. Creates/updates widgets, opens existing client surfaces and inspects only bound artifacts. Each invocation establishes an MCP connection over the admitted Octopus artifact transport, negotiates the protocol, sends initialized, executes one request, and closes. All effects still pass ordinary artifact.send admission. No ambient host/MCP configuration or global client access.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "method": {
+        "type": "string",
+        "enum": [
+          "tools/list",
+          "tools/call"
+        ]
+      },
+      "params": {
+        "type": "object"
+      }
+    },
+    "required": [
+      "method"
+    ],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

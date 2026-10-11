@@ -807,6 +807,9 @@ async fn browser_room_keeps_one_cdp_session_across_snapshot_ref_actions_and_publ
     assert_eq!(image["mime_type"], "image/png");
     assert_eq!(image["artifact"]["payload_content_hash"], capture["body"]["content_hash"]);
     let media_bytes = std::fs::read(image["artifact"]["payload_path"].as_str().unwrap()).unwrap();
+    assert_eq!(image["artifact"]["payload_path"], capture["body"]["path"]);
+    let media_root = PathBuf::from(image["artifact"]["payload_path"].as_str().unwrap()).parent().unwrap().join("artifacts");
+    assert!(std::fs::read_dir(media_root).unwrap().all(|entry| entry.unwrap().path().extension().is_some_and(|extension| extension == "json")));
     assert_eq!(blake3::hash(&media_bytes).to_hex().to_string(), capture["body"]["content_hash"].as_str().unwrap());
     assert_eq!(capture["body"]["source_movement_seq"], 7);
     let geometry = &capture["body"]["geometry"];
@@ -1524,6 +1527,8 @@ async fn native_download_import_outlives_process_generation_and_closed_origin() 
     let result = response(result_file.clone());
     let (raw, published, _) = room.prepare_download_output(&result_file,&source,10).unwrap().unwrap();
     assert_eq!(raw.read_payload_bytes().unwrap(),payload);
+    assert_eq!(raw.read_manifest().unwrap().payload_path, PathBuf::from(result["body"]["artifact"]["payload_path"].as_str().unwrap()));
+    assert!(std::fs::read_dir(raw.manifest_path().parent().unwrap()).unwrap().all(|entry| entry.unwrap().path().extension().is_some_and(|extension| extension == "json")));
     assert!(raw.manifest_path().starts_with(&process_var));
     assert!(published.body.as_ref().unwrap().get("path").is_none());
     let published_ref:ArtifactRef=serde_json::from_value(published.body.as_ref().unwrap()["artifact"].clone()).unwrap();

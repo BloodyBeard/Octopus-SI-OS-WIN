@@ -402,6 +402,7 @@ export function ChatView({
         activeProvider={chat.activeProvider}
         agentPresetId={chat.agentPresetId}
         accessMode={chat.accessMode}
+        fullAccessUnavailableReason={chat.fullAccessUnavailableReason}
         agentPresets={chat.composerAgentPresets}
         attachments={chat.attachments}
         applicationIds={chat.applicationIds}
@@ -444,6 +445,8 @@ export function ChatView({
         projectedFileSources={projectedFileSources}
         pausedQueueSubmissionCount={chat.pausedQueueSubmissionCount}
         reasoningEffort={chat.reasoningEffort}
+        serviceTier={chat.serviceTier}
+        onServiceTierChange={chat.chooseServiceTier}
         resumeAvailable={chat.resumeAvailable}
         runId={chat.activeRunId}
         submissionMode={chat.busy ? "steer" : "send"}

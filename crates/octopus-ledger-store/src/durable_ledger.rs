@@ -739,7 +739,9 @@ impl DurableBlobs {
     pub fn open(dir: impl AsRef<Path>) -> LedgerResult<Self> {
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir).map_err(|e| io_err(&dir, &e))?;
-        Ok(Self { dir })
+        Ok(Self {
+            dir,
+        })
     }
 
     fn blob_path(&self, hash: &ContentHash) -> PathBuf {
@@ -763,7 +765,7 @@ impl DurableBlobs {
         Ok(hashes)
     }
 
-    fn stage_blob(&self, bytes: &[u8]) -> LedgerResult<ContentHash> {
+    fn stage_blob(&mut self, bytes: &[u8]) -> LedgerResult<ContentHash> {
         let hash = ContentHash::of_bytes(bytes);
         let path = self.blob_path(&hash);
         if path.exists() {
@@ -776,14 +778,11 @@ impl DurableBlobs {
             std::process::id(),
             BLOB_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        let mut f = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|e| io_err(&tmp, &e))?;
+        let mut f = octopus_file_storage::write_new(&tmp, bytes)
+            .map_err(|error| io_err(&tmp, &error))?;
         let result = (|| {
-            f.write_all(bytes).map_err(|e| io_err(&tmp, &e))?;
             f.flush().map_err(|e| io_err(&tmp, &e))?;
+            verify_blob_file(&tmp, &hash)?;
             sync_blob_data(&f).map_err(|e| io_err(&tmp, &e))?;
             match std::fs::hard_link(&tmp, &path) {
                 Ok(()) => {}
@@ -830,7 +829,7 @@ fn sync_blob_data(file: &File) -> std::io::Result<()> {
     file.sync_all()
 }
 
-fn verify_blob_file(path: &Path, expected: &ContentHash) -> LedgerResult<()> {
+pub(super) fn verify_blob_file(path: &Path, expected: &ContentHash) -> LedgerResult<()> {
     let mut file = File::open(path).map_err(|error| io_err(path, &error))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0u8; 64 * 1024];
@@ -1287,6 +1286,85 @@ mod tests {
             Err(LedgerError::BlobIntegrity { .. })
         ));
         assert!(reopened.try_put_batch(&[]).unwrap().is_empty());
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn durable_blobs_compress_without_changing_raw_read_or_publication_contracts() {
+        use std::os::macos::fs::MetadataExt as _;
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let mut blobs = DurableBlobs::open(directory.path()).unwrap();
+        let original = (0..3 * 1024 * 1024)
+            .map(|index| (index / 4096 + index % 251) as u8)
+            .collect::<Vec<_>>();
+        let first = blobs.try_put(&original).unwrap();
+        let mut changed = original.clone();
+        changed[7000..7100].fill(0x7f);
+        changed.extend_from_slice(b"new exact bytes");
+        let second = blobs.try_put(&changed).unwrap();
+        let shorter = changed[..80 * 1024 + 3].to_vec();
+        let third = blobs.try_put(&shorter).unwrap();
+        for (hash, bytes) in [(first, &original), (second, &changed), (third, &shorter)] {
+            assert_eq!(std::fs::read(blobs.blob_path(&hash)).unwrap(), *bytes);
+            assert_eq!(blobs.try_get(&hash).unwrap().unwrap(), *bytes);
+            let metadata = std::fs::metadata(blobs.blob_path(&hash)).unwrap();
+            assert_eq!(metadata.nlink(), 1);
+            assert_ne!(metadata.st_flags() & 0x20, 0);
+            assert!(metadata.blocks() * 512 < metadata.len());
+        }
+        let inodes = [first, second, third]
+            .map(|hash| std::fs::metadata(blobs.blob_path(&hash)).unwrap().ino());
+        assert_ne!(inodes[0], inodes[1]);
+        assert_ne!(inodes[1], inodes[2]);
+        let mut concurrent = original.clone();
+        concurrent[9000] ^= 0xff;
+        let barrier = std::sync::Barrier::new(2);
+        let published = std::thread::scope(|scope| {
+            let threads = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut writer = DurableBlobs::open(directory.path()).unwrap();
+                        writer.try_put(&original).unwrap();
+                        barrier.wait();
+                        writer.try_put(&concurrent).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(published[0], published[1]);
+        assert_eq!(blobs.try_get(&published[0]).unwrap().unwrap(), concurrent);
+        assert_eq!(
+            std::fs::metadata(blobs.blob_path(&published[0]))
+                .unwrap()
+                .nlink(),
+            1
+        );
+        let noise = (0..4096u64)
+            .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
+            .collect::<Vec<_>>();
+        let noise_hash = blobs.try_put(&noise).unwrap();
+        assert_eq!(std::fs::read(blobs.blob_path(&noise_hash)).unwrap(), noise);
+        assert_eq!(std::fs::metadata(blobs.blob_path(&noise_hash)).unwrap().st_flags() & 0x20, 0);
+        let blocked = directory.path().join("blocked.tmp");
+        std::os::unix::fs::symlink(blobs.blob_path(&second), &blocked).unwrap();
+        assert!(octopus_file_storage::write_new(&blocked, &original).is_err());
+        assert_eq!(std::fs::read(blobs.blob_path(&second)).unwrap(), changed);
+        std::fs::remove_file(blocked).unwrap();
+        std::fs::write(blobs.blob_path(&first), b"corrupted original").unwrap();
+        assert_eq!(blobs.try_get(&second).unwrap().unwrap(), changed);
+        assert_eq!(blobs.try_get(&third).unwrap().unwrap(), shorter);
+        assert!(blobs.try_get(&first).is_err());
+        assert!(blobs.try_put(&original).is_err());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 5);
+        drop(blobs);
+        let reopened = DurableBlobs::open(directory.path()).unwrap();
+        assert_eq!(reopened.try_get(&second).unwrap().unwrap(), changed);
+        assert!(reopened.try_get(&first).is_err());
     }
 
     #[test]

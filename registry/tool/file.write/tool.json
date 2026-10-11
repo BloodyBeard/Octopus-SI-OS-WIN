@@ -54,7 +54,7 @@
   "supported_worker_environment_kinds": [
     "system_room"
   ],
-  "description": "Write one or more files under this room's granted roots. A write supplies either complete bytes or an RFC 6902 JSON patch guarded by exact before/after content hashes. Every result carries path, before_hash, and after_hash evidence; readers validate file-domain semantics fail-closed. An explicit ordered=true batch uses content and expected_before_content for each distinct path, checks each preimage immediately before its effect, and stops at the first refusal. Applied, refused, uncertain and unattempted entries are durably recorded; failure details retain partial evidence. Reinvoking the exact artifact replays those receipts without reapplying committed entries.",
+  "description": "Write one or more files under this room's granted roots. A write supplies either complete bytes or an RFC 6902 JSON patch guarded by exact before/after content hashes. Every result carries path, before_hash, and after_hash evidence; readers validate file-domain semantics fail-closed. An explicit ordered=true batch carries an exact expected_before_content and expected_before_hash for each distinct path, with either content or a patch guarded by expected_after_hash, checks each preimage immediately before its effect, and stops at the first refusal. Applied, refused, uncertain and unattempted entries are durably recorded; failure details retain partial evidence. Reinvoking the exact artifact replays those receipts without reapplying committed entries. Ordered patch preimages may explicitly use a zlib_base64 object with exact decoded byte_count; the complete single stream, decoded hash, and aggregate preimage/postimage host limit are checked before effects. json_format explicitly selects pretty or compact canonical JSON for patches.",
   "args_schema": {
     "type": "object",
     "properties": {
@@ -69,7 +69,7 @@
       "patch": {
         "type": "array",
         "minItems": 1,
-        "description": "RFC 6902 operations applied to the current JSON bytes. The resulting document is encoded as pretty JSON with one trailing newline.",
+        "description": "RFC 6902 operations applied to exact current JSON bytes; json_format selects postimage encoding and omission preserves pretty JSON with one trailing newline.",
         "items": {
           "oneOf": [
             {
@@ -340,14 +340,47 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "expected_before_content": {
-              "type": [
-                "string",
-                "null"
+              "oneOf": [
+                {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "encoding": {
+                      "const": "zlib_base64"
+                    },
+                    "byte_count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "data": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "encoding",
+                    "byte_count",
+                    "data"
+                  ],
+                  "additionalProperties": false
+                }
               ]
             },
             "expected_after_hash": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$"
+            },
+            "json_format": {
+              "type": "string",
+              "enum": [
+                "pretty",
+                "compact"
+              ],
+              "description": "JSON patch postimage serialization, with one trailing newline. Omission means pretty JSON; compact uses canonical sorted keys."
             }
           },
           "oneOf": [
@@ -367,8 +400,21 @@
                     "required": [
                       "expected_after_hash"
                     ]
+                  },
+                  {
+                    "required": [
+                      "json_format"
+                    ]
                   }
                 ]
+              },
+              "properties": {
+                "expected_before_content": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
               }
             },
             {
@@ -385,17 +431,8 @@
                 }
               },
               "not": {
-                "anyOf": [
-                  {
-                    "required": [
-                      "content"
-                    ]
-                  },
-                  {
-                    "required": [
-                      "expected_before_content"
-                    ]
-                  }
+                "required": [
+                  "content"
                 ]
               }
             }
@@ -405,6 +442,14 @@
       },
       "ordered": {
         "const": true
+      },
+      "json_format": {
+        "type": "string",
+        "enum": [
+          "pretty",
+          "compact"
+        ],
+        "description": "JSON patch postimage serialization, with one trailing newline. Omission means pretty JSON; compact uses canonical sorted keys."
       }
     },
     "oneOf": [
@@ -428,6 +473,11 @@
             {
               "required": [
                 "writes"
+              ]
+            },
+            {
+              "required": [
+                "json_format"
               ]
             }
           ]
@@ -501,6 +551,11 @@
               "required": [
                 "expected_after_hash"
               ]
+            },
+            {
+              "required": [
+                "json_format"
+              ]
             }
           ]
         }
@@ -522,23 +577,65 @@
             "writes": {
               "items": {
                 "required": [
-                  "content",
                   "expected_before_content",
                   "expected_before_hash"
                 ],
-                "not": {
-                  "anyOf": [
-                    {
-                      "required": [
-                        "patch"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "expected_after_hash"
+                "if": {
+                  "required": [
+                    "patch"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "expected_before_content": {
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "encoding": {
+                              "const": "zlib_base64"
+                            },
+                            "byte_count": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "data": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "encoding",
+                            "byte_count",
+                            "data"
+                          ],
+                          "additionalProperties": false
+                        }
                       ]
                     }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "writes": {
+              "items": {
+                "if": {
+                  "required": [
+                    "patch"
                   ]
+                },
+                "then": {
+                  "not": {
+                    "required": [
+                      "expected_before_content"
+                    ]
+                  }
                 }
               }
             }

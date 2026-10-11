@@ -45,7 +45,7 @@ impl ProviderOutputHandoff {
         }
         let mut previous = prior.clone();
         let mut recovered = None;
-        let mut independent_sources = BTreeSet::new();
+        let mut independent_sources = BTreeMap::new();
         let mut earlier_sources = BTreeMap::new();
         for transition in &chain {
             if transition.writer == provider_writer {
@@ -72,9 +72,7 @@ impl ProviderOutputHandoff {
                 recovered = Some(next.clone());
             } else if prior.as_ref().is_none_or(|prior| prior.source_movement_seq != next.source_movement_seq) {
                 if next.source_movement_seq > self.source_movement_seq {
-                    if independent_sources.insert(next.source_movement_seq) {
-                        self.validate_independent_handoff_source(&next)?;
-                    }
+                    independent_sources.insert(next.source_movement_seq, next.clone());
                 } else {
                     earlier_sources.insert(next.source_movement_seq, next.clone());
                 }
@@ -83,6 +81,10 @@ impl ProviderOutputHandoff {
         }
         if previous.as_ref() != Some(pending) {
             return Err("checked source replay differs from the current pending handoff".into());
+        }
+        for independent in independent_sources.values() {
+            self.validate_independent_handoff_source(independent)?;
+            self.admitted_replay_handoff(independent)?;
         }
         for earlier in earlier_sources.values() {
             self.validate_replay_handoff_source(earlier, false)?;
@@ -146,13 +148,15 @@ impl ProviderOutputHandoff {
         let checkpoint_id = CheckpointId::new(&coordinate.checkpoint);
         let checkpoint = pinned.checkpoint(&checkpoint_id)
             .ok_or("replayed handoff source lost its pinned checkpoint")?;
+        let context_free = !independent || self.source_is_context_free(pending.source_movement_seq)?;
         let templates = self.config.checkpoints.iter().filter(|template| {
-            (!independent || (template.role == RunAuthoringCheckpointRole::IndependentInput
+            (!independent || (matches!(template.role,
+                RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput)
                 && !template.include_context))
                 && template.interface() == &source.source
                 && checkpoint_record_matches_template(checkpoint, template, &self.config.run)
         }).collect::<Vec<_>>();
-        if !pending.terminal || pinned.id != self.config.run || pinned.worker != self.config.worker
+        if !pending.terminal || !context_free || pinned.id != self.config.run || pinned.worker != self.config.worker
             || !pinned.active_checkpoints.contains(&checkpoint_id)
             || checkpoint.epoch.0 != coordinate.epoch || templates.len() != 1
             || !indexed_evidence_matches_checkpoint(&source, templates[0])

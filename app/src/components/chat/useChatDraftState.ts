@@ -26,6 +26,7 @@ export type ChatDraftValue = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   applicationIds: string[];
   driverNames: string[];
   accessMode: TaskAccessMode;
@@ -49,6 +50,7 @@ type ChatDraftState = ChatDraftValue & {
   setProviderInterfaceId: Dispatch<SetStateAction<string>>;
   setProviderModel: Dispatch<SetStateAction<string>>;
   setReasoningEffort: Dispatch<SetStateAction<string>>;
+  setServiceTier: Dispatch<SetStateAction<string>>;
   setApplicationIds: Dispatch<SetStateAction<string[]>>;
   setDriverNames: Dispatch<SetStateAction<string[]>>;
   setAccessMode: Dispatch<SetStateAction<TaskAccessMode>>;
@@ -96,6 +98,7 @@ export function useChatDraftState(input: {
       providerInterfaceId: draft.providerInterfaceId,
       providerModel: draft.providerModel,
       reasoningEffort: draft.reasoningEffort,
+      serviceTier: draft.serviceTier,
       applicationIds: draft.applicationIds,
       driverNames: draft.driverNames,
       accessMode: draft.accessMode,
@@ -125,14 +128,15 @@ export function useChatDraftState(input: {
   attachmentsRef.current = attachments;
   const [agentPresetId, setAgentPresetId] = useState(initialDraftRef.current?.agentPresetId || "");
   const [providerInterfaceId, setProviderInterfaceId] = useState(
-    initialDraftRef.current?.providerInterfaceId || storedSettingsRef.current.providerInterfaceId,
+    initialDraftRef.current?.providerInterfaceId || (input.activeRunId ? "" : storedSettingsRef.current.providerInterfaceId),
   );
   const [providerModel, setProviderModel] = useState(
-    initialDraftRef.current?.providerModel || storedSettingsRef.current.providerModel,
+    initialDraftRef.current?.providerModel || (input.activeRunId ? "" : storedSettingsRef.current.providerModel),
   );
   const [reasoningEffort, setReasoningEffort] = useState(
-    initialDraftRef.current?.reasoningEffort || storedSettingsRef.current.reasoningEffort,
+    initialDraftRef.current?.reasoningEffort ?? (input.activeRunId ? "" : storedSettingsRef.current.reasoningEffort),
   );
+  const [serviceTier, setServiceTier] = useState(initialDraftRef.current?.serviceTier ?? (input.activeRunId ? "" : storedSettingsRef.current.serviceTier ?? ""));
   const [eeId, setEeId] = useState(initialDraftRef.current?.eeId || "");
   const [workerInterfaceId, setWorkerInterfaceId] = useState(initialDraftRef.current?.workerInterfaceId || "");
   const [applicationIds, setApplicationIds] = useState<string[]>(initialDraftRef.current?.applicationIds ?? []);
@@ -147,8 +151,11 @@ export function useChatDraftState(input: {
     setLoadedScope(scopeIdentity);
     applyDraft(initialDraftRef.current ?? {
       messageId: "", messageHadAttachments: false, text: "", attachments: [], agentPresetId: "", eeId: "", workerInterfaceId: "",
-      providerInterfaceId: storedSettingsRef.current.providerInterfaceId, providerModel: storedSettingsRef.current.providerModel,
-      reasoningEffort: storedSettingsRef.current.reasoningEffort, applicationIds: [], driverNames: [], accessMode: "project_access", continuation: null,
+      providerInterfaceId: input.activeRunId ? "" : storedSettingsRef.current.providerInterfaceId,
+      providerModel: input.activeRunId ? "" : storedSettingsRef.current.providerModel,
+      reasoningEffort: input.activeRunId ? "" : storedSettingsRef.current.reasoningEffort,
+      serviceTier: input.activeRunId ? "" : storedSettingsRef.current.serviceTier,
+      applicationIds: [], driverNames: [], accessMode: "project_access", continuation: null,
     });
   }
   const liveDraftRef = useRef({ runId: input.activeRunId, text, attachments, scopeIdentity });
@@ -178,6 +185,7 @@ export function useChatDraftState(input: {
       providerInterfaceId,
       providerModel,
       reasoningEffort,
+      serviceTier,
       applicationIds,
       driverNames,
       accessMode,
@@ -211,6 +219,7 @@ export function useChatDraftState(input: {
     setProviderInterfaceId(draft.providerInterfaceId);
     setProviderModel(draft.providerModel);
     setReasoningEffort(draft.reasoningEffort);
+    setServiceTier(draft.serviceTier ?? "");
     setApplicationIds(draft.applicationIds);
     setDriverNames(draft.driverNames);
     setAccessMode(draft.accessMode);
@@ -473,6 +482,7 @@ export function useChatDraftState(input: {
     providerInterfaceId,
     providerModel,
     reasoningEffort,
+    serviceTier,
     messageId,
     messageHadAttachments,
     text,
@@ -504,6 +514,7 @@ export function useChatDraftState(input: {
     providerInterfaceId,
     providerModel,
     reasoningEffort,
+    serviceTier,
     applicationIds,
     driverNames,
     accessMode,
@@ -520,6 +531,7 @@ export function useChatDraftState(input: {
     setProviderInterfaceId,
     setProviderModel,
     setReasoningEffort,
+    setServiceTier,
     setApplicationIds,
     setDriverNames,
     setAccessMode,
@@ -556,6 +568,7 @@ function serializedDrafts(drafts: ReadonlyMap<string, ChatDraft>) {
     providerInterfaceId: draft.providerInterfaceId,
     providerModel: draft.providerModel,
     reasoningEffort: draft.reasoningEffort,
+    serviceTier: draft.serviceTier,
     applicationIds: draft.applicationIds,
     driverNames: draft.driverNames,
     accessMode: draft.accessMode,

@@ -133,6 +133,15 @@ test("native compaction projects as non-terminal activity", () => {
   }), false);
 });
 
+test("partial answers retain their message meaning in the live transcript", () => {
+  const config = { artifact_labels: { terminal_output: "interface.artifact.output", error_output: "interface.artifact.error", tool_call: "tool.call" } };
+  const payload = { phase: "partial_answer", text: "The first result." };
+  const activity = operatorChatLiveActivityPayload("turn.agent_message", config, payload);
+  assert.equal(activity.eventKind, "message");
+  assert.equal(activity.text, payload.text);
+  assert.equal(operatorChatLiveEventEndsTurn({ config, eventKind: activity.eventKind, label: "turn.agent_message", payload, willRetry: false }), false);
+});
+
 test("provider authentication recovery stays visible and non-terminal", () => {
   const config = {
     artifact_labels: {
@@ -2414,7 +2423,7 @@ test("task deletion releases its exact worker environment through an allow-only 
     fs.promises.mkdir(controlRoot, { recursive: true }),
     fs.promises.mkdir(ledgerRoot, { recursive: true }),
     fs.promises.mkdir(path.dirname(formationPath), { recursive: true }),
-    ...[ACTIVE_CLIENT, door, ACTIVE_WORKER].map((interfaceId) => (
+    ...[ACTIVE_CLIENT, ACTIVE_PROVIDER, door, ACTIVE_WORKER].map((interfaceId) => (
       fs.promises.mkdir(path.join(registryRoot, interfaceId), { recursive: true })
     )),
   ]);
@@ -2426,7 +2435,7 @@ test("task deletion releases its exact worker environment through an allow-only 
     root_refs: { run_records_root: runsRoot },
   }));
   await fs.promises.writeFile(path.join(ledgerRoot, "movements.jsonl"), "");
-  for (const interfaceId of [ACTIVE_CLIENT, door]) {
+  for (const interfaceId of [ACTIVE_CLIENT, ACTIVE_PROVIDER, door]) {
     await fs.promises.writeFile(
       path.join(registryRoot, interfaceId, "octopus_os.json"),
       JSON.stringify({
@@ -2447,6 +2456,32 @@ test("task deletion releases its exact worker environment through an allow-only 
     checkpoint.trace = `trace:${ACTIVE_RUN}:${checkpoint.id}`;
     checkpoint.required_verified_artifacts = [];
   }
+  const writerId = "declared_task_writer";
+  const initialWriter = {
+    id: writerId, ee: run.ee, worker: run.worker, trace: `trace:${writerId}`, status: "idle",
+    interface_state: { [ACTIVE_PROVIDER]: { file_writer_target: {
+      run: ACTIVE_RUN, provider: ACTIVE_PROVIDER, source: ACTIVE_CLIENT, door, generation: 0,
+    } } },
+    checkpoints: [
+      { id: "writer_call", run: writerId, epoch: 0, trace: `trace:${writerId}:writer_call`,
+        interface_binding: authoredBinding(ACTIVE_CLIENT), outbound_interface_bindings: [authoredBinding(door)], artifact_bindings: [] },
+      { id: "writer_result", run: writerId, epoch: 0, trace: `trace:${writerId}:writer_result`,
+        interface_binding: authoredBinding(door), outbound_interface_bindings: [authoredBinding(ACTIVE_PROVIDER)], artifact_bindings: [] },
+    ],
+    active_checkpoints: ["writer_call", "writer_result"],
+  };
+  run.interface_state[ACTIVE_PROVIDER].run_authoring_binding.writer_run = {
+    run: writerId, initial_record: initialWriter, role_artifact_bindings: [],
+  };
+  const currentWriter = structuredClone(initialWriter);
+  currentWriter.interface_state[ACTIVE_PROVIDER].file_writer_target.generation = 2;
+  currentWriter.checkpoints.forEach((checkpoint) => {
+    checkpoint.id += "_2";
+    checkpoint.trace = `trace:${writerId}:${checkpoint.id}`;
+  });
+  currentWriter.active_checkpoints = currentWriter.checkpoints.map((checkpoint) => checkpoint.id);
+  const writerPath = path.join(runsRoot, `${writerId}.json`);
+  await fs.promises.writeFile(writerPath, JSON.stringify(currentWriter));
   const runPath = path.join(runsRoot, `${ACTIVE_RUN}.json`);
   const runText = `${JSON.stringify(run, null, 2)}\n`;
   await fs.promises.writeFile(runPath, runText);
@@ -2465,6 +2500,23 @@ test("task deletion releases its exact worker environment through an allow-only 
     last_activity_movement_seq: 11,
   };
   await fs.promises.writeFile(formationPath, `${JSON.stringify(formationRecord, null, 2)}\n`);
+  const writerEnvironmentId = `we_${"b".repeat(32)}`;
+  const writerFormationPath = path.join(path.dirname(path.dirname(formationPath)), writerEnvironmentId, "worker_environment.json");
+  const writerFormation = structuredClone(formationRecord);
+  Object.assign(writerFormation.formation, { worker_environment_id: writerEnvironmentId, run: writerId, requires_release: false });
+  await fs.promises.mkdir(path.dirname(writerFormationPath));
+  const preflightRelease = () => releaseOperatorTaskWorkerEnvironments({ octopusHome: () => root }, {
+    runId: ACTIVE_RUN, expectedDigest: crypto.createHash("sha256").update(runText).digest("hex"),
+  });
+  writerFormation.formation.run = "unrelated_run";
+  await fs.promises.writeFile(writerFormationPath, JSON.stringify(writerFormation));
+  await assert.rejects(preflightRelease(), /formation for another run/);
+  writerFormation.formation.run = writerId;
+  await fs.promises.writeFile(writerFormationPath, JSON.stringify(writerFormation));
+  await fs.promises.writeFile(writerPath, JSON.stringify({ ...currentWriter, ee: "unrelated_ee" }));
+  await assert.rejects(preflightRelease(), /drifted from its declared generation/);
+  await fs.promises.writeFile(writerPath, JSON.stringify(currentWriter));
+  assert.equal(await fs.promises.readFile(runPath, "utf8"), runText);
 
   const socketPath = path.join(
     controlRoot,

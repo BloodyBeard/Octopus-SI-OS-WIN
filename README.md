@@ -32,6 +32,7 @@ Underneath, its architecture gives an agent a structure to execute in and a pict
 <tr><td><b>Projects</b></td><td>A goal with its own context and permissions. What an agent may do in one project says nothing about another.</td></tr>
 <tr><td><b>Agents</b></td><td>Set one up once: a model, a role, and what it may touch. Underneath, an agent is not a program but two JSON files, so you can run as many as you want.</td></tr>
 <tr><td><b>Tasks</b></td><td>A piece of work you hand to an agent. Leave it running, come back later, pick up where it stopped.</td></tr>
+<tr><td><b>Terminal client</b></td><td>Chat, tasks, tools, files, and results in your terminal. Shares the same Home, Projects, and Agents with the desktop client.</td></tr>
 <tr><td><b>Applications</b></td><td>The outside world, plugged in: chat channels, MCP servers, other model providers.</td></tr>
 <tr><td><b>Drivers</b></td><td>Where the work physically happens: a folder, a git worktree, a browser, your desktop, a container, a remote machine.</td></tr>
 </table>
@@ -93,6 +94,15 @@ For a new task, create an Agent first: choose a Project and a model, review its 
 Model availability and usage limits belong to your provider account. Voice and some applications ask for their own credentials and macOS permissions.
 
 </details>
+
+To use the terminal client, build it from the checkout and open Octopus:
+
+```sh
+npm --prefix app run build:cli
+./octopus
+```
+
+See [Terminal client](docs/cli.md) for setup, keyboard controls, existing Home selection, and commands for scripts or other agents.
 
 ## How it works
 

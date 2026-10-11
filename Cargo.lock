@@ -6526,6 +6526,7 @@ dependencies = [
  "libc",
  "octopus-code-mode-engine",
  "octopus-descriptors",
+ "octopus-file-write-contract",
  "octopus-interface-activation-app-server-transport",
  "octopus-interface-transport",
  "octopus-interfaces",
@@ -6561,6 +6562,7 @@ dependencies = [
  "octopus-process-session-tool-runtime",
  "octopus-provider-run-authoring",
  "octopus-tool-handlers",
+ "octopus-worker-env",
  "serde",
  "serde_json",
  "tokio",
@@ -6952,6 +6954,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "octopus-file-storage"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "octopus-file-system"
 version = "0.1.0"
 dependencies = [
@@ -6968,6 +6977,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "octopus-file-write-contract"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "flate2",
+ "octopus-descriptors",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -7204,6 +7225,7 @@ dependencies = [
  "blake3",
  "libc",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-ledger",
  "octopus-marks",
  "octopus-policy",
@@ -7248,6 +7270,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-ledger",
  "rustix 1.1.4",
  "serde",
@@ -7517,6 +7540,7 @@ dependencies = [
  "notify",
  "object",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-tool-handlers",
@@ -7579,6 +7603,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "futures",
+ "json-patch",
  "notify",
  "octopus-app-server-interface",
  "octopus-app-server-transport",
@@ -7668,6 +7693,7 @@ dependencies = [
  "json-patch",
  "octopus-app-server-interface",
  "octopus-descriptors",
+ "octopus-file-write-contract",
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
@@ -7675,6 +7701,7 @@ dependencies = [
  "octopus-ledger-store",
  "octopus-marks",
  "octopus-runtime",
+ "octopus-system-room-env",
  "octopus-tool-handlers",
  "octopus-world-pyecho-life-runtime",
  "serde",
@@ -8014,7 +8041,9 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "json-patch",
+ "libc",
  "octopus-descriptors",
+ "octopus-file-write-contract",
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-ledger-store",

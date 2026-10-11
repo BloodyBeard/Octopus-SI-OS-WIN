@@ -12,7 +12,7 @@ vm.runInNewContext(`${fs.readFileSync(filename, "utf8")}\nmodule.exports = { pla
 const { plannedClientWrite, plannedArtifactOwner, safeSegment } = loaded.exports;
 const registry = path.resolve(__dirname, "../../..");
 const topologyOwner = "artifact-code-mode-topology__system_code_mode__project_preflight_66cb898c4b507fb5de287d0d217df62d";
-const write = (id) => ({ path: path.join(registry, "artifact", id, "artifact.json"), content: '{"schema_version":1}', tag: `artifact:${id}`, expected_before_hash: null });
+const write = (id) => ({ path: path.join(registry, "artifact", id, "artifact.json"), content: JSON.stringify({ id, schema_version: 1 }), tag: `artifact:${id}`, expected_before_hash: null });
 
 test("planned Code Mode artifact keeps its exact 97-character owner and binding tag", () => {
   assert.equal(topologyOwner.length, 97);
@@ -39,6 +39,8 @@ test("artifact owners follow the canonical context-artifact component contract w
 test("planned artifact writes still reject changed tags, nonobjects, and escaped or noncanonical files", () => {
   const planned = write(topologyOwner);
   assert.throws(() => plannedClientWrite({ ...planned, tag: "artifact:another-owner" }, 0, registry), /identity differs/);
+  assert.throws(() => plannedClientWrite({ ...planned, content: '{"schema_version":1}' }, 0, registry), /identity differs/);
+  assert.throws(() => plannedClientWrite({ ...planned, content: '{"id":"another-owner"}' }, 0, registry), /identity differs/);
   assert.throws(() => plannedClientWrite({ ...planned, content: "[]" }, 0, registry), /must be an object/);
   assert.throws(() => plannedClientWrite({ ...planned, path: path.join(registry, "artifact", "payload.json") }, 0, registry), /escapes/);
   assert.throws(() => plannedClientWrite({ ...planned, path: path.resolve(registry, "..", "artifact.json") }, 0, registry), /escapes/);

@@ -14,6 +14,7 @@ use octopus_worker_env::WorkerEnvironmentLifecycle;
 
 mod artifact_bound;
 mod artifact_bound_process;
+mod client_mcp;
 mod artifact_send;
 mod bound_surface;
 mod file_write;
@@ -30,6 +31,7 @@ struct FileWriteProcess {
     interface: InterfaceId,
     root_slots: BTreeMap<String, PathBuf>,
     effect_root: PathBuf,
+    max_payload_bytes: u64,
 }
 
 struct ArtifactSendProcess {
@@ -70,6 +72,7 @@ impl ToolProcessHandler for FileWriteProcess {
                 &room_kinds,
                 &self.root_slots,
                 &self.effect_root,
+                self.max_payload_bytes,
             ) {
                 Ok(body) => {
                     io.record_worker_environment_lifecycle(
@@ -201,6 +204,7 @@ pub async fn run_file_write_tool_process() -> Result<(), String> {
         interface: environment.interface,
         root_slots: environment.root_slots,
         effect_root,
+        max_payload_bytes: environment.host_io_limits.max_payload_bytes,
     }))
     .await
 }
@@ -361,6 +365,7 @@ mod tests {
             &room_kinds,
             &root_slots,
             &root.path().join("effects"),
+            8 * 1024 * 1024,
         )
         .unwrap();
         assert_eq!(body["result"], "files_written");
@@ -432,6 +437,7 @@ mod tests {
             &patch_room_kinds,
             &root_slots,
             &root.path().join("effects"),
+            8 * 1024 * 1024,
         )
         .unwrap();
         assert_eq!(patch_body["result"], "files_written");
@@ -464,6 +470,7 @@ mod tests {
                 &room_kinds,
                 &root_slots,
                 &root.path().join("effects"),
+            8 * 1024 * 1024,
             )
         };
         let receipt = apply(&arguments).unwrap();

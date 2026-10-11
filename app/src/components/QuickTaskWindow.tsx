@@ -188,6 +188,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           activeProvider={chat.activeProvider}
           agentPresetId={chat.agentPresetId}
           accessMode={chat.accessMode}
+          fullAccessUnavailableReason={chat.fullAccessUnavailableReason}
           agentPresets={chat.composerAgentPresets}
           attachments={chat.attachments}
           applicationIds={chat.applicationIds}
@@ -218,6 +219,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           onProviderModelChange={chat.setProviderModel}
           onProviderModelsRefresh={chat.refreshProviderModels}
           onReasoningEffortChange={chat.setReasoningEffort}
+          onServiceTierChange={chat.chooseServiceTier}
           onRemoveAttachment={chat.removeAttachment}
           onResolvePausedQueueSubmission={chat.resolvePausedQueueSubmission}
           onSubmit={chat.submit}
@@ -228,6 +230,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           providerInterfaces={chat.providerInterfaces}
           providerInterfacesLoaded={chat.providerInterfacesLoaded}
           reasoningEffort={chat.reasoningEffort}
+          serviceTier={chat.serviceTier}
           resumeAvailable={chat.resumeAvailable}
           runId={chat.activeRunId}
           submissionMode={chat.busy ? "steer" : "send"}

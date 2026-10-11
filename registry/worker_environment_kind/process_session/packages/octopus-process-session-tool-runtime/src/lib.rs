@@ -271,6 +271,7 @@ pub enum ToolProcessBrokerResult {
 
 enum ToolProcessBrokerInvocation {
     Outcome(ToolProcessBrokerResult),
+    Completed(Option<ToolProcessPrimaryInput>),
     InterruptedEffectUnknown,
 }
 
@@ -494,6 +495,7 @@ struct ToolProcessBoundArtifact {
 struct ToolProcessBoundArtifactCarrier {
     artifact: ArtifactRef,
     manifest_path: PathBuf,
+    payload_hash: ContentHash,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -589,19 +591,8 @@ impl ToolProcessEnvelope {
                     format!("tool-process invocation artifact failed to materialize: {error}")
                 })?;
         let mut artifact_bindings = Vec::with_capacity(self.artifact_bindings.len());
-        for (index, binding) in self.artifact_bindings.into_iter().enumerate() {
-            let artifact_file = InterfaceArtifactFile::write(
-                request_root.join(format!("binding-{index}")),
-                "tool-process.bound-artifact",
-                &binding.bytes,
-            )
-            .map_err(|error| {
-                format!("tool-process bound artifact failed to materialize: {error}")
-            })?;
-            artifact_bindings.push(ToolProcessBoundArtifactCarrier {
-                artifact: binding.artifact,
-                manifest_path: artifact_file.manifest_path().to_path_buf(),
-            });
+        for binding in self.artifact_bindings {
+            artifact_bindings.push(materialize_tool_process_binding(root, binding)?);
         }
         Ok(ToolProcessWireEnvelope {
             artifact: self.artifact,
@@ -644,11 +635,7 @@ impl ToolProcessWireEnvelope {
         .map_err(|_| "tool-process payload size overflow".to_string())?;
         let mut artifact_binding_payloads = Vec::with_capacity(self.artifact_bindings.len());
         for binding in self.artifact_bindings {
-            let artifact_file = read_tool_process_input_artifact(
-                &binding.manifest_path,
-                &request_root,
-                host_io_limits,
-            )?;
+            let artifact_file = read_tool_process_bound_artifact(&binding, root, host_io_limits)?;
             let bytes = artifact_file
                 .read_payload_bytes_bounded(host_io_limits.max_payload_bytes)
                 .map_err(|error| error.to_string())?;
@@ -673,6 +660,212 @@ impl ToolProcessWireEnvelope {
             metadata: self.metadata,
         })
     }
+}
+
+fn tool_process_binding_root(
+    root: &Path,
+    artifact: &ArtifactRef,
+    payload_hash: &ContentHash,
+) -> Result<PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| format!("tool-process invocation root cannot be resolved: {error}"))?;
+    let reference = serde_json::to_vec(artifact)
+        .map_err(|error| format!("tool-process bound reference cannot encode: {error}"))?;
+    Ok(root.join("bound-artifacts").join(format!(
+        "{}-{}",
+        ContentHash::of_bytes(&reference).to_hex(),
+        payload_hash.to_hex(),
+    )))
+}
+
+fn read_tool_process_bound_artifact(
+    binding: &ToolProcessBoundArtifactCarrier,
+    root: &Path,
+    limits: &InterfaceHostIoLimits,
+) -> Result<InterfaceArtifactFile, String> {
+    let expected = tool_process_binding_root(root, &binding.artifact, &binding.payload_hash)?;
+    if binding.manifest_path != expected.join("artifact.json")
+        || expected.canonicalize().map_err(|error| {
+            format!("tool-process bound artifact directory cannot be resolved: {error}")
+        })? != expected
+    {
+        return Err(
+            "tool-process bound artifact escaped its exact generation and reference".into(),
+        );
+    }
+    let manifest_bytes =
+        read_tool_process_binding_bytes(root, &binding.manifest_path, limits.max_manifest_bytes)?;
+    let manifest: InterfaceArtifactManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| error.to_string())?;
+    if manifest.label != "tool-process.bound-artifact"
+        || manifest.payload_path != expected.join("payload")
+        || manifest.payload_content_hash.as_deref() != Some(binding.payload_hash.to_hex().as_str())
+    {
+        return Err("tool-process bound artifact has a different payload contract".into());
+    }
+    let payload =
+        read_tool_process_binding_bytes(root, &expected.join("payload"), limits.max_payload_bytes)?;
+    InterfaceArtifactFile::from_captured_snapshot(&binding.manifest_path, manifest_bytes, payload)
+        .map_err(|error| error.to_string())
+}
+
+fn read_tool_process_binding_bytes(
+    root: &Path,
+    path: &Path,
+    maximum: u64,
+) -> Result<Vec<u8>, String> {
+    let canonical_root = root.canonicalize().map_err(|error| error.to_string())?;
+    let relative = path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| "tool-process bound carrier escaped its generation")?;
+    let file = open_private_read_source(
+        &canonical_root,
+        relative
+            .to_str()
+            .ok_or("tool-process bound carrier path is not UTF-8")?,
+    )?;
+    if file.metadata().map_err(|error| error.to_string())?.len() > maximum {
+        return Err("tool-process bound carrier exceeds its byte limit".into());
+    }
+    let limit = maximum
+        .checked_add(1)
+        .ok_or("tool-process bound carrier byte limit overflowed")?;
+    let mut bytes = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > maximum {
+        return Err("tool-process bound carrier exceeds its byte limit".into());
+    }
+    Ok(bytes)
+}
+
+fn materialize_tool_process_binding(
+    root: &Path,
+    binding: ToolProcessBoundArtifact,
+) -> Result<ToolProcessBoundArtifactCarrier, String> {
+    let payload_hash = ContentHash::of_bytes(&binding.bytes);
+    let destination = tool_process_binding_root(root, &binding.artifact, &payload_hash)?;
+    let parent = destination
+        .parent()
+        .ok_or("tool-process bound artifact has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("tool-process bound artifact root cannot be created: {error}"))?;
+    if parent.canonicalize().map_err(|error| error.to_string())? != parent {
+        return Err("tool-process bound artifact root is a symbolic link".into());
+    }
+    let carrier = ToolProcessBoundArtifactCarrier {
+        artifact: binding.artifact,
+        manifest_path: destination.join("artifact.json"),
+        payload_hash,
+    };
+    let manifest = InterfaceArtifactManifest {
+        label: "tool-process.bound-artifact".into(),
+        payload_path: destination.join("payload"),
+        payload_content_hash: Some(carrier.payload_hash.to_hex()),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|error| format!("tool-process bound artifact manifest cannot encode: {error}"))?;
+    let verify = || {
+        if destination
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            != destination
+        {
+            return Err("tool-process bound artifact directory is a symbolic link".into());
+        }
+        if read_tool_process_binding_bytes(
+            root,
+            &carrier.manifest_path,
+            manifest_bytes.len() as u64,
+        )? != manifest_bytes
+        {
+            return Err("tool-process bound artifact changed its immutable manifest".into());
+        }
+        if read_tool_process_binding_bytes(
+            root,
+            &destination.join("payload"),
+            binding.bytes.len() as u64,
+        )? != binding.bytes
+        {
+            return Err("tool-process bound artifact changed its immutable bytes".into());
+        }
+        Ok(())
+    };
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => {
+            verify()?;
+            return Ok(carrier);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "tool-process bound artifact cannot be inspected: {error}"
+            ));
+        }
+    }
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| "tool-process bound artifact publication sequence overflowed")?;
+    let temporary = parent.join(format!(".binding-{}-{sequence}", std::process::id()));
+    std::fs::create_dir(&temporary)
+        .map_err(|error| format!("tool-process bound artifact stage cannot be created: {error}"))?;
+    let result = (|| -> Result<(), String> {
+        #[cfg(unix)]
+        let directory_permissions = {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::metadata(&temporary)
+                .map_err(|error| error.to_string())?
+                .permissions();
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+            permissions
+        };
+        for (name, bytes) in [
+            ("payload", binding.bytes.as_slice()),
+            ("artifact.json", manifest_bytes.as_slice()),
+        ] {
+            let file = octopus_file_storage::write_new(&temporary.join(name), bytes)
+                .map_err(|error| error.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| error.to_string())?;
+            }
+            file.sync_all().map_err(|error| error.to_string())?;
+        }
+        #[cfg(unix)]
+        std::fs::set_permissions(&temporary, directory_permissions)
+            .map_err(|error| error.to_string())?;
+        sync_tool_process_owner_directory(&temporary)?;
+        match std::fs::rename(&temporary, &destination) {
+            Ok(()) => sync_tool_process_owner_directory(parent)?,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                std::fs::remove_dir_all(&temporary).map_err(|error| error.to_string())?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "tool-process bound artifact cannot be published: {error}"
+                ));
+            }
+        }
+        verify()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&temporary);
+    }
+    result?;
+    Ok(carrier)
 }
 
 fn read_tool_process_input_artifact(
@@ -1717,6 +1910,109 @@ struct ToolProcessClient {
 struct ToolProcessCompletion {
     artifacts: Vec<InterfaceArtifactFile>,
     streamed_output_admitted: bool,
+    primary_input: Option<ToolProcessPrimaryInput>,
+}
+
+struct ToolProcessPrimaryInput {
+    directory: std::fs::File,
+    files: Vec<(std::ffi::OsString, ContentHash, std::fs::Metadata)>,
+}
+
+#[cfg(unix)]
+impl ToolProcessPrimaryInput {
+    fn capture(root: &Path, request_id: u64, manifest_path: &Path, limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let request_root = root.join(request_id.to_string());
+        let directory_path = request_root.join("artifact");
+        if manifest_path.parent() != Some(directory_path.as_path()) {
+            return Err("tool-process primary manifest left its exact request directory".into());
+        }
+        let artifact = read_tool_process_input_artifact(manifest_path, &request_root, limits)?;
+        let snapshot = artifact.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|error| error.to_string())?;
+        if snapshot.manifest.payload_path.parent() != Some(directory_path.as_path()) {
+            return Err("tool-process primary payload left its exact request directory".into());
+        }
+        let mut directory = std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY).open(&root)
+            .map_err(|error| error.to_string())?;
+        for component in [request_id.to_string(), "artifact".to_string()] {
+            let component = std::ffi::CString::new(component).map_err(|error| error.to_string())?;
+            let descriptor = unsafe { libc::openat(directory.as_raw_fd(), component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if descriptor < 0 {
+                return Err(format!("tool-process primary input directory cannot be opened: {}", std::io::Error::last_os_error()));
+            }
+            directory = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        }
+        let mut owned = Self { directory, files: Vec::with_capacity(2) };
+        for (path, expected) in [(manifest_path, snapshot.manifest_bytes.as_slice()),
+            (snapshot.manifest.payload_path.as_path(), snapshot.payload_bytes.as_slice())]
+        {
+            let name = path.file_name().ok_or("tool-process primary input has no filename")?;
+            let (bytes, metadata) = owned.read_file(name, expected.len() as u64)?;
+            if bytes != expected { return Err("tool-process primary input changed before dispatch".into()); }
+            owned.files.push((name.to_os_string(), ContentHash::of_bytes(&bytes), metadata));
+        }
+        Ok(owned)
+    }
+
+    fn read_file(&self, name: &std::ffi::OsStr, maximum: u64) -> Result<(Vec<u8>, std::fs::Metadata), String> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|error| error.to_string())?;
+        let descriptor = unsafe { libc::openat(self.directory.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        if descriptor < 0 { return Err(format!("tool-process primary input cannot be opened: {}", std::io::Error::last_os_error())); }
+        let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let before = file.metadata().map_err(|error| error.to_string())?;
+        if !before.is_file() || before.nlink() != 1 || before.uid() != unsafe { libc::geteuid() } || before.len() > maximum {
+            return Err("tool-process primary input changed its private regular-file boundary".into());
+        }
+        let mut bytes = Vec::new();
+        (&mut file).take(maximum.saturating_add(1)).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+        let after = file.metadata().map_err(|error| error.to_string())?;
+        if bytes.len() as u64 != before.len() || !Self::same_file(&before, &after) {
+            return Err("tool-process primary input changed during verification".into());
+        }
+        Ok((bytes, after))
+    }
+
+    fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev() && left.ino() == right.ino() && left.mode() == right.mode()
+            && left.uid() == right.uid() && left.nlink() == right.nlink() && left.len() == right.len()
+            && left.mtime() == right.mtime() && left.mtime_nsec() == right.mtime_nsec()
+            && left.ctime() == right.ctime() && left.ctime_nsec() == right.ctime_nsec()
+    }
+
+    fn retire(self) -> Result<(), String> {
+        use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+        for (name, hash, expected) in &self.files {
+            let (bytes, observed) = self.read_file(name, expected.len())?;
+            if !Self::same_file(expected, &observed) || ContentHash::of_bytes(&bytes) != *hash {
+                return Err("tool-process primary input changed before retirement".into());
+            }
+        }
+        for (name, _, _) in &self.files {
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|error| error.to_string())?;
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) } < 0 {
+                return Err(format!("tool-process primary input retirement failed: {}", std::io::Error::last_os_error()));
+            }
+        }
+        self.directory.sync_all().map_err(|error| format!("tool-process primary input retirement directory sync failed: {error}"))
+    }
+}
+
+#[cfg(not(unix))]
+impl ToolProcessPrimaryInput {
+    fn capture(_root: &Path, _request_id: u64, _manifest_path: &Path, _limits: &InterfaceHostIoLimits) -> Result<Self, String> {
+        Err("tool-process primary input retirement requires descriptor-relative file operations".into())
+    }
+    fn retire(self) -> Result<(), String> {
+        Err("tool-process primary input retirement requires descriptor-relative file operations".into())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2197,6 +2493,9 @@ impl ToolProcessClient {
         let envelope = envelope
             .materialize_for_process(&self.input_root, request_id)
             .map_err(ToolProcessInvokeError::Unavailable)?;
+        let primary_input = ToolProcessPrimaryInput::capture(
+            &self.input_root, request_id, &envelope.manifest_path, &self.host_io_limits,
+        ).map_err(ToolProcessInvokeError::Unavailable)?;
         let input = ToolProcessInput::Invoke {
             request_id,
             descriptor,
@@ -2206,6 +2505,7 @@ impl ToolProcessClient {
             .await
             .map_err(ToolProcessInvokeError::Unavailable)?;
         let mut streamed_output_admitted = false;
+        let mut all_streamed_outputs_admitted = true;
         loop {
             let output = self
                 .read_protocol_output("tool process closed stdout before completion")
@@ -2229,6 +2529,7 @@ impl ToolProcessClient {
                         Err(error) => Err(tool_process_error_message(error)),
                     };
                     let admitted = matches!(&delivery, Ok(DeliveryVerdict::Admitted { .. }));
+                    all_streamed_outputs_admitted &= admitted;
                     self.acknowledge_delivery(request_id, event_id, delivery)
                         .await?;
                     streamed_output_admitted |= admitted;
@@ -2259,6 +2560,7 @@ impl ToolProcessClient {
                         }
                         Err(error) => Err(error),
                     };
+                    all_streamed_outputs_admitted &= matches!(&delivery, Ok(DeliveryVerdict::Admitted { .. }));
                     self.acknowledge_delivery(request_id, event_id, delivery)
                         .await?;
                 }
@@ -2359,6 +2661,7 @@ impl ToolProcessClient {
                     return Ok(ToolProcessCompletion {
                         artifacts,
                         streamed_output_admitted,
+                        primary_input: all_streamed_outputs_admitted.then_some(primary_input),
                     });
                 }
                 ToolProcessOutput::Failed {
@@ -3092,22 +3395,15 @@ impl ToolProcessBrokerHost {
                 error,
             });
         }
-        ToolProcessBrokerInvocation::Outcome(
-            shard
-                .lock()
-                .await
-                .invoke(
-                    ctx,
-                    tool,
-                    arguments,
-                    envelope,
-                    process_key,
-                    terminalize_on_failure,
-                    &self.owner,
-                    self.output_callback.as_ref(),
-                )
-                .await,
-        )
+        let mut primary_input = None;
+        let result = shard.lock().await.invoke(
+            ctx, tool, arguments, envelope, process_key, terminalize_on_failure,
+            &self.owner, self.output_callback.as_ref(), &mut primary_input,
+        ).await;
+        match result {
+            ToolProcessBrokerResult::Completed => ToolProcessBrokerInvocation::Completed(primary_input),
+            result => ToolProcessBrokerInvocation::Outcome(result),
+        }
     }
 
     pub(crate) async fn release_worker_environment(
@@ -3625,6 +3921,7 @@ impl ToolProcessBrokerState {
         terminalize_on_failure: bool,
         owner: &ToolDoorOwner,
         output_callback: Option<&ToolDoorOutputCallback>,
+        primary_input: &mut Option<ToolProcessPrimaryInput>,
     ) -> ToolProcessBrokerResult {
         let source_movement_seq = envelope.source_movement_seq;
         if let Err(error) = require_tool_in_invocation_grant(&envelope, &tool) {
@@ -3909,7 +4206,10 @@ impl ToolProcessBrokerState {
                 }
                 match refusal {
                     Some((reason, detail)) => ToolProcessBrokerResult::Refused { reason, detail },
-                    None => ToolProcessBrokerResult::Completed,
+                    None => {
+                        *primary_input = completion.primary_input;
+                        ToolProcessBrokerResult::Completed
+                    },
                 }
             }
             Err(ToolProcessInvokeError::Capability(error)) => {
@@ -7423,6 +7723,7 @@ struct ToolDoorCompletion {
     seq: u64,
     movement_digest: String,
     result: Result<ToolDoorJournalState, String>,
+    primary_input: Option<ToolProcessPrimaryInput>,
 }
 
 pub type ToolDoorArtifactDecoder = fn(
@@ -7611,11 +7912,13 @@ async fn tool_door_loop(
                 let ctx = invocation_ctx;
                 let host = Arc::clone(&host);
                 tasks.spawn(async move {
-                    let result = execute_tool_door_action(&ctx, &host, seq, action).await;
+                    let mut primary_input = None;
+                    let result = execute_tool_door_action(&ctx, &host, seq, action, &mut primary_input).await;
                     ToolDoorCompletion {
                         seq,
                         movement_digest,
                         result,
+                        primary_input,
                     }
                 });
             }
@@ -7744,11 +8047,12 @@ async fn execute_tool_door_action(
     host: &ToolProcessBrokerHost,
     source_movement_seq: u64,
     action: ToolDoorAction,
+    primary_input: &mut Option<ToolProcessPrimaryInput>,
 ) -> Result<ToolDoorJournalState, String> {
     match action {
         ToolDoorAction::Complete => Ok(ToolDoorJournalState::Completed),
         ToolDoorAction::RecoverIndeterminate => {
-            hand_tool_effect_indeterminate(ctx, source_movement_seq, None, None).await
+            hand_tool_effect_indeterminate(ctx, source_movement_seq, None, None, None).await
         }
         ToolDoorAction::Failure {
             class,
@@ -7762,14 +8066,15 @@ async fn execute_tool_door_action(
                 details,
                 target.as_ref(),
                 ToolDoorJournalState::Completed,
+                None,
             )
             .await
         }
         ToolDoorAction::Invoke { call, envelope } => {
-            execute_tool_invocation(ctx, host, source_movement_seq, call, envelope, false).await
+            execute_tool_invocation(ctx, host, source_movement_seq, call, envelope, false, primary_input).await
         }
         ToolDoorAction::Recover { call, envelope } => {
-            execute_tool_invocation(ctx, host, source_movement_seq, call, envelope, true).await
+            execute_tool_invocation(ctx, host, source_movement_seq, call, envelope, true, primary_input).await
         }
         ToolDoorAction::Release { request, envelope } => {
             execute_worker_environment_release(ctx, host, source_movement_seq, request, envelope)
@@ -7795,6 +8100,7 @@ async fn execute_worker_environment_release(
                 serde_json::json!({ "error": error.to_string() }),
                 None,
                 ToolDoorJournalState::Completed,
+                None,
             )
             .await;
         }
@@ -7832,6 +8138,7 @@ async fn execute_worker_environment_release(
                         }),
                         None,
                         ToolDoorJournalState::Completed,
+                        None,
                     )
                     .await;
                 }
@@ -7852,6 +8159,7 @@ async fn execute_worker_environment_release(
                 }),
                 None,
                 ToolDoorJournalState::Completed,
+                None,
             )
             .await
         }
@@ -7865,9 +8173,18 @@ async fn execute_tool_invocation(
     call: ToolCallArtifact,
     envelope: InterfaceInvocationEnvelope,
     interrupted_recovery: bool,
+    primary_input: &mut Option<ToolProcessPrimaryInput>,
 ) -> Result<ToolDoorJournalState, String> {
     let host_io_limits = ctx.required_host_io_limits()?;
     let target = ToolResultTarget::from(&call);
+    let failure_output = match host.output_callback.as_ref() {
+        Some(callback) => Some((callback, ToolDoorOutputSource {
+            movement: ctx.source_movement(&envelope)?.clone(),
+            envelope: envelope.clone(),
+            formation: None,
+        })),
+        None => None,
+    };
     let mut captured =
         ToolProcessEnvelope::capture(&envelope, source_movement_seq, &host_io_limits)?;
     if host.output_callback.is_some() {
@@ -7887,6 +8204,10 @@ async fn execute_tool_invocation(
         )
         .await
     {
+        ToolProcessBrokerInvocation::Completed(retirement) => {
+            *primary_input = retirement;
+            Ok(ToolDoorJournalState::Completed)
+        }
         ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Completed) => {
             Ok(ToolDoorJournalState::Completed)
         }
@@ -7903,6 +8224,7 @@ async fn execute_tool_invocation(
                 serde_json::json!({ "tool": target.tool.clone(), "error": error }),
                 Some(&target),
                 ToolDoorJournalState::Completed,
+                failure_output,
             )
             .await
         }
@@ -7912,11 +8234,12 @@ async fn execute_tool_invocation(
                 source_movement_seq,
                 Some(&target),
                 Some((&target.tool, &error)),
+                failure_output,
             )
             .await
         }
         ToolProcessBrokerInvocation::InterruptedEffectUnknown => {
-            hand_tool_effect_indeterminate(ctx, source_movement_seq, Some(&target), None).await
+            hand_tool_effect_indeterminate(ctx, source_movement_seq, Some(&target), None, failure_output).await
         }
     }
 }
@@ -7926,6 +8249,7 @@ async fn hand_tool_effect_indeterminate(
     source_movement_seq: u64,
     target: Option<&ToolResultTarget>,
     failure: Option<(&str, &str)>,
+    output: Option<(&ToolDoorOutputCallback, ToolDoorOutputSource)>,
 ) -> Result<ToolDoorJournalState, String> {
     let mut details = serde_json::json!({
         "source_movement_seq": source_movement_seq,
@@ -7954,6 +8278,7 @@ async fn hand_tool_effect_indeterminate(
         details,
         target,
         ToolDoorJournalState::Indeterminate,
+        output,
     )
     .await
 }
@@ -7965,6 +8290,7 @@ async fn hand_tool_failure(
     details: serde_json::Value,
     target: Option<&ToolResultTarget>,
     admitted_state: ToolDoorJournalState,
+    output: Option<(&ToolDoorOutputCallback, ToolDoorOutputSource)>,
 ) -> Result<ToolDoorJournalState, String> {
     let artifact = match target {
         Some(target) => {
@@ -7973,7 +8299,11 @@ async fn hand_tool_failure(
         }
         None => ctx.failure_artifact(source_movement_seq, failure_class, details)?,
     };
-    match ctx.hand_arrival(artifact, Vec::new()).await? {
+    let verdict = match output {
+        Some((callback, source)) => hand_tool_process_output(ctx, Some(&source), Some(callback), artifact).await?,
+        None => ctx.hand_arrival(artifact, Vec::new()).await?,
+    };
+    match verdict {
         DeliveryVerdict::Admitted { .. } => Ok(admitted_state),
         DeliveryVerdict::Refused { .. } => Ok(ToolDoorJournalState::Refused),
     }
@@ -8466,6 +8796,14 @@ fn record_tool_door_completion(
     let state = completion.result?;
     journal.finish(completion.seq, &completion.movement_digest, state)?;
     row.state = ToolDoorRowState::Completed;
+    if let Some(primary_input) = completion.primary_input {
+        if state != ToolDoorJournalState::Completed {
+            return Err("tool-process input retirement requires durable completion".into());
+        }
+        primary_input.retire().map_err(|error| format!(
+            "tool input retirement failed after durable completion of movement {}: {error}", completion.seq,
+        ))?;
+    }
     Ok(())
 }
 
@@ -8771,6 +9109,61 @@ mod tool_process_private_boundary_tests {
         std::fs::write(root.join("movements.jsonl"), bytes).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn primary_input_retirement_preserves_outputs_and_durable_completion_on_failure() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let limits = InterfaceHostIoLimits { max_control_frame_bytes: 65536, max_stderr_bytes: 65536,
+                max_manifest_bytes: 65536, max_payload_bytes: 1024 * 1024 };
+            let mut ctx = test_lift_context(root.path(), InterfaceId::new("system_test_door"));
+            ctx.host_io_limits = Some(limits);
+            let payload = vec![b'p'; 256 * 1024];
+            let artifact = store_recovery_artifact(root.path(), "tool.call", &payload);
+            let input_root = ctx.interface_var_dir().join("invocations");
+            let wire = ToolProcessEnvelope {
+                artifact: artifact.clone(), label: "tool.call".into(), payload: payload.clone(),
+                artifact_bindings: vec![super::ToolProcessBoundArtifact { artifact: artifact.clone(), bytes: b"bound bytes".to_vec() }],
+                metadata: None, source_movement_seq: 0, worker_environment: None,
+                worker_environment_kind: None, output_source: None,
+            }.materialize_for_process(&input_root, 1).unwrap();
+            std::os::unix::fs::symlink(input_root.join("1"), input_root.join("2")).unwrap();
+            assert!(super::ToolProcessPrimaryInput::capture(&input_root, 2, &wire.manifest_path, &limits).is_err());
+            let input = super::ToolProcessPrimaryInput::capture(&input_root, 1, &wire.manifest_path, &limits).unwrap();
+            let captured = wire.clone().materialize(&input_root, 1, &limits).unwrap();
+            let input_payload = captured.artifact_file.read_manifest().unwrap().payload_path;
+            let output = InterfaceArtifactFile::write(wire.manifest_path.parent().unwrap().join("emitted"), "result", b"retained output").unwrap();
+            let bound = wire.artifact_bindings[0].manifest_path.clone();
+            let source = Movement { seq: Seq(0), lamport: Lamport(1), recorded_at_unix_ms: 1,
+                trace: TraceId("retirement".into()), kind: MovementKind::InterfaceOutbound,
+                from: Endpoint::Interface(InterfaceId::new("worker")), to: Endpoint::Interface(ctx.interface.clone()),
+                artifact: Some(artifact), invocation_metadata: None };
+            write_recovery_ledger(root.path(), std::slice::from_ref(&source));
+            let digest = super::tool_door_movement_digest(&source).unwrap();
+            let mut reader = super::LedgerTailReader::open_named(&ctx, "retirement-test").unwrap();
+            let own = reader.read_new_uncommitted_limit(1).unwrap().remove(0);
+            let mut rows = BTreeMap::from([(0, super::ToolDoorPendingRow {
+                own, movement_digest: digest.clone(), state: super::ToolDoorRowState::InFlight,
+            })]);
+            let journal_path = ctx.interface_var_dir().join(TOOL_DOOR_EFFECT_JOURNAL_FILE);
+            let mut journal = ToolDoorEffectJournal::open(journal_path.clone(), 0, 65536).unwrap();
+            journal.prepare(0, &digest).unwrap(); journal.begin(0, &digest).unwrap();
+            if corrupt { std::fs::write(&input_payload, vec![b'x'; payload.len()]).unwrap(); }
+            let result = super::record_tool_door_completion(super::ToolDoorCompletion {
+                seq: 0, movement_digest: digest.clone(), result: Ok(ToolDoorJournalState::Completed), primary_input: Some(input),
+            }, &mut journal, &mut rows);
+            assert_eq!(result.is_err(), corrupt);
+            assert_eq!(wire.manifest_path.exists(), corrupt);
+            assert_eq!(input_payload.exists(), corrupt);
+            assert_eq!(output.read_payload_bytes().unwrap(), b"retained output");
+            assert!(bound.exists());
+            assert_eq!(captured.read_artifact_payload_bounded(limits.max_payload_bytes).unwrap(), payload);
+            drop(journal);
+            let recovered = ToolDoorEffectJournal::open(journal_path, 0, 65536).unwrap();
+            assert_eq!(recovered.state(0, &digest).unwrap(), Some(ToolDoorJournalState::Completed));
+        }
+    }
+
     fn test_worker_environment_kind() -> WorkerEnvKindSpec {
         serde_json::from_value(serde_json::json!({
             "worker_environment_kind_id": "test.room",
@@ -8925,6 +9318,7 @@ mod tool_process_private_boundary_tests {
                 .await.expect("streamed result must complete after its verdict").unwrap();
             assert!(completed.artifacts.is_empty(), "an admitted output must not be handed twice");
             assert_eq!(completed.streamed_output_admitted, admitted);
+            assert_eq!(completed.primary_input.is_some(), admitted);
             assert!(responder.await.unwrap().try_recv().is_err());
         }
     }
@@ -10016,7 +10410,44 @@ mod tool_process_carrier_tests {
             worker_environment_kind: None,
             output_source: None,
         };
-        let wire = envelope.materialize_for_process(root.path(), 7).unwrap();
+        let wire = envelope
+            .clone()
+            .materialize_for_process(root.path(), 7)
+            .unwrap();
+        let shared = wire.artifact_bindings[0].manifest_path.clone();
+        let payload_path = shared.parent().unwrap().join("payload");
+        #[cfg(unix)]
+        let published_metadata = std::fs::metadata(&payload_path).unwrap();
+        for request_id in 8..40 {
+            let repeated = envelope
+                .clone()
+                .materialize_for_process(root.path(), request_id)
+                .unwrap();
+            assert_eq!(repeated.artifact_bindings[0].manifest_path, shared);
+        }
+        assert_eq!(
+            std::fs::read_dir(root.path().join("bound-artifacts"))
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_dir(shared.parent().unwrap()).unwrap().count(),
+            2
+        );
+        assert_eq!(
+            std::fs::metadata(&payload_path).unwrap().len(),
+            binding_payload.len() as u64
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(&payload_path).unwrap();
+            assert_eq!(metadata.nlink(), 1);
+            assert_eq!(metadata.ino(), published_metadata.ino());
+            assert_eq!(metadata.mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&shared).unwrap().mode() & 0o777, 0o600);
+        }
         let control = serde_json::to_vec(&wire).unwrap();
         assert!(control.len() < 16 * 1024);
         let decoded: ToolProcessWireEnvelope = serde_json::from_slice(&control).unwrap();
@@ -10042,6 +10473,112 @@ mod tool_process_carrier_tests {
             invocation.artifact_binding_payloads[0].bytes,
             binding_payload
         );
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::macos::fs::MetadataExt as _;
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::metadata(&payload_path).unwrap();
+            assert_ne!(metadata.st_flags() & 0x20, 0);
+            assert_eq!(metadata.blocks(), published_metadata.blocks());
+            let raw = root.path().join("raw-allocation-control");
+            std::fs::write(&raw, &binding_payload).unwrap();
+            let raw_metadata = std::fs::metadata(&raw).unwrap();
+            assert!(metadata.blocks() < raw_metadata.blocks());
+            println!(
+                "bound-carrier logical={} raw_allocated={} compressed_allocated={} after_replay_allocated={} mode={:o} nlink={}",
+                metadata.len(), raw_metadata.blocks() * 512, published_metadata.blocks() * 512,
+                metadata.blocks() * 512, metadata.mode() & 0o777, metadata.nlink(),
+            );
+        }
+        let limits = InterfaceHostIoLimits {
+            max_control_frame_bytes: 16 * 1024,
+            max_stderr_bytes: 16 * 1024,
+            max_manifest_bytes: 16 * 1024,
+            max_payload_bytes: 1024 * 1024,
+        };
+        let other = tempfile::tempdir().unwrap();
+        let foreign = envelope
+            .clone()
+            .materialize_for_process(other.path(), 7)
+            .unwrap();
+        assert_ne!(foreign.artifact_bindings[0].manifest_path, shared);
+        let mut wrong_owner = wire.clone();
+        wrong_owner.artifact_bindings[0].manifest_path =
+            foreign.artifact_bindings[0].manifest_path.clone();
+        assert!(wrong_owner.materialize(root.path(), 7, &limits).is_err());
+        let mut wrong_reference = wire.clone();
+        wrong_reference.artifact_bindings[0].artifact.id = ArtifactId::new("context:other");
+        assert!(
+            wrong_reference
+                .materialize(root.path(), 7, &limits)
+                .is_err()
+        );
+        let concurrent = tempfile::tempdir().unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let publishers: Vec<_> = (0..4)
+            .map(|_| {
+                let root = concurrent.path().to_path_buf();
+                let binding = envelope.artifact_bindings[0].clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::materialize_tool_process_binding(&root, binding)
+                        .unwrap()
+                        .manifest_path
+                })
+            })
+            .collect();
+        let paths: Vec<_> = publishers
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(paths.iter().all(|path| path == &paths[0]));
+        assert_eq!(
+            std::fs::read_dir(concurrent.path().join("bound-artifacts"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let mut changed = envelope.clone();
+        changed.artifact_bindings[0].bytes[0] = b'c';
+        let changed_wire = changed.materialize_for_process(root.path(), 40).unwrap();
+        assert_ne!(changed_wire.artifact_bindings[0].manifest_path, shared);
+        assert_eq!(
+            changed_wire
+                .materialize(root.path(), 40, &limits)
+                .unwrap()
+                .artifact_binding_payloads[0]
+                .bytes[0],
+            b'c'
+        );
+        let mut too_small = limits;
+        too_small.max_payload_bytes = payload.len() as u64;
+        assert!(
+            wire.clone()
+                .materialize(root.path(), 7, &too_small)
+                .is_err()
+        );
+        let manifest_bytes = std::fs::read(&shared).unwrap();
+        let mut redirected: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        redirected["payload_path"] = serde_json::json!(other.path().join("not-admitted"));
+        std::fs::write(&shared, serde_json::to_vec(&redirected).unwrap()).unwrap();
+        assert!(
+            wire.clone()
+                .materialize(root.path(), 7, &limits)
+                .unwrap_err()
+                .contains("different payload contract")
+        );
+        assert!(
+            envelope
+                .clone()
+                .materialize_for_process(root.path(), 41)
+                .is_err()
+        );
+        std::fs::write(&shared, &manifest_bytes).unwrap();
+        std::fs::write(&payload_path, vec![b'x'; binding_payload.len()]).unwrap();
+        assert!(wire.materialize(root.path(), 7, &limits).is_err());
+        assert!(envelope.materialize_for_process(root.path(), 41).is_err());
+        assert_eq!(std::fs::read(&payload_path).unwrap()[0], b'x');
     }
 }
 
@@ -10697,6 +11234,22 @@ pub mod owner_contract_tests {
         artifact: InterfaceArtifactFile,
     ) -> Result<DeliveryVerdict, String> {
         hand_tool_process_output(ctx, Some(source), Some(callback), artifact).await
+    }
+
+    pub async fn hand_owned_invocation_failure(
+        ctx: &InterfaceLiftContext,
+        source: &ToolDoorOutputSource,
+        callback: &ToolDoorOutputCallback,
+    ) -> Result<bool, String> {
+        let call: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(
+            &source.envelope.read_artifact_payload_bounded(ctx.required_host_io_limits()?.max_payload_bytes)
+                .map_err(|e| e.to_string())?,
+        ).map_err(|e| e.to_string())?;
+        let target = ToolResultTarget::from(&call);
+        let state = hand_tool_failure(ctx, source.movement.seq.0, "tool_process_failure",
+            serde_json::json!({"error":"fixture process stopped"}), Some(&target), ToolDoorJournalState::Completed,
+            Some((callback, source.clone()))).await?;
+        Ok(matches!(state, ToolDoorJournalState::Refused))
     }
 
     pub async fn execute_formed(

@@ -120,6 +120,7 @@ async function main(rootScope = false) {
       name: "Octopus Development",
       icon: "glasses",
       providerInterfaceId: "world_provider_codex",
+      providerModel: "catalog-model-a",
       reasoningEffort: "high",
       applicationIds: ["world_terminal"],
       driverNames: ["process_session"],
@@ -131,6 +132,7 @@ async function main(rootScope = false) {
           id: sourceWorkerInterfaceId,
           authoring_profile: true,
           provider_interface_ids: ["world_provider_codex"],
+          interface_policy: { world_provider_codex: { models: ["catalog-model-a", "catalog-model-b"] } },
           applications: [{ id: "world_terminal" }],
           drivers: [{ name: "process_session" }],
         }],
@@ -150,6 +152,14 @@ async function main(rootScope = false) {
     await assert.rejects(
       mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, { ...request, projectEeId: "ee_foreign" }, { commitClientAuthoring, chatContexts }),
       /outside the workspace scope/,
+    );
+    await assert.rejects(
+      mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, { ...request, providerModel: "not-admitted" }, { commitClientAuthoring, chatContexts }),
+      /not admitted by worker template/,
+    );
+    await assert.rejects(
+      mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, { ...request, providerModel: "" }, { commitClientAuthoring, chatContexts }),
+      /explicit Agent provider model/,
     );
     const created = await mutateOctopusOsWorkspace(
       registryRoot,
@@ -173,6 +183,7 @@ async function main(rootScope = false) {
       worker_interface: created.workerInterfaceId,
       project_ee_id: projectEeId,
       provider_interface_id: "world_provider_codex",
+      provider_model: "catalog-model-a",
       reasoning_effort: "high",
       application_ids: ["world_terminal"],
       worker_environment_kinds: ["process_session"],
@@ -239,6 +250,7 @@ async function main(rootScope = false) {
       name: "Octopus Core Development",
       icon: "hardhat",
       providerInterfaceId: "world_provider_codex",
+      providerModel: "catalog-model-b",
       reasoningEffort: "xhigh",
       applicationIds: [],
       driverNames: [],
@@ -253,6 +265,7 @@ async function main(rootScope = false) {
       { commitClientAuthoring, chatContexts },
     );
     assert.equal(configured.changed, true);
+    assert.equal((await readJson(clonedClientTemplatePath)).provider_model, "catalog-model-b");
     catalog = await readClientAgentCatalog(octopusHomeRoot);
     assert.equal(catalog.document.agents[0].name, "Octopus Core Development");
     assert.equal(catalog.document.agents[0].icon, "hardhat");

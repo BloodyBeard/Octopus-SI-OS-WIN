@@ -3611,6 +3611,7 @@
 
 .eventlog-body {
   overflow-y: auto;
+  overflow-anchor: none;
   min-height: 0;
 }
 
@@ -6158,6 +6159,37 @@
 
 .wp-route.is-zone {
   stroke-dasharray: 3 5;
+}
+
+.artifact-transfer-animations {
+  --artifact-transfer-color: #9cd6ff;
+  pointer-events: none;
+}
+
+.artifact-transfer-segment {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px rgb(51 156 255 / .65));
+}
+
+.system-transfer-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-transfer-animations,
+  .system-transfer-layer {
+    display: none;
+  }
 }
 
 .wp-run {

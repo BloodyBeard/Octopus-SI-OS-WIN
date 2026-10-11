@@ -18,6 +18,7 @@ import { MessageTooltip } from "./MessageTooltip";
 import { OcDropdown } from "../../design-system/OcDropdown";
 import "./queue.css";
 import { RichComposerEditor, type RichComposerEditorHandle } from "./RichComposerEditor";
+import { ChatAttachmentStrip } from "./ChatAttachmentCard";
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -29,10 +30,12 @@ type Props = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   executionContexts?: ChatExecutionContext[];
   agentPresets?: readonly ClientAgentDefinition[];
   agentPresetId?: string;
   accessMode?: TaskAccessMode;
+  fullAccessUnavailableReason?: string;
   applicationIds?: string[];
   applicationSelectionLocked?: boolean;
   applicationSelectionLockReason?: "" | "turn" | "saving" | "read-only";
@@ -58,6 +61,7 @@ type Props = {
   onProviderModelChange: (providerInterfaceId: string, providerModel: string, reasoningEffort?: string) => void;
   onProviderModelsRefresh?: () => void;
   onReasoningEffortChange: (reasoningEffort: string) => void;
+  onServiceTierChange?: (serviceTier: string) => void;
   onEeChange?: (eeId: string) => void;
   onAgentPresetChange?: (agentPresetId: string) => void;
   onAccessModeChange?: (accessMode: TaskAccessMode) => void;
@@ -92,10 +96,12 @@ export function ChatComposer({
   providerInterfaceId,
   providerModel,
   reasoningEffort,
+  serviceTier,
   executionContexts,
   agentPresets,
   agentPresetId,
   accessMode,
+  fullAccessUnavailableReason,
   applicationIds,
   applicationSelectionLocked,
   applicationSelectionLockReason,
@@ -121,6 +127,7 @@ export function ChatComposer({
   onProviderModelChange,
   onProviderModelsRefresh,
   onReasoningEffortChange,
+  onServiceTierChange,
   onEeChange,
   onAgentPresetChange,
   onAccessModeChange,
@@ -418,6 +425,7 @@ export function ChatComposer({
               agentPresets={agentPresets ?? []}
               agentPresetId={agentPresetId ?? ""}
               accessMode={accessMode ?? "project_access"}
+              fullAccessUnavailableReason={fullAccessUnavailableReason ?? "Task capabilities are not ready."}
               applicationIds={applicationIds ?? []}
               applicationLocked={applicationSelectionLocked === true}
               applicationLockReason={applicationSelectionLockReason ?? ""}
@@ -438,15 +446,7 @@ export function ChatComposer({
             <div className="relative z-10 flex min-h-0 flex-1 flex-col">
               <div className="composer-attachments-default">
                 {attachments.length ? (
-                <div className="flex flex-wrap gap-2">
-                  {attachments.map((file) => (
-                    <ComposerAttachment
-                      attachment={file}
-                      key={file.id}
-                      onRemove={() => onRemoveAttachment(file.id)}
-                    />
-                  ))}
-                </div>
+                <ChatAttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
                 ) : null}
               </div>
 
@@ -544,6 +544,8 @@ export function ChatComposer({
                             providerModel={providerModel}
                             providers={providerInterfaces}
                             reasoningEffort={reasoningEffort}
+                            serviceTier={serviceTier}
+                            onServiceTierChange={onServiceTierChange}
                           />
                         ) : null}
                         <DictationButton
@@ -716,74 +718,6 @@ function appendProjectedFileMention(current: string, path: string): string {
   return `${current.replace(/\s+$/, "")} ${mention}`;
 }
 
-function ComposerAttachment({ attachment, onRemove }: { attachment: ChatAttachment; onRemove: () => void }) {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const canPreviewImage = /^(?:image\/(?:avif|bmp|gif|jpeg|png|webp))$/i.test(attachment.type);
-
-  useEffect(() => {
-    if (!canPreviewImage) {
-      setPreviewUrl(null);
-      return;
-    }
-    if (!attachment.file) return;
-    const url = URL.createObjectURL(attachment.file);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
-  }, [attachment.file, canPreviewImage]);
-
-  if (previewUrl) {
-    return (
-      <div
-        className="composer-attachment-surface border-token-border-heavy relative inline-flex size-20 flex-shrink-0 overflow-visible rounded-lg border focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border focus-visible:ring-inset"
-        data-composer-attachment-pill="true"
-        title={attachment.name}
-      >
-        <span className="composer-attachment-surface absolute inset-0 overflow-hidden rounded-lg">
-          <img alt={attachment.name} className="size-full object-cover" draggable={false} src={previewUrl} />
-        </span>
-        <AttachmentRemoveButton name={attachment.name} onRemove={onRemove} />
-      </div>
-    );
-  }
-  return (
-    <div
-      className="composer-attachment-surface group/file-attachment relative flex w-fit max-w-64 flex-shrink-0 items-center gap-2 rounded-lg border border-token-border-heavy bg-token-input-background p-2 pr-6 text-token-foreground"
-      data-composer-attachment-pill="true"
-      title={attachment.name}
-    >
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-token-bg-secondary text-token-text-secondary">
-        <Glyph className="size-6" name="file" size={22} />
-      </span>
-      <span className="flex min-w-0 flex-col">
-        <span className="block max-w-32 truncate text-sm">{attachment.name}</span>
-        <span className="block truncate text-xs text-token-input-placeholder-foreground">{formatFileSize(attachment.size)}</span>
-      </span>
-      <AttachmentRemoveButton name={attachment.name} onRemove={onRemove} />
-    </div>
-  );
-}
-
-function AttachmentRemoveButton({ name, onRemove }: { name: string; onRemove: () => void }) {
-  return (
-    <button
-      aria-label={`Remove ${name}`}
-      className="absolute top-1 right-1 z-20 flex size-4 cursor-interaction items-center justify-center rounded-full bg-token-foreground text-token-dropdown-background shadow-sm"
-      onClick={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        onRemove();
-      }}
-      onPointerDown={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-      }}
-      type="button"
-    >
-      <Glyph className="icon-xxs" name="close" size={10} />
-    </button>
-  );
-}
-
 const COMPOSER_SLASH_COMMANDS: ReadonlyArray<{ id: ClientCommandId; slug: string }> = [
   { id: "open_model_picker", slug: "model" },
   { id: "attach_files", slug: "attach" },
@@ -810,12 +744,6 @@ function slashCommandGlyph(id: ClientCommandId) {
   if (id === "toggle_task_summary") return "viewAll" as const;
   if (id === "open_voice") return "voice" as const;
   return "settings" as const;
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1_000) return `${bytes} B`;
-  if (bytes < 1_000_000) return `${Math.max(1, Math.round(bytes / 1_000))} KB`;
-  return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)} MB`;
 }
 
 function ComposerSubmitSpinner() {

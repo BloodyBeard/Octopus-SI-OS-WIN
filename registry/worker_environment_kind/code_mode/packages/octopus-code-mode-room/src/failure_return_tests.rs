@@ -1,0 +1,480 @@
+use super::*;
+use std::{future::Future, pin::Pin};
+use octopus_provider_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, FileCheckedRunReader};
+use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact, ToolResultError};
+
+pub(super) fn rejected_write_waits_for_the_earlier_peer(
+    admission: &FrontierAdmission, ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    source: &AdmittedDelivery, input: &InterfaceInvocationEnvelope, call_seq: u64,
+) {
+    use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunError, CheckedRunWriter,
+        checked_failed_run_write, checked_declared_run_snapshot};
+    let call: ToolCallArtifact = serde_json::from_slice(&input.artifact_file.read_payload_bytes().unwrap()).unwrap();
+    let peer = admission.deliveries.lock().unwrap().iter().rev()
+        .find(|row| row.seq < call_seq && row.to.as_str() == "system_provider_file_test").cloned().unwrap();
+    let payload: ToolCallArtifact = serde_json::from_slice(&peer.file.read_payload_bytes().unwrap()).unwrap();
+    let entry = &payload.arguments["writes"][1];
+    let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+    let before_text = preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_provider_run_authoring::DecodeBudget::new(ctx.owner_io_limits().unwrap().max_payload_bytes).unwrap()).unwrap();
+    let before = before_text.as_bytes();
+    let patch:json_patch::Patch = serde_json::from_value(call.arguments["patch"].clone()).unwrap();
+    let mut after:Value = serde_json::from_slice(before).unwrap();
+    json_patch::patch(&mut after,&patch).unwrap();
+    let edit = CheckedRunEdit::prepare(serde_json::from_value(call.arguments["path"].clone()).unwrap(),before,
+        after,call.correlation_id.clone().unwrap()).unwrap();
+    let writer = CheckedRunWriter { owner:InterfaceId::new(DOOR),source:InterfaceId::new(DOOR),
+        door:input.runtime().unwrap().interface.clone(),tool:call.tool.clone(),
+        call_label:input.artifact_file.read_manifest().unwrap().label,
+        result_label:ToolResultArtifact::success(&call.tool,None,json!({})).label };
+    let coauthor = CheckedRunWriter { owner:InterfaceId::new("world_provider_test"),source:peer.from.clone(),
+        door:peer.to.clone(),tool:payload.tool.clone(),call_label:peer.file.read_manifest().unwrap().label,
+        result_label:ToolResultArtifact::success(&payload.tool,None,json!({})).label };
+    let limits = ctx.owner_io_limits().unwrap();
+    let evidence = CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),
+        blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,
+        max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
+    let mut reader = FileCheckedRunReader::open(&evidence,Some(call_seq)).unwrap();
+    let mut refusal = None;
+    while let Some(row) = reader.movement(reader.next_sequence()).unwrap() {
+        if row.seq.0 <= call_seq { continue; }
+        assert!(row.from != octopus_ledger::Endpoint::Interface(coauthor.door.clone()), "peer receipt arrived before the pending proof");
+        if row.kind == octopus_ledger::MovementKind::DeliveryRefused && row.from == octopus_ledger::Endpoint::Interface(writer.door.clone()) {
+            refusal = Some(row);
+        }
+    }
+    let refusal = refusal.unwrap();
+    assert!(peer.seq < call_seq && call_seq < refusal.seq.0);
+    let hash = refusal.runtime().unwrap().run_record_hash.as_ref().unwrap();
+    assert!(!ctx.owner_blobs_dir().join(hash).exists());
+    assert!(matches!(checked_failed_run_write(&evidence,&writer,&edit,call_seq,vec![coauthor.clone()]),
+        Err(CheckedRunError::AwaitingResults { call_sequences }) if call_sequences.contains(&peer.seq)));
+    let anchor = std::fs::read(ctx.owner_blobs_dir().join(source.metadata.runtime.as_ref().unwrap().run_record_hash.as_ref().unwrap())).unwrap();
+    assert!(source.seq < peer.seq);
+    assert!(matches!(checked_declared_run_snapshot(&evidence,&edit.path,&anchor,source.seq,hash,peer.seq,vec![writer,coauthor]),
+        Err(CheckedRunError::Invalid(error)) if error.contains("complete admitted checked file.write chain")));
+}
+
+#[tokio::test]
+async fn refused_failure_returns_exactly_once_from_the_retained_install() {
+    for case in [FrontierCase::RefusedFailurePretty, FrontierCase::RefusedFailure] {
+    tokio::time::timeout(std::time::Duration::from_secs(30),
+        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(case)))
+        .await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn nested_failure_retains_its_admitted_carrier_across_cold_and_delivered_replay() {
+    tokio::time::timeout(std::time::Duration::from_secs(45),
+        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::NestedFailure)))
+        .await.unwrap().unwrap();
+}
+
+pub(super) async fn actual_nested_failure_return(
+    admission: &std::sync::Arc<FrontierAdmission>, handoff: &std::sync::Arc<actual_owner_handoff::OwnerHandoff>,
+    formation: &WorkerEnvironmentFormation, input: &(u64, ToolCallArtifact, InterfaceInvocationEnvelope), durable: &Path,
+    room: &CodeModeRoom, kind: &WorkerEnvKindSpec,
+) {
+    use octopus_tool_door_runtime::owner_contract_tests::hand_owned_output;
+    let ctx = admission.door.lock().await.context.clone();
+    assert_eq!(input.2.read_artifact_manifest().unwrap().label, "browser.tabs.result");
+    assert_eq!(input.1.tool, "code_mode.resume");
+    assert!(serde_json::from_slice::<ToolCallArtifact>(&input.2.artifact_file.read_payload_bytes().unwrap()).is_err());
+    let records = octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir());
+    let record_path = records.record_path(&formation.worker_environment_id);
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    let record = records.read(&formation.worker_environment_id).unwrap();
+    assert!(record.opened_at_movement_seq <= record.last_activity_movement_seq && record.last_activity_movement_seq < input.0);
+    let mut source = admission.door.lock().await.output_source(input.0, &input.2, formation).unwrap();
+    source.formation = None;
+    let failure = ToolResultArtifact::failure(&input.1.tool, input.1.correlation_id.clone(),
+        ToolResultError::new("tool_effect_indeterminate", "fixture interrupted native continuation")
+            .with_details(serde_json::Map::from_iter([("source_movement_seq".into(), json!(input.0))])));
+    let materialize = |result: &ToolResultArtifact| InterfaceArtifactFile::write(ctx.interface_var_dir().join("failure-artifacts"),
+        &result.label, &serde_json::to_vec(result).unwrap()).unwrap();
+    let file = materialize(&failure);
+    let reference = super::super::continuation::artifact_ref(&file).unwrap();
+    let callback = handoff.callback();
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    let nested_count = || admission.deliveries.lock().unwrap().iter().filter(|row|
+        row.to.as_str() == NESTED_INTERFACE || row.to.as_str() == "system_browser_test").count();
+    let effects = nested_count();
+    let mut foreign = source.clone(); foreign.movement.from = octopus_ledger::Endpoint::Interface(InterfaceId::new("foreign"));
+    assert!(hand_owned_output(&ctx, &foreign, &callback, file.clone()).await.is_err());
+    foreign = source.clone(); foreign.envelope.metadata.as_mut().unwrap().runtime.as_mut().unwrap().epoch += 1;
+    assert!(hand_owned_output(&ctx, &foreign, &callback, file.clone()).await.is_err());
+    let mut wrong = failure.clone(); wrong.correlation_id = Some("code-mode-resume:foreign:invalid".into());
+    assert!(hand_owned_output(&ctx, &source, &callback, materialize(&wrong)).await.is_err());
+    let key = input.1.correlation_id.as_ref().unwrap().rsplit(':').next().unwrap();
+    let pending = durable.join(format!("{key}.pending.json"));
+    let saved_pending = std::fs::read(&pending).unwrap();
+    std::fs::write(&pending, b"{}").unwrap();
+    assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err());
+    std::fs::write(&pending, &saved_pending).unwrap();
+    let admitted = durable.join(format!("{key}.admitted.json"));
+    let saved_admitted = std::fs::read(&admitted).unwrap();
+    let witness: Value = serde_json::from_slice(&saved_admitted).unwrap();
+    assert_eq!(witness["source_movement_seq"], json!(input.0));
+    assert_eq!(witness["artifact"], json!(input.2.artifact));
+    let withheld = durable.join(format!("{key}.withheld-admitted.json"));
+    std::fs::rename(&admitted, &withheld).unwrap();
+    assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err());
+    std::fs::rename(&withheld, &admitted).unwrap();
+    for (field, value) in [("source_movement_seq", json!(input.0 + 1)), ("source_interface", json!("foreign")),
+        ("artifact", json!({"id":"foreign", "content":input.2.artifact.content})),
+        ("payload_hash", json!(ContentHash::of_bytes(b"foreign").to_hex())),
+        ("metadata_hash", json!(ContentHash::of_bytes(b"foreign").to_hex()))] {
+        let mut changed = witness.clone(); changed[field] = value;
+        std::fs::write(&admitted, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err(), "accepted changed {field}");
+    }
+    std::fs::write(&admitted, &saved_admitted).unwrap();
+    let boundary = durable.join(format!("{key}.{}.return.json", input.2.runtime().unwrap().run_record_hash.as_ref().unwrap()));
+    let saved_boundary = std::fs::read(&boundary).unwrap();
+    let mut changed: Value = serde_json::from_slice(&saved_boundary).unwrap(); changed["epoch"] = json!(input.2.runtime().unwrap().epoch + 1);
+    std::fs::write(&boundary, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err());
+    std::fs::write(&boundary, &saved_boundary).unwrap();
+    for value in [json!("released"), json!(input.0 + 1)] {
+        let mut changed: Value = serde_json::from_slice(&record_bytes).unwrap();
+        if value.is_string() { changed["lifecycle"] = value; }
+        else { changed["opened_at_movement_seq"] = value.clone(); changed["last_activity_movement_seq"] = value; }
+        std::fs::write(&record_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err());
+    }
+    std::fs::write(&record_path, &record_bytes).unwrap();
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    let cell = serde_json::from_slice::<Value>(&saved_pending).unwrap()["identity"]["cell_id"].clone();
+    let wait = envelope(&admission.root, 9099, "code_mode.wait", json!({"cell_id":cell,"yield_time_ms":20}));
+    admission.model_call(&wait.artifact_file).await.unwrap();
+    let wait = admission.next().await.unwrap();
+    assert!(wait.0 > input.0);
+    let wait_pin = wait.2.runtime().unwrap().clone();
+    assert_ne!(wait_pin.checkpoint, input.2.runtime().unwrap().checkpoint);
+    let cold_room = CodeModeRoom::new(room.environment.clone());
+    let error = cold_room.receive_with_sink(ToolProcessInvocation {
+        request_id: wait.0 + 1, source_movement_seq: wait.0,
+        descriptor: effective_descriptor(&wait.1.tool), envelope: wait.2.clone(),
+        worker_environment: Some(formation.clone()), worker_environment_kind: Some(kind.clone()),
+    }, &FakeSink::default()).await.err().expect("cold wait executed without a live context");
+    assert!(matches!(error, ToolProcessError::Capability(ref detail) if detail.contains("no live context to continue")));
+    records.fail(formation, wait.0).unwrap();
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    let record = records.read(&formation.worker_environment_id).unwrap();
+    let mut wait_source = admission.door.lock().await.output_source(wait.0, &wait.2, formation).unwrap();
+    wait_source.formation = None;
+    let wait_failure = ToolResultArtifact::failure(&wait.1.tool, wait.1.correlation_id.clone(),
+        ToolResultError::new("tool_process_failure", "persistent code mode has no live context to continue")
+            .with_details(serde_json::Map::from_iter([("source_movement_seq".into(), json!(wait.0))])));
+    let wait_file = materialize(&wait_failure);
+    let wait_proof = serde_json::to_value(&wait_source.movement).unwrap();
+    let wait_metadata = serde_json::to_value(wait_source.envelope.metadata().unwrap()).unwrap();
+    admission.provider_progress(9099).await.unwrap();
+    let run_path = admission.run_records.join("run_code_mode_test.json");
+    let before_replacement: Value = serde_json::from_slice(&std::fs::read(&run_path).unwrap()).unwrap();
+    assert!(!before_replacement["active_checkpoints"].as_array().unwrap().contains(&json!(wait_pin.checkpoint)));
+    let old_frontier = before_replacement["interface_state"][DOOR]["frontier_checkpoint_ids"].clone();
+    admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
+    assert!(matches!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.unwrap(),
+        DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::Policy, .. }));
+    let receipt = durable.join(format!("{}.receipt.json", reference.content.to_hex()));
+    let receipt_bytes = std::fs::read(&receipt).unwrap();
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    let restarted = actual_owner_handoff::OwnerHandoff::new();
+    let callback = restarted.callback();
+    let changed = json!({"artifact":reference,"source_seq":input.0+1});
+    std::fs::write(&receipt, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.is_err());
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    std::fs::write(&receipt, &receipt_bytes).unwrap();
+    assert!(matches!(hand_owned_output(&ctx, &source, &callback, file.clone()).await.unwrap(), DeliveryVerdict::Admitted { .. }));
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes + 1, "cold replay repeated the installed receipt write");
+    let delivered: Vec<_> = admission.deliveries.lock().unwrap().iter().filter(|row|
+        row.from.as_str() == DOOR && row.file.read_manifest().unwrap().label == failure.label).cloned().collect();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].to.as_str(), DOOR);
+    assert_eq!(delivered[0].file.read_payload_bytes().unwrap(), file.read_payload_bytes().unwrap());
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    let limits = ctx.owner_io_limits().unwrap();
+    let evidence = CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),
+        blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,
+        max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
+    let movement = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, delivered[0].seq).unwrap();
+    let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "nested-failure-contract").unwrap();
+    for _ in 0..2 {
+        let cold = actual_owner_handoff::OwnerHandoff::new();
+        assert!(matches!(hand_owned_output(&ctx, &source, &cold.callback(), file.clone()).await.unwrap(),
+            DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::CheckpointSpent, detail }
+            if detail["recorded_result_movement_seq"] == json!(delivered[0].seq)));
+        cold.reconcile_failure(&ctx, &mut reader, &movement).await.unwrap();
+    }
+    std::fs::write(&receipt, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(restarted.reconcile_failure(&ctx, &mut reader, &movement).await.is_err());
+    std::fs::write(&receipt, &receipt_bytes).unwrap();
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    assert_eq!(nested_count(), effects);
+    assert_eq!(std::fs::read(&pending).unwrap(), saved_pending);
+    assert!(!durable.join(format!("{key}.accepted.json")).exists(), "failure recovery executed the continuation");
+    assert_eq!(std::fs::read(&record_path).unwrap(), record_bytes);
+    assert_eq!(std::fs::read(&admitted).unwrap(), saved_admitted);
+    let current: Value = serde_json::from_slice(&std::fs::read(&run_path).unwrap()).unwrap();
+    assert!(old_frontier.as_array().unwrap().iter().all(|id| !current["active_checkpoints"].as_array().unwrap().contains(id)));
+    let replacing = admission.deliveries.lock().unwrap().iter().filter(|row|
+        row.seq > wait.0 && row.from.as_str() == DOOR && row.to.as_str() == "system_file_test"
+        && row.metadata.runtime.as_ref().unwrap().checkpoint == input.2.runtime().unwrap().checkpoint).cloned().collect::<Vec<_>>();
+    assert_eq!(replacing.len(), 1, "replacement did not use the separately admitted nested checkpoint");
+    assert!(!old_frontier.as_array().unwrap().contains(&json!(replacing[0].metadata.runtime.as_ref().unwrap().checkpoint)));
+    let replacing_call: ToolCallArtifact = serde_json::from_slice(&replacing[0].file.read_payload_bytes().unwrap()).unwrap();
+    let generation = replacing_call.correlation_id.as_ref().unwrap().rsplit(':').next().unwrap();
+    let edit_path = durable.join(format!("{generation}.edit.json"));
+    let edit: Value = super::super::continuation::read_record(&edit_path).unwrap();
+    let install_path = durable.join(format!("{}.installed.json", edit["after_hash"].as_str().unwrap()));
+    for (path, field, changed) in [
+        (receipt.clone(), "source_seq", json!(input.0 + 1)),
+        (edit_path, "content", json!("{}")),
+        (install_path, "source_artifact", json!({"id":"foreign", "content":reference.content})),
+        (admitted.clone(), "metadata_hash", json!(ContentHash::of_bytes(b"foreign").to_hex())),
+    ] {
+        let saved = std::fs::read(&path).unwrap();
+        let mut value: Value = serde_json::from_slice(&saved).unwrap(); value[field] = changed;
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(hand_owned_output(&ctx, &wait_source, &actual_owner_handoff::OwnerHandoff::new().callback(), wait_file.clone()).await.is_err(), "accepted changed {field}");
+        std::fs::write(&path, saved).unwrap();
+    }
+    let call_ref = super::super::continuation::artifact_ref(&replacing[0].file).unwrap();
+    let manifest_path = ctx.owner_blobs_dir().join(call_ref.content.to_hex());
+    let withheld = manifest_path.with_extension("withheld");
+    std::fs::rename(&manifest_path, &withheld).unwrap();
+    std::fs::write(&manifest_path, b"{}").unwrap();
+    assert!(hand_owned_output(&ctx, &wait_source, &actual_owner_handoff::OwnerHandoff::new().callback(), wait_file.clone()).await.is_err());
+    std::fs::remove_file(&manifest_path).unwrap();
+    std::fs::rename(&withheld, &manifest_path).unwrap();
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    assert_eq!(nested_count(), effects);
+    let cold = actual_owner_handoff::OwnerHandoff::new();
+    assert!(matches!(hand_owned_output(&ctx, &wait_source, &cold.callback(), wait_file.clone()).await.unwrap(), DeliveryVerdict::Admitted { .. }));
+    let settled = admission.deliveries.lock().unwrap().iter().filter(|row|
+        row.from.as_str() == DOOR && row.to.as_str() == "world_provider_test"
+        && row.file.read_payload_bytes().unwrap() == wait_file.read_payload_bytes().unwrap()).cloned().collect::<Vec<_>>();
+    assert_eq!(settled.len(), 1);
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    assert!(matches!(hand_owned_output(&ctx, &wait_source, &actual_owner_handoff::OwnerHandoff::new().callback(), wait_file).await.unwrap(),
+        DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::CheckpointSpent, .. }));
+    assert_eq!(serde_json::to_value(&wait_source.movement).unwrap(), wait_proof);
+    assert_eq!(serde_json::to_value(wait_source.envelope.metadata().unwrap()).unwrap(), wait_metadata);
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    assert_eq!(nested_count(), effects);
+    let ordinary = envelope(&admission.root, 9100, "code_mode.run", json!({"script":"text('MUST_NOT_EXECUTE');", "yield_time_ms":20}));
+    admission.model_call(&ordinary.artifact_file).await.unwrap();
+    let ordinary = admission.next().await.unwrap();
+    assert_eq!(ordinary.2.read_artifact_manifest().unwrap().label, "tool.call");
+    assert!(ordinary.0 > record.last_activity_movement_seq);
+    let mut ordinary_source = admission.door.lock().await.output_source(ordinary.0, &ordinary.2, formation).unwrap();
+    ordinary_source.formation = None;
+    let ordinary_failure = ToolResultArtifact::failure(&ordinary.1.tool, ordinary.1.correlation_id.clone(),
+        ToolResultError::new("tool_effect_indeterminate", "fixture unexecuted ordinary call")
+            .with_details(serde_json::Map::from_iter([("source_movement_seq".into(), json!(ordinary.0))])));
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    assert_eq!(hand_owned_output(&ctx, &ordinary_source, &callback, materialize(&ordinary_failure)).await.unwrap_err(),
+        "retained output has no exact recorded formation");
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    assert_eq!(nested_count(), effects);
+    assert_eq!(std::fs::read(&record_path).unwrap(), record_bytes);
+}
+
+fn arrival<'a>(
+    admission: &'a FrontierAdmission,
+    file: &'a InterfaceArtifactFile,
+) -> Pin<Box<dyn Future<Output = Result<u64, String>> + Send + 'a>> {
+    Box::pin(admission.arrive(DOOR, file))
+}
+
+pub(super) fn actual_refused_failure_return<'a>(
+    admission: &'a std::sync::Arc<FrontierAdmission>, room: &'a CodeModeRoom,
+    handoff: &'a std::sync::Arc<actual_owner_handoff::OwnerHandoff>, formation: &'a WorkerEnvironmentFormation,
+    _kind: &WorkerEnvKindSpec, config: &'a super::super::config::CodeModeConfig,
+    initial: &'a (u64, ToolCallArtifact, InterfaceInvocationEnvelope), durable: &'a Path,
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        use octopus_tool_door_runtime::owner_contract_tests::hand_owned_output;
+        let ctx = admission.door.lock().await.context.clone();
+        super::super::continuation::ContinuationContext::create(durable, formation, config,
+            &config.resolve_context(&initial.2).unwrap(), &initial.2,
+            super::super::continuation::OriginalRun::from_envelope(&initial.2, initial.0).unwrap()).unwrap();
+        let records = octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir());
+        records.activate(formation, initial.0).unwrap();
+        let source = admission.door.lock().await.output_source(initial.0, &initial.2, formation).unwrap();
+        let first = ToolResultArtifact::success(&initial.1.tool, initial.1.correlation_id.clone(),
+            json!({"state":"completed","error_text":"SyntaxError: Illegal return statement"}));
+        let first_file = InterfaceArtifactFile::write(ctx.interface_var_dir().join("failure-artifacts"),
+            &first.label, &serde_json::to_vec(&first).unwrap()).unwrap();
+        admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
+        assert!(matches!(hand_owned_output(&ctx, &source, &handoff.callback(), first_file.clone()).await.unwrap(),
+            DeliveryVerdict::Refused { .. }));
+        arrival(admission, &first_file).await.unwrap();
+        let failure_file = |input: &(u64, ToolCallArtifact, InterfaceInvocationEnvelope)| {
+            let result = ToolResultArtifact::failure(&input.1.tool, input.1.correlation_id.clone(),
+                ToolResultError::new("tool_effect_indeterminate", "checked historical interval ends during an unjoined authoring call")
+                    .with_details(serde_json::Map::from_iter([("source_movement_seq".into(), json!(input.0))])));
+            InterfaceArtifactFile::write(ctx.interface_var_dir().join("failure-artifacts"),
+                &result.label, &serde_json::to_vec(&result).unwrap()).unwrap()
+        };
+        let limits = ctx.owner_io_limits().unwrap();
+        let evidence = CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let refusal = |file: &InterfaceArtifactFile| {
+            let reference = super::super::continuation::artifact_ref(file).unwrap();
+            let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+            let mut selected = None;
+            while let Some(movement) = reader.movement(reader.next_sequence()).unwrap() {
+                if movement.kind == octopus_ledger::MovementKind::DeliveryRefused && movement.artifact.as_ref() == Some(&reference) {
+                    assert!(matches!(movement.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict()),
+                        Some(octopus_ledger::DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::CheckpointSpent, .. })));
+                    selected = Some(movement);
+                }
+            }
+            selected.unwrap()
+        };
+        let first_failure = failure_file(initial);
+        assert!(arrival(admission, &first_failure).await.is_err());
+        let closed = refusal(&first_failure);
+        let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "refused-failure-contract").unwrap();
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        handoff.reconcile_failure(&ctx, &mut reader, &closed).await.unwrap();
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+
+        let next = envelope(&admission.root, 9001, "code_mode.run", json!({"script":"text('MUST_NOT_EXECUTE');", "yield_time_ms":20}));
+        admission.model_call(&next.artifact_file).await.unwrap();
+        let next = admission.next().await.unwrap();
+        assert_eq!(next.2.read_artifact_manifest().unwrap().label, "tool.call");
+        assert_eq!(next.1.tool, "code_mode.run");
+        let run_path = admission.run_records.join("run_code_mode_test.json");
+        let before_progress = std::fs::read(&run_path).unwrap();
+        admission.provider_progress(9002).await.unwrap();
+        let after_progress = std::fs::read(&run_path).unwrap();
+        actual_checked_recovery_observation(&ctx, &run_path, &before_progress, &after_progress, next.0,
+            &config.resolve_owner_topology(&next.2).unwrap().coauthor.unwrap());
+        records.activate(formation, next.0).unwrap();
+        let second_file = failure_file(&next);
+        assert!(arrival(admission, &second_file).await.is_err());
+        let pending = refusal(&second_file);
+        let observed = reader.read_new_uncommitted_with_refusals_limit(256).unwrap();
+        assert!(observed.iter().any(|row| row.movement == pending), "owner reader skipped the recorded refusal");
+        let current_bytes = std::fs::read(&run_path).unwrap();
+        let current: Value = serde_json::from_slice(&current_bytes).unwrap();
+        assert!(!current["checkpoints"].as_array().unwrap().iter().any(|checkpoint|
+            checkpoint["id"] == json!(next.2.runtime().unwrap().checkpoint)));
+        let install = std::fs::read_dir(durable).unwrap().filter_map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_name().unwrap().to_str().unwrap().ends_with(".installed.json").then(||
+                super::super::continuation::read_record::<super::super::continuation::InstalledHandoff>(&path).unwrap())
+        }).max_by_key(|record| record.result_seq).unwrap();
+        let anchor = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, install.result_seq).unwrap();
+        let anchor_runtime = anchor.runtime().unwrap();
+        let installed: Value = serde_json::from_slice(&std::fs::read(ctx.owner_blobs_dir().join(&install.after_hash)).unwrap()).unwrap();
+        let anchor_checkpoint = installed["checkpoints"].as_array().unwrap().iter()
+            .find(|checkpoint| checkpoint["id"] == json!(anchor_runtime.checkpoint)).unwrap();
+        assert!(current["checkpoints"].as_array().unwrap().contains(anchor_checkpoint));
+        assert!(current["active_checkpoints"].as_array().unwrap().contains(&json!(anchor_runtime.checkpoint)));
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        let mut wrong = pending.clone(); wrong.artifact.as_mut().unwrap().id = ArtifactId::new("foreign-failure");
+        assert!(handoff.reconcile_failure(&ctx, &mut reader, &wrong).await.is_err());
+        let mut changed = current.clone();
+        changed["active_checkpoints"].as_array_mut().unwrap().retain(|id| id != &json!(anchor_runtime.checkpoint));
+        std::fs::write(&run_path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
+        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.is_err());
+        std::fs::write(&run_path, &current_bytes).unwrap();
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+        let generation = super::super::continuation::digest(&json!({
+            "before":octopus_ledger::ContentHash::of_bytes(&current_bytes).to_hex(),
+            "emission":super::super::continuation::artifact_ref(&second_file).unwrap().content.to_hex(),
+            "edge":config.resolve_owner_topology(&next.2).unwrap().model_output,
+            "source_seq":install.result_seq,
+        })).unwrap();
+        let proposal = durable.join(format!("{generation}.edit.json"));
+        let orphan = durable.join(format!("{generation}.authoring-result.json"));
+        assert!(!proposal.exists() && !orphan.exists());
+        super::super::continuation::create_record(&orphan, &json!({"correlation":"retained orphan"})).unwrap();
+        let orphan_bytes = std::fs::read(&orphan).unwrap();
+        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap_err()
+            .contains("authoring result has no durable edit proposal"));
+        assert_eq!(std::fs::read(&orphan).unwrap(), orphan_bytes);
+        assert_eq!(std::fs::read(&run_path).unwrap(), current_bytes);
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+        assert!(!proposal.exists());
+        std::fs::remove_file(orphan).unwrap();
+        admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
+        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap_err()
+            .contains("fixture interrupted after checked owner installation"));
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        let restarted = actual_owner_handoff::OwnerHandoff::new();
+        restarted.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap();
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes + 1, "prepared return was rewritten before readiness");
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        restarted.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap();
+        restarted.reconcile_failure(&ctx, &mut reader, &closed).await.unwrap();
+        let mut native_source = admission.door.lock().await.output_source(next.0, &next.2, formation).unwrap();
+        native_source.formation = None;
+        let callback = restarted.callback();
+        let verdict = hand_owned_output(&ctx, &native_source, &callback, second_file.clone()).await.unwrap();
+        assert!(octopus_tool_door_runtime::owner_contract_tests::hand_owned_invocation_failure(&ctx, &native_source, &callback)
+            .await.unwrap());
+        let delivered = admission.deliveries.lock().unwrap().iter().filter(|row|
+            row.from.as_str() == DOOR && row.to.as_str() == "world_provider_test" && row.file.read_manifest().unwrap().label == first.label)
+            .cloned().collect::<Vec<_>>();
+        assert_eq!(delivered.len(), 2);
+        assert_eq!(delivered[0].file.read_payload_bytes().unwrap(), first_file.read_payload_bytes().unwrap());
+        assert_eq!(super::super::continuation::artifact_ref(&delivered[1].file).unwrap(), pending.artifact.unwrap());
+        assert_eq!(delivered[1].file.read_payload_bytes().unwrap(), second_file.read_payload_bytes().unwrap());
+        assert!(matches!(verdict, DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::CheckpointSpent, detail }
+            if detail["recorded_result_movement_seq"] == json!(delivered[1].seq)));
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+        assert!(room.rooms.lock().await.is_empty(), "failure recovery executed the admitted script");
+    })
+}
+
+fn actual_checked_recovery_observation(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext, path: &Path,
+    before: &[u8], after: &[u8], after_seq: u64,
+    writer: &octopus_provider_run_authoring::CheckedRunWriter,
+) {
+    let limits = ctx.owner_io_limits().unwrap();
+    let evidence = CheckedRunEvidence { movements_path: ctx.owner_movements_path(),
+        ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+        max_control_frame_bytes: limits.max_control_frame_bytes,
+        max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes };
+    let prove = |captured: &[u8]| octopus_provider_run_authoring::checked_declared_run_advance(
+        &evidence, path, before, captured, after_seq, vec![writer.clone()]);
+    let expected = prove(after).unwrap();
+    assert!(!expected.is_empty());
+    let mut invalid: Value = serde_json::from_slice(after).unwrap();
+    invalid["status"] = json!("unproved mutation");
+    let invalid = serde_json::to_vec(&invalid).unwrap();
+    let invalid_error = prove(&invalid).unwrap_err();
+    for first in [before, invalid.as_slice()] {
+        let mut reads = std::collections::VecDeque::from([
+            first.to_vec(), after.to_vec(), after.to_vec(), after.to_vec()]);
+        let mut attempts = 0;
+        let checked = super::super::continuation::checked_recovery_observation(
+            || Ok(reads.pop_front().unwrap()),
+            |captured| { attempts += 1; prove(captured) }, || false).unwrap();
+        assert_eq!(attempts, 2);
+        assert!(reads.is_empty());
+        assert_eq!(checked.last().unwrap().after, expected.last().unwrap().after);
+    }
+    let mut attempts = 0;
+    let error = super::super::continuation::checked_recovery_observation(
+        || Ok(invalid.clone()), |captured| { attempts += 1; prove(captured) }, || false).unwrap_err();
+    assert_eq!(error, invalid_error);
+    assert_eq!(attempts, 1);
+    let cancelled = std::cell::Cell::new(false);
+    let mut reads = 0;
+    let error = super::super::continuation::checked_recovery_observation(
+        || { reads += 1; if reads == 2 { cancelled.set(true); } Ok(if reads == 1 { before.to_vec() } else { after.to_vec() }) },
+        prove, || cancelled.get()).unwrap_err();
+    assert_eq!(error, "shared run recovery cancelled");
+    assert_eq!(reads, 2);
+    assert_eq!(std::fs::read(path).unwrap(), after);
+}

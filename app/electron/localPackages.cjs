@@ -1449,13 +1449,16 @@ async function snapshotDirectory(rootValue, options = {}) {
   const cached = options.cacheKey ? sourceSnapshotCache.get(options.cacheKey) : null;
   if (cached?.fingerprint === fingerprint) return cached.snapshot;
   for (const { path: absolute, relative_path: relative, stat } of inventory) {
-    const body = await fs.readFile(absolute);
+    const handle = await fs.open(absolute, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
+    let content;
+    try { content = await hashFileHandle(handle); }
+    finally { await handle.close(); }
     const current = await fs.lstat(absolute);
-    if (body.byteLength !== stat.size || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs
+    if (content.size !== stat.size || current.size !== stat.size || current.mtimeMs !== stat.mtimeMs
       || current.ctimeMs !== stat.ctimeMs || current.mode !== stat.mode || current.ino !== stat.ino || !current.isFile()) {
       throw new Error(`local package file changed while reading: ${absolute}`);
     }
-    files.push({ path: absolute, relative_path: relative, size: stat.size, mode: stat.mode & 0o777, sha256: sha256Bytes(body) });
+    files.push({ path: absolute, relative_path: relative, size: stat.size, mode: stat.mode & 0o777, sha256: content.sha256 });
   }
   const digest = snapshotDigest(files);
   const snapshot = { root, directories, files, digest };
@@ -2408,38 +2411,64 @@ async function copySnapshot(snapshot, targetRoot, onFile) {
     await fs.mkdir(path.join(targetRoot, relativeDirectory), { mode: 0o755 });
   }
   for (const file of snapshot.files) {
-    const sourceBody = await fs.readFile(file.path);
-    const stat = await fs.lstat(file.path);
-    const digest = sha256Bytes(sourceBody);
-    if (
-      stat.isSymbolicLink()
-      || !stat.isFile()
-      || stat.size !== (file.input_size ?? file.size)
-      || (stat.mode & 0o777) !== file.mode
-      || digest !== (file.input_sha256 ?? file.sha256)
-    ) throw new Error(`local package source changed while copying '${file.path}'`);
-    if (file.configuration_input) {
-      const input = file.configuration_input;
-      const current = await fs.lstat(input.path);
-      if (!current.isFile() || current.isSymbolicLink() || current.size !== input.size || (current.mode & 0o777) !== input.mode
-        || sha256Bytes(await fs.readFile(input.path)) !== input.sha256) throw new Error(`package configuration changed while copying '${input.path}'`);
-    }
-    const body = file.body ?? sourceBody;
-    const target = path.join(targetRoot, file.relative_path);
-    const handle = await fs.open(target, "wx", file.mode);
+    const source = await fs.open(file.path, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
     try {
-      await handle.writeFile(body);
-      await handle.chmod(file.mode);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
+      const before = await source.stat();
+      if (!before.isFile()) throw new Error(`local package source is not a regular file: ${file.path}`);
+      const content = await hashFileHandle(source);
+      const stat = await source.stat();
+      if (!stat.isFile() || stat.size !== (file.input_size ?? file.size) || content.size !== stat.size
+        || (stat.mode & 0o777) !== file.mode || content.sha256 !== (file.input_sha256 ?? file.sha256)
+        || before.mtimeMs !== stat.mtimeMs || before.ctimeMs !== stat.ctimeMs) {
+        throw new Error(`local package source changed while copying '${file.path}'`);
+      }
+      if (file.configuration_input) {
+        const input = file.configuration_input;
+        const current = await fs.lstat(input.path);
+        if (!current.isFile() || current.isSymbolicLink() || current.size !== input.size || (current.mode & 0o777) !== input.mode
+          || sha256Bytes(await fs.readFile(input.path)) !== input.sha256) throw new Error(`package configuration changed while copying '${input.path}'`);
+      }
+      const target = path.join(targetRoot, file.relative_path);
+      if (file.body === undefined) {
+        const parent = await fs.open(path.dirname(target), fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW);
+        try { require("./nativeFiles.cjs").cloneFile(source.fd, parent.fd, path.basename(target)); }
+        finally { await parent.close(); }
+      }
+      const handle = await fs.open(target, file.body === undefined ? fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW : "wx", file.mode);
+      try {
+        if (file.body !== undefined) await handle.writeFile(file.body);
+        const installed = await handle.stat();
+        if (!installed.isFile() || installed.nlink !== 1 || installed.dev === stat.dev && installed.ino === stat.ino) {
+          throw new Error(`local package copy is not isolated: ${target}`);
+        }
+        await handle.chmod(file.mode);
+        await handle.sync();
+      } finally { await handle.close(); }
+      const after = await source.stat();
+      if (after.size !== stat.size || after.mode !== stat.mode || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+        throw new Error(`local package source changed while copying '${file.path}'`);
+      }
+    } finally { await source.close(); }
     onFile();
   }
   for (const relativeDirectory of [...snapshot.directories].sort((left, right) => right.length - left.length)) {
     await syncDirectory(path.join(targetRoot, relativeDirectory));
   }
   await syncDirectory(path.dirname(targetRoot));
+}
+
+async function hashFileHandle(handle) {
+  const hash = crypto.createHash("sha256");
+  const stat = await handle.stat();
+  if (!stat.isFile()) throw new Error("Local package hashing requires a regular file");
+  const buffer = Buffer.allocUnsafe(Math.max(1, Math.min(stat.size, 1024 * 1024)));
+  let size = 0;
+  for (;;) {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, size);
+    if (bytesRead === 0) return { size, sha256: hash.digest("hex") };
+    hash.update(buffer.subarray(0, bytesRead));
+    size += bytesRead;
+  }
 }
 
 async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onFile) {

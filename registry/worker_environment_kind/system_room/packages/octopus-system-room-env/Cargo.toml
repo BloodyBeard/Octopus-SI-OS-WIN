@@ -19,9 +19,11 @@ path = "src/bin/octopus-artifact-bound-tool.rs"
 
 [dependencies]
 fs2 = "0.4"
+libc = "0.2.182"
 serde = { workspace = true }
 serde_json = { workspace = true }
 json-patch.workspace = true
+octopus-file-write-contract = { path = "../octopus-file-write-contract" }
 tokio = { workspace = true }
 
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }

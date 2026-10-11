@@ -68,7 +68,7 @@ const { createClientSurfaceDocumentStore, filterClientSurfaceSnapshot } = requir
 const { createClientExtensionStore, readClientExtensionFilesystemSource } = require("./clientExtensions.cjs");
 const { createClientSetupStore } = require("./clientSetup.cjs");
 const { createChatgptSignIn } = require("./chatgptSignIn.cjs");
-const { createClientProviderMetadata } = require("./clientProviderMetadata.cjs");
+const { createClientProviderMetadata, validateProviderModelSelection } = require("./clientProviderMetadata.cjs");
 const { runClientDoctor } = require("./clientDoctor.cjs");
 const {
   clientExtensionActionFailure,
@@ -101,43 +101,13 @@ const {
 const { planClientAgentTemplate } = require("./clientAgentCatalog.cjs");
 const { createNativeBrowserSurfaceAdapter, createBrowserPresentationHost, createBrowserDownloadHistory } = require("./browserSurface.cjs");
 const {
-  commitClientAuthoringTransaction,
   initializeWorkspace,
   mutateWorkspaceProject,
   readWorkspaceSetupState,
   recoverWorkspaceTransactions,
 } = require("./workspaceSetup.cjs");
 
-function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
-  const writes = Array.isArray(request?.writes) ? request.writes : [];
-  const removals = Array.isArray(request?.removals) ? request.removals : [];
-  const publishBarrierPath = path.resolve(request?.publishBarrierPath ?? "");
-  if (!writes.some((write) => path.resolve(write?.file ?? "") === publishBarrierPath)) {
-    throw new Error("Client authoring publication barrier is absent from its write set");
-  }
-  return commitClientAuthoringTransaction({
-    octopusHomeRoot: octopusHome,
-    registryRoot,
-    plan: {
-      operationId: randomUUID(),
-      label: String(request?.label ?? ""),
-      writes: writes.map((write) => ({
-        destination: path.resolve(write?.file ?? ""),
-        expectedBeforeDigest: write?.beforeDigest ?? null,
-        content: write?.next === null ? null : `${JSON.stringify(write?.next, null, 2)}\n`,
-        tag: String(write?.label ?? write?.file ?? "client authoring write"),
-        publishBarrier: path.resolve(write?.file ?? "") === publishBarrierPath,
-      })),
-      removals: removals.map((removal) => ({
-        destination: path.resolve(removal?.path ?? ""),
-        type: removal?.type,
-        expectedDev: removal?.dev,
-        expectedIno: removal?.ino,
-        tag: String(removal?.label ?? removal?.path ?? "client authoring removal"),
-      })),
-    },
-  });
-}
+const { commitProjectionClientAuthoring } = require("./clientWorkspaceAuthoring.cjs");
 
 const OPERATOR_CHAT_INTERFACE = "world_operator_chat";
 
@@ -1277,7 +1247,8 @@ function requireClientSetupPack(catalog, plan) {
         || !Array.isArray(choice.projectKeys) || choice.projectKeys.length === 0
         || new Set(choice.projectKeys).size !== choice.projectKeys.length || choice.projectKeys.some((key) => !requestProjectKeys.has(key))
         || choice.providerInterfaceId !== preset.provider_interface_id || choice.providerInterfaceId !== requestHome?.providerInterfaceId
-        || choice.providerModel !== requestHome?.providerModel || choice.reasoningEffort !== (requestHome?.reasoningEffort ?? "")) {
+        || choice.providerModel !== requestHome?.providerModel || choice.reasoningEffort !== (requestHome?.reasoningEffort ?? "")
+        || (choice.serviceTier ?? "") !== (requestHome?.serviceTier ?? "")) {
       throw new Error(`Client setup Agent preset does not match its reviewed pack, Projects, or provider selection.`);
     }
     presetIds.add(choice.presetId);
@@ -1568,6 +1539,7 @@ async function withWorkspaceAgentPreset(choice, eeInstancesRoot, operation) {
         workerInterfaceId: source.recipe.worker_interface_id,
         providerInterfaceId, providerModel,
         reasoningEffort: choice.reasoningEffort,
+        serviceTier: choice.serviceTier,
         doorHostSlots: {},
         contextArtifactBindings: source.recipe.context_artifact_bindings,
         selectedWorkerEnvironmentKinds: source.recipe.selected_worker_environment_kinds,
@@ -1575,10 +1547,12 @@ async function withWorkspaceAgentPreset(choice, eeInstancesRoot, operation) {
     verifyHome();
     const profile = preflight.authoringProfile;
     if (profile.ee_id !== choice.projectEeId || profile.worker_choice_interface !== source.sourceInterface.id || preflight.providerModel !== providerModel) throw new Error("Agent preset planning changed its Project, worker, or model");
+    if (choice.serviceTier && preflight.serviceTier !== choice.serviceTier) throw new Error("Agent preset planning changed its selected service tier");
     if (source.recipe.selected_application_ids.length) throw new Error("Agent preset application binding planning is unavailable");
     const settings = {
       schema_version: 1, worker_interface: source.sourceInterface.id, project_ee_id: choice.projectEeId,
-      provider_interface_id: providerInterfaceId, reasoning_effort: choice.reasoningEffort,
+      provider_interface_id: providerInterfaceId, provider_model: providerModel, reasoning_effort: choice.reasoningEffort,
+      ...(choice.serviceTier ? { service_tier: choice.serviceTier } : {}),
       application_ids: source.recipe.selected_application_ids,
       worker_environment_kinds: source.recipe.selected_worker_environment_kinds,
     };
@@ -2710,8 +2684,14 @@ function getChatgptSignIn() {
     chatgptSignIn = createChatgptSignIn({
       codexBinary: () => path.join(resolveInstallationRoot(), "bin", "codex"),
       codexHome: resolveOperatorCodexHome,
+      octopusHome: resolveOctopusHome,
       version: () => app.getVersion(),
       openExternal: (url) => shell.openExternal(url),
+      onAccountChanged: () => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) win.webContents.send("octopus:chatgpt-account-changed");
+        }
+      },
     });
     app.once("before-quit", () => chatgptSignIn?.dispose());
   }
@@ -2721,6 +2701,16 @@ function getChatgptSignIn() {
 ipcMain.handle("octopus:chatgpt-account", async (event, token) => {
   requireRuntimeStateAccess(event, token);
   return getChatgptSignIn().account();
+});
+
+ipcMain.handle("octopus:chatgpt-rate-limits", async (event, token) => {
+  requireRuntimeStateAccess(event, token);
+  return getChatgptSignIn().rateLimits();
+});
+
+ipcMain.handle("octopus:chatgpt-logout", async (_event, token) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  return getChatgptSignIn().logout();
 });
 
 ipcMain.handle("octopus:chatgpt-sign-in-start", async (event, token) => {
@@ -2786,6 +2776,19 @@ ipcMain.handle("octopus:stage-dropped-attachments", async (event, token, paths) 
     stageFile: (metadata, sourcePath) => store.stageFile(token, metadata, sourcePath),
     discard: async (handle) => store.discard(await store.consume(token, handle)),
   });
+});
+
+ipcMain.handle("octopus:client-attachment-preview", async (event, token, request) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const current = () => {
+    getClientAccessController().requireSession(token);
+    if (!win || win.isDestroyed() || event.sender.isDestroyed() || win.webContents !== event.sender
+      || event.senderFrame !== event.sender.mainFrame) throw new Error("Attachment preview requires its active client window.");
+  };
+  current();
+  const preview = await getClientAttachmentStagingStore().readPreview(token, request);
+  current();
+  return preview;
 });
 
 ipcMain.handle("octopus:attachment-stages-discard", async (_event, token, handles) => {
@@ -3443,10 +3446,15 @@ ipcMain.handle("octopus:provider-interfaces", async (_event, token) => {
         "projection.operator.providers.list",
       ))).providers
       : await readClientProviderInterfaceDescriptors(profile, registryRoot);
+    const catalog = profile === "live" ? await getClientProviderMetadata().catalog(providers) : providers;
+    getClientAccessController().requireSession(token, [profile]);
+    if (profile === "live" && registryRoot !== path.join(resolveOctopusHome(), "registry")) {
+      throw new Error("Provider catalogue belongs to another Home.");
+    }
     return {
       repoRoot,
       registryRoot: registryRoot || null,
-      providers,
+      providers: catalog,
     };
   } catch (error) {
     return {
@@ -3563,6 +3571,13 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
   const octopusHome = resolveOctopusHome();
   const registryRoot = path.join(octopusHome, "registry");
   let outcome;
+  if (["create_agent_template", "configure_agent_template"].includes(request?.action)) {
+    const declared = await store.read(projectionReadRequest("projection.operator.providers.list"));
+    const providers = await getClientProviderMetadata().catalog(declared.providers.filter((provider) => provider.id === request.providerInterfaceId));
+    getClientAccessController().requireSession(token, ["live"]);
+    if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during Agent model validation.");
+    validateProviderModelSelection(providers, request);
+  }
   if (request?.action === "initialize_workspace") {
     if (scope?.status !== "unbound") {
       throw new Error(`Workspace setup requires an unbound Octopus OS scope, found '${stringValue(scope?.status) || "unknown"}'`);
@@ -4000,6 +4015,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
         providerInterfaceId: request?.providerInterfaceId,
         providerModel: request?.providerModel,
         reasoningEffort: request?.reasoningEffort,
+        serviceTier: request?.serviceTier,
         eeId: request?.eeId,
         workerInterfaceId: request?.workerInterfaceId,
         doorHostSlots: request?.doorHostSlots,
@@ -4122,6 +4138,7 @@ ipcMain.handle("octopus:submit-chat-steer", async (_event, token, request) => {
       providerInterfaceId: request?.providerInterfaceId,
       providerModel: request?.providerModel,
       reasoningEffort: request?.reasoningEffort,
+        serviceTier: request?.serviceTier,
       eeId: request?.eeId,
       workerInterfaceId: request?.workerInterfaceId,
       clientSurfaceRole: request?.clientSurfaceRole,

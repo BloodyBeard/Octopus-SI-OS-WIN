@@ -24,7 +24,7 @@
   "supported_worker_environment_kinds": [
     "code_mode"
   ],
-  "description": "Start JavaScript in the formed V8 room. Pure computation can finish immediately; configured nested tools leave as ordinary tool.call artifacts and the cell yields until their results are supplied with code_mode.resume.",
+  "description": "Start JavaScript in the formed V8 room. Emit values with text(value), images with image(value), and progress with notify(value). Evaluating an expression or awaiting a returned value does not emit it. There is no console, Node.js, filesystem or direct network access. Pure computation can finish immediately; configured nested tools leave as ordinary tool.call artifacts. A yielded response gives cell_id; use the advertised code_mode.wait method for retained output. Internal code_mode.resume accepts exact admitted results and is not a model operation.",
   "args_schema": {
     "type": "object",
     "properties": {

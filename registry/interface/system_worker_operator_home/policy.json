@@ -99,7 +99,8 @@
       "artifact.send",
       "artifact.read",
       "artifact.list",
-      "artifact.search"
+      "artifact.search",
+      "client.mcp"
     ],
     "wek": [
       "browser_session",

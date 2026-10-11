@@ -153,6 +153,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
       : { canceled: false, attachments: [] };
     return { ...selection, fileIndices };
   },
+  readClientAttachmentPreview(request) {
+    return invokeAccess("octopus:client-attachment-preview", request);
+  },
   discardClientAttachmentStages(handles) {
     return invokeAccess("octopus:attachment-stages-discard", handles);
   },
@@ -378,6 +381,17 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   },
   chatgptAccount() {
     return invokeAccess("octopus:chatgpt-account");
+  },
+  chatgptRateLimits() {
+    return invokeAccess("octopus:chatgpt-rate-limits");
+  },
+  chatgptLogout() {
+    return invokeAccess("octopus:chatgpt-logout");
+  },
+  onChatgptAccountChanged(listener) {
+    const wrapped = () => listener();
+    ipcRenderer.on("octopus:chatgpt-account-changed", wrapped);
+    return () => ipcRenderer.removeListener("octopus:chatgpt-account-changed", wrapped);
   },
   chatgptSignInStart() {
     return invokeAccess("octopus:chatgpt-sign-in-start");

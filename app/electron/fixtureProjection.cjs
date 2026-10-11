@@ -374,6 +374,8 @@ function createFixtureProjectionStore(options = {}) {
         return { resolved: false, blob_path: String(params.blob_path || ""), size: 0, text: "", truncated: false };
       case "projection.client_surfaces.list":
         return { generation, root: "artifact://lab", documents: [], errors: [] };
+      case "projection.client_actions.list":
+        return { home: params.home, run_id: params.run_id, interface_id: params.interface_id, actions: [] };
       case "projection.interface_artifacts.list":
         return { artifacts: [] };
       default:
@@ -2171,6 +2173,7 @@ function fixtureChatExecutionContexts(data) {
         client_agent_deleted_at_ms: 0,
         client_template: environment.ee_id !== FIXTURE_ROOT_EE_ID,
         client_template_provider_interface_id: "lab_world_provider_codex",
+        client_template_provider_model: fixtureProviderInterfaceDescriptors()[0].model,
         client_template_reasoning_effort: "high",
         client_template_digest: "lab-client-template",
         client_template_application_ids: applicationChoices.map((application) => application.id),

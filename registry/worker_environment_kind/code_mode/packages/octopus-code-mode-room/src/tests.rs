@@ -81,6 +81,21 @@ fn persistent_prelude_requires_the_exact_admitted_binding_and_payload() {
         matches!(resolved, super::config::ResolvedContext::Persistent { engine, .. }
         if engine.module_source == "export const value = 'λ你好';" && engine.exports == ["value"])
     );
+    let declared = json!({"id":"registry_prelude","run":"run_code_mode_test","owner_interface":DOOR,
+        "schema_version":1,"module_source":"export const value = 1;","exports":["value"]});
+    for field in [None, Some("id"), Some("run"), Some("owner_interface")] {
+        let mut body = declared.clone();
+        if let Some(field) = field { body.as_object_mut().unwrap().remove(field); }
+        let bytes = octopus_descriptors::canonical_bytes(&body);
+        let reference = ArtifactRef { id:ArtifactId::new("registry_prelude"), content:ContentHash::of_bytes(&bytes) };
+        let declared_config:super::config::CodeModeConfig = serde_json::from_value(json!({
+            "schema_version":1,"context":{"mode":"persistent","prelude_artifact":reference}
+        })).unwrap();
+        let mut declared_input = input.clone();
+        declared_input.metadata.as_mut().unwrap().artifact_binding_refs = vec![reference.clone()];
+        declared_input.artifact_binding_payloads = vec![octopus_interfaces::ArtifactBindingPayload::new(reference,bytes)];
+        assert_eq!(declared_config.resolve_context(&declared_input).is_ok(),field.is_none());
+    }
     input
         .metadata
         .as_mut()
@@ -1099,6 +1114,8 @@ mod actual_file_write;
 mod actual_bound_surface;
 #[path = "../../octopus-code-mode-tool-runtime/src/owner_handoff.rs"]
 mod actual_owner_handoff;
+#[path = "failure_return_tests.rs"]
+mod failure_return_tests;
 
 #[derive(Clone)]
 struct AdmittedDelivery {
@@ -1123,7 +1140,7 @@ impl octopus_runtime::RunGrantResolver for FrontierPolicy {
         &self,
         query: octopus_runtime::RunGrantQuery<'_>,
     ) -> Result<octopus_runtime::RunGrantResolution, String> {
-        if query.run.as_str() != "run_code_mode_test"
+        if !["run_code_mode_test", "run_detached_provider_writer"].contains(&query.run.as_str())
             || query.ee.as_str() != "ee_code_mode_test"
             || query.worker.as_str() != WORKER
         {
@@ -1182,6 +1199,15 @@ struct FrontierAdmission {
     run_records: PathBuf,
     file_writes: std::sync::atomic::AtomicUsize,
     conflict_next: AtomicBool,
+    reject_next_owner_arrival: AtomicBool,
+    interleave_next_write: AtomicBool,
+    provider_wins_next_write: AtomicBool,
+    provider_writes_before_owner_call: AtomicBool,
+    owner_write_prepared: tokio::sync::Notify,
+    owner_write_admitted: tokio::sync::Notify,
+    peer_write_admitted: tokio::sync::Notify,
+    peer_write_applied: tokio::sync::Notify,
+    owner_write_completed: tokio::sync::Notify,
 }
 
 impl FrontierAdmission {
@@ -1235,7 +1261,6 @@ impl FrontierAdmission {
             {
                 Ok(observation) => observation.commit(),
                 Err(error) => {
-                    std::fs::write(self.root.join("blobs").join(target.run_record.hash.to_hex()), &target.run_record.bytes).map_err(|error|error.to_string())?;
                     self.door.lock().await.record_refusal(file, RuntimeInvocationMetadata {
                         run:target.run.clone(),ee:target.ee.clone(),worker:target.worker.clone(),checkpoint:target.checkpoint.clone(),
                         interface:InterfaceId::new(from),epoch:target.epoch.0,run_record_hash:Some(target.run_record.hash.to_hex()),
@@ -1285,6 +1310,14 @@ impl FrontierAdmission {
                 .runtime
                 .as_ref()
                 .ok_or("missing source metadata")?;
+            let interleaved = self.interleave_next_write.load(Ordering::SeqCst);
+            let provider_wins = self.provider_wins_next_write.load(Ordering::SeqCst);
+            let provider_writes_first = self.provider_writes_before_owner_call.load(Ordering::SeqCst);
+            if interleaved && provider_wins {
+                self.owner_write_prepared.notify_one();
+                if provider_writes_first { self.peer_write_applied.notified().await; }
+                else { self.peer_write_admitted.notified().await; }
+            }
             let authority = self
                 .runtime
                 .resolve_system_interface_emission_grant(
@@ -1327,6 +1360,10 @@ impl FrontierAdmission {
                     metadata.clone(),
                 )
                 .await?;
+            if interleaved && provider_wins && provider_writes_first {
+                assert_ne!(metadata.runtime.as_ref().unwrap().run_record_hash.as_deref(),
+                    call.arguments["expected_before_hash"].as_str());
+            }
             let envelope = InterfaceInvocationEnvelope {
                 artifact: self.door.lock().await.cache(&output.artifact)?,
                 artifact_file: output.artifact.clone(),
@@ -1334,12 +1371,21 @@ impl FrontierAdmission {
                 artifact_binding_payloads: vec![],
             };
             if self.conflict_next.swap(false, Ordering::SeqCst) { self.provider_progress(777).await?; }
+            if interleaved {
+                self.owner_write_admitted.notify_one();
+                if provider_wins && !provider_writes_first {
+                    self.peer_write_applied.notified().await;
+                } else if !provider_wins {
+                    self.peer_write_admitted.notified().await;
+                }
+            }
             let effect = actual_file_write::execute_file_write(
                 &envelope,
                 &call.arguments,
                 &["system_room".into()],
                 &BTreeMap::from([("run_records_root".into(), self.run_records.clone())]),
                 &self.root.join("file-effects"),
+                8 * 1024 * 1024,
             );
             self.file_writes.fetch_add(1, Ordering::SeqCst);
             let result = match effect {
@@ -1354,8 +1400,20 @@ impl FrontierAdmission {
             .map_err(|e| e.to_string())?;
             let delivered = self.arrive(target.as_str(), &file).await;
             if result.ok { delivered?; } else { assert!(delivered.is_err()); }
+            if interleaved && provider_wins && !provider_writes_first {
+                let ctx = self.door.lock().await.context.clone();
+                failure_return_tests::rejected_write_waits_for_the_earlier_peer(self, &ctx, &source, &envelope, seq);
+            }
+            if interleaved { self.owner_write_completed.notify_one(); }
             seq
         } else {
+            if self.reject_next_owner_arrival.swap(false, Ordering::SeqCst) {
+                let private = self.door.lock().await.context.interface_var_dir().canonicalize().unwrap();
+                assert!(output.artifact.manifest_path().starts_with(&private), "owner replay must cross the spawned private-output boundary");
+                assert!(output.artifact.read_manifest().unwrap().payload_path.starts_with(&private));
+                return output.acknowledge(DeliveryVerdict::refused(octopus_interfaces::RefusedReason::Policy,
+                    "fixture interrupted after checked owner installation".into()));
+            }
             self.arrive(DOOR, &output.artifact).await?
         };
         output.acknowledge(DeliveryVerdict::Admitted { seq })
@@ -1391,18 +1449,19 @@ impl FrontierAdmission {
         .map_err(|_| "owner fixture timed out waiting for an admitted invocation".to_string())?
     }
 
-    async fn run(
-        &self,
-        room: &CodeModeRoom,
-        handoff: &std::sync::Arc<actual_owner_handoff::OwnerHandoff>,
-        formation: &WorkerEnvironmentFormation,
-        kind: &WorkerEnvKindSpec,
+    fn run<'a>(
+        &'a self,
+        room: &'a CodeModeRoom,
+        handoff: &'a std::sync::Arc<actual_owner_handoff::OwnerHandoff>,
+        formation: &'a WorkerEnvironmentFormation,
+        kind: &'a WorkerEnvKindSpec,
         input: (
             u64,
             octopus_tool_handlers::ToolCallArtifact,
             InterfaceInvocationEnvelope,
         ),
-    ) -> Result<Value, String> {
+    ) -> Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'a>> {
+        Box::pin(async move {
         use octopus_tool_door_runtime::owner_contract_tests::{
             execute_formed, hand_owned_output, io_pair,
         };
@@ -1445,6 +1504,7 @@ impl FrontierAdmission {
             hand_owned_output(&ctx, &source, &callback, file).await?;
         }
         result.ok_or_else(|| "room emitted no terminal result".into())
+        })
     }
 }
 
@@ -1466,7 +1526,161 @@ fn application_approval_rearms_the_return_before_either_delivery_order() {
     }).unwrap().join().unwrap();
 }
 
-enum FrontierCase { Full, Generated, Application }
+async fn actual_owner_failure_return(
+    admission: &std::sync::Arc<FrontierAdmission>, room: &CodeModeRoom,
+    handoff: &std::sync::Arc<actual_owner_handoff::OwnerHandoff>,
+    formation: &WorkerEnvironmentFormation, config: &super::config::CodeModeConfig,
+    initial: &(u64, octopus_tool_handlers::ToolCallArtifact, InterfaceInvocationEnvelope), durable: &Path,
+) {
+    let ctx = admission.door.lock().await.context.clone();
+    super::continuation::ContinuationContext::create(durable, formation, config,
+        &config.resolve_context(&initial.2).unwrap(), &initial.2,
+        super::continuation::OriginalRun::from_envelope(&initial.2, initial.0).unwrap()).unwrap();
+    let records = octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir());
+    records.activate(formation, initial.0).unwrap();
+    let result = octopus_tool_handlers::ToolResultArtifact::failure(&initial.1.tool, initial.1.correlation_id.clone(),
+        octopus_tool_handlers::ToolResultError::new("tool_effect_indeterminate", "tool process outcome is unknown")
+            .with_details(serde_json::Map::from_iter([("source_movement_seq".into(), json!(initial.0)),
+                ("failure_details".into(), json!({"effect_state":"in_flight_outcome_unknown"}))])));
+    let file = InterfaceArtifactFile::write(ctx.interface_var_dir().join("failures"), &result.label, &serde_json::to_vec(&result).unwrap()).unwrap();
+    admission.arrive(DOOR, &file).await.unwrap();
+    let own = admission.deliveries.lock().unwrap().iter().rev().find(|row| row.from.as_str() == DOOR && row.to.as_str() == DOOR).unwrap().clone();
+    let limits = ctx.owner_io_limits().unwrap();
+    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+        movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+        max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+    };
+    let movement = octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, own.seq).unwrap();
+    let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "failure-contract").unwrap();
+    let mut wrong = movement.clone(); wrong.artifact.as_mut().unwrap().id = ArtifactId::new("foreign");
+    assert!(handoff.reconcile_failure(&ctx, &mut reader, &wrong).await.is_err());
+    let context_path = durable.join("context.json");
+    let saved = std::fs::read(&context_path).unwrap();
+    let mut drift: Value = serde_json::from_slice(&saved).unwrap(); drift["identity"]["formation"]["ee"] = json!("ee_foreign");
+    std::fs::write(&context_path, serde_json::to_vec(&drift).unwrap()).unwrap();
+    assert!(handoff.reconcile_failure(&ctx, &mut reader, &movement).await.is_err());
+    std::fs::write(&context_path, saved).unwrap();
+    admission.provider_progress(4242).await.unwrap();
+    let current: Value = serde_json::from_slice(&std::fs::read(admission.run_records.join("run_code_mode_test.json")).unwrap()).unwrap();
+    assert!(!current["checkpoints"].as_array().unwrap().iter().any(|cp|
+        cp["id"] == json!(initial.2.runtime().unwrap().checkpoint)));
+    assert!(current["active_checkpoints"].as_array().unwrap().contains(&json!(own.metadata.runtime.as_ref().unwrap().checkpoint)));
+    admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
+    assert!(handoff.reconcile_failure(&ctx, &mut reader, &movement).await.unwrap_err()
+        .contains("fixture interrupted after checked owner installation"));
+    let installed_writes = admission.file_writes.load(Ordering::SeqCst);
+    let proposal = std::fs::read_dir(durable).unwrap().map(|entry| entry.unwrap().path())
+        .find(|path| path.file_name().unwrap().to_str().unwrap().ends_with(".edit.json")).unwrap();
+    let saved = std::fs::read(&proposal).unwrap();
+    let mut edit: octopus_provider_run_authoring::CheckedRunEdit = super::continuation::read_record(&proposal).unwrap();
+    super::continuation::prepare_record(&proposal, &edit).unwrap();
+    edit.correlation_id.push_str("-foreign");
+    assert!(super::continuation::prepare_record(&proposal, &edit).is_err());
+    assert_eq!(std::fs::read(&proposal).unwrap(), saved);
+    std::fs::write(&proposal, serde_json::to_vec(&edit).unwrap()).unwrap();
+    assert!(actual_owner_handoff::OwnerHandoff::new().reconcile_failure(&ctx, &mut reader, &movement).await.unwrap_err()
+        .contains("exact prepared checked write"));
+    std::fs::write(&proposal, saved).unwrap();
+    actual_owner_handoff::OwnerHandoff::new().reconcile_failure(&ctx, &mut reader, &movement).await.unwrap();
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), installed_writes + 1);
+    let writes = admission.file_writes.load(Ordering::SeqCst);
+    actual_owner_handoff::OwnerHandoff::new().reconcile_failure(&ctx, &mut reader, &movement).await.unwrap();
+    assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+    assert!(room.rooms.lock().await.is_empty());
+    let delivered = admission.deliveries.lock().unwrap().iter().filter(|row|
+        row.from.as_str() == DOOR && row.to.as_str() == "world_provider_test"
+        && row.file.read_manifest().unwrap().label == result.label).cloned().collect::<Vec<_>>();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(super::continuation::artifact_ref(&delivered[0].file).unwrap(), movement.artifact.unwrap());
+    assert_eq!(serde_json::from_slice::<octopus_tool_handlers::ToolResultArtifact>(&delivered[0].file.read_payload_bytes().unwrap()).unwrap(), result);
+}
+
+enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, DetachedFailure, InterleavedResult, RefusedFailure, RefusedFailurePretty, NestedFailure }
+
+fn exact_install_does_not_claim_later_state(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    path: &Path, call: &AdmittedDelivery, result: &AdmittedDelivery,
+    peer: &octopus_provider_run_authoring::CheckedRunWriter,
+) {
+    use octopus_provider_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, CheckedRunInstall,
+        CheckedRunWriter, ConsentEvidenceRef, FileCheckedRunReader, checked_run_install};
+    let limits = ctx.owner_io_limits().unwrap();
+    let evidence = CheckedRunEvidence { movements_path:ctx.owner_movements_path(), ledger_index_path:ctx.owner_ledger_index_path(),
+        blobs_dir:ctx.owner_blobs_dir(), max_control_frame_bytes:limits.max_control_frame_bytes,
+        max_manifest_bytes:limits.max_manifest_bytes, max_payload_bytes:limits.max_payload_bytes };
+    let tool: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&call.file.read_payload_bytes().unwrap()).unwrap();
+    let writer = CheckedRunWriter { owner:result.to.clone(), source:call.from.clone(), door:call.to.clone(), tool:tool.tool,
+        call_label:call.file.read_manifest().unwrap().label, result_label:result.file.read_manifest().unwrap().label };
+    let writers = [writer.clone(), peer.clone()];
+    let install = CheckedRunInstall {
+        call:ConsentEvidenceRef {movement_seq:call.seq,artifact:super::continuation::artifact_ref(&call.file).unwrap()},
+        result:ConsentEvidenceRef {movement_seq:result.seq,artifact:super::continuation::artifact_ref(&result.file).unwrap()},
+    };
+    let fresh = || {
+        let mut reader = FileCheckedRunReader::open(&evidence, Some(call.seq-1)).unwrap();
+        while reader.next_sequence() < call.seq {
+            reader.movement(reader.next_sequence()).unwrap().unwrap();
+        }
+        reader
+    };
+    let exact = checked_run_install(&mut fresh(), path, &install, &writers).unwrap();
+    let mut alias = writer.clone(); alias.owner = InterfaceId::new("another_owner");
+    assert!(checked_run_install(&mut fresh(), path, &install, &[writer, alias]).unwrap_err().contains("ambiguous writer"));
+    struct LaterSnapshot<'a> { reader:FileCheckedRunReader<'a>, result:octopus_ledger::Movement, bytes:Vec<u8>, hash:ContentHash }
+    impl CheckedRunEvidenceReader for LaterSnapshot<'_> {
+        fn max_payload_bytes(&self) -> u64 { self.reader.max_payload_bytes() }
+        fn admitted_movement(&mut self, seq:u64) -> Result<Option<octopus_ledger::Movement>,String> {
+            if seq==self.result.seq.0 {Ok(Some(self.result.clone()))}else{self.reader.admitted_movement(seq)}
+        }
+        fn movement(&mut self, seq:u64) -> Result<Option<octopus_ledger::Movement>,String> {
+            if seq==self.result.seq.0 {Ok(Some(self.result.clone()))}else{self.reader.movement(seq)}
+        }
+        fn snapshot(&mut self, hash:&ContentHash)->Result<Vec<u8>,String> {
+            if hash==&self.hash {Ok(self.bytes.clone())}else{self.reader.snapshot(hash)}
+        }
+        fn artifact(&mut self, reference:&ArtifactRef)->Result<(octopus_interfaces::InterfaceArtifactManifest,Vec<u8>),String> {self.reader.artifact(reference)}
+    }
+    let overlay = |state:Value| {
+        let bytes=serde_json::to_vec_pretty(&state).unwrap();let hash=ContentHash::of_bytes(&bytes);
+        let mut result=exact.result.clone();
+        let mut metadata=result.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+        metadata.runtime.as_mut().unwrap().run_record_hash=Some(hash.to_hex());
+        result.invocation_metadata=Some(metadata.into());
+        LaterSnapshot {reader:fresh(),result,bytes,hash}
+    };
+    let mut later:Value=serde_json::from_slice(&exact.after).unwrap();
+    later["interface_state"][peer.owner.as_str()]["unproven_later_state"]=json!(true);
+    let mut reader=overlay(later.clone());
+    assert_eq!(checked_run_install(&mut reader,path,&install,&writers).unwrap().after,exact.after);
+    let unproven=reader.bytes.clone();
+    assert!(octopus_provider_run_authoring::checked_run_file_chain_before(&mut overlay(later.clone()),path,
+        &exact.before,&unproven,call.seq-1,result.seq+1,&writers).is_err());
+    let cp=exact.result.runtime().unwrap().checkpoint.clone();
+    later["checkpoints"].as_array_mut().unwrap().iter_mut().find(|row|row["id"]==json!(cp)).unwrap()["epoch"]=json!(1);
+    assert!(checked_run_install(&mut overlay(later),path,&install,&writers).is_err());
+}
+
+#[tokio::test]
+async fn completed_owner_write_survives_an_overlapping_provider_write() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),
+        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::InterleavedResult)))
+        .await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn detached_coauthor_result_recovers_target_bytes_from_checked_write() {
+    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedResult)).await.unwrap();
+}
+
+#[tokio::test]
+async fn admitted_owner_failure_returns_once_without_reexecuting_the_effect() {
+    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedFailure)).await.unwrap();
+}
+
+#[tokio::test]
+async fn detached_coauthor_uses_its_exact_admitted_writer_declaration() {
+    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Coauthor)).await.unwrap();
+}
 
 async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) {
     let generated_only = matches!(case, FrontierCase::Generated);
@@ -1513,49 +1727,52 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
             .unwrap();
     let prelude = super::continuation::artifact_ref(&prelude_file).unwrap();
     let binding = |from: &str, to: &str| json!({"inbound":{"interface":from,"config":{"artifact_policy":{"mode":"all"}}},"outbound":[{"interface":to,"config":{"artifact_policy":{"mode":"all"}}}]});
-    let edge = |name: &str, from: &str, to: &str| json!({"name":name,"binding":binding(from,to)});
-    let mut topology = json!({"schema_version":1,"run":"run_code_mode_test","worker":WORKER,"owner_interface":DOOR,"prelude_artifact":prelude,"file_write_tool":"file.write",
-        "authoring_result":edge("authoring","system_file_test",DOOR),"model_output":edge("model",DOOR,"world_provider_test"),"notification":edge("notification",DOOR,"world_operator_test"),"receipt":edge("receipt",DOOR,DOOR),"readiness":edge("readiness",DOOR,DOOR),
-        "routes":[{"tool":NESTED_TOOL,"call":edge(NESTED_CHECKPOINT,DOOR,NESTED_INTERFACE),"result":edge("cp_process_to_code_mode",NESTED_INTERFACE,DOOR)},
-                  {"tool":"browser.tabs","call":edge("cp_code_mode_to_browser",DOOR,"system_browser_test"),"result":edge("cp_browser_to_code_mode","system_browser_test",DOOR)}]});
-    topology["routes"].as_array_mut().unwrap().push(json!({"tool":"gui.app_state","call":edge("cp_code_mode_to_gui",DOOR,"system_gui_test"),"result":edge("cp_gui_to_code_mode","system_gui_test",DOOR),"app_approval":{"operator_interface":"world_operator_test","resume_tool":"gui.app_resume"}}));
-    for tool in browser_sdk_tools {
-        topology["routes"].as_array_mut().unwrap().push(json!({"tool":tool,"call":edge(&format!("cp_sdk_{}",tool.replace('.',"_")),DOOR,"system_browser_test"),"result":edge("cp_browser_to_code_mode","system_browser_test",DOOR)}));
-    }
-    topology["routes"].as_array_mut().unwrap().push(json!({"tool":"browser.wait_complete","call":edge("cp_wait_complete",DOOR,"system_browser_test"),"result":edge("cp_wait_complete_return","system_browser_test",DOOR)}));
-    for (tool,door) in [("browser.download_wait","system_browser_test"),("artifact.read","system_context_test")] {
-        topology["routes"].as_array_mut().unwrap().push(json!({"tool":tool,"call":edge(&format!("cp_{}",tool.replace('.',"_")),DOOR,door),"result":edge("generated_return",door,DOOR)}));
-    }
-    let mut descriptor_pins = BTreeMap::new();
-    let mut returns: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
-    for route in topology["routes"].as_array_mut().unwrap() {
-        let mut descriptor = raw_descriptor(route["tool"].as_str().unwrap());
-        descriptor.interface = InterfaceId::new(route["call"]["binding"]["outbound"][0]["interface"].as_str().unwrap());
-        let owner = super::config::DeclaredToolOwner::from_descriptor(&descriptor).unwrap();
-        let name = owner.return_checkpoint().unwrap();
-        let labels = returns.entry(name.clone()).or_default();
-        labels.insert(format!("{}.result",descriptor.id));
-        let value = serde_json::to_value(&descriptor).unwrap();
-        descriptor_pins.insert(octopus_descriptors::DescriptorName::new(format!("registry_tool_root/{}/tool.json",descriptor.id)),octopus_descriptors::DescriptorHash::of_canonical_json(&value));
-        route["process_descriptor"] = value;
-        route["result"]["name"] = json!(name);
-        if let Some(approval) = route.get_mut("app_approval") {
-            let mut resume = raw_descriptor(approval["resume_tool"].as_str().unwrap());
-            resume.interface = descriptor.interface;
-            assert_eq!(super::config::DeclaredToolOwner::from_descriptor(&resume).unwrap(),owner);
-            labels.insert(format!("{}.result",resume.id));
-            let value = serde_json::to_value(&resume).unwrap();
-            descriptor_pins.insert(octopus_descriptors::DescriptorName::new(format!("registry_tool_root/{}/tool.json",resume.id)),octopus_descriptors::DescriptorHash::of_canonical_json(&value));
-            approval["resume_descriptor"] = value;
+    let (topology, descriptor_pins, returns) = (|| {
+        let edge = |name: &str, from: &str, to: &str| json!({"name":name,"binding":binding(from,to)});
+        let mut topology = json!({"schema_version":1,"run":"run_code_mode_test","worker":WORKER,"owner_interface":DOOR,"prelude_artifact":prelude,"file_write_tool":"file.write",
+            "authoring_result":edge("authoring","system_file_test",DOOR),"model_output":edge("model",DOOR,"world_provider_test"),"notification":edge("notification",DOOR,"world_operator_test"),"receipt":edge("receipt",DOOR,DOOR),"readiness":edge("readiness",DOOR,DOOR),
+            "routes":[{"tool":NESTED_TOOL,"call":edge(NESTED_CHECKPOINT,DOOR,NESTED_INTERFACE),"result":edge("cp_process_to_code_mode",NESTED_INTERFACE,DOOR)},
+                      {"tool":"browser.tabs","call":edge("cp_code_mode_to_browser",DOOR,"system_browser_test"),"result":edge("cp_browser_to_code_mode","system_browser_test",DOOR)}]});
+        topology["routes"].as_array_mut().unwrap().push(json!({"tool":"gui.app_state","call":edge("cp_code_mode_to_gui",DOOR,"system_gui_test"),"result":edge("cp_gui_to_code_mode","system_gui_test",DOOR),"app_approval":{"operator_interface":"world_operator_test","resume_tool":"gui.app_resume"}}));
+        for tool in browser_sdk_tools {
+            topology["routes"].as_array_mut().unwrap().push(json!({"tool":tool,"call":edge(&format!("cp_sdk_{}",tool.replace('.',"_")),DOOR,"system_browser_test"),"result":edge("cp_browser_to_code_mode","system_browser_test",DOOR)}));
         }
-    }
-    for route in topology["routes"].as_array_mut().unwrap() {
-        let labels = &returns[route["result"]["name"].as_str().unwrap()];
-        let policy = json!({"mode":"allow","names":labels,"namespaces":[]});
-        route["result"]["binding"]["inbound"]["config"]["artifact_policy"] = policy.clone();
-        route["result"]["binding"]["outbound"][0]["config"]["artifact_policy"] = policy;
-    }
-    topology["coauthor"] = json!({"owner":"world_provider_test","source":"system_provider_author_test","door":"system_provider_file_test","tool":"file.write.provider","call_label":"tool.call","result_label":"file.write.provider.result"});
+        topology["routes"].as_array_mut().unwrap().push(json!({"tool":"browser.wait_complete","call":edge("cp_wait_complete",DOOR,"system_browser_test"),"result":edge("cp_wait_complete_return","system_browser_test",DOOR)}));
+        for (tool,door) in [("browser.download_wait","system_browser_test"),("artifact.read","system_context_test")] {
+            topology["routes"].as_array_mut().unwrap().push(json!({"tool":tool,"call":edge(&format!("cp_{}",tool.replace('.',"_")),DOOR,door),"result":edge("generated_return",door,DOOR)}));
+        }
+        let mut descriptor_pins = BTreeMap::new();
+        let mut returns: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+        for route in topology["routes"].as_array_mut().unwrap() {
+            let mut descriptor = raw_descriptor(route["tool"].as_str().unwrap());
+            descriptor.interface = InterfaceId::new(route["call"]["binding"]["outbound"][0]["interface"].as_str().unwrap());
+            let owner = super::config::DeclaredToolOwner::from_descriptor(&descriptor).unwrap();
+            let name = owner.return_checkpoint().unwrap();
+            let labels = returns.entry(name.clone()).or_default();
+            labels.insert(format!("{}.result",descriptor.id));
+            let value = serde_json::to_value(&descriptor).unwrap();
+            descriptor_pins.insert(octopus_descriptors::DescriptorName::new(format!("registry_tool_root/{}/tool.json",descriptor.id)),octopus_descriptors::DescriptorHash::of_canonical_json(&value));
+            route["process_descriptor"] = value;
+            route["result"]["name"] = json!(name);
+            if let Some(approval) = route.get_mut("app_approval") {
+                let mut resume = raw_descriptor(approval["resume_tool"].as_str().unwrap());
+                resume.interface = descriptor.interface;
+                assert_eq!(super::config::DeclaredToolOwner::from_descriptor(&resume).unwrap(),owner);
+                labels.insert(format!("{}.result",resume.id));
+                let value = serde_json::to_value(&resume).unwrap();
+                descriptor_pins.insert(octopus_descriptors::DescriptorName::new(format!("registry_tool_root/{}/tool.json",resume.id)),octopus_descriptors::DescriptorHash::of_canonical_json(&value));
+                approval["resume_descriptor"] = value;
+            }
+        }
+        for route in topology["routes"].as_array_mut().unwrap() {
+            let labels = &returns[route["result"]["name"].as_str().unwrap()];
+            let policy = json!({"mode":"allow","names":labels,"namespaces":[]});
+            route["result"]["binding"]["inbound"]["config"]["artifact_policy"] = policy.clone();
+            route["result"]["binding"]["outbound"][0]["config"]["artifact_policy"] = policy;
+        }
+        topology["coauthor"] = json!({"owner":"world_provider_test","source":"system_provider_author_test","door":"system_provider_file_test","tool":"file.write.provider","call_label":"tool.call","result_label":"file.write.provider.result"});
+        (topology, descriptor_pins, returns)
+    })();
     let topology_bytes = serde_json::to_vec(&topology).unwrap();
     let topology_file =
         InterfaceArtifactFile::write(root.join("topology"), "code-mode.topology", &topology_bytes)
@@ -1614,7 +1831,10 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     );
     let provider_directory = root.join("provider-interface");
     std::fs::create_dir_all(&provider_directory).unwrap();
-    let provider_descriptor:octopus_interfaces::InterfaceDescriptor=serde_json::from_value(json!({"id":"world_provider_test","interface_type":"world","role":"provider","direction":"bidirectional","source_names":["fixture"],"interface_driver_ref":"fixture","interface_driver_config":{"private_config":{"model_hidden_tools":["file.write.provider"],"run_authoring_profile":{"file_write_tool":"file.write.provider","file_write_label":"tool.call","file_write_result_label":"file.write.provider.result","result_timeout_ms":5000},"context_output_labels":["provider.fixture.snapshot"],"session_snapshot_labels":["provider.fixture.snapshot"]}}})).unwrap();
+    let mut provider_descriptor:octopus_interfaces::InterfaceDescriptor=serde_json::from_value(json!({"id":"world_provider_test","interface_type":"world","role":"provider","direction":"bidirectional","source_names":["fixture"],"interface_driver_ref":"fixture","interface_driver_config":{"private_config":{"model_hidden_tools":["file.write.provider"],"run_authoring_profile":{"file_write_tool":"file.write.provider","file_write_label":"tool.call","file_write_result_label":"file.write.provider.result","result_timeout_ms":5000},"context_output_labels":["provider.fixture.snapshot"],"session_snapshot_labels":["provider.fixture.snapshot"]}}})).unwrap();
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+        provider_descriptor.interface_driver_config.as_mut().unwrap().private_config["context_output_labels"] = json!(["provider.fixture.snapshot", "tool.call"]);
+    }
     let control = root.join("control");std::fs::create_dir_all(&control).unwrap();
     let listener = tokio::net::UnixListener::bind(octopus_interface_activation_app_server_transport::interface_control_socket_path_from_root(&control,&InterfaceId::new("system_provider_author_test"))).unwrap();
     let (provider_arrivals,mut provider_transport) = tokio::sync::mpsc::channel(8);
@@ -1622,79 +1842,89 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     std::fs::create_dir_all(&provider_context.var_dir).unwrap();
     provider_context.host_io_limits = Some(octopus_interface_transport::InterfaceHostIoLimits { max_control_frame_bytes:limits.max_control_frame_bytes,max_stderr_bytes:limits.max_stderr_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes });
     let provider = FrontierProvider { context:provider_context,descriptor:provider_descriptor };
-    let bindings = json!([{"id":prelude.id},{"id":topology_ref.id},{"id":input_ref.id}]);
-    let checkpoint = |id: &str, from: &str, to: &str| json!({"id":id,"run":"run_code_mode_test","trace":"trace:code-mode-owner-contract","epoch":0,"interface_binding":binding(from,to)["inbound"],"outbound_interface_bindings":binding(from,to)["outbound"],"artifact_bindings":bindings,"required_verified_artifacts":[]});
-    let mut run = json!({"id":"run_code_mode_test","ee":"ee_code_mode_test","worker":WORKER,"trace":"trace:code-mode-owner-contract","status":"running","interface_state":{DOOR:{"frontier_checkpoint_ids":["initial-owner","initial-authoring"]}},
-        "checkpoints":[checkpoint("model-input","world_provider_test",DOOR),checkpoint("operator-input","world_operator_test",DOOR),checkpoint("initial-owner",DOOR,DOOR),checkpoint("initial-authoring","system_file_test",DOOR)],
-        "active_checkpoints":["model-input","operator-input","initial-owner","initial-authoring"]});
-    for (name, _) in &returns {
-        let route = topology["routes"].as_array().unwrap().iter().find(|route| route["result"]["name"] == *name).unwrap();
-        let mut row = checkpoint(name,route["result"]["binding"]["inbound"]["interface"].as_str().unwrap(),DOOR);
-        row["interface_binding"] = route["result"]["binding"]["inbound"].clone();
-        row["outbound_interface_bindings"] = route["result"]["binding"]["outbound"].clone();
-        run["checkpoints"].as_array_mut().unwrap().push(row);
-        run["active_checkpoints"].as_array_mut().unwrap().push(json!(name));
-    }
-    run["checkpoints"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|cp| cp["id"] == "operator-input")
-        .unwrap()["interface_binding"]["config"]["artifact_policy"] =
-        json!({"mode":"allow","names":["operator.message"],"namespaces":[]});
-    let provider_tool_requirement = json!([{"mark":"tool.call.allowed","artifact_label":"tool.call","verifier":"tool_call_allowed","params":{"tools":["code_mode.run","code_mode.wait","code_mode.cancel"]}}]);
-    let templates = vec![
-        ("model-input","provider_tool_output","world_provider_test",DOOR,false),
-        ("provider-output","provider_artifact_output","world_provider_test","world_provider_projection_test",false),
-        ("provider-input","stable","world_provider_input_test","world_provider_test",true),
-        ("provider-authoring-call","authoring_call","system_provider_author_test","system_provider_file_test",false),
-        ("provider-authoring-result","authoring_result","system_provider_file_test","world_provider_test",false),
-    ];
-    let mut bound = Vec::new();
-    for (id,role,from,to,context) in templates {
-        let mut row = checkpoint(id,from,to);
-        row["artifact_bindings"] = if id == "model-input" { bindings.clone() } else if context { json!([{"id":input_ref.id}]) } else { json!([]) };
-        if id == "model-input" { row["required_verified_artifacts"] = provider_tool_requirement.clone(); }
-        if id == "provider-authoring-call" { row["required_verified_artifacts"] = json!([{"mark":"tool.call.allowed","artifact_label":"tool.call","verifier":"tool_call_allowed","params":{"tools":["file.write.provider"]}}]); }
-        if id == "provider-output" { row["interface_binding"]["config"]["artifact_policy"] = json!({"mode":"allow","names":["provider.fixture.progress"],"namespaces":[]}); }
-        let mut template = json!({"name":id,"role":role,"interface_binding":row["interface_binding"],"outbound_interface_bindings":row["outbound_interface_bindings"],"include_context":context,"required_verified_artifacts":row["required_verified_artifacts"]});
-        if id == "model-input" { template["static_artifact_bindings"] = json!([prelude.id,topology_ref.id,input_ref.id]); }
-        bound.push(template);
-        if id == "model-input" { *run["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"]==id).unwrap()=row; }
-        else { run["checkpoints"].as_array_mut().unwrap().push(row);run["active_checkpoints"].as_array_mut().unwrap().push(json!(id)); }
-    }
-    bound.push(json!({"name":"owner-output","role":"owner_input","interface_binding":binding(DOOR,"world_provider_test")["inbound"],"outbound_interface_bindings":binding(DOOR,"world_provider_test")["outbound"],"static_artifact_bindings":[prelude.id,topology_ref.id,input_ref.id],"owner_authoring":{"owner":DOOR,"source":DOOR,"door":"system_file_test","tool":"file.write","call_label":"tool.call","result_label":"file.write.result"},"include_context":false,"required_verified_artifacts":[]}));
-    run["interface_state"]["world_provider_test"] = json!({"context_generation":0,"authoring_generation":0,"frontier_checkpoint_ids":["model-input","provider-output","provider-authoring-call","provider-authoring-result"],"run_authoring_binding":{"schema_version":2,"run":"run_code_mode_test","worker":WORKER,"provider_interface":"world_provider_test","authoring_source_interface":"system_provider_author_test","payload_artifact_bindings":[input_ref],"checkpoints":bound}});
-    run["interface_state"][DOOR]["owned_checkpoint_ids"] = json!(["initial-owner".to_string(),"initial-authoring".to_string()].into_iter().chain(returns.keys().cloned()).collect::<Vec<_>>());
-    let source_provenance = Value::Array([
-        ("artifact-code-mode-cua-prelude", &prelude_source),
-        ("artifact-code-mode-browser-prelude", &browser_source),
-    ].into_iter().map(|(id, body)| {
-        use sha2::{Digest, Sha256};
-        let bytes = std::fs::read(registry_root().join("artifact").join(id).join("artifact.json")).unwrap();
-        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), *body);
-        let content = octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(body));
-        let source = octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(id),content };
-        let snapshot = octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(format!("{id}__fixture_source")),content };
-        std::fs::write(root.join(format!("{}.json",snapshot.id)),&bytes).unwrap();
-        json!({"source":source,"snapshot":snapshot,"source_sha256":format!("{:x}",Sha256::digest(&bytes))})
-    }).collect());
-    run["interface_state"][DOOR]["prelude_sources"] = source_provenance.clone();
-    if generated_only {
-        let mut observer=checkpoint("00-observer","system_browser_test",DOOR);
-        observer["outbound_interface_bindings"]=json!([]);observer["artifact_bindings"]=json!([]);
-        run["checkpoints"].as_array_mut().unwrap().insert(0,observer);
-        run["active_checkpoints"].as_array_mut().unwrap().insert(0,json!("00-observer"));
-    }
-    for checkpoint in run["checkpoints"].as_array_mut().unwrap() {
-        let bindings = checkpoint["artifact_bindings"].as_array_mut().unwrap();
-        bindings.splice(0..0, roles.iter().map(|role| json!({"id":role.id})));
-    }
-    std::fs::write(
-        records.join("run_code_mode_test.json"),
-        serde_json::to_vec_pretty(&run).unwrap(),
-    )
-    .unwrap();
+    let source_provenance = (|| {
+        let bindings = json!([{"id":prelude.id},{"id":topology_ref.id},{"id":input_ref.id}]);
+        let checkpoint = |id: &str, from: &str, to: &str| json!({"id":id,"run":"run_code_mode_test","trace":"trace:code-mode-owner-contract","epoch":0,"interface_binding":binding(from,to)["inbound"],"outbound_interface_bindings":binding(from,to)["outbound"],"artifact_bindings":bindings,"required_verified_artifacts":[]});
+        let mut run = json!({"id":"run_code_mode_test","ee":"ee_code_mode_test","worker":WORKER,"trace":"trace:code-mode-owner-contract","status":"running","interface_state":{DOOR:{"frontier_checkpoint_ids":["initial-owner","initial-authoring"]}},
+            "checkpoints":[checkpoint("model-input","world_provider_test",DOOR),checkpoint("operator-input","world_operator_test",DOOR),checkpoint("initial-owner",DOOR,DOOR),checkpoint("initial-authoring","system_file_test",DOOR)],
+            "active_checkpoints":["model-input","operator-input","initial-owner","initial-authoring"]});
+        for (name, _) in &returns {
+            let route = topology["routes"].as_array().unwrap().iter().find(|route| route["result"]["name"] == *name).unwrap();
+            let mut row = checkpoint(name,route["result"]["binding"]["inbound"]["interface"].as_str().unwrap(),DOOR);
+            row["interface_binding"] = route["result"]["binding"]["inbound"].clone();
+            row["outbound_interface_bindings"] = route["result"]["binding"]["outbound"].clone();
+            run["checkpoints"].as_array_mut().unwrap().push(row);
+            run["active_checkpoints"].as_array_mut().unwrap().push(json!(name));
+        }
+        run["checkpoints"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|cp| cp["id"] == "operator-input")
+            .unwrap()["interface_binding"]["config"]["artifact_policy"] =
+            json!({"mode":"allow","names":["operator.message"],"namespaces":[]});
+        let provider_tool_requirement = json!([{"mark":"tool.call.allowed","artifact_label":"tool.call","verifier":"tool_call_allowed","params":{"tools":["code_mode.run","code_mode.wait","code_mode.cancel"]}}]);
+        let templates = vec![
+            ("model-input","provider_tool_output","world_provider_test",DOOR,false),
+            ("provider-output","provider_artifact_output","world_provider_test","world_provider_projection_test",false),
+            ("provider-input","stable","world_provider_input_test","world_provider_test",true),
+            ("provider-authoring-call","authoring_call","system_provider_author_test","system_provider_file_test",false),
+            ("provider-authoring-result","authoring_result","system_provider_file_test","world_provider_test",false),
+        ];
+        let mut bound = Vec::new();
+        for (id,role,from,to,context) in templates {
+            let mut row = checkpoint(id,from,to);
+            row["artifact_bindings"] = if id == "model-input" { bindings.clone() } else if context { json!([{"id":input_ref.id}]) } else { json!([]) };
+            if id == "model-input" { row["required_verified_artifacts"] = provider_tool_requirement.clone(); }
+            if id == "provider-authoring-call" { row["required_verified_artifacts"] = json!([{"mark":"tool.call.allowed","artifact_label":"tool.call","verifier":"tool_call_allowed","params":{"tools":["file.write.provider"]}}]); }
+            if id == "provider-output" { row["interface_binding"]["config"]["artifact_policy"] = json!({"mode":"allow","names":["provider.fixture.progress"],"namespaces":[]}); }
+            let mut template = json!({"name":id,"role":role,"interface_binding":row["interface_binding"],"outbound_interface_bindings":row["outbound_interface_bindings"],"include_context":context,"required_verified_artifacts":row["required_verified_artifacts"]});
+            if id == "model-input" { template["static_artifact_bindings"] = json!([prelude.id,topology_ref.id,input_ref.id]); }
+            bound.push(template);
+            if id == "model-input" { *run["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"]==id).unwrap()=row; }
+            else { run["checkpoints"].as_array_mut().unwrap().push(row);run["active_checkpoints"].as_array_mut().unwrap().push(json!(id)); }
+        }
+        bound.push(json!({"name":"owner-output","role":"owner_input","interface_binding":binding(DOOR,"world_provider_test")["inbound"],"outbound_interface_bindings":binding(DOOR,"world_provider_test")["outbound"],"static_artifact_bindings":[prelude.id,topology_ref.id,input_ref.id],"owner_authoring":{"owner":DOOR,"source":DOOR,"door":"system_file_test","tool":"file.write","call_label":"tool.call","result_label":"file.write.result"},"include_context":false,"required_verified_artifacts":[]}));
+        run["interface_state"]["world_provider_test"] = json!({"context_generation":0,"authoring_generation":0,"frontier_checkpoint_ids":["model-input","provider-output","provider-authoring-call","provider-authoring-result"],"run_authoring_binding":{"schema_version":2,"run":"run_code_mode_test","worker":WORKER,"provider_interface":"world_provider_test","authoring_source_interface":"system_provider_author_test","payload_artifact_bindings":[input_ref],"checkpoints":bound}});
+        run["interface_state"][DOOR]["owned_checkpoint_ids"] = json!(["initial-owner".to_string(),"initial-authoring".to_string()].into_iter().chain(returns.keys().cloned()).collect::<Vec<_>>());
+        let source_provenance = Value::Array([
+            ("artifact-code-mode-cua-prelude", &prelude_source),
+            ("artifact-code-mode-browser-prelude", &browser_source),
+        ].into_iter().map(|(id, body)| {
+            use sha2::{Digest, Sha256};
+            let bytes = std::fs::read(registry_root().join("artifact").join(id).join("artifact.json")).unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), *body);
+            let content = octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(body));
+            let source = octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(id),content };
+            let snapshot = octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(format!("{id}__fixture_source")),content };
+            std::fs::write(root.join(format!("{}.json",snapshot.id)),&bytes).unwrap();
+            json!({"source":source,"snapshot":snapshot,"source_sha256":format!("{:x}",Sha256::digest(&bytes))})
+        }).collect());
+        run["interface_state"][DOOR]["prelude_sources"] = source_provenance.clone();
+        if generated_only {
+            let mut observer=checkpoint("00-observer","system_browser_test",DOOR);
+            observer["outbound_interface_bindings"]=json!([]);observer["artifact_bindings"]=json!([]);
+            run["checkpoints"].as_array_mut().unwrap().insert(0,observer);
+            run["active_checkpoints"].as_array_mut().unwrap().insert(0,json!("00-observer"));
+        }
+        for checkpoint in run["checkpoints"].as_array_mut().unwrap() {
+            let bindings = checkpoint["artifact_bindings"].as_array_mut().unwrap();
+            bindings.splice(0..0, roles.iter().map(|role| json!({"id":role.id})));
+        }
+        if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+            let writer = octopus_provider_run_authoring::separate_writer_run(
+                &mut run, &InterfaceId::new("world_provider_test"), &RunId::new("run_detached_provider_writer"),
+            ).unwrap();
+            let bytes = octopus_provider_run_authoring::JsonFormat::Compact.encode(&writer).unwrap();
+            std::fs::write(records.join("run_detached_provider_writer.json"), bytes).unwrap();
+        }
+        std::fs::write(
+            records.join("run_code_mode_test.json"),
+            serde_json::to_vec_pretty(&run).unwrap(),
+        )
+        .unwrap();
+        source_provenance
+    })();
     let interfaces = [
         DOOR,
         NESTED_INTERFACE,
@@ -1779,6 +2009,15 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         run_records: records,
         file_writes: std::sync::atomic::AtomicUsize::new(0),
         conflict_next: AtomicBool::new(false),
+        reject_next_owner_arrival: AtomicBool::new(false),
+        interleave_next_write: AtomicBool::new(false),
+        provider_wins_next_write: AtomicBool::new(false),
+        provider_writes_before_owner_call: AtomicBool::new(false),
+        owner_write_prepared: tokio::sync::Notify::new(),
+        owner_write_admitted: tokio::sync::Notify::new(),
+        peer_write_admitted: tokio::sync::Notify::new(),
+        peer_write_applied: tokio::sync::Notify::new(),
+        owner_write_completed: tokio::sync::Notify::new(),
     });
     let transport_owner = admission.clone();
     let pump = tokio::spawn(async move {
@@ -1799,7 +2038,9 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         }
         #[allow(unreachable_code)] Ok::<(),String>(())
     });
-    let handoff = actual_owner_handoff::OwnerHandoff::new();
+    let handoff = if matches!(case, FrontierCase::RefusedFailurePretty) {
+        actual_owner_handoff::OwnerHandoff::with_json_format(None)
+    } else { actual_owner_handoff::OwnerHandoff::new() };
     let room = std::sync::Arc::new(CodeModeRoom::new(ToolProcessEnvironment {
         interface: InterfaceId::new(DOOR),
         interface_dir,
@@ -1810,7 +2051,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         private_reads: BTreeMap::new(),
         root_slots: BTreeMap::new(),
     }));
-    if !matches!(case, FrontierCase::Full) {
+    if matches!(case, FrontierCase::Generated | FrontierCase::Application) {
         if generated_only {
             Box::pin(actual_generated_artifact_read(&admission,&room,&handoff,&formation,&kind,&root)).await;
         } else {
@@ -1854,20 +2095,179 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         &root,
         300,
         "code_mode.run",
-        json!({"script":"let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);","yield_time_ms":20}),
+        json!({"script":if matches!(case, FrontierCase::InterleavedResult) { "const docs = await prelude.cua.documentation(); return docs;" } else { "let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);" },"yield_time_ms":20}),
     );
-    admission
-        .model_call(&source.artifact_file)
-        .await
-        .unwrap();
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+        let handoff = admission.provider_handoff().unwrap().unwrap();
+        handoff.hand(octopus_provider_run_authoring::ProviderEmission {
+            artifact: InterfaceArtifactFile::write(admission.provider.context.var_dir.join("model-call"), "tool.call", &source.artifact_file.read_payload_bytes().unwrap()).unwrap(),
+            route: octopus_provider_run_authoring::ProviderEmissionRoute::Tool { tool: "code_mode.run".into() },
+        }).await.unwrap();
+    } else {
+        admission.model_call(&source.artifact_file).await.unwrap();
+    }
     let initial = admission.next().await.unwrap();
     let parsed_config: super::config::CodeModeConfig = serde_json::from_value(config.clone()).unwrap();
     let original_topology: super::config::CodeModeOwnerTopology = serde_json::from_value(topology.clone()).unwrap();
     parsed_config.validate_owner_topology(&original_topology,&initial.2).unwrap();
+    let coauthor = original_topology.coauthor.as_ref().unwrap();
+    let metadata = initial.2.metadata().unwrap();
+    let snapshot = std::fs::read(root.join("blobs").join(metadata.runtime.as_ref().unwrap().run_record_hash.as_ref().unwrap())).unwrap();
+    octopus_provider_run_authoring::validate_admitted_run_writer(&snapshot, metadata, coauthor).unwrap();
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+        admission.provider_handoff().unwrap().unwrap().recover_source().await.unwrap();
+        let target_path = admission.run_records.join("run_code_mode_test.json");
+        let target = std::fs::read(&target_path).unwrap();
+        let target_hash = ContentHash::of_bytes(&target).to_hex();
+        if !matches!(case, FrontierCase::InterleavedResult) {
+            assert!(!root.join("blobs").join(&target_hash).exists());
+        }
+        if matches!(case, FrontierCase::InterleavedResult) {
+            admission.interleave_next_write.store(true, Ordering::SeqCst);
+            let peer = admission.clone();
+            let progress = tokio::spawn(async move {
+                peer.owner_write_admitted.notified().await;
+                peer.provider_progress(777).await
+            });
+            let first = Box::pin(admission.run(&room, &handoff, &formation, &kind, initial)).await.unwrap();
+            assert_eq!(first["body"]["state"], "completed", "{first}");
+            assert!(first["body"]["error_text"].as_str().unwrap().contains("Illegal return"), "{first}");
+            if let Err(error) = progress.await.unwrap() {
+                if provider_socket.is_finished() { panic!("{error}; socket: {:?}", provider_socket.await); }
+                panic!("{error}");
+            }
+            let ctx = admission.door.lock().await.context.clone();
+            {
+                let rows = admission.deliveries.lock().unwrap();
+                let call = rows.iter().find(|row| row.from.as_str() == DOOR && row.to.as_str() == "system_file_test").unwrap();
+                let result = rows.iter().find(|row| row.seq > call.seq && row.from.as_str() == "system_file_test").unwrap();
+                let peer_call = rows.iter().find(|row| row.seq > call.seq && row.to.as_str() == "system_provider_file_test").unwrap();
+                let peer_result = rows.iter().find(|row| row.seq > peer_call.seq && row.from.as_str() == "system_provider_file_test").unwrap();
+                assert!(call.seq < peer_call.seq && peer_call.seq < result.seq && result.seq < peer_result.seq);
+                let refused: Value = serde_json::from_slice(&peer_result.file.read_payload_bytes().unwrap()).unwrap();
+                assert_eq!(refused["ok"], false);
+                assert_eq!(refused["error"]["code"], "file_write_incomplete");
+                exact_install_does_not_claim_later_state(&ctx, &target_path, call, result, coauthor);
+            }
+            let next = envelope(&root, 301, "code_mode.run", json!({"script":"globalThis.cuaDocs = await prelude.cua.documentation(); text(typeof cuaDocs);", "yield_time_ms":1000}));
+            Box::pin(admission.model_call(&next.artifact_file)).await.unwrap();
+            let input = admission.next().await.unwrap();
+            admission.provider_wins_next_write.store(true, Ordering::SeqCst);
+            admission.interleave_next_write.store(true, Ordering::SeqCst);
+            let peer = admission.clone();
+            let progress = tokio::spawn(async move {
+                peer.owner_write_prepared.notified().await;
+                peer.provider_progress(778).await
+            });
+            let second = Box::pin(admission.run(&room, &handoff, &formation, &kind, input)).await.unwrap();
+            progress.await.unwrap().unwrap();
+            admission.provider_wins_next_write.store(false, Ordering::SeqCst);
+            assert_eq!(second["body"]["state"], "completed", "{second}");
+            assert!(second["body"]["error_text"].as_str().unwrap().contains("documentation is not a function"), "{second}");
+            let next = envelope(&root, 302, "code_mode.run", json!({"script":"text('NEXT_CODE_OK');", "yield_time_ms":1000}));
+            Box::pin(admission.model_call(&next.artifact_file)).await.unwrap();
+            let input = admission.next().await.unwrap();
+            admission.provider_wins_next_write.store(true, Ordering::SeqCst);
+            admission.provider_writes_before_owner_call.store(true, Ordering::SeqCst);
+            admission.interleave_next_write.store(true, Ordering::SeqCst);
+            let peer = admission.clone();
+            let progress = tokio::spawn(async move {
+                peer.owner_write_prepared.notified().await;
+                peer.provider_progress(779).await
+            });
+            let third = Box::pin(admission.run(&room, &handoff, &formation, &kind, input)).await.unwrap();
+            progress.await.unwrap().unwrap();
+            admission.provider_wins_next_write.store(false, Ordering::SeqCst);
+            admission.provider_writes_before_owner_call.store(false, Ordering::SeqCst);
+            assert_eq!(third["body"]["state"], "completed", "{third}");
+            assert_eq!(third["body"]["output"][0]["text"], "NEXT_CODE_OK", "{third}");
+            room.release_room(&formation).await.unwrap();
+            admission.door.lock().await.context.owner_cancel().cancel();
+            provider_socket.abort(); provider_pump.abort(); pump.abort();
+            let _ = tokio::join!(provider_socket, provider_pump, pump);
+            return;
+        }
+        if matches!(case, FrontierCase::DetachedFailure | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+            if matches!(case, FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+                Box::pin(failure_return_tests::actual_refused_failure_return(&admission, &room, &handoff, &formation, &kind, &parsed_config, &initial, &durable)).await;
+            } else {
+                Box::pin(actual_owner_failure_return(&admission, &room, &handoff, &formation, &parsed_config, &initial, &durable)).await;
+            }
+            admission.door.lock().await.context.owner_cancel().cancel();
+            provider_socket.abort(); provider_pump.abort(); pump.abort();
+            let _ = tokio::join!(provider_socket, provider_pump, pump);
+            return;
+        }
+        let started = Box::pin(admission.run(&room, &handoff, &formation, &kind, initial)).await.unwrap();
+        assert_eq!(started["body"]["state"], "yielded", "{started}");
+        let installed: super::continuation::InstalledHandoff = super::continuation::read_record(&durable.join(format!("{target_hash}.installed.json"))).unwrap();
+        let install = octopus_provider_run_authoring::CheckedRunInstall {
+            call: octopus_provider_run_authoring::ConsentEvidenceRef { artifact: installed.source_artifact.clone(), movement_seq: installed.source_seq },
+            result: octopus_provider_run_authoring::ConsentEvidenceRef { artifact: installed.result_artifact.clone(), movement_seq: installed.result_seq },
+        };
+        let ctx = admission.door.lock().await.context.clone();
+        let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+            movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+        };
+        let checked = |path: &Path, proof: &octopus_provider_run_authoring::CheckedRunInstall| {
+            octopus_provider_run_authoring::checked_declared_run_install(&evidence, path, &snapshot, proof, vec![coauthor.clone()])
+        };
+        assert_eq!(checked(&target_path, &install).unwrap().after, target);
+        assert!(checked(&admission.run_records.join("foreign.json"), &install).is_err());
+        let mut wrong = install.clone(); wrong.result.artifact.content = ContentHash::of_bytes(b"wrong result");
+        assert!(checked(&target_path, &wrong).is_err());
+        wrong = install.clone(); wrong.result.movement_seq = wrong.call.movement_seq;
+        assert!(checked(&target_path, &wrong).is_err());
+        let latest = std::fs::read_dir(&durable).unwrap().filter_map(|entry| {
+            let path = entry.unwrap().path();
+            path.file_name().unwrap().to_str().unwrap().ends_with(".installed.json").then(|| {
+                let record: super::continuation::InstalledHandoff = super::continuation::read_record(&path).unwrap(); (path, record)
+            })
+        }).max_by_key(|(_, record)| record.result_seq).unwrap();
+        let saved = std::fs::read(&latest.0).unwrap();
+        let mut bad = latest.1; bad.after_hash = ContentHash::of_bytes(b"wrong target hash").to_hex();
+        std::fs::write(&latest.0, serde_json::to_vec(&bad).unwrap()).unwrap();
+        assert!(super::continuation::reconcile_checked_provider_advance(&ctx, &durable, &parsed_config, None).is_err());
+        std::fs::write(&latest.0, saved).unwrap();
+        room.release_room(&formation).await.unwrap();
+        ctx.owner_cancel().cancel();
+        provider_socket.abort(); provider_pump.abort(); pump.abort();
+        let _ = tokio::join!(provider_socket, provider_pump, pump);
+        return;
+    }
+    let mut detached: Value = serde_json::from_slice(&snapshot).unwrap();
+    octopus_provider_run_authoring::separate_writer_run(&mut detached, &coauthor.owner, &RunId::new("run_separate_provider_writer")).unwrap();
+    let detached_bytes = serde_json::to_vec_pretty(&detached).unwrap();
+    let mut detached_input = initial.2.clone();
+    let detached_metadata = detached_input.metadata.as_mut().unwrap();
+    detached_metadata.runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(&detached_bytes).to_hex());
+    detached_metadata.grant.interfaces.retain(|id| id != coauthor.source.as_str() && id != coauthor.door.as_str());
+    detached_metadata.grant.tools.retain(|tool| tool != &coauthor.tool);
+    parsed_config.validate_owner_topology(&original_topology, &detached_input).unwrap();
+    octopus_provider_run_authoring::validate_admitted_run_writer(&detached_bytes, detached_input.metadata().unwrap(), coauthor).unwrap();
+    detached_input.metadata.as_mut().unwrap().runtime.as_mut().unwrap().epoch += 1;
+    assert!(octopus_provider_run_authoring::validate_admitted_run_writer(&detached_bytes, detached_input.metadata().unwrap(), coauthor).is_err());
+    detached_input.metadata.as_mut().unwrap().runtime.as_mut().unwrap().epoch -= 1;
+    assert!(octopus_provider_run_authoring::validate_admitted_run_writer(&snapshot, detached_input.metadata().unwrap(), coauthor).is_err());
+    let mut foreign_writer = coauthor.clone(); foreign_writer.source = InterfaceId::new("system_foreign_writer");
+    assert!(octopus_provider_run_authoring::validate_admitted_run_writer(&detached_bytes, detached_input.metadata().unwrap(), &foreign_writer).is_err());
+    detached["interface_state"][coauthor.owner.as_str()]["run_authoring_binding"]["writer_run"]["initial_record"]["ee"] = json!("ee_foreign_writer");
+    let foreign_bytes = serde_json::to_vec_pretty(&detached).unwrap();
+    detached_input.metadata.as_mut().unwrap().runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(&foreign_bytes).to_hex());
+    assert!(octopus_provider_run_authoring::validate_admitted_run_writer(&foreign_bytes, detached_input.metadata().unwrap(), coauthor).is_err());
+    if matches!(case, FrontierCase::Coauthor) {
+        room.release_room(&formation).await.unwrap();
+        admission.door.lock().await.context.owner_cancel().cancel();
+        provider_socket.abort(); provider_pump.abort(); pump.abort();
+        let _ = tokio::join!(provider_socket, provider_pump, pump);
+        return;
+    }
     let mut wrong = original_topology.clone(); wrong.routes[0].process_descriptor.process.bin.push_str("-foreign");
     assert!(parsed_config.validate_owner_topology(&wrong,&initial.2).is_err());
     let mut overlap = topology.clone(); overlap["routes"][0]["result"]["binding"]["inbound"]["config"]["artifact_policy"] = topology["routes"][1]["result"]["binding"]["inbound"]["config"]["artifact_policy"].clone();
     assert!(parsed_config.validate_owner_topology(&serde_json::from_value(overlap).unwrap(),&initial.2).is_err());
+    let initial_seq = initial.0;
     let started = tokio::time::timeout(
         std::time::Duration::from_secs(12),
         admission.run(&room, &handoff, &formation, &kind, initial),
@@ -1876,6 +2276,10 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     .unwrap()
     .unwrap();
     assert_eq!(started["body"]["state"], "yielded", "{started}");
+    if matches!(case, FrontierCase::NestedFailure) {
+        let ctx = admission.door.lock().await.context.clone();
+        octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir()).activate(&formation, initial_seq).unwrap();
+    }
     let cell = started["body"]["cell_id"].as_str().unwrap();
     let nested: Vec<_> = admission
         .deliveries
@@ -1952,6 +2356,14 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     }
     let first_return = admission.next().await.unwrap();
     let second_return = admission.next().await.unwrap();
+    if matches!(case, FrontierCase::NestedFailure) {
+        Box::pin(failure_return_tests::actual_nested_failure_return(&admission, &handoff, &formation, &second_return, &durable, &room, &kind)).await;
+        room.release_room(&formation).await.unwrap();
+        admission.door.lock().await.context.owner_cancel().cancel();
+        provider_socket.abort(); provider_pump.abort(); pump.abort();
+        let _ = tokio::join!(provider_socket, provider_pump, pump);
+        return;
+    }
     let run_path = admission.run_records.join("run_code_mode_test.json");
     let exact_before = std::fs::read(&run_path).unwrap();
     let mut neighbor:Value = serde_json::from_slice(&exact_before).unwrap();
@@ -3181,10 +3593,26 @@ impl FrontierAdmission {
         let call:octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&delivery.file.read_payload_bytes().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
         if call.tool != "file.write.provider" || !delivery.metadata.grant.tools.contains(&call.tool) { return Err("provider private file tool is not exactly granted".into()); }
         let input = InterfaceInvocationEnvelope { artifact:super::continuation::artifact_ref(&delivery.file)?,artifact_file:delivery.file.clone(),metadata:Some(delivery.metadata.clone()),artifact_binding_payloads:Vec::new() };
-        let body = actual_file_write::execute_file_write(&input,&call.arguments,&["system_room".into()],&BTreeMap::from([("run_records_root".into(),self.run_records.clone())]),&self.root.join("provider-file-effects"))?;
+        let interleaved = self.interleave_next_write.swap(false, Ordering::SeqCst);
+        let provider_wins = self.provider_wins_next_write.load(Ordering::SeqCst);
+        if interleaved {
+            self.peer_write_admitted.notify_one();
+            if provider_wins {
+                if !self.provider_writes_before_owner_call.load(Ordering::SeqCst) { self.owner_write_admitted.notified().await; }
+            } else { self.owner_write_completed.notified().await; }
+        }
+        let body = actual_file_write::execute_file_write_result(&input,&call.arguments,&["system_room".into()],&BTreeMap::from([("run_records_root".into(),self.run_records.clone())]),&self.root.join("provider-file-effects"), 8 * 1024 * 1024);
         self.file_writes.fetch_add(1,Ordering::SeqCst);
-        let result = octopus_tool_handlers::ToolResultArtifact::success(&call.tool,call.correlation_id,body);
+        let result = match body {
+            Ok(body) => octopus_tool_handlers::ToolResultArtifact::success(&call.tool,call.correlation_id,body),
+            Err(error) => octopus_tool_handlers::ToolResultArtifact::failure(&call.tool,call.correlation_id,error),
+        };
         let file = InterfaceArtifactFile::write(self.root.join("provider-file-results"),&result.label,&serde_json::to_vec(&result).unwrap()).map_err(|e| e.to_string())?;
+        if interleaved && provider_wins {
+            assert!(result.ok, "{result:?}");
+            self.peer_write_applied.notify_one();
+            self.owner_write_completed.notified().await;
+        }
         Box::pin(self.arrive("system_provider_file_test",&file)).await?;
         Ok(())
     }

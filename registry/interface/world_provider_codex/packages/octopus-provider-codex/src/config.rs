@@ -1402,10 +1402,11 @@ mod tests {
         .expect("write owner AGENTS.md persona");
         std::fs::write(
             inherited.join("config.toml"),
-            b"model = \"gpt-5.5\"\npersonality = \"friendly\"\n[plugins.\"agentmemory@local\"]\nenabled = true\n",
+            b"model = \"gpt-5.5\"\npersonality = \"friendly\"\n[plugins.\"agentmemory@local\"]\nenabled = true\n[mcp_servers.ambient]\nurl = \"https://ambient.invalid/mcp\"\nbearer_token_env_var = \"AMBIENT_MCP_TOKEN\"\n",
         )
         .expect("write owner config with plugins");
         std::fs::create_dir_all(inherited.join("memories")).expect("mk owner memories dir");
+        std::fs::write(inherited.join(".credentials.json"), b"{\"mcp_oauth\":{\"ambient\":\"MCP-ONLY-TEST-SECRET\"}}").unwrap();
 
         let curated = build_curated_codex_home(&inherited).expect("curated home must build");
 
@@ -1426,6 +1427,10 @@ mod tests {
 
         let cfg =
             std::fs::read_to_string(curated.join("config.toml")).expect("read curated config");
+        let isolated: toml::Value = toml::from_str(&cfg).unwrap();
+        assert!(isolated.get("mcp_servers").is_none());
+        assert_eq!(isolated["features"]["code_mode_host"].as_bool(), Some(true));
+        assert!(!curated.join(".credentials.json").exists());
         assert!(
             !cfg.contains("[plugins."),
             "curated config must carry NO plugin tables: {cfg}"

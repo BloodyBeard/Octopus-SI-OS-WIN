@@ -27,6 +27,7 @@ octopus-provider-run-authoring = { path = "../../../../interface/world_provider_
 
 
 [dev-dependencies]
+octopus-file-write-contract = { path = "../../../system_room/packages/octopus-file-write-contract" }
 octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 octopus-interface-activation-app-server-transport = { path = "../../../../interface/world_operator_chat/packages/octopus-interface-activation-app-server-transport" }
 octopus-runtime = { path = "../../../../../crates/octopus-runtime" }

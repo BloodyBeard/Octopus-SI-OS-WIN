@@ -4,17 +4,14 @@ import type { ClientAgentPresetInput } from "../agentPresets";
 import { DEFAULT_PROJECT_COLOR } from "../design-system/projectColors";
 import { useProjectionStructureGeneration } from "../projectionLive";
 import { mutateOctopusOsWorkspace, readProjection } from "../projectionClient";
+import { projectPolicyOption, type ProjectPolicyOption } from "./projectPolicyOptions";
 import {
   readClientChatProjects,
   saveClientChatProjects,
   type ClientChatProject,
 } from "./clientWorkspaces";
 
-export type OctopusOsEeTemplateOption = {
-  id: string;
-  label: string;
-  description: string;
-};
+export type OctopusOsEeTemplateOption = ProjectPolicyOption;
 
 export type OctopusOsEnvironmentSummary = {
   eeId: string;
@@ -225,11 +222,14 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     }
     const parentEeId = draft.parentId.trim();
     if (!parentEeId) throw new Error("Project creation requires an explicit parent execution environment");
-    if (draft.templateName !== "project") throw new Error("Project creation requires the generic Project template");
     const parent = parentEeId === scope.rootEeId
       ? scope.rootEnvironment
       : scope.projects.find((project) => project.eeId === parentEeId) ?? null;
     if (!parent?.recordDigest) throw new Error(`Project parent '${parentEeId}' has no projected record digest`);
+    if (!parent.allowedChildTemplateIds.includes(draft.templateName)
+      || !scope.templates.some((template) => template.id === draft.templateName)) {
+      throw new Error("Choose an installed project policy allowed by the selected parent.");
+    }
     await perform(async () => {
       await mutateOctopusOsWorkspace({
         action: "create_project",
@@ -237,7 +237,7 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         workspace: workspaceMutationIdentity(scope),
         parentEeId,
         expectedParentDigest: parent.recordDigest,
-        templateName: "project",
+        templateName: draft.templateName,
         name: draft.name,
         goal: draft.name,
         presentation: { icon: draft.icon, color: draft.color },
@@ -284,7 +284,9 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         name: input.name,
         icon: input.icon,
         providerInterfaceId: input.providerInterfaceId,
+        providerModel: input.providerModel,
         reasoningEffort: input.reasoningEffort,
+        serviceTier: input.serviceTier,
         applicationIds: input.applicationIds,
         driverNames: input.driverNames,
       });
@@ -310,7 +312,9 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
         name: input.name,
         icon: input.icon,
         providerInterfaceId: input.providerInterfaceId,
+        providerModel: input.providerModel,
         reasoningEffort: input.reasoningEffort,
+        serviceTier: input.serviceTier,
         applicationIds: input.applicationIds,
         driverNames: input.driverNames,
         expectedClientTemplateDigest,
@@ -471,15 +475,8 @@ function normalizeScope(value: unknown): ScopeSnapshot {
     .map(normalizeProjectPresentation)
     .filter((row): row is ProjectPresentation => row !== null);
   const templates = list(value.ee_templates).flatMap((row): OctopusOsEeTemplateOption[] => {
-    if (!isRecord(row)) return [];
-    const id = text(row.id);
-    if (!id) return [];
-    const goalClass = text(row.goal_class);
-    return [{
-      id,
-      label: id,
-      description: goalClass && goalClass !== id ? goalClass : "",
-    }];
+    const option = projectPolicyOption(row);
+    return option ? [option] : [];
   });
   const taskDigests = new Map<string, string>();
   for (const row of list(value.client_runs)) {

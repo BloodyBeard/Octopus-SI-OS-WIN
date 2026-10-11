@@ -317,6 +317,7 @@ impl Fixture {
             &invocation, &call["arguments"], &["system_room".into()],
             &BTreeMap::from([("run_records_root".into(), self.ctx.root_slots["run_records_root"].clone())]),
             &self.ctx.var_dir.join("effects"),
+        self.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes,
         ).unwrap();
         assert_eq!(body["writes"][0]["after_hash"], call["arguments"]["expected_after_hash"]);
         let after = std::fs::read(&self.run_path).unwrap();

@@ -11,7 +11,7 @@ pub(super) fn is_extension(before: &BoundRunAuthoringTopology, after: &BoundRunA
 // whose input/history must still have its complete checked writer chain. This
 // never grants the new edge: its eventual emission passes normal policy gates.
 pub(super) fn protected_record(
-    before: &RunRecord,
+    before: &[u8],
     current: &[u8],
     config: &RunAuthoringConfig,
 ) -> Result<Option<Vec<u8>>, String> {
@@ -46,7 +46,7 @@ impl Extension {
 }
 
 pub(super) fn extension(
-    before: &RunRecord,
+    before: &[u8],
     current: &[u8],
     config: &RunAuthoringConfig,
 ) -> Result<Option<Extension>, String> {
@@ -55,6 +55,9 @@ pub(super) fn extension(
             .and_then(|state| state.get(RUN_AUTHORING_BINDING)).cloned()
             .ok_or("outgoing connection has no provider topology")?).map_err(|error| error.to_string())
     };
+    let before_value: serde_json::Value = serde_json::from_slice(before).map_err(|error| error.to_string())?;
+    let before_bytes = before;
+    let before = &RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let prior = read(before)?;
     let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
     let next = read(&record)?;
@@ -105,7 +108,6 @@ pub(super) fn extension(
     state[FRONTIER_CHECKPOINT_IDS].as_array_mut().ok_or("connection frontier is absent")?
         .retain(|id| !id.as_str().is_some_and(|id| ids.contains(id)));
     state[RUN_AUTHORING_BINDING] = serde_json::to_value(prior).map_err(|error| error.to_string())?;
-    let mut bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
-    bytes.push(b'\n');
+    let bytes = if value == before_value { before_bytes.to_vec() } else { JsonFormat::Compact.encode(&value)? };
     Ok(Some(Extension { protected: bytes, checkpoints, templates, ids: added_ids }))
 }

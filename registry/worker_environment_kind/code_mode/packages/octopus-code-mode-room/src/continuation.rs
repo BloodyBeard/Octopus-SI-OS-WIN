@@ -455,6 +455,31 @@ pub(crate) fn result_locator(
     Ok(Some(worker))
 }
 
+pub fn historical_continuation_call(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    envelope: &InterfaceInvocationEnvelope,
+    source: &Movement,
+) -> Result<(ToolCallArtifact, PathBuf), String> {
+    if source.kind != octopus_ledger::MovementKind::InterfaceOutbound
+        || source.to != Endpoint::Interface(ctx.owner_interface().clone())
+        || source.artifact.as_ref() != Some(&envelope.artifact)
+        || source.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+            != Some(envelope.metadata().map_err(|e| e.to_string())?) {
+        return Err("historical continuation differs from its original admitted movement".into());
+    }
+    let purpose = ToolDoorArtifactDecodePurpose::HistoricalIdentity;
+    if envelope.read_artifact_manifest().map_err(|e| e.to_string())?.label == "code_mode.frontier_ready" {
+        let ready = read_ready(envelope)?;
+        let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &ready.worker_environment_id)?;
+        let call = decode_ready(&root, envelope, source, purpose, None)?;
+        return Ok((call, root));
+    }
+    let worker = result_locator(envelope)?.ok_or("native failure source is not a declared continuation")?;
+    let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &worker)?;
+    let call = decode_result(&root, ctx.owner_interface(), envelope, purpose, None, source)?;
+    Ok((call, root))
+}
+
 pub(crate) fn decode_result(
     root: &Path,
     door: &InterfaceId,
@@ -808,7 +833,7 @@ pub fn prepare_return(
     {
         return Err("code mode prospective return differs from immutable route".into());
     }
-    create_record(
+    prepare_record(
         &root.join(format!(
             "{}.{}.return.json",
             pending.digest, boundary.run_record_hash
@@ -1217,6 +1242,11 @@ pub fn validate_directory(path: &Path) -> Result<(), String> {
 }
 
 pub fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
+    serde_json::from_slice(&read_record_bytes(path)?)
+        .map_err(|e| format!("code mode immutable record is malformed: {e}"))
+}
+
+fn read_record_bytes(path: &Path) -> Result<Vec<u8>, String> {
     validate_directory(
         path.parent()
             .ok_or("code mode record has no owner directory")?,
@@ -1253,8 +1283,17 @@ pub fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, Strin
     if bytes.len() > RECORD_BYTES {
         return Err("code mode private record exceeded byte limit".into());
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|e| format!("code mode immutable record is malformed: {e}"))
+    Ok(bytes)
+}
+
+pub fn prepare_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    if path.try_exists().map_err(|e| e.to_string())? {
+        if read_record_bytes(path)? != serde_json::to_vec(value).map_err(|e| e.to_string())? {
+            return Err(format!("code mode prospective record {} conflicts with its immutable bytes", path.display()));
+        }
+        return Ok(());
+    }
+    create_record(path, value)
 }
 
 pub fn create_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -1378,7 +1417,7 @@ pub fn record_internal_receipt(
     artifact: &ArtifactRef,
     source_seq: u64,
 ) -> Result<(), String> {
-    create_record(
+    prepare_record(
         &root.join(format!("{}.receipt.json", artifact.content.to_hex())),
         &json!({"artifact":artifact,"source_seq":source_seq}),
     )
@@ -1457,7 +1496,7 @@ pub fn prepare_authoring_result(
     bytes: usize,
 ) -> Result<(), String> {
     let (_, key) = parse_owner_correlation(correlation, "code-mode-authoring")?;
-    create_record(
+    prepare_record(
         &root.join(format!("{key}.authoring-result.json")),
         &AuthoringResult {
             correlation: correlation.to_string(),
@@ -1494,6 +1533,35 @@ pub(crate) fn consume_authoring_result(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     envelope: &InterfaceInvocationEnvelope,
 ) -> Result<bool, String> {
+    consume_authoring_result_with_source(ctx, envelope, || ctx.source_movement(envelope).cloned())
+}
+
+pub fn validate_historical_authoring_result(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    envelope: &InterfaceInvocationEnvelope,
+    source: &Movement,
+) -> Result<bool, String> {
+    let limits = ctx.owner_io_limits()?;
+    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+        movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+        max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+    };
+    if source.kind != octopus_ledger::MovementKind::InterfaceOutbound
+        || source.to != Endpoint::Interface(ctx.owner_interface().clone())
+        || source.artifact.as_ref() != Some(&envelope.artifact)
+        || source.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+            != Some(envelope.metadata().map_err(|e| e.to_string())?)
+        || octopus_provider_run_authoring::generated_artifacts::read_movement(&evidence, source.seq.0)? != *source {
+        return Err("historical authoring result changed its exact admitted movement".into());
+    }
+    consume_authoring_result_with_source(ctx, envelope, || Ok(source.clone()))
+}
+
+fn consume_authoring_result_with_source(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    envelope: &InterfaceInvocationEnvelope,
+    source: impl FnOnce() -> Result<Movement, String>,
+) -> Result<bool, String> {
     let captured = envelope
         .read_artifact_bounded(MANIFEST_BYTES, RECORD_BYTES as u64)
         .map_err(|e| e.to_string())?;
@@ -1507,24 +1575,26 @@ pub(crate) fn consume_authoring_result(
         return Ok(false);
     };
     let (worker, key) = parse_owner_correlation(correlation, "code-mode-authoring")?;
+    let key = key.to_owned();
     let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &worker)?;
     let pending: AuthoringResult = read_record(&root.join(format!("{key}.authoring-result.json")))?;
     validate_carrier(envelope, &captured.manifest_bytes, &captured.manifest.label)?;
-    let source = ctx.source_movement(envelope)?;
+    let source = source()?;
     let result: ToolResultArtifact = serde_json::from_value(payload).map_err(|e| e.to_string())?;
     let metadata = envelope.metadata().map_err(|e| e.to_string())?;
     let mut boundary = pending.boundary.clone();
     let hash = envelope.runtime().map_err(|error| error.to_string())?.run_record_hash.as_deref()
         .ok_or("authoring result has no admitted snapshot")?;
-    if hash != boundary.run_record_hash {
+    if result.ok && hash != boundary.run_record_hash {
         let read = |hash: &str| -> Result<Vec<u8>, String> {
             let pin = ContentHash::from_hex(hash).ok_or("authoring result snapshot hash invalid")?;
             let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&ctx.owner_blobs_dir().join(hash), RECORD_BYTES as u64).map_err(|error| error.to_string())?;
             if ContentHash::of_bytes(&bytes) != pin { return Err("authoring result snapshot integrity mismatch".into()); }
             Ok(bytes)
         };
+        let installed = checked_authoring_result_install(ctx, &root, &key, &pending, &source)?;
         octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(
-            &read(&boundary.run_record_hash)?, &read(hash)?, &octopus_descriptors::CheckpointId::new(&boundary.checkpoint),
+            &installed, &read(hash)?, &octopus_descriptors::CheckpointId::new(&boundary.checkpoint),
         )?;
         boundary.run_record_hash = hash.to_owned();
     }
@@ -1555,6 +1625,73 @@ pub(crate) fn consume_authoring_result(
         return Err("failed authoring result has no error".into());
     }
     Ok(true)
+}
+
+fn checked_authoring_result_install(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext, root: &Path, key: &str,
+    pending: &AuthoringResult, result: &Movement,
+) -> Result<Vec<u8>, String> {
+    use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunEvidence, CheckedRunEvidenceReader,
+        CheckedRunInstall, CheckedRunWriter, ConsentEvidenceRef, FileCheckedRunReader, RunAuthoringProfile};
+    let context: ContextRecord = read_record(&root.join("context.json"))?;
+    if digest(&context.identity)? != context.generation || context.identity.formation.door_interface != *ctx.owner_interface() {
+        return Err("authoring result changed its immutable owner context".into());
+    }
+    let topology = context.identity.owner_topology.as_ref().ok_or("authoring result has no retained topology")?;
+    let descriptor = ctx.owner_descriptor()?;
+    let profile: RunAuthoringProfile = serde_json::from_value(descriptor.interface_driver_config.as_ref()
+        .and_then(|config| config.private_config.get("run_authoring_profile"))
+        .cloned().ok_or("authoring result has no checked writer profile")?).map_err(|error| error.to_string())?;
+    let writer = CheckedRunWriter { owner: ctx.owner_interface().clone(), source: ctx.owner_interface().clone(),
+        door: topology.authoring_result.binding.inbound.interface.clone(), tool: profile.file_write_tool,
+        call_label: profile.file_write_label, result_label: profile.file_write_result_label };
+    if writer.tool != pending.tool || writer.result_label != pending.label
+        || pending.boundary.binding != topology.authoring_result.binding {
+        return Err("authoring result changed its exact retained writer".into());
+    }
+    let limits = ctx.owner_io_limits()?;
+    let evidence = CheckedRunEvidence { movements_path:ctx.owner_movements_path(), ledger_index_path:ctx.owner_ledger_index_path(),
+        blobs_dir:ctx.owner_blobs_dir(), max_control_frame_bytes:limits.max_control_frame_bytes,
+        max_manifest_bytes:limits.max_manifest_bytes, max_payload_bytes:limits.max_payload_bytes };
+    let mut reader = FileCheckedRunReader::open(&evidence, Some(context.identity.first_run.source_movement_seq))?;
+    let mut selected = None;
+    while reader.next_sequence() < result.seq.0 {
+        let movement = reader.movement(reader.next_sequence())?.ok_or("authoring result has no complete admitted prefix")?;
+        if movement.kind != octopus_ledger::MovementKind::InterfaceOutbound
+            || movement.from != Endpoint::Interface(writer.source.clone()) || movement.to != Endpoint::Interface(writer.door.clone()) {
+            continue;
+        }
+        let (manifest, payload) = reader.artifact(movement.artifact.as_ref().ok_or("authoring call has no exact artifact")?)?;
+        if manifest.label != writer.call_label { continue; }
+        let call: ToolCallArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+        if call.correlation_id.as_deref() != Some(pending.correlation.as_str()) { continue; }
+        if call.tool != writer.tool || selected.replace((movement, call)).is_some() {
+            return Err("authoring result has no unique exact admitted call".into());
+        }
+    }
+    let (call, artifact) = selected.ok_or("authoring result has no matching admitted call")?;
+    let hash = call.runtime().and_then(|runtime| runtime.run_record_hash.as_deref()).and_then(ContentHash::from_hex)
+        .ok_or("authoring call lost its admitted preimage")?;
+    let declaration = reader.snapshot(&hash)?;
+    if ContentHash::of_bytes(&declaration) != hash { return Err("authoring call preimage integrity mismatch".into()); }
+    let mut seeds = topology.coauthor.iter().cloned().collect::<Vec<_>>();
+    seeds.push(writer);
+    let transition = octopus_provider_run_authoring::checked_declared_run_install(&evidence, &pending.path, &declaration,
+        &CheckedRunInstall {
+            call: ConsentEvidenceRef { movement_seq:call.seq.0, artifact:call.artifact.clone().ok_or("authoring call lost its artifact")? },
+            result: ConsentEvidenceRef { movement_seq:result.seq.0, artifact:result.artifact.clone().ok_or("authoring result lost its artifact")? },
+        }, seeds)?;
+    let edit: CheckedRunEdit = read_record(&root.join(format!("{key}.edit.json")))?;
+    let expected = CheckedRunEdit::prepare_with_format(pending.path.clone(), &transition.before,
+        serde_json::from_slice(&transition.after).map_err(|error| error.to_string())?, pending.correlation.clone(), edit.json_format)?;
+    if transition.call != call || transition.result != *result
+        || artifact.arguments != edit.arguments()?
+        || serde_json::to_value(&edit).map_err(|error| error.to_string())? != serde_json::to_value(&expected).map_err(|error| error.to_string())?
+        || edit.before_hash != pending.before || edit.after_hash != pending.after
+        || edit.after_hash != pending.boundary.run_record_hash || edit.content.len() != pending.bytes {
+        return Err("authoring result differs from its exact prepared checked installation".into());
+    }
+    Ok(transition.after)
 }
 
 impl ContinuationContext {
@@ -2097,6 +2234,39 @@ impl ContinuationContext {
     }
 }
 
+pub fn validate_admitted_coauthor(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    envelope: &InterfaceInvocationEnvelope,
+    topology: &crate::config::CodeModeOwnerTopology,
+) -> Result<(), String> {
+    let Some(writer) = &topology.coauthor else { return Ok(()); };
+    let metadata = envelope.metadata().map_err(|e| e.to_string())?;
+    let hash = envelope.runtime().map_err(|e| e.to_string())?.run_record_hash.as_deref()
+        .ok_or("coauthor proof has no admitted Run snapshot")?;
+    let pin = ContentHash::from_hex(hash).filter(|pin| pin.to_hex() == hash)
+        .ok_or("coauthor proof has an invalid Run snapshot hash")?;
+    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+        &ctx.owner_blobs_dir().join(hash), ctx.owner_io_limits()?.max_payload_bytes,
+    ).map_err(|e| e.to_string())?;
+    if ContentHash::of_bytes(&bytes) != pin { return Err("coauthor Run snapshot integrity mismatch".into()); }
+    octopus_provider_run_authoring::validate_admitted_run_writer(&bytes, metadata, writer)
+}
+
+pub fn checked_recovery_observation<T>(
+    mut read: impl FnMut() -> Result<Vec<u8>, String>,
+    mut prove: impl FnMut(&[u8]) -> Result<T, String>,
+    cancelled: impl Fn() -> bool,
+) -> Result<T, String> {
+    loop {
+        if cancelled() { return Err("shared run recovery cancelled".into()); }
+        let current = read()?;
+        let result = prove(&current);
+        let reread = read()?;
+        if reread == current { return result; }
+        std::thread::yield_now();
+    }
+}
+
 pub fn reconcile_checked_provider_advance(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     root: &Path,
@@ -2113,6 +2283,7 @@ pub fn reconcile_checked_provider_advance(
     if root.join("retired.json").try_exists().map_err(|e| e.to_string())? { return Err("shared run context is retired".into()); }
     if let Some(input) = input {
         if config.resolve_owner_topology(input)? != *topology { return Err("shared run input changed its immutable owner topology".into()); }
+        validate_admitted_coauthor(ctx, input, topology)?;
         let ResolvedContext::Persistent { artifact,payload,.. } = config.resolve_context(input)? else { return Err("shared run input lost its prelude".into()); };
         let runtime = input.runtime().map_err(|e| e.to_string())?;
         if artifact != context.identity.prelude_artifact || DescriptorHash::of_bytes(&payload).to_hex() != context.identity.prelude_payload_hash
@@ -2137,24 +2308,48 @@ pub fn reconcile_checked_provider_advance(
             if latest.as_ref().is_none_or(|old| old.result_seq < record.result_seq) { latest = Some(record); }
         }
     }
-    let (before_hash,after_seq) = latest.as_ref().map(|record| (record.after_hash.as_str(),record.source_seq)).unwrap_or((&context.identity.first_run.run_record_hash,context.identity.first_run.source_movement_seq));
-    let before = load(before_hash)?;
     let run_root = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?;
     let path = run_root.join(format!("{}.json",topology.run)).canonicalize().map_err(|e| e.to_string())?;
     if path.parent() != Some(run_root.as_path()) { return Err("shared run file escapes its granted root".into()); }
-    let current = octopus_interfaces::read_artifact_carrier_file_bounded(&path,limits.max_payload_bytes).map_err(|e| e.to_string())?;
     let evidence = octopus_provider_run_authoring::CheckedRunEvidence { movements_path:ctx.owner_movements_path(),ledger_index_path:ctx.owner_ledger_index_path(),blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
-    let transitions = octopus_provider_run_authoring::checked_declared_run_advance(&evidence,&path,&before,&current,after_seq,vec![writer.clone()])?;
-    if let Some(input) = input {
-        let manifest = input.read_artifact_manifest().map_err(|e| e.to_string())?;
-        if manifest.label != "tool.call" {
-            let runtime = input.runtime().map_err(|e| e.to_string())?;
-            let pinned = load(runtime.run_record_hash.as_deref().ok_or("shared run input has no pinned snapshot")?)?;
-            octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pinned,&current,&runtime.checkpoint)?;
+    let original = load(&context.identity.first_run.run_record_hash)?;
+    let (before, after_seq) = match &latest {
+        Some(installed) => {
+            use octopus_provider_run_authoring::{CheckedRunInstall, ConsentEvidenceRef};
+            let transition = octopus_provider_run_authoring::checked_declared_run_install(
+                &evidence, &path, &original,
+                &CheckedRunInstall {
+                    call: ConsentEvidenceRef { movement_seq: installed.source_seq, artifact: installed.source_artifact.clone() },
+                    result: ConsentEvidenceRef { movement_seq: installed.result_seq, artifact: installed.result_artifact.clone() },
+                }, vec![writer.clone()],
+            )?;
+            if ContentHash::of_bytes(&transition.before).to_hex() != installed.before_hash
+                || ContentHash::of_bytes(&transition.after).to_hex() != installed.after_hash {
+                return Err("installed shared run differs from its exact checked write".into());
+            }
+            (transition.after, installed.source_seq)
         }
-    }
-    let reread = octopus_interfaces::read_artifact_carrier_file_bounded(&path,limits.max_payload_bytes).map_err(|e| e.to_string())?;
-    if reread != current { return Err("shared run advanced during its checked recovery proof".into()); }
+        None => (original, context.identity.first_run.source_movement_seq),
+    };
+    let input_checkpoint = input.map(|input| -> Result<_, String> {
+        let manifest = input.read_artifact_manifest().map_err(|e| e.to_string())?;
+        if manifest.label == "tool.call" { return Ok(None); }
+        let runtime = input.runtime().map_err(|e| e.to_string())?;
+        let pinned = load(runtime.run_record_hash.as_deref().ok_or("shared run input has no pinned snapshot")?)?;
+        Ok(Some((pinned, runtime.checkpoint.clone())))
+    }).transpose()?.flatten();
+    let cancellation = ctx.owner_cancel();
+    let transitions = checked_recovery_observation(
+        || octopus_interfaces::read_artifact_carrier_file_bounded(&path,limits.max_payload_bytes).map_err(|e| e.to_string()),
+        |current| {
+            let transitions = octopus_provider_run_authoring::checked_declared_run_advance(&evidence,&path,&before,current,after_seq,vec![writer.clone()])?;
+            if let Some((pinned, checkpoint)) = &input_checkpoint {
+                octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(pinned,current,checkpoint)?;
+            }
+            Ok(transitions)
+        },
+        || cancellation.is_cancelled(),
+    )?;
     if transitions.is_empty() {
         return Ok(latest);
     }
@@ -2190,4 +2385,113 @@ pub fn reconcile_checked_provider_advance(
         latest = Some(installed);
     }
     Ok(latest)
+}
+
+pub fn retained_continuation_formation(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    config: &CodeModeConfig,
+    input: &InterfaceInvocationEnvelope,
+    source: &Movement,
+) -> Result<WorkerEnvironmentFormation, String> {
+    let (_, root) = historical_continuation_call(ctx, input, source)?;
+    let context: ContextRecord = read_record(&root.join("context.json"))?;
+    let label = input.read_artifact_manifest().map_err(|e| e.to_string())?.label;
+    let witness_path = if label == "code_mode.frontier_ready" {
+        root.join(format!("{}.wake-admitted.json", read_ready(input)?.identity()?))
+    } else {
+        let (pending, suffix) = if let Some((_, key)) = application_locator(input)? {
+            let pending: PreparedCall = read_record(&root.join(format!("{key}.pending.json")))?;
+            pending.validate()?;
+            let suffix = if label == "operator.approval.response" { "decision-admitted" } else { "app-result-admitted" };
+            (pending, suffix)
+        } else {
+            (read_pending_result(&root, input, ResultCarrier::OriginalAdmitted)?.0, "admitted")
+        };
+        if pending.identity.context != context {
+            return Err("retained continuation changed its immutable pending context".into());
+        }
+        root.join(format!("{}.{suffix}.json", pending.digest))
+    };
+    let Endpoint::Interface(source_interface) = &source.from;
+    let witness: AdmittedCarrier = read_record(&witness_path)?;
+    if witness != result_witness(input, source_interface.clone(), source.seq.0)? {
+        return Err("retained continuation differs from its exact admitted carrier".into());
+    }
+    let formation = &context.identity.formation;
+    formation.validate().map_err(|e| e.to_string())?;
+    let runtime = input.runtime().map_err(|e| e.to_string())?;
+    let topology = config.resolve_owner_topology(input)?;
+    validate_admitted_coauthor(ctx, input, &topology)?;
+    let ResolvedContext::Persistent { artifact, payload, .. } = config.resolve_context(input)? else {
+        return Err("retained continuation has no admitted persistent context".into());
+    };
+    if context.generation != digest(&context.identity)?
+        || context.identity.config != *config
+        || context.identity.owner_topology.as_ref() != Some(&topology)
+        || context.identity.prelude_artifact != artifact
+        || context.identity.prelude_payload_hash != DescriptorHash::of_bytes(&payload).to_hex()
+        || formation.door_interface != runtime.interface || formation.run != runtime.run.as_str()
+        || formation.ee != runtime.ee.as_str() || formation.worker != runtime.worker
+        || octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &formation.worker_environment_id)? != root {
+        return Err("retained continuation differs from its immutable context and formation".into());
+    }
+    let mut selected = None;
+    for snapshot in octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir())
+        .snapshots().map_err(|e| e.to_string())? {
+        let record = snapshot.record;
+        if record.formation.worker_environment_id != formation.worker_environment_id { continue; }
+        if record.formation != *formation || source.seq.0 < record.opened_at_movement_seq {
+            return Err("retained continuation differs from its recorded formation".into());
+        }
+        if record.lifecycle == octopus_worker_env::WorkerEnvironmentLifecycle::Released
+            || root.join("retired.json").try_exists().map_err(|e| e.to_string())? {
+            return Err("retained continuation context was released".into());
+        }
+        if selected.replace(record.formation).is_some() {
+            return Err("retained continuation has ambiguous formed ownership".into());
+        }
+    }
+    selected.ok_or_else(|| "retained continuation has no exact recorded formation".into())
+}
+
+pub fn retained_output_formation(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    config: &CodeModeConfig,
+    input: &InterfaceInvocationEnvelope,
+    source_seq: u64,
+) -> Result<WorkerEnvironmentFormation, String> {
+    let runtime = input.runtime().map_err(|e| e.to_string())?;
+    let topology = config.resolve_owner_topology(input)?;
+    validate_admitted_coauthor(ctx, input, &topology)?;
+    let ResolvedContext::Persistent { artifact, payload, .. } = config.resolve_context(input)? else {
+        return Err("retained output has no admitted persistent context".into());
+    };
+    let mut selected = None;
+    for snapshot in octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir())
+        .snapshots().map_err(|e| e.to_string())? {
+        let record = snapshot.record;
+        let formation = record.formation;
+        if formation.door_interface != runtime.interface || formation.run != runtime.run.as_str()
+            || formation.ee != runtime.ee.as_str() || formation.worker != runtime.worker
+            || source_seq < record.opened_at_movement_seq || source_seq > record.last_activity_movement_seq {
+            continue;
+        }
+        let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &formation.worker_environment_id)?;
+        if !root.join("context.json").try_exists().map_err(|e| e.to_string())? { continue; }
+        let context: ContextRecord = read_record(&root.join("context.json"))?;
+        if context.identity.formation != formation || context.generation != digest(&context.identity)? {
+            return Err("retained output formation differs from its immutable context".into());
+        }
+        if context.identity.config != *config || context.identity.owner_topology.as_ref() != Some(&topology)
+            || context.identity.prelude_artifact != artifact
+            || context.identity.prelude_payload_hash != DescriptorHash::of_bytes(&payload).to_hex() {
+            continue;
+        }
+        if record.lifecycle == octopus_worker_env::WorkerEnvironmentLifecycle::Released
+            || root.join("retired.json").try_exists().map_err(|e| e.to_string())? {
+            return Err("retained output context was released".into());
+        }
+        if selected.replace(formation).is_some() { return Err("retained output has ambiguous formed ownership".into()); }
+    }
+    selected.ok_or_else(|| "retained output has no exact recorded formation".into())
 }

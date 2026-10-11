@@ -1,16 +1,56 @@
+use octopus_provider_run_authoring::JsonFormat;
 use super::*;
 use octopus_provider_run_authoring::{
     CheckedRunWriter, WriterRunBinding, separate_owner_writer_run, separate_writer_run,
 };
+
+mod schema;
+pub use schema::{OperatorWriterSchemaPlanRequest, plan_operator_writer_schema};
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorWriterRunPlanRequest {
+    pub run_records_root: PathBuf,
+    pub run_id: String,
+    pub expected_before_sha256: String,
+}
+
+pub fn plan_operator_writer_runs(
+    request: &OperatorWriterRunPlanRequest,
+) -> Result<Vec<PlannedClientWrite>, String> {
+    let root = require_absolute("run_records_root", &request.run_records_root)?;
+    safe_segment(&request.run_id, "run_id")?;
+    let path = root.join(format!("{}.json", request.run_id));
+    let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("writer target must be a regular Run record".into());
+    }
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    if sha256_hex(&bytes) != request.expected_before_sha256 {
+        return Err("writer target changed before planning".into());
+    }
+    let original = RunRecord::from_bytes(&bytes).map_err(|e| e.to_string())?;
+    if original.id.as_str() != request.run_id {
+        return Err("writer target identity does not match its path".into());
+    }
+    let existing: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let (content, mut writes) = wire_record_at_root(
+        root, &request.run_id, Some(&existing), pretty_json(&existing)?,
+    )?;
+    if serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())? != existing {
+        writes.push(PlannedClientWrite {
+            path, content, tag: format!("run:{}", request.run_id),
+            expected_before_hash: Some(request.expected_before_sha256.clone()),
+        });
+    }
+    Ok(writes)
+}
 
 pub(super) fn wire(
     request: &OperatorChatPlanRequest,
     identity: &PlannedIdentity,
     content: String,
 ) -> Result<(String, Vec<PlannedClientWrite>), String> {
-    if identity.voice.is_none() {
-        return Ok((content, Vec::new()));
-    }
     wire_record(
         request,
         &identity.run_id,
@@ -30,13 +70,22 @@ pub(super) fn wire_record(
         request
             .run_records_root
             .as_deref()
-            .ok_or("Home writer Runs require their declared run_records_root")?,
+            .ok_or("client writer Runs require their declared run_records_root")?,
     )?;
+    wire_record_at_root(root, run_id, existing, content)
+}
+
+fn wire_record_at_root(
+    root: &Path,
+    run_id: &str,
+    existing: Option<&serde_json::Value>,
+    content: String,
+) -> Result<(String, Vec<PlannedClientWrite>), String> {
     let mut record: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
     let owners = record["interface_state"]
         .as_object()
-        .ok_or("Home state absent")?
+        .ok_or("client Run state absent")?
         .iter()
         .filter(|(_, state)| {
             state.get("run_authoring_binding").is_some() || state.get("input_intake").is_some()
@@ -99,24 +148,24 @@ pub(super) fn wire_record(
                             != initial)
                 {
                     return Err(
-                        "Home writer Run collides with an independently authored record".into(),
+                        "client writer Run collides with an independently authored record".into(),
                     );
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && prior.is_none() => writes
                 .push(PlannedClientWrite {
                     path,
-                    content: pretty_json(&initial)?,
+                    content: String::from_utf8(JsonFormat::Compact.encode(&initial)?).map_err(|error| error.to_string())?,
                     tag: format!("run:{id}"),
                     expected_before_hash: None,
                 }),
             Err(error) => {
                 return Err(format!(
-                    "Home writer Run '{}' cannot be preserved: {error}",
+                    "client writer Run '{}' cannot be preserved: {error}",
                     path.display()
                 ));
             }
         }
     }
-    Ok((pretty_json(&record)?, writes))
+    Ok((String::from_utf8(JsonFormat::Compact.encode(&record)?).map_err(|error| error.to_string())?, writes))
 }

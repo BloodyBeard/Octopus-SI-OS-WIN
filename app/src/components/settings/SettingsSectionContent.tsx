@@ -4,6 +4,7 @@ import type { OctopusClientAccessProfile } from "../../electron";
 import type { ClientExtensionRegistryState } from "../../extensions/types";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import { AppearanceSection } from "./AppearanceSection";
+import { AccountSettingsSection } from "./AccountSettingsSection";
 import { ExtensionsSection } from "./ExtensionsSection";
 import {
   AboutSection,
@@ -32,6 +33,7 @@ export type SettingsSectionContext = {
 
 const SETTINGS_SECTION_CONTENT: Record<SettingsSectionId, (context: SettingsSectionContext) => ReactNode> = {
   general: ({ accessProfile, surfaces }) => <GeneralSection accessProfile={accessProfile} surfaces={surfaces} />,
+  account: () => <AccountSettingsSection />,
   appearance: () => <div {...settingsTargetProps("appearance.theme")}><AppearanceSection /></div>,
   "voice-audio": ({ accessProfile }) => <VoiceAudioSection accessProfile={accessProfile} />,
   gestures: ({ accessProfile }) => <GesturesSection accessProfile={accessProfile} />,

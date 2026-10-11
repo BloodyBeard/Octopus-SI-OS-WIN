@@ -53,6 +53,34 @@ const toolActivities = functions(activitySource, ["completedGroupSummary", "push
 });
 const progress = functions(activitySource, ["activityProgressSurface"], { record });
 const listSource = read("src/components/chat/ChatMessageList.tsx");
+const turns = functions(listSource, ["groupIntoTurns"], { eventRecord: record, eventString: text });
+{
+  const user = { id: "first", role: "user" };
+  const queued = { id: "queued", role: "user" };
+  const started = { id: "call", role: "assistant", runId: "run", interfaceId: "client",
+    eventKind: "dynamic_tool", eventData: { tool: "code_mode.run", call_id: "exact-call", status: "started",
+      thread_id: "thread", turn_id: "native-turn",
+      _activity_origin: { interface_id: "provider" }, arguments: { script: "broken();" } } };
+  const failed = { ...started, id: "result", eventData: { ...started.eventData, status: "failed", ok: false,
+    arguments: undefined, error: { message: "recorded native failure" } } };
+  assert.deepEqual(turns.groupIntoTurns([user, started, queued, failed]), [[user, started, failed], [queued]]);
+  const entry = { family: "dynamic_tool", messages: [started, failed] };
+  assert.equal(activities.entryIsActive(entry), false);
+  assert.deepEqual(toolActivities.activityDetailMessages(entry)[0].eventData.arguments, started.eventData.arguments);
+  assert.deepEqual(turns.groupIntoTurns([user, started, queued, failed], false), [[user, started], [queued, failed]]);
+  const closure = { ...failed, id: "closed", eventKind: "interrupted_result", terminal: true,
+    eventData: { _activity_origin: started.eventData._activity_origin, correlation_id: "exact-call",
+      thread_id: "thread", turn_id: "native-turn", returned_to_model: false, turn_interrupted: true } };
+  assert.deepEqual(turns.groupIntoTurns([user, started, queued, failed, closure]), [[user, started, failed, closure], [queued]]);
+  const foreignClosure = { ...closure, eventData: { ...closure.eventData, turn_id: "other" } };
+  assert.deepEqual(turns.groupIntoTurns([user, started, queued, foreignClosure]), [[user, started], [queued, foreignClosure]]);
+  for (const foreign of [{ ...failed, runId: "other" }, { ...failed, interfaceId: "other" },
+    { ...failed, eventData: { ...failed.eventData, _activity_origin: { interface_id: "other" } } },
+    { ...failed, eventData: { ...failed.eventData, call_id: "other" } },
+    { ...failed, eventData: { ...failed.eventData, tool: "other" } }]) {
+    assert.deepEqual(turns.groupIntoTurns([user, started, queued, foreign]), [[user, started], [queued, foreign]]);
+  }
+}
 const uiDependencies = {
   ...React, ...model, useShouldReduceMotion: () => true,
   motion: { div: ({ children, className, ...props }) => React.createElement("div", { className, "aria-hidden": props["aria-hidden"] }, children) },
@@ -62,7 +90,7 @@ const uiDependencies = {
   eventArray: (value) => Array.isArray(value) ? value : [], eventString: text,
 };
 const ui = functions(listSource, ["CommandActivity", "normalizeTerminalControl", "formatActivityElapsed"], uiDependencies);
-const commandUi = functions(listSource, ["ExecActivity", "DynamicToolExecActivity", "dynamicToolExecMessage", "shellCommandText", "shellArgument", "activityPathLabel"], {
+const commandUi = functions(listSource, ["ExecActivity", "DynamicToolExecActivity", "dynamicToolExecMessage", "suppliedShellCommand", "shellCommandText", "shellArgument", "activityPathLabel"], {
   ...uiDependencies, ...toolPresentation, eventRecord: record, CommandActivity: ui.CommandActivity,
   MessageTooltip: ({ children }) => children,
 });
@@ -85,6 +113,53 @@ const dynamic = (body, extra = {}) => ({ ...native(undefined), eventKind: "dynam
 const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandActivity, { command: "arbitrary executable", message }));
 
 (async () => {
+  for (const eventData of [
+    { command: "printf 'hello world'" },
+    { arguments: { cmd: "printf 'hello world'" } },
+    { arguments: { argv: ["printf", "hello world"] } },
+    { parsed_cmd: { cmd: "printf 'hello world'" } },
+  ]) {
+    const mapped = commandUi.dynamicToolExecMessage({ ...dynamic({}), text: "Run", eventData });
+    assert.equal(mapped.eventData.command, "printf 'hello world'");
+    const html = renderToStaticMarkup(React.createElement(commandUi.ExecActivity, { message: mapped }));
+    assert.match(html, /hello world/);
+    assert.doesNotMatch(html, /\$ Run/);
+  }
+  const absent = commandUi.dynamicToolExecMessage({ ...dynamic({}), text: "Run" });
+  assert.equal(absent.eventData.command, "");
+  const absentHtml = renderToStaticMarkup(React.createElement(commandUi.ExecActivity, { message: absent }));
+  assert.match(absentHtml, /Command unavailable/);
+  assert.doesNotMatch(absentHtml, /Copy command|\$ Run/);
+  const script = "const d = await prelude.cua.documentation(); return d;";
+  const codeMessage = commandUi.dynamicToolExecMessage({ ...dynamic({}), text: "Run", eventData: {
+    tool: "code_mode.run__42450f1bf38856e1fb9743bf91929c06", status: "started", arguments: { script, yield_time_ms: 1000 },
+  } });
+  assert.equal(codeMessage.eventData.command, script);
+  const codeHtml = renderToStaticMarkup(React.createElement(commandUi.ExecActivity, { message: codeMessage }));
+  assert.match(codeHtml, /Running code/);
+  assert.match(codeHtml, /prelude.cua.documentation/);
+  assert.match(codeHtml, /Copy code/);
+  assert.doesNotMatch(codeHtml, />Shell<|\$ Run|\$ const/);
+  assert.equal(toolPresentation.dynamicToolPresentation(codeMessage, {}).target, script);
+  assert.equal(toolActivities.activeActivityLabel({ family: "dynamic_tool", messages: [codeMessage] }, {}), `Running ${script}`);
+  for (const errorText of ["SyntaxError: Illegal return statement", "TypeError: prelude.cua.documentation is not a function"]) {
+    const result = commandUi.dynamicToolExecMessage({ ...codeMessage, eventData: { ...codeMessage.eventData,
+      status: "completed", ok: true, body: { cell_id: "1", state: "completed", output: [], error_text: errorText } } });
+    assert.equal(model.commandActivityModel(result).phase, "failed");
+    assert.equal(activities.activityTone([result]), "danger");
+    assert.equal(activities.activityIsActive(result), false);
+    const html = renderToStaticMarkup(React.createElement(commandUi.ExecActivity, { message: result }));
+    assert.match(html, /Failed/);
+    assert.ok(html.includes(errorText));
+    assert.doesNotMatch(html, /Outcome unknown|Running code/);
+  }
+  const codeResult = dynamic({ cell_id: "2", state: "completed", output: [{ type: "text", text: "NEXT_CODE_OK" }] });
+  assert.equal(model.commandActivityModel(codeResult).phase, "exited");
+  assert.deepEqual(model.commandActivityModel(codeResult).sections, [{ stream: "", text: "NEXT_CODE_OK" }]);
+  const codeYield = dynamic({ cell_id: "3", state: "yielded", output: [] });
+  assert.equal(model.commandActivityModel(codeYield).phase, "running");
+  assert.equal(model.commandActivityModel(codeYield).yielded, true);
+  assert.equal(activities.activityIsActive(codeYield), true);
   const begin = { id: "start", eventKind: "dynamic_tool", eventData: {
     call_id: "command-call", status: "started", tool: "workspace.build__0123456789abcdef0123456789abcdef",
     arguments: { command: ["/bin/sh", "-c", "pwd"] },

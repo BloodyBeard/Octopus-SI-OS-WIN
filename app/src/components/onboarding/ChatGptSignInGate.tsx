@@ -1,112 +1,72 @@
-import { useEffect, useRef, useState } from "react";
-import { recordChatgptSignIn } from "../../onboarding/chatgptSignIn";
-import { appToast } from "../../toasts";
+import { useLayoutEffect, useRef, useState } from "react";
+import { useChatgptAccount } from "../../account/useChatgptAccount";
 import { OctopusLoadingState } from "../OctopusLoadingLogo";
 import openaiLogo from "../../assets/openai-logo.svg?raw";
+import "../account/account.css";
 
-type Phase = "checking" | "idle" | "waiting";
-
-export function ChatGptSignInGate({ onDone }: { onDone: () => void }) {
-  const [phase, setPhase] = useState<Phase>("checking");
-  const loginId = useRef("");
-  const finished = useRef(false);
-
-  function finish() {
-    if (finished.current) return;
-    finished.current = true;
-    recordChatgptSignIn();
-    onDone();
-  }
-
-  useEffect(() => {
-    let active = true;
-    void window.octopusTransport!.chatgptAccount().then((account) => {
-      if (!active) return;
-      if (account.signedIn) finish();
-      else setPhase("idle");
-    }).catch((error) => {
-      if (!active) return;
-      appToast.danger(error instanceof Error ? error.message : String(error));
-      setPhase("idle");
-    });
-    return () => { active = false; };
-  }, []);
-
-  useEffect(() => {
-    if (phase !== "waiting") return;
-    const timer = window.setInterval(() => {
-      const transport = window.octopusTransport!;
-      void transport.chatgptSignInStatus(loginId.current).then(async (status) => {
-        if (status.state === "pending") return;
-        window.clearInterval(timer);
-        if (status.state === "completed" && (await transport.chatgptAccount()).signedIn) {
-          finish();
-          return;
-        }
-        appToast.danger(status.error || "ChatGPT sign-in did not complete.");
-        setPhase("idle");
-      }).catch((error) => {
-        window.clearInterval(timer);
-        appToast.danger(error instanceof Error ? error.message : String(error));
-        setPhase("idle");
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [phase]);
-
-  async function signIn() {
-    if (phase !== "idle") return;
+export function ChatGptSignInGate() {
+  const state = useChatgptAccount();
+  const waiting = state.action === "waiting" || state.action === "cancelling";
+  const busy = state.action !== "idle";
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const copyAttempt = useRef({ url: state.signInUrl, generation: 0, mounted: false });
+  useLayoutEffect(() => {
+    const attempt = copyAttempt.current;
+    attempt.url = state.signInUrl;
+    attempt.generation += 1;
+    attempt.mounted = true;
+    setCopied(false);
+    setCopyError("");
+    return () => { attempt.mounted = false; attempt.generation += 1; };
+  }, [state.signInUrl]);
+  async function copySignInLink() {
+    const url = state.signInUrl;
+    if (!url || !copyAttempt.current.mounted) return;
+    const generation = ++copyAttempt.current.generation;
+    const isCurrent = () => copyAttempt.current.mounted && copyAttempt.current.url === url && copyAttempt.current.generation === generation;
     try {
-      loginId.current = (await window.octopusTransport!.chatgptSignInStart()).loginId;
-      setPhase("waiting");
+      await navigator.clipboard.writeText(url);
+      if (!isCurrent()) return;
+      setCopied(true);
+      setCopyError("");
     } catch (error) {
-      appToast.danger(error instanceof Error ? error.message : String(error));
+      if (!isCurrent()) return;
+      setCopied(false);
+      setCopyError(error instanceof Error ? error.message : String(error));
     }
   }
+  if (state.loading && !state.account) return <main className="welcome">
+    <OctopusLoadingState className="app-loading-state" label="Checking your ChatGPT account" />
+  </main>;
 
-  function cancel() {
-    void window.octopusTransport!.chatgptSignInCancel(loginId.current).catch(() => undefined);
-    setPhase("idle");
-  }
-
-  if (phase === "checking") {
-    return (
-      <main className="welcome">
-        <OctopusLoadingState className="app-loading-state" label="Opening Octopus" />
-      </main>
-    );
-  }
-
-  return (
-    <main className="welcome" aria-labelledby="welcome-title">
-      <header className="welcome-top">
-        <div className="welcome-brand">
-          <img className="welcome-brand-mark" src="./octopus-logo.png" alt="" />
-          <span className="welcome-brand-name">Octopus&nbsp;OS</span>
-        </div>
-      </header>
-      <div className="welcome-stage">
-        <section className="welcome-centered">
-          <span className="welcome-tag">Account</span>
-          <h1 id="welcome-title" className="welcome-title">
-            {phase === "waiting" ? "Finish signing in" : "Sign in with ChatGPT"}
-          </h1>
-          <p className="welcome-body">
-            {phase === "waiting"
-              ? "Complete sign-in in your browser. Octopus continues as soon as your account is confirmed."
-              : "Octopus runs on your ChatGPT account. No API key is needed."}
-          </p>
-          <div className="welcome-support">
-            <button className="welcome-next welcome-signin" type="button" onClick={() => void signIn()} disabled={phase === "waiting"}>
-              <span aria-hidden="true" className="welcome-signin-mark" dangerouslySetInnerHTML={{ __html: openaiLogo }} />
-              {phase === "waiting" ? "Waiting for browser…" : "Continue with ChatGPT"}
-            </button>
-            {phase === "waiting" ? (
-              <button className="welcome-back" type="button" onClick={cancel}>Cancel</button>
-            ) : null}
-          </div>
-        </section>
+  const error = state.error || state.signInStatusError || copyError;
+  return <main className="chatgpt-signin" data-state={state.action} aria-labelledby="chatgpt-signin-title">
+    <header className="welcome-top chatgpt-signin-brand">
+      <div className="welcome-brand"><img className="welcome-brand-mark" src="./octopus-logo.png" alt="" /><span className="welcome-brand-name">Octopus&nbsp;OS</span></div>
+    </header>
+    <section className="chatgpt-signin-panel">
+      <div className="chatgpt-signin-heading">
+        <span className="chatgpt-signin-logo" aria-hidden="true" dangerouslySetInnerHTML={{ __html: openaiLogo }} />
+        <h1 id="chatgpt-signin-title" className={waiting ? "sr-only" : "chatgpt-signin-title"}>Sign in to ChatGPT</h1>
+        {waiting ? <p className="chatgpt-signin-body">Continue signing in with your browser</p> : null}
       </div>
-    </main>
-  );
+      {!waiting && (state.error || state.account?.authType === "apiKey" || state.account?.authType === "amazonBedrock") ? <p className="chatgpt-signin-body">
+        {state.account?.authType === "apiKey" ? "This native credential location uses an API key. Sign in with ChatGPT to continue."
+          : state.account?.authType === "amazonBedrock" ? "This native credential location uses Amazon Bedrock. Sign in with ChatGPT to continue."
+            : "Your native account could not be checked. Retry the account check or sign in with ChatGPT."}
+      </p> : null}
+      {error ? <p className="chatgpt-signin-body account-error" role="alert">{error}</p> : null}
+      <div className="chatgpt-signin-actions">
+        {waiting ? <>
+          {state.signInStatusError ? <button className="chatgpt-signin-button" type="button" onClick={() => void state.retrySignInStatus?.()}>Retry sign-in check</button> : null}
+          <button className="chatgpt-signin-button is-secondary" type="button" disabled={state.action === "cancelling"} onClick={() => void state.cancel?.()}>{state.action === "cancelling" ? "Cancelling…" : "Cancel sign-in"}</button>
+          <div className="chatgpt-signin-copy-row"><span>Browser didn’t open?</span><button className="chatgpt-signin-copy" type="button" disabled={!state.signInUrl || state.action === "cancelling"} onClick={() => void copySignInLink()}>{copied ? "Copied" : "Copy sign-in link"}</button></div>
+        </> : <>
+          <button className="chatgpt-signin-button" type="button" onClick={() => void state.signIn?.()} disabled={busy || state.loading || !state.signIn}>{state.action === "starting" ? "Opening browser…" : "Continue with ChatGPT"}</button>
+          {state.error ? <button className="chatgpt-signin-button is-secondary" type="button" disabled={busy || state.loading || !state.refresh} onClick={() => void state.refresh?.()}>Retry account check</button> : null}
+        </>}
+      </div>
+    </section>
+  </main>;
 }

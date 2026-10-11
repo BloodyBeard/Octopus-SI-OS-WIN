@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { providerServiceTiers, providerServiceTierAvailable } from "../chat/chatWorkspaceCapabilities";
 import type { OctopusProviderInterface } from "../../electron";
 import {
   compileWorkspaceSetupDraft,
@@ -106,12 +107,12 @@ export function WorkspaceSetupOverlay({
   const applying = draft.step === "applying";
   const model = provider?.models.find((candidate) => candidate.model === draft.providerModel && candidate.showInPicker);
   const canContinue = stepIsComplete(draft, activeStep, catalogLoading, catalog.length)
-    && (!["capabilities", "review"].includes(activeStep) || Boolean(model));
+    && (!["capabilities", "review"].includes(activeStep) || Boolean(model && provider && providerServiceTierAvailable(provider, model.model, draft.serviceTier ?? "default")));
 
   useEffect(() => {
     if (draft.providerModel !== undefined || draft.step === "applying" || !provider) return;
     const selected = provider.models.find((candidate) => candidate.model === provider.model && candidate.showInPicker);
-    if (selected) onChange({ ...draft, providerModel: selected.model, reasoningEffort: provider.reasoningEffort ?? "" });
+    if (selected) onChange({ ...draft, providerModel: selected.model, reasoningEffort: provider.reasoningEffort ?? "", serviceTier: provider.serviceTier || selected.defaultServiceTier || "default" });
   }, [draft, provider, onChange]);
 
   useEffect(() => {
@@ -366,6 +367,11 @@ function CapabilitiesStep({
             {model.supportedReasoningEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
           </select>
         ) : null}
+        {provider && model ? <select aria-label="Speed for Home" className="setup-select"
+          value={draft.serviceTier || "default"} onChange={(event) => onChange({ ...draft, serviceTier: event.target.value })}>
+          {providerServiceTierAvailable(provider, model.model, draft.serviceTier ?? "default") ? null : <option value={draft.serviceTier} disabled>{draft.serviceTier} · unavailable</option>}
+          {providerServiceTiers(provider, model.model).map((tier) => <option key={tier.id} value={tier.id}>{tier.name}</option>)}
+        </select> : null}
       </div>
       {error ? <InlineError detail={error} title="Some local packages could not be read" /> : null}
       {catalog.map((capability) => {

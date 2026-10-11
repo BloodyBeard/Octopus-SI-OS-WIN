@@ -35,7 +35,16 @@
           "gpt-5.6-luna",
           "gpt-5.6-sol",
           "gpt-5.6-terra",
-          "gpt-6-astra"
+          "gpt-6-astra",
+          "gpt-6.1-sol",
+          "chatgpt-web/gpt-6-sol",
+          "chatgpt-web/gpt-5.6-sol",
+          "chatgpt-web/gpt-5.6-pro",
+          "chatgpt-web/gpt-6-pro",
+          "chatgpt-web/gpt-6-sol-instant",
+          "chatgpt-web/gpt-5.6-sol-instant",
+          "gpt-6-sol",
+          "gpt-6-luna"
         ]
       }
     }
@@ -54,6 +63,7 @@
       "worker_instruction_artifacts": [],
       "model_tool_names": {},
       "web_search": "live",
+      "native_mcp_resource_discovery": true,
       "input_intake": {
         "template_interface_id": "system_service_input"
       },
@@ -309,6 +319,123 @@
             }
           ],
           "show_in_picker": true
+        },
+        {
+          "model": "gpt-6.1-sol",
+          "display_name": "GPT-6.1-Sol",
+          "description": "Latest workhorse model for coding and everyday work.",
+          "default_reasoning_effort": "low",
+          "supported_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "show_in_picker": true,
+          "is_default": true
+        },
+        {
+          "model": "chatgpt-web/gpt-6-sol",
+          "display_name": "GPT-6 Sol (Web)",
+          "description": "GPT-6 Sol with Medium, High, or account-supported Extra High. Bigger Context supports up to 240,000 tokens on Pro; other accounts use standard context.",
+          "default_reasoning_effort": "high",
+          "supported_reasoning_efforts": [
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "chatgpt-web/gpt-5.6-sol",
+          "display_name": "GPT-5.6 Sol (Web)",
+          "description": "GPT-5.6 Sol through ChatGPT with Medium, High, or account-supported Extra High reasoning.",
+          "default_reasoning_effort": "high",
+          "supported_reasoning_efforts": [
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "chatgpt-web/gpt-5.6-pro",
+          "display_name": "GPT-5.6 Pro (Web)",
+          "description": "GPT-5.6 Pro through ChatGPT. The fixed Max effort selects Pro.",
+          "default_reasoning_effort": "max",
+          "supported_reasoning_efforts": [
+            "max"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "chatgpt-web/gpt-6-pro",
+          "display_name": "GPT-6 Pro (Web)",
+          "description": "GPT-6 Pro through ChatGPT. The fixed Max effort selects Pro.",
+          "default_reasoning_effort": "max",
+          "supported_reasoning_efforts": [
+            "max"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "chatgpt-web/gpt-6-sol-instant",
+          "display_name": "GPT-6 Sol Instant (Web)",
+          "description": "GPT-6 Sol Instant through ChatGPT. Uses standard context even when Bigger Context is enabled.",
+          "default_reasoning_effort": "low",
+          "supported_reasoning_efforts": [
+            "low"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "chatgpt-web/gpt-5.6-sol-instant",
+          "display_name": "GPT-5.6 Sol Instant (Web)",
+          "description": "GPT-5.6 Sol Instant through ChatGPT, with its own context and compaction budget.",
+          "default_reasoning_effort": "low",
+          "supported_reasoning_efforts": [
+            "low"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "gpt-6-sol",
+          "display_name": "GPT-6-Sol",
+          "description": "Previous generation workhorse model.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "show_in_picker": true,
+          "is_default": false
+        },
+        {
+          "model": "gpt-6-luna",
+          "display_name": "GPT-6-Luna",
+          "description": "Fast and affordable model for easier tasks.",
+          "default_reasoning_effort": "medium",
+          "supported_reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "show_in_picker": true,
+          "is_default": false
         }
       ],
       "model_catalog_operation": {

@@ -2,7 +2,10 @@
 
 The research preview runs locally on macOS. You build the desktop app from this
 repository and finish setup inside it. Codex is the first supported provider,
-and sign-in is **Sign in with ChatGPT** in the app - no terminal login.
+and sign-in is **Sign in with ChatGPT** in the app - no separate provider CLI login.
+
+For the terminal client and its independent build command, see
+[Terminal client](cli.md). Both clients use the same Home and runtime.
 
 ## Prerequisites
 

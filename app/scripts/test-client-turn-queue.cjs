@@ -508,6 +508,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   let sendShortcut = "enter";
   const composer = load("src/components/chat/ChatComposer.tsx", {
     "../IconGlyphs": { Glyph: empty }, "./ProviderModelPicker": { ProviderModelPicker: empty },
+    "./ChatAttachmentCard": { ChatAttachmentStrip: empty },
     "../icon-glyphs/geometric-primitives": load("src/components/icon-glyphs/geometric-primitives.tsx"),
     "./useLocalDictation": { useLocalDictation: () => ({}) }, "../../toasts": { appToast: {} },
     "../../design-system/components": { ...menuComponents, OcDialog: empty },

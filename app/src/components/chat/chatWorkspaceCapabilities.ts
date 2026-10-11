@@ -11,6 +11,7 @@ export type NewTaskDefaults = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
 };
 
 export function providerModels(provider: OctopusProviderInterface): OctopusProviderModel[] {
@@ -19,6 +20,7 @@ export function providerModels(provider: OctopusProviderInterface): OctopusProvi
 
 export function providerDefaultModel(provider: OctopusProviderInterface): OctopusProviderModel | null {
   const models = providerModels(provider);
+  if (provider.model) return models.find((model) => model.model === provider.model) ?? null;
   return models.find((model) => model.model === provider.model)
     ?? models.find((model) => model.isDefault)
     ?? models[0]
@@ -46,6 +48,21 @@ export function providerReasoningEfforts(
       ? [selected.defaultReasoningEffort]
       : [];
   return [...new Set(configured)];
+}
+
+export function providerServiceTiers(provider: OctopusProviderInterface, model: string) {
+  return [
+    { id: "default", name: "Standard", description: "Default speed" },
+    ...(providerSelectedModel(provider, model)?.serviceTiers ?? []),
+  ];
+}
+
+export function providerServiceTierAvailable(provider: OctopusProviderInterface, model: string, tier: string) {
+  return providerServiceTiers(provider, model).some((option) => option.id === providerSelectedServiceTier(provider, model, tier));
+}
+
+export function providerSelectedServiceTier(provider: OctopusProviderInterface, model: string, tier = "") {
+  return tier || provider.serviceTier || providerSelectedModel(provider, model)?.defaultServiceTier || "default";
 }
 
 export function providerDefaultReasoningEffort(
@@ -81,7 +98,7 @@ export function providerForExecutionContext(
 
 export function resolveNewTaskDefaults(
   runs: readonly ChatRun[],
-  settings: { providerInterfaceId: string; providerModel: string; reasoningEffort: string },
+  settings: { providerInterfaceId: string; providerModel: string; reasoningEffort: string; serviceTier?: string },
 ): NewTaskDefaults | null {
   const homes = runs.filter((run) => run.clientSurfaceRole === "home");
   if (homes.length !== 1) return null;
@@ -106,6 +123,7 @@ export function resolveNewTaskDefaults(
     providerModel: modelOverride || (sameProvider ? home.providerModel : ""),
     reasoningEffort: reasoningOverride
       || (sameProvider ? home.reasoningEffort : ""),
+    serviceTier: settings.serviceTier || (sameProvider ? home.serviceTier : "") || "",
   };
 }
 
@@ -201,6 +219,21 @@ export function taskCapabilitySelectionFailure(
     }
   }
   return "";
+}
+
+export function taskFullAccessSelectionFailure(
+  context: ChatExecutionContext | null,
+  worker: ChatWorkerChoice | null,
+  applicationIds: readonly string[],
+  driverNames: readonly string[],
+): string {
+  if (!context || !worker) return "Select an Agent before enabling full access.";
+  try {
+    executionContextTaskCapabilities([context], context.eeId, worker.id, applicationIds, driverNames, "full_access");
+    return "";
+  } catch (failure) {
+    return failure instanceof Error ? failure.message : String(failure);
+  }
 }
 
 export function executionContextTaskCapabilities(

@@ -549,22 +549,20 @@ impl InterfaceLiftContext {
         let artifact = match artifact {
             crate::SystemInterfaceEmissionArtifact::Materialized(artifact) => {
                 let limits = self.required_host_io_limits()?;
-                let staged = artifact
+                let mut roots = vec![self.interface_var_dir()];
+                if let Some(root) = self.root_slots.get("interface_hand_in_root") {
+                    roots.push(root.join(self.interface.as_str()));
+                }
+                let private = capture_spawned_artifact(artifact.manifest_path(), &roots, limits)?;
+                let original = artifact
                     .read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
                     .map_err(|error| format!("interface output carrier capture failed: {error}"))?;
-                let durable = InterfaceArtifactFile::write(
-                    self.interface_var_dir().join("emitted"),
-                    &staged.manifest.label,
-                    &staged.payload_bytes,
-                )
-                .map_err(|error| format!("interface output carrier could not be kept: {error}"))?;
-                crate::SystemInterfaceEmissionArtifact::Materialized(
-                    durable
-                        .capture_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
-                        .map_err(|error| {
-                            format!("interface output carrier capture failed: {error}")
-                        })?,
-                )
+                let captured = private.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+                    .map_err(|error| error.to_string())?;
+                if original.manifest_bytes != captured.manifest_bytes || original.payload_bytes != captured.payload_bytes {
+                    return Err("interface emission differs from its exact private output files".into());
+                }
+                crate::SystemInterfaceEmissionArtifact::Materialized(private)
             }
             artifact @ crate::SystemInterfaceEmissionArtifact::Reference(_) => artifact,
         };
@@ -1991,13 +1989,24 @@ impl LedgerTailReader {
         if maximum_movements == 0 {
             return Ok(Vec::new());
         }
-        self.read_from(self.pending_cursor, maximum_movements)
+        self.read_from(self.pending_cursor, maximum_movements, false)
+    }
+
+    pub fn read_new_uncommitted_with_refusals_limit(
+        &mut self,
+        maximum_movements: usize,
+    ) -> Result<Vec<OwnOutboundMovement>, String> {
+        if maximum_movements == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_from(self.pending_cursor, maximum_movements, true)
     }
 
     fn read_from(
         &mut self,
         start: TailCursor,
         maximum_movements: usize,
+        include_refusals: bool,
     ) -> Result<Vec<OwnOutboundMovement>, String> {
         let file = match std::fs::File::open(&self.movements_path) {
             Ok(file) => file,
@@ -2102,7 +2111,10 @@ impl LedgerTailReader {
             let addressed_here = route.kind == MovementKind::InterfaceOutbound
                 && matches!(&route.from, Endpoint::Interface(_))
                 && matches!(&route.to, Endpoint::Interface(target) if target == &self.interface);
-            if !addressed_here {
+            let refused_here = include_refusals
+                && route.kind == MovementKind::DeliveryRefused
+                && matches!(&route.from, Endpoint::Interface(source) if source == &self.interface);
+            if !addressed_here && !refused_here {
                 continue;
             }
             let movement = self
@@ -2256,11 +2268,19 @@ impl LedgerTailReader {
         &self,
         own: &OwnOutboundMovement,
     ) -> Result<InterfaceInvocationEnvelope, String> {
-        let metadata = own.metadata()?;
-        let artifact = own.movement.artifact.clone().ok_or_else(|| {
+        own.metadata()?;
+        self.envelope_for_movement(&own.movement)
+    }
+
+    pub fn envelope_for_movement(
+        &self,
+        movement: &Movement,
+    ) -> Result<InterfaceInvocationEnvelope, String> {
+        let metadata = strict_interface_outbound_metadata(movement, &self.interface)?;
+        let artifact = movement.artifact.clone().ok_or_else(|| {
             format!(
                 "outbound movement seq {} for interface '{}' carries no artifact",
-                own.movement.seq.0,
+                movement.seq.0,
                 self.interface.as_str()
             )
         })?;
@@ -3147,6 +3167,57 @@ mod tests {
         assert_eq!(payload["ok"], false);
         assert_eq!(payload["error"]["code"], "execution_refused");
         assert_eq!(payload["error"]["message"], "execution refused");
+    }
+
+    #[tokio::test]
+    async fn materialized_emissions_keep_only_exact_private_carriers() {
+        let root = tempfile::tempdir().unwrap();
+        let var = root.path().join("var");
+        let hand_in = root.path().join("hand-in");
+        let (arrivals, _) = tokio::sync::mpsc::channel(1);
+        let limits = InterfaceHostIoLimits {
+            max_control_frame_bytes: 65536, max_stderr_bytes: 65536,
+            max_manifest_bytes: 65536, max_payload_bytes: 65536,
+        };
+        let mut ctx = InterfaceLiftContext::unprivileged(
+            InterfaceId::new("door"), root.path().join("interface"), None, var.clone(),
+            root.path().join("movements.jsonl"), root.path().join("blobs"),
+            root.path().join("ledger-index.sqlite"),
+            BTreeMap::from([("interface_hand_in_root".into(), hand_in.clone())]),
+            arrivals, CancellationToken::new(),
+        );
+        ctx.host_io_limits = Some(limits);
+        let (emissions, mut received) = tokio::sync::mpsc::channel(1);
+        ctx.emissions = emissions;
+        for output in [var.join(".tool-process-host-state/generations/g/state/invocations/1/artifact/emitted"),
+            var.join(".tool-process-host-state/worker-environment-state/w/authoring-artifacts"),
+            hand_in.join("door")]
+        {
+            let artifact = InterfaceArtifactFile::write(output, "test.output", b"payload").unwrap();
+            let original = artifact.manifest_path().to_path_buf();
+            let send = ctx.hand_system_emission(SystemInterfaceEmissionArtifact::Materialized(artifact), 17, InterfaceId::new("target"));
+            let host = async {
+                let emission = received.recv().await.unwrap();
+                let (SystemInterfaceEmissionArtifact::Materialized(artifact), seq, target, verdict) = emission.into_parts()
+                    else { panic!("materialized emission changed kind") };
+                assert_eq!(seq, 17); assert_eq!(target.as_str(), "target");
+                assert_eq!(artifact.manifest_path(), original);
+                let recaptured = super::capture_spawned_artifact(artifact.manifest_path(), &[var.clone(), hand_in.join("door")], limits).unwrap();
+                assert_eq!(recaptured.read_payload_bytes().unwrap(), b"payload");
+                verdict.send(DeliveryVerdict::Admitted { seq: 18 }).unwrap();
+            };
+            let (verdict, ()) = tokio::join!(send, host);
+            assert!(matches!(verdict.unwrap(), DeliveryVerdict::Admitted { seq: 18 }));
+        }
+        assert!(!var.join("emitted").exists());
+        let outside = InterfaceArtifactFile::write(root.path().join("blobs"), "outside", b"payload").unwrap();
+        assert!(ctx.hand_system_emission(SystemInterfaceEmissionArtifact::Materialized(outside.clone()), 17, InterfaceId::new("target")).await.is_err());
+        let manifest = std::fs::read(outside.manifest_path()).unwrap();
+        let alias = InterfaceArtifactFile::store_manifest_bounded(var.join("alias"), &manifest, 65536, 65536).unwrap();
+        assert!(ctx.hand_system_emission(SystemInterfaceEmissionArtifact::Materialized(alias), 17, InterfaceId::new("target")).await.is_err());
+        let private = InterfaceArtifactFile::write(var.join("private"), "private", b"payload").unwrap()
+            .capture_bounded(65536, 65536).unwrap().rewrite_payload(b"changed capture").unwrap();
+        assert!(ctx.hand_system_emission(SystemInterfaceEmissionArtifact::Materialized(private), 17, InterfaceId::new("target")).await.is_err());
     }
 
     #[tokio::test]

@@ -39,6 +39,7 @@ struct Fixture {
 }
 
 impl CheckedRunEvidenceReader for &Fixture {
+    fn max_payload_bytes(&self) -> u64 { self.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         Ok(self.log.read_from(Seq(seq)).into_iter().next())
     }
@@ -94,6 +95,10 @@ impl Fixture {
             json!({"template_interface_id":"system_service_input"});
         std::fs::write(descriptor, serde_json::to_vec(&value).unwrap()).unwrap();
         let plan = plan_run_composition(&request).unwrap();
+        for write in &plan.descriptor_writes {
+            std::fs::create_dir_all(write.path.parent().unwrap()).unwrap();
+            std::fs::write(&write.path, &write.content).unwrap();
+        }
         let before = plan.run_write.content.into_bytes();
         let record = RunRecord::from_bytes(&before).unwrap();
         let intake = InterfaceId::new(&plan.receive_interface_id);
@@ -186,7 +191,7 @@ impl Fixture {
     }
 
     fn intake_edit(&self) -> CheckedRunEdit {
-        prepare_input(&self.config, self.path.clone(), &self.before, 0, self.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0)
+        prepare_input(&self.config, self.path.clone(), &self.before, 0, self.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0, 8 * 1024 * 1024)
             .unwrap()
             .edit
     }
@@ -313,8 +318,7 @@ impl Fixture {
             panic!("expected exact writer edge {from} -> {to}");
         };
         let payload = match result {
-            None => json!({"tool":writer.tool,"correlation_id":edit.correlation_id,"arguments":{
-                "path":edit.path,"patch":edit.patch,"expected_before_hash":edit.before_hash,"expected_after_hash":edit.after_hash}}),
+            None => json!({"tool":writer.tool,"correlation_id":edit.correlation_id,"arguments":edit.arguments().unwrap()}),
             Some(true) => {
                 json!({"tool":writer.tool,"label":label,"correlation_id":edit.correlation_id,"ok":true,"body":{
                 "result":"files_written","writes":[{"path":edit.path,"before_hash":edit.before_hash,"after_hash":edit.after_hash,"bytes":edit.content.len()}]}})
@@ -578,7 +582,7 @@ fn retained_input(f: &Fixture) -> octopus_provider_codex::intake_state::PendingI
         delivery: serde_json::from_value(json!({"schema_version":1,"source_movement_seq":source.seq.0,
             "source_artifact":source.artifact,"message":{"action":"followup","control_id":"retained-intent","text":"same original input"}})).unwrap(),
         source,
-        edit: Some(prepare_input(&f.config, f.path.clone(), &f.before, 0, f.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0).unwrap()),
+        edit: Some(prepare_input(&f.config, f.path.clone(), &f.before, 0, f.log.read_from(Seq(0))[0].artifact.as_ref().unwrap(), 0, 8 * 1024 * 1024).unwrap()),
     }
 }
 
@@ -635,7 +639,7 @@ fn intake_retries_both_negative_cas_boundaries_only_with_exact_call_and_independ
                 &recovered,
                 provider.content.as_bytes(),
                 negative.seq.0,
-                &chain,
+                &chain, 8 * 1024 * 1024
             )
             .unwrap(),
         );
@@ -653,7 +657,7 @@ fn intake_retries_both_negative_cas_boundaries_only_with_exact_call_and_independ
             next.interface_state[&p.owner],
             winner.interface_state[&p.owner]
         );
-        assert!(reprepare_input(&f.config, &pending, &before, 0, &[]).is_err());
+        assert!(reprepare_input(&f.config, &pending, &before, 0, &[], 8 * 1024 * 1024).is_err());
         let missing = rows
             .iter()
             .filter(|row| row.seq != call.seq)
@@ -831,7 +835,7 @@ fn intake_verification_failure_rebases_retained_input_without_inventing_tool_res
         &pending,
         provider.content.as_bytes(),
         failure.seq.0,
-        &chain,
+        &chain, 8 * 1024 * 1024
     )
     .unwrap();
     let mut rebased_draft = f.movement_draft(&i, &rebased.edit, provider.content.as_bytes(), None);
@@ -923,6 +927,7 @@ fn delivered_source_is_bound_read_only_and_requires_its_exact_admitted_edge() {
     assert_eq!(context_artifact_payloads(&record, &metadata, &stable_payloads).unwrap().len(), stable_payloads.len());
     struct Changed<'a>(&'a Fixture, Movement);
     impl CheckedRunEvidenceReader for Changed<'_> {
+        fn max_payload_bytes(&self) -> u64 { self.0.max_payload_bytes() }
         fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> { Ok((seq == self.1.seq.0).then(|| self.1.clone())) }
         fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String> { let mut reader = self.0; reader.artifact(reference) }
         fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String> { let mut reader = self.0; reader.snapshot(hash) }

@@ -1,6 +1,7 @@
 import { createElement, useEffect, useMemo, useRef, useState, type ButtonHTMLAttributes, type ReactNode, type PointerEvent as ReactPointerEvent } from "react";
 import type { WorkerEnvironmentProjection, WorkerEnvironmentSurfaceProjection } from "../../data/topology";
 import type {
+  OctopusClientContextMenuItem,
   OctopusCdpViewerActionAccepted,
   OctopusCdpViewerActionRequest,
   OctopusCdpViewerFrameMetadata,
@@ -799,7 +800,7 @@ function NativeBrowserSurface({ active, environment, surface }: { active: boolea
   const cursorFingerprint = useRef("");
   const address = useRef<HTMLInputElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
-  const menuRoot = useRef<HTMLDivElement>(null);
+  const nativeMenu = useRef<{ requestId: string; signature: string; transport: NonNullable<Window["octopusTransport"]> } | null>(null);
   const editing = useRef(false);
   const attachment = useRef("");
   const lease = useRef<OctopusNativeBrowserViewerIdentity | null>(null);
@@ -818,6 +819,8 @@ function NativeBrowserSurface({ active, environment, surface }: { active: boolea
   const targetId = dataText(surface.data, "target_id");
   const activity = browserActivity(surface);
   const readOnly = surface.readOnly === true || state?.readOnly === true;
+  const readOnlyRef = useRef(readOnly);
+  readOnlyRef.current = readOnly;
 
   const ready = state?.connected === true && state.presentationPhase === "ready";
   const previewError = surface.data.browser_preview && typeof surface.data.browser_preview === "object"
@@ -1022,12 +1025,9 @@ function NativeBrowserSurface({ active, environment, surface }: { active: boolea
 
   useEffect(() => { present(); scheduleLayout.current?.(); }, [active, find]);
   useEffect(() => {
-    if (!menu) return;
-    const dismiss = (event: globalThis.PointerEvent) => { if (!menuRoot.current?.contains(event.target as Node)) setMenu(false); };
-    const escape = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") setMenu(false); };
-    window.addEventListener("pointerdown", dismiss); window.addEventListener("keydown", escape);
-    return () => { window.removeEventListener("pointerdown", dismiss); window.removeEventListener("keydown", escape); };
-  }, [menu]);
+    if (nativeMenu.current && nativeMenu.current.signature !== browserMenuSignature()) { cancelNativeMenu(); setMenu(false); }
+  }, [active, readOnly, state]);
+  useEffect(() => cancelNativeMenu, []);
   useEffect(() => {
     if (!active || !find) return;
     const animation = window.requestAnimationFrame(() => { findInput.current?.focus(); findInput.current?.select(); });
@@ -1045,7 +1045,61 @@ function NativeBrowserSurface({ active, environment, surface }: { active: boolea
       return next;
     } catch (failure) { if (attachment.current === id) setError(formatProjectionError(failure)); return null; }
   }
+  function browserMenuSignature() {
+    const next = current.current;
+    return JSON.stringify([lease.current, activeRef.current, readOnlyRef.current, next?.connected, next?.visible, next?.presentationPhase, next?.url, next?.zoomFactor,
+      next?.modelViewport.revision, next?.engine.capabilities.persistentDownloadHistory]);
+  }
+  function cancelNativeMenu() {
+    const pending = nativeMenu.current;
+    nativeMenu.current = null;
+    if (pending) void pending.transport.cancelClientContextMenu({ requestId: pending.requestId }).catch(failure => {
+      if (activeRef.current && browserMenuSignature() === pending.signature) setError(formatProjectionError(failure));
+    });
+  }
+  async function toggleBrowserMenu(anchor: HTMLButtonElement) {
+    if (nativeMenu.current) { cancelNativeMenu(); setMenu(false); return; }
+    if (!activeRef.current) return;
+    const transport = window.octopusTransport;
+    if (!transport?.showClientContextMenu || !transport.cancelClientContextMenu) { setError("Native browser actions are unavailable."); return; }
+    const next = current.current, connected = next?.connected === true && next.presentationPhase === "ready";
+    const writable = connected && !readOnlyRef.current, zoomFactor = next?.zoomFactor ?? 1;
+    const downloadsEnabled = next?.engine.capabilities.persistentDownloadHistory === true;
+    const choices = [
+      { id: "downloads", label: "Downloads", enabled: downloadsEnabled, select: () => setDownloadRequest(value => value + 1) },
+      { id: "find", label: "Find in page", enabled: connected, accelerator: "CommandOrControl+F", select: openFind },
+      { id: "external", label: "Open in default browser", enabled: isViewerUrl(next?.url ?? ""), select: () => window.open(next?.url, "_blank", "noopener,noreferrer") },
+      { id: "zoom-out", label: "Zoom out", enabled: writable && zoomFactor > 0.5, select: () => { void action({ action: "zoom", params: { zoomFactor: Math.max(0.5, zoomFactor - 0.1) } }); } },
+      { id: "zoom-in", label: "Zoom in", enabled: writable && zoomFactor < 2.5, select: () => { void action({ action: "zoom", params: { zoomFactor: Math.min(2.5, zoomFactor + 0.1) } }); } },
+      { id: "zoom-reset", label: "Reset zoom", enabled: writable, select: () => { void action({ action: "zoom", params: { zoomFactor: 1 } }); } },
+      { id: "details", label: "Browser details", enabled: true, select: () => setDetails(value => !value) },
+    ];
+    const itemsFor = (ids: string[]): OctopusClientContextMenuItem[] => choices.filter(choice => ids.includes(choice.id)).map(({ select: _select, ...item }) => item);
+    const items: OctopusClientContextMenuItem[] = [
+      ...itemsFor(downloadsEnabled ? ["downloads", "find", "external"] : ["find", "external"]),
+      { type: "separator" },
+      { id: "zoom", label: `Zoom (${Math.round(zoomFactor * 100)}%)`, submenu: itemsFor(["zoom-out", "zoom-in", "zoom-reset"]) },
+      { type: "separator" }, ...itemsFor(["details"]),
+    ];
+    const bounds = anchor.getBoundingClientRect(), pending = { requestId: crypto.randomUUID(), signature: browserMenuSignature(), transport };
+    nativeMenu.current = pending; setMenu(true);
+    try {
+      const result = await transport.showClientContextMenu({ requestId: pending.requestId, items, position: { x: Math.max(0, bounds.right), y: Math.max(0, bounds.bottom) } });
+      if (nativeMenu.current !== pending) return;
+      if (browserMenuSignature() !== pending.signature) return;
+      if (result?.requestId !== pending.requestId || !(result.id === null || typeof result.id === "string")) throw new Error("Invalid native browser-menu response.");
+      if (result.id === null) return;
+      const choice = choices.find(choice => choice.id === result.id && choice.enabled);
+      if (!choice) throw new Error("Native browser-menu action is unavailable.");
+      choice.select();
+    } catch (failure) {
+      if (nativeMenu.current === pending && browserMenuSignature() === pending.signature) setError(formatProjectionError(failure));
+    } finally {
+      if (nativeMenu.current === pending) { nativeMenu.current = null; setMenu(false); }
+    }
+  }
   function openFind() {
+    cancelNativeMenu();
     setMenu(false);
     setFind(true);
     setFindRequest(value => value + 1);
@@ -1096,28 +1150,13 @@ function NativeBrowserSurface({ active, environment, surface }: { active: boolea
         {isViewerUrl(state?.url ?? "") ? <BrowserToolbarButton label="Open in default browser" glyph="openExternal" onClick={() => window.open(state?.url, "_blank", "noopener,noreferrer")} /> : null}
       </div></div>
       {state?.engine.capabilities.persistentDownloadHistory ? <div className="we-browser-downloads" title="Downloads"><BrowserDownloads active={active} environment={environment} surface={surface} openRequest={downloadRequest} /></div> : !ready ? <div className="we-browser-actions"><BrowserToolbarButton label="Downloads" glyph="download" disabled /></div> : null}
-      <div className="we-browser-actions" ref={menuRoot}>
-        <BrowserToolbarButton aria-expanded={menu} aria-haspopup="menu" label="More browser actions" glyph="more" onClick={() => setMenu(!menu)} />
-        {menu ? <OcMenuSurface aria-label="Browser actions" className="we-browser-menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setMenu(false); }}>
-          {state?.engine.capabilities.persistentDownloadHistory ? <OcMenuItem label="Downloads" leadingIcon="download" onClick={() => { setMenu(false); setDownloadRequest(value => value + 1); }} role="menuitem" /> : null}
-          <OcMenuItem label="Find in page" leadingIcon="search" disabled={!ready} onClick={openFind} role="menuitem" trailing={<span>⌘F</span>} />
-          <OcMenuItem label="Open in default browser" leadingIcon="openExternal" disabled={!isViewerUrl(state?.url ?? "")} onClick={() => { setMenu(false); window.open(state?.url, "_blank", "noopener,noreferrer"); }} role="menuitem" />
-          <div className="we-browser-menu-divider" role="separator" />
-          <div className="we-native-zoom" role="group" aria-label="Zoom">
-            <span>Zoom</span>
-            <button aria-label="Zoom out" disabled={readOnly || !ready || (state?.zoomFactor ?? 1) <= 0.5} onClick={() => { void action({ action: "zoom", params: { zoomFactor: Math.max(0.5, (state?.zoomFactor ?? 1) - 0.1) } }); }} type="button">−</button>
-            <span className="we-native-zoom-value">{Math.round((state?.zoomFactor ?? 1) * 100)}%</span>
-            <button aria-label="Zoom in" disabled={readOnly || !ready || (state?.zoomFactor ?? 1) >= 2.5} onClick={() => { void action({ action: "zoom", params: { zoomFactor: Math.min(2.5, (state?.zoomFactor ?? 1) + 0.1) } }); }} type="button">+</button>
-            <button aria-label="Reset zoom" disabled={readOnly || !ready} onClick={() => { void action({ action: "zoom", params: { zoomFactor: 1 } }); }} type="button"><Glyph name="refresh" size={13} /></button>
-          </div>
-          <div className="we-browser-menu-divider" role="separator" />
-          <OcMenuItem label="Browser details" onClick={() => { setMenu(false); setDetails(value => !value); }} role="menuitem" />
-        </OcMenuSurface> : null}
+      <div className="we-browser-actions">
+        <BrowserToolbarButton aria-expanded={menu} aria-haspopup="menu" label="More browser actions" glyph="more" onClick={(event) => { void toggleBrowserMenu(event.currentTarget); }} />
       </div>
       <span aria-hidden="true" className={`we-browser-loading${opening || state?.loading ? " is-visible" : ""}`}><i /></span>
     </div>
-    {ready && (state.modelActive || readOnly) ? <div className="we-browser-status" role="status">
-      <span><Glyph name={readOnly ? "lock" : "browser"} size={13} />{state.modelActive ? "Octopus is using this page" : "Read-only browser"}</span>
+    {ready && readOnly ? <div className="we-browser-status" role="status">
+      <span><Glyph name="lock" size={13} />Read-only browser</span>
     </div> : null}
     {details ? <details className="we-browser-details we-browser-details-panel" open onToggle={(event) => { if (!event.currentTarget.open) setDetails(false); }}><summary>Technical details</summary><dl>
         <dt>Task</dt><dd>{environment.runId}</dd><dt>Room</dt><dd>{environment.id}</dd><dt>Target</dt><dd>{targetId}</dd>

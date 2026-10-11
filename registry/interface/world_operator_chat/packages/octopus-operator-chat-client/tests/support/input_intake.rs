@@ -13,7 +13,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
     std::fs::create_dir(&ee).unwrap();
     tests::boot_operator_space_ee_instances(&ee);
     let apply = |plan: &OperatorChatPlan| {
-        for edit in &plan.interface_writes {
+        for edit in plan.interface_writes.iter().chain(&plan.run_writes) {
             if let Some(expected) = &edit.expected_before_hash {
                 assert_eq!(expected, &sha256_hex(&std::fs::read(&edit.path).unwrap()));
             }
@@ -24,7 +24,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
     let first_payload = json!({"id":"fixture.selected.first","content":vec![1;32]});
     let second_payload = json!({"id":"fixture.selected.second","content":vec![2;32]});
     let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ee,"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ee,"run_records_root":temp.path().join("runs"),"write_hash_algorithm":"sha256",
         "chat_id":"intake_client","provider_interface_id":"world_provider_codex",
         "ee_id":"ee_operator_space","worker_interface_id":"system_worker_coder_max",
         "client_surface_role":"task","cycle":"first","conversation":{"ledger_offset":0},
@@ -70,6 +70,8 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
         .as_array().unwrap().iter().find(|row| row["role"] == "authoring_call").unwrap()["required_verified_artifacts"].clone();
     let mut intake_gate = provider_gate.clone();
     intake_gate[0]["params"]["tools"] = json!([config.writer.tool]);
+    assert_eq!(owned_state["writer_run"]["initial_record"]["checkpoints"][0]["required_verified_artifacts"], intake_gate);
+    intake_gate[0]["params"]["metadata_matches"][0]["payload"] = json!("/arguments/expected_before_hash");
     assert_eq!(json!(config.writer_required_verified_artifacts), intake_gate);
     for generation in ["first", "second", "third"] {
         let (rows, _) = input_intake::initial_checkpoints(&config, &prior["trace"], generation).unwrap();
@@ -94,18 +96,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
         let broken = serde_json::from_value::<input_intake::InputIntakeConfig>(broken).unwrap();
         assert!(broken.validate(&config.writer.owner).is_err());
     }
-    let writer_rows: Vec<Value> = prior["checkpoints"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|row| {
-            owned_state["frontier_checkpoint_ids"]
-                .as_array()
-                .unwrap()
-                .contains(&row["id"])
-        })
-        .cloned()
-        .collect();
+    let writer_rows = owned_state["writer_run"]["initial_record"]["checkpoints"].as_array().unwrap().clone();
     assert_eq!(writer_rows.len(), 2);
     let peer = "system_service_selected_peer";
     std::fs::create_dir_all(registry.join(format!("interface/{peer}"))).unwrap();
@@ -207,7 +198,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
         }
         assert_eq!(value["interface_state"][&owner], owned_state);
         for row in &writer_rows {
-            assert!(value["checkpoints"].as_array().unwrap().contains(row));
+            assert!(value["interface_state"][&owner]["writer_run"]["initial_record"]["checkpoints"].as_array().unwrap().contains(row));
         }
         apply(&plan);
         prior = value;

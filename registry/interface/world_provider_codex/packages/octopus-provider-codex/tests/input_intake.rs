@@ -105,7 +105,7 @@ fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent() {
             &current,
             sequence,
             &ArtifactRef { id: format!("source:{}", ContentHash::of_bytes(b"source").to_hex()).into(), content: ContentHash::of_bytes(b"source") },
-            sequence,
+            sequence, 8 * 1024 * 1024
         )
         .unwrap();
         let replay = prepare_input(
@@ -114,7 +114,7 @@ fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent() {
             &current,
             sequence,
             &ArtifactRef { id: format!("source:{}", ContentHash::of_bytes(b"source").to_hex()).into(), content: ContentHash::of_bytes(b"source") },
-            sequence,
+            sequence, 8 * 1024 * 1024
         )
         .unwrap();
         assert_eq!(edit.edit.content, replay.edit.content);
@@ -233,7 +233,7 @@ fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent() {
     let pending = octopus_provider_codex::intake_state::PendingInput {
         source: delivered.clone(),
         delivery,
-        edit: Some(prepare_input(&config, plan.run_write.path.clone(), &current, 13, &source_ref, 40).unwrap()),
+        edit: Some(prepare_input(&config, plan.run_write.path.clone(), &current, 13, &source_ref, 40, 8 * 1024 * 1024).unwrap()),
     };
     let retained = IntakeState {
         completed_through: Some(11),
@@ -246,7 +246,7 @@ fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent() {
     );
     let mut corrupted = config.clone();
     corrupted.writer.door = id;
-    assert!(prepare_input(&corrupted, plan.run_write.path, &current, 13, &source_ref, 13).is_err());
+    assert!(prepare_input(&corrupted, plan.run_write.path, &current, 13, &source_ref, 13, 8 * 1024 * 1024).is_err());
 }
 
 #[test]

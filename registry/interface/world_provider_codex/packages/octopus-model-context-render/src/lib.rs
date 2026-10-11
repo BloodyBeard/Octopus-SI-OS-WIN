@@ -102,6 +102,13 @@ fn render_grant(metadata: &InvocationMetadata, visible_tools: &[String]) -> Opti
         &grant.mark_outcomes,
         "mark outcomes this grant can close",
     );
+    if let Some(slots) = &grant.ee_root_slot_allowance {
+        push_grant_line(
+            &mut lines,
+            slots,
+            "EE root-slot ceiling (each tool may be narrower; slot names are not filesystem paths)",
+        );
+    }
 
     if lines.is_empty() {
         return None;
@@ -114,6 +121,13 @@ fn render_grant(metadata: &InvocationMetadata, visible_tools: &[String]) -> Opti
         out.push_str("\n- ");
         out.push_str(&line);
     }
+    out.push_str(
+        "\n\nTool effects belong to their declared worker environments. The provider transport's \
+         cwd, workspace roots and sandbox permissions are not tool path authority and do not set \
+         a tool's working directory. Use the target tool's declared path scope and explicit paths \
+         from bound context or tool results. Inspect authorized tool/workspace metadata for paths; \
+         if the applicable filesystem root is still unknown, ask for the missing path scope.",
+    );
     Some(out)
 }
 
@@ -275,7 +289,8 @@ mod tests {
                 &["world_provider_codex"],
                 &["package_script"],
                 &["coder.build.ok"],
-            ),
+            )
+            .with_ee_root_slot_allowance(Some(vec!["workspace_root".into()])),
             vec![outbound("surface_client"), outbound("system_coder_env")],
         );
         let block = render_model_context_block(&metadata).expect("grant renders");
@@ -286,6 +301,10 @@ mod tests {
         assert!(!block.contains("spawnable worker types"));
         assert!(!block.contains("surface_client"));
         assert!(!block.contains("system_coder_env"));
+        assert!(block.contains("EE root-slot ceiling (each tool may be narrower; slot names are not filesystem paths): workspace_root"));
+        assert!(block.contains("provider transport's cwd, workspace roots and sandbox permissions are not tool path authority"));
+        assert!(block.contains("Inspect authorized tool/workspace metadata for paths; if the applicable filesystem root is still unknown, ask for the missing path scope."));
+        assert!(!block.contains("/workspace_root"));
     }
 
     #[test]

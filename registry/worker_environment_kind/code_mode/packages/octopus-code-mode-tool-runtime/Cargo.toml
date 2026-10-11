@@ -19,5 +19,6 @@ octopus-provider-run-authoring = { path = "../../../../interface/world_provider_
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

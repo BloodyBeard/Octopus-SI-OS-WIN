@@ -23,7 +23,6 @@ import type {
   OctopusClientAccessProfile,
   OctopusOperatorChatArtifact,
   OctopusOperatorChatMovementArtifact,
-  OctopusProviderModelsRefreshResponse,
 } from "../../electron";
 import { DEFAULT_RUNTIME_ENDPOINT } from "../../gateway";
 import {
@@ -31,7 +30,6 @@ import {
   canSubmitOperatorTurn,
   hasProjectionBridge,
   mutateOctopusOsWorkspace,
-  refreshProviderModels as refreshOperatorProviderModels,
   submitInterfaceArtifact,
   submitOperatorSteer,
   submitOperatorTurn,
@@ -84,8 +82,11 @@ import {
   providerModels,
   providerReasoningEfforts,
   providerSelectedModel,
+  providerServiceTierAvailable,
+  providerSelectedServiceTier,
   resolveNewTaskDefaults,
   taskCapabilitySelectionFailure,
+  taskFullAccessSelectionFailure,
 } from "./chatWorkspaceCapabilities";
 import {
   chatObservationFailureMessage,
@@ -128,6 +129,7 @@ type ChatTurnSubmission = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   applicationIds: string[];
   driverNames: string[];
   accessMode: TaskAccessMode;
@@ -168,12 +170,13 @@ export function useChatWorkspace(
     executionContexts,
     executionContextsLoaded,
     providerInterfaceError,
-    providerInterfaces: projectedProviderInterfaces,
+    providerInterfaces,
     providerInterfacesLoaded,
+    providerInterfacesRefreshing,
     refreshProviderInterfaces,
     toolPresentations,
     workerEnvironmentRooms,
-  } = useChatCapabilityCatalog(accessProfile, enabled, runtimeReady);
+  } = useChatCapabilityCatalog(accessProfile, enabled, runtimeReady, runtimeHome);
   const {
     queueStore,
     queueOwner,
@@ -213,7 +216,6 @@ export function useChatWorkspace(
   const composerActionRef = useMemo(() => ({ current: new Set<string>() }), [accessProfile, runtimeHome]);
   const steeringComposerRef = useRef(new Set<string>());
   const pendingNewTaskTargetRef = useRef<{ eeId: string; agentPresetId: string } | null>(null);
-  const providerModelRefreshesRef = useRef(new Set<string>());
   const runReads = useMemo(() => createLatestProjectionRead<ChatRun[]>(), [accessProfile, enabled, runtimeHome]);
   const statusReads = useMemo(() => createLatestProjectionRead<ChatRunStatus[]>(), [accessProfile, enabled, runtimeHome]);
   useEffect(() => () => runReads.invalidate(), [runReads]);
@@ -229,10 +231,6 @@ export function useChatWorkspace(
   const [runsLoaded, setRunsLoaded] = useState(false);
   const [activeRunId, setActiveRunId] = useState("");
   const [error, setError] = useState("");
-  const [providerModelCatalogs, setProviderModelCatalogs] = useState<Record<string, OctopusProviderModelsRefreshResponse>>({});
-  useEffect(() => {
-    if (!runtimeReady) setProviderModelCatalogs({});
-  }, [runtimeReady]);
   const {
     agentPresetId,
     accessMode,
@@ -260,6 +258,7 @@ export function useChatWorkspace(
     providerModel,
     readDraft,
     reasoningEffort,
+    serviceTier,
     removeAttachment,
     resetInputHistory,
     saveCurrentDraft,
@@ -274,6 +273,7 @@ export function useChatWorkspace(
     setProviderInterfaceId,
     setProviderModel,
     setReasoningEffort,
+    setServiceTier,
     setRawText: setText,
     setText: setComposerText,
     setWorkerInterfaceId,
@@ -599,6 +599,7 @@ export function useChatWorkspace(
         setProviderInterfaceId(defaults?.providerInterfaceId ?? "");
         setProviderModel(defaults?.providerModel ?? "");
         setReasoningEffort(defaults?.reasoningEffort ?? "");
+        setServiceTier(defaults?.serviceTier ?? "");
       }
     }
     const eventName = chatSettingsChangedEvent(accessProfile);
@@ -625,11 +626,6 @@ export function useChatWorkspace(
   const projectedActiveRun = useMemo(() => runs.find((run) => run.runId === activeRunId) ?? null, [activeRunId, runs]);
   const inFlightTurnControlTarget = inFlightTurnControlTargets[activeRunId] ?? null;
   const activeRun = projectedActiveRun;
-  const providerInterfaces = useMemo(() => projectedProviderInterfaces.map((provider) => {
-    const catalog = providerModelCatalogs[provider.id];
-    if (!catalog || catalog.providerInterfaceId !== provider.id) return provider;
-    return { ...provider, models: catalog.models.map((model) => ({ ...model })) };
-  }), [projectedProviderInterfaces, providerModelCatalogs]);
   const activeTurnControlTarget = inFlightTurnControlTarget ?? (
     (projectedActiveRun?.turnOpen || operatorTurnResumeAcknowledgedOpen(messages, projectedActiveRun?.lastMovementSeq ?? -1))
       && projectedActiveRun?.chatInterfaceId
@@ -649,6 +645,7 @@ export function useChatWorkspace(
     setProviderInterfaceId(activeRun.providerInterfaceId);
     setProviderModel((current) => current || activeRun.providerModel);
     setReasoningEffort((current) => current || activeRun.reasoningEffort);
+    setServiceTier((current) => current || activeRun.serviceTier || "");
   }, [activeRun]);
 
   useEffect(() => {
@@ -729,6 +726,7 @@ export function useChatWorkspace(
     setProviderInterfaceId((current) => current || defaults.providerInterfaceId);
     setProviderModel((current) => current || defaults.providerModel);
     setReasoningEffort((current) => current || defaults.reasoningEffort);
+    setServiceTier((current) => current || defaults.serviceTier || "");
   }, [accessProfile, clientSurfaceRole, eeId, runs, runsLoaded]);
 
   const activeRunKey = chatDraftKey(activeRunId);
@@ -766,6 +764,7 @@ export function useChatWorkspace(
     providerInterfaceId,
     providerModel,
     reasoningEffort,
+    serviceTier,
     runs,
     runsLoaded,
   ]);
@@ -784,10 +783,20 @@ export function useChatWorkspace(
     ? null
     : agentPresets.find((agent) => agent.id === agentPresetId) ?? null;
   const activeTaskAgent = activeRun ? clientAgentForRun(allAgentPresets, activeRun) : null;
-  const selectedClientAgentFailure = selectedClientAgent
+  const capabilitySelectionReady = Boolean(
+    executionContextsLoaded && providerInterfacesLoaded
+    && !pendingNewTaskTargetRef.current && !newTaskTargetResolutionBlocked
+    && selectedClientAgent && selectedWorker
+    && selectedClientAgent.projectEeId === eeId
+    && selectedClientAgent.workerInterfaceId === workerInterfaceId
+    && capabilitySelectionOwnerRef.current === `${eeId}\0${workerInterfaceId}\0${selectedClientAgent.id}`
+  );
+  const selectedClientAgentFailure = executionContextsLoaded && providerInterfacesLoaded
+    && !pendingNewTaskTargetRef.current && selectedClientAgent
+    && selectedClientAgent.projectEeId === eeId && selectedClientAgent.workerInterfaceId === workerInterfaceId
     ? clientAgentSelectionFailure(selectedClientAgent)
     : "";
-  const selectedClientAgentCapabilityFailure = selectedClientAgent
+  const selectedClientAgentCapabilityFailure = capabilitySelectionReady && selectedClientAgent
     ? clientAgentCapabilitySelectionFailure(
         selectedClientAgent,
         selectedWorker,
@@ -802,6 +811,13 @@ export function useChatWorkspace(
     && selectedClientAgent.projectEeId === eeId
     && selectedClientAgent.workerInterfaceId === workerInterfaceId
   );
+  const fullAccessUnavailableReason = executionContextError || selectedClientAgentFailure || (!capabilitySelectionReady
+    ? !executionContextsLoaded || !providerInterfacesLoaded || pendingNewTaskTargetRef.current
+      ? "Wait for the selected Agent’s capabilities to load."
+      : "Select an Agent with available capabilities before enabling full access."
+    : selectedClientAgentCapabilityFailure || taskFullAccessSelectionFailure(
+        selectedExecutionContext, selectedWorker, applicationIds, driverNames,
+      ));
   useEffect(() => {
     if (
       !activeRun
@@ -853,27 +869,9 @@ export function useChatWorkspace(
     && !selectableProviderInterfaces.some((provider) => provider.id === declaredActiveProvider.id)
     ? [declaredActiveProvider, ...selectableProviderInterfaces]
     : selectableProviderInterfaces;
-  const refreshProviderModels = useCallback(() => {
-    if (
-      accessProfile !== "live"
-      || !enabled
-      || !resolvedProviderInterfaceId
-      || activeProvider?.runtimeHandlerRef !== "codex_app_server"
-    ) return;
-    const refreshKey = resolvedProviderInterfaceId;
-    if (providerModelRefreshesRef.current.has(refreshKey)) return;
-    providerModelRefreshesRef.current.add(refreshKey);
-    void refreshOperatorProviderModels({ providerInterfaceId: resolvedProviderInterfaceId }).then((catalog) => {
-      if (catalog.providerInterfaceId !== resolvedProviderInterfaceId || catalog.models.length === 0) {
-        throw new Error("Provider model refresh returned a catalog outside its exact provider selection.");
-      }
-      setProviderModelCatalogs((current) => ({ ...current, [refreshKey]: catalog }));
-    }).catch((failure) => {
-      setError(formatRuntimeError(failure));
-    }).finally(() => {
-      providerModelRefreshesRef.current.delete(refreshKey);
-    });
-  }, [accessProfile, enabled, activeProvider?.runtimeHandlerRef, resolvedProviderInterfaceId]);
+  const refreshProviderModels = useCallback(async () => {
+    if (accessProfile === "live" && enabled) await refreshProviderInterfaces();
+  }, [accessProfile, enabled, refreshProviderInterfaces]);
   const executionContextReady = Boolean(
     activeRunId
     || executionContextsLoaded
@@ -882,12 +880,15 @@ export function useChatWorkspace(
       && eeId
       && workerInterfaceId
       && clientAgentSelectionReady
+      && capabilitySelectionReady
       && !selectedClientAgentCapabilityFailure
       && selectedExecutionContext?.workers.some((worker) => worker.id === workerInterfaceId),
   );
 
   useEffect(() => {
     if (activeRunId || !executionContextsLoaded || !selectedExecutionContext || !selectedWorker) return;
+    if (!selectedClientAgent || selectedClientAgent.projectEeId !== selectedExecutionContext.eeId
+      || selectedClientAgent.workerInterfaceId !== selectedWorker.id || pendingNewTaskTargetRef.current) return;
     const owner = `${selectedExecutionContext.eeId}\0${selectedWorker.id}\0${selectedClientAgent?.id ?? ""}`;
     const agentApplicationIds = new Set(selectedClientAgent?.applicationIds ?? []);
     const agentDriverNames = new Set(selectedClientAgent?.driverNames ?? []);
@@ -921,7 +922,9 @@ export function useChatWorkspace(
       eeId,
       workerInterfaceId,
       providerInterfaceId,
+      providerModel,
       reasoningEffort,
+      serviceTier,
       applicationIds,
       driverNames,
     );
@@ -954,6 +957,7 @@ export function useChatWorkspace(
     providerModel,
     providerInterfacesLoaded,
     reasoningEffort,
+    serviceTier,
     clientAgentSelectionReady,
     selectedClientAgent,
     selectedClientAgentFailure,
@@ -1001,24 +1005,6 @@ export function useChatWorkspace(
       });
     }
   }, [runs, runsLoaded, enabled, runtimeReady, queueReady, queuedTurns, pausedQueueRunKeys, inFlightRunKeys, steeringComposerPendingRunKeys]);
-
-  useEffect(() => {
-    if (!activeProvider) return;
-    setProviderModel((current) => current.trim() || providerDefaultModel(activeProvider)?.model || "");
-  }, [activeProvider]);
-
-  useEffect(() => {
-    if (!activeProvider || !providerModel) return;
-    const selectedModel = providerSelectedModel(activeProvider, providerModel);
-    if (!selectedModel) return;
-    setReasoningEffort((current) => {
-      const options = providerReasoningEfforts(activeProvider, selectedModel.model);
-      const next = current && options.includes(current)
-        ? current
-        : providerDefaultReasoningEffort(activeProvider, selectedModel.model);
-      return next;
-    });
-  }, [activeProvider, providerModel]);
 
   const renderedMessages = useMemo<ChatRenderMessage[]>(() => {
     const projected = messages.map(toRender);
@@ -1131,6 +1117,11 @@ export function useChatWorkspace(
     ? providerModels(activeProvider).find((model) => model.model === providerModel) ?? null
     : null;
   const providerDeclared = providerSelectionReady && Boolean(activeProvider && activeProviderModel);
+  const reasoningOptions = activeProvider && activeProviderModel
+    ? providerReasoningEfforts(activeProvider, activeProviderModel.model) : [];
+  const reasoningSelectionValid = reasoningOptions.length
+    ? reasoningOptions.includes(reasoningEffort) : reasoningEffort === "";
+  const serviceTierSelectionValid = Boolean(activeProvider && providerServiceTierAvailable(activeProvider, providerModel, serviceTier ?? ""));
   const canQueueOnActiveRun = replyOpen && replyRunKey === chatDraftKey(activeRunId);
   const canSteer = Boolean(
     steeringWriterAvailable
@@ -1167,18 +1158,25 @@ export function useChatWorkspace(
                 ? "The current turn cannot accept a steering message."
                 : !activeRunId && executionContextsLoaded && providerInterfacesLoaded && !clientAgentSelectionReady
                   ? "Choose an Agent before sending."
+                : providerInterfacesRefreshing
+                  ? "Refreshing available models…"
                 : !providerDeclared
                   ? !providerInterfacesLoaded
                   ? "Loading model interfaces…"
-                    : providerInterfaceError || `${resolvedProviderInterfaceId || "Provider interface"} does not admit model '${providerModel || "not selected"}' for this task.`
+                    : providerInterfaceError || providerInterfaces.find((provider) => provider.id === resolvedProviderInterfaceId)?.modelCatalogError || `${resolvedProviderInterfaceId || "Provider interface"} does not admit model '${providerModel || "not selected"}' for this task.`
+                  : !serviceTierSelectionValid
+                    ? `Model '${providerModel}' does not advertise service tier '${activeProvider ? providerSelectedServiceTier(activeProvider, providerModel, serviceTier) : serviceTier}'. Choose an available speed.`
+                  : !reasoningSelectionValid
+                    ? "The selected reasoning level is no longer supported by this model. Choose a supported level."
                   : !executionContextReady
-                    ? selectedClientAgentCapabilityFailure || executionContextError || newTaskAuthoringError || "Choose an Agent available in a projected execution environment."
+                    ? executionContextError || (!executionContextsLoaded ? "Loading task capabilities…" : "")
+                      || selectedClientAgentCapabilityFailure || newTaskAuthoringError || "Choose an Agent available in a projected execution environment."
                     : !hasSubmissionPayload
                       ? "Type a message or attach a file."
                       : "";
   const editingQueuedTurn = queuedTurns.find((item) => item.runKey === activeRunKey && item.status === "editing" && item.messageId === draftMessageId && item.editOwner === queueOwner.id);
   const canSubmit = !activeRun?.archived && (Boolean(editingQueuedTurn && queueReady && hasSubmissionPayload) || submitBlockReason === "");
-  const canQueue = enabled && runtimeReady && queueReady && activeRun?.writable === true && canQueueOnActiveRun && hasSubmissionPayload && providerDeclared;
+  const canQueue = enabled && runtimeReady && queueReady && activeRun?.writable === true && canQueueOnActiveRun && hasSubmissionPayload && providerDeclared && !providerInterfacesRefreshing && reasoningSelectionValid && serviceTierSelectionValid;
 
   function selectRun(runId: string) {
     if (runId === activeRunIdRef.current) return;
@@ -1210,6 +1208,7 @@ export function useChatWorkspace(
       providerInterfaceId: nextRun?.providerInterfaceId || nextDraft?.providerInterfaceId || "",
       providerModel: nextDraft?.providerModel || nextRun?.providerModel || "",
       reasoningEffort: nextDraft?.reasoningEffort || nextRun?.reasoningEffort || "",
+      serviceTier: nextDraft?.serviceTier ?? nextRun?.serviceTier ?? "",
       applicationIds: nextRun?.connectedApplicationIds ?? [],
       driverNames: nextDraft?.driverNames ?? [],
       accessMode: nextRun
@@ -1267,20 +1266,8 @@ export function useChatWorkspace(
       nextWorkerInterfaceId,
     );
     const nextProviderInterfaceId = usableAgent?.providerInterfaceId ?? defaults?.providerInterfaceId ?? "";
-    const declaredNextProvider = providerInterfaces.find((provider) => provider.id === nextProviderInterfaceId);
-    const nextProvider = declaredNextProvider && nextEeId && nextWorkerInterfaceId
-      ? providerInExecutionContext(
-          executionContexts,
-          nextEeId,
-          nextWorkerInterfaceId,
-          declaredNextProvider,
-        )
-      : undefined;
-    const requestedProviderModel = defaults?.providerInterfaceId === nextProviderInterfaceId
-      ? defaults.providerModel
-      : "";
-    const nextProviderModel = requestedProviderModel
-      || (nextProvider ? providerDefaultModel(nextProvider)?.model ?? "" : "");
+    const nextProviderModel = usableAgent?.providerModel
+      ?? (defaults?.providerInterfaceId === nextProviderInterfaceId ? defaults.providerModel : "");
     applyDraft({
       messageId: "",
       messageHadAttachments: false,
@@ -1292,6 +1279,7 @@ export function useChatWorkspace(
       providerInterfaceId: nextProviderInterfaceId,
       providerModel: nextProviderModel,
       reasoningEffort: usableAgent?.reasoningEffort ?? defaults?.reasoningEffort ?? "",
+      serviceTier: usableAgent?.serviceTier ?? defaults?.serviceTier ?? "",
       applicationIds: usableAgent?.applicationIds ?? capabilityDefaults.applicationIds,
       driverNames: usableAgent?.driverNames ?? capabilityDefaults.driverNames,
       accessMode: requestedContext?.defaultTaskAccessMode ?? "project_access",
@@ -1350,7 +1338,7 @@ export function useChatWorkspace(
       workerInterfaceId: sourceAgent?.workerInterfaceId ?? "",
       providerInterfaceId: sourceAgent ? sourceRun.providerInterfaceId : "",
       providerModel: sourceAgent ? sourceRun.providerModel : "",
-      reasoningEffort: sourceAgent ? sourceRun.reasoningEffort : "",
+      reasoningEffort: sourceAgent ? sourceRun.reasoningEffort : "", serviceTier: sourceAgent ? sourceRun.serviceTier : "",
       applicationIds: sourceAgent ? [...sourceAgent.applicationIds] : [],
       driverNames: sourceAgent ? [...sourceAgent.driverNames] : [],
       accessMode: taskAccessModeFromDoorHostSlots(sourceRun.doorHostSlots),
@@ -1427,6 +1415,7 @@ export function useChatWorkspace(
       providerInterfaceId: nextProviderInterfaceId,
       providerModel: sourceRun.providerModel || providerModel,
       reasoningEffort: nextReasoningEffort,
+      serviceTier,
       applicationIds: [...sourceAgent.applicationIds],
       driverNames: [...sourceAgent.driverNames],
       accessMode: taskAccessModeFromDoorHostSlots(sourceRun.doorHostSlots),
@@ -1491,7 +1480,7 @@ export function useChatWorkspace(
       workerInterfaceId: sourceAgent?.workerInterfaceId ?? "",
       providerInterfaceId: sourceAgent ? sourceRun?.providerInterfaceId || providerInterfaceId : "",
       providerModel: sourceAgent ? sourceRun?.providerModel || providerModel : "",
-      reasoningEffort: sourceAgent ? sourceRun?.reasoningEffort || reasoningEffort : "",
+      reasoningEffort: sourceAgent ? sourceRun?.reasoningEffort || reasoningEffort : "", serviceTier: sourceAgent ? sourceRun?.serviceTier ?? serviceTier : "",
       applicationIds: sourceAgent ? [...sourceAgent.applicationIds] : [],
       driverNames: sourceAgent ? [...sourceAgent.driverNames] : [],
       accessMode: sourceRun
@@ -1621,6 +1610,7 @@ export function useChatWorkspace(
       providerInterfaceId: nextProviderInterfaceId,
       providerModel: nextProviderModel,
       reasoningEffort: nextReasoningEffort,
+      serviceTier,
     }, accessProfile);
   }
 
@@ -1644,6 +1634,7 @@ export function useChatWorkspace(
         providerInterfaceId: provider.id,
         providerModel: model.model,
         reasoningEffort: nextReasoningEffort,
+        serviceTier,
       }, accessProfile);
     }
   }
@@ -1687,7 +1678,8 @@ export function useChatWorkspace(
     const provider = worker && declaredProvider
       ? providerForExecutionContext(declaredProvider, worker)
       : undefined;
-    const defaultModel = provider ? providerDefaultModel(provider) : null;
+    const defaultModel = provider && preset.providerModel
+      ? providerModels(provider).find((model) => model.model === preset.providerModel) : null;
     const supportedReasoningEfforts = provider && defaultModel
       ? providerReasoningEfforts(provider, defaultModel.model)
       : [];
@@ -1698,8 +1690,10 @@ export function useChatWorkspace(
         : !provider || !worker.providerInterfaceIds.includes(preset.providerInterfaceId)
           ? `model interface '${preset.providerInterfaceId}' is unavailable to that Agent template`
           : !defaultModel
-            ? `model interface '${preset.providerInterfaceId}' exposes no admitted model`
-          : preset.reasoningEffort && supportedReasoningEfforts.length && !supportedReasoningEfforts.includes(preset.reasoningEffort)
+            ? `model '${preset.providerModel || "not selected"}' is unavailable; edit the Agent to choose an admitted model`
+          : !providerServiceTierAvailable(provider, defaultModel.model, preset.serviceTier ?? "")
+            ? `service tier '${providerSelectedServiceTier(provider, defaultModel.model, preset.serviceTier)}' is unavailable; edit the Agent to choose an advertised speed`
+          : (supportedReasoningEfforts.length ? !supportedReasoningEfforts.includes(preset.reasoningEffort) : Boolean(preset.reasoningEffort))
             ? `reasoning level '${preset.reasoningEffort}' is unavailable to that model interface`
             : "";
     if (unavailable || !worker) return unavailable;
@@ -1768,13 +1762,9 @@ export function useChatWorkspace(
     setEeId(preset.projectEeId);
     setWorkerInterfaceId(preset.workerInterfaceId);
     setProviderInterfaceId(preset.providerInterfaceId);
-    const declaredPresetProvider = providerInterfaces.find((provider) => provider.id === preset.providerInterfaceId);
-    const presetWorker = presetContext?.workers.find((worker) => worker.id === preset.workerInterfaceId);
-    const presetProvider = declaredPresetProvider && presetWorker
-      ? providerForExecutionContext(declaredPresetProvider, presetWorker)
-      : undefined;
-    setProviderModel(presetProvider ? providerDefaultModel(presetProvider)?.model ?? "" : "");
+    setProviderModel(preset.providerModel);
     setReasoningEffort(preset.reasoningEffort);
+    setServiceTier(preset.serviceTier ?? "");
     setApplicationIds([...preset.applicationIds]);
     setDriverNames([...preset.driverNames]);
     setAccessMode(nextAccessMode);
@@ -1834,6 +1824,7 @@ export function useChatWorkspace(
   function chooseTaskAccessMode(nextAccessMode: TaskAccessMode) {
     if (activeRunIdRef.current) return;
     if (nextAccessMode === "full_access") {
+      if (!capabilitySelectionReady) return;
       try {
         executionContextTaskCapabilities(
           executionContexts,
@@ -1860,6 +1851,16 @@ export function useChatWorkspace(
     if (!activeRunIdRef.current) saveChatSettings({ reasoningEffort: next }, accessProfile);
   }
 
+  function chooseServiceTier(next: string) {
+    if (!activeProvider || !providerModel || !providerServiceTierAvailable(activeProvider, providerModel, next)) {
+      setError(`Model '${providerModel}' does not advertise service tier '${next}'. Choose an available speed.`);
+      return;
+    }
+    setServiceTier(next);
+    if (!activeRunIdRef.current) saveChatSettings({ serviceTier: next }, accessProfile);
+    setError("");
+  }
+
   function queuedSubmission(item: QueuedChatTurn): ChatTurnSubmission {
     if (!item.clientSurfaceRole) throw new Error("The saved message has no exact client surface identity.");
     return {
@@ -1874,7 +1875,7 @@ export function useChatWorkspace(
       workerInterfaceId: item.workerInterfaceId,
       providerInterfaceId: item.providerInterfaceId,
       providerModel: item.providerModel,
-      reasoningEffort: item.reasoningEffort,
+      reasoningEffort: item.reasoningEffort, serviceTier: item.serviceTier,
       applicationIds: item.applicationIds ?? [],
       driverNames: item.driverNames ?? [],
       accessMode: item.accessMode ?? "project_access",
@@ -1906,6 +1907,7 @@ export function useChatWorkspace(
       providerInterfaceId,
       providerModel,
       reasoningEffort,
+      serviceTier,
       endpoint,
       createdAtMs: Date.now(),
       status: "queued",
@@ -1947,7 +1949,7 @@ export function useChatWorkspace(
         }
         const turn: ChatTurnSubmission = { ...current, messageId: claimed.messageId, text: claimed.text,
           attachments: claimed.attachments, providerInterfaceId: claimed.providerInterfaceId,
-          providerModel: claimed.providerModel, reasoningEffort: claimed.reasoningEffort, endpoint: claimed.endpoint };
+          providerModel: claimed.providerModel, reasoningEffort: claimed.reasoningEffort, serviceTier: claimed.serviceTier, endpoint: claimed.endpoint };
         const messageId = turn.messageId;
         const nowMs = Date.now();
         const startingNewTask = !turn.runId;
@@ -2009,7 +2011,10 @@ export function useChatWorkspace(
             throw new Error(`Provider interface '${turn.providerInterfaceId}' does not admit model '${turn.providerModel || "not selected"}'`);
           }
           const turnEfforts = providerReasoningEfforts(turnProvider, turnModel.model);
-          if (turn.reasoningEffort && turnEfforts.length && !turnEfforts.includes(turn.reasoningEffort)) {
+          if (!providerServiceTierAvailable(turnProvider, turnModel.model, turn.serviceTier ?? "")) {
+            throw new Error(`Model '${turnModel.model}' does not advertise service tier '${turn.serviceTier}'. Choose an available speed.`);
+          }
+          if (turnEfforts.length ? !turnEfforts.includes(turn.reasoningEffort) : Boolean(turn.reasoningEffort)) {
             throw new Error(`Model '${turnModel.model}' does not admit reasoning effort '${turn.reasoningEffort}'`);
           }
           const authoredAgent = turn.runId
@@ -2062,7 +2067,7 @@ export function useChatWorkspace(
             runId: turn.runId || undefined,
             providerInterfaceId: turn.providerInterfaceId,
             providerModel: turn.providerModel,
-            reasoningEffort: turn.reasoningEffort,
+            reasoningEffort: turn.reasoningEffort, serviceTier: turn.serviceTier,
             eeId: turn.eeId || undefined,
             workerInterfaceId: turn.workerInterfaceId || undefined,
             doorHostSlots: taskCapabilities?.doorHostSlots,
@@ -2434,6 +2439,7 @@ export function useChatWorkspace(
       providerInterfaceId: activeProvider.id,
       providerModel: activeProviderModel?.model ?? "",
       reasoningEffort,
+      serviceTier,
       applicationIds: submissionRunId ? [] : applicationIds,
       driverNames: submissionRunId ? [] : driverNames,
       accessMode: submissionRunId ? "project_access" : accessMode,
@@ -2700,7 +2706,7 @@ export function useChatWorkspace(
     applyDraft({ ...(backup ?? { agentPresetId: "", applicationIds: [], driverNames: [], accessMode: "project_access", continuation: null }),
       messageId: item.messageId, messageHadAttachments: item.hadAttachments, text: savedEdit?.text ?? item.text,
       attachments: savedEdit?.attachments ?? item.attachments, eeId: item.eeId, workerInterfaceId: item.workerInterfaceId,
-      providerInterfaceId: item.providerInterfaceId, providerModel: item.providerModel, reasoningEffort: item.reasoningEffort });
+      providerInterfaceId: item.providerInterfaceId, providerModel: item.providerModel, reasoningEffort: item.reasoningEffort, serviceTier: item.serviceTier });
     resetInputHistory();
   }
 
@@ -2938,6 +2944,7 @@ export function useChatWorkspace(
     eeId,
     error,
     executionContextError,
+    fullAccessUnavailableReason,
     executionContexts,
     fileInputRef,
     interruptActiveTurn,
@@ -2957,9 +2964,11 @@ export function useChatWorkspace(
     providerInterfaceId: resolvedProviderInterfaceId,
     providerModel,
     providerInterfacesLoaded,
+    providerInterfacesRefreshing,
     declaredProviderInterfaces: agentProviderInterfaces,
     providerInterfaces: presentedProviderInterfaces,
     reasoningEffort,
+    serviceTier,
     resolvePausedQueueSubmission,
     resumeActiveTurn,
     resumeAvailable,
@@ -2985,6 +2994,7 @@ export function useChatWorkspace(
     setProviderInterfaceId: chooseProviderInterface,
     setProviderModel: chooseProviderModel,
     setReasoningEffort: chooseReasoningEffort,
+    chooseServiceTier,
     toggleApplication,
     toggleDriver,
     setText: setComposerText,
@@ -3028,7 +3038,9 @@ function exactClientAgentConfiguration(
   projectEeId: string,
   workerInterfaceId: string,
   providerInterfaceId: string,
+  providerModel: string,
   reasoningEffort: string,
+  serviceTier: string | undefined,
   applicationIds: readonly string[],
   driverNames: readonly string[],
 ): ClientAgentDefinition | null {
@@ -3037,7 +3049,9 @@ function exactClientAgentConfiguration(
     agent.projectEeId === projectEeId
     && agent.workerInterfaceId === workerInterfaceId
     && agent.providerInterfaceId === providerInterfaceId
+    && agent.providerModel === providerModel
     && agent.reasoningEffort === reasoningEffort
+    && (agent.serviceTier ?? "") === (serviceTier ?? "")
     && sameStringSelection(agent.applicationIds, applicationIds)
     && sameStringSelection(agent.driverNames, driverNames)
   ));

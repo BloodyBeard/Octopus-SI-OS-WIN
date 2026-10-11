@@ -23,10 +23,12 @@ import { AgentPresetLogo } from "./AgentPresetLogo";
 import { Glyph } from "../IconGlyphs";
 import {
   executionContextTaskCapabilities,
-  providerDefaultModel,
+  providerModels,
   providerDefaultReasoningEffort,
   providerForExecutionContext,
   providerReasoningEfforts,
+  providerServiceTiers,
+  providerServiceTierAvailable,
 } from "../chat/chatWorkspaceCapabilities";
 
 type Props = {
@@ -39,6 +41,9 @@ type Props = {
   projects: readonly ClientChatProject[];
   providers: readonly OctopusProviderInterface[];
   readOnly?: boolean;
+  modelsLoading?: boolean;
+  modelError?: string;
+  onRefreshModels: () => Promise<void>;
   onCancel: () => void;
   onDelete: (presetId: string) => void;
   onSubmit: (value: ClientAgentPresetInput) => void;
@@ -59,7 +64,7 @@ const AGENT_PRESET_ICON_LABELS: Readonly<Record<ClientAgentPresetIcon, string>> 
   hardhat: "Hard hat",
 };
 
-export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, open, preset, presets, projects, providers, readOnly = false, onCancel, onDelete, onSubmit }: Props) {
+export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, open, preset, presets, projects, providers, readOnly = false, modelsLoading = false, modelError = "", onRefreshModels, onCancel, onDelete, onSubmit }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const initializedDialogRef = useRef("");
   const [name, setName] = useState("");
@@ -67,7 +72,9 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
   const [projectEeId, setProjectEeId] = useState("");
   const [workerInterfaceId, setWorkerInterfaceId] = useState("");
   const [providerInterfaceId, setProviderInterfaceId] = useState("");
+  const [providerModel, setProviderModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
+  const [serviceTier, setServiceTier] = useState("default");
   const [applicationIds, setApplicationIds] = useState<string[]>([]);
   const [driverNames, setDriverNames] = useState<string[]>([]);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -86,14 +93,19 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
     const provider = providers.find((candidate) => candidate.id === id);
     if (!provider) return [];
     const formed = providerForExecutionContext(provider, selectedWorker);
-    const model = providerDefaultModel(formed);
-    return model ? [{ value: formed.id, label: formed.label || formed.id, description: model.model }] : [];
+    return providerModels(formed).map((model) => ({
+      value: JSON.stringify([formed.id, model.model]),
+      label: `${formed.sourceNames.join(" / ") || formed.id} · ${model.displayName || model.model}`,
+      description: model.description || model.model,
+    }));
   }) ?? [];
-  const reasoningOptions = selectedProvider ? providerReasoningOptions(selectedProvider) : [];
+  const unavailableModels = providerOptions.length ? "" : selectedWorker?.providerInterfaceIds
+    .map((id) => providers.find((provider) => provider.id === id)?.modelCatalogError).filter(Boolean).join("\n") ?? "";
+  const reasoningOptions = selectedProvider && providerModel ? providerReasoningEfforts(selectedProvider, providerModel) : [];
   const applications = selectedWorker?.applications.filter((application) => application.category !== "artifact") ?? [];
   const contextArtifacts = selectedWorker?.applications.filter((application) => application.category === "artifact") ?? [];
   const drivers = selectedWorker?.drivers ?? [];
-  const invalidReason = validateSelection({
+  const invalidReason = modelsLoading ? "Refreshing available models…" : modelError || declaredSelectedProvider?.modelCatalogError || unavailableModels || validateSelection({
     applicationIds,
     context: selectedContext,
     contexts,
@@ -101,9 +113,14 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
     name,
     provider: selectedProvider,
     providerInterfaceId,
+    providerModel,
     reasoningEffort,
+    serviceTier,
     worker: selectedWorker,
   });
+  useEffect(() => {
+    if (open && !readOnly) void onRefreshModels();
+  }, [open, readOnly, onRefreshModels]);
   useEffect(() => {
     if (!open) {
       initializedDialogRef.current = "";
@@ -121,7 +138,9 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
       setProjectEeId(preset.projectEeId);
       setWorkerInterfaceId(preset.workerInterfaceId);
       setProviderInterfaceId(preset.providerInterfaceId);
+      setProviderModel(preset.providerModel);
       setReasoningEffort(preset.reasoningEffort);
+      setServiceTier(preset.serviceTier || "default");
       setApplicationIds([...preset.applicationIds]);
       setDriverNames([...preset.driverNames]);
       return;
@@ -134,7 +153,9 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
     setProjectEeId(requestedProject);
     setWorkerInterfaceId(defaults.workerInterfaceId);
     setProviderInterfaceId(defaults.providerInterfaceId);
+    setProviderModel("");
     setReasoningEffort(defaults.reasoningEffort);
+    setServiceTier("default");
     setApplicationIds(defaults.applicationIds);
     setDriverNames(defaults.driverNames);
   }, [initialProjectEeId, open, preset?.id, projectContexts.length, providers.length]);
@@ -145,15 +166,22 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
     setProjectEeId(nextProjectEeId);
     setWorkerInterfaceId(defaults.workerInterfaceId);
     setProviderInterfaceId(defaults.providerInterfaceId);
+    setProviderModel("");
     setReasoningEffort(defaults.reasoningEffort);
+    setServiceTier("default");
     setApplicationIds(defaults.applicationIds);
     setDriverNames(defaults.driverNames);
   };
 
-  const chooseProvider = (nextProviderInterfaceId: string) => {
-    const provider = providers.find((candidate) => candidate.id === nextProviderInterfaceId) ?? null;
+  const chooseModel = (selection: string) => {
+    const [nextProviderInterfaceId, nextModel] = JSON.parse(selection) as [string, string];
+    const declared = providers.find((candidate) => candidate.id === nextProviderInterfaceId);
+    if (!declared || !selectedWorker) return;
+    const provider = providerForExecutionContext(declared, selectedWorker);
+    if (!providerModels(provider).some((model) => model.model === nextModel)) return;
     setProviderInterfaceId(nextProviderInterfaceId);
-    setReasoningEffort(provider ? defaultReasoningEffort(provider) : "");
+    setProviderModel(nextModel);
+    setReasoningEffort(providerDefaultReasoningEffort(provider, nextModel));
   };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -165,7 +193,9 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
       projectEeId,
       workerInterfaceId,
       providerInterfaceId,
+      providerModel,
       reasoningEffort,
+      serviceTier,
       applicationIds,
       driverNames,
     });
@@ -258,14 +288,14 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
 
           <section className="grid grid-cols-2 gap-3">
             <OcSelect
-              disabled={busy || readOnly}
+              disabled={busy || readOnly || modelsLoading}
               label="Model"
-              onChange={chooseProvider}
+              onChange={chooseModel}
               options={providerOptions}
               placeholder="Choose a model"
               showLabel
               stretch
-              value={providerInterfaceId}
+              value={providerModel ? JSON.stringify([providerInterfaceId, providerModel]) : ""}
             />
             <OcSelect
               disabled={busy || readOnly || reasoningOptions.length <= 1}
@@ -277,6 +307,10 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
               stretch
               value={reasoningEffort}
             />
+            <OcSelect disabled={busy || readOnly || !selectedProvider || !providerModel} label="Speed"
+              onChange={setServiceTier} showLabel stretch value={serviceTier}
+              placeholder="Choose speed"
+              options={selectedProvider ? providerServiceTiers(selectedProvider, providerModel).map((tier) => ({ value: tier.id, label: tier.name })) : []} />
           </section>
 
           <AgentChoiceDisclosure
@@ -455,7 +489,7 @@ function defaultsForWorker(worker: ChatWorkerChoice | null, providers: readonly 
       : null;
   return {
     providerInterfaceId: provider?.id ?? "",
-    reasoningEffort: provider ? defaultReasoningEffort(provider) : "",
+    reasoningEffort: "",
     applicationIds: worker?.applications.map((application) => application.id).sort() ?? [],
     driverNames: worker?.drivers.map((driver) => driver.name).sort() ?? [],
   };
@@ -469,7 +503,9 @@ function validateSelection(input: {
   name: string;
   provider: OctopusProviderInterface | null;
   providerInterfaceId: string;
+  providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   worker: ChatWorkerChoice | null;
 }): string {
   if (!input.name.trim()) return "Enter an agent name.";
@@ -478,10 +514,12 @@ function validateSelection(input: {
   if (
     !input.provider
     || !input.worker.providerInterfaceIds.includes(input.providerInterfaceId)
-    || !providerDefaultModel(input.provider)
+    || !input.providerModel
+    || !providerModels(input.provider).some((model) => model.model === input.providerModel)
   ) return "Choose a model interface allowed by this Agent template.";
-  const efforts = providerReasoningOptions(input.provider);
-  if (input.reasoningEffort && efforts.length && !efforts.includes(input.reasoningEffort)) return "The selected reasoning level is no longer supported by this model.";
+  if (!providerServiceTierAvailable(input.provider, input.providerModel, input.serviceTier ?? "")) return `Model '${input.providerModel}' does not advertise service tier '${input.serviceTier}'. Choose an available speed.`;
+  const efforts = providerReasoningEfforts(input.provider, input.providerModel);
+  if (efforts.length ? !efforts.includes(input.reasoningEffort) : Boolean(input.reasoningEffort)) return "The selected reasoning level is no longer supported by this model.";
   const applicationIds = new Set(input.worker.applications.map((application) => application.id));
   const missingApplication = input.applicationIds.find((id) => !applicationIds.has(id));
   if (missingApplication) return `Application '${missingApplication}' is no longer available to this Agent template.`;
@@ -500,14 +538,6 @@ function validateSelection(input: {
     return failure instanceof Error ? failure.message : String(failure);
   }
   return "";
-}
-
-function providerReasoningOptions(provider: OctopusProviderInterface): string[] {
-  return providerReasoningEfforts(provider, providerDefaultModel(provider)?.model ?? "");
-}
-
-function defaultReasoningEffort(provider: OctopusProviderInterface): string {
-  return providerDefaultReasoningEffort(provider, providerDefaultModel(provider)?.model ?? "");
 }
 
 function toggleId(values: readonly string[], id: string): string[] {

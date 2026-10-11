@@ -144,6 +144,8 @@ pub struct RunDefaults {
     pub provider_interface_id: String,
     pub model: String,
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub authoring: CompositionAuthoring,
     #[serde(default)]
     pub worker_environment_kinds: Vec<String>,
@@ -182,6 +184,8 @@ pub struct CreateRunRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     #[serde(default)]
     pub worker_environment_kinds: Option<Vec<String>>,
     #[serde(default)]
@@ -237,6 +241,8 @@ pub struct CreatedRun {
     pub return_interface_ids: Vec<String>,
     pub model: String,
     pub reasoning_effort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -732,6 +738,7 @@ impl RunAffordances {
             reasoning_effort: args
                 .reasoning_effort
                 .unwrap_or_else(|| defaults.reasoning_effort.clone()),
+            service_tier: args.service_tier.or_else(|| defaults.service_tier.clone()),
             authoring: defaults.authoring.clone(),
             communication: CompositionCommunication {
                 client_template_interface_id: args.client_interface_id.is_none()
@@ -821,6 +828,7 @@ impl RunAffordances {
             return_interface_ids: plan.return_interface_ids,
             model: plan.model,
             reasoning_effort: plan.reasoning_effort,
+            service_tier: plan.service_tier,
         };
         let pending = NativePending {
             call_id: call_id.into(),
@@ -1122,6 +1130,12 @@ fn absolute_path(path: &Path) -> Result<(), String> {
 
 fn validate_defaults(defaults: &RunDefaults) -> Result<(), String> {
     distinct_refs(&defaults.context_artifacts)?;
+    if let Some(tier) = &defaults.service_tier {
+        exact_string(tier, "service_tier")?;
+        if tier.len() > 80 || tier.chars().any(char::is_control) {
+            return Err("service_tier must be a native tier id".into());
+        }
+    }
     if let Some(template) = &defaults.client_template_interface_id { exact_string(template, "client template")?; }
     for (field, value) in [
         ("ee_id", &defaults.ee_id),
@@ -1181,6 +1195,7 @@ mod tests {
                     return_interface_ids: vec![],
                     model: "chosen".into(),
                     reasoning_effort: "xhigh".into(),
+                    service_tier: None,
                 },
                 files: vec![FileProof {
                     path: "/tmp/native-created.json".into(),

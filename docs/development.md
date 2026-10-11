@@ -17,6 +17,7 @@ Use [Getting started](getting-started.md) for the macOS build,
 | [registry/mark/](../registry/mark/), [registry/verifier/](../registry/verifier/) | Outcome vocabulary and check packages. |
 | [schemas/](../schemas/) | JSON Schemas for run records, movements, grants, verdicts, marks, verifiers. |
 | [app/src/](../app/src/), [app/electron/](../app/electron/) | The desktop client: React presentation and Electron host operations. |
+| [app/cli/](../app/cli/) | Terminal presentation over the shared client projections, authoring, setup, and artifact transports. |
 | [app/distribution/](../app/distribution/) | The baseline registry, local application packs, generated-output declarations. |
 | [app/schemas/](../app/schemas/) | Client-side JSON contracts: setup, packages, surfaces, extensions. |
 
@@ -47,6 +48,15 @@ bindings. A genuinely new execution family is code inside its concrete owner
 folder under `registry/`. Do not put provider names, artifact semantics, or
 product behavior into the crates' decision paths. See
 [Extending Octopus](contracts/EXTENSION_SURFACES.md).
+
+The [file observer example](../registry/interface/world_file_observer/examples/binding_repair.py)
+demonstrates selected files becoming immutable input artifacts, a checkpoint
+waiting for two independently verified snapshots, and catch-up after repairing
+an exact interface binding. Its `--read-root` argument grants an explicit
+existing directory; the command prints the proposed files and steps without
+installing them. The observer is an interface package, while waiting and
+replay use existing runtime mechanisms. Use `./octopus inspect <run-id> --json`
+to inspect the resulting checkpoint and movement evidence.
 
 ## Source and Home
 
@@ -134,6 +144,14 @@ npm run test:chat-trace-contracts
 The [quality workflow](../.github/workflows/quality.yml) lists the broader checks
 and platform dependencies. Source/type checks and contract tests do not prove a
 fresh packaged setup, a real model reply, or physical device permissions.
+
+For the terminal client, `npm --prefix app run test:cli` checks transcript,
+interaction, transport, packaging, and setup contracts. `npm --prefix app run
+build:cli` builds its release distribution; `build:cli-client` rebuilds only the
+shared TypeScript client functions. Exercise the resulting CLI with an explicit
+test Home for real task and tool acceptance. The terminal imports the existing
+client libraries and installed chat interface; it does not create a second task
+index or runtime control API.
 
 Run the Doomsday latency budget separately in release mode:
 

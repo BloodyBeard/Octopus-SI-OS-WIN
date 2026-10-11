@@ -1,3 +1,4 @@
+use octopus_provider_run_authoring::JsonFormat;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -66,8 +67,7 @@ impl IntakeEdit {
         if let Some(ordered) = &self.ordered { return Ok(ordered.matches_call(&value)); }
         Ok(value
             == json!({"tool":config.writer.tool,"correlation_id":self.edit.correlation_id,
-            "arguments":{"path":self.edit.path,"patch":self.edit.patch,
-                "expected_before_hash":self.edit.before_hash,"expected_after_hash":self.edit.after_hash}}))
+            "arguments":self.edit.arguments()?}))
     }
 
     pub fn validate(
@@ -76,6 +76,7 @@ impl IntakeEdit {
         path: &Path,
         source_seq: u64,
         source_artifact: &ArtifactRef,
+        max_payload_bytes: u64,
     ) -> Result<(), String> {
         let expected = prepare_input_edit(
             config,
@@ -84,13 +85,14 @@ impl IntakeEdit {
             source_seq,
             source_artifact,
             self.after_seq,
+            self.edit.json_format,
         )?;
         if serde_json::to_value(&self.edit).map_err(|e| e.to_string())?
             != serde_json::to_value(expected.edit).map_err(|e| e.to_string())?
         {
             return Err("retained intake edit differs from its exact source intent".into());
         }
-        if let Some(ordered) = &self.ordered { ordered.validate(self.before.as_bytes(), &self.edit, &config.writer)?; }
+        if let Some(ordered) = &self.ordered { ordered.validate(self.before.as_bytes(), &self.edit, &config.writer, max_payload_bytes)?; }
         let record = RunRecord::from_bytes(self.before.as_bytes()).map_err(|e|e.to_string())?;
         if self.ordered.is_some() != owner_writer_binding(&record,&config.writer.owner)?.is_some() { return Err("intake edit changed its declared writer mode".into()); }
         Ok(())
@@ -122,12 +124,13 @@ pub fn reprepare_input(
     current: &[u8],
     after_seq: u64,
     chain: &[CheckedRunTransition],
+    max_payload_bytes: u64,
 ) -> Result<IntakeEdit, String> {
     let previous = pending
         .edit
         .as_ref()
         .ok_or("intake retry has no retained edit")?;
-    previous.validate(config, &previous.edit.path, pending.source.seq.0, &pending.delivery.source_artifact)?;
+    previous.validate(config, &previous.edit.path, pending.source.seq.0, &pending.delivery.source_artifact, max_payload_bytes)?;
     let mut expected = previous.before.as_bytes();
     if chain.is_empty() {
         return Err("intake retry has no proven independent change".into());
@@ -166,6 +169,7 @@ pub fn reprepare_input(
         pending.source.seq.0,
         &pending.delivery.source_artifact,
         after_seq,
+        max_payload_bytes,
     )
 }
 
@@ -445,13 +449,14 @@ pub fn prepare_input(
     source_seq: u64,
     source_artifact: &ArtifactRef,
     after_seq: u64,
+    max_payload_bytes: u64,
 ) -> Result<IntakeEdit, String> {
-    let mut pending = prepare_input_edit(config,path,current,source_seq,source_artifact,after_seq)?;
-    pending.ordered = OwnerWriterEdit::prepare(current,&pending.edit,&config.writer)?;
+    let mut pending = prepare_input_edit(config,path,current,source_seq,source_artifact,after_seq,Some(JsonFormat::Compact))?;
+    pending.ordered = OwnerWriterEdit::prepare(current,&pending.edit,&config.writer,max_payload_bytes)?;
     Ok(pending)
 }
 
-fn prepare_input_edit(config: &InputIntakeConfig, path: PathBuf, current: &[u8], source_seq: u64, source_artifact: &ArtifactRef, after_seq: u64) -> Result<IntakeEdit,String> {
+fn prepare_input_edit(config: &InputIntakeConfig, path: PathBuf, current: &[u8], source_seq: u64, source_artifact: &ArtifactRef, after_seq: u64, json_format: Option<JsonFormat>) -> Result<IntakeEdit,String> {
     config.validate(&config.writer.owner)?;
     let original = RunRecord::from_bytes(current).map_err(|e| e.to_string())?;
     if original.id.as_str() != config.run {
@@ -505,7 +510,7 @@ fn prepare_input_edit(config: &InputIntakeConfig, path: PathBuf, current: &[u8],
         .extend(ids.iter().map(|id| json!(id)));
     next["interface_state"][owner]["owned_checkpoint_ids"] = json!(ids);
     next["interface_state"][owner]["frontier_checkpoint_ids"] = json!(frontier);
-    let edit = CheckedRunEdit::prepare(path, current, next, format!("input:{owner}:{generation}"))?;
+    let edit = CheckedRunEdit::prepare_with_format(path, current, next, format!("input:{owner}:{generation}"), json_format)?;
     validate_unchanged_run_neighbors(
         current,
         edit.content.as_bytes(),

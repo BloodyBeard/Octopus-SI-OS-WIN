@@ -3,6 +3,8 @@ import type { CheckpointRow, EnvironmentNode, RunProjection, SelectionRef, Topol
 import type { DashboardFilters, DashboardScope, DashboardTopologyMode } from "../uiState";
 import { Glyph } from "./IconGlyphs";
 import { WorldProjection } from "./WorldProjection";
+import { SystemArtifactTransfers, useArtifactTransfers } from "./ArtifactTransferAnimation";
+import { useAppErrorToast } from "../toasts";
 
 // Two scopes, two honest pictures (owner):
 //   System — zone cards, one level at a time (drill into child environments instead of
@@ -109,6 +111,8 @@ type Props = {
 
 export function TopologyStage({ snapshot, query, scope, viewMode, filters, selected, onSelect }: Props) {
   const zoneMaskPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const artifactTransfers = useArtifactTransfers(snapshot.projection);
+  useAppErrorToast(artifactTransfers.error);
   // Callback-state ref: the grid wrap appears only once the projection has zones, so the
   // wheel listener must attach when the ELEMENT arrives, not when the component mounts.
   const [wrapEl, setWrapEl] = useState<HTMLDivElement | null>(null);
@@ -463,6 +467,8 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
             <WorldProjection
               environments={snapshot.environments}
               registeredWorldInterfaces={registeredWorldInterfaces}
+              interfaceIndex={snapshot.interfaceIndex}
+              transfers={artifactTransfers.transfers}
               mode={viewMode === "zones" ? "routeSets" : "instances"}
               selected={selected}
               onSelect={onSelect}
@@ -635,6 +641,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
                   );
                 })}
               </div>
+              <SystemArtifactTransfers container={wrapEl} interfaces={snapshot.interfaceIndex} transfers={artifactTransfers.transfers} />
             </div>
           </>
         )}
@@ -791,7 +798,7 @@ function RunNodeCard({
       }}
     >
       <div className="env-head">
-        <span className="env-icon"><Glyph name="dashboard" size={20} /></span>
+        <span className="env-icon" data-projection-interface={run.worker} data-projection-anchor="worker"><Glyph name="dashboard" size={20} /></span>
         <span className="run-card-title">
           <strong>{run.worker}.run</strong>
           <small><i className={`status-dot ${runTone(run)}`} />{run.statusLabel} · {env.name}</small>
@@ -838,6 +845,7 @@ function RunNodeCard({
           <CheckpointAsRunBlock
             checkpoint={checkpoint}
             index={index}
+            onSelect={onSelect}
             key={checkpoint.id}
           />
         ))}
@@ -860,9 +868,11 @@ function RunNodeCard({
 function CheckpointAsRunBlock({
   checkpoint,
   index,
+  onSelect,
 }: {
   checkpoint: CheckpointRow;
   index: number;
+  onSelect: (selection: SelectionRef) => void;
 }) {
   return (
     <div className="env-run">
@@ -872,6 +882,7 @@ function CheckpointAsRunBlock({
           <strong>{checkpoint.label || `Checkpoint ${index + 1}`}</strong>
           <em className={`env-status-word is-${checkpointTone(checkpoint.status)}`}>{titleCase(checkpoint.status)}</em>
         </div>
+        <CheckpointInterface checkpoint={checkpoint} onSelect={onSelect} />
       </div>
       <RequiredVerifiedArtifactList checkpoint={checkpoint} />
     </div>
@@ -925,7 +936,7 @@ function RunBlock({
   onSelect: (selection: SelectionRef) => void;
 }) {
   return (
-    <div className={`env-run ${active ? "is-active" : ""}`}>
+    <div className={`env-run ${active ? "is-active" : ""}`} data-run-id={run.id}>
       <div className="env-run-row">
         <button
           className="env-run-main"
@@ -936,7 +947,7 @@ function RunBlock({
           }}
         >
           <i className={`status-dot ${runTone(run)}`} />
-          <strong>{run.worker}.run</strong>
+          <strong data-projection-interface={run.worker} data-projection-anchor="worker">{run.worker}.run</strong>
           <em className={`env-status-word is-${runTone(run)}`}>{run.statusLabel}</em>
         </button>
         {run.checkpoints.length ? (
@@ -959,7 +970,7 @@ function RunBlock({
         <div className={`env-checkpoints-shell ${expanded ? "is-open" : ""}`}>
           <div className="env-checkpoints">
             {run.checkpoints.map((checkpoint, index) => (
-              <CheckpointBlock checkpoint={checkpoint} index={index} onSelect={onSelect} key={checkpoint.id} />
+              <CheckpointBlock checkpoint={checkpoint} index={index} projectionVisible={expanded} onSelect={onSelect} key={checkpoint.id} />
             ))}
           </div>
         </div>
@@ -968,7 +979,7 @@ function RunBlock({
   );
 }
 
-function CheckpointBlock({ checkpoint, index, onSelect }: { checkpoint: CheckpointRow; index: number; onSelect: (selection: SelectionRef) => void }) {
+function CheckpointBlock({ checkpoint, index, projectionVisible, onSelect }: { checkpoint: CheckpointRow; index: number; projectionVisible: boolean; onSelect: (selection: SelectionRef) => void }) {
   const artifactCount = checkpoint.artifactBindings ?? dedupeNonEmpty([checkpoint.artifactLabel, checkpoint.tool]).length;
   const interfaceCount = checkpoint.interfaceBindings ?? dedupeNonEmpty([checkpoint.interfaceName]).length;
   return (
@@ -977,20 +988,7 @@ function CheckpointBlock({ checkpoint, index, onSelect }: { checkpoint: Checkpoi
         <i className="env-checkpoint-mark" aria-hidden="true" />
         <strong>{`Checkpoint ${index + 1}`}</strong>
         <em className={`env-status-word is-${checkpointTone(checkpoint.status)}`}>{titleCase(checkpoint.status)}</em>
-        {checkpoint.interfaceName ? (
-          <button
-            className="env-checkpoint-interface"
-            type="button"
-            title={`interface: ${checkpoint.interfaceName}`}
-            aria-label={`Open interface ${checkpoint.interfaceName}`}
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelect({ kind: "interface", id: checkpoint.interfaceName! });
-            }}
-          >
-            <i className="status-dot blue" />
-          </button>
-        ) : null}
+        <CheckpointInterface checkpoint={checkpoint} onSelect={onSelect} visible={projectionVisible} />
       </div>
       <div className="env-checkpoint-chips">
         <span>Artifact bindings <b>{artifactCount}</b></span>
@@ -998,6 +996,26 @@ function CheckpointBlock({ checkpoint, index, onSelect }: { checkpoint: Checkpoi
       </div>
       <RequiredVerifiedArtifactList checkpoint={checkpoint} />
     </div>
+  );
+}
+
+function CheckpointInterface({ checkpoint, onSelect, visible = true }: { checkpoint: CheckpointRow; onSelect: (selection: SelectionRef) => void; visible?: boolean }) {
+  if (!checkpoint.interfaceName) return null;
+  return (
+    <button
+      className="env-checkpoint-interface"
+      data-projection-interface={visible ? checkpoint.interfaceName : undefined}
+      data-projection-checkpoint={checkpoint.id}
+      type="button"
+      title={`interface: ${checkpoint.interfaceName}`}
+      aria-label={`Open interface ${checkpoint.interfaceName}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSelect({ kind: "interface", id: checkpoint.interfaceName! });
+      }}
+    >
+      <i className="status-dot blue" />
+    </button>
   );
 }
 

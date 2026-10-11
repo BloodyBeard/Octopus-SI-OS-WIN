@@ -23,6 +23,7 @@ mod retained_connections;
 mod home_voice;
 mod home_outputs;
 mod writer_runs;
+pub use writer_runs::{OperatorWriterRunPlanRequest, OperatorWriterSchemaPlanRequest, plan_operator_writer_runs, plan_operator_writer_schema};
 #[cfg(test)]
 #[path = "../tests/support/home_delegation.rs"]
 mod home_delegation;
@@ -58,6 +59,8 @@ pub struct OperatorChatPlanRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
     #[serde(default)]
     pub ee_id: Option<String>,
     #[serde(default)]
@@ -177,6 +180,7 @@ pub struct OperatorChatPlan {
     pub authoring_environment_interface_id: String,
     pub model: String,
     pub reasoning_effort: String,
+    pub service_tier: Option<String>,
     pub expected_before_hash_algorithm: WriteHashAlgorithm,
     pub ee_template_chain: Vec<String>,
     pub capability_doors: BTreeMap<String, String>,
@@ -285,6 +289,7 @@ struct ResolvedProvider {
     interface: InterfaceDescriptor,
     model: String,
     reasoning_effort: String,
+    service_tier: Option<String>,
     client_operation_request_labels: Vec<String>,
 }
 
@@ -502,6 +507,7 @@ pub fn plan_operator_chat_topology(
         &selection.provider_choice_interface,
         request.model.as_deref().unwrap_or(""),
         request.reasoning_effort.as_deref().unwrap_or(""),
+        request.service_tier.as_deref(),
         &topology,
     )?;
     let mut identity = plan_identity(&config, &chat_id, &provider, &topology, &selection)?;
@@ -740,6 +746,7 @@ pub fn plan_operator_chat_topology(
         authoring_environment_interface_id: identity.authoring_environment_id.clone(),
         model: provider.model.clone(),
         reasoning_effort: provider.reasoning_effort.clone(),
+        service_tier: provider.service_tier.clone(),
         expected_before_hash_algorithm: request.write_hash_algorithm,
         ee_template_chain: chain
             .iter()
@@ -987,6 +994,7 @@ fn resolve_provider(
     provider_interface_id: &str,
     requested_model: &str,
     requested_reasoning_effort: &str,
+    requested_service_tier: Option<&str>,
     topology: &FormedCapabilityTopology,
 ) -> Result<ResolvedProvider, String> {
     let provider_id = safe_segment(provider_interface_id, "provider_interface_id")?;
@@ -1015,6 +1023,15 @@ fn resolve_provider(
         .unwrap_or("")
         .trim()
         .to_string();
+    let configured_service_tier = match resolved_config.private_config.get("service_tier") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(tier)) => Some(tier.clone()),
+        Some(_) => return Err(format!("{provider_id} service tier must be a native tier id string")),
+    };
+    let service_tier = requested_service_tier.map(str::to_string).or(configured_service_tier);
+    if service_tier.as_ref().is_some_and(|tier| tier.is_empty() || tier.trim() != tier || tier.len() > 80 || tier.chars().any(char::is_control)) {
+        return Err(format!("{provider_id} service tier must be a non-empty native tier id"));
+    }
     let formed_models = formed_provider_models(topology, &interface.id)?;
     let catalog = resolved_provider_model_catalog(
         &resolved_config,
@@ -1086,6 +1103,7 @@ fn resolve_provider(
         interface,
         model,
         reasoning_effort,
+        service_tier,
     })
 }
 
@@ -1784,6 +1802,7 @@ struct CodeModeTaskRecipe {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeModePreludeSource {
+    id: String,
     schema_version: u32,
     module_source: String,
     export_factory: String,
@@ -1972,7 +1991,7 @@ fn plan_code_mode_owners(
                 .map_err(|e| format!("invalid declared prelude artifact: {e}"))?;
             let prelude: CodeModePreludeSource = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("invalid declared prelude artifact: {e}"))?;
-            if prelude.schema_version != 1
+            if prelude.id != *prelude_source_id || prelude.schema_version != 1
                 || !javascript_identifier(&prelude.export_factory)
                 || !javascript_identifier(&prelude.export_name)
                 || prelude.module_source.trim().is_empty()
@@ -2049,14 +2068,19 @@ fn plan_code_mode_owners(
             modules.push_str(&format!("\nexport const {} = {}({});\n", prelude.export_name, prelude.export_factory, serde_json::Value::Object(roles)));
             exports.push(prelude.export_name);
             let content = octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&body));
-            prelude_sources.push(PlannedCodeModeSource {
-                source: octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(prelude_source_id.clone()), content },
-                snapshot: octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(format!("{prelude_source_id}__source__{}",identity.chat_id)), content },
-                source_sha256: {
+            let source = octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(prelude_source_id.clone()), content };
+            let snapshot_id = format!("{prelude_source_id}__source__{}",identity.chat_id);
+            let source_sha256 = {
                     use sha2::{Digest, Sha256};
                     format!("{:x}", Sha256::digest(&bytes))
-                },
-                content: String::from_utf8(bytes).map_err(|_| "prelude source is not UTF8")?,
+            };
+            let snapshot = serde_json::json!({"id":snapshot_id,"run":identity.run_id,"source":source,"source_sha256":source_sha256,
+                "source_content":String::from_utf8(bytes).map_err(|_| "prelude source is not UTF8")?});
+            prelude_sources.push(PlannedCodeModeSource {
+                source,
+                snapshot: octopus_ledger::ArtifactRef { id:octopus_descriptors::ArtifactId::new(snapshot_id), content:octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&snapshot)) },
+                source_sha256,
+                content: pretty_json(&snapshot)?,
             });
         }
         let nested_doors = owner_routes.iter().filter_map(|route| route.pointer("/call/binding/outbound/0/interface").and_then(serde_json::Value::as_str)).map(str::to_owned).collect::<BTreeSet<_>>();
@@ -2077,7 +2101,8 @@ fn plan_code_mode_owners(
         for previous in identity.code_mode_owners.values() {
             if !previous.nested_doors.is_disjoint(&nested_doors) { return Err("selected persistent owners cannot share one nested door".into()); }
         }
-        let prelude_body = serde_json::json!({"schema_version":1,"module_source":modules,"exports":exports});
+        let prelude_id = format!("artifact-code-mode-prelude__{}__{}", source, identity.chat_id);
+        let prelude_body = serde_json::json!({"id":prelude_id,"run":identity.run_id,"owner_interface":owner,"schema_version":1,"module_source":modules,"exports":exports});
         let artifact = |id: String, body: &serde_json::Value| octopus_ledger::ArtifactRef {
             id: octopus_descriptors::ArtifactId::new(id),
             content: octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(
@@ -2085,7 +2110,7 @@ fn plan_code_mode_owners(
             )),
         };
         let prelude_ref = artifact(
-            format!("artifact-code-mode-prelude__{}__{}", source, identity.chat_id),
+            prelude_id,
             &prelude_body,
         );
         let authoring_environment = format!("{}_authoring_{}", recipe.authoring_room, owner);
@@ -2097,17 +2122,15 @@ fn plan_code_mode_owners(
                 "persistent owner cannot share the provider's live authoring identity".into(),
             );
         }
-        let topology_body = serde_json::json!({"schema_version":1,"run":identity.run_id,"worker":identity.worker_interface_id,"owner_interface":owner,"prelude_artifact":prelude_ref,"file_write_tool":authoring_tool,
+        let topology_id = format!("artifact-code-mode-topology__{}__{}", source, identity.chat_id);
+        let topology_body = serde_json::json!({"id":topology_id,"schema_version":1,"run":identity.run_id,"worker":identity.worker_interface_id,"owner_interface":owner,"prelude_artifact":prelude_ref,"file_write_tool":authoring_tool,
             "authoring_result":edge("authoring_result".into(),&authoring_environment,owner),
             "model_output":edge("model_output".into(),owner,&identity.model_interface_id),
             "notification":edge("notification".into(),owner,&identity.chat_interface_id),
             "receipt":edge("receipt".into(),owner,owner),"readiness":edge("readiness".into(),owner,owner),"routes":owner_routes,
             "coauthor":{"owner":identity.model_interface_id,"source":identity.authoring_source_id,"door":identity.authoring_environment_id,"tool":identity.authoring_tool_id,"call_label":config.artifact_labels.tool_call,"result_label":format!("{}.result",identity.authoring_tool_id)}});
         let topology_ref = artifact(
-            format!(
-                "artifact-code-mode-topology__{}__{}",
-                source, identity.chat_id
-            ),
+            topology_id,
             &topology_body,
         );
         if pretty_json(&prelude_body)?.len() as u64 > max_source_bytes {
@@ -3058,6 +3081,11 @@ fn plan_provider_interface(
         );
     } else {
         driver_config.private_config.remove("reasoning_effort");
+    }
+    if let Some(tier) = &provider.service_tier {
+        driver_config.private_config.insert("service_tier".into(), serde_json::json!(tier));
+    } else {
+        driver_config.private_config.remove("service_tier");
     }
     replace_provider_hidden_tools(
         &mut driver_config.private_config,
@@ -6357,6 +6385,63 @@ mod tests {
         );
     }
 
+    fn assert_exact_writer_detachment(plan: &OperatorChatPlan, root: &Path) {
+        use serde_json::{Value, json};
+        std::fs::create_dir_all(root).unwrap();
+        for write in &plan.run_writes {
+            std::fs::write(&write.path, &write.content).unwrap();
+        }
+        let mut original: Value = serde_json::from_str(&plan.run_record_content).unwrap();
+        let provider = &plan.model_interface_id;
+        let writer = original["interface_state"][provider]["run_authoring_binding"]
+            .as_object_mut().unwrap().remove("writer_run").unwrap();
+        std::fs::remove_file(root.join(format!("{}.json", writer["run"].as_str().unwrap()))).unwrap();
+        let ids = writer["initial_record"]["active_checkpoints"].as_array().unwrap();
+        for cp in writer["initial_record"]["checkpoints"].as_array().unwrap() {
+            let mut cp = cp.clone();
+            cp["run"] = json!(plan.run_id);
+            original["checkpoints"].as_array_mut().unwrap().push(cp);
+        }
+        original["active_checkpoints"].as_array_mut().unwrap().extend(ids.clone());
+        original["interface_state"][provider]["frontier_checkpoint_ids"].as_array_mut().unwrap().extend(ids.clone());
+        let output = original["checkpoints"].as_array().unwrap().iter()
+            .find(|cp| cp["interface_binding"]["interface"] == *provider
+                && cp["outbound_interface_bindings"].as_array().unwrap().iter()
+                    .any(|binding| binding["interface"] == plan.chat_interface_id)).unwrap().clone();
+        original["interface_state"][provider]["pending_handoff"] = json!({
+            "source_movement_seq":77,"terminal":true,"items":[{
+                "artifact_id":"turn.completed:exact","artifact_content_hash":"7".repeat(64),
+                "artifact_label":"turn.completed","manifest_relative_path":"emitted/exact.artifact.json",
+                "checkpoint":{"id":output["id"],"epoch":output["epoch"],
+                    "interface_binding":output["interface_binding"],"outbound_interface_bindings":output["outbound_interface_bindings"],
+                    "artifact_bindings":output["artifact_bindings"].as_array().unwrap().iter().map(|b|b["id"].clone()).collect::<Vec<_>>(),
+                    "required_verified_artifacts":output["required_verified_artifacts"]}
+            }],
+        });
+        original["interface_state"][provider]["context_generation"] = json!(16);
+        let bytes = pretty_json(&original).unwrap();
+        let target = root.join(format!("{}.json", plan.run_id));
+        std::fs::write(&target, &bytes).unwrap();
+        let mut request = OperatorWriterRunPlanRequest {
+            run_records_root:root.to_path_buf(),run_id:plan.run_id.clone(),expected_before_sha256:sha256_hex(bytes.as_bytes()),
+        };
+        let writes = plan_operator_writer_runs(&request).unwrap();
+        assert_eq!(writes.len(),2);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes.as_bytes(), "planning cannot mutate its source");
+        let next: Value = serde_json::from_str(&writes.last().unwrap().content).unwrap();
+        for key in ["pending_handoff","context_generation"] {
+            assert_eq!(next["interface_state"][provider][key],original["interface_state"][provider][key]);
+        }
+        assert_eq!(next["interface_state"][&plan.chat_interface_id],original["interface_state"][&plan.chat_interface_id]);
+        let retained: Vec<_> = original["checkpoints"].as_array().unwrap().iter().filter(|cp| !ids.contains(&cp["id"])).cloned().collect();
+        assert_eq!(next["checkpoints"],json!(retained));
+        request.expected_before_sha256 = "0".repeat(64);
+        assert!(plan_operator_writer_runs(&request).unwrap_err().contains("changed before planning"));
+        for write in writes { std::fs::write(write.path,write.content).unwrap(); }
+        request.expected_before_sha256 = sha256_hex(&std::fs::read(&target).unwrap());
+        assert!(plan_operator_writer_runs(&request).unwrap().is_empty());
+    }
+
     #[test]
     fn real_registry_home_plan_exports_authoring_and_exact_policy_requirements() {
         let repository = repository_registry_root();
@@ -6367,13 +6452,14 @@ mod tests {
         let request = OperatorChatPlanRequest {
             registry_root: registry_root.clone(),
             ee_instances_root: ee_dir.path().to_path_buf(),
-            run_records_root: None,
+            run_records_root: Some(ee_dir.path().join("runs")),
             write_hash_algorithm: WriteHashAlgorithm::Sha256,
             interface_private_state_root: None,
             chat_id: "planprobe0000000000000001".to_string(),
             provider_interface_id: "world_provider_ollama".to_string(),
             model: None,
             reasoning_effort: None,
+            service_tier: None,
             ee_id: Some("ee_operator_space".to_string()),
             worker_interface_id: Some("system_worker_coder_max".to_string()),
             client_surface_role: "task".to_string(),
@@ -6410,6 +6496,7 @@ mod tests {
             },
         };
         let plan = plan_operator_chat_topology(&request).expect("the real registry plans a chat");
+        assert_exact_writer_detachment(&plan, request.run_records_root.as_ref().unwrap());
         assert_computer_use_planned_identities(&registry_root, ee_dir.path());
         assert_browser_only_persistent_plan(&registry_root, ee_dir.path());
         assert_home_and_task_browser_cu_profile(&registry_root, ee_dir.path());
@@ -6453,6 +6540,11 @@ mod tests {
         )
         .expect("a new task carries its explicit provider run-authoring binding");
         assert_eq!(run_authoring_binding.schema_version, 2);
+        let writer = run_authoring_binding.writer_run.as_ref().expect("task authoring has an independent checked writer Run");
+        let writer_plan = plan.run_writes.iter().find(|write| write.path.file_stem().unwrap() == writer.run.as_str()).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&writer_plan.content).unwrap(), writer.initial_record);
+        assert_eq!(writer.initial_record["interface_state"][&plan.model_interface_id]["file_writer_target"]["run"], plan.run_id);
+        assert!(!record.checkpoints.iter().any(|checkpoint| checkpoint.inbound_interface() == Some(&run_authoring_binding.authoring_source_interface)));
         assert_eq!(
             run_authoring_binding.provider_interface.as_str(),
             plan.model_interface_id
@@ -6500,7 +6592,7 @@ mod tests {
             !operator_input.artifact_bindings.is_empty(),
             "ordinary operator input keeps the authored conversation context"
         );
-        let mut requirement_tools: BTreeSet<String> = record
+        let requirement_tools: BTreeSet<String> = record
             .checkpoints
             .iter()
             .flat_map(|checkpoint| checkpoint.required_verified_artifacts.iter())
@@ -6525,7 +6617,9 @@ mod tests {
             .map(|tool| tool.as_str().to_string())
             .collect();
         assert!(model_tools.remove(&plan.authoring_tool_id));
-        assert!(requirement_tools.remove(&plan.authoring_tool_id),
+        assert!(writer.initial_record["checkpoints"].as_array().unwrap().iter().any(|cp|
+            cp["required_verified_artifacts"].as_array().unwrap().iter().any(|requirement|
+                requirement["params"]["tools"].as_array().is_some_and(|tools| tools.contains(&serde_json::json!(plan.authoring_tool_id))))),
             "the private authoring writer has its own required verifier");
         assert_eq!(
             requirement_tools, model_tools,
@@ -6822,7 +6916,7 @@ mod tests {
 
     fn assert_computer_use_planned_identities(registry_root: &Path, ee_root: &Path) {
         let request: OperatorChatPlanRequest = serde_json::from_value(serde_json::json!({
-            "registry_root":registry_root,"ee_instances_root":ee_root,
+            "registry_root":registry_root,"ee_instances_root":ee_root,"run_records_root":ee_root.join("runs"),
             "write_hash_algorithm":"sha256","chat_id":"cu_exact_identity",
             "provider_interface_id":"world_provider_codex","ee_id":"ee_operator_space",
             "worker_interface_id":"system_worker_computer_use","client_surface_role":"task",
@@ -6935,7 +7029,7 @@ mod tests {
         .unwrap();
         let binding = &topology.tool_bindings[&InterfaceId::new("system_gui")];
         let provider =
-            resolve_provider(&interface_root, "world_provider_codex", "", "", &topology).unwrap();
+            resolve_provider(&interface_root, "world_provider_codex", "", "", None, &topology).unwrap();
         let identity = plan_identity(
             &config,
             &request.chat_id,
@@ -6993,6 +7087,8 @@ mod tests {
         let prelude_body = exact_json(&persistent,format!("artifact:{}",prelude["id"].as_str().unwrap()));
         for (reference,body) in [(prelude,&prelude_body),(topology_ref,&owner_topology)] {
             let reference:octopus_ledger::ArtifactRef=serde_json::from_value(reference.clone()).unwrap();
+            assert_eq!(body["id"],reference.id.as_str());
+            assert_eq!(body["run"],persistent.run_id);
             assert_eq!(reference.content,octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(body)));
         }
         assert_eq!(owner_topology["prelude_artifact"],*prelude);
@@ -7014,7 +7110,8 @@ mod tests {
         assert_eq!(returned[0]["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id]));
         assert_eq!(run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["payload_artifact_bindings"], serde_json::json!([payload_ref]));
         let rows = run["checkpoints"].as_array().unwrap();
-        let authoring_row = rows.iter().find(|cp| cp["interface_binding"]["interface"] == persistent.authoring_source_interface_id
+        let writer = &run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["writer_run"];
+        let authoring_row = writer["initial_record"]["checkpoints"].as_array().unwrap().iter().find(|cp| cp["interface_binding"]["interface"] == persistent.authoring_source_interface_id
             && cp["outbound_interface_bindings"][0]["interface"] == persistent.authoring_environment_interface_id).unwrap();
         let output_template = templates.iter().find(|cp| cp["role"] == "provider_tool_output"
             && cp["outbound_interface_bindings"][0]["interface"] == *owner).unwrap();
@@ -7023,10 +7120,11 @@ mod tests {
         exact_bindings.extend(output_template["static_artifact_bindings"].as_array().unwrap().iter().map(|id| serde_json::json!({"id":id})));
         let owner_call = rows.iter().find(|cp| cp["interface_binding"] == output_template["interface_binding"]
             && cp["outbound_interface_bindings"] == output_template["outbound_interface_bindings"]).unwrap();
-        assert_eq!(owner_call["artifact_bindings"], serde_json::json!(exact_bindings));
+        let bindings = |value: &serde_json::Value| serde_json::from_value::<Vec<ArtifactBinding>>(value.clone()).unwrap();
+        assert_eq!(bindings(&owner_call["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)));
         for id in run["interface_state"][owner]["owned_checkpoint_ids"].as_array().unwrap() {
             let row = rows.iter().find(|cp| cp["id"] == *id).unwrap();
-            assert_eq!(row["artifact_bindings"], serde_json::json!(exact_bindings), "owned checkpoint bindings differ from the exact provider return template");
+            assert_eq!(bindings(&row["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)), "owned checkpoint bindings differ from the exact provider return template");
         }
         assert!(!templates.iter().any(|cp| cp["interface_binding"]["interface"] == *gui || cp["outbound_interface_bindings"].as_array().unwrap().iter().any(|out| out["interface"] == *gui)));
         let provider = exact_json(&persistent,format!("interface:{}",persistent.model_interface_id));
@@ -7171,7 +7269,7 @@ mod tests {
             if role == "home" {
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
-                for label in ["client.surface.document", "realtime.session.update"] {
+                for label in ["client.surface.document", "client.action", "realtime.session.update"] {
                     let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)).unwrap();
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
                     let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)).unwrap();
@@ -7188,6 +7286,10 @@ mod tests {
             let exact = |tag: String| -> serde_json::Value {
                 serde_json::from_str(&plan.interface_writes.iter().find(|write|write.tag == tag).unwrap().content).unwrap()
             };
+            let mcp_tool = exact(format!("tool:{}", plan.capability_tools["client.mcp"]));
+            assert_eq!(mcp_tool["handler_config"], read("registry/tool/client.mcp/tool.json")["handler_config"]);
+            let worker_policy = exact(format!("policy:{}", plan.worker_interface_id));
+            assert!(worker_policy["ceiling"]["tools"].as_array().unwrap().contains(&serde_json::json!(plan.capability_tools["client.mcp"])));
             let sidecar = exact(format!("octopus-os:{}", plan.chat_interface_id));
             let parsed: OctopusOsInterfaceSidecar = serde_json::from_value(sidecar.clone()).unwrap();
             assert_eq!(parsed.surface_role, role);
@@ -7321,10 +7423,10 @@ mod tests {
         let registry_root = overlay.as_path();
         println!("browser planner source overlay retained at {}", registry_root.display());
         let mut request = OperatorChatPlanRequest {
-            registry_root:registry_root.into(), ee_instances_root:ee_root.into(), run_records_root:None,
+            registry_root:registry_root.into(), ee_instances_root:ee_root.into(), run_records_root:Some(ee_root.join("runs")),
             write_hash_algorithm:WriteHashAlgorithm::Sha256, interface_private_state_root:None,
             chat_id:"browser_persistent_identity".into(), provider_interface_id:"world_provider_codex".into(),
-            model:None, reasoning_effort:None, ee_id:Some("ee_operator_space".into()),
+            model:None, reasoning_effort:None, service_tier:None, ee_id:Some("ee_operator_space".into()),
             worker_interface_id:Some("system_worker_coder_max".into()), client_surface_role:"task".into(),
             cycle:"browser_persistent_cycle".into(), door_host_slots:BTreeMap::new(),
             external_inputs:Vec::new(), external_relays:Vec::new(), model_outputs:Vec::new(),
@@ -7393,8 +7495,14 @@ mod tests {
         assert_eq!(source_ref.content,octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&source_body)));
         assert_eq!(source["source_sha256"],format!("{:x}",Sha256::digest(&source_bytes)));
         let snapshot = plan.interface_writes.iter().find(|write|write.tag==format!("artifact:{}",source["snapshot"]["id"].as_str().unwrap())).unwrap();
-        assert_eq!(snapshot.content.as_bytes(),source_bytes);
-        assert_eq!(source["snapshot"]["content"],source["source"]["content"]);
+        let snapshot_body:serde_json::Value=serde_json::from_str(&snapshot.content).unwrap();
+        assert_eq!(snapshot_body["id"],source["snapshot"]["id"]);
+        assert_eq!(snapshot_body["run"],plan.run_id);
+        assert_eq!(snapshot_body["source"],source["source"]);
+        assert_eq!(snapshot_body["source_content"].as_str().unwrap().as_bytes(),source_bytes);
+        assert_eq!(snapshot_body["source_sha256"],source["source_sha256"]);
+        let snapshot_ref:octopus_ledger::ArtifactRef=serde_json::from_value(source["snapshot"].clone()).unwrap();
+        assert_eq!(snapshot_ref.content,octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&snapshot_body)));
         let provider = exact(&plan,format!("interface:{}",plan.model_interface_id));
         let hidden = provider["interface_driver_config"]["private_config"]["model_hidden_tools"].as_array().unwrap();
         let routes = topology["routes"].as_array().unwrap();
@@ -7479,13 +7587,14 @@ mod tests {
         let mut request = OperatorChatPlanRequest {
             registry_root,
             ee_instances_root: ee_dir.path().to_path_buf(),
-            run_records_root: None,
+            run_records_root: Some(ee_dir.path().join("runs")),
             write_hash_algorithm: WriteHashAlgorithm::Blake3,
             interface_private_state_root: Some(private_root.path().to_path_buf()),
             chat_id: "scheduledprobe000000000001".to_string(),
             provider_interface_id: "world_provider_codex".to_string(),
             model: Some("gpt-5.6-terra".to_string()),
             reasoning_effort: Some("ultra".to_string()),
+            service_tier: Some("priority".to_string()),
             ee_id: Some("ee_operator_space".to_string()),
             worker_interface_id: Some("system_worker_coder_max".to_string()),
             client_surface_role: "task".to_string(),
@@ -7543,6 +7652,7 @@ mod tests {
         );
         assert_eq!(plan.model, "gpt-5.6-terra");
         assert_eq!(plan.reasoning_effort, "ultra");
+        assert_eq!(plan.service_tier.as_deref(), Some("priority"));
         assert_eq!(
             plan.model_interface_id,
             "world_provider_codex_scheduledprobe000000000001"
@@ -7582,11 +7692,12 @@ mod tests {
             provider_config.private_config["reasoning_effort"],
             serde_json::json!("ultra")
         );
+        assert_eq!(provider_config.private_config["service_tier"], serde_json::json!("priority"));
         assert_eq!(
-            provider.interface_policy.values["models"],
-            load_interface_descriptor(&request.registry_root.join("interface"), &request.provider_interface_id)
+            serde_json::from_value::<BTreeSet<String>>(provider.interface_policy.values["models"].clone()).unwrap(),
+            serde_json::from_value::<BTreeSet<String>>(load_interface_descriptor(&request.registry_root.join("interface"), &request.provider_interface_id)
                 .expect("declared provider model ceiling")
-                .interface_policy.variables["models"].default
+                .interface_policy.variables["models"].default.clone()).unwrap()
         );
 
         let life: SpawnLifeConfig = serde_json::from_str(

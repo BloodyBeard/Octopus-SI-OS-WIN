@@ -284,8 +284,8 @@
   "code_mode.run": {
     "kind": "command",
     "conversation_visible": true,
-    "label": "Run",
-    "target_arguments": [],
+    "label": "Run code",
+    "target_arguments": ["script"],
     "query_arguments": []
   },
   "code_mode.wait": {

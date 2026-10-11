@@ -308,6 +308,7 @@ export async function submitOperatorTurn(request: OctopusChatTurnRequest): Promi
         providerInterfaceId: request.providerInterfaceId,
         providerModel: request.providerModel,
         reasoningEffort: request.reasoningEffort,
+        serviceTier: request.serviceTier,
         eeId: request.eeId,
         workerInterfaceId: request.workerInterfaceId,
         doorHostSlots: request.doorHostSlots,

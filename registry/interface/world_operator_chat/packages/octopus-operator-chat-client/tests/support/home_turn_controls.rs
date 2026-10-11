@@ -63,7 +63,7 @@ impl Boundary {
                     let (_, envelope) = self.input(&self.door, &file);
                     let call: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&envelope.read_artifact_payload().unwrap()).unwrap();
                     let body = octopus_system_room_env::execute_file_write_result(&envelope, &call.arguments,
-                        &["system_room".into()], &self.roots, &self.ctx.var_dir.join("effects")).unwrap();
+                        &["system_room".into()], &self.roots, &self.ctx.var_dir.join("effects"), self.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes).unwrap();
                     let result = octopus_tool_handlers::ToolResultArtifact::success(&call.tool, call.correlation_id, body);
                     let result = InterfaceArtifactFile::write(self.ctx.var_dir.join("results"), &result.label, &serde_json::to_vec(&result).unwrap()).unwrap();
                     assert!(matches!(self.admit(&result, &self.door.clone()).await, DeliveryVerdict::Admitted { .. }));
@@ -77,6 +77,7 @@ impl Boundary {
 
 #[tokio::test]
 async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart() {
+    for surface in ["home", "task"] {
     let temp = tempfile::tempdir().unwrap(); let root = temp.path();
     let registry = root.join("registry"); let ees = root.join("ees"); let runs = root.join("runs");
     tests::copy_planner_descriptors(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry"), &registry);
@@ -84,7 +85,7 @@ async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart(
     let request: OperatorChatPlanRequest = serde_json::from_value(json!({
         "registry_root":registry,"ee_instances_root":ees,"run_records_root":runs,"write_hash_algorithm":"sha256",
         "chat_id":"home_controls","provider_interface_id":"world_provider_codex","ee_id":"ee_existence",
-        "worker_interface_id":"system_worker_operator_home","client_surface_role":"home","cycle":"initial",
+        "worker_interface_id":"system_worker_operator_home","client_surface_role":surface,"cycle":"initial",
         "selected_worker_environment_kinds":["system_room"],
         "conversation":{"ledger_offset":0,"artifact_bindings":[],"pinned_artifact_bindings":[],"pinned_context_items":[],"continued_from":null}
     })).unwrap();
@@ -94,8 +95,10 @@ async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart(
     }
     let path = runs.join(format!("{}.json", plan.run_id)); std::fs::write(&path, &plan.run_record_content).unwrap();
     let record: Value = serde_json::from_str(&plan.run_record_content).unwrap();
-    let voice_path = runs.join(format!("{}.json", record["interface_state"][&plan.chat_interface_id]["voice_context"]["run_id"].as_str().unwrap()));
-    let voice = std::fs::read(&voice_path).unwrap();
+    let voice_path = record["interface_state"][&plan.chat_interface_id]["voice_context"]["run_id"].as_str().map(|id| runs.join(format!("{id}.json")));
+    let voice = voice_path.as_ref().map(|path| std::fs::read(path).unwrap());
+    assert_eq!(voice.is_some(), surface == "home");
+    assert!(record["interface_state"][&plan.model_interface_id]["run_authoring_binding"]["writer_run"].is_object());
     let blobs: SharedBlobs = Arc::new(Mutex::new(DurableBlobs::open(root.join("ledger/blobs")).unwrap()));
     let runtime = build_embedded_spine(SpineRootConfig { registry_root:registry.clone(), run:plan.run_id.clone().into(), blobs:blobs.clone(),
         interface_artifact_root:root.join("artifacts"), run_records_root:runs.clone(), ee_instances_root:ees }).await.unwrap();
@@ -140,12 +143,13 @@ async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart(
             let (seq, input) = b.input(&provider, &message); let pinned = b.ctx.pinned_run_record_bytes(&input).unwrap();
             foreground = Some(ProviderHandoffSession::new(&b.ctx).unwrap().from_invocation(&b.ctx,b.ctx.descriptor_snapshot.as_ref().unwrap(),&plan.run_id.clone().into(),&input,seq,&pinned).unwrap());
         }
-        assert_eq!(std::fs::read(&voice_path).unwrap(), voice);
+        assert_eq!(voice_path.as_ref().map(|path| std::fs::read(path).unwrap()), voice);
     }
     let active = foreground.unwrap();
     b.drive(active.hand_final(emission(artifact("interface.artifact.output", json!({"text":"typed response"}))))).await;
     let retry = artifact("operator.message", json!({"text":"next typed input","message_id":"retry"}));
     assert!(matches!(b.admit(&retry, &client).await, DeliveryVerdict::Admitted { .. }));
     assert!(b.log.read_from(Seq(0)).iter().any(|row| row.kind == MovementKind::InterfaceOutbound && row.to == Endpoint::Interface(client.clone()) && row.artifact.as_ref().is_some_and(|a| a.id.as_str().starts_with("turn.control.failed:"))));
-    assert_eq!(std::fs::read(&voice_path).unwrap(), voice);
+    assert_eq!(voice_path.as_ref().map(|path| std::fs::read(path).unwrap()), voice);
+    }
 }

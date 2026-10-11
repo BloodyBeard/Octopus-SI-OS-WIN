@@ -1,4 +1,5 @@
 const { parseScheduledDueAt } = require("./scheduledTime.cjs");
+const { modelServiceTiers } = require("./providerModelTiers.cjs");
 const { parseHomeVoiceContext, projectHomeVoiceContext } = require("./homeVoiceProjection.cjs");
 const { payloadArtifactBindings } = require("./contentAddressedArtifact.cjs");
 const fsSync = require("node:fs");
@@ -408,7 +409,11 @@ function createProjectionStore(options) {
   async function readProjection(request) {
     await beforeRead();
     const { method, params } = parseProjectionReadRequest(request);
-    if (method === "projection.interface_artifacts.list") {
+    if (method === "projection.interface_artifacts.list" || method === "projection.client_actions.list") {
+      const home = octopusHome();
+      if (method === "projection.client_actions.list" && params.home !== home) {
+        throw new Error("Client action read does not match the selected Home.");
+      }
       ensureProjectionWatchers();
       const ledgerView = {
         durableRoot: resolveDurableRoot(),
@@ -417,7 +422,13 @@ function createProjectionStore(options) {
         ledgerRevision: "",
         ledgerMemo: new Map(),
       };
-      return { artifacts: await interfaceArtifactPayloadRows(ledgerView, params) };
+      switch (method) {
+        case "projection.interface_artifacts.list":
+          return { artifacts: await interfaceArtifactPayloadRows(ledgerView, params) };
+        case "projection.client_actions.list":
+          return { home, run_id: params.run_id, interface_id: params.interface_id,
+            actions: await clientActionRows(ledgerView, params) };
+      }
     }
     const exactInterface = params.interface_id ?? params.interface;
     if (method === "projection.interfaces.artifact_transfer.targets"
@@ -600,7 +611,11 @@ function createProjectionStore(options) {
         }
         await refreshLedgerProjection(projection);
         const movements = await movementRows(projection);
-        return { movements: limitRows(movements, params), total: movements.length };
+        return {
+          movements: limitRows(movements, params),
+          total: movements.length,
+          next_seq: movements.reduce((next, row) => Math.max(next, row.seq + 1), 0),
+        };
       }
       case "projection.movements.payload":
         return await movementPayloadPreview(params);
@@ -716,7 +731,7 @@ function createProjectionStore(options) {
         throw new Error("movement cursor before_seq must be greater than after_seq");
       }
       const predicates = ["seq < ?"];
-      const values = [beforeSeq ?? index.watermark];
+      const values = [Math.min(beforeSeq ?? index.watermark, index.watermark)];
       if (afterSeq !== null) {
         predicates.push("seq > ?");
         values.push(afterSeq);
@@ -769,6 +784,7 @@ function createProjectionStore(options) {
         query,
         recordedAfter,
         recordedBefore,
+        limit,
       });
       if (tail === null) return null;
       const rows = projectMovementRows(projection, [...indexedRows, ...tail.rows])
@@ -781,6 +797,7 @@ function createProjectionStore(options) {
       return {
         movements: rows,
         total,
+        next_seq: tail.nextSeq,
         ...(oldest !== null && rows.length < total ? { next_before_seq: oldest } : {}),
       };
     } finally {
@@ -791,11 +808,11 @@ function createProjectionStore(options) {
   async function readMovementLedgerTailPage(ledgerPath, startOffset, expectedSeq, filter) {
     const stat = await fs.stat(ledgerPath);
     if (stat.size < startOffset) return null;
-    if (stat.size === startOffset) return { rows: [], total: 0 };
+    if (stat.size === startOffset) return { rows: [], total: 0, nextSeq: expectedSeq };
     const rows = [];
     let total = 0;
     let pending = Buffer.alloc(0);
-    for await (const chunk of fsSync.createReadStream(ledgerPath, { start: startOffset })) {
+    for await (const chunk of fsSync.createReadStream(ledgerPath, { start: startOffset, end: stat.size - 1 })) {
       const bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
       let recordStart = 0;
       for (;;) {
@@ -818,10 +835,11 @@ function createProjectionStore(options) {
           source_file: ledgerPath,
           source_line: seq + 1,
         });
+        if (rows.length >= filter.limit * 2) rows.splice(0, rows.length - filter.limit);
       }
       pending = bytes.subarray(recordStart);
     }
-    return { rows, total };
+    return { rows: rows.slice(-filter.limit), total, nextSeq: expectedSeq };
   }
 
   function matchesMovementPage(movement, seq, filter) {
@@ -1078,6 +1096,70 @@ function createProjectionStore(options) {
     );
   }
 
+  async function clientActionRows(projection, params) {
+    const runId = params.run_id;
+    const interfaceId = params.interface_id;
+    const afterSeq = params.after_seq ?? -1;
+    const labels = new Set(["client.action"]);
+    const indexed = await readIndexedInterfaceArtifactRows(
+      projection, runId, interfaceId, labels, afterSeq, true,
+    );
+    if (indexed === null) {
+      await refreshLedgerProjection(projection);
+      if (projection.invalidLedgerRows.length) {
+        throw new ProjectionEvidenceError("Client actions cannot be consumed from malformed ledger evidence.");
+      }
+    }
+    const movements = indexed ?? ledgerRowsForRun(projection, runId);
+    const page = movements.filter((row) => matchesInterfaceArtifactMovement(
+      row, runId, interfaceId, labels, afterSeq, true,
+    ))
+      .sort((left, right) => left.seq - right.seq)
+      .slice(0, params.limit ?? 128);
+    return Promise.all(page.map(async (row) => {
+      const identity = {
+        artifact_id: row.artifact.id, run_id: runId, seq: row.seq,
+        movement_kind: "InterfaceOutbound", from: row.from, to: row.to,
+      };
+      try {
+        return { ...identity, action: await immutableClientAction(row) };
+      } catch (error) {
+        return { ...identity, error: String(error?.message ?? error) };
+      }
+    }));
+  }
+
+  async function immutableClientAction(row) {
+    const manifestHash = contentHashHex(row?.artifact?.content);
+    if (!manifestHash || !row.source_file) throw new Error("Client action has no immutable manifest.");
+    const blobRoot = path.join(path.dirname(row.source_file), "blobs");
+    const manifest = JSON.parse((await readStableContentAddressedArtifactBytes(
+      path.join(blobRoot, manifestHash), manifestHash, ARTIFACT_MANIFEST_PREVIEW_MAX_BYTES, "client action manifest",
+    )).toString("utf8"));
+    if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)
+      || manifest.label !== "client.action" || row.artifact.id !== `client.action:${manifestHash}`) {
+      throw new Error("Client action identity does not match its immutable manifest.");
+    }
+    const payloadHash = requiredContentHash(manifest.payload_content_hash, "client action payload_content_hash");
+    if (typeof manifest.payload_path !== "string" || !path.isAbsolute(manifest.payload_path)) {
+      throw new Error("Client action payload_path must be absolute.");
+    }
+    const bytes = await readStableContentAddressedArtifactBytes(
+      path.join(blobRoot, payloadHash), payloadHash, ARTIFACT_PREVIEW_MAX_BYTES, "client action payload",
+    );
+    const text = bytes.toString("utf8");
+    if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Client action payload must be UTF-8 JSON.");
+    const action = JSON.parse(text);
+    if (!action || typeof action !== "object" || Array.isArray(action)
+      || Object.keys(action).length !== 4
+      || action.schema !== "octopus.client_action" || action.schema_version !== 1
+      || action.action !== "open_surface" || typeof action.surface_id !== "string"
+      || !action.surface_id || action.surface_id !== action.surface_id.trim()) {
+      throw new Error("Client action must be an exact octopus.client_action v1 open_surface payload.");
+    }
+    return action;
+  }
+
   async function interfaceArtifactPayloadRows(projection, params) {
     const runId = stringValue(params.run_id);
     const interfaceId = stringValue(params.interface_id);
@@ -1135,13 +1217,16 @@ function createProjectionStore(options) {
     return artifacts.sort((left, right) => left.seq - right.seq);
   }
 
-  function matchesInterfaceArtifactMovement(row, runId, interfaceId, labels, afterSeq) {
-    if (!isAdmittedInterfaceArtifactMovement(row)) return false;
+  function matchesInterfaceArtifactMovement(row, runId, interfaceId, labels, afterSeq, outboundRecipientOnly = false) {
+    if (outboundRecipientOnly ? row.kind !== "InterfaceOutbound" : !isAdmittedInterfaceArtifactMovement(row)) return false;
     const artifactId = ledgerArtifactId(row);
-    const label = ledgerArtifactLabel(row);
+    const label = outboundRecipientOnly ? row.artifact?.id?.split(":")[0] : ledgerArtifactLabel(row);
     const seq = numberValue(row.seq, -1);
     if (!artifactId || seq <= afterSeq) return false;
     if (labels.size > 0 && !labels.has(label)) return false;
+    if (outboundRecipientOnly) {
+      return row.invocation_metadata?.runtime?.run === runId && row.to?.Interface === interfaceId;
+    }
     const coordinates = artifactMovementCoordinates(row);
     if (runId && coordinates.runId !== runId) return false;
     return !interfaceId || coordinates.interfaceId === interfaceId;
@@ -1159,9 +1244,8 @@ function createProjectionStore(options) {
     const indexPath = path.join(projection.durableRoot, "ledger-index.sqlite");
     let database;
     try {
-      const ledgerStat = await fs.stat(ledgerPath);
       database = new DatabaseSync(indexPath, { readOnly: true });
-      database.exec("PRAGMA query_only = ON");
+      database.exec("PRAGMA query_only = ON; BEGIN");
       const meta = database.prepare(
         "SELECT key, value FROM index_meta WHERE key IN ('schema_version', 'watermark', 'durable_end_offset')",
       ).all();
@@ -1172,6 +1256,7 @@ function createProjectionStore(options) {
       }
       const watermark = indexedUnsignedInteger(values.get("watermark"));
       const durableEndOffset = indexedUnsignedInteger(values.get("durable_end_offset"));
+      const ledgerStat = await fs.stat(ledgerPath);
       if (watermark === null || durableEndOffset === null || durableEndOffset > ledgerStat.size) {
         database.close();
         return null;
@@ -1278,13 +1363,14 @@ function createProjectionStore(options) {
     interfaceId,
     labels,
     afterSeq,
+    outboundRecipientOnly = false,
   ) {
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
     try {
       const predicates = [
         "artifact_id IS NOT NULL",
-        "kind IN ('InterfaceArrival', 'InterfaceOutbound')",
+        outboundRecipientOnly ? "kind = 'InterfaceOutbound'" : "kind IN ('InterfaceArrival', 'InterfaceOutbound')",
         "seq > ?",
       ];
       const values = [afterSeq];
@@ -1298,7 +1384,10 @@ function createProjectionStore(options) {
         )`);
         values.push(runId);
       }
-      if (interfaceId) {
+      if (interfaceId && outboundRecipientOnly) {
+        predicates.push("to_kind = 'interface' AND to_id = ?");
+        values.push(interfaceId);
+      } else if (interfaceId) {
         predicates.push(`(
           runtime_interface = ?
           OR (from_kind = 'interface' AND from_id = ?)
@@ -1324,6 +1413,7 @@ function createProjectionStore(options) {
         interfaceId,
         labels,
         afterSeq,
+        outboundRecipientOnly,
       );
       if (tail === null) return null;
       const rows = [...indexedRows, ...tail].sort(compareMovementOrder);
@@ -1344,6 +1434,7 @@ function createProjectionStore(options) {
     interfaceId,
     labels,
     afterSeq,
+    outboundRecipientOnly = false,
   ) {
     const stat = await fs.stat(ledgerPath);
     if (stat.size < startOffset) return null;
@@ -1377,6 +1468,7 @@ function createProjectionStore(options) {
           interfaceId,
           labels,
           afterSeq,
+          outboundRecipientOnly,
         )) rows.push(projected);
       }
       pending = bytes.subarray(recordStart);
@@ -1826,7 +1918,9 @@ function createProjectionStore(options) {
       ARTIFACT_PREVIEW_MAX_BYTES,
       "artifact payload blob",
     );
-    const nested = await nestedArtifactMedia(payloadBytes);
+    const nested = Object.hasOwn(params, "attachment_id")
+      ? await artifactAttachmentBytes(payloadBytes, params.attachment_id)
+      : await nestedArtifactMedia(payloadBytes);
     const selected = nested ?? {
       bytes: payloadBytes,
       contentHash: payloadHash,
@@ -1837,12 +1931,67 @@ function createProjectionStore(options) {
       artifact_id: artifactId,
       run_id: runId,
       interface_id: interfaceId,
+      ...(Object.hasOwn(params, "attachment_id") ? { attachment_id: params.attachment_id } : {}),
       filename: selected.filename,
       mime_type: selected.mimeType,
       content_hash: selected.contentHash,
       size: selected.bytes.byteLength,
       base64: selected.bytes.toString("base64"),
     };
+  }
+
+  async function artifactAttachmentBytes(payloadBytes, attachmentId) {
+    if (typeof attachmentId !== "string" || !/^[0-9a-f]{64}$/.test(attachmentId)) {
+      throw new Error("attachment_id must be an exact SHA-256 digest.");
+    }
+    let payload;
+    try {
+      payload = JSON.parse(payloadBytes.toString("utf8"));
+    } catch {
+      throw new Error("The admitted artifact has no attachment manifest.");
+    }
+    const matches = Array.isArray(payload?.attachments)
+      ? payload.attachments.filter((entry) => entry?.payload_content_hash === attachmentId)
+      : [];
+    if (matches.length !== 1) throw new Error("The requested attachment must match exactly one admitted manifest entry.");
+    const attachment = matches[0];
+    const filename = requiredString(attachment.name, "attachment.name");
+    const mimeType = attachment.mime_type;
+    if (typeof mimeType !== "string" || mimeType.length > 160 || !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(mimeType)) {
+      throw new Error("Attachment mime_type is invalid.");
+    }
+    const payloadPath = requiredString(attachment.payload_path, "attachment.payload_path");
+    if (!path.isAbsolute(payloadPath)) throw new Error("Attachment payload_path must be absolute.");
+    const size = attachment.size;
+    if (!Number.isSafeInteger(size) || size < 0 || size > ARTIFACT_PREVIEW_MAX_BYTES) {
+      throw new Error(`Attachment size exceeds the ${ARTIFACT_PREVIEW_MAX_BYTES} byte preview boundary or is invalid.`);
+    }
+    const stat = await fs.lstat(payloadPath);
+    if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("Attachment payload is not a regular file.");
+    const handle = await fs.open(payloadPath, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW | fsSync.constants.O_NONBLOCK);
+    try {
+      const before = await handle.stat();
+      if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || before.size !== size) {
+        throw new Error("Attachment size or file identity does not match its admitted manifest.");
+      }
+      const buffer = Buffer.alloc(size + 1);
+      let offset = 0;
+      while (offset < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+      }
+      const after = await handle.stat();
+      if (offset !== size || after.size !== size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+        throw new Error("Attachment changed while it was being read.");
+      }
+      const bytes = buffer.subarray(0, size);
+      const contentHash = crypto.createHash("sha256").update(bytes).digest("hex");
+      if (contentHash !== attachmentId) throw new Error("Attachment content hash does not match its admitted manifest.");
+      return { bytes, contentHash, filename: path.basename(filename), mimeType };
+    } finally {
+      await handle.close();
+    }
   }
 
   function artifactMovementCoordinates(row) {
@@ -5440,6 +5589,7 @@ function createProjectionStore(options) {
       boundId: bound,
       model: stringValue(descriptorMetadata.model),
       reasoningEffort: stringValue(descriptorMetadata.reasoning_effort),
+      serviceTier: stringValue(descriptorMetadata.service_tier),
       modelCatalogRefreshable,
     };
   }
@@ -5676,9 +5826,14 @@ function createProjectionStore(options) {
             client_template_provider_interface_id: clientTemplateMatchesProject
               ? stringValue(clientTemplate.provider_interface_id)
               : "",
+            client_template_provider_model: clientTemplateMatchesProject
+              ? stringValue(clientTemplate.provider_model)
+              : "",
             client_template_reasoning_effort: clientTemplateMatchesProject
               ? stringValue(clientTemplate.reasoning_effort)
               : "",
+            client_template_service_tier: clientTemplateMatchesProject
+              ? stringValue(clientTemplate.service_tier) : "",
             client_template_digest: clientTemplateMatchesProject
               ? stringValue(worker.client_worker_template_digest)
               : "",
@@ -6390,6 +6545,7 @@ function createProjectionStore(options) {
         provider_model: provider.model,
         provider_models_refreshable: provider.modelCatalogRefreshable,
         reasoning_effort: provider.reasoningEffort,
+        service_tier: provider.serviceTier,
         created_at_ms: times.length ? Math.min(...times) : 0,
         updated_at_ms: times.length ? Math.max(...times) : 0,
         last_movement_seq: lastMovementSeq,
@@ -8217,6 +8373,7 @@ function providerInterfaceDescriptorRows(descriptors) {
       sourceNames: arrayValue(descriptor.source_names).map(stringValue).filter(Boolean),
       model,
       reasoningEffort: stringValue(privateConfig.reasoning_effort),
+      serviceTier: stringValue(privateConfig.service_tier),
       supportedReasoningEfforts,
       models,
     });
@@ -8252,6 +8409,7 @@ function providerModelCatalogRows(descriptorConfig, privateConfig, selectedModel
         : model === selectedModel ? [...new Set(globalEfforts)] : [],
       showInPicker: entry.show_in_picker !== false && entry.showInPicker !== false,
       isDefault: entry.is_default === true || entry.isDefault === true || model === selectedModel,
+      ...modelServiceTiers(entry.service_tiers, entry.default_service_tier, `Provider model '${model}'`),
     });
   }
   for (const model of declaredModels) {
@@ -8314,8 +8472,6 @@ async function readOperatorChatProtocol(registryRoot) {
 
 function providerLabel(descriptor, fallback) {
   const source = arrayValue(descriptor.source_names).map(stringValue).find(Boolean);
-  const model = stringValue(descriptor.interface_driver_config?.private_config?.model);
-  if (source && model) return `${source} · ${model}`;
   return source || fallback;
 }
 
@@ -8449,7 +8605,9 @@ function parseClientWorkerTemplate(value, workerInterfaceId, file) {
       "worker_interface",
       "project_ee_id",
       "provider_interface_id",
+      "provider_model",
       "reasoning_effort",
+      "service_tier",
       "application_ids",
       "worker_environment_kinds",
     ],
@@ -8466,7 +8624,10 @@ function parseClientWorkerTemplate(value, workerInterfaceId, file) {
   const workerInterface = requiredSafeRegistryId(value.worker_interface, "client worker template interface");
   const projectEeId = requiredSafeRegistryId(value.project_ee_id, "client worker template Project EE");
   const providerInterfaceId = requiredSafeRegistryId(value.provider_interface_id, "client worker template provider");
+  const providerModel = value.provider_model === undefined ? "" : requiredAgentModel(value.provider_model);
   const reasoningEffort = stringValue(value.reasoning_effort);
+  const serviceTier = value.service_tier === undefined ? "" : requiredString(value.service_tier, "client worker template service tier");
+  if (serviceTier.length > 80 || /[\u0000-\u001f\u007f]/.test(serviceTier)) throw new Error("Agent service tier is invalid");
   if (
     value.schema_version !== 1
     || workerInterface !== workerInterfaceId
@@ -8485,7 +8646,9 @@ function parseClientWorkerTemplate(value, workerInterfaceId, file) {
     worker_interface: workerInterface,
     project_ee_id: projectEeId,
     provider_interface_id: providerInterfaceId,
+    ...(providerModel ? { provider_model: providerModel } : {}),
     reasoning_effort: reasoningEffort,
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
     application_ids: applicationIds,
     worker_environment_kinds: workerEnvironmentKinds,
   };
@@ -9938,6 +10101,7 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
     "delete_project",
     "update_project_presentation",
     "delete_task",
+    "rename_task",
     "move_task",
     "set_task_archived",
     "install_application",
@@ -9977,8 +10141,31 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
     if (action === "set_task_archived") {
       return setOctopusOsTaskArchived(registryRoot, octopusHomeRoot, snapshot, request, hooks);
     }
+    if (action === "rename_task") {
+      const runId = requiredSafeRegistryId(request.runId, "runId");
+      const name = requiredAgentName(request.name);
+      const task = snapshot.clientRuns.find((row) => row.run_id === runId && row.surface_role === "task");
+      if (!task) throw new Error(`Task '${runId}' is not an editable task in this Home.`);
+      if (typeof hooks.commitClientAuthoring !== "function") throw new Error("Client authoring transaction is unavailable.");
+      const interfaceId = requiredSafeRegistryId(task.interface_id, "task client interface");
+      const file = path.join(registryRoot, "interface", interfaceId, "octopus_os.json");
+      const current = await readRegularJsonDocument(file, "task presentation");
+      parseOctopusOsSidecar(current.document, interfaceId, file);
+      if (current.document.component !== "client" || current.document.surface_role !== "task"
+        || current.document.owner_interface !== interfaceId) {
+        throw new Error("Task presentation no longer belongs to the selected run.");
+      }
+      const next = { ...current.document, presentation: { name, projects: [] } };
+      parseOctopusOsSidecar(next, interfaceId, file);
+      await hooks.commitClientAuthoring({
+        label: "rename Octopus task",
+        writes: [{ file, beforeDigest: current.digest, next }],
+        removals: [], publishBarrierPath: file,
+      });
+      return { action, runId, name };
+    }
     if (action === "add_agent_preset") {
-      exactObjectKeys(request, ["action", "operationId", "home", "workspace", "projectEeId", "packId", "expectedPackManifestDigest", "presetId", "providerInterfaceId", "providerModel", "reasoningEffort"], ["action", "operationId", "home", "workspace", "projectEeId", "packId", "expectedPackManifestDigest", "presetId", "providerInterfaceId", "providerModel", "reasoningEffort"], "Agent preset request");
+      exactObjectKeys(request, ["action", "operationId", "home", "workspace", "projectEeId", "packId", "expectedPackManifestDigest", "presetId", "providerInterfaceId", "providerModel", "reasoningEffort", "serviceTier"], ["action", "operationId", "home", "workspace", "projectEeId", "packId", "expectedPackManifestDigest", "presetId", "providerInterfaceId", "providerModel", "reasoningEffort"], "Agent preset request");
       if (request.home !== octopusHomeRoot || typeof hooks.withAgentPreset !== "function") throw new Error("Agent preset authoring is unavailable for this Home");
       return hooks.withAgentPreset(request, async (preset) => {
         await preset.verify();
@@ -10475,7 +10662,14 @@ function clientAgentTemplateFromRequest(request, chatContexts, projectEeId, work
   if (!providerIds.has(providerInterfaceId)) {
     throw new Error(`Agent provider '${providerInterfaceId}' is not admitted by worker template '${workerInterfaceId}'`);
   }
+  const providerModel = requiredAgentModel(request?.providerModel);
+  const admittedModels = worker.interface_policy?.[providerInterfaceId]?.models;
+  if (!Array.isArray(admittedModels) || !admittedModels.includes(providerModel)) {
+    throw new Error(`Agent model '${providerModel}' is not admitted by worker template '${workerInterfaceId}'`);
+  }
   const reasoningEffort = stringValue(request?.reasoningEffort);
+  const serviceTier = request?.serviceTier === undefined || request.serviceTier === "" ? "" : requiredString(request.serviceTier, "Agent service tier");
+  if (serviceTier.length > 80 || /[\u0000-\u001f\u007f]/.test(serviceTier)) throw new Error("Agent service tier is invalid");
   if (reasoningEffort.length > 80 || /[\u0000-\u001f\u007f]/.test(reasoningEffort)) {
     throw new Error("Agent reasoning effort is invalid");
   }
@@ -10496,10 +10690,19 @@ function clientAgentTemplateFromRequest(request, chatContexts, projectEeId, work
     worker_interface: workerInterfaceId,
     project_ee_id: projectEeId,
     provider_interface_id: providerInterfaceId,
+    provider_model: providerModel,
     reasoning_effort: reasoningEffort,
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
     application_ids: applicationIds,
     worker_environment_kinds: workerEnvironmentKinds,
   };
+}
+
+function requiredAgentModel(value) {
+  if (typeof value !== "string" || !value || value.trim() !== value || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("Choose an explicit Agent provider model.");
+  }
+  return value;
 }
 
 function requiredAgentId(value) {
@@ -11031,6 +11234,8 @@ async function configureOctopusOsTaskApplication(
       octopusHomeRoot,
       workerInterface,
       chatInterface,
+      next,
+      exactInterfaces,
     );
     const installedApplicationDocuments = await readInstalledApplicationManifestDocuments(registryRoot);
     const chatSidecarPath = path.join(
@@ -11291,7 +11496,7 @@ function plannedTaskApplicationWrites(value) {
       throw new Error(`task application planner write ${index} is malformed JSON: ${error.message}`);
     }
     if (!isPlainRecord(next)) throw new Error(`task application planner write ${index} must contain an object`);
-    return { file, beforeDigest, next };
+    return { file, beforeDigest, content: write.content };
   });
 }
 
@@ -12288,7 +12493,8 @@ async function deleteOctopusOsTask(
   if (readClientTaskArchive(current.document, ownerInterface)) throw new Error(`task '${runId}' is archived; restore it before deleting`);
   const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
   assertRunPrivateStateIsOwned(current.document, exactInterfaces, runId);
-  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces);
+  const ownedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, current.document, exactInterfaces);
+  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
 
   const registryHomeRoot = await fs.realpath(octopusHomeRoot);
   const registryHome = await fs.realpath(registryRoot);
@@ -12302,8 +12508,10 @@ async function deleteOctopusOsTask(
     "task interface",
   );
   const ownedTools = await octopusOsOwnedToolTopology(registryHome, exactInterfaces);
+  const ownedArtifacts = await octopusOsOwnedArtifactTopology(registryHome, current.document, exactInterfaces);
+  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, ownedArtifacts.ids, ownedWriters.ids);
   const policyWrites = await taskTopologyPolicyWrites(registryHome, exactInterfaces, ownedTools.ids);
-  const plannedDocuments = new Map(policyWrites.map((write) => [write.file, write.next]));
+  const plannedDocuments = new Map([...policyWrites, ...ownedArtifacts.writes].map((write) => [write.file, write.next]));
   await assertNoExternalTaskTopologyReferences(
     registryHome,
     new Set([
@@ -12311,7 +12519,7 @@ async function deleteOctopusOsTask(
       ...ownedTools.directories.map((entry) => entry.path),
     ]),
     plannedDocuments,
-    new Set([runId, ...exactInterfaces, ...ownedTools.ids]),
+    new Set([runId, ...ownedWriters.ids, ...exactInterfaces, ...ownedTools.ids, ...ownedArtifacts.ids]),
   );
 
   let releasedWorkerEnvironmentIds = [];
@@ -12339,7 +12547,15 @@ async function deleteOctopusOsTask(
       throw new Error(`task run '${runId}' changed outside its exact release cycle`);
     }
     assertRunPrivateStateIsOwned(releasedRun.document, exactInterfaces, runId);
-    await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces);
+    await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, ownedArtifacts.ids, ownedWriters.ids);
+    const releasedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, releasedRun.document, exactInterfaces);
+    if (stableJson(releasedWriters.writes) !== stableJson(ownedWriters.writes)) {
+      throw new Error(`task '${runId}' writer ownership changed during release`);
+    }
+    const releasedArtifacts = await octopusOsOwnedArtifactTopology(registryHome, releasedRun.document, exactInterfaces);
+    if (stableJson(releasedArtifacts.writes) !== stableJson(ownedArtifacts.writes)) {
+      throw new Error(`task '${runId}' artifact ownership changed during release`);
+    }
     await assertNoExternalTaskTopologyReferences(
       registryHome,
       new Set([
@@ -12347,7 +12563,7 @@ async function deleteOctopusOsTask(
         ...ownedTools.directories.map((entry) => entry.path),
       ]),
       plannedDocuments,
-      new Set([runId, ...exactInterfaces, ...ownedTools.ids]),
+      new Set([runId, ...ownedWriters.ids, ...exactInterfaces, ...ownedTools.ids, ...ownedArtifacts.ids]),
     );
   }
 
@@ -12355,11 +12571,13 @@ async function deleteOctopusOsTask(
     registryHomeRoot,
     exactInterfaces,
   );
-  await assertTaskWorkerEnvironmentsReleased(registryHomeRoot, exactInterfaces, runId);
+  await assertTaskWorkerEnvironmentsReleased(registryHomeRoot, exactInterfaces, runId, ownedWriters.records);
+  for (const removal of [...interfaceDirectories, ...ownedTools.directories]) await requireUnchangedRemoval(removal);
+  for (const write of ownedWriters.writes) await snapshotRemovalFile(write.file, write.beforeDigest, "task writer Run");
   await snapshotRemovalFile(runPath, expectedDigest, `task run ${runId}`);
   const committed = await commitClientAuthoring({
     label: "delete Octopus OS task",
-    writes: [...policyWrites, { file: runPath, beforeDigest: expectedDigest, next: null }],
+    writes: [...policyWrites, ...ownedArtifacts.writes, ...ownedWriters.writes, { file: runPath, beforeDigest: expectedDigest, next: null }],
     removals: [
       ...interfaceDirectories,
       ...ownedTools.directories,
@@ -12370,8 +12588,10 @@ async function deleteOctopusOsTask(
   return {
     action: "delete_task",
     runId,
+    removedRuns: [runId, ...ownedWriters.ids].sort(),
     removedInterfaces: [...exactInterfaces].sort(),
     removedTools: [...ownedTools.ids].sort(),
+    removedArtifacts: [...ownedArtifacts.ids].sort(),
     releasedWorkerEnvironmentIds,
     cleanupWarnings: arrayValue(committed?.cleanupWarnings),
   };
@@ -12473,14 +12693,16 @@ async function moveOctopusOsTask(
   if (readClientTaskArchive(current.document, ownerInterface)) throw new Error(`task '${runId}' is archived; restore it before moving`);
   const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
   assertRunPrivateStateIsOwned(current.document, exactInterfaces, runId);
-  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces);
+  const ownedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, current.document, exactInterfaces);
+  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
   scopeEnvironmentChain(currentEeId, scope.byId, scope.rootEeId);
   scopeEnvironmentChain(targetEeId, scope.byId, scope.rootEeId);
   const targetEnvironment = scope.byId.get(targetEeId);
   const targetPolicy = objectOrEmpty(targetEnvironment?.formed_envelope);
   assertPolicyAxisAdmits(
     targetPolicy.allowed_interfaces,
-    runInterfaceReferences(current.document),
+    new Set([current.document, ...[...ownedWriters.records.values()].map((entry) => entry.document)]
+      .flatMap((record) => [...runInterfaceReferences(record)])),
     `target EE '${targetEeId}' interface policy`,
   );
   const workerInterface = requiredSafeRegistryId(current.document.worker, "task worker interface");
@@ -12500,7 +12722,11 @@ async function moveOctopusOsTask(
   }
   assertPolicyAxisAdmits(
     targetPolicy.allowed_tools,
-    new Set(workerPolicy.document.ceiling.tools.map((value) => requiredSafeRegistryId(value, "task worker tool"))),
+    new Set(workerPolicy.document.ceiling.tools.map((value) => {
+      const id = requiredString(value, "task worker tool");
+      if (!safeInterfacePathSegment(id)) throw new Error("task worker tool must be an exact Registry path segment");
+      return id;
+    })),
     `target EE '${targetEeId}' tool policy`,
   );
   assertPolicyAxisAdmits(
@@ -12529,6 +12755,14 @@ async function moveOctopusOsTask(
   const writes = [{ file: clientSidecarPath, beforeDigest: clientSidecar.digest, next: nextSidecar }];
   const nextRun = structuredClone(current.document);
   nextRun.ee = targetEeId;
+  for (const entry of ownedWriters.records.values()) {
+    const state = nextRun.interface_state[entry.owner];
+    const binding = entry.provider ? state.run_authoring_binding.writer_run : state.writer_run;
+    binding.initial_record.ee = targetEeId;
+    const nextWriter = structuredClone(entry.document);
+    nextWriter.ee = targetEeId;
+    writes.push({ file: entry.file, beforeDigest: entry.digest, next: nextWriter });
+  }
   writes.push({ file: runPath, beforeDigest: expectedDigest, next: nextRun });
   await commitClientAuthoring({
     label: "move Octopus OS task",
@@ -12601,8 +12835,11 @@ async function taskArchiveInterfaceIds(registryRoot, run, ownerInterface, runId)
   const intake = await readInterface(intakeId);
   const declaration = intake.interface_driver_config?.private_config?.input_intake;
   exactObjectKeys(declaration,
-    ["schema_version", "run", "provider_interface", "writer", "writer_required_verified_artifacts", "profile", "provider_profile", "input_label", "artifact_bindings"],
+    ["schema_version", "run", "provider_interface", "writer", "writer_required_verified_artifacts", "profile", "provider_profile", "input_label", "artifact_bindings", "notification_action"],
     ["schema_version", "run", "provider_interface", "writer", "writer_required_verified_artifacts", "profile", "provider_profile", "input_label", "artifact_bindings"], label);
+  if (declaration.notification_action !== undefined && !["queue", "followup"].includes(declaration.notification_action)) {
+    throw new Error(`${label} has an invalid notification action`);
+  }
   if (intake.interface_type !== "system" || intake.role !== "service" || intake.interface_driver_ref !== "checked_input_intake"
     || declaration.schema_version !== 1 || declaration.run !== runId || declaration.provider_interface !== providerId
     || !isPlainRecord(run.interface_state[intakeId])
@@ -12725,7 +12962,10 @@ async function assertTaskWorkerPinRemainsTaskLocal(
   octopusHomeRoot,
   workerInterface,
   ownerInterface,
+  run,
+  exactInterfaces,
 ) {
+  const writers = await octopusOsOwnedWriterRuns(octopusHomeRoot, run, exactInterfaces);
   const runRoot = await fs.realpath(path.join(octopusHomeRoot, "state", "runs"));
   for (const file of await listDirectFiles(runRoot, isRunRecordJsonPath)) {
     let candidate;
@@ -12735,6 +12975,8 @@ async function assertTaskWorkerPinRemainsTaskLocal(
       continue;
     }
     if (stringValue(candidate.document?.worker) !== workerInterface) continue;
+    const writer = writers.records.get(candidate.document?.id);
+    if (writer && candidate.digest === writer.digest && file === writer.file) continue;
     if (!runInterfaceReferences(candidate.document).has(ownerInterface)) {
       throw new Error(
         `task worker '${workerInterface}' is also worn by run '${stringValue(candidate.document?.id)}' outside exact task interface '${ownerInterface}'`,
@@ -12743,16 +12985,114 @@ async function assertTaskWorkerPinRemainsTaskLocal(
   }
 }
 
-async function assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces) {
+async function octopusOsOwnedWriterRuns(octopusHomeRoot, run, exactInterfaces) {
+  const ids = new Set(), writes = [], records = new Map();
+  const runRoot = await fs.realpath(path.join(octopusHomeRoot, "state", "runs"));
+  for (const [owner, state] of Object.entries(objectOrEmpty(run.interface_state))) {
+    const provider = state?.run_authoring_binding;
+    const binding = provider?.writer_run ?? state?.writer_run;
+    if (binding === undefined) continue;
+    const label = `task '${run.id}' writer for '${owner}'`;
+    exactObjectKeys(binding, ["run", "initial_record", "initial_record_format", "role_artifact_bindings"], ["run", "initial_record", "role_artifact_bindings"], label);
+    if (Object.hasOwn(binding, "initial_record_format") && !["pretty", "compact"].includes(binding.initial_record_format)) {
+      throw new Error(`${label} has invalid initial record format`);
+    }
+    const id = requiredSafeRegistryId(binding.run, `${label} Run`);
+    if (id === run.id || ids.has(id) || !exactInterfaces.has(owner)
+      || (provider && state.writer_run !== undefined) || !Array.isArray(binding.role_artifact_bindings)) {
+      throw new Error(`${label} has conflicting ownership`);
+    }
+    const initial = binding.initial_record;
+    exactObjectKeys(initial, ["id", "ee", "worker", "trace", "status", "interface_state", "checkpoints", "active_checkpoints"],
+      ["id", "ee", "worker", "trace", "status", "interface_state", "checkpoints", "active_checkpoints"], label);
+    if (initial.id !== id || initial.ee !== run.ee || initial.worker !== run.worker
+      || initial.trace !== `trace:${id}` || initial.status !== "idle"
+      || !isPlainRecord(initial.interface_state) || stableJson(Object.keys(initial.interface_state)) !== stableJson([owner])) {
+      throw new Error(`${label} changed its exact identity, worker or EE`);
+    }
+    exactObjectKeys(initial.interface_state[owner], ["file_writer_target"], ["file_writer_target"], label);
+    const target = initial.interface_state[owner].file_writer_target;
+    exactObjectKeys(target, ["run", "provider", "source", "door", "generation"], ["run", "provider", "source", "door", "generation"], label);
+    if (target.run !== run.id || target.provider !== owner || target.generation !== 0
+      || !exactInterfaces.has(target.source) || !exactInterfaces.has(target.door) || target.source === target.door) {
+      throw new Error(`${label} changed its exact target or private interfaces`);
+    }
+    let templates;
+    if (provider) {
+      if (provider.run !== run.id || provider.worker !== run.worker || provider.provider_interface !== owner
+        || provider.authoring_source_interface !== target.source || !Array.isArray(provider.checkpoints)) {
+        throw new Error(`${label} differs from its provider declaration`);
+      }
+      templates = ["authoring_call", "authoring_result"].map((role) => {
+        const rows = provider.checkpoints.filter((row) => row.role === role);
+        if (rows.length !== 1) throw new Error(`${label} has ambiguous authoring roles`);
+        return rows[0];
+      });
+    } else {
+      const writer = state.input_intake?.writer;
+      if (!writer || writer.owner !== owner || writer.source !== target.source || writer.door !== target.door
+        || state.input_intake.run !== run.id) throw new Error(`${label} lacks its exact intake declaration`);
+    }
+    if (!Array.isArray(initial.checkpoints) || initial.checkpoints.length !== 2 || !Array.isArray(initial.active_checkpoints)) {
+      throw new Error(`${label} needs one exact call/result pair`);
+    }
+    const checkpoints = new Set();
+    for (const [source, destination] of [[target.source, target.door], [target.door, owner]]) {
+      const rows = initial.checkpoints.filter((cp) => interfaceBindingId(cp.interface_binding) === source
+        && Array.isArray(cp.outbound_interface_bindings) && cp.outbound_interface_bindings.length === 1
+        && interfaceBindingId(cp.outbound_interface_bindings[0]) === destination);
+      if (rows.length !== 1) throw new Error(`${label} changed its exact call/result edge`);
+      if (arrayValue(run.checkpoints).some((cp) => interfaceBindingId(cp.interface_binding) === source
+        && arrayValue(cp.outbound_interface_bindings).some((binding) => interfaceBindingId(binding) === destination))) {
+        throw new Error(`${label} duplicates its writer edge in the target Run`);
+      }
+      const cp = rows[0], checkpointId = requiredSafeRegistryId(cp.id, `${label} checkpoint`);
+      if (checkpoints.has(checkpointId) || cp.run !== id || cp.trace !== `trace:${id}:${checkpointId}`
+        || !Number.isSafeInteger(cp.epoch) || cp.epoch < 0
+        || !Array.isArray(cp.artifact_bindings) || !Array.isArray(cp.required_verified_artifacts)) {
+        throw new Error(`${label} has malformed checkpoint ownership`);
+      }
+      if (templates) {
+        const template = templates[source === target.source ? 0 : 1];
+        for (const key of ["interface_binding", "outbound_interface_bindings", "required_verified_artifacts"]) {
+          if (stableJson(cp[key]) !== stableJson(template[key])) throw new Error(`${label} changed its declared ${key}`);
+        }
+      }
+      checkpoints.add(checkpointId);
+    }
+    if (stableJson([...checkpoints].sort()) !== stableJson([...initial.active_checkpoints].sort())) {
+      throw new Error(`${label} has an unrelated active checkpoint`);
+    }
+    const file = path.join(runRoot, `${id}.json`);
+    const current = await readRegularJsonDocument(file, label);
+    const generation = current.document?.interface_state?.[owner]?.file_writer_target?.generation;
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error(`${label} has invalid generation`);
+    const expected = structuredClone(initial);
+    if (generation > 0) {
+      expected.interface_state[owner].file_writer_target.generation = generation;
+      for (const cp of expected.checkpoints) {
+        cp.id = `${cp.id}_${generation}`; cp.trace = `trace:${id}:${cp.id}`;
+      }
+      expected.active_checkpoints = expected.checkpoints.map((cp) => cp.id);
+    }
+    if (stableJson(current.document) !== stableJson(expected)) throw new Error(`${label} drifted from its declared generation`);
+    ids.add(id);
+    records.set(id, { ...current, file, owner, provider: Boolean(provider) });
+    writes.push({ file, beforeDigest: current.digest, next: null });
+  }
+  return { ids, writes, records };
+}
+
+async function assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, artifactIds = new Set(), ownedRunIds = new Set()) {
   const runRoot = await fs.realpath(path.join(octopusHomeRoot, "state", "runs"));
   for (const file of await listDirectFiles(runRoot, isRunRecordJsonPath)) {
-    if (path.basename(file) === `${runId}.json`) continue;
+    if (path.basename(file) === `${runId}.json` || ownedRunIds.has(path.basename(file, ".json"))) continue;
     const candidate = await readRegularJsonDocument(file, `run record ${file}`);
     const used = runInterfaceReferences(candidate.document);
     for (const interfaceId of exactInterfaces) {
       if (used.has(interfaceId)) throw new Error(`exact interface '${interfaceId}' is also bound by run '${stringValue(candidate.document?.id)}'`);
     }
-    const runReferences = exactStringReferencePaths(candidate.document, new Set([runId]));
+    const runReferences = exactStringReferencePaths(candidate.document, new Set([runId, ...ownedRunIds, ...artifactIds]));
     if (runReferences.length) {
       throw new Error(`task run '${runId}' is referenced by run '${stringValue(candidate.document?.id)}' at ${runReferences[0]}`);
     }
@@ -12803,6 +13143,74 @@ async function octopusOsOwnedToolTopology(registryRoot, exactInterfaces) {
   return { ids, directories };
 }
 
+async function octopusOsOwnedArtifactTopology(registryRoot, run, exactInterfaces) {
+  const ids = new Set(), writes = [], documents = new Map();
+  const artifactRoot = path.join(registryRoot, "artifact");
+  const reference = (value) => {
+    exactObjectKeys(value, ["id", "content"], ["id", "content"], "task artifact reference");
+    const id = requiredArtifactBindingId(value.id, "task artifact id");
+    if ([".", ".."].includes(id) || id.includes("/") || id.includes("\\")
+      || !Array.isArray(value.content) || value.content.length !== 32
+      || value.content.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+      throw new Error(`task artifact '${id}' has invalid identity or content pin`);
+    }
+    return id;
+  };
+  const readOwned = async (ref) => {
+    const id = reference(ref);
+    if (await fs.realpath(artifactRoot) !== artifactRoot) throw new Error("task artifact registry must not be a symbolic link");
+    const directory = path.join(artifactRoot, id);
+    await requirePlainDirectory(directory, `task artifact ${id}`);
+    const file = path.join(directory, "artifact.json");
+    const descriptor = await readRegularJsonDocument(file, `task artifact ${id}`);
+    const hash = Buffer.from(blake3(Buffer.from(stableJson(descriptor.document)))).toString("hex");
+    if (descriptor.document?.id !== id || descriptor.document?.run !== run.id || hash !== contentHashHex(ref.content)) {
+      throw new Error(`task artifact '${id}' has drifted identity, ownership or content`);
+    }
+    if (documents.has(id) && documents.get(id).digest !== descriptor.digest) throw new Error(`task artifact '${id}' changed during ownership validation`);
+    if (!ids.has(id)) {
+      ids.add(id);
+      documents.set(id, descriptor);
+      writes.push({ file, beforeDigest: descriptor.digest, next: null });
+    }
+    return descriptor.document;
+  };
+  for (const interfaceId of [...exactInterfaces].sort()) {
+    const sidecar = await readOptionalRegularJsonDocument(
+      path.join(registryRoot, "interface", interfaceId, "code_mode.json"), `task Code Mode ${interfaceId}`,
+    );
+    if (!sidecar || sidecar.document?.context?.mode !== "persistent") continue;
+    const preludeRef = sidecar.document.context.prelude_artifact;
+    const topology = await readOwned(sidecar.document.handoff?.topology_artifact);
+    const prelude = await readOwned(preludeRef);
+    if (topology.owner_interface !== interfaceId || topology.worker !== run.worker
+      || prelude.owner_interface !== interfaceId || stableJson(topology.prelude_artifact) !== stableJson(preludeRef)) {
+      throw new Error(`task Code Mode '${interfaceId}' has inconsistent artifact ownership`);
+    }
+    const sources = run.interface_state?.[interfaceId]?.prelude_sources;
+    if (!Array.isArray(sources) || sources.length === 0) throw new Error(`task Code Mode '${interfaceId}' has no source ownership evidence`);
+    const sourceIds = new Set();
+    for (const source of sources) {
+      exactObjectKeys(source, ["source", "snapshot", "source_sha256"], ["source", "snapshot", "source_sha256"], "task prelude source");
+      const sourceId = reference(source.source);
+      const snapshotId = reference(source.snapshot);
+      if (sourceId === snapshotId || sourceIds.has(sourceId)) throw new Error("task prelude source ownership is ambiguous");
+      sourceIds.add(sourceId);
+      const snapshot = await readOwned(source.snapshot);
+      if (stableJson(snapshot.source) !== stableJson(source.source) || snapshot.source_sha256 !== source.source_sha256
+        || typeof snapshot.source_content !== "string"
+        || crypto.createHash("sha256").update(snapshot.source_content).digest("hex") !== source.source_sha256) {
+        throw new Error(`task prelude snapshot '${snapshotId}' differs from its source evidence`);
+      }
+      const original = JSON.parse(snapshot.source_content);
+      if (original?.id !== sourceId || Buffer.from(blake3(Buffer.from(stableJson(original)))).toString("hex") !== contentHashHex(source.source.content)) {
+        throw new Error(`task prelude snapshot '${snapshotId}' has drifted source identity or content`);
+      }
+    }
+  }
+  return { ids, writes };
+}
+
 async function taskTopologyPolicyWrites(registryRoot, exactInterfaces, ownedTools) {
   const writes = [];
   const eeTemplateRoot = await fs.realpath(path.join(registryRoot, "ee_template"));
@@ -12847,6 +13255,7 @@ async function assertNoExternalTaskTopologyReferences(
 ) {
   const files = await registryControlJsonFiles(registryRoot, excludedDirectories);
   for (const file of files) {
+    if (plannedDocuments.has(file) && plannedDocuments.get(file) === null) continue;
     const planned = plannedDocuments.get(file);
     const document = planned ?? (await readRegularJsonDocument(file, `registry control document ${file}`)).document;
     const references = exactStringReferencePaths(document, topologyIds);
@@ -12912,7 +13321,7 @@ async function snapshotOwnedInterfaceStateDirectories(octopusHomeRoot, exactInte
   ];
 }
 
-async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterfaces, runId) {
+async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterfaces, runId, ownedWriters = new Map()) {
   for (const interfaceId of [...exactInterfaces].sort()) {
     const root = path.join(
       octopusHomeRoot,
@@ -12932,11 +13341,15 @@ async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterf
       );
       if (!record) throw new Error(`worker environment '${entry.name}' has no lifecycle record`);
       const formation = objectOrEmpty(record.document?.formation);
+      const writer = ownedWriters.get(formation.run);
+      const writerTarget = writer?.document?.interface_state?.[writer.owner]?.file_writer_target;
+      const ownedWriter = writer && writerTarget?.run === runId && writerTarget.door === interfaceId
+        && formation.worker === writer.document.worker && formation.ee === writer.document.ee;
       if (
         record.document?.schema_version !== 5
         || stringValue(formation.worker_environment_id) !== entry.name
         || stringValue(formation.door_interface) !== interfaceId
-        || stringValue(formation.run) !== runId
+        || (stringValue(formation.run) !== runId && !ownedWriter)
         || typeof formation.requires_release !== "boolean"
         || !["active", "failed", "released"].includes(stringValue(record.document?.lifecycle))
       ) {

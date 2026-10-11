@@ -5,6 +5,9 @@
 > same interfaces, descriptors, and recorded evidence. The screens below are
 > one presentation of that architecture, not required runtime components.
 
+The [terminal client](cli.md) provides chat, tasks, results, and operator
+responses against the same Home without opening this app.
+
 The Octopus desktop client currently supports **macOS 14 and later**. Its
 interaction design is inspired by the ChatGPT desktop app: a conversation,
 voice controls, a sidebar, and work opened beside the conversation. It is an

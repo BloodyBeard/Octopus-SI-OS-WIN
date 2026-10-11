@@ -25,6 +25,7 @@ export type ChatRun = {
   providerModel: string;
   providerModelsRefreshable: boolean;
   reasoningEffort: string;
+  serviceTier?: string;
   workerInterfaceId: string;
   workerChoiceInterfaceId: string;
   doorHostSlots: Record<string, Record<string, string>>;
@@ -84,7 +85,9 @@ export type ChatWorkerChoice = {
   clientAgentDeletedAtMs: number;
   clientTemplate: boolean;
   clientTemplateProviderInterfaceId: string;
+  clientTemplateProviderModel: string;
   clientTemplateReasoningEffort: string;
+  clientTemplateServiceTier?: string;
   clientTemplateDigest: string;
   clientTemplateApplicationIds: string[];
   clientTemplateWorkerEnvironmentKinds: string[];
@@ -315,6 +318,7 @@ type RawChatRunRow = {
   provider_model?: unknown;
   provider_models_refreshable?: unknown;
   reasoning_effort?: unknown;
+  service_tier?: unknown;
   worker_interface_id?: unknown;
   worker_choice_interface_id?: unknown;
   door_host_slots?: unknown;
@@ -387,6 +391,10 @@ function asVoiceCallBinding(value: unknown): VoiceCallBinding | null {
 
 export async function loadChatRuns(): Promise<ChatRun[]> {
   const response = await readProjection<{ chats?: RawChatRunRow[] }>("projection.operator.chats.list");
+  return projectChatRuns(response);
+}
+
+export function projectChatRuns(response: { chats?: RawChatRunRow[] }): ChatRun[] {
   const rows = Array.isArray(response?.chats) ? response.chats : [];
   return rows
     .map((row) => ({
@@ -408,6 +416,7 @@ export async function loadChatRuns(): Promise<ChatRun[]> {
       providerModel: asString(row.provider_model),
       providerModelsRefreshable: row.provider_models_refreshable === true,
       reasoningEffort: asString(row.reasoning_effort),
+      serviceTier: asString(row.service_tier),
       workerInterfaceId: asString(row.worker_interface_id),
       workerChoiceInterfaceId: asString(row.worker_choice_interface_id),
       doorHostSlots: asDoorHostSlots(row.door_host_slots),
@@ -474,6 +483,14 @@ export async function loadChatExecutionContexts(
   presentationColors: ReadonlyMap<string, string> = new Map(),
 ): Promise<ChatExecutionContext[]> {
   const response = await readProjection<{ application_catalog?: unknown[]; contexts?: unknown[] }>("projection.operator.chat.contexts");
+  return projectChatExecutionContexts(response, displayNames, presentationColors);
+}
+
+export function projectChatExecutionContexts(
+  response: { application_catalog?: unknown[]; contexts?: unknown[] },
+  displayNames: ReadonlyMap<string, string> = new Map(),
+  presentationColors: ReadonlyMap<string, string> = new Map(),
+): ChatExecutionContext[] {
   const applicationCatalog = new Map((Array.isArray(response.application_catalog) ? response.application_catalog : []).flatMap((value) => {
     const application = asRecord(value);
     const id = asString(application.id);
@@ -500,7 +517,9 @@ export async function loadChatExecutionContexts(
         clientAgentDeletedAtMs: asNumber(worker.client_agent_deleted_at_ms),
         clientTemplate: worker.client_template === true,
         clientTemplateProviderInterfaceId: asString(worker.client_template_provider_interface_id),
+        clientTemplateProviderModel: asString(worker.client_template_provider_model),
         clientTemplateReasoningEffort: asString(worker.client_template_reasoning_effort),
+        clientTemplateServiceTier: asString(worker.client_template_service_tier),
         clientTemplateDigest: asString(worker.client_template_digest),
         clientTemplateApplicationIds: asStringArray(worker.client_template_application_ids),
         clientTemplateWorkerEnvironmentKinds: asStringArray(worker.client_template_worker_environment_kinds),

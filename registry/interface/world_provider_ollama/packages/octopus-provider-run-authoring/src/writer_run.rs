@@ -125,11 +125,17 @@ impl WriterCallIndex {
 #[path = "../tests/support/writer_call_index.rs"]
 mod writer_call_index_tests;
 
+#[cfg(test)]
+#[path = "../tests/support/ordered_patch_storage.rs"]
+mod ordered_patch_storage_tests;
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterRunBinding {
     pub run: RunId,
     pub initial_record: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "octopus_file_write_contract::optional_json_format")]
+    pub initial_record_format: Option<JsonFormat>,
     pub role_artifact_bindings: Vec<ArtifactBinding>,
 }
 
@@ -144,6 +150,9 @@ struct Target {
 }
 
 impl WriterRunBinding {
+    pub fn initial_bytes(&self) -> Result<Vec<u8>, String> {
+        self.initial_record_format.unwrap_or_default().encode(&self.initial_record)
+    }
     pub(super) fn roles(
         &self,
         record: &RunRecord,
@@ -151,7 +160,7 @@ impl WriterRunBinding {
         templates: &[RunAuthoringCheckpoint],
     ) -> Result<Vec<ArtifactBinding>, String> {
         let initial =
-            RunRecord::from_bytes(&bytes(&self.initial_record)?).map_err(|e| e.to_string())?;
+            RunRecord::from_bytes(&self.initial_bytes()?).map_err(|e| e.to_string())?;
         let target = target(&initial, provider)?;
         if self.run == record.id
             || initial.id != self.run
@@ -193,9 +202,7 @@ impl WriterRunBinding {
 }
 
 fn bytes(value: &Value) -> Result<Vec<u8>, String> {
-    let mut bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
-    bytes.push(b'\n');
-    Ok(bytes)
+    JsonFormat::Compact.encode(value)
 }
 
 pub(super) fn binding(
@@ -248,7 +255,7 @@ fn owner_config(
     let bound =
         owner_writer_binding(record, &writer.owner)?.ok_or("owner has no declared writer Run")?;
     let initial =
-        RunRecord::from_bytes(&bytes(&bound.initial_record)?).map_err(|e| e.to_string())?;
+        RunRecord::from_bytes(&bound.initial_bytes()?).map_err(|e| e.to_string())?;
     let mut templates = Vec::new();
     for (name, role, source, target, label) in [
         (
@@ -367,6 +374,7 @@ pub fn separate_owner_writer_run(
     let bound = WriterRunBinding {
         run: run.clone(),
         initial_record: initial.clone(),
+        initial_record_format: Some(JsonFormat::Compact),
         role_artifact_bindings: serde_json::from_value(rows[0]["artifact_bindings"].clone())
             .map_err(|e| e.to_string())?,
     };
@@ -549,6 +557,7 @@ pub fn separate_writer_run(
         WriterRunBinding {
             run: run.clone(),
             initial_record: initial,
+            initial_record_format: Some(JsonFormat::Compact),
             role_artifact_bindings: roles.ok_or("writer roles absent")?,
         }
     };
@@ -607,6 +616,7 @@ impl OwnerWriterEdit {
         before: &[u8],
         edit: &CheckedRunEdit,
         writer: &CheckedRunWriter,
+        max_payload_bytes: u64,
     ) -> Result<Option<Self>, String> {
         let record = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
         let declared = if record.interface_state.get(&writer.owner)
@@ -625,24 +635,12 @@ impl OwnerWriterEdit {
             .ok_or("writer edit target has no parent")?
             .join(format!("{}.json", binding.run));
         let current = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let next = next_writer(&current, &config)?;
+        let next = next_writer(&current, &config, JsonFormat::Compact)?;
         let arguments = OrderedArguments {
             ordered: true,
             writes: vec![
-                OrderedEntry {
-                    path,
-                    content: String::from_utf8(next).map_err(|e| e.to_string())?,
-                    expected_before_hash: ContentHash::of_bytes(&current).to_hex(),
-                    expected_before_content: String::from_utf8(current)
-                        .map_err(|e| e.to_string())?,
-                },
-                OrderedEntry {
-                    path: edit.path.clone(),
-                    content: edit.content.clone(),
-                    expected_before_hash: edit.before_hash.clone(),
-                    expected_before_content: String::from_utf8(before.to_vec())
-                        .map_err(|e| e.to_string())?,
-                },
+                OrderedEntry::prepare(path, &current, &next, Some(JsonFormat::Compact))?,
+                OrderedEntry::prepare(edit.path.clone(), before, edit.content.as_bytes(), edit.json_format)?,
             ],
         };
         let result = Self {
@@ -650,7 +648,7 @@ impl OwnerWriterEdit {
             writer: writer.clone(),
             correlation_id: edit.correlation_id.clone(),
         };
-        result.validate(before, edit, writer)?;
+        result.validate(before, edit, writer, max_payload_bytes)?;
         Ok(Some(result))
     }
 
@@ -659,6 +657,7 @@ impl OwnerWriterEdit {
         before: &[u8],
         edit: &CheckedRunEdit,
         writer: &CheckedRunWriter,
+        max_payload_bytes: u64,
     ) -> Result<(), String> {
         if self.writer != *writer || self.correlation_id != edit.correlation_id {
             return Err("owner ordered edit changed its writer or correlation".into());
@@ -670,13 +669,14 @@ impl OwnerWriterEdit {
             .ok_or("owner writer advance absent")?;
         let (pinned, args) = self.arguments.checked_call(
             writer,
-            first.expected_before_content.as_bytes(),
+            first.before(max_payload_bytes)?.as_bytes(),
             &edit.path,
+            max_payload_bytes,
         )?;
         if pinned != before
             || args.expected_before_hash != edit.before_hash
             || args.expected_after_hash != edit.after_hash
-            || args.patch != edit.patch
+            || args.patch != edit.patch || args.json_format != edit.json_format
         {
             return Err("owner ordered edit changed its exact target intent".into());
         }
@@ -704,18 +704,19 @@ impl OwnerWriterEvidence {
             .writes
             .get(1)
             .ok_or("ordered owner target absent")?;
-        let before = RunRecord::from_bytes(entry.expected_before_content.as_bytes())
+        let maximum = ctx.required_host_io_limits()?.max_payload_bytes;
+        let before = RunRecord::from_bytes(entry.before(maximum)?.as_bytes())
             .map_err(|e| e.to_string())?;
         let config = owner_config(&before, &attempt.writer)?;
         let progress = history(ctx, &self.0, &config)?;
         let result = progress
             .completed
-            .get(&ContentHash::of_bytes(entry.content.as_bytes()).to_hex())
+            .get(&ContentHash::of_bytes(entry.content(maximum)?.as_bytes()).to_hex())
             .map(|(_, applied)| *applied);
         if result.is_none()
             && progress.current
                 != attempt.arguments.writes[0]
-                    .expected_before_content
+                    .before(maximum)?
                     .as_bytes()
         {
             return Err("owner writer preimage has no exact checked history".into());
@@ -726,11 +727,88 @@ impl OwnerWriterEvidence {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct OrderedEntry {
+struct OrderedPatchEntry {
+    path: PathBuf,
+    expected_before_content: Preimage,
+    expected_before_hash: String,
+    patch: json_patch::Patch,
+    expected_after_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "octopus_file_write_contract::optional_json_format")]
+    json_format: Option<JsonFormat>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrderedContentEntry {
     path: PathBuf,
     content: String,
     expected_before_content: String,
     expected_before_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum OrderedEntry {
+    Patch(OrderedPatchEntry),
+    Content(OrderedContentEntry),
+}
+
+impl OrderedEntry {
+    fn prepare(path: PathBuf, before: &[u8], after: &[u8], json_format: Option<JsonFormat>) -> Result<Self, String> {
+        let entry = OrderedPatchEntry {
+            path,
+            expected_before_content: Preimage::encode(before)?,
+            expected_before_hash: ContentHash::of_bytes(before).to_hex(),
+            patch: json_patch::diff(
+                &serde_json::from_slice(before).map_err(|error| error.to_string())?,
+                &serde_json::from_slice(after).map_err(|error| error.to_string())?,
+            ),
+            expected_after_hash: ContentHash::of_bytes(after).to_hex(),
+            json_format,
+        };
+        if apply_run_json_patch(before, &entry.patch, &entry.expected_after_hash, json_format)?.as_bytes() != after {
+            return Err("ordered write patch did not reconstruct its exact postimage".into());
+        }
+        Ok(Self::Patch(entry))
+    }
+
+    fn path(&self) -> &Path {
+        match self { Self::Patch(entry) => &entry.path, Self::Content(entry) => &entry.path }
+    }
+
+    fn json_format(&self) -> Option<JsonFormat> {
+        match self { Self::Patch(entry) => entry.json_format, Self::Content(_) => None }
+    }
+
+    fn after_hash(&self) -> String {
+        match self { Self::Patch(entry) => entry.expected_after_hash.clone(),
+            Self::Content(entry) => ContentHash::of_bytes(entry.content.as_bytes()).to_hex() }
+    }
+
+    fn before(&self, maximum: u64) -> Result<String, String> {
+        self.decode_before(&mut DecodeBudget::new(maximum)?)
+    }
+
+    fn decode_before(&self, budget: &mut DecodeBudget) -> Result<String, String> {
+        match self {
+            Self::Patch(entry) => entry.expected_before_content.decode(&entry.expected_before_hash, budget),
+            Self::Content(entry) => Preimage::Text(entry.expected_before_content.clone()).decode(&entry.expected_before_hash, budget),
+        }
+    }
+
+    fn resolved(&self, budget: &mut DecodeBudget) -> Result<(String, String), String> {
+        let before = self.decode_before(budget)?;
+        let after = match self {
+            Self::Patch(entry) => apply_run_json_patch(before.as_bytes(), &entry.patch, &entry.expected_after_hash, entry.json_format)?,
+            Self::Content(entry) => entry.content.clone(),
+        };
+        budget.charge(after.len() as u64)?;
+        Ok((before, after))
+    }
+
+    fn content(&self, maximum: u64) -> Result<String, String> {
+        Ok(self.resolved(&mut DecodeBudget::new(maximum)?)?.1)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -752,7 +830,7 @@ struct OrderedResult {
     writes: Vec<OrderedReceipt>,
 }
 
-fn next_writer(before: &[u8], config: &RunAuthoringConfig) -> Result<Vec<u8>, String> {
+fn next_writer(before: &[u8], config: &RunAuthoringConfig, format: JsonFormat) -> Result<Vec<u8>, String> {
     let record = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
     let declaration = target(&record, &config.provider_interface)?;
     let binding = config
@@ -772,19 +850,19 @@ fn next_writer(before: &[u8], config: &RunAuthoringConfig) -> Result<Vec<u8>, St
         .checked_add(1)
         .ok_or("writer generation overflow")?;
     let initial =
-        RunRecord::from_bytes(&bytes(&binding.initial_record)?).map_err(|e| e.to_string())?;
+        RunRecord::from_bytes(&binding.initial_bytes()?).map_err(|e| e.to_string())?;
     if record.ee != initial.ee || record.trace != initial.trace || record.status != initial.status {
         return Err("writer continuation changed EE, trace or status".into());
     }
-    if bytes(&writer_generation(
+    if writer_generation(
         binding,
         &config.provider_interface,
         declaration.generation,
-    )?)? != before
+    )? != serde_json::from_slice::<Value>(before).map_err(|error| error.to_string())?
     {
         return Err("writer Run differs from its declared generation".into());
     }
-    bytes(&writer_generation(
+    format.encode(&writer_generation(
         binding,
         &config.provider_interface,
         generation,
@@ -821,7 +899,7 @@ fn writer_generation(
 
 impl OrderedArguments {
     pub fn targets(&self, path: &Path) -> bool {
-        self.writes.get(1).is_some_and(|entry| entry.path == path)
+        self.writes.get(1).is_some_and(|entry| entry.path() == path)
     }
 
     pub fn checked_call(
@@ -829,30 +907,27 @@ impl OrderedArguments {
         writer: &CheckedRunWriter,
         snapshot: &[u8],
         path: &Path,
+        max_payload_bytes: u64,
     ) -> Result<(Vec<u8>, FileWriteCallArguments), String> {
         let [advance, edit] = self.writes.as_slice() else {
             return Err(
                 "provider ordered write needs exactly its writer and target entries".into(),
             );
         };
+        let mut budget = DecodeBudget::new(max_payload_bytes)?;
+        let (advance_before, advance_content) = advance.resolved(&mut budget)?;
+        let (edit_before, edit_content) = edit.resolved(&mut budget)?;
         if !self.ordered
-            || edit.path != path
+            || edit.path() != path
             || !path.is_absolute()
-            || advance.path.parent() != path.parent()
-            || advance.expected_before_content.as_bytes() != snapshot
+            || advance.path().parent() != path.parent()
+            || advance_before.as_bytes() != snapshot
         {
             return Err(
                 "provider ordered write changed its exact paths or admitted writer preimage".into(),
             );
         }
-        for entry in &self.writes {
-            if entry.expected_before_hash
-                != ContentHash::of_bytes(entry.expected_before_content.as_bytes()).to_hex()
-            {
-                return Err("ordered write preimage hash differs from its pinned content".into());
-            }
-        }
-        let before = edit.expected_before_content.as_bytes().to_vec();
+        let before = edit_before.into_bytes();
         let record = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
         let config = owner_config(&record, writer)?;
         let bound = config
@@ -860,33 +935,35 @@ impl OrderedArguments {
             .as_ref()
             .ok_or("ordered call target has no declared writer Run")?;
         bound.roles(&record, &writer.owner, &config.checkpoints)?;
-        if advance.path.file_name().and_then(|s| s.to_str()) != Some(&format!("{}.json", bound.run))
-            || edit.path.file_name().and_then(|s| s.to_str())
+        if advance.path().file_name().and_then(|s| s.to_str()) != Some(&format!("{}.json", bound.run))
+            || edit.path().file_name().and_then(|s| s.to_str())
                 != Some(&format!("{}.json", record.id))
-            || next_writer(snapshot, &config)? != advance.content.as_bytes()
+            || next_writer(snapshot, &config, advance.json_format().unwrap_or_default())? != advance_content.as_bytes()
         {
             return Err("ordered call does not author exactly the next writer generation".into());
         }
         let prospective =
-            RunRecord::from_bytes(edit.content.as_bytes()).map_err(|e| e.to_string())?;
+            RunRecord::from_bytes(edit_content.as_bytes()).map_err(|e| e.to_string())?;
         if record.id != prospective.id
             || record.ee != prospective.ee
             || record.worker != prospective.worker
         {
             return Err("ordered call changes its target identity".into());
         }
-        let patch = json_patch::diff(
-            &serde_json::from_slice(&before).map_err(|e| e.to_string())?,
-            &serde_json::from_str(&edit.content).map_err(|e| e.to_string())?,
-        );
         let arguments = FileWriteCallArguments {
-            path: edit.path.clone(),
-            patch,
+            path: edit.path().to_path_buf(),
+            patch: match edit {
+                OrderedEntry::Patch(entry) => entry.patch.clone(),
+                OrderedEntry::Content(_) => json_patch::diff(
+                    &serde_json::from_slice(&before).map_err(|error| error.to_string())?,
+                    &serde_json::from_str(&edit_content).map_err(|error| error.to_string())?),
+            },
             expected_before_hash: ContentHash::of_bytes(&before).to_hex(),
-            expected_after_hash: ContentHash::of_bytes(edit.content.as_bytes()).to_hex(),
+            expected_after_hash: edit.after_hash(),
+            json_format: edit.json_format(),
         };
-        if apply_run_json_patch(&before, &arguments.patch, &arguments.expected_after_hash)?
-            != edit.content
+        if apply_run_json_patch(&before, &arguments.patch, &arguments.expected_after_hash, arguments.json_format)?
+            != edit_content
         {
             return Err("ordered call target is not the exact canonical patched JSON".into());
         }
@@ -899,6 +976,7 @@ impl OrderedArguments {
         metadata: &InvocationMetadata,
         snapshot: &[u8],
         result: &ToolResultArtifact,
+        max_payload_bytes: u64,
     ) -> Result<bool, String> {
         let [advance, edit] = self.writes.as_slice() else {
             return Err("ordered result lost its two exact writes".into());
@@ -915,7 +993,9 @@ impl OrderedArguments {
             .interface_binding
             .clone()
             .ok_or("ordered result inbound absent")?;
-        if snapshot != advance.content.as_bytes()
+        let mut budget = DecodeBudget::new(max_payload_bytes)?;
+        let decoded = [advance.resolved(&mut budget)?, edit.resolved(&mut budget)?];
+        if snapshot != decoded[0].1.as_bytes()
             || runtime.run != record.id
             || runtime.ee != record.ee
             || runtime.worker != record.worker
@@ -971,14 +1051,14 @@ impl OrderedArguments {
         if body.result != "ordered_file_writes" || body.writes.len() != 2 {
             return Err("ordered result has a different operation or entry count".into());
         }
-        for (entry, receipt) in [advance, edit].into_iter().zip(&body.writes) {
-            if receipt.path != entry.path
+        for ((entry, receipt), (before, content)) in [advance, edit].into_iter().zip(&body.writes).zip(&decoded) {
+            if receipt.path != entry.path()
                 || receipt.before_hash.as_deref()
                     != Some(
-                        &ContentHash::of_bytes(entry.expected_before_content.as_bytes()).to_hex(),
+                        &ContentHash::of_bytes(before.as_bytes()).to_hex(),
                     )
-                || receipt.after_hash != ContentHash::of_bytes(entry.content.as_bytes()).to_hex()
-                || receipt.bytes != entry.content.len() as u64
+                || receipt.after_hash != entry.after_hash()
+                || receipt.bytes != content.len() as u64
             {
                 return Err("ordered result changed a pinned entry".into());
             }
@@ -1041,13 +1121,13 @@ fn history(
     let saved = cache.entry(binding.run.clone()).or_insert(WriterHistory {
         binding: binding.clone(),
         next_seq: 0,
-        current: bytes(&binding.initial_record)?,
+        current: binding.initial_bytes()?,
         pending: None,
         completed: BTreeMap::new(),
         applied_calls: BTreeMap::new(),
         cursor: None,
     });
-    if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record {
+    if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record || saved.binding.initial_record_format != binding.initial_record_format {
         return Err("writer evidence cache declaration changed".into());
     }
     let mut current = saved.clone();
@@ -1154,14 +1234,14 @@ fn history(
             }
             let args: OrderedArguments =
                 serde_json::from_value(call.arguments).map_err(|e| e.to_string())?;
-            let (before, _) = args.checked_call(&declared, &snapshot, &target_path)?;
+            let (before, _) = args.checked_call(&declared, &snapshot, &target_path, limits.max_payload_bytes)?;
             let before = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
             if owner_config(&before, &declared)?
                 .writer_run
                 .as_ref()
                 .is_none_or(|bound| {
                     bound.run != current.binding.run
-                        || bound.initial_record != current.binding.initial_record
+                        || bound.initial_record != current.binding.initial_record || bound.initial_record_format != current.binding.initial_record_format
                 })
             {
                 return Err("writer call target declared a different writer Run".into());
@@ -1216,13 +1296,13 @@ fn history(
             {
                 return Err("writer result correlation or label differs".into());
             }
-            let applied = args.checked_result(&declared, metadata, &snapshot, &result)?;
+            let applied = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes)?;
             let call_seq = call.seq.0;
             if applied {
                 let transition = CheckedRunTransition {
                     writer: declared.clone(),
-                    before: args.writes[1].expected_before_content.as_bytes().to_vec(),
-                    after: args.writes[1].content.as_bytes().to_vec(),
+                    before: args.writes[1].before(limits.max_payload_bytes)?.into_bytes(),
+                    after: args.writes[1].content(limits.max_payload_bytes)?.into_bytes(),
                     call,
                     result: movement.clone(),
                 };
@@ -1230,8 +1310,8 @@ fn history(
                 generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
                 validate_verified_input_transition(&mut reader, &transition)?;
             }
-            current.current = args.writes[0].content.as_bytes().to_vec();
-            let hash = ContentHash::of_bytes(args.writes[1].content.as_bytes()).to_hex();
+            current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
+            let hash = args.writes[1].after_hash();
             if applied {
                 current.applied_calls.insert(hash.clone(), call_seq);
             }
@@ -1342,10 +1422,11 @@ impl ProviderOutputHandoff {
                 .ok_or("private ordered call has no writer")?;
             let (before, args) = call.arguments.checked_call(
                 &declared,
-                first.expected_before_content.as_bytes(),
+                first.before(limits.max_payload_bytes)?.as_bytes(),
                 &self.run_path,
+                limits.max_payload_bytes,
             )?;
-            let prospective = call.arguments.writes[1].content.clone();
+            let prospective = call.arguments.writes[1].content(limits.max_payload_bytes)?;
             let record =
                 RunRecord::from_bytes(prospective.as_bytes()).map_err(|e| e.to_string())?;
             let pending = persisted_pending_handoff(&record, &self.config.provider_interface)?
@@ -1358,7 +1439,7 @@ impl ProviderOutputHandoff {
                 "authoring_generation",
             )?;
             let writer_record =
-                RunRecord::from_bytes(first.content.as_bytes()).map_err(|e| e.to_string())?;
+                RunRecord::from_bytes(first.content(limits.max_payload_bytes)?.as_bytes()).map_err(|e| e.to_string())?;
             let writer_generation =
                 target(&writer_record, &self.config.provider_interface)?.generation;
             if call.correlation_id != format!("{prefix}{generation}:{writer_generation}") {
@@ -1381,6 +1462,7 @@ impl ProviderOutputHandoff {
                 })
                 .ok_or("writer result checkpoint absent")?;
             let authored = AuthoredRun {
+                json_format: args.json_format,
                 content: prospective,
                 patch: args.patch,
                 before_hash: ContentHash::of_bytes(&before).to_hex(),
@@ -1428,13 +1510,14 @@ impl ProviderOutputHandoff {
             if correlation_generation(&record.id, &attempt.authored.correlation_id)? != expected {
                 continue;
             }
+            let before_bytes = attempt.args.writes[1].before(self.ctx.required_host_io_limits()?.max_payload_bytes)?;
             let before =
-                RunRecord::from_bytes(attempt.args.writes[1].expected_before_content.as_bytes())
+                RunRecord::from_bytes(before_bytes.as_bytes())
                     .map_err(|e| e.to_string())?;
             if before.interface_state.get(&self.config.provider_interface)
                 != record.interface_state.get(&self.config.provider_interface)
             {
-                let protected = output_connections::protected_record(&before, record_bytes, &self.config)?
+                let protected = output_connections::protected_record(before_bytes.as_bytes(), record_bytes, &self.config)?
                     .ok_or("private writer recovery changed provider-owned target state")?;
                 let protected = RunRecord::from_bytes(&protected).map_err(|error| error.to_string())?;
                 if before.interface_state.get(&self.config.provider_interface)
@@ -1479,6 +1562,7 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         authored: &AuthoredRun,
     ) -> Result<AuthoredRunInstallOutcome, String> {
+        let maximum = self.ctx.required_host_io_limits()?.max_payload_bytes;
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(self.config.result_timeout_ms))
             .ok_or("writer deadline overflow")?;
@@ -1503,7 +1587,8 @@ impl ProviderOutputHandoff {
             }
             if let Some((_, false)) = progress.completed.get(&planned.after_hash) {
                 let attempt = existing.ok_or("refused ordered write lost its private call")?;
-                let before = attempt.args.writes[1].expected_before_content.as_bytes();
+                let before_content = attempt.args.writes[1].before(maximum)?;
+                let before = before_content.as_bytes();
                 let remaining = deadline
                     .saturating_duration_since(Instant::now())
                     .as_millis()
@@ -1518,8 +1603,7 @@ impl ProviderOutputHandoff {
                     )
                 })
                 .await?;
-                let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
-                let routing_only = output_connections::protected_record(&original, &current, &self.config)?
+                let routing_only = output_connections::protected_record(before, &current, &self.config)?
                     .is_some_and(|protected| ContentHash::of_bytes(&protected) == ContentHash::of_bytes(before));
                 if (chain.is_empty() && !routing_only) || chain
                         .iter()
@@ -1530,7 +1614,7 @@ impl ProviderOutputHandoff {
                     );
                 }
                 planned =
-                    authoring_retry::rebase_authored_run(before, &current, &planned, &self.config)?;
+                    authoring_retry::rebase_authored_run(before, &current, &planned, &self.config, Some(JsonFormat::Compact))?;
                 state.run_record_bytes = current;
                 if let Some(last) = chain.last() {
                     state.run_record_evidence_seq = Some(last.call.seq.0);
@@ -1559,7 +1643,7 @@ impl ProviderOutputHandoff {
                 if ContentHash::of_bytes(&state.run_record_bytes).to_hex() != planned.before_hash {
                     return Err("writer lost its planned target preimage".into());
                 }
-                let next = next_writer(&progress.current, &self.config)?;
+                let next = next_writer(&progress.current, &self.config, JsonFormat::Compact)?;
                 let next_record = RunRecord::from_bytes(&next).map_err(|e| e.to_string())?;
                 let generation = target(&next_record, &self.config.provider_interface)?.generation;
                 let call = OrderedCall {
@@ -1572,29 +1656,12 @@ impl ProviderOutputHandoff {
                     arguments: OrderedArguments {
                         ordered: true,
                         writes: vec![
-                            OrderedEntry {
-                                path,
-                                content: String::from_utf8(next).map_err(|e| e.to_string())?,
-                                expected_before_hash: ContentHash::of_bytes(&progress.current)
-                                    .to_hex(),
-                                expected_before_content: String::from_utf8(progress.current)
-                                    .map_err(|e| e.to_string())?,
-                            },
-                            OrderedEntry {
-                                path: self.run_path.clone(),
-                                content: planned.content.clone(),
-                                expected_before_hash: ContentHash::of_bytes(
-                                    &state.run_record_bytes,
-                                )
-                                .to_hex(),
-                                expected_before_content: String::from_utf8(
-                                    state.run_record_bytes.clone(),
-                                )
-                                .map_err(|e| e.to_string())?,
-                            },
+                            OrderedEntry::prepare(path, &progress.current, &next, Some(JsonFormat::Compact))?,
+                            OrderedEntry::prepare(self.run_path.clone(), &state.run_record_bytes, planned.content.as_bytes(), planned.json_format)?,
                         ],
                     },
                 };
+                call.arguments.checked_call(&writer(&self.config)?, &progress.current, &self.run_path, maximum)?;
                 InterfaceArtifactFile::write(
                     &self.hand_in_root,
                     &self.config.file_write_label,

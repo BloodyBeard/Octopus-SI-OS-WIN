@@ -24,14 +24,14 @@ use crate::handler::{
     CodexTurnControlResult, ControlOutputError, PROVIDER_TRANSPORT_DISPATCH_LABEL,
     ProviderHandoffBarrier, ProviderOutputStream, ProviderStreamEmission,
     TURN_INTERRUPTED_RESULT_LABEL, codex_continuity_incompatibility,
-    codex_continuity_successor_is_settled, codex_continuity_waits_for_result,
+    codex_continuity_successor_is_settled, codex_continuity_waits_for_result, codex_continuity_has_interrupted_pending,
     codex_session_snapshot_labels, decode_inflight_turn_control,
-    exact_interrupted_control_continuity, exact_interrupted_result_source,
-    interrupted_result_closure_ref, interrupted_turn_identity, is_explicit_turn_control_label,
-    is_admitted_peer_interrupt,
+    exact_interrupted_control_continuity, exact_interrupted_result_source, exact_interrupted_result_payload,
+    interrupted_result_closure_ref, interrupted_result_closure_payload, interrupted_turn_identity, is_explicit_turn_control_label,
+    is_admitted_peer_interrupt, is_operator_continuity_input,
     is_inflight_turn_control_candidate_label, materialize_incompatible_continuity_turn_error,
     materialize_turn_control_result,
-    recover_operator_turn_continuity, reconcile_operator_session_continuity, recovered_failed_result_source, terminal_failure_continuity,
+    recover_operator_turn_continuity, reconcile_operator_session_continuity, reconcile_delivered_interrupted_continuity, recovered_failed_result_source, terminal_failure_continuity,
     codex_projection_output_labels,
     validate_codex_projection_descriptor_contract, validate_durable_interrupted_continuity,
 };
@@ -359,10 +359,24 @@ struct DeferredProviderTurnJournal {
     source_movement_seq: u64,
     run_id: String,
     artifact: ArtifactRef,
+    metadata_content_hash: String,
+    payload_content_hash: String,
+    payload_byte_count: u64,
+    artifact_bindings: Vec<DeferredArtifactBindingRef>,
+    release: Option<DeferredProviderTurnRelease>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeferredProviderTurnJournalV2 {
+    schema_version: u32,
+    source_movement_seq: u64,
+    run_id: String,
+    artifact: ArtifactRef,
     manifest_path: PathBuf,
     manifest_bytes: Vec<u8>,
     payload_bytes: Vec<u8>,
-    artifact_binding_payloads: Vec<DeferredArtifactBindingPayload>,
+    artifact_binding_payloads: Vec<DeferredArtifactBindingPayloadV2>,
     metadata: octopus_ledger::InvocationMetadata,
     release: Option<DeferredProviderTurnRelease>,
 }
@@ -383,6 +397,11 @@ enum DeferredProviderTurnRelease {
         source_session_carrier: Option<ArtifactRef>,
         failed_source_movement_seq: u64,
     },
+    InterruptedResult {
+        source_session_carrier: Option<ArtifactRef>,
+        result_source: DurableArtifactAdmission,
+        closure: DurableArtifactAdmission,
+    },
 }
 
 struct ProviderSessionCarrierScan {
@@ -393,7 +412,15 @@ struct ProviderSessionCarrierScan {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-struct DeferredArtifactBindingPayload {
+struct DeferredArtifactBindingRef {
+    artifact: ArtifactRef,
+    bytes_content: ContentHash,
+    byte_count: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DeferredArtifactBindingPayloadV2 {
     artifact: ArtifactRef,
     bytes_content: ContentHash,
     bytes: Vec<u8>,
@@ -463,6 +490,7 @@ async fn codex_life(
     let active_controls = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let control_gates = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
     let interrupted_effects = InterruptedEffectArbiter::new(ctx.clone());
+    upgrade_deferred_provider_turn_journals(&ctx, &descriptor).await?;
     let mut deferred_turns = load_deferred_provider_turns(&ctx, &descriptor)?;
     let mut control_task =
         tokio_util::task::AbortOnDropHandle::new(tokio::spawn(control_reader_life(
@@ -2100,6 +2128,18 @@ impl InterruptedEffectArbiter {
         }))
     }
 
+    async fn reconciled_result(
+        &self, run: &RunId,
+    ) -> Result<Option<(crate::handler::CodexContinuityState, u64, DurableArtifactAdmission)>, String> {
+        let mut cache = self.cache.lock().await;
+        self.load_run(&mut cache, run)?;
+        Ok(cache.journals.get(run.as_str()).and_then(|journal| match &journal.phase {
+            InterruptedEffectPhase::Reconciled { result_source_movement_seq, closure } =>
+                Some((journal.continuity.clone(), *result_source_movement_seq, closure.clone())),
+            _ => None,
+        }))
+    }
+
     async fn record_acknowledgement(
         &self,
         run: &RunId,
@@ -2817,28 +2857,41 @@ fn capture_deferred_provider_turn(
             run.as_str()
         ));
     }
-    let artifact_binding_payloads = turn
+    let artifact_bindings = turn
         .envelope
         .artifact_binding_payloads
         .iter()
-        .map(|payload| DeferredArtifactBindingPayload {
+        .map(|payload| DeferredArtifactBindingRef {
             artifact: payload.artifact.clone(),
             bytes_content: ContentHash::of_bytes(&payload.bytes),
-            bytes: payload.bytes.clone(),
+            byte_count: payload.bytes.len() as u64,
         })
         .collect::<Vec<_>>();
-    Ok(DeferredProviderTurnJournal {
-        schema_version: 2,
+    let journal = DeferredProviderTurnJournal {
+        schema_version: 3,
         source_movement_seq: turn.seq,
         run_id: run.as_str().to_string(),
         artifact: turn.envelope.artifact.clone(),
-        manifest_path: turn.envelope.artifact_file.manifest_path().to_path_buf(),
-        manifest_bytes: captured.manifest_bytes,
-        payload_bytes: captured.payload_bytes,
-        artifact_binding_payloads,
-        metadata,
+        metadata_content_hash: deferred_metadata_hash(&metadata)?,
+        payload_content_hash: ContentHash::of_bytes(&captured.payload_bytes).to_hex(),
+        payload_byte_count: captured.payload_bytes.len() as u64,
+        artifact_bindings,
         release: None,
-    })
+    };
+    let canonical = restore_deferred_provider_envelope(ctx, &journal)?;
+    let restored = canonical.artifact_file
+        .read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+        .map_err(|error| error.to_string())?;
+    if captured.manifest_bytes != restored.manifest_bytes
+        || captured.payload_bytes != restored.payload_bytes
+        || canonical.metadata.as_ref() != Some(&metadata)
+        || canonical.artifact_binding_payloads.len() != turn.envelope.artifact_binding_payloads.len()
+        || canonical.artifact_binding_payloads.iter().zip(&turn.envelope.artifact_binding_payloads)
+            .any(|(pinned, observed)| pinned.artifact != observed.artifact || pinned.bytes != observed.bytes)
+    {
+        return Err(format!("deferred provider turn {} differs from its canonical source bytes", turn.seq));
+    }
+    Ok(journal)
 }
 
 fn persist_deferred_provider_turn_release(
@@ -2906,36 +2959,251 @@ fn persist_deferred_provider_turn_release(
     persist_json_file(&path, &current, "deferred provider turn journal")
 }
 
-fn validate_deferred_binding_payload(
+fn deferred_metadata_hash(metadata: &octopus_ledger::InvocationMetadata) -> Result<String, String> {
+    serde_json::to_vec(metadata)
+        .map(|bytes| ContentHash::of_bytes(&bytes).to_hex())
+        .map_err(|error| error.to_string())
+}
+
+fn read_deferred_binding_payload(
     ctx: &InterfaceLiftContext,
-    payload: &DeferredArtifactBindingPayload,
-) -> Result<(), String> {
+    binding: &DeferredArtifactBindingRef,
+) -> Result<Vec<u8>, String> {
     let limits = ctx.required_host_io_limits()?;
-    let observed = ContentHash::of_bytes(&payload.bytes);
-    if payload.bytes.len() as u64 > limits.max_payload_bytes || observed != payload.bytes_content {
+    if binding.byte_count > limits.max_payload_bytes {
         return Err("deferred binding exceeds its captured payload contract".into());
     }
     let carrier = octopus_interfaces::read_artifact_carrier_file_bounded(
-        &ctx.blobs_dir.join(payload.artifact.content.to_hex()),
+        &ctx.blobs_dir.join(binding.artifact.content.to_hex()),
         limits.max_manifest_bytes.max(limits.max_payload_bytes),
     ).map_err(|error| error.to_string())?;
-    if ContentHash::of_bytes(&carrier) != payload.artifact.content {
+    if ContentHash::of_bytes(&carrier) != binding.artifact.content {
         return Err("deferred binding carrier differs from its admitted reference".into());
     }
-    match serde_json::from_slice::<octopus_interfaces::InterfaceArtifactManifest>(&carrier) {
+    let bytes = match serde_json::from_slice::<octopus_interfaces::InterfaceArtifactManifest>(&carrier) {
         Ok(manifest) if !manifest.payload_path.as_os_str().is_empty() => {
             if carrier.len() as u64 > limits.max_manifest_bytes || manifest.label.trim().is_empty()
                 || !manifest.payload_path.is_absolute()
-                || manifest.payload_content_hash.as_deref().and_then(ContentHash::from_hex) != Some(observed)
+                || manifest.payload_content_hash.as_deref().and_then(ContentHash::from_hex) != Some(binding.bytes_content)
             {
                 return Err("deferred binding bytes differ from their admitted manifest payload pin".into());
             }
+            octopus_interfaces::read_artifact_carrier_file_bounded(
+                &ctx.blobs_dir.join(binding.bytes_content.to_hex()), limits.max_payload_bytes,
+            ).map_err(|error| error.to_string())?
         }
-        _ => {
-            if carrier.len() as u64 > limits.max_payload_bytes || carrier != payload.bytes {
-                return Err("deferred binding bytes differ from their admitted raw carrier".into());
+        _ => carrier,
+    };
+    if bytes.len() as u64 != binding.byte_count || ContentHash::of_bytes(&bytes) != binding.bytes_content {
+        return Err("deferred binding bytes differ from their admitted payload digest or length".into());
+    }
+    Ok(bytes)
+}
+
+fn restore_deferred_provider_envelope(
+    ctx: &InterfaceLiftContext,
+    journal: &DeferredProviderTurnJournal,
+) -> Result<InterfaceInvocationEnvelope, String> {
+    if journal.schema_version != 3 || journal.run_id.trim().is_empty() {
+        return Err("deferred provider receipt has an unsupported schema or empty run".into());
+    }
+    let run = RunId::new(journal.run_id.clone());
+    let source = read_provider_source_movement(ctx, &run, journal.source_movement_seq)?;
+    let metadata = source.invocation_metadata.as_ref()
+        .and_then(octopus_ledger::MovementMetadata::invocation)
+        .ok_or("deferred provider source has no original invocation metadata")?;
+    if source.artifact.as_ref() != Some(&journal.artifact)
+        || deferred_metadata_hash(metadata)? != journal.metadata_content_hash
+        || metadata.artifact_binding_refs.len() != journal.artifact_bindings.len()
+    {
+        return Err("deferred provider receipt differs from its exact admitted source or grant".into());
+    }
+    let limits = ctx.required_host_io_limits()?;
+    let manifest_path = ctx.blobs_dir.join(journal.artifact.content.to_hex());
+    let manifest_bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+        &manifest_path, limits.max_manifest_bytes,
+    ).map_err(|error| error.to_string())?;
+    if ContentHash::of_bytes(&manifest_bytes) != journal.artifact.content {
+        return Err("deferred provider manifest differs from its admitted reference".into());
+    }
+    let manifest: octopus_interfaces::InterfaceArtifactManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("deferred provider manifest is malformed: {error}"))?;
+    let payload_hash = manifest.payload_content_hash.as_deref().and_then(ContentHash::from_hex)
+        .ok_or("deferred provider manifest has no canonical payload pin")?;
+    if !manifest.payload_path.is_absolute() || manifest.label.trim().is_empty()
+        || !artifact_ref_has_label(&journal.artifact, &manifest.label)
+        || payload_hash.to_hex() != journal.payload_content_hash
+        || journal.payload_byte_count > limits.max_payload_bytes
+    {
+        return Err("deferred provider receipt differs from its admitted manifest payload pin".into());
+    }
+    let payload_bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+        &ctx.blobs_dir.join(payload_hash.to_hex()), limits.max_payload_bytes,
+    ).map_err(|error| error.to_string())?;
+    if payload_bytes.len() as u64 != journal.payload_byte_count
+        || ContentHash::of_bytes(&payload_bytes) != payload_hash
+    {
+        return Err("deferred provider payload differs from its admitted digest or length".into());
+    }
+    let artifact_file = octopus_interfaces::InterfaceArtifactFile::from_captured_snapshot(
+        manifest_path, manifest_bytes, payload_bytes,
+    ).map_err(|error| error.to_string())?;
+    let mut artifact_binding_payloads = Vec::with_capacity(journal.artifact_bindings.len());
+    for (expected, binding) in metadata.artifact_binding_refs.iter().zip(&journal.artifact_bindings) {
+        if expected != &binding.artifact {
+            return Err("deferred provider receipt changed its ordered artifact bindings".into());
+        }
+        artifact_binding_payloads.push(octopus_interfaces::ArtifactBindingPayload::new(
+            binding.artifact.clone(), read_deferred_binding_payload(ctx, binding)?,
+        ));
+    }
+    Ok(InterfaceInvocationEnvelope {
+        artifact: journal.artifact.clone(), artifact_file, artifact_binding_payloads,
+        metadata: Some(metadata.clone()),
+    })
+}
+
+fn deferred_provider_journal_entries(ctx: &InterfaceLiftContext) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    let directory = deferred_provider_turn_dir(ctx);
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("deferred provider turn directory '{}' cannot be read: {error}", directory.display())),
+    };
+    let mut journals = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") { continue; }
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if !kind.is_file() || kind.is_symlink()
+            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+        {
+            return Err(format!("deferred provider turn entry '{}' is not a regular JSON journal", path.display()));
+        }
+        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+        journals.push((path, bytes));
+    }
+    journals.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(journals)
+}
+
+fn deferred_turn_from_journal(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    path: &Path,
+    journal: &DeferredProviderTurnJournal,
+) -> Result<DeferredProviderTurn, String> {
+    if path != deferred_provider_turn_path(ctx, journal.source_movement_seq) {
+        return Err(format!("deferred provider turn journal '{}' has a mismatched identity", path.display()));
+    }
+    let run = RunId::new(journal.run_id.clone());
+    let envelope = restore_deferred_provider_envelope(ctx, journal)?;
+    if let Some(DeferredProviderTurnRelease::SessionRebase { rebased_session_carrier, .. }) = &journal.release {
+        validate_artifact_admission(ctx, &run, journal.source_movement_seq, rebased_session_carrier)?;
+    }
+    let manifest = envelope.artifact_file.read_manifest().map_err(|error| error.to_string())?;
+    if is_explicit_turn_control_label(&manifest.label)
+        || !matches!(decode_admitted_turn_control(ctx, descriptor, &envelope).map_err(|error| error.to_string())?,
+            Some(CodexTurnControl::Steer { .. } | CodexTurnControl::Inject { .. }))
+    {
+        return Err(format!("deferred provider turn journal '{}' does not preserve one operator message", path.display()));
+    }
+    Ok(DeferredProviderTurn {
+        run, turn: QueuedTurn { envelope, seq: journal.source_movement_seq }, release: journal.release.clone(),
+    })
+}
+
+fn publish_deferred_provider_journal_upgrade(
+    path: &Path,
+    original: &[u8],
+    upgraded: &DeferredProviderTurnJournal,
+) -> Result<(), String> {
+    let parent = path.parent().ok_or("deferred provider upgrade journal has no parent")?;
+    let mut bytes = serde_json::to_vec_pretty(upgraded).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?.as_nanos();
+    let temporary = path.with_extension(format!("upgrade-{}-{nonce}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)
+        .map_err(|error| format!("deferred provider upgrade temporary file cannot be created: {error}"))?;
+    let mut published = false;
+    let result = (|| {
+        std::io::Write::write_all(&mut file, &bytes)
+            .and_then(|()| file.sync_all()).map_err(|error| error.to_string())?;
+        let current = octopus_interfaces::read_artifact_carrier_file_bounded(path, original.len() as u64)
+            .map_err(|error| error.to_string())?;
+        if current != original {
+            return Err("deferred provider v2 journal changed during its checked upgrade".into());
+        }
+        std::fs::rename(&temporary, path).map_err(|error| error.to_string())?;
+        published = true;
+        std::fs::File::open(parent).and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("deferred provider v3 upgrade was published but directory sync failed: {error}"))
+    })();
+    drop(file);
+    if let Err(error) = result {
+        if !published {
+            std::fs::remove_file(&temporary).map_err(|cleanup|
+                format!("{error}; unpublished deferred upgrade temporary file could not be removed: {cleanup}"))?;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn upgrade_deferred_provider_turn_journals(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct Version { schema_version: u32 }
+    for (path, bytes) in deferred_provider_journal_entries(ctx)? {
+        let version: Version = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        match version.schema_version {
+            3 => continue,
+            2 => {}
+            version => return Err(format!("deferred provider journal '{}' has unsupported schema {version}", path.display())),
+        }
+        let old: DeferredProviderTurnJournalV2 = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("deferred provider v2 journal '{}' is malformed: {error}", path.display()))?;
+        if old.run_id.trim().is_empty() || path != deferred_provider_turn_path(ctx, old.source_movement_seq)
+            || old.metadata.artifact_binding_refs.len() != old.artifact_binding_payloads.len()
+        {
+            return Err("deferred provider v2 journal has a mismatched source identity".into());
+        }
+        let run = RunId::new(old.run_id);
+        validate_provider_source_artifact(ctx, &run, old.source_movement_seq, &old.artifact, &old.metadata)?;
+        let artifact_file = octopus_interfaces::InterfaceArtifactFile::from_captured_snapshot(
+            old.manifest_path, old.manifest_bytes, old.payload_bytes,
+        ).map_err(|error| error.to_string())?;
+        let mut artifact_binding_payloads = Vec::with_capacity(old.artifact_binding_payloads.len());
+        for (reference, binding) in old.metadata.artifact_binding_refs.iter().zip(old.artifact_binding_payloads) {
+            if reference != &binding.artifact || ContentHash::of_bytes(&binding.bytes) != binding.bytes_content {
+                return Err("deferred provider v2 journal changed a captured binding".into());
             }
+            artifact_binding_payloads.push(octopus_interfaces::ArtifactBindingPayload::new(binding.artifact, binding.bytes));
         }
+        let turn = QueuedTurn { seq: old.source_movement_seq, envelope: InterfaceInvocationEnvelope {
+            artifact: old.artifact, artifact_file, artifact_binding_payloads, metadata: Some(old.metadata),
+        }};
+        let mut upgraded = capture_deferred_provider_turn(ctx, &run, &turn)?;
+        upgraded.release = old.release;
+        let deferred = deferred_turn_from_journal(ctx, descriptor, &path, &upgraded)?;
+        if deferred.release.is_some() && !matches!(
+            prepare_deferred_provider_turn(ctx, descriptor, &run, &deferred, &ActiveTurnControls::default()).await?,
+            DeferredTurnReadiness::Ready(_)
+        ) {
+            return Err("deferred provider v2 release has no settled canonical proof".into());
+        }
+        publish_deferred_provider_journal_upgrade(&path, &bytes, &upgraded)?;
     }
     Ok(())
 }
@@ -2944,177 +3212,13 @@ fn load_deferred_provider_turns(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
 ) -> Result<BTreeMap<u64, DeferredProviderTurn>, String> {
-    let directory = deferred_provider_turn_dir(ctx);
-    let entries = match std::fs::read_dir(&directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(error) => {
-            return Err(format!(
-                "deferred provider turn directory '{}' cannot be read: {error}",
-                directory.display()
-            ));
-        }
-    };
     let mut turns = BTreeMap::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "deferred provider turn directory '{}' cannot be enumerated: {error}",
-                directory.display()
-            )
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
-            continue;
-        }
-        let file_type = entry.file_type().map_err(|error| {
-            format!(
-                "deferred provider turn journal '{}' cannot be inspected: {error}",
-                path.display()
-            )
-        })?;
-        if !file_type.is_file()
-            || file_type.is_symlink()
-            || path.extension().and_then(|extension| extension.to_str()) != Some("json")
-        {
-            return Err(format!(
-                "deferred provider turn entry '{}' is not a regular JSON journal",
-                path.display()
-            ));
-        }
-        let bytes = std::fs::read(&path).map_err(|error| {
-            format!(
-                "deferred provider turn journal '{}' cannot be read: {error}",
-                path.display()
-            )
-        })?;
-        let journal =
-            serde_json::from_slice::<DeferredProviderTurnJournal>(&bytes).map_err(|error| {
-                format!(
-                    "deferred provider turn journal '{}' is malformed: {error}",
-                    path.display()
-                )
-            })?;
-        if journal.schema_version != 2
-            || journal.run_id.trim().is_empty()
-            || path != deferred_provider_turn_path(ctx, journal.source_movement_seq)
-        {
-            return Err(format!(
-                "deferred provider turn journal '{}' has a mismatched identity",
-                path.display()
-            ));
-        }
-        let run = RunId::new(journal.run_id.clone());
-        let runtime = journal.metadata.runtime().ok_or_else(|| {
-            format!(
-                "deferred provider turn journal '{}' has no runtime coordinates",
-                path.display()
-            )
-        })?;
-        if &runtime.run != &run || &runtime.interface != &ctx.interface {
-            return Err(format!(
-                "deferred provider turn journal '{}' runtime coordinates do not match its identity",
-                path.display()
-            ));
-        }
-        validate_provider_source_artifact(
-            ctx,
-            &run,
-            journal.source_movement_seq,
-            &journal.artifact,
-            &journal.metadata,
-        )?;
-        if let Some(DeferredProviderTurnRelease::SessionRebase {
-            rebased_session_carrier,
-            ..
-        }) = journal.release.as_ref()
-        {
-            validate_artifact_admission(
-                ctx,
-                &run,
-                journal.source_movement_seq,
-                rebased_session_carrier,
-            )?;
-        }
-        let artifact_file = octopus_interfaces::InterfaceArtifactFile::from_captured_snapshot(
-            journal.manifest_path.clone(),
-            journal.manifest_bytes.clone(),
-            journal.payload_bytes.clone(),
-        )
-        .map_err(|error| {
-            format!(
-                "deferred provider turn journal '{}' source artifact is invalid: {error}",
-                path.display()
-            )
-        })?;
-        let manifest = artifact_file.read_manifest().map_err(|error| {
-            format!(
-                "deferred provider turn journal '{}' source manifest is invalid: {error}",
-                path.display()
-            )
-        })?;
-        let content = ContentHash::of_bytes(&journal.manifest_bytes);
-        if content != journal.artifact.content
-            || !artifact_ref_has_label(&journal.artifact, &manifest.label)
-            || journal.metadata.artifact_binding_refs.len()
-                != journal.artifact_binding_payloads.len()
-        {
-            return Err(format!(
-                "deferred provider turn journal '{}' captured inputs do not match its source envelope",
-                path.display()
-            ));
-        }
-        let mut artifact_binding_payloads = Vec::new();
-        for (expected, payload) in journal
-            .metadata
-            .artifact_binding_refs
-            .iter()
-            .zip(&journal.artifact_binding_payloads)
-        {
-            if expected != &payload.artifact
-                || payload.bytes_content != ContentHash::of_bytes(&payload.bytes)
-            {
-                return Err(format!(
-                    "deferred provider turn journal '{}' has a mismatched artifact binding",
-                    path.display()
-                ));
-            }
-            validate_deferred_binding_payload(ctx, payload)?;
-            artifact_binding_payloads.push(octopus_interfaces::ArtifactBindingPayload::new(
-                payload.artifact.clone(),
-                payload.bytes.clone(),
-            ));
-        }
-        let seq = journal.source_movement_seq;
-        let envelope = InterfaceInvocationEnvelope {
-            artifact: journal.artifact,
-            artifact_file,
-            artifact_binding_payloads,
-            metadata: Some(journal.metadata),
-        };
-        if is_explicit_turn_control_label(&manifest.label)
-            || !matches!(
-                decode_admitted_turn_control(&ctx, &descriptor, &envelope).map_err(|error| format!(
-                    "deferred provider turn journal '{}' source cannot be decoded: {error}",
-                    path.display()
-                ))?,
-                Some(CodexTurnControl::Steer { .. } | CodexTurnControl::Inject { .. })
-            )
-        {
-            return Err(format!(
-                "deferred provider turn journal '{}' does not preserve one operator message",
-                path.display()
-            ));
-        }
-        let turn = DeferredProviderTurn {
-            run,
-            turn: QueuedTurn { envelope, seq },
-            release: journal.release,
-        };
-        if turns.insert(seq, turn).is_some() {
-            return Err(format!(
-                "deferred provider turn movement {seq} is journaled more than once"
-            ));
+    for (path, bytes) in deferred_provider_journal_entries(ctx)? {
+        let journal: DeferredProviderTurnJournal = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("deferred provider v3 journal '{}' is malformed: {error}", path.display()))?;
+        let turn = deferred_turn_from_journal(ctx, descriptor, &path, &journal)?;
+        if turns.insert(journal.source_movement_seq, turn).is_some() {
+            return Err(format!("deferred provider turn movement {} is journaled more than once", journal.source_movement_seq));
         }
     }
     Ok(turns)
@@ -3232,6 +3336,16 @@ async fn prepare_deferred_provider_turn(
     .map_err(|error| error.to_string())?;
     if let Some(release) = deferred.release.as_ref() {
         match release {
+            DeferredProviderTurnRelease::InterruptedResult { source_session_carrier: released_source, .. } => {
+                if released_source != &source_session_carrier {
+                    return Err(format!("deferred provider turn {} changed its interrupted-result source carrier", deferred.turn.seq));
+                }
+                return Ok(if checked_deferred_interrupted_result(
+                    ctx, descriptor, run, &deferred.turn, source_continuity.as_ref(), Some(release), None,
+                ).await?.is_some() {
+                    DeferredTurnReadiness::Ready(deferred.turn.clone())
+                } else { DeferredTurnReadiness::AwaitingSessionSettlement });
+            }
             DeferredProviderTurnRelease::RecoveredResult {
                 source_session_carrier: released_source,
                 failed_source_movement_seq,
@@ -3295,6 +3409,13 @@ async fn prepare_deferred_provider_turn(
         }
     }
 
+    if let Some((release, _)) = checked_deferred_interrupted_result(
+        ctx, descriptor, run, &deferred.turn, source_continuity.as_ref(), None, None,
+    ).await? {
+        persist_deferred_provider_turn_release(ctx, descriptor, run, &deferred.turn, &release)?;
+        return Ok(DeferredTurnReadiness::Ready(deferred.turn.clone()));
+    }
+
     let labels = codex_session_snapshot_labels(descriptor).map_err(|error| error.to_string())?;
     let scan = latest_provider_session_carrier(ctx, run, deferred.turn.seq, &labels, None)?;
     let has_carrier = scan.latest.is_some();
@@ -3330,6 +3451,110 @@ async fn prepare_deferred_provider_turn(
         return Ok(DeferredTurnReadiness::Ready(deferred.turn.clone()));
     }
     Ok(DeferredTurnReadiness::AwaitingSessionSettlement)
+}
+
+async fn checked_deferred_interrupted_result(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    run: &RunId,
+    turn: &QueuedTurn,
+    source: Option<&crate::handler::CodexContinuityState>,
+    released: Option<&DeferredProviderTurnRelease>,
+    current: Option<&[octopus_provider_run_authoring::SessionContextArtifact]>,
+) -> Result<Option<(DeferredProviderTurnRelease, crate::handler::CodexContinuityState)>, String> {
+    let Some(source) = source.filter(|state| codex_continuity_has_interrupted_pending(state)) else { return Ok(None); };
+    let snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
+    let carrier = snapshot.as_ref().map(|(carrier, _)| carrier.clone());
+    let (result_source, closure) = match released {
+        Some(DeferredProviderTurnRelease::InterruptedResult { source_session_carrier, result_source, closure }) => {
+            if source_session_carrier != &carrier { return Err("interrupted release changed its source session carrier".into()); }
+            (result_source.clone(), closure.clone())
+        }
+        Some(_) => return Err("interrupted release has a different release kind".into()),
+        None => {
+            let Some((interrupted, seq, closure)) = InterruptedEffectArbiter::new(ctx.clone()).reconciled_result(run).await? else { return Ok(None); };
+            if &interrupted != source { return Ok(None); }
+            let movement = read_provider_source_movement(ctx, run, seq)?;
+            (DurableArtifactAdmission { artifact: movement.artifact.ok_or("interrupted result source has no artifact")?, movement_seq: seq }, closure)
+        }
+    };
+    let checked;
+    let current = if let Some(current) = current { current } else {
+        let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
+        let session = ProviderHandoffSession::new(ctx)?;
+        let handoff = session.from_invocation_when_ready(ctx, descriptor, run, &turn.envelope, turn.seq, &pinned).await?;
+        checked = handoff.current_session_context_artifacts().await;
+        &checked
+    };
+    let continuity = checked_interrupted_result_continuity(
+        ctx, descriptor, run, &turn.envelope, source, &result_source, &closure,
+        current,
+    )?;
+    if !codex_continuity_successor_is_settled(Some(source), Some(&continuity))? { return Ok(None); }
+    Ok(Some((DeferredProviderTurnRelease::InterruptedResult {
+        source_session_carrier: carrier, result_source, closure,
+    }, continuity)))
+}
+
+fn checked_interrupted_result_continuity(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    run: &RunId,
+    input: &InterfaceInvocationEnvelope,
+    interrupted: &crate::handler::CodexContinuityState,
+    result_source: &DurableArtifactAdmission,
+    closure: &DurableArtifactAdmission,
+    current: &[octopus_provider_run_authoring::SessionContextArtifact],
+) -> Result<crate::handler::CodexContinuityState, String> {
+    let result = read_provider_source_movement(ctx, run, result_source.movement_seq)?;
+    if result.artifact.as_ref() != Some(&result_source.artifact) {
+        return Err("interrupted release result ref differs from its exact source movement".into());
+    }
+    let runtime = input.runtime().map_err(|error| error.to_string())?;
+    let result_runtime = result.runtime().ok_or("interrupted release result has no runtime coordinates")?;
+    if result_runtime.ee != runtime.ee || result_runtime.worker != runtime.worker {
+        return Err("interrupted release result crossed its admitted run scope".into());
+    }
+    validate_artifact_admission(ctx, run, result_source.movement_seq, closure)?;
+    let (result_manifest, result_payload) = read_pinned_provider_artifact(ctx, &result_source.artifact, "interrupted result")?;
+    if !exact_interrupted_result_payload(&result_manifest.label, &result_payload, interrupted)? {
+        return Err("interrupted release result does not close its exact native pending call".into());
+    }
+    let (closure_manifest, closure_payload) = read_pinned_provider_artifact(ctx, &closure.artifact, "interrupted closure")?;
+    let closed = interrupted_result_closure_payload(&closure_manifest.label, &closure_payload, interrupted, &result_source.artifact)?
+        .ok_or("interrupted release lost its exact native closure payload")?;
+    let mut evidence = current.to_vec();
+    let result_payload: serde_json::Value = serde_json::from_slice(&result_payload).map_err(|error| error.to_string())?;
+    if let Some(existing) = evidence.iter().find(|entry| entry.source_artifact == result_source.artifact) {
+        if existing.payload != result_payload { return Err("interrupted release result conflicts with checked current evidence".into()); }
+    } else {
+        evidence.push(octopus_provider_run_authoring::SessionContextArtifact {
+            label: result_manifest.label,
+            payload: result_payload, source_artifact: result_source.artifact.clone(),
+            source_movement_seq: Some(result_source.movement_seq),
+        });
+    }
+    let settled = reconcile_operator_session_continuity(descriptor, input, Some(interrupted.clone()), &evidence)
+        .map_err(|error| error.to_string())?;
+    if settled.as_ref().is_some_and(codex_continuity_waits_for_result) {
+        return settled.ok_or("interrupted release lost its current continuity".into());
+    }
+    reconcile_delivered_interrupted_continuity(Some(interrupted), settled, Some(closed))
+        .map_err(|error| error.to_string())?.ok_or("interrupted release lost its checked closed continuity".into())
+}
+
+fn read_provider_source_movement(
+    ctx: &InterfaceLiftContext, run: &RunId, seq: u64,
+) -> Result<octopus_ledger::Movement, String> {
+    let (mut file, snapshot_len, max_row_bytes) = open_arbitration_snapshot(ctx)?;
+    let decoder = DurableMovementDecoder::for_log(&ctx.movements_path);
+    let (offset, expected_seq) = authoritative_source_scan_start(ctx, &mut file, snapshot_len, max_row_bytes, &decoder, seq);
+    let scan = scan_authoritative_snapshot(ctx, &mut file, snapshot_len, max_row_bytes, &decoder, offset, expected_seq, None,
+        |movement| Ok((movement.seq.0 == seq).then_some(movement)))?;
+    ensure_arbitration_snapshot_length(ctx, &file, snapshot_len)?;
+    let movement = scan.found.ok_or_else(|| format!("interrupted result source {seq} is absent from the authoritative ledger"))?;
+    if !movement_is_provider_source(ctx, run, &movement) { return Err("interrupted result source crossed its provider/run coordinates".into()); }
+    Ok(movement)
 }
 
 async fn recover_deferred_failed_result(
@@ -3784,26 +4009,31 @@ fn read_pinned_provider_artifact_payload(
     artifact: &ArtifactRef,
     boundary: &str,
 ) -> Result<Vec<u8>, String> {
+    read_pinned_provider_artifact(ctx, artifact, boundary).map(|(_, payload)| payload)
+}
+
+fn read_pinned_provider_artifact(
+    ctx: &InterfaceLiftContext,
+    artifact: &ArtifactRef,
+    boundary: &str,
+) -> Result<(octopus_interfaces::InterfaceArtifactManifest, Vec<u8>), String> {
     let limits = ctx.required_host_io_limits()?;
     let manifest_path = ctx.blobs_dir.join(artifact.content.to_hex());
-    let manifest_bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
-        &manifest_path,
-        limits.max_manifest_bytes,
-    )
+    let captured = octopus_interfaces::InterfaceArtifactFile::new(&manifest_path)
+        .map_err(|error| error.to_string())?
+        .read_manifest_bounded(limits.max_manifest_bytes)
     .map_err(|error| {
         format!(
             "{boundary} '{}' cannot be read: {error}",
             manifest_path.display()
         )
     })?;
-    if ContentHash::of_bytes(&manifest_bytes) != artifact.content {
+    if ContentHash::of_bytes(&captured.manifest_bytes) != artifact.content {
         return Err(format!(
             "{boundary} manifest hash differs from its artifact ref"
         ));
     }
-    let manifest: octopus_interfaces::InterfaceArtifactManifest =
-        serde_json::from_slice(&manifest_bytes)
-            .map_err(|error| format!("{boundary} manifest is malformed: {error}"))?;
+    let manifest = captured.manifest;
     if artifact.id.as_str() != format!("{}:{}", manifest.label, artifact.content.to_hex()) {
         return Err(format!("{boundary} id differs from its manifest identity"));
     }
@@ -3826,7 +4056,7 @@ fn read_pinned_provider_artifact_payload(
     if ContentHash::of_bytes(&payload) != payload_hash {
         return Err(format!("{boundary} payload hash differs from its manifest"));
     }
-    Ok(payload)
+    Ok((manifest, payload))
 }
 
 fn validate_provider_source_artifact(
@@ -4709,6 +4939,12 @@ async fn drive_turn_with_retries(
     ).await {
         Ok(handoff) => handoff,
         Err(error) => {
+            if recover_interrupted_result_without_context(
+                ctx, descriptor, handoff_session, interrupted_effects, run, &turn,
+            ).await? {
+                control.finish();
+                return Ok(());
+            }
             record_invalid_provider_context(ctx, descriptor, handoff_session, run, &turn, error)
                 .await?;
             control.finish();
@@ -5238,6 +5474,20 @@ async fn drive_turn_with_retries(
         let live_stream_root = ctx.interface_var_dir().join("streams");
         let current_run_record = handoff.current_run_record_bytes().await;
         let current_session_context = handoff.current_session_context_artifacts().await;
+        let reconciled_result_continuity = match is_operator_continuity_input(descriptor, &turn.envelope) {
+            Ok(true) => {
+            let snapshot = bound_operator_session_snapshot(ctx, descriptor, &turn)?;
+            let bound = recover_operator_turn_continuity(descriptor, &turn.envelope,
+                snapshot.as_ref().map(|(_, snapshot)| snapshot), run, &pinned_run_record)
+                .map_err(|error| error.to_string())?;
+            let deferred = load_deferred_provider_turns(ctx, descriptor)?;
+            let release = deferred.get(&turn.seq).and_then(|turn| turn.release.as_ref())
+                .filter(|release| matches!(release, DeferredProviderTurnRelease::InterruptedResult { .. }));
+            checked_deferred_interrupted_result(ctx, descriptor, run, &turn, bound.as_ref(), release,
+                Some(&current_session_context)).await?.map(|(_, continuity)| continuity)
+            }
+            Ok(false) | Err(_) => None,
+        };
         let input_changes_context = handoff.input_changes_context().await;
         let receive = async {
             let result = live
@@ -5256,6 +5506,7 @@ async fn drive_turn_with_retries(
                     interrupted_after_artifact: interrupted_after_artifact.clone(),
                     recovered_handoff_artifacts: recovered_handoff_artifacts.clone(),
                     durable_interrupted_continuity: durable_interrupted_continuity.clone(),
+                    reconciled_result_continuity,
                     control,
                     handoff_barrier: handoff_barrier.clone(),
                 })
@@ -5645,6 +5896,35 @@ async fn emit_terminal_error_message(
         }
     }
     handoff.hand_final(terminal).await.map(|_| ())
+}
+
+async fn recover_interrupted_result_without_context(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    handoff_session: &ProviderHandoffSession,
+    interrupted_effects: &InterruptedEffectArbiter,
+    run: &RunId,
+    turn: &QueuedTurn,
+) -> Result<bool, String> {
+    let Some(continuity) = interrupted_effects.durable_continuity(run).await? else {
+        return Ok(false);
+    };
+    if !exact_interrupted_result_source(&turn.envelope, &continuity)? {
+        return Ok(false);
+    }
+    let Some((emissions, closure)) = recover_sealed_interrupted_result(
+        ctx, descriptor, turn, &continuity,
+    )? else { return Ok(false); };
+    if !interrupted_effects.begin_result(run, turn.seq, &turn.envelope).await? {
+        return Err("sealed interrupted result does not match the durable exact effect".into());
+    }
+    let handoff = handoff_session.failed_source_handoff(
+        ctx, descriptor, run, &turn.envelope, turn.seq,
+    )?;
+    admit_interrupted_result(
+        &handoff, interrupted_effects, run, turn.seq, &closure, emissions,
+    ).await?;
+    Ok(true)
 }
 
 fn recover_sealed_interrupted_result(
@@ -6414,6 +6694,66 @@ mod tests {
         artifact_ref
     }
 
+    async fn upgrade_deferred_fixture(
+        ctx: &InterfaceLiftContext,
+        descriptor: &InterfaceDescriptor,
+        run: &RunId,
+        turn: &QueuedTurn,
+    ) {
+        let path = deferred_provider_turn_path(ctx, turn.seq);
+        let expected: DeferredProviderTurnJournal = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let captured = turn.envelope.artifact_file.read_bounded(1_048_576, 1_048_576).unwrap();
+        let old = DeferredProviderTurnJournalV2 {
+            schema_version: 2, source_movement_seq: turn.seq, run_id: run.to_string(),
+            artifact: turn.envelope.artifact.clone(),
+            manifest_path: turn.envelope.artifact_file.manifest_path().to_path_buf(),
+            manifest_bytes: captured.manifest_bytes, payload_bytes: captured.payload_bytes,
+            metadata: turn.envelope.metadata.clone().unwrap(), release: expected.release.clone(),
+            artifact_binding_payloads: turn.envelope.artifact_binding_payloads.iter().map(|bound|
+                DeferredArtifactBindingPayloadV2 { artifact: bound.artifact.clone(),
+                    bytes_content: ContentHash::of_bytes(&bound.bytes), bytes: bound.bytes.clone() }).collect(),
+        };
+        let bytes = serde_json::to_vec_pretty(&old).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(load_deferred_provider_turns(ctx, descriptor).is_err());
+        assert!(publish_deferred_provider_journal_upgrade(&path, b"changed v2 receipt", &expected).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        #[cfg(unix)]
+        let old_allocated = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path).unwrap().blocks() * 512
+        };
+        let payload = ctx.blobs_dir.join(&expected.payload_content_hash);
+        let original = std::fs::read(&payload).unwrap();
+        std::fs::write(&payload, b"corrupt canonical input").unwrap();
+        assert!(upgrade_deferred_provider_turn_journals(ctx, descriptor).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::write(&payload, &original).unwrap();
+        std::fs::remove_file(&old.manifest_path).unwrap();
+        std::fs::remove_file(&captured.manifest.payload_path).unwrap();
+        upgrade_deferred_provider_turn_journals(ctx, descriptor).await.unwrap();
+        let upgraded = std::fs::read(&path).unwrap();
+        assert_eq!(serde_json::from_slice::<DeferredProviderTurnJournal>(&upgraded).unwrap(), expected);
+        assert!(upgraded.len() < bytes.len());
+        let loaded = load_deferred_provider_turns(ctx, descriptor).unwrap();
+        assert_eq!(loaded[&turn.seq].turn.envelope.metadata, turn.envelope.metadata);
+        assert_eq!(loaded[&turn.seq].turn.envelope.read_artifact_payload_bounded(1_048_576).unwrap(), original);
+        for (actual, original) in loaded[&turn.seq].turn.envelope.artifact_binding_payloads.iter()
+            .zip(&turn.envelope.artifact_binding_payloads)
+        { assert_eq!(actual.artifact, original.artifact); assert_eq!(actual.bytes, original.bytes); }
+        upgrade_deferred_provider_turn_journals(ctx, descriptor).await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), upgraded);
+        std::fs::write(&old.manifest_path, &old.manifest_bytes).unwrap();
+        std::fs::write(&captured.manifest.payload_path, &old.payload_bytes).unwrap();
+        eprintln!("deferred receipt v2={} v3={} bytes, bindings={}", bytes.len(), upgraded.len(), expected.artifact_bindings.len());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            eprintln!("deferred receipt stat-allocated v2={old_allocated} v3={} bytes",
+                std::fs::metadata(&path).unwrap().blocks() * 512);
+        }
+    }
+
     #[tokio::test]
     async fn control_reader_progresses_other_runs_past_unready_targets() {
         for (ready_count, with_starting) in [(1_u64, false), (10, true), (12, true)] {
@@ -6919,6 +7259,7 @@ mod tests {
                     interrupted_after_artifact: None,
                     recovered_handoff_artifacts: Arc::new(Vec::new()),
                     durable_interrupted_continuity: Some(interrupted.clone()),
+                    reconciled_result_continuity: None,
                     control: &broker,
                     handoff_barrier: ProviderHandoffBarrier::new(),
                 },
@@ -7032,6 +7373,14 @@ mod tests {
             assert_eq!(recovered[1].artifact.read_payload_bytes().unwrap(), first_closure_bytes);
             replay.seq += 1;
             assert!(recover_sealed_interrupted_result(&ctx, &descriptor, &replay, &interrupted).is_err());
+            let failed_context_session = ProviderHandoffSession::new(&ctx).unwrap();
+            assert!(recover_interrupted_result_without_context(
+                &ctx, &descriptor, &failed_context_session, &resolving_restart, &run, &replay,
+            ).await.is_err());
+            assert!(!recover_interrupted_result_without_context(
+                &ctx, &descriptor, &failed_context_session, &resolving_restart, &run,
+                &QueuedTurn { envelope: message_envelope.clone(), seq: result_seq + 1 },
+            ).await.unwrap());
             replay.seq = result_seq;
             replay.envelope.artifact.content = ContentHash::of_bytes(b"another result");
             assert!(recover_sealed_interrupted_result(&ctx, &descriptor, &replay, &interrupted).is_err());
@@ -7081,6 +7430,7 @@ mod tests {
                     interrupted_after_artifact: Some("turn.dynamic_tool_call".to_string()),
                     recovered_handoff_artifacts: Arc::new(Vec::new()),
                     durable_interrupted_continuity: Some(interrupted.clone()),
+                    reconciled_result_continuity: None,
                     control: &recovery_broker,
                     handoff_barrier: ProviderHandoffBarrier::new(),
                 })
@@ -7526,18 +7876,18 @@ mod tests {
             let descriptor = descriptor();
             let ctx = context(root, &descriptor);
             let run = RunId::new("run-a");
-            let file_bytes = [0xff, 0, 0x81, b'A'];
+            let file_bytes = [0xff, 0, 0x81, b'A'].repeat(32 * 1024);
             let file = InterfaceArtifactFile::write(root.join("binary"), "operator.file.binary", &file_bytes).unwrap();
             let file_ref = cache_artifact(&ctx, &file);
             let attachment = json!({"name":"résumé.zip","label":"operator.file.binary","mime_type":"application/zip",
                 "size":file_bytes.len(),"payload_path":file.read_manifest().unwrap().payload_path,
-                "payload_content_hash":format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(file_bytes)),"last_modified":0});
+                "payload_content_hash":format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&file_bytes)),"last_modified":0});
             let message = artifact(
                 &root.join("message"),
                 "operator.message",
                 json!({"text": "next task", "message_id": "message-a", "attachments":[attachment]}),
             );
-            let message_ref = materialized_artifact_ref(&message).unwrap();
+            let message_ref = cache_artifact(&ctx, &message);
             let mut artifact_binding_payloads = with_settled_continuity
                 .then(|| {
                     bound(
@@ -7644,6 +7994,7 @@ mod tests {
                 panic!("terminal carrierless ownership must release the original envelope")
             };
             assert_eq!(released.envelope.artifact, message_ref);
+            upgrade_deferred_fixture(&ctx, &descriptor, &run, &turn).await;
             assert_eq!(
                 released.envelope.artifact_binding_payloads.len(),
                 usize::from(with_settled_continuity) + 1
@@ -7689,9 +8040,9 @@ mod tests {
             let actual_manifest = std::fs::read(ctx.blobs_dir.join(chosen.content.to_hex())).unwrap();
             for replacement in [vec![0xfe, 0, 0x81, b'A'], actual_manifest] {
                 let mut changed: DeferredProviderTurnJournal = serde_json::from_slice(&preserved).unwrap();
-                let bound = changed.artifact_binding_payloads.iter_mut().find(|bound| bound.artifact == chosen).unwrap();
-                bound.bytes = replacement;
-                bound.bytes_content = ContentHash::of_bytes(&bound.bytes);
+                let bound = changed.artifact_bindings.iter_mut().find(|bound| bound.artifact == chosen).unwrap();
+                bound.byte_count = replacement.len() as u64;
+                bound.bytes_content = ContentHash::of_bytes(&replacement);
                 std::fs::write(&journal_path, serde_json::to_vec(&changed).unwrap()).unwrap();
                 assert!(load_deferred_provider_turns(&ctx, &descriptor).err().unwrap().contains("admitted manifest payload pin"));
             }
@@ -7724,7 +8075,7 @@ mod tests {
             "operator.message",
             json!({"prompt": "next task", "message_id": "message-a"}),
         );
-        let message_ref = materialized_artifact_ref(&message).unwrap();
+        let message_ref = cache_artifact(&ctx, &message);
         let turn = QueuedTurn {
             envelope: InterfaceInvocationEnvelope {
                 artifact: message_ref.clone(),
@@ -7770,6 +8121,7 @@ mod tests {
 
         assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn).unwrap());
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
+        upgrade_deferred_fixture(&ctx, &descriptor, &run, &turn).await;
         let deferred = DeferredProviderTurn {
             run: run.clone(),
             turn,
@@ -7797,6 +8149,7 @@ mod tests {
                 ..
             }
         )));
+        upgrade_deferred_fixture(&ctx, &descriptor, &run, &deferred.turn).await;
     }
 
     #[tokio::test]
@@ -7872,7 +8225,7 @@ mod tests {
             "operator.message",
             json!({"prompt": "next task", "message_id": "message-a"}),
         );
-        let message_ref = materialized_artifact_ref(&message).unwrap();
+        let message_ref = cache_artifact(&ctx, &message);
         let mut metadata = runtime_metadata();
         metadata.artifact_binding_refs = vec![original_ref.clone(), result_ref.clone()];
         let turn = QueuedTurn {
@@ -7978,6 +8331,87 @@ mod tests {
         ));
         remove_deferred_provider_turn(&ctx, 2).unwrap();
         assert!(load_deferred_provider_turns(&ctx, &descriptor).unwrap().is_empty());
+
+        let ctx = context(&root.join("interrupted"), &descriptor);
+        let interrupted = continuity(7, Some("interrupted_pending"));
+        let closed = continuity(8, None);
+        let partial = artifact(&root.join("interrupted-session"), "interface.artifact.output", json!({
+            "label":"interface.artifact.output", "codex_continuity":interrupted,
+            "session_context":{"schema_version":3,"provider_interface":"world_provider_codex","artifacts":[]},
+        }));
+        let partial_ref = cache_artifact(&ctx, &partial);
+        let result_ref = cache_artifact(&ctx, &result);
+        let closure_file = artifact(&root.join("interrupted-closure"), TURN_INTERRUPTED_RESULT_LABEL, json!({
+            "label":TURN_INTERRUPTED_RESULT_LABEL,"codex_continuity":closed,
+            "result_kind":"tool_result","correlation_id":"call-a","thread_id":"thread-a","turn_id":"turn-a",
+            "ok":true,"turn_interrupted":true,"returned_to_model":false,
+            "result_disposition":"durably_admitted_after_interrupt","source_artifact":result_ref,
+        }));
+        let closure = DurableArtifactAdmission { artifact:cache_artifact(&ctx, &closure_file), movement_seq:3 };
+        let result_source = DurableArtifactAdmission { artifact:result_ref, movement_seq:2 };
+        std::fs::remove_file(result.read_manifest().unwrap().payload_path).unwrap();
+        std::fs::remove_file(closure_file.read_manifest().unwrap().payload_path).unwrap();
+        assert!(result.read_payload_bytes().is_err());
+        assert!(closure_file.read_payload_bytes().is_err());
+        assert!(read_pinned_provider_artifact_payload(&ctx, &result_source.artifact, "interrupted result").is_ok());
+        assert!(read_pinned_provider_artifact_payload(&ctx, &closure.artifact, "interrupted closure").is_ok());
+        let mut original = turn.clone();
+        original.envelope.artifact_binding_payloads = vec![octopus_interfaces::ArtifactBindingPayload::new(
+            partial_ref.clone(), partial.read_payload_bytes().unwrap())];
+        original.envelope.metadata.as_mut().unwrap().artifact_binding_refs = vec![partial_ref.clone()];
+        let mut source = movement(1, MovementKind::InterfaceOutbound,
+            Endpoint::Interface(InterfaceId::new("world_operator")), Endpoint::Interface(descriptor.id.clone()), message_ref);
+        source.invocation_metadata = Some(original.envelope.metadata.clone().unwrap().into());
+        let mut later_source = source.clone();
+        later_source.seq = Seq(4);
+        later_source.lamport = Lamport(5);
+        write_movements(&ctx.movements_path, &[
+            movement(0, MovementKind::InterfaceArrival, Endpoint::Interface(descriptor.id.clone()),
+                Endpoint::Interface(InterfaceId::new("system_worker_test")), partial_ref.clone()), source,
+            movement(2, MovementKind::InterfaceOutbound, Endpoint::Interface(InterfaceId::new("system_coder")),
+                Endpoint::Interface(descriptor.id.clone()), result_source.artifact.clone()),
+            movement(3, MovementKind::InterfaceArrival, Endpoint::Interface(descriptor.id.clone()),
+                Endpoint::Interface(InterfaceId::new("system_worker_test")), closure.artifact.clone()), later_source,
+        ]);
+        let mut current = vec![octopus_provider_run_authoring::SessionContextArtifact {
+            label:"interface.artifact.output".into(), payload:json!({"label":"interface.artifact.output","codex_continuity":interrupted}),
+            source_artifact:partial_ref, source_movement_seq:Some(0),
+        }];
+        for seq in [1, 4] {
+            original.seq = seq;
+            let pinned = ctx.pinned_run_record_bytes(&original.envelope).unwrap();
+            let snapshot = bound_operator_session_snapshot(&ctx, &descriptor, &original).unwrap();
+            assert_eq!(recover_operator_turn_continuity(&descriptor, &original.envelope,
+                snapshot.as_ref().map(|(_, snapshot)| snapshot), &run, &pinned).unwrap(), Some(interrupted.clone()));
+            let private = checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
+                &interrupted, &result_source, &closure, &current).unwrap();
+            assert_eq!(private, closed);
+            assert_eq!(original.envelope.artifact_binding_payloads.len(), 1);
+            assert_eq!(current.len(), 1);
+        }
+        let later = continuity(10, None);
+        current.push(octopus_provider_run_authoring::SessionContextArtifact {
+            label:"turn.agent_message".into(), payload:json!({"label":"turn.agent_message","codex_continuity":later}),
+            source_artifact:ArtifactRef { id:ArtifactId::new("later-answer"), content:ContentHash::of_bytes(b"later") },
+            source_movement_seq:Some(5),
+        });
+        assert_eq!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
+            &interrupted, &result_source, &closure, &current).unwrap(), later);
+        assert!(reconcile_delivered_interrupted_continuity(Some(&interrupted), Some(continuity(10, Some("pending"))), Some(closed.clone())).is_err());
+        for key in ["provider_interface", "run", "thread_id", "thread_shape_fingerprint", "static_context_fingerprint"] {
+            let mut wrong = serde_json::to_value(&later).unwrap();
+            wrong[key] = json!("different");
+            assert!(reconcile_delivered_interrupted_continuity(Some(&interrupted),
+                Some(serde_json::from_value(wrong).unwrap()), Some(closed.clone())).is_err());
+        }
+        let mut wrong = result_source.clone();
+        wrong.artifact.content = ContentHash::of_bytes(b"different result");
+        assert!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
+            &interrupted, &wrong, &closure, &current).is_err());
+        let mut wrong = closure.clone();
+        wrong.movement_seq = 4;
+        assert!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
+            &interrupted, &result_source, &wrong, &current).is_err());
     }
 
     #[tokio::test]

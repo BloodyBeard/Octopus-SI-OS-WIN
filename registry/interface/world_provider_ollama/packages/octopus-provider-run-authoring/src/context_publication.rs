@@ -80,16 +80,16 @@ impl ProviderOutputHandoff {
         provider_state.insert("context_generation".into(), context_generation.into());
         provider_state.insert(FRONTIER_CHECKPOINT_IDS.into(), serde_json::json!(frontier));
         provider_state.insert("pending_handoff".into(), serde_json::to_value(&published).map_err(|error| error.to_string())?);
-        let mut bytes = serde_json::to_vec_pretty(&value).map_err(|error| error.to_string())?;
-        bytes.push(b'\n');
+        let bytes = JsonFormat::Compact.encode(&value)?;
         let candidate = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
         validate_bound_run_authoring_topology(&candidate, &config, None)?;
         validate_persisted_profile_binding(&candidate, &config, &topology)?;
         let content = String::from_utf8(bytes).map_err(|error| error.to_string())?;
         let after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
         let patch = json_patch::diff(&before, &value);
-        if apply_run_json_patch(current, &patch, &after_hash)? != content { return Err("provider publication patch changed its bytes".into()); }
+        if apply_run_json_patch(current, &patch, &after_hash, Some(JsonFormat::Compact))? != content { return Err("provider publication patch changed its bytes".into()); }
         Ok(AuthoredRun {
+            json_format: Some(JsonFormat::Compact),
             before_hash: ContentHash::of_bytes(current).to_hex(), after_hash, content, patch,
             correlation_id: format!("provider-run-authoring:{}:{generation}", record.id),
             authoring_result_checkpoint: match result_id { Some(id) => id, None if config.writer_run.is_some() => CheckpointId::new(format!("{prefix}_writer_result")), None => return Err("provider publication has no authoring result".into()) },

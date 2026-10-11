@@ -517,7 +517,7 @@ test("desktop arrivals are primary only, preference filtered, scoped and never r
   } finally { h.close(); }
 });
 
-function eventLog() {
+function eventLog(overrides = {}) {
   global.window = storageWindow();
   const host = hookHost(), requests = [];
   let generation = 0;
@@ -528,7 +528,7 @@ function eventLog() {
     "../runtimeFormat": {}, "./chat/format": {}, "./IconGlyphs": {}, "./JsonPanel": {}, "./SurfaceCopyButton": {},
     "../toasts": { appToast: { danger() {} } }, "./TopBar": {}, "./projectionResource": resource,
   }).EventLogView;
-  const props = { focusedMovement: { id: "movements:3", sequence: 2 }, query: "stale search", onQueryChange(value) { props.query = value; host.update(); }, onClearMovement() { props.focusedMovement = null; host.update(); }, searchFocusTick: 0, title: "Event log", placeholder: "Search" };
+  const props = { focusedMovement: { id: "movements:3", sequence: 2 }, query: "stale search", onQueryChange(value) { props.query = value; host.update(); }, onClearMovement() { props.focusedMovement = null; host.update(); }, searchFocusTick: 0, title: "Event log", placeholder: "Search", ...overrides };
   host.mount(() => View(props));
   return Object.assign(host, { requests, props, refresh() { generation++; return host.update(); } });
 }
@@ -537,32 +537,86 @@ function elements(node, predicate) {
   if (Array.isArray(node)) return node.flatMap((child) => elements(child, predicate));
   return [...(predicate(node) ? [node] : []), ...elements(node.props?.children, predicate)];
 }
-test("movement rows and expanded payloads remain readable during continuous ledger writes", async () => {
-  const h = eventLog();
+test("movement deltas preserve reading state, coalesce writes and retry from the last successful cursor", async () => {
+  const h = eventLog({ focusedMovement: null, query: "" });
   const lists = () => h.requests.filter(r => r.method === "projection.movements.list");
   const rows = () => elements(h.value, node => node.type?.name === "MovementRowView");
-  const page = () => ({ movements: movementRows.filter(row => row.seq === 2).map(row => ({...row})), total: 1 });
+  const page = (seqs, next_seq, total = seqs.length) => ({ next_seq, total, movements: seqs.map(seq => ({ ...movementRows[0], seq, movement_id: `movements:${seq + 1}`, source_line: seq + 1 })) });
+  const toolbar = () => elements(h.value, node => node.props?.toolbar)[0].props.toolbar;
   try {
     for (let i = 0; i < 20; i++) h.refresh();
     assert.equal(lists().length, 1);
-    lists()[0].resolve(page()); await h.settle();
-    assert.equal(rows().length, 1); assert.equal(lists().length, 2);
+    lists()[0].resolve(page([2, 1, 0], 3)); await h.settle();
+    assert.equal(rows().length, 3); assert.equal(lists().length, 2);
+    assert.equal(lists()[1].params.after_seq, 2);
+    rows()[0].props.onToggle(); h.update();
     const payload = h.requests.find(r => r.method === "projection.movements.payload");
     for (let i = 0; i < 20; i++) h.refresh();
-    assert.equal(lists().length, 2);
-    lists()[1].resolve(page()); await h.settle();
-    assert.equal(rows().length, 1); assert.equal(lists().length, 3);
+    lists()[1].resolve(page([4, 3], 5)); await h.settle();
+    assert.deepEqual(rows().map(row => row.props.row.seq), [2, 1, 0]);
+    assert.equal(lists()[2].params.after_seq, 4);
     assert.equal(h.requests.filter(r => r.method === "projection.movements.payload").length, 1);
-    payload.resolve({resolved: true, text: "readable artifact"}); await h.settle();
+    payload.resolve({ resolved: true, text: "readable artifact" }); await h.settle();
     assert.equal(rows()[0].props.payload.text, "readable artifact");
-    const old = lists()[2];
-    h.props.focusedMovement = {id: "movements:1", sequence: 0}; h.update();
-    old.resolve(page()); await h.settle();
+    lists()[2].reject(Error("read failed")); await h.settle();
+    elements(h.value, node => node.type?.name === "ProjectionResourceIssue")[0].props.onRetry(); h.update();
+    assert.equal(lists()[3].params.after_seq, 4);
+    lists()[3].resolve(page([6, 5], 7)); await h.settle();
+    const showNew = elements(toolbar(), node => node.type === "button" && String(node.props.children).includes("new movements"))[0];
+    assert.equal(showNew.props.children[0], 4); showNew.props.onClick(); h.update();
+    assert.deepEqual(rows().map(row => row.props.row.seq), [6, 5, 4, 3, 2, 1, 0]);
+    elements(h.value, node => node.props?.className === "eventlog-body")[0].props.onScroll({ currentTarget: { scrollTop: 100 } }); h.update();
+    h.refresh(); lists()[4].resolve(page([7], 8)); await h.settle();
+    assert.equal(rows()[0].props.row.seq, 6);
+    h.refresh(); const old = lists()[5];
+    h.props.query = "different"; h.update();
+    old.resolve(page([8], 9)); await h.settle();
     assert.equal(rows().length, 0);
-    lists().at(-1).reject(Error("projection unavailable")); await h.settle();
-    assert.equal(elements(h.value, node => node.type?.name === "ProjectionResourceFailure").length, 1);
+    lists().at(-1).resolve(page([], 9)); await h.settle();
+    h.refresh(); assert.equal(lists().at(-1).params.after_seq, 8);
+    lists().at(-1).resolve(page([10], 11)); await h.settle();
+    assert.equal(elements(h.value, node => node.type?.name === "ProjectionResourceFailure").length, 0);
   } finally { h.close(); }
 });
+test("movement cursors cover indexed rows, an unindexed burst, partial writes and empty search windows", async () => {
+  const { DatabaseSync } = require("node:sqlite");
+  const root = path.join(temporary, "movement-cursors"), ledger = path.join(root, "ledger");
+  fs.mkdirSync(ledger, { recursive: true });
+  fs.mkdirSync(path.join(root, "registry", "interface"), { recursive: true });
+  const file = path.join(ledger, "movements.jsonl");
+  const row = seq => JSON.stringify({ seq, lamport: seq, recorded_at_unix_ms: 1000 + seq, trace: "cursor-test", kind: "InterfaceOutbound", from: { Interface: "source" }, to: { Interface: "target" } }) + "\n";
+  fs.writeFileSync(file, row(0) + row(1) + row(2));
+  const db = new DatabaseSync(path.join(ledger, "ledger-index.sqlite"));
+  db.exec(`CREATE TABLE index_meta(key TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO index_meta VALUES ('schema_version', '4'), ('watermark', '1'), ('durable_end_offset', '${Buffer.byteLength(row(0))}');
+    CREATE TABLE movements(seq INTEGER PRIMARY KEY, lamport INTEGER, recorded_at_unix_ms INTEGER, trace TEXT, kind TEXT, mark TEXT,
+      from_kind TEXT, from_id TEXT, to_kind TEXT, to_id TEXT, artifact_id TEXT, artifact_label TEXT, artifact_content TEXT,
+      runtime_run TEXT, runtime_checkpoint TEXT, runtime_interface TEXT);
+    INSERT INTO movements(seq, lamport, recorded_at_unix_ms, trace, kind, from_kind, from_id, to_kind, to_id)
+      VALUES (0, 0, 1000, 'cursor-test', 'InterfaceOutbound', 'interface', 'source', 'interface', 'target');`);
+  db.close();
+  const projection = createProjectionStore({ resolveRepoRoot: () => path.resolve(appRoot, ".."), octopusHome: () => root,
+    sourceRegistry: () => path.join(temporary, "registry"), localPackageLibrary: () => path.join(temporary, "library"), projectEePolicies: async () => ({ environments: [], issues: [] }) });
+  const read = params => projection.read({ contract_version: 1, method: "projection.movements.list", params: { limit: 2, ...params } });
+  try {
+    const first = await read({});
+    assert.deepEqual(first.movements.map(row => row.seq), [2, 1]);
+    assert.deepEqual([first.total, first.next_seq, first.next_before_seq], [3, 3, 1]);
+    assert.deepEqual((await read({ before_seq: 1 })).movements.map(row => row.seq), [0]);
+    fs.appendFileSync(file, [3, 4, 5, 6, 7].map(row).join("") + row(8).slice(0, 30));
+    const burst = await read({ after_seq: first.next_seq - 1 });
+    assert.deepEqual(burst.movements.map(row => row.seq), [7, 6]);
+    assert.deepEqual([burst.total, burst.next_seq], [5, 8]);
+    fs.appendFileSync(file, row(8).slice(30));
+    const next = await read({ after_seq: burst.next_seq - 1 });
+    assert.deepEqual(next.movements.map(row => row.seq), [8]);
+    assert.deepEqual([next.total, next.next_seq], [1, 9]);
+    const empty = await read({ after_seq: 2, query: "absent" });
+    assert.deepEqual([empty.total, empty.next_seq], [0, 9]);
+    assert.deepEqual((await read({ before_seq: 7, after_seq: 2 })).movements.map(row => row.seq), [6, 5]);
+  } finally { projection.close(); }
+});
+
 test("focused movement queries exact seq and expands the composite row key", async () => {
   const h = eventLog();
   try {
@@ -585,7 +639,7 @@ test("focused movement queries exact seq and expands the composite row key", asy
     clear.props.onClick();
     assert.equal(h.props.focusedMovement, null);
     assert.deepEqual(h.requests.at(-1).params, {limit: 500, query: ""});
-    h.requests.at(-1).resolve({movements: movementRows, total: movementRows.length}); await h.settle();
+    h.requests.at(-1).resolve({movements: movementRows, total: movementRows.length, next_seq: 3}); await h.settle();
     assert.equal(elements(h.value, node => node.type?.name === "MovementRowView").length, movementRows.length);
   } finally { h.close(); }
 });

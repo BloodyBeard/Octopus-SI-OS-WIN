@@ -28,6 +28,7 @@ tracing = "0.1.44"
 object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }

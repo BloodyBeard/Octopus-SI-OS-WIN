@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+octopus_checkout=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "${OCTOPUS_NODE:-node}" "$octopus_checkout/app/cli/index.cjs" "$@"

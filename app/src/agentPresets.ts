@@ -35,7 +35,9 @@ export type ClientAgentPresetInput = {
   projectEeId: string;
   workerInterfaceId: string;
   providerInterfaceId: string;
+  providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   applicationIds: string[];
   driverNames: string[];
 };
@@ -46,7 +48,9 @@ export type ClientAgentDefinition = ClientAgentPreset & {
   sourceTemplate: boolean;
   clientTemplateDigest: string;
   providerInterfaceId: string;
+  providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
   applicationIds: string[];
   driverNames: string[];
 };
@@ -69,7 +73,9 @@ export function resolveClientAgents(contexts: readonly ChatExecutionContext[]): 
         sourceTemplate: worker.agentSourceTemplate,
         clientTemplateDigest: worker.clientTemplateDigest,
         providerInterfaceId: worker.clientTemplateProviderInterfaceId,
+        providerModel: worker.clientTemplateProviderModel,
         reasoningEffort: worker.clientTemplateReasoningEffort,
+        serviceTier: worker.clientTemplateServiceTier,
         applicationIds: [...worker.clientTemplateApplicationIds],
         driverNames: [...worker.clientTemplateWorkerEnvironmentKinds],
       };

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { providerServiceTierAvailable } from "../chat/chatWorkspaceCapabilities";
 import type {
   OctopusProviderInterface,
   OctopusClientAccessProfile,
@@ -588,6 +589,9 @@ async function compileClientSetupPlan(
 ): Promise<OctopusClientSetupPlan> {
   if (!pack.setupProvider?.models.some((model) => model.model === draft.providerModel && model.showInPicker)) {
     throw new ProductSetupError("Choose a model from the current provider catalog.");
+  }
+  if (!providerServiceTierAvailable(pack.setupProvider, draft.providerModel!, draft.serviceTier ?? "default")) {
+    throw new ProductSetupError(`Model '${draft.providerModel}' does not advertise service tier '${draft.serviceTier}'. Choose an available speed.`);
   }
   const workspaceRequest = compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
   const workspaceRequestDigest = await workspaceInitializeRequestDigest(workspaceRequest);
@@ -1445,10 +1449,20 @@ function parseSetupProvider(value: unknown): OctopusProviderInterface {
     id: id(provider.id, "setup provider id"), label: text(provider.label, "setup provider label"),
     descriptorPath: text(provider.descriptorPath, "setup provider path"), sourceNames: stringArray(provider.sourceNames, "provider sources"),
     model: text(provider.model, "provider selected model"), reasoningEffort: typeof provider.reasoningEffort === "string" ? provider.reasoningEffort : "",
+    serviceTier: typeof provider.serviceTier === "string" ? provider.serviceTier : "",
     supportedReasoningEfforts: stringArray(provider.supportedReasoningEfforts, "provider reasoning efforts"),
     models: array(provider.models, "provider models").map((value) => {
       const model = record(value, "provider model");
-      return { model: text(model.model, "model id"), displayName: text(model.displayName, "model name"), description: typeof model.description === "string" ? model.description : "", defaultReasoningEffort: typeof model.defaultReasoningEffort === "string" ? model.defaultReasoningEffort : "", supportedReasoningEfforts: stringArray(model.supportedReasoningEfforts, "model efforts"), showInPicker: boolean(model.showInPicker, "model visible"), isDefault: boolean(model.isDefault, "model default") };
+      const serviceTiers = array(model.serviceTiers ?? [], "model service tiers").map((value) => {
+        const tier = record(value, "model service tier");
+        return { id: text(tier.id, "service tier id"), name: text(tier.name, "service tier name"), description: typeof tier.description === "string" ? tier.description : "" };
+      });
+      if (new Set(serviceTiers.map((tier) => tier.id)).size !== serviceTiers.length
+        || serviceTiers.some((tier) => tier.id === "default")
+        || (model.defaultServiceTier != null && !serviceTiers.some((tier) => tier.id === model.defaultServiceTier))) {
+        throw new ProductSetupError("Provider returned invalid model service tiers.");
+      }
+      return { model: text(model.model, "model id"), displayName: text(model.displayName, "model name"), description: typeof model.description === "string" ? model.description : "", defaultReasoningEffort: typeof model.defaultReasoningEffort === "string" ? model.defaultReasoningEffort : "", supportedReasoningEfforts: stringArray(model.supportedReasoningEfforts, "model efforts"), showInPicker: boolean(model.showInPicker, "model visible"), isDefault: boolean(model.isDefault, "model default"), serviceTiers, defaultServiceTier: typeof model.defaultServiceTier === "string" ? model.defaultServiceTier : null };
     }),
   };
 }

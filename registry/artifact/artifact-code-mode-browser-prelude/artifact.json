@@ -1,4 +1,5 @@
 {
+  "id": "artifact-code-mode-browser-prelude",
   "schema_version": 1,
   "export_factory": "createBrowser",
   "export_name": "browser",

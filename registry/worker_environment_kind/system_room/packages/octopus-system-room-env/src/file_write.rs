@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
+use octopus_file_write_contract::{DecodeBudget, JsonFormat, Preimage};
 use octopus_interfaces::InterfaceInvocationEnvelope;
 use octopus_ledger::ContentHash;
 use octopus_worker_env::AbsPath;
@@ -18,11 +19,12 @@ pub fn execute_file_write_result(
     room_kinds: &[String],
     root_slots: &BTreeMap<String, PathBuf>,
     effect_root: &Path,
+    max_payload_bytes: u64,
 ) -> Result<serde_json::Value, octopus_tool_handlers::ToolResultError> {
     if arguments.get("ordered").is_some() {
-        ordered::execute(input, arguments, room_kinds, root_slots, effect_root)
+        ordered::execute(input, arguments, room_kinds, root_slots, effect_root, max_payload_bytes)
     } else {
-        execute_file_write(input, arguments, room_kinds, root_slots, effect_root)
+        execute_file_write(input, arguments, room_kinds, root_slots, effect_root, max_payload_bytes)
             .map_err(|error| octopus_tool_handlers::ToolResultError::new("tool_execution_failed", error))
     }
 }
@@ -33,10 +35,11 @@ pub fn execute_file_write(
     room_kinds: &[String],
     root_slots: &BTreeMap<String, PathBuf>,
     effect_root: &Path,
+    max_payload_bytes: u64,
 ) -> Result<serde_json::Value, String> {
     ensure_room_kind_granted(input, room_kinds)?;
     let roots = configured_write_roots(&root_slots.values().cloned().collect::<Vec<_>>())?;
-    let mut requests = parse_write_requests(arguments, &roots)?;
+    let mut requests = parse_write_requests(arguments, &roots, max_payload_bytes)?;
     bind_effect_record(input, effect_root, &mut requests)?;
     retain_write_inputs(effect_root, &requests)?;
     let staging_root = effect_root.join("staging");
@@ -333,7 +336,9 @@ struct FileWriteEffectEntry {
 fn parse_write_requests(
     arguments: &serde_json::Value,
     roots: &[AbsPath],
+    max_payload_bytes: u64,
 ) -> Result<Vec<WriteRequest>, String> {
+    let mut budget = DecodeBudget::new(max_payload_bytes)?;
     let values = match arguments.get("writes") {
         Some(serde_json::Value::Array(values)) if !values.is_empty() => values.clone(),
         Some(serde_json::Value::Array(_)) => {
@@ -379,8 +384,14 @@ fn parse_write_requests(
                 target.display()
             ));
         }
-        let observed_before_bytes = match std::fs::read(&target) {
-            Ok(bytes) => Some(bytes),
+        let observed_before_bytes = match std::fs::File::open(&target) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take(max_payload_bytes.checked_add(1).ok_or("file.write read limit overflow")?)
+                    .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+                if bytes.len() as u64 > max_payload_bytes { return Err("file.write target exceeds host payload limit".into()); }
+                Some(bytes)
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(format!(
@@ -389,6 +400,12 @@ fn parse_write_requests(
                 ));
             }
         };
+        if let Some(before) = &observed_before_bytes { budget.charge(before.len() as u64)?; }
+        let format: Option<JsonFormat> = value.get("json_format").cloned()
+            .map(serde_json::from_value).transpose().map_err(|error| error.to_string())?;
+        if format.is_some() && value.get("patch").is_none() {
+            return Err("file.write json_format belongs only to patch writes".into());
+        }
         let observed_before_hash = observed_before_bytes
             .as_deref()
             .map(ContentHash::of_bytes)
@@ -535,45 +552,12 @@ fn parse_write_requests(
                             target.display()
                         )
                     })?;
-                    let mut document: serde_json::Value =
-                        serde_json::from_slice(before).map_err(|error| {
-                            format!(
-                                "file.write patch target '{}' is not JSON: {error}",
-                                target.display()
-                            )
-                        })?;
-                    json_patch::patch(&mut document, &patch).map_err(|error| {
-                        format!(
-                            "file.write patch could not apply to '{}': {error}",
-                            target.display()
-                        )
-                    })?;
-                    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| {
-                        format!(
-                            "file.write patched JSON '{}' could not encode: {error}",
-                            target.display()
-                        )
-                    })?;
-                    bytes.push(b'\n');
-                    let observed_after = ContentHash::of_bytes(&bytes).to_hex();
-                    if observed_after != expected_after {
-                        return Err(format!(
-                            "file.write patch for '{}' produced hash {}, expected {}",
-                            target.display(),
-                            observed_after,
-                            expected_after
-                        ));
-                    }
-                    let content = String::from_utf8(bytes).map_err(|error| {
-                        format!(
-                            "file.write patched JSON '{}' is not UTF-8: {error}",
-                            target.display()
-                        )
-                    })?;
+                    let content = apply_checked_json_patch(&target, before, &patch, &expected_after, format.unwrap_or_default())?;
                     (content, Some(expected_before), false)
                 }
             }
         };
+        budget.charge(content.len() as u64)?;
         requests.push(WriteRequest {
             target,
             content,
@@ -584,6 +568,31 @@ fn parse_write_requests(
         });
     }
     Ok(requests)
+}
+
+fn apply_checked_json_patch(
+    target: &Path,
+    before: &[u8],
+    patch: &json_patch::Patch,
+    expected_after: &str,
+    format: JsonFormat,
+) -> Result<String, String> {
+    parse_content_hash(expected_after, "expected_after_hash")?;
+    if patch.is_empty() {
+        return Err("file.write patch must not be empty".into());
+    }
+    let mut document: serde_json::Value = serde_json::from_slice(before)
+        .map_err(|error| format!("file.write patch target '{}' is not JSON: {error}", target.display()))?;
+    json_patch::patch(&mut document, patch)
+        .map_err(|error| format!("file.write patch could not apply to '{}': {error}", target.display()))?;
+    let bytes = format.encode(&document)
+        .map_err(|error| format!("file.write patched JSON '{}' could not encode: {error}", target.display()))?;
+    let observed_after = ContentHash::of_bytes(&bytes).to_hex();
+    if observed_after != expected_after {
+        return Err(format!("file.write patch for '{}' produced hash {}, expected {}", target.display(), observed_after, expected_after));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| format!("file.write patched JSON '{}' is not UTF-8: {error}", target.display()))
 }
 
 fn parse_content_hash<'a>(value: &'a str, field: &str) -> Result<&'a str, String> {

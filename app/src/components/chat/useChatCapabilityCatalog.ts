@@ -23,8 +23,10 @@ export function useChatCapabilityCatalog(
   accessProfile: OctopusClientAccessProfile,
   enabled: boolean,
   runtimeReady: boolean,
+  runtimeHome: string,
 ) {
   const providerReadGenerationRef = useRef(0);
+  const providerReadScopeRef = useRef("");
   const capabilityCatalogProfileRef = useRef<OctopusClientAccessProfile | null>(null);
   const [projectPresentationGeneration, setProjectPresentationGeneration] = useState(0);
   const [executionContexts, setExecutionContexts] = useState<ChatExecutionContext[]>([]);
@@ -34,26 +36,37 @@ export function useChatCapabilityCatalog(
   const [executionContextError, setExecutionContextError] = useState("");
   const [providerInterfaces, setProviderInterfaces] = useState<OctopusProviderInterface[]>([]);
   const [providerInterfacesLoaded, setProviderInterfacesLoaded] = useState(false);
+  const [providerInterfacesRefreshing, setProviderInterfacesRefreshing] = useState(false);
   const [providerInterfaceError, setProviderInterfaceError] = useState("");
   const projectionStructureGeneration = useProjectionStructureGeneration();
 
   const refreshProviderInterfaces = useCallback(async () => {
     const generation = providerReadGenerationRef.current + 1;
     providerReadGenerationRef.current = generation;
+    const scope = JSON.stringify([accessProfile, enabled, runtimeReady, runtimeHome]);
+    if (providerReadScopeRef.current !== scope) {
+      providerReadScopeRef.current = scope;
+      setProviderInterfaces([]);
+      setProviderInterfacesLoaded(false);
+    }
     if (!enabled) {
       setProviderInterfaces([]);
       setProviderInterfacesLoaded(false);
       setProviderInterfaceError("");
+      setProviderInterfacesRefreshing(false);
       return;
     }
     setProviderInterfaceError("");
+    setProviderInterfacesRefreshing(true);
     try {
       const response = await readRuntimeProviderInterfaces();
       if (providerReadGenerationRef.current !== generation) return;
       const providers = response.providers;
       setProviderInterfaces(providers);
       const declarationError = response.error
-        ?? (providers.length === 0 ? "No world/provider interface is declared in the registry." : "");
+        ?? (providers.length === 0 ? "No world/provider interface is declared in the registry."
+          : providers.every((provider) => !provider.models.length)
+            ? providers.map((provider) => provider.modelCatalogError).filter(Boolean).join("\n") : "");
       setProviderInterfaceError(declarationError);
       setProviderInterfacesLoaded(true);
       if (declarationError) return;
@@ -72,11 +85,14 @@ export function useChatCapabilityCatalog(
         setProviderInterfaceError(formatRuntimeError(failure));
         setProviderInterfacesLoaded(true);
       }
+    } finally {
+      if (providerReadGenerationRef.current === generation) setProviderInterfacesRefreshing(false);
     }
-  }, [accessProfile, enabled, runtimeReady]);
+  }, [accessProfile, enabled, runtimeReady, runtimeHome]);
 
   useEffect(() => {
     void refreshProviderInterfaces();
+    return () => { providerReadGenerationRef.current += 1; };
   }, [projectionStructureGeneration, refreshProviderInterfaces]);
 
   useEffect(() => {
@@ -152,6 +168,7 @@ export function useChatCapabilityCatalog(
     providerInterfaceError,
     providerInterfaces,
     providerInterfacesLoaded,
+    providerInterfacesRefreshing,
     refreshProviderInterfaces,
     toolPresentations,
     workerEnvironmentRooms,

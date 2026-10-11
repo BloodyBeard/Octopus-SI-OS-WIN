@@ -3791,57 +3791,6 @@ mark.octopus-thread-find-active {
   margin-top: 10px;
 }
 
-.octopus-message-attachment {
-  display: inline-flex;
-  max-width: min(300px, 100%);
-  min-width: 150px;
-  align-items: center;
-  gap: 8px;
-  overflow: hidden;
-  border: .5px solid var(--color-token-border);
-  border-radius: var(--radius-xl);
-  background: color-mix(in srgb, var(--color-token-foreground) 3%, transparent);
-  padding: 7px 9px 7px 7px;
-}
-
-.octopus-message-attachment-icon {
-  display: inline-flex;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--color-token-list-hover-background);
-  color: var(--color-token-text-secondary);
-}
-
-.octopus-message-attachment-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.octopus-message-attachment-copy strong,
-.octopus-message-attachment-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.octopus-message-attachment-copy strong {
-  color: var(--color-token-foreground);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.octopus-message-attachment-copy small {
-  color: var(--color-token-description-foreground);
-  font-size: 10px;
-}
-
 .octopus-message-attachment-more {
   align-self: center;
   border-radius: var(--radius-md);

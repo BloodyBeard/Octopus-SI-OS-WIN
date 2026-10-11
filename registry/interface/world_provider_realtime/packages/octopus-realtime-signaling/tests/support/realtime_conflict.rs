@@ -4,6 +4,22 @@ use octopus_ledger::{Mark, MarkClass, MovementMetadata, VerifierPackagePin};
 use octopus_ledger_index::ArrivalDedupIndex;
 use octopus_tool_handlers::{ToolResultArtifact, ToolResultError};
 
+fn ordered_before(entry: &Value) -> String {
+    let preimage: octopus_provider_run_authoring::Preimage = serde_json::from_value(entry["expected_before_content"].clone()).unwrap();
+    preimage.decode(entry["expected_before_hash"].as_str().unwrap(), &mut octopus_provider_run_authoring::DecodeBudget::new(8 * 1024 * 1024).unwrap()).unwrap()
+}
+fn ordered_postimage(entry: &Value) -> Value {
+    let before = ordered_before(entry);
+    assert_eq!(entry["expected_before_hash"], ContentHash::of_bytes(before.as_bytes()).to_hex());
+    let mut after = serde_json::from_str(&before).unwrap();
+    let patch: json_patch::Patch = serde_json::from_value(entry["patch"].clone()).unwrap();
+    json_patch::patch(&mut after, &patch).unwrap();
+    let format: Option<octopus_provider_run_authoring::JsonFormat> = entry.get("json_format").cloned().map(serde_json::from_value).transpose().unwrap();
+    let bytes = format.unwrap_or_default().encode(&after).unwrap();
+    assert_eq!(entry["expected_after_hash"], ContentHash::of_bytes(&bytes).to_hex());
+    after
+}
+
 fn rename(value: &mut Value) {
     match value {
         Value::String(s) => {
@@ -92,8 +108,7 @@ fn pair() -> (Fixture, Fixture) {
             &id,
         )
         .unwrap();
-        let mut content = serde_json::to_vec_pretty(&writer).unwrap();
-        content.push(b'\n');
+        let content = octopus_provider_run_authoring::JsonFormat::Compact.encode(&writer).unwrap();
         std::fs::write(
             owner.ctx.root_slots["run_records_root"].join(format!("{id}.json")),
             content,
@@ -196,10 +211,8 @@ fn admit_call(
     call: &Value,
     file: &InterfaceArtifactFile,
 ) -> InterfaceInvocationEnvelope {
-    let before = call["arguments"]["writes"][0]["expected_before_content"]
-        .as_str()
-        .unwrap()
-        .as_bytes();
+    let before_content = ordered_before(&call["arguments"]["writes"][0]);
+    let before = before_content.as_bytes();
     let run: Value = serde_json::from_slice(before).unwrap();
     assert_eq!(
         std::fs::read(call["arguments"]["writes"][0]["path"].as_str().unwrap()).unwrap(),
@@ -310,6 +323,7 @@ fn effect(
             f.ctx.root_slots["run_records_root"].clone(),
         )]),
         &f.ctx.var_dir.join("effects"),
+        f.ctx.host_io_limits.as_ref().unwrap().max_payload_bytes,
     )
 }
 fn admit_result(f: &Fixture, call: &Value, outcome: Result<Value, ToolResultError>) {
@@ -456,8 +470,8 @@ async fn outgoing_connection_survives_publication_conflict_and_cold_recovery() {
             receipt = owner.accept_write() => receipt, result = &mut attempt => panic!("before publication: {result:?}")
         };
         let private_bytes = std::fs::read(file.manifest_path()).unwrap(); let private_payload = file.read_payload_bytes().unwrap();
-        let before: Value = serde_json::from_str(call["arguments"]["writes"][1]["expected_before_content"].as_str().unwrap()).unwrap();
-        let planned: Value = serde_json::from_str(call["arguments"]["writes"][1]["content"].as_str().unwrap()).unwrap();
+        let before: Value = serde_json::from_str(&ordered_before(&call["arguments"]["writes"][1])).unwrap();
+        let planned = ordered_postimage(&call["arguments"]["writes"][1]);
         let pending = &before["interface_state"]["voice"]["pending_handoff"];
         assert!(pending["context_publication"].is_array());
         assert_eq!(pending["source_movement_seq"], json!(owner.source_seq)); assert_eq!(pending["terminal"], true);
@@ -484,8 +498,8 @@ async fn outgoing_connection_survives_publication_conflict_and_cold_recovery() {
         let restarted = owner.handoff();
         let finish = async {
             let (ws, retry, file) = owner.accept_write().await;
-            assert_eq!(retry["correlation_id"], "provider-writer-run:run:2:3"); assert_eq!(retry["arguments"]["writes"][1]["expected_before_content"].as_str().unwrap().as_bytes(), connected_bytes);
-            let rebased: Value = serde_json::from_str(retry["arguments"]["writes"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(retry["correlation_id"], "provider-writer-run:run:2:3"); assert_eq!(ordered_before(&retry["arguments"]["writes"][1]).as_bytes(), connected_bytes);
+            let rebased = ordered_postimage(&retry["arguments"]["writes"][1]);
             assert_eq!(rebased["interface_state"]["voice"]["pending_handoff"], planned["interface_state"]["voice"]["pending_handoff"]);
             install(&owner, ws, retry, file).await;
         };

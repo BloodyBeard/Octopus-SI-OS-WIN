@@ -3,6 +3,7 @@ export const PROJECTION_READ_METHODS = [
   "projection.artifact.bytes.read",
   "projection.artifacts.list",
   "projection.bindings.list",
+  "projection.client_actions.list",
   "projection.client_surfaces.list",
   "projection.descriptors.artifact_labels.list",
   "projection.descriptors.ee.list",

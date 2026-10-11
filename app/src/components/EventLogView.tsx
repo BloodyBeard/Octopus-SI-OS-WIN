@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { formatProjectionError, hasProjectionBridge, readProjection } from "../projectionClient";
 import { useProjectionGeneration } from "../projectionLive";
 import { jsonText, shortId } from "../runtimeFormat";
@@ -63,6 +63,7 @@ type PayloadPreview = {
 
 type MovementPage = {
   nextBeforeSeq: number | null;
+  nextSeq: number;
   rows: MovementRow[];
   total: number;
 };
@@ -90,24 +91,36 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
   const [expandedId, setExpandedId] = useState("");
   const [payloads, setPayloads] = useState<Record<string, PayloadPreview>>({});
   const [beforeSeq, setBeforeSeq] = useState<number | null>(null);
+  const [scrolled, setScrolled] = useState(false);
+  const [heldPage, setHeldPage] = useState<{ key: string; data: MovementPage } | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   const searchQuery = focusedMovement ? "" : query.trim();
   const projectionAvailable = hasProjectionBridge();
+  const resourceKey = `${searchQuery}\0${beforeSeq ?? "latest"}\0${focusedMovement?.id ?? ""}\0${focusedMovement?.sequence ?? ""}`;
+
+  useEffect(() => {
+    setScrolled(false);
+    setExpandedId("");
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [resourceKey]);
 
   useEffect(() => {
     setBeforeSeq(null);
     if (focusedMovement) { setInterfaceFilter(ALL); setEnvironmentFilter(ALL); setTypeFilter(ALL); }
   }, [searchQuery, focusedMovement]);
 
-  const loadMovements = useCallback(async () => {
+  const loadMovements = useCallback(async (lastGood: MovementPage | null) => {
+    if (lastGood && (beforeSeq !== null || focusedMovement)) return { data: lastGood };
     if (focusedMovement && (focusedMovement.sequence === null || !Number.isSafeInteger(focusedMovement.sequence)
       || focusedMovement.sequence < 0 || focusedMovement.sequence >= Number.MAX_SAFE_INTEGER)) {
       throw new Error("This mark has no addressable movement sequence to open.");
     }
-    const response = await readProjection<{ movements?: MovementRow[]; total?: number; next_before_seq?: number }>("projection.movements.list", {
+    const response = await readProjection<{ movements?: MovementRow[]; total?: number; next_before_seq?: number; next_seq?: number }>("projection.movements.list", {
       limit: MOVEMENT_PAGE_SIZE,
       query: searchQuery,
       ...(beforeSeq === null ? {} : { before_seq: beforeSeq }),
+      ...(lastGood && lastGood.nextSeq > 0 ? { after_seq: lastGood.nextSeq - 1 } : {}),
       ...(focusedMovement?.sequence != null ? { before_seq: focusedMovement.sequence + 1, ...(focusedMovement.sequence > 0 ? { after_seq: focusedMovement.sequence - 1 } : {}) } : {}),
     });
     if (!response || !Array.isArray(response.movements)) {
@@ -115,33 +128,53 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
     }
     const target = focusedMovement ? response.movements.find((row) => row?.movement_id === focusedMovement.id && row.seq === focusedMovement.sequence) : null;
     if (focusedMovement && !target) throw new Error("The selected mark movement is unavailable.");
-    const rows = target ? [target] : response.movements;
+    const nextSeq = response.next_seq;
+    if (!focusedMovement && (!Number.isSafeInteger(nextSeq) || nextSeq! < 0
+      || lastGood && nextSeq! < lastGood.nextSeq)) {
+      throw new Error("The movement ledger returned an invalid or regressed cursor. Reopen Movements to read it again.");
+    }
+    const added = response.movements;
+    if (!focusedMovement && added.some(row => !Number.isSafeInteger(row.seq) || row.seq! < (lastGood?.nextSeq ?? 0) || row.seq! >= nextSeq!)) {
+      throw new Error("The movement projection returned rows outside its sequence window.");
+    }
+    const rows = target ? [target] : added.length === 0 && lastGood ? lastGood.rows
+      : [...added, ...(lastGood?.rows ?? [])].slice(0, MOVEMENT_PAGE_SIZE);
+    const total = focusedMovement ? rows.length : (lastGood?.total ?? 0) + (response.total ?? added.length);
     return {
       data: {
-        nextBeforeSeq: !focusedMovement && typeof response?.next_before_seq === "number" ? response.next_before_seq : null,
+        nextBeforeSeq: !focusedMovement && rows.length < total ? rows.at(-1)?.seq ?? null : null,
+        nextSeq: nextSeq ?? 0,
         rows,
-        total: focusedMovement ? rows.length : typeof response?.total === "number" ? response.total : rows.length,
+        total,
       },
     };
   }, [beforeSeq, searchQuery, focusedMovement]);
   const movements = useProjectionResource<MovementPage>({
     enabled: projectionAvailable,
     load: loadMovements,
-    resourceKey: `${searchQuery}\0${beforeSeq ?? "latest"}\0${focusedMovement?.id ?? ""}\0${focusedMovement?.sequence ?? ""}`,
+    resourceKey,
     refreshKey: generation,
   });
-  const rows = movements.data?.rows ?? [];
-  const total = movements.data?.total ?? 0;
-  const nextBeforeSeq = movements.data?.nextBeforeSeq ?? null;
+  const paused = scrolled || expandedId !== "";
+  const page = paused && heldPage?.key === resourceKey ? heldPage.data : movements.data;
+  useEffect(() => {
+    if (movements.data && (!paused || heldPage?.key !== resourceKey)) {
+      setHeldPage({ key: resourceKey, data: movements.data });
+    }
+  }, [movements.data, paused, resourceKey, heldPage?.key]);
+  const rows = page?.rows ?? [];
+  const total = page?.total ?? 0;
+  const nextBeforeSeq = page?.nextBeforeSeq ?? null;
+  const newMovements = Math.max(0, (movements.data?.total ?? 0) - total);
   const loaded = movements.data !== null;
 
   useEffect(() => {
-    if (!movements.data) return;
-    const retained = new Set(movements.data.rows.map(movementRowKey));
+    if (!page) return;
+    const retained = new Set(page.rows.map(movementRowKey));
     setPayloads((current) => Object.fromEntries(Object.entries(current).filter(([key]) => retained.has(key))));
-    const target = focusedMovement ? movements.data.rows.find((row) => row.movement_id === focusedMovement.id && row.seq === focusedMovement.sequence) : null;
+    const target = focusedMovement ? page.rows.find((row) => row.movement_id === focusedMovement.id && row.seq === focusedMovement.sequence) : null;
     setExpandedId((current) => target ? movementRowKey(target) : retained.has(current) ? current : "");
-  }, [movements.data, focusedMovement?.id, focusedMovement?.sequence]);
+  }, [page, focusedMovement?.id, focusedMovement?.sequence]);
 
   // Resolve the expanded movement's blob lazily — one small read per expansion.
   const indexedRows = useMemo(
@@ -206,6 +239,9 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
 
   const clearFilters = () => {
     setBeforeSeq(null);
+    setExpandedId("");
+    setScrolled(false);
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
     setInterfaceFilter(ALL);
     setEnvironmentFilter(ALL);
     setTypeFilter(ALL);
@@ -239,8 +275,15 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
                 <button className="eventlog-filter" onClick={clearFilters} type="button">Show all movements</button>
               ) : null}
             </div>
+            {newMovements > 0 ? (
+              <button className="eventlog-filter" type="button" onClick={() => {
+                setExpandedId("");
+                setScrolled(false);
+                if (bodyRef.current) bodyRef.current.scrollTop = 0;
+              }}>{newMovements} new movements</button>
+            ) : null}
             <span className="eventlog-count">
-              {movements.phase === "refreshing" ? "Refreshing movements…" : visibleRows.length === rows.length
+              {visibleRows.length === rows.length
                 ? `${rows.length} / ${total} movements`
                 : `${visibleRows.length} filtered / ${rows.length} loaded`}
             </span>
@@ -276,7 +319,7 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
                   <span>Environment</span>
                   <span>Type</span>
                 </div>
-                <div className="eventlog-body">
+                <div className="eventlog-body" ref={bodyRef} onScroll={(event) => setScrolled(event.currentTarget.scrollTop > 0)}>
                   {movements.data === null ? (
                     <ProjectionResourceFailure
                       className="min-h-40"

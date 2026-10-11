@@ -1838,16 +1838,46 @@ impl BrowserRoom {
             "capture-{}.{}",
             decoded.source_movement_seq, extension
         ));
-        std::fs::write(&path, bytes).map_err(|error| {
-            format!(
-                "browser screenshot '{}' cannot be written: {error}",
-                path.display()
-            )
-        })?;
-        let media = InterfaceArtifactFile::write(root.join("artifacts"), "browser.screenshot", bytes)
-            .map_err(|error| format!("browser screenshot artifact could not be written: {error}"))?
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW).open(&path)
+            {
+                Ok(mut file) => file.write_all(bytes).and_then(|()| file.sync_all())
+                    .map_err(|error| format!("browser screenshot cannot be persisted: {error}"))?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = octopus_interfaces::read_artifact_carrier_file_bounded(&path, bytes.len() as u64)
+                        .map_err(|error| error.to_string())?;
+                    if existing != bytes { return Err("browser screenshot conflicts with its existing immutable capture".into()); }
+                    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)
+                        .and_then(|file| file.sync_all()).map_err(|error| format!("browser screenshot cannot be synced: {error}"))?;
+                }
+                Err(error) => return Err(format!("browser screenshot cannot be created: {error}")),
+            }
+            std::fs::File::open(&root).and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("browser screenshot directory cannot be synced: {error}"))?;
+        }
+        let manifest = serde_json::to_vec_pretty(&octopus_interfaces::InterfaceArtifactManifest {
+            label: "browser.screenshot".into(), payload_path: path.clone(),
+            payload_content_hash: Some(blake3::hash(bytes).to_hex().to_string()),
+        }).map_err(|error| error.to_string())?;
+        let media = InterfaceArtifactFile::store_manifest_bounded(
+            root.join("artifacts"), &manifest,
+            self.environment.host_io_limits.max_manifest_bytes,
+            self.environment.host_io_limits.max_payload_bytes,
+        ).map_err(|error| format!("browser screenshot artifact could not be written: {error}"))?
             .read_manifest()
             .map_err(|error| format!("browser screenshot artifact could not be read: {error}"))?;
+        std::fs::File::open(root.join("artifacts")).and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("browser screenshot artifact directory cannot be synced: {error}"))?;
+        let mut directory = root.as_path();
+        loop {
+            std::fs::File::open(directory).and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("browser screenshot parent directory cannot be synced: {error}"))?;
+            if directory == self.environment.var_dir { break; }
+            directory = directory.parent().filter(|parent| parent.starts_with(&self.environment.var_dir))
+                .ok_or("browser screenshot directory left its private owner")?;
+        }
         state.target_url = captured.url;
         state.target_title = captured.title;
         let mut capture = json!({

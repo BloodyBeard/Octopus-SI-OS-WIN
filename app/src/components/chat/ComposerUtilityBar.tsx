@@ -37,6 +37,7 @@ type Props = {
   agentPresets: readonly ClientAgentDefinition[];
   agentPresetId: string;
   accessMode: TaskAccessMode;
+  fullAccessUnavailableReason: string;
   applicationIds: string[];
   applicationLocked: boolean;
   applicationLockReason: "" | "turn" | "saving" | "read-only";
@@ -58,6 +59,7 @@ export function ComposerUtilityBar({
   agentPresets,
   agentPresetId,
   accessMode,
+  fullAccessUnavailableReason,
   applicationIds,
   applicationLocked,
   applicationLockReason,
@@ -249,8 +251,9 @@ export function ComposerUtilityBar({
             aria-pressed={accessMode === "full_access"}
             className="composer-agent-access-toggle inline-flex size-4 shrink-0 cursor-interaction items-center justify-center bg-transparent focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border disabled:cursor-not-allowed disabled:opacity-40"
             data-composer-navigation-target="permissions"
-            disabled={locked || !selectedWorker}
+            disabled={locked || !selectedWorker || accessMode !== "full_access" && Boolean(fullAccessUnavailableReason)}
             onClick={() => onAccessModeChange(accessMode === "full_access" ? "project_access" : "full_access")}
+            aria-description={accessMode === "full_access" ? undefined : fullAccessUnavailableReason || undefined}
             type="button"
           >
             <TaskAccessIcon accessMode={accessMode} className="icon-xs shrink-0" />

@@ -1925,6 +1925,7 @@ pub(crate) struct CodexProviderInvocation<'a> {
     pub interrupted_after_artifact: Option<String>,
     pub recovered_handoff_artifacts: Arc<Vec<CodexRecoveredHandoffArtifact>>,
     pub durable_interrupted_continuity: Option<CodexContinuityState>,
+    pub reconciled_result_continuity: Option<CodexContinuityState>,
     pub control: &'a Arc<CodexTurnControlBroker>,
     pub handoff_barrier: Arc<ProviderHandoffBarrier>,
 }
@@ -3539,6 +3540,7 @@ impl CodexAppServerInterfaceDriver {
                         params: ThreadResumeParams {
                             thread_id: recovered.thread_id.clone(),
                             model: model.clone(),
+                            service_tier: self.bound_service_tier()?,
                             config: Some(self.native_tool_thread_config()?),
                             developer_instructions: Some(bound_instructions.to_string()),
                             sandbox: Some(self.native_thread_sandbox()?),
@@ -3553,6 +3555,10 @@ impl CodexAppServerInterfaceDriver {
                             .await
                             .map_err(typed_error)?
                     };
+                    validate_native_service_tier_response(
+                        self.bound_service_tier()?.as_ref().and_then(Option::as_deref),
+                        resumed.service_tier.as_deref(),
+                    )?;
                     if resumed.thread.id != recovered.thread_id {
                         return Err(InterfaceDriverError::FailedClosed(format!(
                             "thread/resume returned thread '{}', expected '{}'",
@@ -3628,6 +3634,7 @@ impl CodexAppServerInterfaceDriver {
         );
         params.sandbox = Some(self.native_thread_sandbox()?);
         params.config = Some(self.native_tool_thread_config()?);
+        params.service_tier = self.bound_service_tier()?;
         let request = ClientRequest::ThreadStart {
             request_id: self.mint_request_id(),
             params,
@@ -3639,6 +3646,10 @@ impl CodexAppServerInterfaceDriver {
                 .await
                 .map_err(typed_error)?
         };
+        validate_native_service_tier_response(
+            self.bound_service_tier()?.as_ref().and_then(Option::as_deref),
+            response.service_tier.as_deref(),
+        )?;
         let rollout_path = response.thread.path.clone();
         let thread_id = response.thread.id;
         let mut transport_state = self.transport_state.lock().await;
@@ -3728,6 +3739,20 @@ impl CodexAppServerInterfaceDriver {
         }
     }
 
+    fn native_mcp_resource_discovery(&self) -> Result<bool, InterfaceDriverError> {
+        match self
+            .interface_private_config
+            .get("native_mcp_resource_discovery")
+        {
+            None => Ok(false),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                InterfaceDriverError::Protocol(format!(
+                    "interface_driver_config.private_config.native_mcp_resource_discovery is malformed: {error}"
+                ))
+            }),
+        }
+    }
+
     fn enforce_native_web_search_policy(
         &self,
         input: &InterfaceInvocationEnvelope,
@@ -3782,6 +3807,35 @@ impl CodexAppServerInterfaceDriver {
             self.interface_private_config.get(key),
             &format!("interface_driver_config.private_config.{key}"),
         )
+    }
+
+    fn bound_service_tier(&self) -> Result<Option<Option<String>>, InterfaceDriverError> {
+        let tier = self.resolve_private_config_string("service_tier")?;
+        if tier.as_ref().is_some_and(|tier| tier.trim() != tier || tier.len() > 80 || tier.chars().any(char::is_control)) {
+            return Err(InterfaceDriverError::Protocol("provider service_tier must be a trimmed native tier id".into()));
+        }
+        Ok(tier.map(Some))
+    }
+
+    async fn validate_native_service_tier(&self, model: &str) -> Result<(), InterfaceDriverError> {
+        let Some(Some(tier)) = self.bound_service_tier()? else { return Ok(()); };
+        if tier == "default" { return Ok(()); }
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            let response = self.client.lock().await.request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                request_id: self.mint_request_id(),
+                params: ModelListParams { cursor, limit: None, include_hidden: Some(true) },
+            }).await.map_err(typed_error)?;
+            if let Some(selected) = response.data.iter().find(|entry| entry.model == model) {
+                return validate_model_service_tier(selected, &tier);
+            }
+            match response.next_cursor {
+                Some(next) if !next.is_empty() && seen.insert(next.clone()) && seen.len() < 100 => cursor = Some(next),
+                None => return Err(InterfaceDriverError::FailedClosed(format!("native model catalogue does not advertise selected model '{model}' for service tier '{tier}'"))),
+                _ => return Err(InterfaceDriverError::Protocol("native model catalogue returned an invalid service-tier cursor".into())),
+            }
+        }
     }
 
     fn context_output_labels(&self) -> Result<BTreeSet<String>, InterfaceDriverError> {
@@ -3973,6 +4027,16 @@ pub(crate) fn codex_session_snapshot_labels(
     private_config_string_set(&config.private_config, "session_snapshot_labels")
 }
 
+pub(crate) fn is_operator_continuity_input(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+) -> Result<bool, InterfaceDriverError> {
+    if input.read_artifact_manifest()?.label == OPERATOR_MESSAGE_LABEL { return Ok(true); }
+    Ok(admitted_peer_message(input, descriptor.interface_driver_config.as_ref()
+        .and_then(|config| config.private_config.get("input_intake")))?
+        .is_some_and(|peer| peer.action != PeerAction::Interrupt))
+}
+
 pub(crate) fn recover_operator_turn_continuity(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
@@ -4067,6 +4131,10 @@ pub(crate) fn recover_operator_turn_continuity(
 
 pub(crate) fn codex_continuity_waits_for_result(state: &CodexContinuityState) -> bool {
     state.pending.is_some() || state.interrupted_pending.is_some()
+}
+
+pub(crate) fn codex_continuity_has_interrupted_pending(state: &CodexContinuityState) -> bool {
+    state.interrupted_pending.is_some()
 }
 
 pub(crate) fn codex_continuity_successor_is_settled(
@@ -5111,6 +5179,7 @@ impl CodexAppServerInterfaceDriver {
             interrupted_after_artifact,
             recovered_handoff_artifacts,
             durable_interrupted_continuity,
+            reconciled_result_continuity,
             control,
             handoff_barrier,
         } = invocation;
@@ -5244,6 +5313,7 @@ impl CodexAppServerInterfaceDriver {
             &context_output_labels,
             &session_snapshot_labels,
         )?;
+        let bound_continuity = recovered.clone();
         let recovered = reconcile_current_session_continuity(
             recovered,
             recover_codex_continuity_from_current_session(
@@ -5253,6 +5323,9 @@ impl CodexAppServerInterfaceDriver {
                 runtime.run.as_str(),
                 &context_output_labels,
             )?,
+        )?;
+        let recovered = reconcile_delivered_interrupted_continuity(
+            bound_continuity.as_ref(), recovered, reconciled_result_continuity,
         )?;
         let (recovered, durable_interrupt_override) =
             reconcile_durable_interrupted_continuity(recovered, durable_interrupted_continuity)?;
@@ -5275,6 +5348,7 @@ impl CodexAppServerInterfaceDriver {
             sink.set_continuity(state);
         }
         self.enforce_native_web_search_policy(&input)?;
+        self.native_mcp_resource_discovery()?;
         let hidden_tools = model_hidden_tool_names(&self.interface_private_config)
             .map_err(InterfaceDriverError::Protocol)?;
         let native_namespace = self.native_tool_namespace()?;
@@ -6200,6 +6274,7 @@ impl CodexAppServerInterfaceDriver {
             self.resolve_private_config_string("reasoning_effort")?
                 .as_deref(),
         )?;
+        self.validate_native_service_tier(&model).await?;
         let reasoning_summary = parse_reasoning_summary(
             self.resolve_private_config_string("reasoning_summary")?
                 .as_deref(),
@@ -6487,6 +6562,7 @@ impl CodexAppServerInterfaceDriver {
                 turn_input,
                 model.clone(),
                 reasoning_effort.clone(),
+                self.bound_service_tier()?,
                 reasoning_summary,
                 additional_context,
                 if resume_control_id.is_some() {
@@ -7184,6 +7260,7 @@ impl CodexAppServerInterfaceDriver {
             params: ThreadResumeParams {
                 thread_id: recovered.thread_id.clone(),
                 model: Some(model.to_string()),
+                service_tier: self.bound_service_tier()?,
                 config: Some(self.native_tool_thread_config()?),
                 developer_instructions: Some(bound_instructions.to_string()),
                 sandbox: Some(self.native_thread_sandbox()?),
@@ -7197,6 +7274,10 @@ impl CodexAppServerInterfaceDriver {
                 .request_typed::<ThreadResumeResponse>(resume)
                 .await
                 .map_err(typed_error)?;
+            validate_native_service_tier_response(
+                self.bound_service_tier()?.as_ref().and_then(Option::as_deref),
+                resumed.service_tier.as_deref(),
+            )?;
             if resumed.thread.id != recovered.thread_id {
                 return Err(InterfaceDriverError::FailedClosed(format!(
                     "thread/resume did not restore pending operator turn '{}' on thread '{}'",
@@ -8887,6 +8968,7 @@ impl CodexAppServerInterfaceDriver {
                                 &started.item,
                                 "started",
                                 self.native_web_search_mode()?,
+                                self.native_mcp_resource_discovery()?,
                             )?;
                             if let ThreadItem::AgentMessage { id, phase, .. } = &started.item {
                                 message_phases.insert(id.clone(), phase.clone());
@@ -9041,6 +9123,7 @@ impl CodexAppServerInterfaceDriver {
                                 &item,
                                 "completed",
                                 self.native_web_search_mode()?,
+                                self.native_mcp_resource_discovery()?,
                             )?;
                             flush_pending_delta(sink, &mut pending_delta, &mut delta_seq)?;
                             flush_deadline = None;
@@ -9882,6 +9965,7 @@ fn fresh_turn_start_params(
     input: Vec<UserInput>,
     model: String,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<Option<String>>,
     reasoning_summary: ReasoningSummary,
     additional_context: BTreeMap<String, AdditionalContextEntry>,
     turn_trigger: &str,
@@ -9891,12 +9975,38 @@ fn fresh_turn_start_params(
         input,
         model: Some(model),
         effort: reasoning_effort,
+        service_tier,
         summary: Some(reasoning_summary),
         additional_context: (!additional_context.is_empty())
             .then(|| additional_context.into_iter().collect()),
         turn_trigger: Some(turn_trigger.to_string()),
         ..TurnStartParams::default()
     }
+}
+
+fn validate_model_service_tier(
+    model: &octopus_appserver_proto::Model,
+    tier: &str,
+) -> Result<(), InterfaceDriverError> {
+    if tier == "default" || model.service_tiers.iter().any(|entry| entry.id == tier) {
+        return Ok(());
+    }
+    Err(InterfaceDriverError::FailedClosed(format!(
+        "native model '{}' does not advertise service tier '{}'; available tiers: [{}]",
+        model.model, tier, model.service_tiers.iter().map(|entry| entry.id.as_str()).collect::<Vec<_>>().join(", ")
+    )))
+}
+
+fn validate_native_service_tier_response(
+    requested: Option<&str>,
+    reported: Option<&str>,
+) -> Result<(), InterfaceDriverError> {
+    if requested.is_some() && requested != reported {
+        return Err(InterfaceDriverError::FailedClosed(format!(
+            "native provider did not retain selected service tier {requested:?}; active tier: {reported:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn native_turn_context(
@@ -11334,9 +11444,9 @@ pub(crate) fn exact_interrupted_result_source(
     envelope: &InterfaceInvocationEnvelope,
     continuity: &CodexContinuityState,
 ) -> Result<bool, String> {
-    let Some(interrupted) = continuity.interrupted_pending.as_ref() else {
+    if continuity.interrupted_pending.is_none() {
         return Ok(false);
-    };
+    }
     let manifest = envelope
         .artifact_file
         .read_manifest()
@@ -11345,7 +11455,18 @@ pub(crate) fn exact_interrupted_result_source(
         .artifact_file
         .read_payload_bytes()
         .map_err(|error| format!("interrupted result payload cannot be read: {error}"))?;
-    let value = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+    exact_interrupted_result_payload(&manifest.label, &bytes, continuity)
+}
+
+pub(crate) fn exact_interrupted_result_payload(
+    label: &str,
+    bytes: &[u8],
+    continuity: &CodexContinuityState,
+) -> Result<bool, String> {
+    let Some(interrupted) = continuity.interrupted_pending.as_ref() else {
+        return Ok(false);
+    };
+    let value = match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(value) => value,
         Err(_) => return Ok(false),
     };
@@ -11366,7 +11487,7 @@ pub(crate) fn exact_interrupted_result_source(
             output_label,
             ..
         } => {
-            if manifest.label != *output_label {
+            if label != output_label {
                 return Ok(false);
             }
             let operations = BTreeMap::from([(
@@ -11380,7 +11501,7 @@ pub(crate) fn exact_interrupted_result_source(
             )]);
             let result = decode_interface_operation_result_artifact(
                 &value,
-                &manifest.label,
+                label,
                 interface,
                 &operations,
             )
@@ -11434,12 +11555,39 @@ pub(crate) fn interrupted_result_closure_ref(
     if manifest.label != TURN_INTERRUPTED_RESULT_LABEL {
         return Ok(None);
     }
-    let payload: serde_json::Value = serde_json::from_slice(
-        &artifact
-            .read_payload_bytes()
-            .map_err(|error| format!("provider closure payload cannot be read: {error}"))?,
-    )
-    .map_err(|error| format!("provider closure payload is malformed: {error}"))?;
+    let bytes = artifact.read_payload_bytes()
+        .map_err(|error| format!("provider closure payload cannot be read: {error}"))?;
+    if interrupted_result_closure_payload(&manifest.label, &bytes, interrupted, source_artifact)?.is_none() {
+        return Ok(None);
+    }
+    let manifest_bytes = std::fs::read(artifact.manifest_path()).map_err(|error| {
+        format!(
+            "provider closure manifest '{}' cannot be read: {error}",
+            artifact.manifest_path().display()
+        )
+    })?;
+    let content = octopus_ledger::ContentHash::of_bytes(&manifest_bytes);
+    Ok(Some(ArtifactRef {
+        id: octopus_descriptors::ArtifactId::new(format!(
+            "{}:{}",
+            manifest.label,
+            content.to_hex()
+        )),
+        content,
+    }))
+}
+
+pub(crate) fn interrupted_result_closure_payload(
+    label: &str,
+    bytes: &[u8],
+    interrupted: &CodexContinuityState,
+    source_artifact: &ArtifactRef,
+) -> Result<Option<CodexContinuityState>, String> {
+    if label != TURN_INTERRUPTED_RESULT_LABEL {
+        return Ok(None);
+    }
+    let payload: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("provider closure payload is malformed: {error}"))?;
     let pending = interrupted.interrupted_pending.as_ref().ok_or_else(|| {
         "provider closure arbitration lost its interrupted exact effect".to_string()
     })?;
@@ -11521,21 +11669,7 @@ pub(crate) fn interrupted_result_closure_ref(
                 .to_string(),
         );
     }
-    let manifest_bytes = std::fs::read(artifact.manifest_path()).map_err(|error| {
-        format!(
-            "provider closure manifest '{}' cannot be read: {error}",
-            artifact.manifest_path().display()
-        )
-    })?;
-    let content = octopus_ledger::ContentHash::of_bytes(&manifest_bytes);
-    Ok(Some(ArtifactRef {
-        id: octopus_descriptors::ArtifactId::new(format!(
-            "{}:{}",
-            manifest.label,
-            content.to_hex()
-        )),
-        content,
-    }))
+    Ok(Some(closure))
 }
 
 fn decode_tool_result_artifact(
@@ -12980,16 +13114,25 @@ fn insert_client_output_field(output: &mut CodexTurnOutput, key: &str, value: se
     }
 }
 
-fn forbidden_native_effect_item(item: &ThreadItem, web_search: WebSearchMode) -> bool {
+fn forbidden_native_effect_item(
+    item: &ThreadItem,
+    web_search: WebSearchMode,
+    native_mcp_resource_discovery: bool,
+) -> bool {
     if matches!(item, ThreadItem::WebSearch { .. }) {
         return web_search == WebSearchMode::Disabled;
+    }
+    if let ThreadItem::McpToolCall { server, tool, arguments, .. } = item {
+        return !(native_mcp_resource_discovery
+            && server == "codex"
+            && matches!(tool.as_str(), "list_mcp_resources" | "list_mcp_resource_templates")
+            && arguments.as_object().is_some_and(serde_json::Map::is_empty));
     }
     matches!(
         item,
         ThreadItem::HookPrompt { .. }
             | ThreadItem::CommandExecution { .. }
             | ThreadItem::FileChange { .. }
-            | ThreadItem::McpToolCall { .. }
             | ThreadItem::CollabAgentToolCall { .. }
             | ThreadItem::SubAgentActivity { .. }
             | ThreadItem::ImageView { .. }
@@ -13002,8 +13145,9 @@ fn reject_native_effect_item(
     item: &ThreadItem,
     phase: &str,
     web_search: WebSearchMode,
+    native_mcp_resource_discovery: bool,
 ) -> Result<(), InterfaceDriverError> {
-    if !forbidden_native_effect_item(item, web_search) {
+    if !forbidden_native_effect_item(item, web_search, native_mcp_resource_discovery) {
         return Ok(());
     }
     let value = serde_json::to_value(item).map_err(|error| {
@@ -13720,24 +13864,25 @@ fn recover_codex_continuity_resolved(
         return close_recovered_pending_from_session(
             ContinuityCandidate {
                 current: true,
-                source_movement_seq,
+                source_movement_seq: outer.source_movement_seq,
                 state: outer.state.clone(),
             },
             &session_evidence,
+            source_movement_seq,
         )
         .map(Some);
     }
-    let Some(mut candidate) = candidates.pop() else {
+    let Some(candidate) = candidates.pop() else {
         return Ok(None);
     };
-    if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
-        candidate.source_movement_seq = candidates.iter()
+    let pending_source = if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
+        candidates.iter()
             .filter(|prior| prior.state.pending.as_ref() == Some(pending) || prior.state.interrupted_pending.as_ref() == Some(pending))
             .filter_map(|prior| prior.source_movement_seq)
             .chain(candidate.source_movement_seq)
-            .min();
-    }
-    close_recovered_pending_from_session(candidate, &session_evidence).map(Some)
+            .min()
+    } else { candidate.source_movement_seq };
+    close_recovered_pending_from_session(candidate, &session_evidence, pending_source).map(Some)
 }
 
 fn recover_codex_continuity_from_current_session(
@@ -13798,17 +13943,17 @@ fn recover_codex_continuity_from_current_session(
             "Codex current session has an ambiguous context generation".to_string(),
         ));
     }
-    let Some(mut candidate) = candidates.pop() else {
+    let Some(candidate) = candidates.pop() else {
         return Ok(None);
     };
-    if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
-        candidate.source_movement_seq = candidates.iter()
+    let pending_source = if let Some(pending) = candidate.state.pending.as_ref().or(candidate.state.interrupted_pending.as_ref()) {
+        candidates.iter()
             .filter(|prior| prior.state.pending.as_ref() == Some(pending) || prior.state.interrupted_pending.as_ref() == Some(pending))
             .filter_map(|prior| prior.source_movement_seq)
             .chain(candidate.source_movement_seq)
-            .min();
-    }
-    close_recovered_pending_from_session(candidate, &session_evidence).map(Some)
+            .min()
+    } else { candidate.source_movement_seq };
+    close_recovered_pending_from_session(candidate, &session_evidence, pending_source).map(Some)
 }
 
 pub(crate) fn reconcile_operator_session_continuity(
@@ -13886,6 +14031,37 @@ fn resumed_model_context(
             entry.source_artifact.id.as_str(), &entry.source_artifact, projection)?;
     }
     Ok((!assembled.conversation.is_empty()).then(|| assembled.conversation.join("\n\n")))
+}
+
+pub(crate) fn reconcile_delivered_interrupted_continuity(
+    bound: Option<&CodexContinuityState>,
+    current: Option<CodexContinuityState>,
+    delivered: Option<CodexContinuityState>,
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let Some(delivered) = delivered else { return Ok(current); };
+    let bound = bound.filter(|state| state.interrupted_pending.is_some()).ok_or_else(|| {
+        InterfaceDriverError::FailedClosed("delivered interruption has no exact bound interrupted request".into())
+    })?;
+    if !codex_continuity_successor_is_settled(Some(bound), Some(&delivered))
+        .map_err(InterfaceDriverError::FailedClosed)?
+        || delivered.context_generation <= bound.context_generation {
+        return Err(InterfaceDriverError::FailedClosed("delivered interruption is not a settled native successor".into()));
+    }
+    let current = current.ok_or_else(|| InterfaceDriverError::FailedClosed(
+        "delivered interruption has no recovered native continuity".into()))?;
+    codex_continuity_successor_is_settled(Some(bound), Some(&current))
+        .map_err(InterfaceDriverError::FailedClosed)?;
+    if current.context_generation >= delivered.context_generation {
+        if codex_continuity_waits_for_result(&current) {
+            return Err(InterfaceDriverError::FailedClosed("delivered interruption cannot settle a later pending request".into()));
+        }
+        return Ok(Some(current));
+    }
+    if current.pending.is_some()
+        || current.interrupted_pending.as_ref().is_some_and(|pending| Some(pending) != bound.interrupted_pending.as_ref()) {
+        return Err(InterfaceDriverError::FailedClosed("delivered interruption differs from the recovered pending request".into()));
+    }
+    reconcile_current_session_continuity(Some(current), Some(delivered))
 }
 
 fn reconcile_current_session_continuity(
@@ -14007,6 +14183,7 @@ pub(crate) fn terminal_failure_continuity(
 fn close_recovered_pending_from_session(
     candidate: ContinuityCandidate,
     session_evidence: &[SessionContinuityEvidence],
+    pending_source_movement_seq: Option<u64>,
 ) -> Result<CodexContinuityState, InterfaceDriverError> {
     let ContinuityCandidate {
         source_movement_seq,
@@ -14025,7 +14202,7 @@ fn close_recovered_pending_from_session(
             ));
         }
     };
-    let Some(pending_seq) = source_movement_seq else {
+    let Some(pending_seq) = pending_source_movement_seq else {
         return Ok(state);
     };
     let mut closing_source = None;
@@ -14047,7 +14224,7 @@ fn close_recovered_pending_from_session(
             continue;
         }
         if closing_source
-            .replace(evidence.source_key.as_str())
+            .replace((evidence.source_key.as_str(), evidence.source_movement_seq.expect("validated result movement")))
             .is_some()
         {
             return Err(InterfaceDriverError::FailedClosed(
@@ -14056,7 +14233,14 @@ fn close_recovered_pending_from_session(
             ));
         }
     }
-    if closing_source.is_some() {
+    if let Some((_, result_seq)) = closing_source {
+        if source_movement_seq.is_some_and(|continuity_seq| result_seq > continuity_seq) {
+            state.context_generation = state.context_generation.checked_add(1).ok_or_else(|| {
+                InterfaceDriverError::FailedClosed(
+                    "Codex admitted result context generation overflowed".to_string(),
+                )
+            })?;
+        }
         state.tool_operator_request = None;
         if interrupted {
             state.interrupted_pending = None;
@@ -15909,6 +16093,7 @@ mod tests {
                     run_id: "run-b".into(), worker_interface_id: "system_worker_b".into(),
                     provider_interface_id: "world_provider_b".into(), receive_interface_id: "system_worker_b".into(),
                     return_interface_ids: vec!["system_worker_a".into()], model: "model".into(), reasoning_effort: "high".into(),
+                    service_tier: None,
                 },
                 files: vec![file.clone()], outgoing_bindings: vec![],
                 seed: NativeEffect { tool: "artifact.send".into(), correlation_id: "native:seed".into(), arguments: serde_json::json!({}) },
@@ -16104,6 +16289,7 @@ mod tests {
             }),
         );
         interrupted.interrupted_pending = None;
+        interrupted.context_generation = 10;
         assert_eq!(
             recover_codex_continuity(
                 std::slice::from_ref(&interrupted_resolved_session),
@@ -16454,6 +16640,53 @@ mod tests {
             reconcile_current_session_continuity(Some(old), current).unwrap(),
             Some(newest)
         );
+
+        let mut interrupted = continuity("world_provider_codex", "run-a", "thr-exact", 7, None);
+        interrupted.interrupted_pending = Some(CodexPendingContinuity::DynamicTool {
+            native_operation: None, turn_id: "turn-7".into(), call_id: "call-7".into(),
+            tool: "coder.exec".into(),
+        });
+        let ack: SessionContextArtifact = serde_json::from_value(session_artifact(
+            "stop-ack", TURN_CONTROL_ACKNOWLEDGED_LABEL,
+            serde_json::json!({"label": TURN_CONTROL_ACKNOWLEDGED_LABEL, CODEX_CONTINUITY_FIELD: interrupted}), 70,
+        )).unwrap();
+        let next_input = ArtifactRef {
+            id: octopus_descriptors::ArtifactId::new("next-input"),
+            content: octopus_ledger::ContentHash::of_bytes(b"next-input"),
+        };
+        let recover = |entries: &[SessionContextArtifact]| recover_codex_continuity_from_current_session(
+            entries, &next_input, &InterfaceId::new("world_provider_codex"), "run-a", &codex_context_labels(),
+        );
+        let closed = recover(&[ack.clone(), source.clone()]).unwrap().unwrap();
+        assert_eq!(closed.context_generation, 8);
+        assert!(closed.interrupted_pending.is_none());
+        validate_recovered_thread_coordinates(
+            &closed, &closed.thread_shape_fingerprint, 9, &closed.static_context_fingerprint,
+        ).unwrap();
+        assert!(validate_recovered_thread_coordinates(
+            &closed, &closed.thread_shape_fingerprint, 10, &closed.static_context_fingerprint,
+        ).is_err());
+        let mut later_ack = ack.clone();
+        later_ack.source_artifact.id = octopus_descriptors::ArtifactId::new("later-stop-ack");
+        later_ack.source_movement_seq = Some(72);
+        later_ack.payload[CODEX_CONTINUITY_FIELD]["context_generation"] = serde_json::json!(8);
+        assert_eq!(recover(&[ack.clone(), source.clone(), later_ack]).unwrap(), Some(closed.clone()));
+        let mut wrong_result = source.clone();
+        wrong_result.payload["correlation_id"] = serde_json::json!("other-call");
+        let unchanged = recover(&[ack.clone(), wrong_result.clone()]).unwrap().unwrap();
+        assert_eq!(unchanged.context_generation, 7);
+        assert!(unchanged.interrupted_pending.is_some());
+        wrong_result.payload["correlation_id"] = serde_json::json!("call-7");
+        wrong_result.payload["tool"] = serde_json::json!("other-tool");
+        assert!(recover(&[ack.clone(), wrong_result]).is_err());
+        let mut duplicate = source.clone();
+        duplicate.source_artifact.id = octopus_descriptors::ArtifactId::new("duplicate-result");
+        duplicate.source_movement_seq = Some(73);
+        assert!(recover(&[ack.clone(), source.clone(), duplicate]).is_err());
+        let mut replay = ack;
+        replay.source_movement_seq = Some(74);
+        replay.payload[CODEX_CONTINUITY_FIELD] = serde_json::to_value(&closed).unwrap();
+        assert_eq!(recover(&[source, replay]).unwrap(), Some(closed));
     }
 
     #[test]
@@ -17586,11 +17819,21 @@ mod tests {
             .clone(),
             ..InterfaceDriverConfig::default()
         };
-        let driver = CodexAppServerInterfaceDriver::new_with_config(
+        let mut driver = CodexAppServerInterfaceDriver::new_with_config(
             AppServerClient::Remote(client),
             Some(&driver_config),
         );
         let mut web_policy = model_policy_input(serde_json::json!(["gpt-5.5"]));
+        assert!(!driver.native_mcp_resource_discovery().unwrap());
+        for enabled in [true, false] {
+            driver.interface_private_config.insert("native_mcp_resource_discovery".into(), serde_json::json!(enabled));
+            assert_eq!(driver.native_mcp_resource_discovery().unwrap(), enabled);
+        }
+        for value in [serde_json::Value::Null, serde_json::json!("true"), serde_json::json!({}), serde_json::json!(1)] {
+            driver.interface_private_config.insert("native_mcp_resource_discovery".into(), value);
+            assert!(driver.native_mcp_resource_discovery().is_err());
+        }
+        driver.interface_private_config.remove("native_mcp_resource_discovery");
         for modes in [serde_json::json!(["cached"]), serde_json::json!([]), serde_json::json!("live")] {
             web_policy.metadata.as_mut().unwrap().grant.interface_policy
                 .get_mut("world_provider_codex").unwrap()
@@ -17710,6 +17953,9 @@ mod tests {
             )],
             metadata: Some(runtime_metadata.clone()),
         };
+        let descriptor: InterfaceDescriptor =
+            serde_json::from_str(include_str!("../../../interface.json")).unwrap();
+        assert!(!is_operator_continuity_input(&descriptor, &catalog_envelope).unwrap());
         let (catalog_output, _catalog_output_rx) = ProviderOutputStream::channel();
         let blocked_catalog = driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {
@@ -17727,6 +17973,7 @@ mod tests {
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
                 durable_interrupted_continuity: None,
+                reconciled_result_continuity: None,
                 control: &CodexTurnControlBroker::new(Some(1)),
                 handoff_barrier: ProviderHandoffBarrier::new(),
             })
@@ -17914,6 +18161,7 @@ while IFS= read -r _; do :; done
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
                 durable_interrupted_continuity: None,
+                reconciled_result_continuity: None,
                 control: &cold_control,
                 handoff_barrier: ProviderHandoffBarrier::new(),
             });
@@ -18181,6 +18429,7 @@ while IFS= read -r _; do :; done
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
                 durable_interrupted_continuity: Some(interrupted.clone()),
+                reconciled_result_continuity: None,
                 control: &CodexTurnControlBroker::new(Some(2)),
                 handoff_barrier: ProviderHandoffBarrier::new(),
             })
@@ -18209,6 +18458,7 @@ while IFS= read -r _; do :; done
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
                 durable_interrupted_continuity: Some(interrupted.clone()),
+                reconciled_result_continuity: None,
                 control: &CodexTurnControlBroker::new(Some(3)),
                 handoff_barrier: ProviderHandoffBarrier::new(),
             })
@@ -18269,6 +18519,7 @@ while IFS= read -r _; do :; done
                 interrupted_after_artifact: Some(TURN_DYNAMIC_TOOL_CALL_LABEL.to_string()),
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
                 durable_interrupted_continuity: Some(interrupted.clone()),
+                reconciled_result_continuity: None,
                 control: &CodexTurnControlBroker::new(Some(4)),
                 handoff_barrier: ProviderHandoffBarrier::new(),
             })
@@ -18775,6 +19026,41 @@ while IFS= read -r _; do :; done
     }
 
     #[test]
+    fn native_service_tiers_preserve_exact_catalog_and_wire_values() {
+        let mut model: octopus_appserver_proto::Model = serde_json::from_value(serde_json::json!({
+            "id":"declared-model", "model":"declared-model", "displayName":"Declared model",
+            "description":"", "hidden":false, "supportedReasoningEfforts":[],
+            "defaultReasoningEffort":"high", "isDefault":false,
+            "serviceTiers":[
+                {"id":"priority","name":"Fast","description":"Declared Fast"},
+                {"id":"ultrafast","name":"Ultra Fast","description":"Declared Ultra Fast"},
+                {"id":"custom-express","name":"Express","description":"Declared provider tier"}
+            ]
+        })).unwrap();
+        for tier in ["default", "priority", "ultrafast", "custom-express"] {
+            validate_model_service_tier(&model, tier).unwrap();
+            let params = fresh_turn_start_params(
+                "thread-1".into(), Vec::new(), model.model.clone(), Some(ReasoningEffort::XHigh),
+                Some(Some(tier.into())), ReasoningSummary::Detailed, BTreeMap::new(), TURN_TRIGGER_INPUT,
+            );
+            let wire = serde_json::to_value(params).unwrap();
+            assert_eq!(wire["model"], model.model);
+            assert_eq!(wire["serviceTier"], tier);
+            validate_native_service_tier_response(Some(tier), Some(tier)).unwrap();
+            assert!(validate_native_service_tier_response(Some(tier), None).is_err());
+        }
+        for undeclared in ["ultra_fast", "turbo", "fast"] {
+            assert!(validate_model_service_tier(&model, undeclared).is_err());
+        }
+        model.service_tiers.retain(|tier| tier.id == "priority");
+        model.additional_speed_tiers = vec!["ultrafast".into()];
+        assert!(validate_model_service_tier(&model, "ultrafast").is_err());
+        validate_model_service_tier(&model, "priority").unwrap();
+        assert!(validate_native_service_tier_response(Some("ultrafast"), Some("priority")).is_err());
+        validate_native_service_tier_response(None, Some("priority")).unwrap();
+    }
+
+    #[test]
     fn fresh_turn_start_params_carries_bound_reasoning_effort() {
         let params = fresh_turn_start_params(
             "thread-1".to_string(),
@@ -18784,6 +19070,7 @@ while IFS= read -r _; do :; done
             }],
             "gpt-5.5".to_string(),
             Some(ReasoningEffort::XHigh),
+            None,
             ReasoningSummary::Detailed,
             native_turn_context(Some("context".repeat(200_000)), Some("grant".into())),
             TURN_TRIGGER_INPUT,
@@ -18814,6 +19101,7 @@ while IFS= read -r _; do :; done
             Vec::new(),
             "gpt-5.5".to_string(),
             Some(ReasoningEffort::XHigh),
+            None,
             ReasoningSummary::Detailed,
             BTreeMap::new(),
             TURN_TRIGGER_RESUME_INTERRUPTED_TASK,
@@ -20373,24 +20661,26 @@ while IFS= read -r _; do :; done
             "changes": []
         }))
         .expect("a file-change ThreadItem deserializes");
-        assert!(forbidden_native_effect_item(&exec, WebSearchMode::Live));
-        assert!(forbidden_native_effect_item(&patch, WebSearchMode::Live));
+        assert!(forbidden_native_effect_item(&exec, WebSearchMode::Live, false));
+        assert!(forbidden_native_effect_item(&patch, WebSearchMode::Live, false));
+        assert!(forbidden_native_effect_item(&exec, WebSearchMode::Live, true));
+        assert!(forbidden_native_effect_item(&patch, WebSearchMode::Live, true));
         let image: ThreadItem = serde_json::from_value(serde_json::json!({
             "type": "imageView", "id": "image-9", "path": "/work/repo/image.png",
         })).unwrap();
         for phase in ["started", "completed"] {
-            let error = reject_native_effect_item(&image, phase, WebSearchMode::Live).unwrap_err().to_string();
+            let error = reject_native_effect_item(&image, phase, WebSearchMode::Live, false).unwrap_err().to_string();
             for expected in [phase, "imageView", "image-9"] { assert!(error.contains(expected)); }
         }
         assert!(forbidden_native_effect_item(&ThreadItem::Sleep {
             id: "sleep-1".into(),
             duration_ms: 100,
-        }, WebSearchMode::Live));
+        }, WebSearchMode::Live, false));
         assert!(!forbidden_native_effect_item(&ThreadItem::Reasoning {
             id: "r-1".into(),
             summary: Vec::new(),
             content: Vec::new(),
-        }, WebSearchMode::Live));
+        }, WebSearchMode::Live, false));
         assert!(!forbidden_native_effect_item(&ThreadItem::DynamicToolCall {
             id: "tool-1".into(),
             namespace: None,
@@ -20400,12 +20690,33 @@ while IFS= read -r _; do :; done
             content_items: None,
             success: None,
             duration_ms: None,
-        }, WebSearchMode::Live));
+        }, WebSearchMode::Live, false));
         let search = ThreadItem::WebSearch {
             id: "web-1".into(), query: "example".into(), action: None, results: None,
         };
-        assert!(forbidden_native_effect_item(&search, WebSearchMode::Disabled));
-        assert!(!forbidden_native_effect_item(&search, WebSearchMode::Live));
+        assert!(forbidden_native_effect_item(&search, WebSearchMode::Disabled, false));
+        assert!(!forbidden_native_effect_item(&search, WebSearchMode::Live, false));
+        for phase in ["started", "completed"] {
+            for tool in ["list_mcp_resources", "list_mcp_resource_templates"] {
+                let value = serde_json::json!({"type":"mcpToolCall","id":"resource-1","server":"codex","tool":tool,"arguments":{},"status":if phase == "started" { "inProgress" } else { "completed" }});
+                let item: ThreadItem = serde_json::from_value(value.clone()).unwrap();
+                assert!(reject_native_effect_item(&item, phase, WebSearchMode::Live, false).is_err());
+                assert!(reject_native_effect_item(&item, phase, WebSearchMode::Live, true).is_ok());
+                for (server, name, args) in [
+                    ("foreign", tool, serde_json::json!({})),
+                    ("codex", "arbitrary_server_tool", serde_json::json!({})),
+                    ("codex", "read_mcp_resource", serde_json::json!({"server":"codex","uri":"resource://private"})),
+                    ("codex", tool, serde_json::json!({"server":"foreign"})),
+                    ("codex", tool, serde_json::json!({"cursor":"next"})),
+                    ("codex", tool, serde_json::Value::Null),
+                ] {
+                    let mut refused = value.clone();
+                    refused["server"] = serde_json::json!(server); refused["tool"] = serde_json::json!(name); refused["arguments"] = args;
+                    let refused: ThreadItem = serde_json::from_value(refused).unwrap();
+                    assert!(reject_native_effect_item(&refused, phase, WebSearchMode::Live, true).is_err());
+                }
+            }
+        }
     }
 
 

@@ -587,12 +587,7 @@ impl InterfaceArtifactFile {
         let payload_hash = ContentHash::of_bytes(payload_bytes);
         let safe_label = artifact_label_slug(label);
         let payload_path = root.join(format!("{}-{}.payload", safe_label, payload_hash.to_hex()));
-        std::fs::write(&payload_path, payload_bytes).map_err(|source| {
-            InterfaceArtifactFileError::WritePayload {
-                path: payload_path.display().to_string(),
-                source,
-            }
-        })?;
+        write_immutable_carrier(&payload_path, payload_bytes, CarrierSurface::Payload)?;
         let manifest = InterfaceArtifactManifest {
             label: label.to_string(),
             payload_path,
@@ -610,12 +605,7 @@ impl InterfaceArtifactFile {
             safe_label,
             manifest_hash.to_hex()
         ));
-        std::fs::write(&manifest_path, manifest_bytes).map_err(|source| {
-            InterfaceArtifactFileError::WriteManifest {
-                path: manifest_path.display().to_string(),
-                source,
-            }
-        })?;
+        write_immutable_carrier(&manifest_path, &manifest_bytes, CarrierSurface::Manifest)?;
         Self::new(manifest_path)
     }
 
@@ -906,6 +896,49 @@ pub fn read_artifact_carrier_file_bounded(
     maximum_bytes: u64,
 ) -> Result<Vec<u8>, InterfaceArtifactFileError> {
     read_regular_file_stable_bounded(path.as_ref(), maximum_bytes, CarrierSurface::Payload)
+}
+
+fn write_immutable_carrier(
+    path: &Path,
+    bytes: &[u8],
+    surface: CarrierSurface,
+) -> Result<(), InterfaceArtifactFileError> {
+    let write_error = |source| match surface {
+        CarrierSurface::Manifest => InterfaceArtifactFileError::WriteManifest {
+            path: path.display().to_string(), source,
+        },
+        CarrierSurface::Payload => InterfaceArtifactFileError::WritePayload {
+            path: path.display().to_string(), source,
+        },
+    };
+    let verify = || {
+        if read_regular_file_stable_bounded(path, bytes.len() as u64, surface)? != bytes {
+            return Err(write_error(std::io::Error::other("immutable carrier bytes differ")));
+        }
+        Ok(())
+    };
+    let parent = path.parent().ok_or_else(|| {
+        InterfaceArtifactFileError::RelativeManifestPath(path.display().to_string())
+    })?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => verify()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let temporary = tempfile::Builder::new()
+                .prefix(".artifact-")
+                .make_in(parent, |temporary| octopus_file_storage::write_new(temporary, bytes))
+                .map_err(write_error)?;
+            temporary.as_file().sync_all().map_err(write_error)?;
+            match temporary.persist_noclobber(path) {
+                Ok(_) => {}
+                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => verify()?,
+                Err(error) => return Err(write_error(error.error)),
+            }
+        }
+        Err(error) => return Err(write_error(error)),
+    }
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(write_error)
 }
 
 fn write_manifest_atomic(
@@ -1319,6 +1352,39 @@ mod tests {
             }
         ));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn immutable_carriers_publish_exact_bytes_and_refuse_existing_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let bytes = b"{\"exact\":\"immutable evidence\"}\n".repeat(32768);
+        let barrier = std::sync::Barrier::new(4);
+        let artifacts = std::thread::scope(|scope| {
+            let handles = (0..4).map(|_| scope.spawn(|| {
+                barrier.wait();
+                InterfaceArtifactFile::write(root.path(), "exact.payload", &bytes).unwrap()
+            })).collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+        for artifact in &artifacts {
+            assert_eq!(artifact.manifest_path(), artifacts[0].manifest_path());
+            let reopened = InterfaceArtifactFile::new(artifact.manifest_path()).unwrap();
+            assert_eq!(reopened.read_payload_bytes().unwrap(), bytes);
+        }
+        let payload = artifacts[0].read_manifest().unwrap().payload_path;
+        #[cfg(target_vendor = "apple")]
+        {
+            use std::os::macos::fs::MetadataExt as _;
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::metadata(&payload).unwrap();
+            assert_ne!(metadata.st_flags() & 0x20, 0);
+            assert!(metadata.blocks() * 512 < metadata.len());
+            assert_eq!(metadata.nlink(), 1);
+        }
+        std::fs::write(&payload, b"corruption").unwrap();
+        assert!(InterfaceArtifactFile::write(root.path(), "exact.payload", &bytes).is_err());
+        assert_eq!(std::fs::read(&payload).unwrap(), b"corruption");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
     }
 
     #[test]

@@ -14,6 +14,7 @@ path = "src/lib.rs"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 json-patch.workspace = true
+octopus-file-write-contract = { path = "../../../../worker_environment_kind/system_room/packages/octopus-file-write-contract" }
 blake3.workspace = true
 sha2 = "0.10"
 url = "2"
@@ -34,5 +35,6 @@ octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
 octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
 
 [dev-dependencies]
+octopus-system-room-env = { path = "../../../../worker_environment_kind/system_room/packages/octopus-system-room-env" }
 tempfile = "3.23.0"
 tokio-util = "0.7"

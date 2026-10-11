@@ -5,8 +5,8 @@ import { useShouldReduceMotion } from "../../appearance";
 import { copyText } from "../../runtimeFormat";
 import { Glyph } from "../IconGlyphs";
 import { CadencedShimmerText } from "../CadencedShimmerText";
-import { formatBytes } from "./format";
 import { MessageContent } from "./MessageContent";
+import { ChatAttachmentStrip } from "./ChatAttachmentCard";
 import { MessageTooltip } from "./MessageTooltip";
 import type { ChatOperatorResponse, ChatRenderMessage, ChatToolPresentationIndex } from "./types";
 import type { ChatPinnedContextItem } from "../../chatRuns";
@@ -205,7 +205,7 @@ export function ChatMessageList({
       ? messages
       : presentationMessages.filter((message) => conversationSearchVisible(message, toolPresentations))
   ), [activityPresentation, messages, presentationMessages, toolPresentations]);
-  const turns = useStableTurns(renderMessages);
+  const turns = useStableTurns(renderMessages, activityPresentation === "conversation");
   const turnKeyByMessageId = useMemo(() => new Map(turns.flatMap((turn, index) => {
     const key = turnKey(turn, index);
     return turn.map((message) => [message.id, key] as const);
@@ -1312,19 +1312,41 @@ function nearestUserMessage(list: HTMLElement): string {
   return nearest.dataset.threadUserMessageId || "";
 }
 
-function groupIntoTurns(messages: ChatRenderMessage[]): ChatRenderMessage[][] {
+function groupIntoTurns(messages: ChatRenderMessage[], linkToolResults = true): ChatRenderMessage[][] {
   const turns: ChatRenderMessage[][] = [];
+  const toolTurns = new Map<string, ChatRenderMessage[]>();
+  const interruptedTurns = new Map<string, ChatRenderMessage[]>();
   for (const message of messages) {
     const startsTurn = message.role === "user" && message.eventKind !== "steering";
-    if (startsTurn || turns.length === 0) turns.push([message]);
-    else turns[turns.length - 1].push(message);
+    if (startsTurn || turns.length === 0) turns.push([]);
+    const data = eventRecord(message.eventData);
+    const scope = [message.runId, message.interfaceId,
+      eventString(eventRecord(data._activity_origin).interface_id)];
+    const callId = eventString(data.call_id ?? data.callId ?? data.correlation_id);
+    const coordinates = [...scope, eventString(data.tool), callId];
+    const toolKey = linkToolResults && message.role !== "user" && message.eventKind === "dynamic_tool"
+      && coordinates.every((value) => typeof value === "string" && value.length > 0)
+      ? JSON.stringify(coordinates) : "";
+    const interruptedCoordinates = [...scope, callId, eventString(data.thread_id),
+      eventString(data.turn_id ?? eventRecord(data._event).turn_id)];
+    const interruptedKey = linkToolResults && message.role !== "user"
+      && interruptedCoordinates.every((value) => typeof value === "string" && value.length > 0)
+      ? JSON.stringify(interruptedCoordinates) : "";
+    const turn = (toolKey && toolTurns.get(toolKey))
+      || (message.eventKind === "interrupted_result" && interruptedKey && interruptedTurns.get(interruptedKey))
+      || turns[turns.length - 1];
+    turn.push(message);
+    if (toolKey && data.status === "started") {
+      toolTurns.set(toolKey, turn);
+      if (interruptedKey) interruptedTurns.set(interruptedKey, turn);
+    }
   }
   return turns;
 }
 
-function useStableTurns(messages: ChatRenderMessage[]): ChatRenderMessage[][] {
+function useStableTurns(messages: ChatRenderMessage[], linkToolResults: boolean): ChatRenderMessage[][] {
   const previousRef = useRef<ChatRenderMessage[][]>([]);
-  const next = groupIntoTurns(messages);
+  const next = groupIntoTurns(messages, linkToolResults);
   const previous = previousRef.current;
   const previousByKey = new Map(previous.map((turn, index) => [turnKey(turn, index), turn]));
   let changed = previous.length !== next.length;
@@ -1675,7 +1697,7 @@ function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, on
   }
   return (
     <div
-      className={`group flex w-full flex-col items-end justify-end gap-1 ${message.error ? "octopus-chat-error" : ""}${steering ? " chat-steering-message" : ""}`}
+      className={`group flex w-full flex-col items-end justify-end gap-2 ${message.error ? "octopus-chat-error" : ""}${steering ? " chat-steering-message" : ""}`}
       data-steering-status={steering ? steeringStatus : undefined}
     >
       {steering ? (
@@ -1684,24 +1706,26 @@ function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, on
           <span>{steeringLabel}</span>
         </div>
       ) : null}
-      <div
-        className="bg-token-foreground/5 max-w-[77%] min-w-0 overflow-hidden break-words rounded-2xl px-3 py-2 [&_.contain-inline-size]:[contain:initial] text-left focus-visible:ring-2 focus-visible:ring-token-focus-border focus-visible:outline-none"
-        data-user-message-bubble="true"
-        tabIndex={0}
-      >
-        <div className="flex flex-col items-end gap-1">
-          <div className="chat-user-message-content text-size-chat relative w-full min-w-0">
-          <SelectableMessageText message={message} onPinMessageExcerpt={onPinMessageExcerpt} taskActionsEnabled={taskActionsEnabled}>
-            <CollapsibleMessageBody>
-              <div className="text-size-chat whitespace-pre-wrap">
-                {message.text ? <MessageContent find={find} text={message.text} variant="user" /> : null}
-              </div>
-            </CollapsibleMessageBody>
-          </SelectableMessageText>
-            <MessageAttachments message={message} />
+      <MessageAttachments message={message} />
+      {message.text || !message.attachments?.length ? (
+        <div
+          className="bg-token-foreground/5 max-w-[77%] min-w-0 overflow-hidden break-words rounded-2xl px-3 py-2 [&_.contain-inline-size]:[contain:initial] text-left focus-visible:ring-2 focus-visible:ring-token-focus-border focus-visible:outline-none"
+          data-user-message-bubble="true"
+          tabIndex={0}
+        >
+          <div className="flex flex-col items-end gap-1">
+            <div className="chat-user-message-content text-size-chat relative w-full min-w-0">
+              <SelectableMessageText message={message} onPinMessageExcerpt={onPinMessageExcerpt} taskActionsEnabled={taskActionsEnabled}>
+                <CollapsibleMessageBody>
+                  <div className="text-size-chat whitespace-pre-wrap">
+                    {message.text ? <MessageContent find={find} text={message.text} variant="user" /> : null}
+                  </div>
+                </CollapsibleMessageBody>
+              </SelectableMessageText>
+            </div>
           </div>
         </div>
-      </div>
+      ) : null}
       <MessageActions
         message={message}
         onEditUserMessage={() => setEditing(true)}
@@ -1988,7 +2012,7 @@ function AssistantEventContent({ find, message, onOpenAssistantReview, onOpenAss
     if (presentation.family === "exec") {
       return (
         <div className="flex w-full min-w-0 flex-col items-stretch">
-          <DynamicToolExecActivity message={message} onOpenFile={(path) => onOpenFile(path, presentation.exactToolId)} presentation={presentation} />
+          <DynamicToolExecActivity message={message} onOpenFile={(path) => onOpenFile(path, presentation.exactToolId)} />
         </div>
       );
     }
@@ -2188,11 +2212,7 @@ function ExecActivity({ message, onOpenFile }: { message: ChatRenderMessage; onO
   const model = commandActivityModel(message);
   const parsed = eventRecord(data.parsed_cmd ?? data.parsedCmd);
   const parsedType = eventString(parsed.type).toLocaleLowerCase();
-  const argumentsValue = eventRecord(data.arguments);
-  const command = eventString(parsed.cmd)
-    || shellCommandText(argumentsValue.command ?? argumentsValue.argv ?? argumentsValue.cmd)
-    || eventString(data.command)
-    || (message.text || "command").split("\n")[0];
+  const command = suppliedShellCommand(data);
   const target = eventString(parsed.path) || eventString(parsed.name) || eventString(parsed.file) || eventString(parsed.target);
   const query = eventString(parsed.query) || eventString(parsed.pattern);
   const active = model.phase === "running";
@@ -2239,7 +2259,8 @@ function ExecActivity({ message, onOpenFile }: { message: ChatRenderMessage; onO
     );
   }
 
-  return <CommandActivity command={command} message={message} />;
+  const script = eventString(eventRecord(data.arguments).script).trim();
+  return <CommandActivity command={command} isCode={Boolean(script && command === script)} message={message} />;
 }
 
 function activityPathLabel(value: string): string {
@@ -2247,8 +2268,9 @@ function activityPathLabel(value: string): string {
   return normalized.split("/").filter(Boolean).at(-1) ?? value;
 }
 
-function CommandActivity({ command, message }: {
+function CommandActivity({ command, isCode = false, message }: {
   command: string;
+  isCode?: boolean;
   message: ChatRenderMessage;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -2288,9 +2310,10 @@ function CommandActivity({ command, message }: {
     : completedDurationMs;
   const elapsed = elapsedMs >= 1_000 ? formatActivityElapsed(elapsedMs) : "";
   const summaryCommand = expanded ? "" : command;
+  const operation = isCode ? "code" : "command";
   const summary = model.phase === "running"
-    ? `${model.yielded ? "Command still running" : "Running command"}${elapsed ? ` for ${elapsed}` : ""}`
-    : `${model.phase === "interrupted" ? "Stopped" : model.phase === "timed_out" ? "Timed out" : model.phase === "failed" ? "Failed" : model.phase === "unknown" ? "Outcome unknown for" : "Ran"}${summaryCommand ? ` ${summaryCommand}` : " command"}${elapsed ? ` for ${elapsed}` : ""}`;
+    ? `${model.yielded ? `${isCode ? "Code" : "Command"} still running` : `Running ${operation}`}${elapsed ? ` for ${elapsed}` : ""}`
+    : `${model.phase === "interrupted" ? "Stopped" : model.phase === "timed_out" ? "Timed out" : model.phase === "failed" ? "Failed" : model.phase === "unknown" ? "Outcome unknown for" : "Ran"}${summaryCommand ? ` ${summaryCommand}` : ` ${operation}`}${elapsed ? ` for ${elapsed}` : ""}`;
   const success = model.phase === "exited" && model.exitCode === 0;
   const shellCommand = command;
   const outputSections = model.sections.map((section) => ({ ...section, text: normalizeTerminalControl(section.text) }));
@@ -2326,20 +2349,20 @@ function CommandActivity({ command, message }: {
       >
         <div className="octopus-exec-activity-body-inner" ref={bodyRef}>
           <div className="octopus-exec-shell">
-            <div className="octopus-exec-shell-label">Shell</div>
-            <div className="octopus-exec-shell-command-row group/command">
+            <div className="octopus-exec-shell-label">{isCode ? "Code" : "Shell"}</div>
+            {shellCommand ? <div className="octopus-exec-shell-command-row group/command">
               <button
-                aria-label={`$ ${shellCommand}`}
+                aria-label={isCode ? shellCommand : `$ ${shellCommand}`}
                 className="octopus-exec-shell-command"
                 data-expanded={commandExpanded || undefined}
                 onClick={() => setCommandExpanded(true)}
                 type="button"
               >
-                <span aria-hidden="true">$</span>
+                {isCode ? null : <span aria-hidden="true">$</span>}
                 <code>{shellCommand}</code>
               </button>
-              <ShellCopyButton label="Copy command" value={shellCommand} />
-            </div>
+              <ShellCopyButton label={isCode ? "Copy code" : "Copy command"} value={shellCommand} />
+            </div> : <div className="octopus-exec-shell-no-output" role="status">Command unavailable</div>}
             {terminalInputs.map((input, index) => (
               <pre className="octopus-exec-shell-input" key={`${input}:${index}`}><span aria-hidden="true">&gt; </span>{input}</pre>
             ))}
@@ -2356,7 +2379,7 @@ function CommandActivity({ command, message }: {
               {success ? (
                 <span className="octopus-exec-shell-success"><Glyph aria-hidden="true" name="check" size={10} />Success</span>
               ) : (
-                <span>{commandOutcomeLabel(model)}</span>
+                <span>{commandOutcomeLabel(model, isCode)}</span>
               )}
             </div>
             {model.notices.map((notice) => <div className="octopus-exec-shell-footer" key={notice}>{notice}</div>)}
@@ -2515,15 +2538,11 @@ function stripUnsupportedTerminalEscapes(value: string): string {
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function dynamicToolExecMessage(message: ChatRenderMessage, presentation: DynamicToolPresentation): ChatRenderMessage {
+function dynamicToolExecMessage(message: ChatRenderMessage): ChatRenderMessage {
   const data = message.eventData ?? {};
   const argumentsValue = eventRecord(data.arguments);
   const body = commandResultBody(data);
-  const command = shellCommandText(
-    argumentsValue.command
-    ?? argumentsValue.argv
-    ?? argumentsValue.cmd,
-  ) || dynamicToolOperationLabel(presentation);
+  const command = suppliedShellCommand(data);
   return {
     ...message,
     eventData: {
@@ -2534,10 +2553,9 @@ function dynamicToolExecMessage(message: ChatRenderMessage, presentation: Dynami
   };
 }
 
-function DynamicToolExecActivity({ message, onOpenFile, presentation }: {
+function DynamicToolExecActivity({ message, onOpenFile }: {
   message: ChatRenderMessage;
   onOpenFile: Props["onOpenFile"];
-  presentation: DynamicToolPresentation;
 }) {
   const sourceData = message.eventData ?? {};
   const payloadProjection = eventRecord(sourceData._payload_projection);
@@ -2576,10 +2594,21 @@ function DynamicToolExecActivity({ message, onOpenFile, presentation }: {
     : sourceData;
   return (
     <>
-      <ExecActivity message={dynamicToolExecMessage({ ...message, eventData: data }, presentation)} onOpenFile={onOpenFile} />
+      <ExecActivity message={dynamicToolExecMessage({ ...message, eventData: data })} onOpenFile={onOpenFile} />
       {payloadError ? <div className="activity-command-error">Full command output unavailable · {payloadError}</div> : null}
     </>
   );
+}
+
+function suppliedShellCommand(data: Record<string, unknown>): string {
+  const argumentsValue = eventRecord(data.arguments);
+  const parsed = eventRecord(data.parsed_cmd ?? data.parsedCmd);
+  return shellCommandText(argumentsValue.command)
+    || shellCommandText(argumentsValue.argv)
+    || shellCommandText(argumentsValue.cmd)
+    || shellCommandText(data.command)
+    || shellCommandText(parsed.cmd)
+    || shellCommandText(argumentsValue.script);
 }
 
 function shellCommandText(value: unknown): string {
@@ -3178,38 +3207,8 @@ function reasoningBody(value: string, streaming: boolean): string {
 }
 
 function MessageAttachments({ message }: { message: ChatRenderMessage }) {
-  const [expanded, setExpanded] = useState(false);
   if (!message.attachments?.length) return null;
-  const visible = expanded ? message.attachments : message.attachments.slice(0, 4);
-  const remaining = message.attachments.length - visible.length;
-  return (
-    <div className="octopus-message-attachments">
-      {visible.map((file) => (
-        <span className="octopus-message-attachment" key={file.id} title={`${file.name}\n${file.type || file.label}\n${formatBytes(file.size)}`}>
-          <span className="octopus-message-attachment-icon"><Glyph name={file.type.startsWith("image/") ? "image" : "file"} size={14} /></span>
-          <span className="octopus-message-attachment-copy">
-            <strong>{file.name}</strong>
-            <small>{[friendlyAttachmentType(file.type, file.label), formatBytes(file.size), file.lastModified ? formatAttachmentDate(file.lastModified) : ""].filter(Boolean).join(" · ")}</small>
-          </span>
-        </span>
-      ))}
-      {remaining > 0 ? <button className="octopus-message-attachment-more" onClick={() => setExpanded(true)} type="button">+{remaining} more</button> : null}
-      {expanded && message.attachments.length > 4 ? <button className="octopus-message-attachment-more" onClick={() => setExpanded(false)} type="button">Show fewer</button> : null}
-    </div>
-  );
-}
-
-function friendlyAttachmentType(type: string, label: string): string {
-  const normalized = type.trim().toLocaleLowerCase();
-  if (normalized.startsWith("image/")) return normalized.slice(6).toUpperCase();
-  if (normalized === "text/plain") return "Text";
-  if (normalized === "application/pdf") return "PDF";
-  if (normalized.includes("json")) return "JSON";
-  return label || normalized || "File";
-}
-
-function formatAttachmentDate(value: number): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(value));
+  return <ChatAttachmentStrip attachments={message.attachments} className={`octopus-message-attachments${message.role === "user" ? " is-user" : ""}`} scope={message} />;
 }
 
 function MessageActions({

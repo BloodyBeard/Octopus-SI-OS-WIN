@@ -1,17 +1,13 @@
-export const CHATGPT_SIGN_IN_STORAGE_KEY = "octopus.onboarding.chatgpt.v1";
+let confirmedThisProcess = false;
 
 export function chatgptSignInAvailable(): boolean {
   return typeof window.octopusTransport?.chatgptAccount === "function";
 }
 
 export function chatgptSignInCompleted(): boolean {
-  try {
-    return window.localStorage.getItem(CHATGPT_SIGN_IN_STORAGE_KEY) === "signed-in";
-  } catch {
-    return false;
-  }
+  return confirmedThisProcess;
 }
 
-export function recordChatgptSignIn(): void {
-  window.localStorage.setItem(CHATGPT_SIGN_IN_STORAGE_KEY, "signed-in");
+export function recordChatgptSignIn(signedIn = true): void {
+  confirmedThisProcess = signedIn;
 }

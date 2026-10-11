@@ -33,34 +33,6 @@
     margin: 8px;
     position: static;
   }
-  .we-native-zoom {
-    align-items: center;
-    display: flex;
-    gap: 4px;
-    padding: var(--padding-row-y) var(--padding-row-x);
-  }
-  .we-native-zoom > span:first-child {
-    flex: 1;
-  }
-  .we-native-zoom button {
-    display: inline-flex;
-    width: 24px;
-    height: 24px;
-    align-items: center;
-    justify-content: center;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-  }
-  .we-native-zoom button:enabled:is(:hover, :focus-visible) {
-    background: var(--color-background-primary-ghost-hover);
-  }
-  .we-native-zoom-value {
-    min-width: 40px;
-    text-align: center;
-    font-variant-numeric: tabular-nums;
-  }
   .we-browser-connection-state {
     display: flex;
     width: 100%;

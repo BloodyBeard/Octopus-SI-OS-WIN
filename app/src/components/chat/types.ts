@@ -60,4 +60,5 @@ export type ChatSettings = {
   providerInterfaceId: string;
   providerModel: string;
   reasoningEffort: string;
+  serviceTier?: string;
 };

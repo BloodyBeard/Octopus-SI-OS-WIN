@@ -373,9 +373,16 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
   const artifactWidget = deliveredWidget("Delivered widget");
   const extensionWidget = deliveredWidget("Installed extension", { sourceExtensionId: "approved-extension", sourceRunId: "", sourceInterfaceId: "" });
   const surfaces = [artifactWidget, extensionWidget, deliveredWidget("Other interface", { sourceInterfaceId: "private-task" }), deliveredWidget("Other Home", { sourceRunId: "other-home" })];
-  const props = { accessProfile: "live", activity: { entries: [], total: 0 }, builtinWidgetSources: {}, homeRunId: "home", installedWidgetIds: [], installedWidgetsReady: true, session: session("idle", { start: async context => { startContext = context; calls.push("start"); }, end: async () => calls.push("end") }), surfaces, topology, workerEnvironmentSurfaces: [], widgetsOpen: true, workspace, viewMode: "voice" };
-  const view = await mount(VoiceView, props);
+  const props = { accessProfile: "live", activity: { entries: [], total: 0 }, builtinWidgetSources: {}, homeRunId: "home", installedWidgetIds: [extensionWidget.document.id], installedWidgetsReady: true, session: session("idle", { start: async context => { startContext = context; calls.push("start"); }, end: async () => calls.push("end") }), surfaces, topology, workerEnvironmentSurfaces: [], widgetsOpen: true, workspace, viewMode: "voice" };
+  const visibilityKey = "octopus.voice.hidden-surfaces.v1.live";
+  window.localStorage.removeItem(visibilityKey);
+  const view = await mount(VoiceView, { ...props, installedWidgetIds: [], installedWidgetsReady: false });
   try {
+    assert.equal(window.localStorage.getItem(visibilityKey), null);
+    await view.render(props);
+    assert.deepEqual([...view.container.querySelectorAll("[data-widget]")].map(node => node.dataset.widget), ["Delivered widget"]);
+    assert.equal(button(view.container, "Installed extension").getAttribute("aria-checked"), "false");
+    await click(button(view.container, "Installed extension"));
     const input = view.container.querySelector("textarea");
     assert.equal(input.value, "Follow-up while calling");
     assert.match(view.container.textContent, /A result delivered to Home/);
@@ -496,10 +503,28 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     assert.ok(body.closest(".is-compact"));
   } finally { await view.close(); }
   const resumed = await mount(VoiceView, { ...props, session: session("listening") });
+  const addedWidget = deliveredWidget("Newly installed extension", { sourceExtensionId: "new-extension", sourceRunId: "", sourceInterfaceId: "", document: { ...extensionWidget.document, id: "home.new-extension", title: "Newly installed extension" } });
+  const installedProps = { ...props, installedWidgetIds: [...props.installedWidgetIds, addedWidget.document.id], surfaces: [...surfaces, addedWidget] };
   try {
+    assert.ok(resumed.container.querySelector('[data-widget="Installed extension"]'));
     assert.equal(orbProps.ambient, true);
     const fade = motionState.get(resumed.container.querySelector(".home-response-stage__body"));
     await act(async () => fade.onAnimationComplete({ opacity: 0 }));
     assert.equal(orbProps.ambient, false);
+    await resumed.render(installedProps);
+    assert.equal(resumed.container.querySelector('[data-widget="Newly installed extension"]'), null);
+    assert.equal(button(resumed.container, "Newly installed extension").getAttribute("aria-checked"), "false");
+    assert.ok(resumed.container.querySelector('[data-widget="Installed extension"]'));
+    await click(button(resumed.container, "Installed extension"));
+    await click(button(resumed.container, "Newly installed extension"));
+    await resumed.render({ ...installedProps, installedWidgetIds: [], surfaces: [] });
+    await resumed.render(installedProps);
+    assert.equal(resumed.container.querySelector('[data-widget="Installed extension"]'), null);
+    assert.ok(resumed.container.querySelector('[data-widget="Newly installed extension"]'));
   } finally { await resumed.close(); }
+  const customized = await mount(VoiceView, installedProps);
+  try {
+    assert.equal(customized.container.querySelector('[data-widget="Installed extension"]'), null);
+    assert.ok(customized.container.querySelector('[data-widget="Newly installed extension"]'));
+  } finally { await customized.close(); window.localStorage.removeItem(visibilityKey); }
 });

@@ -65,6 +65,9 @@ type Props = {
   agentExecutionContexts: ChatExecutionContext[];
   agentDefinitions: readonly ClientAgentDefinition[];
   agentProviderInterfaces: OctopusProviderInterface[];
+  agentModelsLoading: boolean;
+  agentModelError: string;
+  onRefreshAgentModels: () => Promise<void>;
   dashboardExpanded: boolean;
   interactionDisabled: boolean;
   runtimeHost: RuntimeHostView;
@@ -130,6 +133,9 @@ export function AppShell({
   agentExecutionContexts,
   agentDefinitions,
   agentProviderInterfaces,
+  agentModelsLoading,
+  agentModelError,
+  onRefreshAgentModels,
   dashboardExpanded,
   interactionDisabled,
   runtimeHost,
@@ -382,6 +388,9 @@ export function AppShell({
                   agentExecutionContexts={agentExecutionContexts}
                   agentDefinitions={agentDefinitions}
                   agentProviderInterfaces={agentProviderInterfaces}
+                  agentModelsLoading={agentModelsLoading}
+                  agentModelError={agentModelError}
+                  onRefreshAgentModels={onRefreshAgentModels}
                   surfaceErrors={surfaceErrors}
                   runtimeHost={runtimeHost}
                   onSurfaceChange={(surfaceId) => {

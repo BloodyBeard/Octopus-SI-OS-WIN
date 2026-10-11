@@ -1,3 +1,4 @@
+pub use octopus_file_write_contract::{DecodeBudget, JsonFormat, Preimage};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -736,6 +737,7 @@ fn validate_pending_handoff_delivery_isolation(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AuthoredRun {
+    json_format: Option<JsonFormat>,
     content: String,
     patch: json_patch::Patch,
     before_hash: String,
@@ -756,9 +758,11 @@ struct FileWriteCallEnvelope {
     correlation_id: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct FileWriteCallArguments {
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "octopus_file_write_contract::optional_json_format")]
+    json_format: Option<JsonFormat>,
     path: PathBuf,
     patch: json_patch::Patch,
     expected_before_hash: String,
@@ -830,7 +834,7 @@ pub struct CheckedRunTransition {
 }
 
 #[derive(Debug)]
-enum CheckedRunError {
+pub enum CheckedRunError {
     Invalid(String),
     AwaitingResults { call_sequences: Vec<u64> },
     ChangedDuringRead { captured: String, current: String },
@@ -871,13 +875,14 @@ pub struct CheckedRunEvidence<'a> {
 }
 
 pub trait CheckedRunEvidenceReader {
+    fn max_payload_bytes(&self) -> u64;
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> { self.movement(seq) }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String>;
 }
 
-struct FileCheckedRunReader<'a> {
+pub struct FileCheckedRunReader<'a> {
     evidence: &'a CheckedRunEvidence<'a>,
     decoder: DurableMovementDecoder,
     reader: std::io::BufReader<std::fs::File>,
@@ -886,7 +891,7 @@ struct FileCheckedRunReader<'a> {
 }
 
 impl<'a> FileCheckedRunReader<'a> {
-    fn open(evidence: &'a CheckedRunEvidence<'a>, after_seq: Option<u64>) -> Result<Self, String> {
+    pub fn open(evidence: &'a CheckedRunEvidence<'a>, after_seq: Option<u64>) -> Result<Self, String> {
     if [evidence.max_control_frame_bytes,evidence.max_manifest_bytes,evidence.max_payload_bytes].contains(&0)
         || [&evidence.movements_path,&evidence.ledger_index_path,&evidence.blobs_dir].iter().any(|path| !path.is_absolute()) {
         return Err("checked authoring requires explicit bounded owner evidence paths".into());
@@ -915,9 +920,12 @@ impl<'a> FileCheckedRunReader<'a> {
 
         Ok(Self { evidence, decoder, reader, next_seq: sequence, snapshot_bytes: 0 })
     }
+
+    pub fn next_sequence(&self) -> u64 { self.next_seq }
 }
 
 impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
+    fn max_payload_bytes(&self) -> u64 { self.evidence.max_payload_bytes }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         generated_artifacts::read_movement(self.evidence,seq).map(Some)
     }
@@ -960,7 +968,7 @@ fn checked_run_file_chain_state(
     if ContentHash::of_bytes(before) == ContentHash::of_bytes(after) { return Ok(Vec::new()); }
     let mut reader = FileCheckedRunReader::open(evidence, Some(after_seq))?;
     let first = reader.next_seq;
-    let transitions = checked_run_file_chain_with_reader(&mut reader, path, before, after, after_seq, first, None, writers, &[], None)?;
+    let transitions = checked_run_file_chain_with_reader(&mut reader, path, before, CheckedRunTarget::Snapshot(after), after_seq, first, None, writers, &[], None, None)?;
     Ok(transitions)
 }
 
@@ -970,25 +978,10 @@ pub fn checked_run_file_chain_before(
 ) -> Result<Vec<CheckedRunTransition>, String> {
     let first = after_seq.checked_add(1).ok_or("checked historical sequence overflow")?;
     if first > before_seq { return Err("checked historical interval is reversed".into()); }
-    checked_run_file_chain_with_reader(reader, path, before, after, after_seq, first, Some(before_seq), writers, &[], None).map_err(Into::into)
+    checked_run_file_chain_with_reader(reader, path, before, CheckedRunTarget::Snapshot(after), after_seq, first, Some(before_seq), writers, &[], None, None).map_err(Into::into)
 }
 
-fn checked_run_file_chain_with_reader(
-    reader: &mut impl CheckedRunEvidenceReader, path: &Path, before: &[u8], after: &[u8],
-    after_seq: u64, first_seq: u64, before_seq: Option<u64>, writers: &[CheckedRunWriter],
-    selected_reads: &[ArtifactRef],
-    connection_config: Option<&RunAuthoringConfig>,
-) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
-    if connection_config.is_some() && (before_seq.is_some() || !selected_reads.is_empty()) {
-        return Err("observed connections cannot bridge historical or selected-read evidence".into());
-    }
-    let start = ContentHash::of_bytes(before).to_hex();
-    let end = ContentHash::of_bytes(after).to_hex();
-    let original = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
-    let target = RunRecord::from_bytes(after).map_err(|e| e.to_string())?;
-    if original.id != target.id || original.ee != target.ee || original.worker != target.worker {
-        return Err("checked authoring chain changed run, EE or worker".into());
-    }
+fn validate_checked_run_writers(writers: &[CheckedRunWriter]) -> Result<(), String> {
     let mut unique = BTreeSet::new();
     let mut returns = BTreeSet::new();
     for writer in writers {
@@ -997,6 +990,37 @@ fn checked_run_file_chain_with_reader(
         }
         for value in [&writer.tool, &writer.call_label, &writer.result_label] { non_empty_string(value, "checked run writer")?; }
     }
+    Ok(())
+}
+
+enum CheckedRunTarget<'a> {
+    Snapshot(&'a [u8]),
+    Observed { hash: ContentHash, sequence: u64 },
+}
+
+fn checked_run_file_chain_with_reader(
+    reader: &mut impl CheckedRunEvidenceReader, path: &Path, before: &[u8], target: CheckedRunTarget<'_>,
+    after_seq: u64, first_seq: u64, before_seq: Option<u64>, writers: &[CheckedRunWriter],
+    selected_reads: &[ArtifactRef],
+    connection_config: Option<&RunAuthoringConfig>,
+    selected_install: Option<&CheckedRunInstall>,
+) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
+    if connection_config.is_some() && (before_seq.is_some() || !selected_reads.is_empty() || matches!(target, CheckedRunTarget::Observed { .. })) {
+        return Err("observed connections cannot bridge historical or selected-read evidence".into());
+    }
+    let start = ContentHash::of_bytes(before).to_hex();
+    let (end, after, observed_sequence) = match target {
+        CheckedRunTarget::Snapshot(after) => (ContentHash::of_bytes(after).to_hex(), Some(after), None),
+        CheckedRunTarget::Observed { hash, sequence } => (hash.to_hex(), None, Some(sequence)),
+    };
+    let original = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
+    if let Some(after) = after {
+        let target = RunRecord::from_bytes(after).map_err(|e| e.to_string())?;
+        if original.id != target.id || original.ee != target.ee || original.worker != target.worker {
+            return Err("checked authoring chain changed run, EE or worker".into());
+        }
+    }
+    validate_checked_run_writers(writers)?;
     struct Candidate {
         writer: CheckedRunWriter,
         call: Movement,
@@ -1017,7 +1041,8 @@ fn checked_run_file_chain_with_reader(
         if movement.seq.0 != sequence { return Err("checked authoring evidence ledger has a sequence gap".into()); }
         sequence = sequence.checked_add(1).ok_or("checked authoring evidence sequence overflow")?;
         if movement.seq.0 <= after_seq || movement.kind != MovementKind::InterfaceOutbound { continue; }
-        if before_seq.is_some() {
+        if selected_install.is_some_and(|install| movement.seq.0 != install.call.movement_seq && movement.seq.0 != install.result.movement_seq) { continue; }
+        if before_seq.is_some() && selected_install.is_none() {
             let metadata = movement.invocation_metadata.as_ref().and_then(|m| m.invocation())
                 .ok_or("checked historical outbound has no actual admission metadata")?;
             let runtime = metadata.runtime.as_ref().ok_or("checked historical outbound has no run coordinate")?;
@@ -1033,6 +1058,7 @@ fn checked_run_file_chain_with_reader(
         let source_writer = writers.iter().find(|w| movement.from == Endpoint::Interface(w.source.clone()) && movement.to == Endpoint::Interface(w.door.clone()));
         let result_writer = writers.iter().find(|w| movement.from == Endpoint::Interface(w.door.clone()) && movement.to == Endpoint::Interface(w.owner.clone()));
         if source_writer.is_none() && result_writer.is_none() { continue; }
+        if source_writer.is_some() && observed_sequence.is_some_and(|sequence| movement.seq.0 >= sequence) { continue; }
         let metadata = movement.invocation_metadata.as_ref().and_then(|m| m.invocation()).ok_or("checked authoring evidence has no invocation metadata")?;
         let runtime = metadata.runtime.as_ref().ok_or("checked authoring evidence has no runtime coordinate")?;
         if runtime.ee != original.ee || runtime.worker != original.worker || metadata.verification_failure.is_some() {
@@ -1055,7 +1081,7 @@ fn checked_run_file_chain_with_reader(
             let (arguments, ordered, before) = if call.arguments.get("ordered").is_some() {
                 let ordered: writer_run::OrderedArguments = serde_json::from_value(call.arguments).map_err(|e|e.to_string())?;
                 if !ordered.targets(path) { continue; }
-                let (before, arguments) = ordered.checked_call(writer,&snapshot,path)?;
+                let (before, arguments) = ordered.checked_call(writer,&snapshot,path,reader.max_payload_bytes())?;
                 (arguments,Some(ordered),before)
             } else {
                 if runtime.run != original.id { continue; }
@@ -1080,8 +1106,8 @@ fn checked_run_file_chain_with_reader(
             let Some(candidate) = calls.remove(&(writer.owner.clone(), correlation)) else { continue; };
             if candidate.writer != *writer { return Err("checked run result came from a different declared writer".into()); }
             if let Some(ordered) = &candidate.ordered {
-                if !ordered.checked_result(writer,metadata,&snapshot,&result)? { continue; }
-                let prospective = apply_run_json_patch(&candidate.before,&candidate.arguments.patch,&candidate.arguments.expected_after_hash)?.into_bytes();
+                if !ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes())? { continue; }
+                let prospective = apply_run_json_patch(&candidate.before,&candidate.arguments.patch,&candidate.arguments.expected_after_hash, candidate.arguments.json_format)?.into_bytes();
                 let transition = CheckedRunTransition {writer:candidate.writer,before:candidate.before,after:prospective,call:candidate.call,result:movement};
                 generated_artifacts::validate_generated_transition(reader,&transition)?;
                 input_artifacts::validate_input_transition(reader, &transition)?;
@@ -1098,7 +1124,7 @@ fn checked_run_file_chain_with_reader(
             let body: FileWriteResultBody = serde_json::from_value(result.body.ok_or("checked run result has no body")?).map_err(|e| e.to_string())?;
             let [evidence] = body.writes.as_slice() else { return Err("checked run result must prove one exact file".into()); };
             let prospective = apply_run_json_patch(&candidate.before, &candidate.arguments.patch,
-                &candidate.arguments.expected_after_hash)?.into_bytes();
+                &candidate.arguments.expected_after_hash, candidate.arguments.json_format)?.into_bytes();
             validate_unchanged_admitted_checkpoint(&prospective, &snapshot, &runtime.checkpoint)?;
             let checkpoint = snapshot_record.checkpoint(&runtime.checkpoint).ok_or("checked run result lost its admitted checkpoint")?;
             let binding = CheckpointBindingPolicySnapshot { inbound: checkpoint.interface_binding.clone().ok_or("checked run result has no inbound binding")?, outbound: checkpoint.outbound_interface_bindings.clone() };
@@ -1140,12 +1166,11 @@ fn checked_run_file_chain_with_reader(
             if let Some(config) = connection_config {
                 // These are validated endpoint bytes, never synthetic writer
                 // receipts. Only routing may differ between adjacent segments.
-                let original = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
                 let mut successors = BTreeMap::new();
                 for bytes in by_before.values().filter(|next| next.call.seq.0 > previous_call).map(|next| next.before.as_slice())
                     .chain(calls.values().filter(|next| next.call.seq.0 > previous_call).map(|next| next.before.as_slice()))
-                    .chain(std::iter::once(after)) {
-                    if output_connections::protected_record(&original, bytes, config)?
+                    .chain(after.into_iter()) {
+                    if output_connections::protected_record(&current, bytes, config)?
                         .is_some_and(|protected| protected == current) {
                         successors.insert(ContentHash::of_bytes(bytes).to_hex(), bytes);
                     }
@@ -1171,7 +1196,7 @@ fn checked_run_file_chain_with_reader(
                         && candidate.arguments.expected_before_hash == ContentHash::of_bytes(&candidate.before).to_hex()
                         && candidate.call.seq.0 > previous_call
                     {
-                        apply_run_json_patch(&candidate.before, &candidate.arguments.patch, &candidate.arguments.expected_after_hash)?;
+                        apply_run_json_patch(&candidate.before, &candidate.arguments.patch, &candidate.arguments.expected_after_hash, candidate.arguments.json_format)?;
                         reachable.insert(candidate.arguments.expected_after_hash.clone());
                         pending_sequences.insert(candidate.call.seq.0);
                     }
@@ -1196,6 +1221,12 @@ fn checked_run_file_chain_with_reader(
         previous_call = transition.call.seq.0;
         chain.push(transition);
     }
+    if observed_sequence.is_some_and(|sequence| by_before.get(&end).is_some_and(|next| next.result.seq.0 <= sequence)) {
+        return Err("observed run snapshot was already withdrawn by a checked effect".into());
+    }
+    // One receipt proves its exact file effect. Later coauthor state requires
+    // the separate full-chain proof, not this installation's result-time snapshot.
+    if selected_install.is_some() { return Ok(chain); }
     let mut versions = BTreeMap::from([(start, 0usize)]);
     for (index, transition) in chain.iter().enumerate() {
         if versions.insert(ContentHash::of_bytes(&transition.after).to_hex(), index + 1).is_some() {
@@ -1242,11 +1273,12 @@ pub fn checked_run_install(
     install: &octopus_app_server_interface::application_consent_contract::CheckedRunInstall,
     writers: &[CheckedRunWriter],
 ) -> Result<CheckedRunTransition, String> {
+    validate_checked_run_writers(writers)?;
     if install.call.movement_seq == 0 || install.call.movement_seq >= install.result.movement_seq {
         return Err("checked installation needs its actual ordered non-genesis call and result".into());
     }
-    let call = reader.movement(install.call.movement_seq)?.ok_or("checked installation call is absent")?;
-    let result = reader.movement(install.result.movement_seq)?.ok_or("checked installation result is absent")?;
+    let call = reader.admitted_movement(install.call.movement_seq)?.ok_or("checked installation call is absent")?;
+    let result = reader.admitted_movement(install.result.movement_seq)?.ok_or("checked installation result is absent")?;
     if call.artifact.as_ref() != Some(&install.call.artifact) || result.artifact.as_ref() != Some(&install.result.artifact) {
         return Err("checked installation changed its exact admitted evidence refs".into());
     }
@@ -1255,15 +1287,54 @@ pub fn checked_run_install(
             .and_then(|runtime| runtime.run_record_hash.as_deref()).and_then(ContentHash::from_hex)
             .ok_or("checked installation has no admitted snapshot".into())
     };
-    let before = reader.snapshot(&snapshot_hash(&call)?)?;
-    let after = reader.snapshot(&snapshot_hash(&result)?)?;
-    let chain = checked_run_file_chain_before(reader, path, &before, &after, install.call.movement_seq - 1,
-        install.result.movement_seq.checked_add(1).ok_or("checked installation sequence overflow")?, writers)?;
+    let admitted = reader.snapshot(&snapshot_hash(&call)?)?;
+    let (manifest, payload) = reader.artifact(&install.call.artifact)?;
+    let writer = writers.iter().find(|writer| call.from == Endpoint::Interface(writer.source.clone())
+        && call.to == Endpoint::Interface(writer.door.clone()))
+        .ok_or("checked installation call has no exact declared writer")?;
+    let artifact: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+    if manifest.label != writer.call_label || artifact.tool != writer.tool {
+        return Err("checked installation call differs from its declared writer".into());
+    }
+    let (before, after) = if artifact.arguments.get("ordered").is_some() {
+        let ordered: writer_run::OrderedArguments = serde_json::from_value(artifact.arguments).map_err(|e| e.to_string())?;
+        let (before, arguments) = ordered.checked_call(writer, &admitted, path,reader.max_payload_bytes())?;
+        let after = apply_run_json_patch(&before, &arguments.patch, &arguments.expected_after_hash, arguments.json_format)?.into_bytes();
+        (before, after)
+    } else {
+        let arguments: FileWriteCallArguments = serde_json::from_value(artifact.arguments).map_err(|e| e.to_string())?;
+        if arguments.path != path { return Err("checked installation targets another path".into()); }
+        let after = apply_run_json_patch(&admitted, &arguments.patch, &arguments.expected_after_hash, arguments.json_format)?.into_bytes();
+        (admitted, after)
+    };
+    let chain = checked_run_file_chain_with_reader(reader, path, &before, CheckedRunTarget::Snapshot(&after), install.call.movement_seq - 1,
+        install.call.movement_seq, Some(install.result.movement_seq.checked_add(1).ok_or("checked installation sequence overflow")?),
+        writers, &[], None, Some(install)).map_err(String::from)?;
     let [transition] = chain.as_slice() else { return Err("checked installation does not prove one exact write".into()); };
     if transition.call != call || transition.result != result {
         return Err("checked installation differs from its exact admitted write".into());
     }
     Ok(transition.clone())
+}
+
+pub fn checked_declared_run_install(
+    evidence: &CheckedRunEvidence<'_>, path: &Path, declaration: &[u8],
+    install: &CheckedRunInstall, seeds: Vec<CheckedRunWriter>,
+) -> Result<CheckedRunTransition, String> {
+    let record = RunRecord::from_bytes(declaration).map_err(|e| e.to_string())?;
+    let writers = declared_writer_closure(&record, seeds)?;
+    let prior = install.call.movement_seq.checked_sub(1).ok_or("checked installation call is genesis")?;
+    let mut reader = FileCheckedRunReader::open(evidence, Some(prior))?;
+    while reader.next_seq < install.call.movement_seq {
+        reader.movement(reader.next_seq)?.ok_or("checked installation call is absent")?;
+    }
+    let transition = checked_run_install(&mut reader, path, install, &writers)?;
+    let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
+    if before.id != record.id || before.ee != record.ee || before.worker != record.worker {
+        return Err("checked installation changed its declared target scope".into());
+    }
+    validate_checked_owner_transition(&transition)?;
+    Ok(transition)
 }
 
 pub fn validate_selected_return_writers(
@@ -1313,7 +1384,7 @@ pub fn checked_return_interval(
     writers.extend(selected.owner_writer.clone());
     let first = after_seq.checked_add(1).ok_or("selected return interval overflow")?;
     if first > before_seq { return Err("selected return interval is reversed".into()); }
-    let chain = checked_run_file_chain_with_reader(reader, &selected.run_path, before, after, after_seq, first, Some(before_seq), &writers, &selected.selected_artifacts, None)?;
+    let chain = checked_run_file_chain_with_reader(reader, &selected.run_path, before, CheckedRunTarget::Snapshot(after), after_seq, first, Some(before_seq), &writers, &selected.selected_artifacts, None, None)?;
     for transition in &chain {
         let prior = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
         let next = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
@@ -1422,8 +1493,7 @@ fn checked_selected_run_advance_state(
 ) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
     let mut writers = config.checkpoints.iter().filter_map(|cp| cp.owner_authoring.clone()).collect::<Vec<_>>();
     if writers.is_empty() {
-        let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
-        if let Some(protected) = output_connections::protected_record(&original, after, config)? {
+        if let Some(protected) = output_connections::protected_record(before, after, config)? {
             if ContentHash::of_bytes(before) != ContentHash::of_bytes(&protected) {
                 return Err("outgoing connection changed protected provider state without a checked writer chain".into());
             }
@@ -1444,8 +1514,8 @@ fn checked_selected_run_advance_state(
     let writers = declared_writer_closure(&record, writers)?;
     let mut reader = FileCheckedRunReader::open(&evidence, Some(first))?;
     let scan_start = reader.next_seq;
-    let chain = checked_run_file_chain_with_reader(&mut reader, path, before, after, first, scan_start,
-        None, &writers, &[], Some(config))?;
+    let chain = checked_run_file_chain_with_reader(&mut reader, path, before, CheckedRunTarget::Snapshot(after), first, scan_start,
+        None, &writers, &[], Some(config), None)?;
     for transition in &chain {
         let original = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
         let next = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
@@ -1687,6 +1757,61 @@ pub fn checked_declared_run_advance(
     let transitions = checked_run_file_chain(evidence, path, before, after, first, &writers)?;
     for transition in &transitions { validate_checked_owner_transition(transition)?; }
     Ok(transitions)
+}
+
+pub fn checked_declared_run_snapshot(
+    evidence: &CheckedRunEvidence<'_>, path: &Path, before: &[u8], after_seq: u64,
+    hash: &str, observed_sequence: u64, seeds: Vec<CheckedRunWriter>,
+) -> Result<Vec<u8>, CheckedRunError> {
+    if after_seq >= observed_sequence { return Err("observed run snapshot has no earlier admitted anchor".into()); }
+    let hash = ContentHash::from_hex(hash).filter(|pin| pin.to_hex() == hash)
+        .ok_or("observed run snapshot has no canonical content hash")?;
+    let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let writers = declared_writer_closure(&record, seeds)?;
+    validate_checked_run_writers(&writers)?;
+    let mut first = concurrent_writer_evidence_start(evidence, &record, before, after_seq)?;
+    let mut prefix = FileCheckedRunReader::open(evidence, None)?;
+    while prefix.next_seq <= first {
+        let Some(call) = prefix.movement(prefix.next_seq)? else { break; };
+        if call.kind != MovementKind::InterfaceOutbound || call.seq.0 >= observed_sequence { continue; }
+        let Some(writer) = writers.iter().find(|writer| call.from == Endpoint::Interface(writer.source.clone())
+            && call.to == Endpoint::Interface(writer.door.clone())) else { continue; };
+        let (manifest, payload) = prefix.artifact(call.artifact.as_ref().ok_or("observed writer call has no artifact")?)?;
+        if manifest.label != writer.call_label { continue; }
+        let artifact: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+        if artifact.tool != writer.tool || artifact.arguments.get("ordered").is_none()
+            || artifact.arguments.pointer("/writes/1/expected_before_hash").and_then(|value| value.as_str())
+                .is_none_or(|hash| hash != ContentHash::of_bytes(before).to_hex()) { continue; }
+        let ordered: writer_run::OrderedArguments = serde_json::from_value(artifact.arguments).map_err(|error| error.to_string())?;
+        if !ordered.targets(path) { continue; }
+        let runtime = call.runtime().ok_or("observed writer call has no admitted coordinate")?;
+        let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+            .ok_or("observed writer call has no admitted writer snapshot")?;
+        let snapshot = prefix.snapshot(&hash)?;
+        if ContentHash::of_bytes(&snapshot) != hash { return Err("observed writer snapshot failed integrity".into()); }
+        let declaration = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
+        if declaration.id != runtime.run || declaration.ee != record.ee || declaration.worker != record.worker
+            || runtime.ee != record.ee || runtime.worker != record.worker || runtime.interface != writer.door {
+            return Err("observed writer snapshot changed its exact admitted scope".into());
+        }
+        let (preimage, _) = ordered.checked_call(writer, &snapshot, path,evidence.max_payload_bytes)?;
+        if preimage == before {
+            first = call.seq.0.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary")?;
+            break;
+        }
+    }
+    let mut reader = FileCheckedRunReader::open(evidence, Some(first))?;
+    let scan_start = reader.next_seq;
+    let transitions = checked_run_file_chain_with_reader(&mut reader, path, before,
+        CheckedRunTarget::Observed { hash, sequence: observed_sequence }, first, scan_start,
+        None, &writers, &[], None, None)?;
+    for transition in &transitions { validate_checked_owner_transition(transition)?; }
+    let after = transitions.last().map_or_else(|| before.to_vec(), |transition| transition.after.clone());
+    let target = RunRecord::from_bytes(&after).map_err(|error| error.to_string())?;
+    if ContentHash::of_bytes(&after) != hash || target.id != record.id || target.ee != record.ee || target.worker != record.worker {
+        return Err("observed run snapshot differs from its exact checked target scope".into());
+    }
+    Ok(after)
 }
 
 fn validate_verified_input_change(before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology, pending: &PendingHandoff) -> Result<(), String> {
@@ -2540,7 +2665,7 @@ fn validate_authoring_attempt_source(
     let content = apply_run_json_patch(
         record_bytes,
         &call.arguments.patch,
-        &call.arguments.expected_after_hash,
+        &call.arguments.expected_after_hash, call.arguments.json_format
     )?;
     let candidate = RunRecord::from_bytes(content.as_bytes()).map_err(|error| {
         format!("provider authoring failure source call carries a malformed run: {error}")
@@ -2584,6 +2709,7 @@ fn validate_authoring_attempt_source(
         manifest_path,
         provider_source_movement_seq: pending.source_movement_seq,
         authored: AuthoredRun {
+            json_format: call.arguments.json_format,
             content,
             patch: call.arguments.patch,
             before_hash: record_hash,
@@ -3097,6 +3223,8 @@ impl OwnerOperatorRequest {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckedRunEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "octopus_file_write_contract::optional_json_format")]
+    pub json_format: Option<JsonFormat>,
     pub path: PathBuf,
     pub before_hash: String,
     pub after_hash: String,
@@ -3109,18 +3237,31 @@ pub use authoring_retry::checked_edit_verification_failure;
 pub use authoring_retry::checked_failed_run_write;
 
 impl CheckedRunEdit {
+    pub fn arguments(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(FileWriteCallArguments {
+            path: self.path.clone(), patch: self.patch.clone(),
+            expected_before_hash: self.before_hash.clone(), expected_after_hash: self.after_hash.clone(),
+            json_format: self.json_format,
+        }).map_err(|error| error.to_string())
+    }
     pub fn prepare(
         path: PathBuf,
         current: &[u8],
         prospective: serde_json::Value,
         correlation_id: String,
     ) -> Result<Self, String> {
+        Self::prepare_with_format(path, current, prospective, correlation_id, Some(JsonFormat::Compact))
+    }
+
+    pub fn prepare_with_format(
+        path: PathBuf, current: &[u8], prospective: serde_json::Value,
+        correlation_id: String, json_format: Option<JsonFormat>,
+    ) -> Result<Self, String> {
         if !path.is_absolute() || correlation_id.is_empty() {
             return Err("checked run edit requires an absolute path and exact correlation".into());
         }
         let before = RunRecord::from_bytes(current).map_err(|e| e.to_string())?;
-        let mut bytes = serde_json::to_vec_pretty(&prospective).map_err(|e| e.to_string())?;
-        bytes.push(b'\n');
+        let bytes = json_format.unwrap_or_default().encode(&prospective)?;
         let after = RunRecord::from_bytes(&bytes).map_err(|e| e.to_string())?;
         if before.id != after.id
             || before.ee != after.ee
@@ -3132,11 +3273,12 @@ impl CheckedRunEdit {
         let previous = serde_json::from_slice(current).map_err(|e| e.to_string())?;
         let patch = json_patch::diff(&previous, &prospective);
         let after_hash = ContentHash::of_bytes(&bytes).to_hex();
-        let content = apply_run_json_patch(current, &patch, &after_hash)?;
+        let content = apply_run_json_patch(current, &patch, &after_hash, json_format)?;
         if content.as_bytes() != bytes {
             return Err("checked run edit did not reconstruct exact prospective bytes".into());
         }
         Ok(Self {
+            json_format,
             path,
             before_hash: ContentHash::of_bytes(current).to_hex(),
             after_hash,
@@ -3160,7 +3302,7 @@ impl CheckedRunEdit {
         }
         let bytes = serde_json::to_vec(&serde_json::json!({
             "tool":profile.file_write_tool,"correlation_id":self.correlation_id,
-            "arguments":{"path":self.path,"patch":self.patch,"expected_before_hash":self.before_hash,"expected_after_hash":self.after_hash}
+            "arguments":self.arguments()?
         })).map_err(|e| e.to_string())?;
         InterfaceArtifactFile::write(root, &profile.file_write_label, &bytes)
             .map_err(|e| e.to_string())
@@ -3288,6 +3430,7 @@ fn apply_run_json_patch(
     current: &[u8],
     patch: &json_patch::Patch,
     expected_after_hash: &str,
+    json_format: Option<JsonFormat>,
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err("provider run authoring patch must not be empty".to_string());
@@ -3305,9 +3448,7 @@ fn apply_run_json_patch(
         .map_err(|error| format!("provider run authoring source is not JSON: {error}"))?;
     json_patch::patch(&mut value, patch)
         .map_err(|error| format!("provider run authoring patch cannot be applied: {error}"))?;
-    let mut bytes = serde_json::to_vec_pretty(&value)
-        .map_err(|error| format!("provider patched run JSON did not encode: {error}"))?;
-    bytes.push(b'\n');
+    let bytes = json_format.unwrap_or_default().encode(&value)?;
     let actual_after = ContentHash::of_bytes(&bytes);
     if actual_after != expected_after {
         return Err(format!(
@@ -3421,11 +3562,10 @@ fn persisted_authoring_attempt(
             || chain
                 .iter()
                 .any(|transition| transition.writer.owner == config.provider_interface)
-            || authoring_retry::rebase_authored_run(before, current, &previous.authored, config)?
-                != next.authored
         {
             return Err("provider authoring retry changed its original intent or independent write evidence".into());
         }
+        authoring_retry::validate_rebased_authored_run(before, current, &previous.authored, &next.authored, config)?;
     }
     Ok(ordered.pop().map(|(attempt, _, _)| attempt))
 }
@@ -3674,6 +3814,7 @@ fn completed_authoring_failure_duplicate(
         .id
         .clone();
         let authored = AuthoredRun {
+            json_format: call.arguments.json_format,
             after_hash: current_hash.clone(),
             before_hash: call.arguments.expected_before_hash,
             content: String::from_utf8(record_bytes.to_vec()).map_err(|error| {
@@ -5257,11 +5398,51 @@ impl ProviderOutputHandoff {
                 .is_none()
                 .then_some(&runtime.checkpoint),
         )?;
-        let coauthor_chain = stable_run_observation(&run_path, &current_run_record, ctx.required_host_io_limits()?.max_payload_bytes, || {
-            checked_selected_run_advance_state(ctx,&run_path,pinned_run_record,&current_run_record,source_movement_seq,&config)
-        })?;
+        let independent_input_unchanged = consumed_context_free_independent_input.is_some()
+            && current_record.checkpoint(&runtime.checkpoint) == Some(consumed_checkpoint)
+            && current_record.active_checkpoints.contains(&runtime.checkpoint);
+        let (coauthor_chain, run_record_evidence_seq) = stable_run_observation(
+            &run_path, &current_run_record, ctx.required_host_io_limits()?.max_payload_bytes, || {
+                if independent_input_unchanged {
+                    validate_unchanged_admitted_checkpoint(
+                        pinned_run_record, &current_run_record, &runtime.checkpoint,
+                    )?;
+                    if runtime.run_record_hash.as_deref() != Some(ContentHash::of_bytes(pinned_run_record).to_hex().as_str())
+                        || runtime.ee != initial_record.ee
+                        || !initial_record.active_checkpoints.contains(&runtime.checkpoint)
+                        || current_config.checkpoints.iter().filter(|template| *template == &consumed_templates[0]).count() != 1
+                        || current_mandatory_role_bindings(&current_record, &current_config)? != mandatory_role_bindings
+                    {
+                        return Err("context-free independent input changed its admitted contract or scope".into());
+                    }
+                    let mut index = session.index()?;
+                    let (coordinate, evidence) = index.exact_provider_source_outbound(
+                        run, &runtime.worker, &ctx.interface, source_movement_seq,
+                    )?;
+                    let metadata = input.metadata().map_err(|error| error.to_string())?;
+                    if coordinate.checkpoint != runtime.checkpoint.as_str() || coordinate.epoch != runtime.epoch
+                        || evidence.artifact != input.artifact || evidence.run_record_hash != runtime.run_record_hash
+                        || evidence.source != *consumed_templates[0].interface()
+                        || !indexed_evidence_matches_checkpoint(&evidence, &consumed_templates[0])
+                        || !metadata_matches_checkpoint(metadata, &consumed_templates[0])
+                        || evidence.artifact_binding_refs != metadata.artifact_binding_refs
+                        || !artifact_refs_match_bindings(&evidence.artifact_binding_refs, &consumed_checkpoint.artifact_bindings)
+                    {
+                        return Err("context-free independent input has no exact admitted source".into());
+                    }
+                    Ok((Vec::new(), index.next_seq.saturating_sub(1).max(source_movement_seq)))
+                } else {
+                    let chain = checked_selected_run_advance_state(
+                        ctx, &run_path, pinned_run_record, &current_run_record, source_movement_seq, &config,
+                    )?;
+                    let evidence_seq = chain.last().map(|transition| transition.call.seq.0).unwrap_or(source_movement_seq);
+                    Ok((chain, evidence_seq))
+                }
+            },
+        )?;
         let added_outputs = output_connections::is_extension(&bound_topology, &current_topology);
-        let retired_verified_input = !added_outputs && (current_config != config || current_topology != bound_topology);
+        let retired_verified_input = !independent_input_unchanged && !added_outputs
+            && (current_config != config || current_topology != bound_topology);
         if retired_verified_input {
             validate_retired_verified_input(
                 ctx,
@@ -5276,7 +5457,6 @@ impl ProviderOutputHandoff {
                 source_movement_seq,
             )?;
         }
-        let run_record_evidence_seq = coauthor_chain.last().map(|transition| transition.call.seq.0).unwrap_or(source_movement_seq);
         let config = current_config;
         let bound_topology = current_topology;
         let effective_record = &current_record;
@@ -6952,10 +7132,22 @@ impl ProviderOutputHandoff {
         let (config, _) = resolve_run_authoring_invocation(
             &profile, &self.config.provider_interface, &self.config.run, &record, &checkpoint.id,
         )?;
-        Ok(config.checkpoints.iter().any(|template| {
-            template.role == RunAuthoringCheckpointRole::IndependentInput && !template.include_context
+        let templates = config.checkpoints.iter().filter(|template| {
+            template.role.is_provider_input()
                 && checkpoint_record_matches_template(checkpoint, template, &record.id)
-        }))
+        }).collect::<Vec<_>>();
+        let [template] = templates.as_slice() else {
+            return Err("context recovery source has no unique provider input contract".into());
+        };
+        if record.worker != self.config.worker
+            || !record.active_checkpoints.contains(&checkpoint.id)
+            || checkpoint.epoch.0 != coordinate.epoch
+            || template.interface() != &evidence.source
+            || !indexed_evidence_matches_checkpoint(&evidence, template)
+        {
+            return Err("context recovery source differs from its exact admitted checkpoint".into());
+        }
+        Ok(!template.include_context)
     }
 
     fn restore_pending_context_with_publications(
@@ -7486,6 +7678,7 @@ impl ProviderOutputHandoff {
                         &current,
                         authored,
                         &self.config,
+                        Some(JsonFormat::Compact),
                     )?;
                     state.run_record_evidence_seq = Some(chain.last().unwrap().call.seq.0);
                     state.run_record_bytes = current;
@@ -8019,9 +8212,7 @@ impl ProviderOutputHandoff {
             FRONTIER_CHECKPOINT_IDS.to_string(),
             serde_json::json!(next_frontier_ids),
         );
-        let mut bytes = serde_json::to_vec_pretty(&value)
-            .map_err(|error| format!("provider run JSON did not encode: {error}"))?;
-        bytes.push(b'\n');
+        let bytes = JsonFormat::Compact.encode(&value)?;
         let authored_record = RunRecord::from_bytes(&bytes).map_err(|error| {
             format!(
                 "provider authored malformed run '{}': {error}",
@@ -8046,7 +8237,7 @@ impl ProviderOutputHandoff {
                 self.config.run.as_str()
             ));
         }
-        let reconstructed = apply_run_json_patch(current, &patch, &after_hash)?;
+        let reconstructed = apply_run_json_patch(current, &patch, &after_hash, Some(JsonFormat::Compact))?;
         if reconstructed != content {
             return Err(format!(
                 "provider run '{}' JSON patch did not reconstruct the exact authored bytes",
@@ -8054,6 +8245,7 @@ impl ProviderOutputHandoff {
             ));
         }
         Ok(AuthoredRun {
+            json_format: Some(JsonFormat::Compact),
             before_hash,
             after_hash,
             correlation_id: format!(
@@ -8075,11 +8267,10 @@ impl ProviderOutputHandoff {
     ) -> Result<InterfaceArtifactFile, String> {
         let payload = serde_json::to_vec(&serde_json::json!({
             "tool": self.config.file_write_tool,
-            "arguments": {
-                "path": self.run_path,
-                "patch": authored.patch,
-                "expected_before_hash": authored.before_hash,
-                "expected_after_hash": authored.after_hash
+            "arguments": FileWriteCallArguments {
+                path: self.run_path.clone(), patch: authored.patch.clone(),
+                expected_before_hash: authored.before_hash.clone(),
+                expected_after_hash: authored.after_hash.clone(), json_format: authored.json_format,
             },
             "correlation_id": authored.correlation_id
         }))
@@ -8575,6 +8766,38 @@ impl RunAuthoringProfile {
     }
 }
 
+pub fn validate_admitted_run_writer(
+    snapshot: &[u8],
+    metadata: &InvocationMetadata,
+    writer: &CheckedRunWriter,
+) -> Result<(), String> {
+    let runtime = metadata.runtime.as_ref().ok_or("coauthor proof has no admitted coordinate")?;
+    let record = RunRecord::from_bytes(snapshot).map_err(|e| e.to_string())?;
+    if runtime.run_record_hash.as_deref() != Some(ContentHash::of_bytes(snapshot).to_hex().as_str())
+        || runtime.run != record.id || runtime.worker != record.worker || runtime.ee != record.ee
+        || !record.active_checkpoints.contains(&runtime.checkpoint)
+        || record.checkpoint(&runtime.checkpoint).is_none_or(|checkpoint| checkpoint.epoch.0 != runtime.epoch)
+    {
+        return Err("coauthor proof differs from its admitted Run snapshot".into());
+    }
+    let topology = validate_declared_provider_writer(&record, writer)?;
+    topology.validate_identity(&record, &writer.owner)?;
+    if !metadata.grant.interfaces.iter().any(|id| id == writer.owner.as_str())
+        || metadata.grant.hard_blocked_tools.contains(&writer.tool)
+    {
+        return Err("coauthor owner or writer is denied by this formation".into());
+    }
+    if let Some(binding) = &topology.writer_run {
+        binding.roles(&record, &writer.owner, &topology.checkpoints)?;
+    } else if [&writer.source, &writer.door].iter().any(|id|
+        !metadata.grant.interfaces.iter().any(|granted| granted == id.as_str()))
+        || !metadata.grant.tools.contains(&writer.tool)
+    {
+        return Err("coauthor's local authoring edge is absent from this formation".into());
+    }
+    Ok(())
+}
+
 fn validate_declared_provider_writer(record: &RunRecord, writer: &CheckedRunWriter) -> Result<BoundRunAuthoringTopology, String> {
     let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state.get(&writer.owner)
         .and_then(|state| state.get(RUN_AUTHORING_BINDING)).cloned()
@@ -8916,6 +9139,17 @@ pub fn bound_tool_door(
             owners.len()
         )),
     }
+}
+
+pub fn declared_provider_run_writer(
+    record: &RunRecord, provider: &InterfaceId, profile: &RunAuthoringProfile,
+) -> Result<CheckedRunWriter, String> {
+    let config = config_from_persisted_profile(record, provider, profile)?;
+    let writer = CheckedRunWriter { owner: provider.clone(), source: config.authoring_source_interface.clone(),
+        door: config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?.interface().clone(),
+        tool: profile.file_write_tool.clone(), call_label: profile.file_write_label.clone(), result_label: profile.file_write_result_label.clone() };
+    validate_declared_provider_writer(record, &writer)?;
+    Ok(writer)
 }
 
 fn config_from_persisted_profile(
@@ -9559,17 +9793,27 @@ fn checkpoint_role_bindings_match(
     mandatory_role_bindings: &[ArtifactBinding],
     template: &RunAuthoringCheckpoint,
 ) -> bool {
+    if template.include_context {
+        return checkpoint.artifact_bindings.starts_with(mandatory_role_bindings)
+            && mandatory_role_bindings.iter().all(|binding| binding.access.read)
+            && template.static_artifact_bindings.iter().all(|id| {
+                let mut matches = checkpoint.artifact_bindings.iter().filter(|binding| &binding.id == id);
+                matches.next().is_some_and(|binding| {
+                    match mandatory_role_bindings.iter().find(|role| &role.id == id) {
+                        Some(role) => binding == role,
+                        None => binding.access == Default::default(),
+                    }
+                })
+                    && matches.next().is_none()
+            });
+    }
     let mut required = mandatory_role_bindings.to_vec();
     for id in &template.static_artifact_bindings {
         if required.iter().any(|binding| &binding.id == id) { continue; }
         required.push(ArtifactBinding { id: id.clone(), access: Default::default() });
     }
     let mandatory_role_bindings = required.as_slice();
-    let allow_additional_context = template.include_context;
-    if checkpoint.artifact_bindings.len() < mandatory_role_bindings.len()
-        || (!allow_additional_context
-            && checkpoint.artifact_bindings.len() != mandatory_role_bindings.len())
-    {
+    if checkpoint.artifact_bindings.len() != mandatory_role_bindings.len() {
         return false;
     }
     checkpoint
@@ -15300,6 +15544,37 @@ mod tests {
         let output = declared.checkpoints.iter().find(|checkpoint| checkpoint.role == RunAuthoringCheckpointRole::ProviderToolOutput).unwrap();
         let bound = pending_output_checkpoint(output, "bound_output", "tool.call", &full, &mandatory_role);
         assert_eq!(bound.artifact_bindings, [full.clone(), vec![ArtifactId::new("explicit-object")]].concat());
+        let roles = vec![ArtifactBinding { id: mandatory_role[0].clone(), access: Default::default() }];
+        let mut projected: octopus_runtime::run_record::CheckpointRecord = serde_json::from_value(
+            materialize_pending_checkpoint(&bound, &config.run),
+        ).unwrap();
+        assert!(checkpoint_role_bindings_match(&projected, &roles, output));
+        projected.artifact_bindings.swap(1, 2);
+        assert!(checkpoint_role_bindings_match(&projected, &roles, output));
+        projected.artifact_bindings[1].access.read = false;
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, output));
+        projected.artifact_bindings.remove(1);
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, output));
+        let mut overlap = output.clone();
+        overlap.static_artifact_bindings.push(mandatory_role[0].clone());
+        let mut roles = roles;
+        roles[0].access.change = true;
+        let mut projected: octopus_runtime::run_record::CheckpointRecord = serde_json::from_value(
+            materialize_pending_checkpoint(&bound, &config.run),
+        ).unwrap();
+        projected.artifact_bindings[0] = roles[0].clone();
+        assert!(checkpoint_role_bindings_match(&projected, &roles, &overlap));
+        projected.artifact_bindings[2].access.change = true;
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, &overlap));
+        projected.artifact_bindings[2].access.change = false;
+        projected.artifact_bindings[0].access.change = false;
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, &overlap));
+        projected.artifact_bindings[0] = roles[0].clone();
+        projected.artifact_bindings.push(roles[0].clone());
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, &overlap));
+        projected.artifact_bindings.pop();
+        projected.artifact_bindings.swap(0, 1);
+        assert!(!checkpoint_role_bindings_match(&projected, &roles, &overlap));
         assert_eq!(
             pending.interface_binding.config.artifact_policy,
             BindingArtifactPolicy::Allow {
@@ -15558,10 +15833,12 @@ mod tests {
             handoff.hand_in_root,
             hand_in_root.join("system_interface_authoring_profile_test")
         );
-        exercise_independent_provider_owner(&handoff, &run_bytes);
+        let independent_run = exercise_independent_provider_owner(&handoff, &run_bytes);
         {
-            let mut probe = run_value.clone();
-            let mut topology = handoff.bound_topology.clone();
+            let mut probe: serde_json::Value = serde_json::from_slice(&independent_run).unwrap();
+            let mut topology: BoundRunAuthoringTopology = serde_json::from_value(
+                probe["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING].clone(),
+            ).unwrap();
             let mut independent = topology.checkpoints.iter().find(|cp| cp.role == RunAuthoringCheckpointRole::Stable).unwrap().clone();
             independent.name = "independent_probe".into();
             independent.role = RunAuthoringCheckpointRole::IndependentInput;
@@ -15569,7 +15846,7 @@ mod tests {
             independent.interface_binding = all_binding("world_peer_probe");
             probe["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&independent, &independent.name, &run, &[]));
             probe["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!(independent.name));
-            topology.checkpoints.push(independent);
+            topology.checkpoints.push(independent.clone());
             probe["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING] = serde_json::json!(topology);
             let probe_bytes = serde_json::to_vec(&probe).unwrap();
             std::fs::write(&run_path, &probe_bytes).unwrap();
@@ -15582,6 +15859,10 @@ mod tests {
                     metadata.runtime.as_mut().unwrap().checkpoint = CheckpointId::new(checkpoint);
                     metadata.runtime.as_mut().unwrap().epoch = epoch;
                     metadata.runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(&probe_bytes).to_hex());
+                    if checkpoint == "independent_probe" {
+                        metadata = metadata.with_checkpoint_binding_policy(independent.binding_policy_snapshot())
+                            .with_outbound_interface_bindings(vec![provider.clone()]);
+                    }
                     Movement { seq: Seq(seq), lamport: Lamport(seq), recorded_at_unix_ms: 0,
                         trace: TraceId("probe".into()), kind: MovementKind::InterfaceOutbound,
                         from: Endpoint::Interface(InterfaceId::new(source)), to: Endpoint::Interface(provider.clone()),
@@ -15591,6 +15872,43 @@ mod tests {
             let probe_session = ProviderHandoffSession::new(&probe_ctx).unwrap();
             assert_eq!(probe_session.consumed_context_input_sources(&probe_ctx, &descriptor).unwrap(),
                 vec![(run.clone(), 0), (run.clone(), 1)]);
+            let mut independent_input = input.clone();
+            independent_input.metadata = Some(rows[1].invocation_metadata.as_ref().unwrap().invocation().unwrap().clone());
+            let mut changed = probe.clone();
+            changed["interface_state"]["system_neighbor"] = serde_json::json!({"revision":7});
+            let changed_bytes = serde_json::to_vec(&changed).unwrap();
+            std::fs::write(&run_path, &changed_bytes).unwrap();
+            let independent_handoff = probe_session.from_invocation(
+                &probe_ctx, &descriptor, &run, &independent_input, 1, &probe_bytes,
+            ).unwrap();
+            assert!(!independent_handoff.source_carries_context);
+            assert!(independent_handoff.invocation_session_snapshot().is_none());
+            let state = independent_handoff.state.try_lock().unwrap();
+            assert!(state.session_context.artifacts.is_empty());
+            assert_eq!(state.run_record_bytes, changed_bytes);
+            assert_eq!(state.consumed_context_free_independent_input.as_ref(), Some(&independent));
+            assert!(probe_session.from_invocation(&probe_ctx, &descriptor, &run, &input, 0, &probe_bytes).is_err());
+            assert!(probe_session.from_invocation(&probe_ctx, &descriptor, &run, &independent_input, 0, &probe_bytes).is_err());
+            let cp_index = changed["checkpoints"].as_array().unwrap().iter().position(|cp| cp["id"] == "independent_probe").unwrap();
+            let template_index = topology.checkpoints.len() - 1;
+            for (pointer, value) in [
+                ("/ee".to_string(), serde_json::json!("other_ee")),
+                (format!("/checkpoints/{cp_index}/epoch"), serde_json::json!(1)),
+                (format!("/checkpoints/{cp_index}/interface_binding/interface"), serde_json::json!("other_source")),
+                (format!("/interface_state/{provider}/run_authoring_binding/checkpoints/{template_index}/include_context"), serde_json::json!(true)),
+            ] {
+                let mut drift = changed.clone();
+                *drift.pointer_mut(&pointer).unwrap() = value;
+                std::fs::write(&run_path, serde_json::to_vec(&drift).unwrap()).unwrap();
+                assert!(probe_session.from_invocation(&probe_ctx, &descriptor, &run, &independent_input, 1, &probe_bytes).is_err(), "{pointer}");
+            }
+            std::fs::write(&run_path, &changed_bytes).unwrap();
+            let mut forged = independent_input.clone();
+            forged.metadata.as_mut().unwrap().runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(b"wrong").to_hex());
+            assert!(probe_session.from_invocation(&probe_ctx, &descriptor, &run, &forged, 1, &probe_bytes).is_err());
+            forged = independent_input.clone();
+            forged.artifact.content = ContentHash::of_bytes(b"wrong");
+            assert!(probe_session.from_invocation(&probe_ctx, &descriptor, &run, &forged, 1, &probe_bytes).is_err());
             let mut rearmed = probe;
             rearmed["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "independent_probe").unwrap()["epoch"] = serde_json::json!(1);
             std::fs::write(&run_path, serde_json::to_vec(&rearmed).unwrap()).unwrap();
@@ -15695,6 +16013,59 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["artifact-context"]
             );
+            let tool_file = InterfaceArtifactFile::write(var_dir.join("emitted"), "tool.call",
+                br#"{"tool":"coder.exec","arguments":{},"correlation_id":"refused-tool"}"#).unwrap();
+            let tool = handoff.author_run(&run_bytes, &state.context_artifacts,
+                &[PreparedHandoff {
+                    identity: artifact_identity(&tool_file, &var_dir).unwrap(),
+                    output_checkpoint: handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderToolOutput).unwrap().clone(),
+                    verified_inputs: Vec::new(),
+                }], true, None, false, true).unwrap();
+            let tool_record = RunRecord::from_bytes(tool.content.as_bytes()).unwrap();
+            assert!(!tool_record.checkpoints.iter().any(|checkpoint| checkpoint.outbound_interfaces()
+                .any(|interface| interface.as_str() == "world_client_profile_test")));
+            let mut recovery = failed.clone();
+            recovery.ctx.movements_path = var_dir.join("refused-pending.jsonl");
+            recovery.ctx.ledger_index_path = var_dir.join("refused-pending.sqlite");
+            let hash = ContentHash::of_bytes(tool.content.as_bytes());
+            std::fs::write(ctx.blobs_dir.join(hash.to_hex()), tool.content.as_bytes()).unwrap();
+            let mut rows = (0..24).map(ledger_row).collect::<Vec<_>>();
+            let save = |rows: &[Movement]| std::fs::write(&recovery.ctx.movements_path,
+                rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+            save(&rows);
+            assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
+            let mut refusal = ledger_row(24);
+            refusal.kind = MovementKind::DeliveryRefused;
+            refusal.from = Endpoint::Interface(provider.clone());
+            refusal.to = Endpoint::Interface(tool_record.worker.clone());
+            refusal.artifact = Some(artifact_identity(&tool_file, &var_dir).unwrap().artifact);
+            refusal.invocation_metadata = Some(octopus_ledger::MovementMetadata::Delivery(octopus_ledger::DeliveryMetadata {
+                delivery_verdict: DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::Policy, detail: serde_json::json!({"message":"descriptor unavailable"}) },
+                runtime: Some(RuntimeInvocationMetadata {
+                    run: run.clone(), ee: tool_record.ee.clone(), worker: tool_record.worker.clone(),
+                    checkpoint: tool.pending_handoff.items[0].checkpoint.id.clone(), interface: provider.clone(),
+                    epoch: tool.pending_handoff.items[0].checkpoint.epoch, run_record_hash: Some(hash.to_hex()),
+                }), source_movement_seq: None,
+            }));
+            rows.push(refusal.clone()); save(&rows);
+            recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).unwrap();
+            let error_projection = recovery.author_run_with_bindings(tool.content.as_bytes(), &state.context_artifacts,
+                &[PreparedHandoff {
+                    identity: artifact_identity(&error_file, &var_dir).unwrap(),
+                    output_checkpoint: recovery.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+                    verified_inputs: Vec::new(),
+                }], true, None, false, true, &[]).unwrap();
+            assert!(error_projection.pending_handoff.source_without_context);
+            assert_eq!(error_projection.pending_handoff.items[0].artifact_label, "turn.error");
+            assert_eq!(error_projection.pending_handoff.items[0].checkpoint.outbound_interface_bindings[0].interface.as_str(), "world_client_profile_test");
+            assert_eq!(error_projection.before_hash, hash.to_hex());
+            let mut drift = tool.pending_handoff.clone(); drift.items[0].checkpoint.epoch += 1;
+            assert!(recovery.validate_refused_source_handoff(&tool_record, &drift).is_err());
+            let mut admitted = refusal.clone(); admitted.seq = Seq(25); admitted.kind = MovementKind::InterfaceArrival;
+            rows.push(admitted); save(&rows);
+            assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
+            rows.pop(); rows[24].artifact.as_mut().unwrap().content = ContentHash::of_bytes(b"other"); save(&rows);
+            assert!(recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).is_err());
         }
         let output_file = InterfaceArtifactFile::write(
             var_dir.join("emitted"),
@@ -15774,19 +16145,19 @@ mod tests {
             observed["interface_state"][provider.as_str()][FRONTIER_CHECKPOINT_IDS].as_array_mut().unwrap().push(serde_json::json!(id));
             observed["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING]["checkpoints"].as_array_mut().unwrap().push(serde_json::json!(route));
             let encode = |value: &serde_json::Value| { let mut bytes = serde_json::to_vec_pretty(value).unwrap(); bytes.push(b'\n'); bytes };
-            let projection = output_connections::protected_record(&authored_record, &encode(&observed), &handoff.config).unwrap().unwrap();
+            let projection = output_connections::protected_record(authored.content.as_bytes(), &encode(&observed), &handoff.config).unwrap().unwrap();
             assert_eq!(projection, authored.content.as_bytes(), "routing projection must end at the exact evidenced bytes");
             let publication = handoff.author_context_publication(authored.content.as_bytes(), &authored.pending_handoff).unwrap();
-            let rebased = authoring_retry::rebase_authored_run(authored.content.as_bytes(), &encode(&observed), &publication, &handoff.config).unwrap();
+            let rebased = authoring_retry::rebase_authored_run(authored.content.as_bytes(), &encode(&observed), &publication, &handoff.config, Some(JsonFormat::Compact)).unwrap();
             let rebased_record = RunRecord::from_bytes(rebased.content.as_bytes()).unwrap();
             assert_eq!(rebased.pending_handoff, publication.pending_handoff);
             assert_eq!(rebased_record.checkpoint(&CheckpointId::new(id)), RunRecord::from_bytes(&encode(&observed)).unwrap().checkpoint(&CheckpointId::new(id)));
-            assert_eq!(output_connections::protected_record(&RunRecord::from_bytes(publication.content.as_bytes()).unwrap(), rebased.content.as_bytes(), &handoff.config).unwrap().unwrap(), publication.content.as_bytes());
+            assert_eq!(output_connections::protected_record(publication.content.as_bytes(), rebased.content.as_bytes(), &handoff.config).unwrap().unwrap(), publication.content.as_bytes());
             assert!(checked_selected_run_advance_state(&ctx, &run_path, authored.content.as_bytes(), &encode(&observed), 23, &handoff.config).unwrap().is_empty());
             let mut history = observed.clone();
             history["interface_state"][provider.as_str()]["context_generation"] = serde_json::json!(200);
             assert!(checked_selected_run_advance_state(&ctx, &run_path, authored.content.as_bytes(), &encode(&history), 23, &handoff.config).is_err(), "an empty writer set cannot prove changed history");
-            assert!(authoring_retry::rebase_authored_run(authored.content.as_bytes(), &encode(&history), &publication, &handoff.config).is_err());
+            assert!(authoring_retry::rebase_authored_run(authored.content.as_bytes(), &encode(&history), &publication, &handoff.config, Some(JsonFormat::Compact)).is_err());
             for mutation in 0..4 {
                 let mut invalid = observed.clone();
                 match mutation {
@@ -15795,11 +16166,11 @@ mod tests {
                     2 => { invalid["active_checkpoints"].as_array_mut().unwrap().pop(); },
                     _ => invalid["interface_state"][provider.as_str()]["pending_handoff"]["items"][0]["checkpoint"]["id"] = serde_json::json!(id),
                 }
-                assert!(output_connections::protected_record(&authored_record, &encode(&invalid), &handoff.config).is_err(), "invalid outgoing mutation {mutation}");
+                assert!(output_connections::protected_record(authored.content.as_bytes(), &encode(&invalid), &handoff.config).is_err(), "invalid outgoing mutation {mutation}");
             }
             let mut input_change = observed;
             input_change["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING]["checkpoints"][0]["include_context"] = serde_json::json!(false);
-            assert!(output_connections::protected_record(&authored_record, &encode(&input_change), &handoff.config).unwrap().is_none(), "input changes are not routing additions");
+            assert!(output_connections::protected_record(authored.content.as_bytes(), &encode(&input_change), &handoff.config).unwrap().is_none(), "input changes are not routing additions");
         }
         std::fs::write(&run_path, authored.content.as_bytes()).unwrap();
         let replay = session
@@ -15946,6 +16317,82 @@ mod tests {
         ).unwrap();
         assert!(consumed);
         assert_eq!(std::fs::read_to_string(&rejection_ctx.movements_path).unwrap(), journal);
+        {
+            let mut concurrent: serde_json::Value = serde_json::from_slice(&run_bytes).unwrap();
+            concurrent["interface_state"]["system_tool_profile_test"] = serde_json::json!({"generation": 2});
+            let current = serde_json::to_vec(&concurrent).unwrap();
+            let hash = ContentHash::of_bytes(&current);
+            std::fs::write(ctx.blobs_dir.join(hash.to_hex()), &current).unwrap();
+            let mut refused = rejected_movement.clone();
+            refused.kind = MovementKind::DeliveryRefused;
+            refused.to = Endpoint::Interface(original.worker.clone());
+            let mut runtime = rejected_envelope.metadata.as_ref().unwrap().runtime.clone().unwrap();
+            runtime.interface = result_template.interface().clone();
+            runtime.run_record_hash = Some(hash.to_hex());
+            refused.invocation_metadata = Some(octopus_ledger::MovementMetadata::Delivery(octopus_ledger::DeliveryMetadata {
+                delivery_verdict: DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::CheckpointSpent, detail: serde_json::json!({}) },
+                runtime: Some(runtime), source_movement_seq: None,
+            }));
+            let mut refused_rows = rows.clone();
+            let save = |rows: &[Movement]| std::fs::write(&rejection_ctx.movements_path,
+                rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+            refused_rows[25] = refused.clone(); save(&refused_rows);
+            assert!(authoring_retry::rejected_write(&rejection_ctx, &handoff.config, &authored).err().unwrap()
+                .contains("complete admitted checked file.write chain"));
+            if let Some(octopus_ledger::MovementMetadata::Delivery(metadata)) = refused.invocation_metadata.as_mut() {
+                metadata.runtime.as_mut().unwrap().run_record_hash = Some(authored.before_hash.clone());
+            }
+            refused_rows[25] = refused.clone(); save(&refused_rows);
+            let rejection = authoring_retry::rejected_write(&rejection_ctx, &handoff.config, &authored).unwrap().unwrap();
+            assert_eq!(rejection.result_seq, 25);
+            assert!(matches!(rejection.evidence, authoring_retry::RejectionEvidence::ToolResult { call_seq: 24, .. }));
+            let rebased = authoring_retry::rebase_authored_run(&run_bytes, &current, &authored, &handoff.config, Some(JsonFormat::Compact)).unwrap();
+            assert_eq!(rebased.before_hash, hash.to_hex());
+            assert_eq!(rebased.pending_handoff, authored.pending_handoff);
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&rebased.content).unwrap()["interface_state"]["system_tool_profile_test"], concurrent["interface_state"]["system_tool_profile_test"]);
+            let mut saved_handoff = handoff.clone();
+            saved_handoff.hand_in_root = var_dir.join("saved-retries");
+            let mut old = authored.clone();
+            old.json_format = None;
+            old.content = String::from_utf8(JsonFormat::Pretty.encode(&serde_json::from_str::<serde_json::Value>(&old.content).unwrap()).unwrap()).unwrap();
+            old.after_hash = ContentHash::of_bytes(old.content.as_bytes()).to_hex();
+            let cold_read = |before: &[u8], planned: &AuthoredRun| -> Result<AuthoredRun, String> {
+                let file = saved_handoff.materialize_file_write_call(planned)?;
+                validate_authoring_attempt_source(AuthoringAttemptSourceValidation {
+                    ctx: &ctx, record: &RunRecord::from_bytes(before).unwrap(), record_bytes: before,
+                    config: &handoff.config,
+                    call: serde_json::from_slice(&file.read_payload_bytes().unwrap()).unwrap(),
+                    manifest_path: file.manifest_path().to_path_buf(),
+                }).map(|attempt| attempt.authored)
+            };
+            let old = cold_read(&run_bytes, &old).unwrap();
+            for format in [None, Some(JsonFormat::Compact)] {
+                let planned = authoring_retry::rebase_authored_run(&run_bytes, &current, &old, &handoff.config, format).unwrap();
+                let saved = cold_read(&current, &planned).unwrap();
+                assert_eq!(saved, planned);
+                assert_eq!(saved.json_format, format);
+                authoring_retry::validate_rebased_authored_run(&run_bytes, &current, &old, &saved, &handoff.config).unwrap();
+                let mut altered = saved.clone();
+                altered.json_format = if format.is_none() { Some(JsonFormat::Compact) } else { None };
+                assert!(cold_read(&current, &altered).is_err());
+                assert!(authoring_retry::validate_rebased_authored_run(&run_bytes, &current, &old, &altered, &handoff.config).is_err());
+                altered = saved.clone();
+                altered.content.push(' ');
+                assert!(authoring_retry::validate_rebased_authored_run(&run_bytes, &current, &old, &altered, &handoff.config).is_err());
+                altered.after_hash = ContentHash::of_bytes(altered.content.as_bytes()).to_hex();
+                assert!(cold_read(&current, &altered).is_err());
+                assert!(authoring_retry::validate_rebased_authored_run(&run_bytes, &current, &old, &altered, &handoff.config).is_err());
+            }
+            if let Some(octopus_ledger::MovementMetadata::Delivery(metadata)) = refused_rows[25].invocation_metadata.as_mut() {
+                metadata.runtime.as_mut().unwrap().epoch += 1;
+            }
+            save(&refused_rows);
+            assert!(authoring_retry::rejected_write(&rejection_ctx, &handoff.config, &authored).is_err());
+            refused_rows[25] = refused;
+            refused_rows[24].artifact = Some(rejected_envelope.artifact.clone()); save(&refused_rows);
+            assert!(authoring_retry::rejected_write(&rejection_ctx, &handoff.config, &authored).unwrap().is_none());
+            save(&rows);
+        }
         let mut malformed = rejected.clone();
         malformed.body = Some(serde_json::json!({"result":"files_written"}));
         assert!(authoring_retry::validate_rejected_result(&rejection_ctx, &handoff.config, &rejected_movement, &rejected_envelope, &original, &malformed).is_err());
@@ -17637,6 +18084,78 @@ mod tests {
             assert_eq!(serde_json::to_value(&state.session_context.artifacts).unwrap(), before);
         }
         {
+            let mut owner_config = handoff.config.clone();
+            let owner_input: RunAuthoringCheckpoint = serde_json::from_value(serde_json::json!({
+                "name":"owner_input", "role":"owner_input", "include_context":false,
+                "interface_binding":all_binding("system_owner_test"),
+                "outbound_interface_bindings":[all_binding("world_provider_test")],
+                "required_verified_artifacts":[],
+                "owner_authoring":{"owner":"system_owner_test","source":"system_owner_test",
+                    "door":"system_owner_writer_test","tool":"file.write.owner",
+                    "call_label":"tool.call","result_label":"file.write.owner.result"}
+            })).unwrap();
+            owner_config.checkpoints.push(owner_input.clone());
+            let mut pinned = run_value.clone();
+            pinned["interface_state"]["world_provider_test"][RUN_AUTHORING_BINDING] =
+                serde_json::to_value(test_bound_topology(&owner_config)).unwrap();
+            pinned["checkpoints"].as_array_mut().unwrap().push(serde_json::json!({
+                "id":"owner_input", "run":"run_test", "trace":"trace:owner-input", "epoch":3,
+                "interface_binding":owner_input.interface_binding,
+                "outbound_interface_bindings":owner_input.outbound_interface_bindings,
+                "artifact_bindings":[],"required_verified_artifacts":[]
+            }));
+            pinned["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!("owner_input"));
+            let pinned_bytes = serde_json::to_vec(&pinned).unwrap();
+            let pinned_hash = ContentHash::of_bytes(&pinned_bytes);
+            std::fs::write(blobs_dir.join(pinned_hash.to_hex()), &pinned_bytes).unwrap();
+            let input = InterfaceArtifactFile::write(&emitted, "tool.result", br#"{"output":"31"}"#).unwrap();
+            let source = pin_artifact(&input, &blobs_dir);
+            let mut metadata = typed_invocation_metadata(&handoff.config.run, "owner_input", &handoff.config.provider_interface, 3);
+            metadata.runtime.as_mut().unwrap().run_record_hash = Some(pinned_hash.to_hex());
+            metadata.checkpoint_binding_policy = Some(owner_input.binding_policy_snapshot());
+            metadata.outbound_interface_bindings = vec![handoff.config.provider_interface.clone()];
+            let movement = Movement {
+                seq:Seq(19), lamport:Lamport(20), recorded_at_unix_ms:20,
+                trace:TraceId("trace:owner-input".into()), kind:MovementKind::InterfaceOutbound,
+                from:Endpoint::Interface(owner_input.interface().clone()),
+                to:Endpoint::Interface(handoff.config.provider_interface.clone()),
+                artifact:Some(source), invocation_metadata:Some(metadata.into()),
+            };
+            use std::io::Write as _;
+            let mut ledger = std::fs::OpenOptions::new().append(true).open(&movements_path).unwrap();
+            writeln!(ledger, "{}", serde_json::to_string(&movement).unwrap()).unwrap();
+            let mut wrong_epoch = movement.clone();
+            wrong_epoch.seq = Seq(20);
+            wrong_epoch.lamport = Lamport(21);
+            let mut wrong_metadata = wrong_epoch.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+            wrong_metadata.runtime.as_mut().unwrap().epoch = 4;
+            wrong_epoch.invocation_metadata = Some(wrong_metadata.into());
+            writeln!(ledger, "{}", serde_json::to_string(&wrong_epoch).unwrap()).unwrap();
+            ledger.sync_all().unwrap();
+            let mut later = handoff.clone();
+            later.source_movement_seq = 21;
+            assert!(later.source_is_context_free(19).unwrap());
+            assert!(later.source_is_context_free(20).unwrap_err().contains("exact admitted checkpoint"));
+            let file = InterfaceArtifactFile::write(&emitted, "interface.artifact.output", br#"{"text":"31"}"#).unwrap();
+            let output = artifact_identity(&file, &handoff.var_dir).unwrap();
+            let mut context_free = pending.clone();
+            context_free.source_movement_seq = 19;
+            context_free.items[0].artifact_id = output.artifact.id;
+            context_free.items[0].artifact_content_hash = output.artifact.content.to_hex();
+            context_free.items[0].manifest_relative_path = output.manifest_relative_path;
+            let mut state = later.state.lock().await;
+            let before = serde_json::to_value(&state.session_context.artifacts).unwrap();
+            let record = RunRecord::from_bytes(&state.run_record_bytes).unwrap();
+            later.restore_pending_context(&mut state, &record, &context_free).unwrap();
+            assert_eq!(serde_json::to_value(&state.session_context.artifacts).unwrap(), before);
+            let mut visible = record.clone();
+            visible.checkpoints.iter_mut().find(|cp| cp.id.as_str() == "terminal_input").unwrap()
+                .artifact_bindings.push(ArtifactBinding {
+                    id:context_free.items[0].artifact_id.clone(), access:octopus_runtime::ArtifactAccess::read_only(),
+                });
+            assert!(later.restore_pending_context(&mut state, &visible, &context_free).is_err());
+        }
+        {
             let mut later = handoff.clone();
             later.source_movement_seq = pending.source_movement_seq + 1;
             later.context_output_labels.insert("turn.error".into());
@@ -17841,7 +18360,7 @@ mod tests {
             concurrent["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!("independent_input"));
             concurrent["interface_state"]["system_independent_input"] = serde_json::json!({"owned_checkpoint_ids":["independent_input"]});
             let mut current_bytes = serde_json::to_vec_pretty(&concurrent).unwrap(); current_bytes.push(b'\n');
-            let rebased = authoring_retry::rebase_authored_run(&before, &current_bytes, &next, &handoff.config).unwrap();
+            let rebased = authoring_retry::rebase_authored_run(&before, &current_bytes, &next, &handoff.config, Some(JsonFormat::Compact)).unwrap();
             let merged: serde_json::Value = serde_json::from_str(&rebased.content).unwrap();
             assert_eq!(merged["interface_state"]["system_independent_input"], concurrent["interface_state"]["system_independent_input"]);
             assert!(merged["checkpoints"].as_array().unwrap().contains(&independent));
@@ -17849,7 +18368,7 @@ mod tests {
             assert_eq!(rebased.pending_handoff, next.pending_handoff);
             assert_ne!(rebased.after_hash, next.after_hash);
             concurrent["interface_state"][handoff.config.provider_interface.as_str()]["context_generation"] = serde_json::json!(9999);
-            assert!(authoring_retry::rebase_authored_run(&before, &serde_json::to_vec(&concurrent).unwrap(), &next, &handoff.config).is_err());
+            assert!(authoring_retry::rebase_authored_run(&before, &serde_json::to_vec(&concurrent).unwrap(), &next, &handoff.config, Some(JsonFormat::Compact)).is_err());
             std::fs::write(&handoff.run_path, &before).unwrap();
             let mut different = next.clone();
             different.content.push(' ');
@@ -17915,7 +18434,7 @@ mod tests {
                 let content = apply_run_json_patch(
                     &current,
                     &call.arguments.patch,
-                    &call.arguments.expected_after_hash,
+                    &call.arguments.expected_after_hash, call.arguments.json_format
                 )
                 .unwrap();
                 assert_eq!(content, next_for_host.content);

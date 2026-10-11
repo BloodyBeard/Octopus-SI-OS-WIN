@@ -473,6 +473,9 @@
   width: var(--app-toast-anchor-width, 100vw);
   max-width: none;
   margin: 8px 0;
+  box-sizing: border-box;
+  gap: 8px;
+  padding: 40px 8px 0;
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
@@ -481,8 +484,8 @@
 
 .app-toast-root {
   display: flex;
-  width: 100%;
-  max-width: var(--composer-adjacent-max-width, 48rem);
+  width: max-content;
+  max-width: min(100%, var(--composer-adjacent-max-width, 48rem));
   margin-inline: auto;
   flex-direction: column;
   align-items: center;
@@ -498,18 +501,20 @@
 .app-toast-alert {
   display: flex;
   width: 100%;
+  min-width: 0;
   max-width: 100%;
+  box-sizing: border-box;
   flex-direction: row;
   align-items: flex-start;
-  gap: 6px;
+  gap: 4px;
   padding: 8px;
   border: 1px solid var(--color-token-border);
-  border-radius: 16px;
+  border-radius: var(--radius-xl);
   background: var(--color-token-dropdown-background);
   box-shadow: 0 4px 12px rgb(0 0 0 / 10%);
   color: var(--color-token-foreground);
   font-size: var(--text-base, 14px);
-  line-height: 1.4;
+  line-height: 1.5;
   pointer-events: auto;
   -webkit-app-region: no-drag;
 }
@@ -525,14 +530,17 @@
 }
 
 .app-toast-alert.is-success {
-  background: var(--color-token-input-validation-info-background, var(--color-token-dropdown-background));
+  --color-background-success-surface: light-dark(#edfaf2, #011c0b);
+  border-color: color-mix(in oklab, var(--color-token-success-foreground) 20%, transparent);
+  background: var(--color-background-success-surface);
+  color: var(--color-token-success-foreground);
 }
 
 .app-toast-icon {
   display: grid;
-  width: 18px;
-  height: 20px;
-  flex: 0 0 18px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
   place-items: center;
   line-height: 0;
 }
@@ -540,17 +548,21 @@
 .app-toast-icon svg,
 .app-toast-close svg {
   display: block;
+  width: 16px;
+  height: 16px;
 }
 
 .app-toast-content {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 6px;
   min-width: 0;
+  min-height: 24px;
   flex: 1 1 auto;
   font-weight: 500;
   text-align: left;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .app-toast-count {
@@ -569,7 +581,7 @@
 }
 
 .app-toast-action {
-  min-height: 20px;
+  min-height: 24px;
   flex: 0 0 auto;
   padding: 0 6px;
   border: 0;
@@ -587,9 +599,9 @@
 
 .app-toast-close {
   display: grid;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
   place-items: center;
   padding: 0;
   border: 0;
@@ -598,7 +610,6 @@
   color: inherit;
   cursor: var(--cursor-interaction, default);
   line-height: 0;
-  opacity: .5;
 }
 
 .app-toast-close:hover {

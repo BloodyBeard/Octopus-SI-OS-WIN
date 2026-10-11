@@ -7,6 +7,31 @@ mod support;
 use support::{fixture, write};
 
 #[test]
+fn selected_model_and_reasoning_effort_preserve_service_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = fixture(dir.path());
+    for tier in ["priority", "ultrafast", "default"] {
+        request.service_tier = Some(tier.into());
+        let plan = plan_run_composition(&request).unwrap();
+        assert_eq!(plan.model, request.model);
+        assert_eq!(plan.reasoning_effort, request.reasoning_effort);
+        assert_eq!(plan.service_tier.as_deref(), Some(tier));
+        let provider: Value = serde_json::from_str(&plan.descriptor_writes.iter()
+            .find(|write| write.tag == format!("interface:{}", plan.provider_interface_id)).unwrap().content).unwrap();
+        assert_eq!(provider["interface_driver_config"]["private_config"]["service_tier"], tier);
+        let retained: RunCompositionPlan = serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+        assert_eq!(retained.service_tier, plan.service_tier);
+    }
+    for tier in ["", " priority", "priority\t"] {
+        request.service_tier = Some(tier.into());
+        assert!(plan_run_composition(&request).unwrap_err().contains("service tier"));
+    }
+    request.service_tier = None;
+    let plan = plan_run_composition(&request).unwrap();
+    assert_eq!(plan.service_tier, None);
+}
+
+#[test]
 fn private_system_composition_is_fresh_exact_and_checked_under_policy() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = fixture(dir.path());

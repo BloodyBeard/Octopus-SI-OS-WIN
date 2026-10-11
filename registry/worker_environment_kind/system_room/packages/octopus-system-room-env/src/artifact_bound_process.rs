@@ -61,10 +61,15 @@ impl ToolProcessHandler for ArtifactBoundProcess {
             let formation = invocation.worker_environment.as_ref().ok_or_else(|| {
                 capability("artifact-bound invocation has no formed worker environment")
             })?;
+            let outcome = if call.handler_config.get("operation").and_then(serde_json::Value::as_str) == Some("mcp") {
+                Ok(crate::client_mcp::execute(&invocation.envelope, &context, &call, &io).await?)
+            } else {
+                self.handler.execute(&context, &call).await
+            };
             let (lifecycle, response) = handler_completion(
                 &call.tool_id,
                 correlation_id,
-                self.handler.execute(&context, &call).await,
+                outcome,
             );
             io.record_worker_environment_lifecycle(formation, lifecycle)
                 .await

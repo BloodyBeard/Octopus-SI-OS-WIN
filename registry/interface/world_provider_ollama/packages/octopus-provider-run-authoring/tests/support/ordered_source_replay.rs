@@ -59,10 +59,18 @@ async fn exercise_interrupted_source_order(
     let control: RunAuthoringCheckpoint = serde_json::from_value(serde_json::json!({"name":"control","role":"independent_input",
         "interface_binding":names_binding("system_worker_widget_return", &["client.surface.document"]),"outbound_interface_bindings":[names_binding(ctx.interface.as_str(), &["client.surface.document"]), names_binding("world_home_client", &["client.surface.document"])],
         "include_context":false,"required_verified_artifacts":[]})).unwrap();
-    topology.checkpoints.push(control.clone());
+    let owner_input: RunAuthoringCheckpoint = serde_json::from_value(serde_json::json!({"name":"owner_result","role":"owner_input",
+        "interface_binding":names_binding("system_owner_return", &["tool.result"]),
+        "outbound_interface_bindings":[names_binding(ctx.interface.as_str(), &["tool.result"])],
+        "include_context":false,"required_verified_artifacts":[],
+        "owner_authoring":{"owner":"system_owner_return","source":"system_owner_return","door":"system_owner_writer",
+            "tool":"file.write.owner","call_label":"tool.call","result_label":"file.write.owner.result"}})).unwrap();
+    topology.checkpoints.extend([control.clone(), owner_input.clone()]);
     value["interface_state"][ctx.interface.as_str()][RUN_AUTHORING_BINDING] = serde_json::to_value(topology).unwrap();
     value["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&control, "control", &run, &[]));
     value["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!("control"));
+    value["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&owner_input, "owner_result", &run, &[]));
+    value["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!("owner_result"));
     let initial = serde_json::to_vec(&value).unwrap();
     std::fs::write(ctx.root_slot("run_records_root").unwrap().join(format!("{run}.json")), &initial).unwrap();
     let mut input = input.clone();
@@ -70,7 +78,7 @@ async fn exercise_interrupted_source_order(
     let mut h = ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx, descriptor, &run, &input, 1452, &initial).unwrap();
     h.session_snapshot_labels.clear(); h.context_output_labels = BTreeSet::from(["interface.artifact.output".into()]);
     let widget = InterfaceArtifactFile::write(h.var_dir.join("widget"), "client.surface.document", br#"{"id":"task-widget","version":1}"#).unwrap();
-    let second_widget = InterfaceArtifactFile::write(h.var_dir.join("widget"), "client.surface.document", br#"{"id":"another-task-widget","version":1}"#).unwrap();
+    let owner_result = InterfaceArtifactFile::write(h.var_dir.join("owner-result"), "tool.result", br#"{"label":"tool.result","tool":"owner.run","correlation_id":"owner-call","ok":true,"body":{"output":"completed"}}"#).unwrap();
     let queued = InterfaceArtifactFile::write(h.var_dir.join("queued"), "operator.message", br#"{"text":"queued new message"}"#).unwrap();
     let queued_ref = pin_artifact(&queued, &h.ctx.blobs_dir);
     let mut rows = (0..1452).map(ledger_row).collect::<Vec<_>>();
@@ -82,24 +90,24 @@ async fn exercise_interrupted_source_order(
         edge(&h, &mut rows, &initial, &cp.id, if role == RunAuthoringCheckpointRole::IndependentInput { &widget } else { &input.artifact_file }, ctx.interface.clone(), MovementKind::InterfaceOutbound);
     }
     let mut closure = None;
-    for source in [1456, 1452, 1481] {
+    for (source, terminal) in [(1456, true), (1452, true), (1481, false), (1481, true)] {
         h.source_movement_seq = source;
         let current = std::fs::read(&h.run_path).unwrap();
         let file = InterfaceArtifactFile::write(h.var_dir.join("emitted"), "interface.artifact.output",
-            &serde_json::to_vec(&serde_json::json!({"text":format!("source {source}")})).unwrap()).unwrap();
+            &serde_json::to_vec(&serde_json::json!({"text":format!("source {source} terminal {terminal}")})).unwrap()).unwrap();
         let identity = artifact_identity(&file, &h.var_dir).unwrap();
         let mut context = current_context_artifacts(&RunRecord::from_bytes(&current).unwrap(), &h.config).unwrap();
         if source != 1481 { context.push(identity.artifact.id.clone()); }
         let authored = h.author_run(&current, &context, &[PreparedHandoff { identity: identity.clone(),
             output_checkpoint:h.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),verified_inputs:vec![] }],
-            true, (source != 1452).then_some(&control), false, true).unwrap();
+            true, (source == 1456).then_some(&control), false, terminal).unwrap();
         if source == 1452 {
             h.materialize_file_write_call(&authored).unwrap();
             let mut stop = h.clone(); stop.source_movement_seq = 1481;
             stop.state.lock().await.run_record_bytes = current.clone();
             assert!(stop.recover_source().await.unwrap_err().contains("private attempt belongs to source movement 1452, current movement is 1481"));
         }
-        if source != 1452 {
+        if source == 1456 {
             let before = RunRecord::from_bytes(&current).unwrap();
             let after = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
             let old = before.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &control, &run)).unwrap();
@@ -116,13 +124,18 @@ async fn exercise_interrupted_source_order(
             let publication = h.author_context_publication(authored.content.as_bytes(), &authored.pending_handoff).unwrap();
             install(&h, &mut rows, &publication); publication
         } else { authored };
+        if !terminal {
+            let mut queued_replay = h.clone(); queued_replay.source_movement_seq = 1477;
+            assert!(queued_replay.recover_overtaken_source(published.content.as_bytes(), &published.pending_handoff)
+                .unwrap_err().contains("independent-input"));
+        }
         if source == 1456 {
-            for (seq, role) in [(1477, RunAuthoringCheckpointRole::Stable), (1481, RunAuthoringCheckpointRole::IndependentInput)] {
+            for (seq, role) in [(1477, RunAuthoringCheckpointRole::Stable), (1481, RunAuthoringCheckpointRole::OwnerInput)] {
                 while rows.len() < seq { rows.push(ledger_row(rows.len() as u64)); }
                 let record = RunRecord::from_bytes(published.content.as_bytes()).unwrap();
                 let cp = record.checkpoints.iter().find(|cp| record.active_checkpoints.contains(&cp.id)
                     && checkpoint_record_matches_template(cp, h.config.checkpoint_for_role(role).unwrap(), &run)).unwrap().id.clone();
-                edge(&h, &mut rows, published.content.as_bytes(), &cp, if seq == 1477 { &queued } else { &second_widget }, ctx.interface.clone(), MovementKind::InterfaceOutbound);
+                edge(&h, &mut rows, published.content.as_bytes(), &cp, if seq == 1477 { &queued } else { &owner_result }, ctx.interface.clone(), MovementKind::InterfaceOutbound);
             }
         }
     }
@@ -143,6 +156,10 @@ async fn exercise_interrupted_source_order(
             assert_eq!(context.last().unwrap().source_artifact, queued_ref);
         }
     }
+    let mut context_bearing = h.clone();
+    context_bearing.config.checkpoints.iter_mut().find(|template| template.role == RunAuthoringCheckpointRole::OwnerInput).unwrap().include_context = true;
+    let pending = persisted_pending_handoff(&RunRecord::from_bytes(&current).unwrap(), &h.config.provider_interface).unwrap().unwrap();
+    assert!(context_bearing.recover_overtaken_source(&current, &pending).unwrap_err().contains("independent-input"));
     let closure_row = rows.iter_mut().find(|row| row.artifact.as_ref() == closure.as_ref()).unwrap();
     *closure_row = ledger_row(closure_row.seq.0);
     std::fs::write(&h.ctx.movements_path, rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();

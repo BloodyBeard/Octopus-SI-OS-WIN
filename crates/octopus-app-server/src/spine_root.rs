@@ -100,17 +100,21 @@ fn observe_stable_registry<T>(
     mut load: impl FnMut() -> Result<T, String>,
 ) -> Result<Option<(RegistryDescriptorFingerprint, T)>, String> {
     for _ in 0..REGISTRY_OBSERVATION_ATTEMPTS {
-        let before = fingerprint().map_err(|error| {
-            format!("registry descriptor fingerprint before load failed: {error}")
-        })?;
+        let before = match fingerprint() {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("registry descriptor fingerprint before load failed: {error}")),
+        };
         let candidate = if current == Some(before) {
             Ok(None)
         } else {
             load().map(Some)
         };
-        let after = fingerprint().map_err(|error| {
-            format!("registry descriptor fingerprint after load failed: {error}")
-        })?;
+        let after = match fingerprint() {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("registry descriptor fingerprint after load failed: {error}")),
+        };
         if before != after {
             continue;
         }

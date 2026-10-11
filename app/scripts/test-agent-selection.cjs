@@ -29,11 +29,11 @@ function selection() {
   const state = {
     activeRunId: '', activeRunIdRef: { current: '' }, pendingNewTaskTargetRef: { current: null }, capabilitySelectionOwnerRef: { current: '' },
     executionContextsLoaded: true, providerInterfacesLoaded: false,
-    agentPresets: ['first', 'second'].map(id => ({ id, name: id, projectEeId: 'ee', workerInterfaceId: id, providerInterfaceId: 'provider', reasoningEffort: '', applicationIds: [], driverNames: [] })),
+    agentPresets: ['first', 'second'].map(id => ({ id, name: id, projectEeId: 'ee', workerInterfaceId: id, providerInterfaceId: 'provider', providerModel: 'admitted', reasoningEffort: '', applicationIds: [], driverNames: [] })),
     executionContexts: [{ eeId: 'ee', workers: ['first', 'second'].map(id => ({ id, providerInterfaceIds: ['provider'] })) }],
     providerInterfaces: [{ id: 'provider', models: [{ model: 'not-admitted' }, { model: 'admitted' }] }],
     providerForExecutionContext: provider => ({ ...provider, models: provider.models.filter(model => model.model === 'admitted') }),
-    providerDefaultModel: provider => provider.models[0], providerReasoningEfforts: () => [], executionContextTaskCapabilities: () => ({}),
+    providerModels: provider => provider.models, providerDefaultModel: provider => provider.models[0], providerReasoningEfforts: () => [], executionContextTaskCapabilities: () => ({}),
     defaultCapabilitySelection: () => ({ applicationIds: [], driverNames: [] }),
     runsLoaded: false, runs: [], accessProfile: 'live', accessMode: 'project_access', eeId: 'ee', error: '',
     saveCurrentDraft() {}, deleteDraft() {}, resetInputHistory() {}, applyDraft: draft => Object.assign(state, draft),
@@ -52,6 +52,9 @@ test('Agent choice waits for catalogs, retains explicit choice, and validates ad
   state.executionContextsLoaded = false; state.chooseAgentPreset('first');
   assert.equal(state.error, ''); assert.equal(state.workerInterfaceId, '');
   state.executionContextsLoaded = true; state.resolvePendingSelection(); assert.equal(state.workerInterfaceId, 'first');
+  state.agentPresets[1].providerModel = 'not-admitted'; state.chooseAgentPreset('second');
+  assert.match(state.error, /model 'not-admitted' is unavailable/);
+  state.agentPresets[1].providerModel = 'admitted';
   state.providerInterfaces = []; state.chooseAgentPreset('second');
   assert.match(state.error, /model interface 'provider' is unavailable/); assert.equal(state.workerInterfaceId, '');
   const early = selection(), agents = early.agentPresets;

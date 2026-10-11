@@ -86,7 +86,7 @@ pub fn admitted_generated_artifacts(
     validate_result_outputs(&mut reader, result_movement, &result)
 }
 
-pub(super) fn read_movement(
+pub fn read_movement(
     evidence: &CheckedRunEvidence<'_>,
     seq: u64,
 ) -> Result<Movement, String> {

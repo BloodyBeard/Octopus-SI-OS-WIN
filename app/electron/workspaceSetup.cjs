@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const Ajv = require("ajv");
+const { blake3 } = require("@noble/hashes/blake3");
 const runRecordSchema = require("../../schemas/run_record.schema.json");
 const { parseHomeVoiceContext } = require("./homeVoiceProjection.cjs");
 const { payloadArtifactBindings } = require("./contentAddressedArtifact.cjs");
@@ -75,6 +76,7 @@ async function initializeWorkspace(options) {
           providerModel: request.home.providerModel,
           workerInterfaceId: request.home.workerInterfaceId,
           ...(request.home.reasoningEffort ? { reasoningEffort: request.home.reasoningEffort } : {}),
+          ...(request.home.serviceTier ? { serviceTier: request.home.serviceTier } : {}),
           ...(Object.keys(request.home.doorHostSlots).length ? { doorHostSlots: request.home.doorHostSlots } : {}),
           ...(request.home.contextArtifactBindings.length
             ? { contextArtifactBindings: request.home.contextArtifactBindings }
@@ -305,6 +307,7 @@ async function readWorkspaceSetupState(options) {
     if (receipts.length > 1) {
       recoveryErrors.push(`workspace receipt root contains ${receipts.length} configured workspaces`);
     }
+    const receiptedProjectEeIds = new Set();
     for (const entry of await fs.readdir(roots.projectReceiptsRoot, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) {
         recoveryErrors.push(`workspace Project receipt root contains an invalid entry '${entry.name}'`);
@@ -321,13 +324,14 @@ async function readWorkspaceSetupState(options) {
         )) {
           throw new Error(`Workspace Project receipt '${entry.name}' belongs to another workspace`);
         }
+        if (workspace && receipt.action === "create_project") receiptedProjectEeIds.add(receipt.outcome.ee_id);
       } catch (error) {
         recoveryErrors.push(errorMessage(error));
       }
     }
     try {
       const topology = await findWorkspaceTopology(roots);
-      const expectedRoots = new Set(receipts.map((receipt) => receipt.root_ee_id));
+      const expectedRoots = new Set([...receipts.map((receipt) => receipt.root_ee_id), ...receiptedProjectEeIds]);
       const expectedRuns = new Set(receipts.map((receipt) => receipt.home_run_id));
       const expectedInterfaces = new Set(receipts.map((receipt) => receipt.home_interface_id));
       const orphanedRoots = topology.operatorSpaceEeIds.filter((eeId) => !expectedRoots.has(eeId));
@@ -534,14 +538,13 @@ function parseProjectMutationRequest(value) {
   let canonical;
   if (request.action === "create_project") {
     const presentation = exactObject(request.presentation, ["icon", "color"], ["icon", "color"], "Project presentation");
-    if (request.templateName !== "project") throw new Error("Workspace Project must use the generic project template");
     canonical = {
       action: "create_project",
       operationId,
       workspace,
       parentEeId: requiredId(request.parentEeId, "Project parent EE"),
       expectedParentDigest: requiredDigest(request.expectedParentDigest, "Project parent digest"),
-      templateName: "project",
+      templateName: requiredId(request.templateName, "Project policy template"),
       name: requiredHumanText(request.name, "Project name", 80),
       goal: requiredHumanText(request.goal, "Project goal", 240),
       presentation: {
@@ -697,6 +700,11 @@ async function planProjectCreate(roots, scope, request, planOperatorSurface) {
   }
   const template = await readTemplate(roots, request.templateName);
   if (template.id !== request.templateName) throw new Error("Project template identity changed before creation");
+  if (template.bootstrapRoot) throw new Error("A bootstrap-root policy cannot be used for a child Project");
+  const parentTemplate = await readTemplate(roots, parentDocument.value.template_name);
+  if (!parentTemplate.allowedChildren.includes(request.templateName)) {
+    throw new Error(`Project parent EE '${parent.eeId}' no longer allows '${request.templateName}'`);
+  }
   const eeId = deterministicId("ee_project", request.operationId, "project");
   if (scope.byId.has(eeId) || await readFileIfPresent(path.join(roots.eeInstancesRoot, `${eeId}.json`))) {
     throw new Error(`Project EE '${eeId}' already exists without this operation receipt`);
@@ -766,6 +774,11 @@ async function planProjectCreate(roots, scope, request, planOperatorSurface) {
   }
   if ((await readJson(path.join(roots.runsRoot, `${scope.homeRunId}.json`), "Home provider selection")).digest !== homeRun.digest
       || (await readJson(path.join(roots.interfaceRoot, providerPin, "interface.json"), "Home exact provider descriptor")).digest !== provider.digest) throw new Error("Home model changed during Project creation");
+  if ((await readJson(parentPath, "Project parent EE")).digest !== parentDocument.digest
+    || (await readTemplate(roots, request.templateName)).digest !== template.digest
+    || (await readTemplate(roots, parentTemplate.id)).digest !== parentTemplate.digest) {
+    throw new Error("Project policy changed during creation; review the policy and try again");
+  }
   const sidecarContent = `${JSON.stringify(nextSidecar, null, 2)}\n`;
   return {
     outcome: { action: "create_project", eeId, parentEeId: parent.eeId, templateName: request.templateName, goal: request.goal },
@@ -985,7 +998,7 @@ function parseAgentPresetChoices(value, projectKeys) {
   if (!Array.isArray(value) || value.length > 32) throw new Error("Workspace Agent presets must be a bounded array");
   const seen = new Set();
   return value.map((entry) => {
-    exactObject(entry, ["packId", "presetId", "expectedPackManifestDigest", "projectKeys", "providerInterfaceId", "providerModel", "reasoningEffort"], ["packId", "presetId", "expectedPackManifestDigest", "projectKeys", "providerInterfaceId", "providerModel", "reasoningEffort"], "Workspace Agent preset");
+    exactObject(entry, ["packId", "presetId", "expectedPackManifestDigest", "projectKeys", "providerInterfaceId", "providerModel", "reasoningEffort", "serviceTier"], ["packId", "presetId", "expectedPackManifestDigest", "projectKeys", "providerInterfaceId", "providerModel", "reasoningEffort"], "Workspace Agent preset");
     const choice = {
       packId: requiredId(entry.packId, "Agent preset pack"), presetId: requiredId(entry.presetId, "Agent preset"),
       expectedPackManifestDigest: requiredDigest(entry.expectedPackManifestDigest, "Agent preset pack digest"),
@@ -993,6 +1006,7 @@ function parseAgentPresetChoices(value, projectKeys) {
       providerInterfaceId: requiredId(entry.providerInterfaceId, "Agent preset provider"),
       providerModel: requiredHumanText(entry.providerModel, "Agent preset model", 256),
       reasoningEffort: optionalText(entry.reasoningEffort, "Agent preset reasoning effort", 80),
+      serviceTier: optionalText(entry.serviceTier, "Agent preset service tier", 80),
     };
     const key = `${choice.packId}\0${choice.presetId}`;
     if (seen.has(key) || choice.projectKeys.some((id) => !projectKeys.has(id))) throw new Error("Workspace Agent preset repeats or targets an unknown Project");
@@ -1028,7 +1042,7 @@ function parseHomeIntent(value) {
   const home = exactObject(
     value,
     [
-      "name", "providerInterfaceId", "providerModel", "workerInterfaceId", "reasoningEffort", "doorHostSlots",
+      "name", "providerInterfaceId", "providerModel", "workerInterfaceId", "reasoningEffort", "serviceTier", "doorHostSlots",
       "contextArtifactBindings", "selectedWorkerEnvironmentKinds",
     ],
     ["name", "providerInterfaceId", "providerModel", "workerInterfaceId"],
@@ -1041,6 +1055,7 @@ function parseHomeIntent(value) {
     providerModel: requiredHumanText(home.providerModel, "Home model", 256),
     workerInterfaceId: requiredId(home.workerInterfaceId, "Home worker interface"),
     reasoningEffort: optionalText(home.reasoningEffort, "Home reasoning effort", 80),
+    serviceTier: optionalText(home.serviceTier, "Home service tier", 80),
     doorHostSlots: parseDoorHostSlots(home.doorHostSlots),
     contextArtifactBindings: parseArtifactBindings(home.contextArtifactBindings),
     selectedWorkerEnvironmentKinds: parseUniqueIds(
@@ -1224,6 +1239,7 @@ async function readTemplate(roots, id) {
   }
   return {
     id,
+    digest: document.digest,
     bootstrapRoot: document.value.bootstrap_root,
     allowedChildren: document.value.allowed_child_ee_templates.map((child, index) => requiredId(child, `EE template ${id} child ${index}`)),
   };
@@ -1492,7 +1508,7 @@ function parseHomePlan(value, request, materialized) {
     value,
     [
       "runId", "chatInterfaceId", "modelInterfaceId", "workerInterfaceId", "clientSurfaceRole",
-      "reasoningEffort", "providerModel", "authoringProfile", "requiredInterfaceIds", "requiredToolIds", "writes", "ledgerOffset",
+      "reasoningEffort", "serviceTier", "providerModel", "authoringProfile", "requiredInterfaceIds", "requiredToolIds", "writes", "ledgerOffset",
     ],
     [
       "runId", "chatInterfaceId", "modelInterfaceId", "workerInterfaceId", "clientSurfaceRole",
@@ -1515,6 +1531,8 @@ function parseHomePlan(value, request, materialized) {
   if (plan.workerInterfaceId !== expectedWorkerInterfaceId) {
     throw new Error("Home topology planner changed the exact worker interface identity");
   }
+  const serviceTier = optionalText(plan.serviceTier, "Home planned service tier", 80);
+  if (request.home.serviceTier && serviceTier !== request.home.serviceTier) throw new Error("Home topology planner changed the selected service tier");
   const reasoningEffort = optionalText(plan.reasoningEffort, "Home planned reasoning effort", 80);
   if (request.home.reasoningEffort && reasoningEffort !== request.home.reasoningEffort) {
     throw new Error("Home topology planner changed the selected reasoning effort");
@@ -1553,6 +1571,7 @@ function parseHomePlan(value, request, materialized) {
     modelInterfaceId: requiredId(plan.modelInterfaceId, "Home provider interface id"),
     workerInterfaceId: requiredId(plan.workerInterfaceId, "Home worker interface id"),
     reasoningEffort,
+    serviceTier,
     authoringProfile,
     requiredInterfaceIds,
     requiredToolIds,
@@ -1669,6 +1688,9 @@ function validatePlannedHomeRuns(roots, plan, writes, home) {
       const writer = state.run_authoring_binding?.writer_run ?? state.writer_run;
       if (writer === undefined || writer === null) continue;
       const id = requiredId(writer.run, "Home declared writer Run");
+      if (Object.hasOwn(writer, "initial_record_format") && !["pretty", "compact"].includes(writer.initial_record_format)) {
+        throw new Error("Home writer Run declaration has invalid initial record format");
+      }
       const initial = writer.initial_record;
       if (declared.has(id) || initial?.id !== id || initial.ee !== run.ee || initial.worker !== run.worker
         || initial.interface_state?.[owner]?.file_writer_target?.run !== run.id) {
@@ -1765,6 +1787,14 @@ async function validatePlannedHomeOwnership(roots, plan, writes, runs) {
         throw new Error("Home prelude snapshots require an exact connected owner");
       }
       for (const source of state.prelude_sources) {
+        exactObject(source, ["source", "snapshot", "source_sha256"], ["source", "snapshot", "source_sha256"], "Home prelude source");
+        for (const reference of [source.source, source.snapshot]) {
+          exactObject(reference, ["id", "content"], ["id", "content"], "Home prelude artifact reference");
+          if (!Array.isArray(reference.content) || reference.content.length !== 32
+            || reference.content.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255)) {
+            throw new Error("Home prelude artifact reference has an invalid content pin");
+          }
+        }
         const sourceId = source?.source?.id;
         const snapshotId = source?.snapshot?.id;
         if (typeof sourceId !== "string" || typeof snapshotId !== "string") throw new Error("Home prelude source has no exact artifact identity");
@@ -1773,10 +1803,20 @@ async function validatePlannedHomeOwnership(roots, plan, writes, runs) {
         if (plannedArtifactOwner(roots.artifactRoot, sourcePath) !== sourceId
           || plannedArtifactOwner(roots.artifactRoot, snapshotPath) !== snapshotId) throw new Error("Home prelude source has a noncanonical artifact path");
         const snapshot = writes.find((write) => write.destination === snapshotPath);
-        const hash = source.source.content;
-        if (!snapshot || !Array.isArray(hash) || hash.length !== 32 || !hash.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)
-          || stableJson(hash) !== stableJson(source.snapshot.content) || !DIGEST.test(source.source_sha256)
-          || snapshot.afterDigest !== source.source_sha256) {
+        if (!snapshot) throw new Error("Home prelude snapshot differs from its exact source evidence");
+        const fields = ["id", "run", "source", "source_sha256", "source_content"];
+        const wrapper = exactObject(documents.get(snapshotPath), fields, fields, "Home prelude snapshot");
+        if (sourceId === snapshotId || wrapper.id !== snapshotId || wrapper.run !== run.id
+          || stableJson(wrapper.source) !== stableJson(source.source)
+          || typeof source.source_sha256 !== "string" || !DIGEST.test(source.source_sha256)
+          || wrapper.source_sha256 !== source.source_sha256 || typeof wrapper.source_content !== "string"
+          || sha256(Buffer.from(wrapper.source_content, "utf8")) !== source.source_sha256
+          || !Buffer.from(blake3(Buffer.from(stableJson(wrapper)))).equals(Buffer.from(source.snapshot.content))) {
+          throw new Error("Home prelude snapshot differs from its exact source evidence");
+        }
+        const original = JSON.parse(wrapper.source_content);
+        if (original?.id !== sourceId
+          || !Buffer.from(blake3(Buffer.from(stableJson(original)))).equals(Buffer.from(source.source.content))) {
           throw new Error("Home prelude snapshot differs from its exact source evidence");
         }
         await requireClientAuthoringRoot(path.dirname(sourcePath));
@@ -2283,28 +2323,29 @@ async function commitClientAuthoringJournal(roots, transactionRoot) {
   journal.phase = "published";
   await writeJournal(transactionRoot, journal);
   for (const index of journal.removals.keys()) {
-    await applyClientAuthoringRemoval(roots, transactionRoot, journal.removals[index]);
+    await applyClientAuthoringRemoval(roots, transactionRoot, journal.removals[index], journal);
     journal.removals[index].state = "moved";
     await writeJournal(transactionRoot, journal);
   }
-  await verifyClientAuthoringRemovals(transactionRoot, journal.removals);
+  await verifyClientAuthoringRemovals(roots, transactionRoot, journal);
   journal.phase = "committed";
   await writeJournal(transactionRoot, journal);
   await writeClientAuthoringReceipt(roots, clientAuthoringReceipt(journal));
   await finalizeClientAuthoringTransaction(roots, transactionRoot, journal);
 }
 
-async function applyClientAuthoringRemoval(roots, transactionRoot, removal) {
+async function applyClientAuthoringRemoval(roots, transactionRoot, removal, journal) {
   const destinationRoot = allowedDestinationRoot(roots, removal.destination);
   await requireClientAuthoringRoot(destinationRoot);
   const tombstone = transactionFile(transactionRoot, removal.tombstone, "removal tombstone");
   const source = await inspectClientAuthoringRemoval(removal.destination, removal.type);
   const removed = await inspectClientAuthoringRemoval(tombstone, removal.type);
+  const retiredState = await isRetiredInterfaceStateRemoval(roots, journal, removal);
   if (source.exists && removed.exists) {
     throw new Error(`Client authoring removal '${removal.tag}' exists at both source and tombstone`);
   }
   if (source.exists) {
-    assertClientAuthoringRemovalIdentity(source, removal, "source");
+    assertClientAuthoringRemovalIdentity(source, removal, "source", retiredState);
     const parentStat = await fs.lstat(path.dirname(removal.destination));
     if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
       throw new Error(`Client authoring removal '${removal.tag}' parent changed`);
@@ -2316,26 +2357,46 @@ async function applyClientAuthoringRemoval(roots, transactionRoot, removal) {
     throw new Error(`Client authoring removal '${removal.tag}' is absent from source and tombstone`);
   }
   const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-  assertClientAuthoringRemovalIdentity(durable, removal, "tombstone");
+  assertClientAuthoringRemovalIdentity(durable, removal, "tombstone", retiredState);
   if (await pathExists(removal.destination)) {
     throw new Error(`Client authoring removal '${removal.tag}' remained published after tombstoning`);
   }
 }
 
-async function verifyClientAuthoringRemovals(transactionRoot, removals) {
-  for (const removal of removals) {
+async function verifyClientAuthoringRemovals(roots, transactionRoot, journal) {
+  for (const removal of journal.removals) {
     if (await pathExists(removal.destination)) {
       throw new Error(`Client authoring removal '${removal.tag}' is still present`);
     }
     const tombstone = transactionFile(transactionRoot, removal.tombstone, "removal tombstone");
     const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-    assertClientAuthoringRemovalIdentity(durable, removal, "tombstone");
+    assertClientAuthoringRemovalIdentity(durable, removal, "tombstone",
+      await isRetiredInterfaceStateRemoval(roots, journal, removal));
   }
+}
+
+async function isRetiredInterfaceStateRemoval(roots, journal, removal) {
+  if (![roots.privateInterfacesRoot, roots.interfaceHandInRoot].includes(path.dirname(removal.destination))) return false;
+  const interfaceId = path.basename(removal.destination);
+  if (!SAFE_ID.test(interfaceId)) return false;
+  const descriptorPath = path.join(roots.interfaceRoot, interfaceId);
+  const descriptor = journal.removals.find((entry) => entry.destination === descriptorPath);
+  if (!descriptor || descriptor.state !== "moved" || await pathExists(descriptorPath)) return false;
+  const references = (value) => typeof value === "string" ? value === interfaceId
+    : Array.isArray(value) ? value.some(references)
+    : value !== null && typeof value === "object"
+      ? Object.entries(value).some(([key, entry]) => key === interfaceId || references(entry)) : false;
+  for (const entry of await fs.readdir(roots.runsRoot, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json")) continue;
+    const run = await readJson(path.join(roots.runsRoot, entry.name), "Run before private state removal");
+    if (references(run.value)) throw new Error(`Interface '${interfaceId}' private state is still referenced by '${entry.name}'`);
+  }
+  return true;
 }
 
 async function finalizeClientAuthoringTransaction(roots, transactionRoot, journal) {
   await verifyJournalWrites(journal.writes);
-  await verifyClientAuthoringRemovals(transactionRoot, journal.removals);
+  await verifyClientAuthoringRemovals(roots, transactionRoot, journal);
   const receipt = await readClientAuthoringReceipt(roots, journal.operation_id);
   if (!receipt) await writeClientAuthoringReceipt(roots, clientAuthoringReceipt(journal));
   else if (stableJson(receipt) !== stableJson(clientAuthoringReceipt(journal))) {
@@ -2419,7 +2480,8 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
     const tombstone = transactionFile(cleanupRoot, removal.tombstone, "cleanup tombstone");
     const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
     if (!durable.exists) continue;
-    await removeCommittedClientAuthoringTombstone(tombstone, durable, removal);
+    await removeCommittedClientAuthoringTombstone(tombstone, durable, removal,
+      await isRetiredInterfaceStateRemoval(roots, journal, removal));
   }
   for (const directory of ["after", "before", "removed"]) {
     const candidate = path.join(cleanupRoot, directory);
@@ -2437,11 +2499,11 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
   await syncDirectory(roots.transactionsRoot);
 }
 
-async function removeCommittedClientAuthoringTombstone(tombstone, actual, removal) {
+async function removeCommittedClientAuthoringTombstone(tombstone, actual, removal, retiredState = false) {
   if (actual.dev !== removal.expected_dev || actual.ino !== removal.expected_ino) {
     throw new Error(`Client authoring cleanup '${removal.tag}' tombstone identity changed`);
   }
-  const expected = new Map(removal.tree_entries.map((entry) => [
+  const expected = new Map((retiredState ? actual.treeEntries : removal.tree_entries).map((entry) => [
     entry.relative_path,
     `${entry.type}\0${entry.digest ?? ""}`,
   ]));
@@ -3096,9 +3158,6 @@ function parseProjectReceipt(value) {
             "Workspace Project presentation receipt EEs",
           ),
         };
-  if (receipt.action === "create_project" && outcome.template_name !== "project") {
-    throw new Error("Workspace Project receipt must use the generic project template");
-  }
   const barrier = writes.find((write) => write.publish_barrier);
   if (receipt.action === "create_project" && writes.some((write) => write.digest === null)) {
     throw new Error("Workspace Project creation receipt cannot contain a deletion");
@@ -3649,12 +3708,12 @@ async function inspectClientAuthoringRemoval(candidate, type) {
   };
 }
 
-function assertClientAuthoringRemovalIdentity(actual, removal, location) {
+function assertClientAuthoringRemovalIdentity(actual, removal, location, retiredState = false) {
   if (
     !actual.exists
     || actual.dev !== removal.expected_dev
     || actual.ino !== removal.expected_ino
-    || actual.treeDigest !== removal.tree_digest
+    || (!retiredState && actual.treeDigest !== removal.tree_digest)
   ) {
     throw new Error(`Client authoring removal '${removal.tag}' ${location} identity changed`);
   }

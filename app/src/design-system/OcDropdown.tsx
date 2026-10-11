@@ -11,7 +11,7 @@ export type OcDropdownProps = Omit<HTMLAttributes<HTMLDivElement>, "role"> & {
   onOpenChange: (open: boolean) => void;
   anchorRef: RefObject<HTMLElement | null>;
   align?: "start" | "center" | "end";
-  side?: "bottom" | "right";
+  side?: "top" | "bottom" | "right";
   contentWidth?: "menu" | "sidebar" | "menuBounded" | "menuWide" | "modelPicker";
   sideOffset?: number;
   alignOffset?: number;
@@ -43,7 +43,7 @@ function nextTextMatch(items: readonly string[], search: string, current: string
   return match === current ? undefined : match;
 }
 
-function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bottom">, width: number, height: number, viewportWidth: number, viewportHeight: number, align: "start" | "center" | "end", sideOffset = 1, alignOffset = 0, preferredSide: "bottom" | "right" = "bottom"): Placement {
+function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bottom">, width: number, height: number, viewportWidth: number, viewportHeight: number, align: "start" | "center" | "end", sideOffset = 1, alignOffset = 0, preferredSide: "top" | "bottom" | "right" = "bottom"): Placement {
   const maxWidth = Math.max(0, viewportWidth - 16);
   if (preferredSide === "right") {
     const right = Math.max(0, viewportWidth - anchor.right - sideOffset - 8);
@@ -65,7 +65,8 @@ function dropdownPlacement(anchor: Pick<DOMRect, "left" | "right" | "top" | "bot
   }
   const below = Math.max(0, viewportHeight - anchor.bottom - sideOffset - 6);
   const above = Math.max(0, anchor.top - sideOffset - 6);
-  const side = height > below && above > below ? "top" : "bottom";
+  const side = preferredSide === "top" ? height > above && below > above ? "bottom" : "top"
+    : height > below && above > below ? "top" : "bottom";
   const maxHeight = Math.min(side === "top" ? above : below, Math.max(0, viewportHeight - 16));
   const renderedWidth = Math.min(width, maxWidth);
   const alignedLeft = align === "end" ? anchor.right - renderedWidth - alignOffset : align === "center" ? (anchor.left + anchor.right - renderedWidth) / 2 + alignOffset : anchor.left + alignOffset;

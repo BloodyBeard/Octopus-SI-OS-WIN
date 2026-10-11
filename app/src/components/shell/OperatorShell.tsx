@@ -58,6 +58,7 @@ import type { SelectionRef } from "../../data/topology";
 import type { OctopusClientAccessProfile, OctopusClientWindowCloseRequest } from "../../electron";
 import { useRuntimeTopology } from "../../runtimeTopology";
 import { useClientSurfaces } from "../../shell/surfaceRegistry";
+import { useAdmittedClientActions } from "../../shell/useAdmittedClientActions";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import {
   clientWindowChatStorageScope,
@@ -1163,9 +1164,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     selectSurface(previous?.surfaceId || destination.surfaceId);
   }, [chatWorkspace, openVoice, selectSurface, surfaceNavigation.entries, taskChatRuns, visibleSurfaces]);
 
-  const openPrimarySurface = useCallback((surface: ClientSurfaceDescriptor) => {
+  const openPrimarySurface = useCallback((surface: ClientSurfaceDescriptor, exactTarget = false) => {
     const destination = clientNavigationDestinations.find((candidate) => candidate.surfaceId === surface.id);
-    if (destination) {
+    if (destination && !exactTarget) {
       openNavigationSection(destination.id);
       return;
     }
@@ -2110,6 +2111,20 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     return () => window.removeEventListener(CLIENT_SURFACE_ACTION_EVENT, handleClientSurfaceAction);
   }, [accessProfile, openPrimarySurface, visibleSurfaces]);
 
+  useAdmittedClientActions({
+    enabled: accessProfile === "live" && clientWindow.primary && runtimeHost.available && runtimeHost.ready
+      && !surfaceRegistry.loading && !agentProjectWorkspace.loading && homeChatWorkspace.runsLoaded
+      && homeChatWorkspace.activeRunId === homeRunId && homeChatWorkspace.activeRun?.runId === homeRunId
+      && homeChatWorkspace.activeRun?.clientSurfaceRole === "home"
+      && homeChatWorkspace.activeRun?.chatInterfaceId === agentProjectWorkspace.homeInterfaceId,
+    home: runtimeHost.home,
+    runId: homeRunId,
+    interfaceId: homeChatWorkspace.activeRun?.chatInterfaceId ?? "",
+    surfaces: visibleSurfaces.filter((surface) => !isSidebarOnlySurface(surface)),
+    openSurface: (surface) => openPrimarySurface(surface, true),
+    onRefusal: (reason) => appToast.warning(reason),
+  });
+
   useEffect(() => {
     if (settingsOpen) setCommandMenuOpen(false);
   }, [settingsOpen]);
@@ -2347,6 +2362,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         agentExecutionContexts={chatWorkspace.executionContexts}
         agentDefinitions={chatWorkspace.agentPresets}
         agentProviderInterfaces={chatWorkspace.declaredProviderInterfaces}
+        agentModelsLoading={!chatWorkspace.providerInterfacesLoaded || chatWorkspace.providerInterfacesRefreshing}
+        agentModelError={chatWorkspace.providerInterfaceError}
+        onRefreshAgentModels={chatWorkspace.refreshProviderModels}
         dashboardExpanded={!inspectorOpen}
         interactionDisabled={settingsOpen}
         onCloseSettings={() => setSettingsOpen(false)}

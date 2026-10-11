@@ -105,9 +105,23 @@ pub enum ResolvedContext {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreludeArtifact {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    run: Option<String>,
+    #[serde(default)]
+    owner_interface: Option<String>,
     schema_version: u32,
     module_source: String,
     exports: Vec<String>,
+}
+
+fn artifact_identity_matches(id: Option<&str>, reference: &ArtifactRef) -> bool {
+    match id {
+        Some(id) => id == reference.id.as_str(),
+        None => reference.id.as_str().rsplit_once(':').is_some_and(|(label, hash)|
+            !label.is_empty() && hash == reference.content.to_hex()),
+    }
 }
 
 impl CodeModeConfig {
@@ -150,6 +164,17 @@ impl CodeModeConfig {
             .map_err(|error| format!("bound code mode prelude is malformed: {error}"))?;
         if prelude.schema_version != 1 {
             return Err("bound code mode prelude requires schema_version 1".to_string());
+        }
+        let runtime = envelope.runtime().map_err(|error| error.to_string())?;
+        let owner_matches = match (&prelude.id, &prelude.run, &prelude.owner_interface) {
+            (Some(_), Some(run), Some(owner)) => run == runtime.run.as_str() && owner == runtime.interface.as_str(),
+            (None, None, None) => true,
+            _ => false,
+        };
+        if !artifact_identity_matches(prelude.id.as_deref(), prelude_artifact)
+            || !owner_matches
+        {
+            return Err("bound code mode prelude has a different declared identity or owner".into());
         }
         Ok(ResolvedContext::Persistent {
             artifact: prelude_artifact.clone(),
@@ -399,6 +424,8 @@ fn validate_pinned_tool(
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CodeModeOwnerTopology {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub schema_version: u32,
     pub run: String,
     pub worker: String,
@@ -461,7 +488,8 @@ impl CodeModeConfig {
         let CodeModeContext::Persistent { prelude_artifact } = &self.context else {
             return Err("owner handoff requires explicit persistent context".into());
         };
-        if topology.schema_version != 1
+        if self.handoff.as_ref().is_none_or(|handoff| !artifact_identity_matches(topology.id.as_deref(), &handoff.topology_artifact))
+            || topology.schema_version != 1
             || topology.run != runtime.run.as_str()
             || topology.worker != runtime.worker.as_str()
             || topology.owner_interface != runtime.interface.as_str()
@@ -481,10 +509,9 @@ impl CodeModeConfig {
             }
             for id in [writer.owner.as_str(),writer.source.as_str(),writer.door.as_str()] {
                 validate_identity("coauthor interface",id)?;
-                if !metadata.grant.interfaces.iter().any(|granted| granted == id) { return Err("coauthor interface is absent from this formation".into()); }
             }
             for value in [&writer.tool,&writer.call_label,&writer.result_label] { validate_identity("coauthor contract",value)?; }
-            if !metadata.grant.tools.contains(&writer.tool) || metadata.grant.hard_blocked_tools.contains(&writer.tool) { return Err("coauthor tool is absent from this formation".into()); }
+            if !metadata.grant.interfaces.iter().any(|id| id == writer.owner.as_str()) || metadata.grant.hard_blocked_tools.contains(&writer.tool) { return Err("coauthor owner or writer is denied by this formation".into()); }
         }
         let continuation = self.continuation.as_ref().ok_or("missing continuation")?;
         let handoff = self.handoff.as_ref().ok_or("missing handoff")?;

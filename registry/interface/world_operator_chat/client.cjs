@@ -283,6 +283,7 @@ async function submitOperatorTurn(options, request) {
         providerInterfaceId: providerReference,
         providerModel,
         reasoningEffort: request?.reasoningEffort,
+        serviceTier: request?.serviceTier,
         eeId: request?.eeId,
         workerInterfaceId: request?.workerInterfaceId,
         doorHostSlots: request?.doorHostSlots,
@@ -345,6 +346,7 @@ async function submitOperatorTurn(options, request) {
         providerChoiceInterfaceId: providerReference,
         providerModel,
         reasoningEffort: request?.reasoningEffort,
+        serviceTier: request?.serviceTier,
         payloadArtifactBindings: authoredRequest?.payloadArtifactBindings,
         preparedPayloadSelection,
         runId,
@@ -519,10 +521,13 @@ async function planExistingProviderSelection(options, input) {
     "provider private_config",
   );
   const currentModel = requiredString(privateConfig.model, "provider model");
+  const currentServiceTier = stringValue(privateConfig.service_tier);
+  const requestedServiceTier = optionalServiceTier(input.serviceTier);
   const currentReasoningEffort = stringValue(privateConfig.reasoning_effort);
   const requestedReasoningEffort = stringValue(input.reasoningEffort);
   const providerSelectionChanged = !(
     currentModel === input.providerModel
+    && (!requestedServiceTier || currentServiceTier === requestedServiceTier)
     && (!requestedReasoningEffort || currentReasoningEffort === requestedReasoningEffort)
   );
   const sidecarPath = path.join(
@@ -552,6 +557,7 @@ async function planExistingProviderSelection(options, input) {
     authorNextCycle = true;
   }
   if (!providerSelectionChanged && !authorNextCycle) return [];
+  const topologyServiceTier = requestedServiceTier || currentServiceTier;
   const topologyReasoningEffort = !providerSelectionChanged && authorNextCycle
     ? currentReasoningEffort
     : requestedReasoningEffort;
@@ -572,6 +578,7 @@ async function planExistingProviderSelection(options, input) {
     providerInterfaceId: input.providerChoiceInterfaceId,
     providerModel: input.providerModel,
     reasoningEffort: topologyReasoningEffort || null,
+    serviceTier: topologyServiceTier,
     eeId: safeSegment(input.currentRunDocument.value.ee, "run.ee"),
     workerInterfaceId: safeSegment(
       clientState.worker_choice_interface,
@@ -603,6 +610,7 @@ async function planExistingProviderSelection(options, input) {
     || topologyPlan.model_interface_id !== providerInterfaceId
     || topologyPlan.model !== input.providerModel
     || (topologyReasoningEffort && topologyPlan.reasoning_effort !== topologyReasoningEffort)
+    || (topologyServiceTier && topologyPlan.service_tier !== topologyServiceTier)
   ) {
     throw new Error("operator chat provider selection changed its exact task identity");
   }
@@ -632,6 +640,7 @@ async function planExistingProviderSelection(options, input) {
       providerInterfaceId,
       topologyPlan.model,
       topologyPlan.reasoning_effort,
+      topologyPlan.service_tier,
     );
     if (providerDescriptor.text !== providerWrite.content) selectedWrites.push(providerWrite);
   }
@@ -727,6 +736,7 @@ function selectedProviderDescriptorContent(
   providerInterfaceId,
   model,
   reasoningEffort,
+  serviceTier,
 ) {
   const plannedProviderDescriptor = requiredObject(
     JSON.parse(plannedText),
@@ -771,6 +781,9 @@ function selectedProviderDescriptorContent(
     "planned provider model_catalog",
   );
   selectedProviderPrivateConfig.model = requiredString(model, "planned provider model");
+  const resolvedServiceTier = optionalServiceTier(serviceTier);
+  if (resolvedServiceTier) selectedProviderPrivateConfig.service_tier = resolvedServiceTier;
+  else delete selectedProviderPrivateConfig.service_tier;
   const resolvedReasoningEffort = stringValue(reasoningEffort);
   if (resolvedReasoningEffort) {
     selectedProviderPrivateConfig.reasoning_effort = resolvedReasoningEffort;
@@ -804,6 +817,7 @@ async function readExistingOperatorMessageEnvelope(options, input) {
       await materializeAttachments(await planOperatorAttachments(
         input.attachmentRoot,
         input.attachmentInputs,
+        envelope.payload.attachments,
       ));
     }
     await verifyOperatorMessageAttachments(envelope.payload.attachments);
@@ -833,6 +847,7 @@ async function readExistingOperatorMessageEnvelope(options, input) {
     await materializeAttachments(await planOperatorAttachments(
       input.attachmentRoot,
       input.attachmentInputs,
+      envelope.payload.attachments,
     ));
   }
   await verifyOperatorMessageAttachments(envelope.payload.attachments);
@@ -986,6 +1001,7 @@ function operatorMessageRequestDigest(config, request, resolved) {
     provider_interface_id: resolved.providerReference,
     provider_model: requiredString(request?.providerModel, "providerModel"),
     reasoning_effort: stringValue(request?.reasoningEffort),
+    ...(optionalServiceTier(request?.serviceTier) ? { service_tier: request.serviceTier } : {}),
     selected_tools: operatorSelectedTools(request?.selectedTools),
     selected_worker_environment_kinds: operatorSelectedWorkerEnvironmentKinds(
       request?.selectedWorkerEnvironmentKinds,
@@ -1338,6 +1354,7 @@ async function planOperatorChatSurface(options, request) {
     "providerInterfaceId",
     "providerModel",
     "reasoningEffort",
+    "serviceTier",
     "eeId",
     "workerInterfaceId",
     "doorHostSlots",
@@ -1426,6 +1443,7 @@ async function planOperatorChatSurface(options, request) {
     providerInterfaceId,
     providerModel,
     reasoningEffort: stringValue(request.reasoningEffort) || null,
+    serviceTier: optionalServiceTier(request.serviceTier),
     eeId,
     workerInterfaceId,
     doorHostSlots,
@@ -1534,6 +1552,7 @@ async function planOperatorChatSurface(options, request) {
     workerInterfaceId: safeSegment(topologyPlan.worker_interface_id, "plan.worker_interface_id"),
     clientSurfaceRole: operatorSurfaceRole(topologyPlan.client_surface_role),
     reasoningEffort: stringValue(topologyPlan.reasoning_effort),
+    serviceTier: optionalServiceTier(topologyPlan.service_tier),
     authoringProfile: expectedAuthoringProfile,
     requiredInterfaceIds,
     requiredToolIds,
@@ -1602,6 +1621,7 @@ async function planOperatorChatTaskAmendment(options, request) {
   );
   const providerModel = requiredString(providerPrivateConfig.model, "provider model");
   const reasoningEffort = stringValue(providerPrivateConfig.reasoning_effort);
+  const serviceTier = optionalServiceTier(providerPrivateConfig.service_tier);
   const conversationState = await readConversationState({
     octopusHome,
     existing: current.value,
@@ -1625,6 +1645,7 @@ async function planOperatorChatTaskAmendment(options, request) {
     providerInterfaceId: providerChoiceInterfaceId,
     providerModel,
     reasoningEffort,
+    serviceTier,
     eeId,
     workerInterfaceId,
     doorHostSlots,
@@ -1652,6 +1673,7 @@ async function planOperatorChatTaskAmendment(options, request) {
     || topologyPlan.model_interface_id !== providerInterfaceId
     || topologyPlan.model !== providerModel
     || topologyPlan.reasoning_effort !== reasoningEffort
+    || (serviceTier && topologyPlan.service_tier !== serviceTier)
   ) {
     throw new Error("operator chat capability amendment changed its exact task identity");
   }
@@ -2352,7 +2374,10 @@ async function operatorTaskWorkerEnvironmentRecords(octopusHome, run, runId, exa
         throw new Error(`worker-environment record '${recordPath}' violates its lifecycle identity`);
       }
       if (formation.run !== runId) {
-        throw new Error(`task-owned interface '${interfaceId}' retains a formation for another run`);
+        await validateTaskWriterFormation(octopusHome, run, formation, exactInterfaces);
+        if (formation.requires_release && record.lifecycle !== "released") {
+          throw new Error(`task writer '${formation.run}' retains an unreleased worker environment`);
+        }
       }
       if (formation.worker !== worker || formation.ee !== ee) {
         throw new Error(`worker-environment '${entry.name}' differs from task '${runId}' coordinates`);
@@ -2367,6 +2392,44 @@ async function operatorTaskWorkerEnvironmentRecords(octopusHome, run, runId, exa
     left.record.formation.worker_environment_id
       .localeCompare(right.record.formation.worker_environment_id)
   ));
+}
+
+async function validateTaskWriterFormation(octopusHome, run, formation, exactInterfaces) {
+  const writerId = safeSegment(formation.run, "task writer run");
+  const declarations = Object.entries(requiredObject(run.interface_state, "task interface state"))
+    .flatMap(([owner, state]) => {
+      const binding = state?.run_authoring_binding?.writer_run ?? state?.writer_run;
+      return binding?.run === writerId ? [{ owner, binding }] : [];
+    });
+  if (declarations.length !== 1) throw new Error(`task-owned interface '${formation.door_interface}' retains a formation for another run`);
+  const { owner, binding } = declarations[0];
+  if (Object.hasOwn(binding, "initial_record_format") && !["pretty", "compact"].includes(binding.initial_record_format)) {
+    throw new Error("task writer Run declaration has invalid initial record format");
+  }
+  const initial = requiredObject(binding.initial_record, "task writer initial record");
+  const target = initial.interface_state?.[owner]?.file_writer_target;
+  if (!exactInterfaces.has(owner) || initial.id !== writerId || initial.ee !== run.ee
+    || initial.worker !== run.worker || target?.run !== run.id || target.provider !== owner
+    || target.generation !== 0 || target.door !== formation.door_interface
+    || !exactInterfaces.has(target.source) || !exactInterfaces.has(target.door) || target.source === target.door) {
+    throw new Error(`task writer '${writerId}' differs from its exact task declaration`);
+  }
+  const file = path.join(await resolveRunRecordsRoot(octopusHome), `${writerId}.json`);
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`task writer '${writerId}' must be a plain file`);
+  const current = await readJsonIfPresent(file);
+  const generation = current?.interface_state?.[owner]?.file_writer_target?.generation;
+  if (!Number.isSafeInteger(generation) || generation < 0) throw new Error(`task writer '${writerId}' has invalid generation`);
+  const expected = structuredClone(initial);
+  if (generation > 0) {
+    expected.interface_state[owner].file_writer_target.generation = generation;
+    for (const checkpoint of requiredArray(expected.checkpoints, "task writer checkpoints")) {
+      checkpoint.id = `${checkpoint.id}_${generation}`;
+      checkpoint.trace = `trace:${writerId}:${checkpoint.id}`;
+    }
+    expected.active_checkpoints = expected.checkpoints.map((checkpoint) => checkpoint.id);
+  }
+  if (canonicalJson(current) !== canonicalJson(expected)) throw new Error(`task writer '${writerId}' drifted from its declared generation`);
 }
 
 async function waitForWorkerEnvironmentRelease(input) {
@@ -2694,6 +2757,7 @@ async function planOperatorChatTopology({
   providerInterfaceId,
   providerModel,
   reasoningEffort,
+  serviceTier,
   eeId,
   workerInterfaceId,
   doorHostSlots,
@@ -2724,6 +2788,7 @@ async function planOperatorChatTopology({
     provider_interface_id: providerInterfaceId,
     model: stringValue(providerModel) || null,
     reasoning_effort: stringValue(reasoningEffort) || null,
+    service_tier: optionalServiceTier(serviceTier) || null,
     ee_id: stringValue(eeId) || null,
     worker_interface_id: stringValue(workerInterfaceId) || null,
     client_surface_role: clientSurfaceRole,
@@ -2837,6 +2902,9 @@ function plannedAdditionalRunWrites(plan, runsRoot) {
       if (!writer) continue;
       const id = safeSegment(writer.run, "declared writer Run");
       if (declared.has(id) || execution.some((run) => run.id === id)) throw new Error("two owners declare the same writer Run");
+      if (Object.hasOwn(writer, "initial_record_format") && !["pretty", "compact"].includes(writer.initial_record_format)) {
+        throw new Error("writer Run declaration has invalid initial record format");
+      }
       const record = requiredObject(writer.initial_record, "declared writer initial record");
       if (record.id !== id || record.ee !== target.ee || record.worker !== target.worker
         || record.interface_state?.[owner]?.file_writer_target?.run !== target.id) {
@@ -2877,8 +2945,8 @@ function plannedClientWrite(value, index, registryRoot) {
     && pathIsWithin(artifactRoot, filePath);
   if (isArtifactDescriptor) {
     const id = plannedArtifactOwner(artifactParts[0]);
-    requiredObject(JSON.parse(write.content), "planned artifact descriptor");
-    if (write.tag !== `artifact:${id}`) {
+    const descriptor = requiredObject(JSON.parse(write.content), "planned artifact descriptor");
+    if (descriptor.id !== id || write.tag !== `artifact:${id}`) {
       throw new Error("planned artifact descriptor identity differs from its exact owner");
     }
   }
@@ -3556,10 +3624,6 @@ function assertOperatorMessageRequestMatchesEnvelope(input, payload) {
     label: requiredString(attachment?.label, "attachment.label"),
     mime_type: stringValue(attachment?.type) || "application/octet-stream",
     size: nonNegativeInteger(attachment?.size, "attachment.size"),
-    payload_path: path.join(
-      input.attachmentRoot,
-      `${contentHashHex(attachment?.contentHash, "attachment.contentHash")}-${safeFilename(requiredString(attachment?.name, "attachment.name"))}`,
-    ),
     payload_content_hash: contentHashHex(attachment?.contentHash, "attachment.contentHash"),
     last_modified: nonNegativeInteger(attachment?.lastModified, "attachment.lastModified"),
   }));
@@ -3568,7 +3632,6 @@ function assertOperatorMessageRequestMatchesEnvelope(input, payload) {
     label: attachment.label,
     mime_type: attachment.mime_type,
     size: attachment.size,
-    payload_path: attachment.payload_path,
     payload_content_hash: attachment.payload_content_hash,
     last_modified: attachment.last_modified,
   }));
@@ -3740,9 +3803,12 @@ async function sha256File(filePath) {
   return hash.digest("hex");
 }
 
-async function planOperatorAttachments(root, inputs) {
+async function planOperatorAttachments(root, inputs, durableAttachments) {
+  if (durableAttachments !== undefined && durableAttachments.length !== inputs.length) {
+    throw new Error("Attachment selection differs from its durable envelope.");
+  }
   const plans = [];
-  for (const input of inputs) {
+  for (const [index, input] of inputs.entries()) {
     const name = requiredString(input?.name, "attachment.name");
     const sourcePath = absolutePath(input?.payloadPath, "attachment.payloadPath");
     const expectedHash = contentHashHex(input?.contentHash, "attachment.contentHash");
@@ -3755,7 +3821,10 @@ async function planOperatorAttachments(root, inputs) {
     if (await sha256File(sourcePath) !== hash) {
       throw new Error("Attachment stage no longer matches its declared content hash.");
     }
-    const payloadPath = path.join(root, `${hash}-${safeFilename(name)}`);
+    const payloadPath = durableAttachments === undefined
+      ? path.join(root, hash)
+      : absolutePath(durableAttachments[index].payload_path, "attachment.payload_path");
+    if (!pathIsWithin(root, payloadPath)) throw new Error("Attachment durable path leaves its owned root.");
     plans.push({
       sourcePath,
       attachment: {
@@ -3779,6 +3848,17 @@ async function materializeAttachments(plans) {
     const expectedSize = attachment.size;
     const payloadPath = attachment.payload_path;
     const root = path.dirname(payloadPath);
+    const existing = await fs.lstat(payloadPath).catch((error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing) {
+      if (existing.isSymbolicLink() || !existing.isFile() || existing.size !== expectedSize || await sha256File(payloadPath) !== expectedHash) {
+        throw new Error(`Durable attachment '${payloadPath}' conflicts with its content address.`);
+      }
+      await syncDirectory(root);
+      continue;
+    }
     const temporary = path.join(
       root,
       `.${path.basename(payloadPath)}.${process.pid}-${randomToken(16)}.tmp`,
@@ -7072,7 +7152,7 @@ function operatorChatLiveEventKind(label, config, payload) {
     return phase === "commentary" ? "commentary_delta" : "message_delta";
   }
   if (label === "turn.agent_message") {
-    return phase === "commentary" ? "commentary" : "event";
+    return phase === "commentary" ? "commentary" : phase === "partial_answer" ? "message" : "event";
   }
   return {
     "turn.reasoning": "reasoning",
@@ -7502,3 +7582,11 @@ module.exports = {
   withOperatorRunAuthoringLock,
   withOperatorWorkspaceTopologyLock,
 };
+
+function optionalServiceTier(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || value.trim() !== value || value.length > 80 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error("serviceTier must be a non-empty native tier id");
+  }
+  return value;
+}
