@@ -897,7 +897,7 @@ assert.match(messageList, /flex w-full min-w-0 flex-col items-stretch/);
 assert.match(messageList, /effectiveActiveMessageCount === 0 && emptyState === "new-task"/);
 assert.match(messageList, /streamKey=\{streaming \? message\.id : undefined\} streaming=\{streaming\}/);
 assert.match(messageList, /const MemoizedChatTurn = memo\(ChatTurn, chatTurnPropsEqual\);/);
-assert.match(messageList, /const turns = useStableTurns\(renderMessages\);/);
+assert.match(messageList, /const turns = useStableTurns\(renderMessages, activityPresentation === "conversation"\);/);
 assert.match(messageList, /projectionValueEqual\(previous\.eventData, next\.eventData\)/);
 assert.doesNotMatch(messageList, /previous\.id\.startsWith\("stream:"\)/);
 assert.match(messageList, /className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pb-4"/);

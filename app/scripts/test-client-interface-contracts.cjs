@@ -368,6 +368,11 @@ test("opening Settings from Account preserves the destination's initial focus", 
     "./components": { OcMenuSurface: ({ surfaceRef, surface, ...props }) => React.createElement("div", { ...props, ref: surfaceRef }) },
   });
   const { AccountRailButton } = load("src/components/shell/AccountRailButton.tsx", {
+    "../../account/useChatgptAccount": { useChatgptAccount: (enabled) => { assert.equal(enabled, false); return { account: null, action: "idle", loading: false }; } },
+    "../../account/useChatgptUsage": { useChatgptUsage: (_account, enabled) => { assert.equal(enabled, false); return { value: null, loading: false, error: "" }; } },
+    "../../account/chatgptUsageModel": load("src/account/chatgptUsageModel.ts"),
+    "../account/AccountLogoutDialog": { AccountLogoutDialog: ({ open }) => { assert.equal(open, false); return null; } },
+    "../account/AccountUsage": { AccountUsageCompact: () => { throw new Error("Lab focus navigation must not render native usage"); } },
     "../../design-system/OcDropdown": { OcDropdown },
     "../../design-system/components": { OcMenuItem: ({ label, leadingIcon, trailing, ...props }) => React.createElement("button", props, label) },
     "../../keyboardShortcuts": { formatKeyboardShortcuts: () => "", useKeyboardShortcuts: () => ({}) },

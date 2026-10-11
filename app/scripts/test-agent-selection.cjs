@@ -13,10 +13,10 @@ const functions = new Map(); let resolvePending;
   ts.forEachChild(node, visit);
 })(ast);
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS } }).outputText;
+const capabilities = { exports: {} };
+Function('module', 'exports', 'require', compile(fs.readFileSync(path.join(app, 'src/components/chat/chatWorkspaceCapabilities.ts'), 'utf8')))(capabilities, capabilities.exports, () => ({}));
 test('An existing task continues through its exact provider without a saved Agent template', () => {
-  const module = { exports: {} };
-  Function('module', 'exports', 'require', compile(fs.readFileSync(path.join(app, 'src/components/chat/chatWorkspaceCapabilities.ts'), 'utf8')))(module, module.exports, () => ({}));
-  const { providerForExistingRun, providerInExecutionContext } = module.exports;
+  const { providerForExistingRun, providerInExecutionContext } = capabilities.exports;
   const provider = { id: 'provider' }, selection = { runId: 'task', eeId: 'project', workerInterfaceId: 'custom-template' };
   const run = { ...selection, workerInterfaceId: 'concrete-worker', workerChoiceInterfaceId: 'custom-template', providerInterfaceId: 'provider', providerBoundInterfaceId: 'private-provider', writable: true, archived: false };
   assert.equal(providerInExecutionContext([], 'project', 'custom-template', provider), null);
@@ -31,14 +31,15 @@ function selection() {
     executionContextsLoaded: true, providerInterfacesLoaded: false,
     agentPresets: ['first', 'second'].map(id => ({ id, name: id, projectEeId: 'ee', workerInterfaceId: id, providerInterfaceId: 'provider', providerModel: 'admitted', reasoningEffort: '', applicationIds: [], driverNames: [] })),
     executionContexts: [{ eeId: 'ee', workers: ['first', 'second'].map(id => ({ id, providerInterfaceIds: ['provider'] })) }],
-    providerInterfaces: [{ id: 'provider', models: [{ model: 'not-admitted' }, { model: 'admitted' }] }],
+    providerInterfaces: [{ id: 'provider', models: [{ model: 'not-admitted', showInPicker: true }, { model: 'admitted', showInPicker: true, serviceTiers: [{ id: 'priority', name: 'Fast' }] }] }],
     providerForExecutionContext: provider => ({ ...provider, models: provider.models.filter(model => model.model === 'admitted') }),
     providerModels: provider => provider.models, providerDefaultModel: provider => provider.models[0], providerReasoningEfforts: () => [], executionContextTaskCapabilities: () => ({}),
+    providerServiceTierAvailable: capabilities.exports.providerServiceTierAvailable, providerSelectedServiceTier: capabilities.exports.providerSelectedServiceTier,
     defaultCapabilitySelection: () => ({ applicationIds: [], driverNames: [] }),
     runsLoaded: false, runs: [], accessProfile: 'live', accessMode: 'project_access', eeId: 'ee', error: '',
     saveCurrentDraft() {}, deleteDraft() {}, resetInputHistory() {}, applyDraft: draft => Object.assign(state, draft),
   };
-  for (const field of ['agentPresetId', 'eeId', 'workerInterfaceId', 'providerInterfaceId', 'providerModel', 'reasoningEffort', 'applicationIds', 'driverNames', 'accessMode', 'error', 'newTaskTargetResolutionBlocked', 'activeRunId', 'messages', 'loadingMessages', 'messageQuery']) state[`set${field[0].toUpperCase()}${field.slice(1)}`] = value => { state[field] = value; };
+  for (const field of ['agentPresetId', 'eeId', 'workerInterfaceId', 'providerInterfaceId', 'providerModel', 'reasoningEffort', 'serviceTier', 'applicationIds', 'driverNames', 'accessMode', 'error', 'newTaskTargetResolutionBlocked', 'activeRunId', 'messages', 'loadingMessages', 'messageQuery']) state[`set${field[0].toUpperCase()}${field.slice(1)}`] = value => { state[field] = value; };
   vm.createContext(state); vm.runInContext(code, state); return state;
 }
 
@@ -55,6 +56,11 @@ test('Agent choice waits for catalogs, retains explicit choice, and validates ad
   state.agentPresets[1].providerModel = 'not-admitted'; state.chooseAgentPreset('second');
   assert.match(state.error, /model 'not-admitted' is unavailable/);
   state.agentPresets[1].providerModel = 'admitted';
+  state.agentPresets[1].serviceTier = 'priority'; state.chooseAgentPreset('second');
+  assert.equal(state.error, ''); assert.equal(state.serviceTier, 'priority');
+  state.agentPresets[1].serviceTier = 'ultrafast'; state.chooseAgentPreset('second');
+  assert.match(state.error, /service tier 'ultrafast' is unavailable/);
+  state.agentPresets[1].serviceTier = '';
   state.providerInterfaces = []; state.chooseAgentPreset('second');
   assert.match(state.error, /model interface 'provider' is unavailable/); assert.equal(state.workerInterfaceId, '');
   const early = selection(), agents = early.agentPresets;
