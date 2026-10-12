@@ -3503,6 +3503,9 @@ fn revision_attempt_generations(
     ctx: &InterfaceLiftContext, record: &RunRecord, current: &[u8], config: &RunAuthoringConfig,
 ) -> Result<BTreeMap<u64, String>, String> {
     let mut generations = BTreeMap::new();
+    if !config.checkpoints.iter().any(|checkpoint| checkpoint.role == RunAuthoringCheckpointRole::OwnerInput) {
+        return Ok(generations);
+    }
     let Some(pending) = persisted_pending_handoff(record, &config.provider_interface)? else { return Ok(generations); };
     let session = ProviderHandoffSession::new(ctx)?;
     let (_, source) = session.index()?.exact_provider_source_outbound(
@@ -18052,6 +18055,7 @@ mod tests {
                 "world_provider_test": {
                     "context_generation": 1,
                     "authoring_generation": 47,
+                    "run_authoring_binding": test_bound_topology(&config),
                     "frontier_checkpoint_ids": ["output", "authoring_call", "authoring_result"],
                     "pending_handoff": pending
                 }
@@ -18509,14 +18513,8 @@ mod tests {
             std::fs::write(&handoff.run_path, &before).unwrap();
             let mut different = next.clone();
             different.content.push(' ');
-            assert!(
-                handoff
-                    .install_authored_run(&mut state, &different)
-                    .await
-                    .err()
-                    .unwrap()
-                    .contains("different exact attempt")
-            );
+            let error = handoff.install_authored_run(&mut state, &different).await.err().unwrap();
+            assert!(error.contains("different exact attempt"), "{error}");
             let mut previous = handoff.clone();
             previous.state = Arc::new(tokio::sync::Mutex::new(state.clone()));
             drop(state);
