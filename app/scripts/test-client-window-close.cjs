@@ -43,7 +43,9 @@ function fixture() {
     globalDictationAccessToken: "foreign", clearGlobalDictationShortcut: () => effects.push("dictation.clear"),
     cdpViewerManager: { closeOwner: (token) => effects.push(`cdp.close:${token}`) }, processViewerManager: { closeOwner: (token) => effects.push(`process.close:${token}`) },
     desktopSurfaceHost: { pauseOwner: async (senderId) => effects.push(`desktop.pause:${senderId}`) },
-    nativeBrowserSurface: null, nativeDesktopPermissions: null,
+    nativeBrowserSurface: null,
+    nativeDesktopPermissions: { closeOwner: (id) => effects.push(`desktop.permissions.close:${id}`) },
+    nativeDesktopSettings: { closeOwner: (id) => effects.push(`desktop.settings.close:${id}`) },
     nativeBrowserPresentations: null, nativeBrowserDownloadHistory: null, nativeDesktopPresentations: null,
     scheduleNativeDesktopPresentations: () => effects.push("desktop.refresh"),
     clientArtifactStreamStore: { abortOwner: async (token) => effects.push(`artifact.abort:${token}`) }, clientAttachmentStagingStore: { abortOwner: async (token) => effects.push(`attachment.abort:${token}`) },
@@ -178,6 +180,7 @@ test("actual logout IPC settles token peers before revoke, preserves cancellatio
   assert.equal((await pending).authenticated, false); assert.equal((await duplicate).authenticated, false);
   assert.equal(f.effects.filter((effect) => effect === "access.lock:shared").length, 1);
   assert.deepEqual(f.effects.filter((effect) => effect.startsWith("desktop.pause:")), ["desktop.pause:1", "desktop.pause:2", "desktop.pause:11", "desktop.pause:13", "desktop.pause:10"]);
+  for (const kind of ["permissions", "settings"]) assert.deepEqual(f.effects.filter((effect) => effect.startsWith(`desktop.${kind}.close:`)), [1, 2, 11, 13, 10].map((id) => `desktop.${kind}.close:${id}`));
   assert.equal(a.lockedStatus.authenticated, false); assert.equal(b.lockedStatus.authenticated, false); assert.equal(foreign.lockedStatus, undefined);
   assert.equal(b.dead, true); assert.equal(a.dead, false); assert.equal(foreign.dead, false); assert.equal(f.subscriptions.has(3), true);
   assert.equal((await a.bridge.accessStatus()).authenticated, false); assert.equal(a.invocations.at(-1).token, ""); assert.equal((await foreign.bridge.accessStatus()).authenticated, true);
@@ -192,12 +195,18 @@ test("actual logout IPC settles token peers before revoke, preserves cancellatio
 test("every desktop IPC sender detaches on document loss and closes once on destruction", async () => {
   const declaration = main.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === "getDesktopSurfaceHost");
   const effects = [], host = { closeOwner: async (id) => effects.push(`close:${id}`), pauseOwner: async (id) => effects.push(`pause:${id}`) };
-  const getHost = Function("desktopSurfaceHost", "desktopSurfaceSenders", "nativeDesktopPermissions", `${declaration.getText(main)}; return getDesktopSurfaceHost;`)(host, new WeakSet(), null);
+  const getHost = Function("desktopSurfaceHost", "desktopSurfaceSenders", "nativeDesktopPermissions", "nativeDesktopPresentations", "nativeDesktopSettings", `${declaration.getText(main)}; return getDesktopSurfaceHost;`)(
+    host, new WeakSet(),
+    { closeOwner: (id) => effects.push(`permissions:${id}`) },
+    { closeViewsOwner: (id) => effects.push(`views:${id}`) },
+    { closeOwner: (id) => effects.push(`settings:${id}`) },
+  );
   const full = new Window(1).webContents, detached = new Window(11).webContents;
   for (const sender of [full, detached]) { assert.equal(getHost(sender), host); assert.equal(getHost(sender), host); assert.equal(sender.listenerCount("destroyed"), 1); }
   detached.emit("did-start-navigation", {}, "file:///next", false, false);
   detached.emit("did-start-navigation", {}, "file:///next#hash", true, true); assert.deepEqual(effects, []);
   detached.emit("did-start-navigation", {}, "file:///next", false, true); full.emit("render-process-gone");
   detached.emit("destroyed"); detached.emit("destroyed"); full.emit("destroyed"); await tick();
-  assert.deepEqual(effects, ["pause:11", "pause:1", "close:11", "close:1"]);
+  assert.deepEqual(effects, [[11, "pause"], [1, "pause"], [11, "close"], [1, "close"]]
+    .flatMap(([id, action]) => [`views:${id}`, `permissions:${id}`, `settings:${id}`, `${action}:${id}`]));
 });

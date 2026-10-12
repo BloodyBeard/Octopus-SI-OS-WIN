@@ -53,8 +53,12 @@ async function rendererPlanAdmission(root) {
   const catalog = await readLocalPackageCatalog({ sourceRegistryRoot: path.join(app, "../registry"),
     libraryRoot: path.join(app, "distribution/local-packages"), activeRegistryRoot: path.join(root, "registry"), stateRoot: path.join(root, "package-state") });
   assert.deepEqual(catalog.errors, []);
-  const native = catalog.packs.find((entry) => entry.id === "codex");
-  assert.ok(native);
+  const declaredPack = catalog.packs.find((entry) => entry.id === "codex");
+  assert.ok(declaredPack);
+  // This fixture checks renderer/main plan agreement; executable import closure is tested by test-local-package-closure.cjs.
+  const native = { ...declaredPack, components: declaredPack.components.map((entry) => ({
+    ...entry, source_digest: digest(`renderer-plan-fixture:${entry.package_id}`),
+  })) };
   const components = native.components.map((entry) => ({
     packageId: entry.package_id, sourceDigest: entry.source_digest, productKind: entry.product_kind, productId: entry.product_id,
   }));
@@ -74,8 +78,14 @@ async function rendererPlanAdmission(root) {
     extensions: (native.extensions ?? []).map((entry) => ({ extensionId: entry.extension_id, version: "1.0.0", sourceDigest: "sha256:" + "3".repeat(64), desiredState: "available" })),
     projectKeysByPackage: Object.fromEntries(components.map((entry) => [entry.packageId, draft.projects.map((project) => project.key)])) };
   const request = renderer.compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
-  const plan = compile(draft, pack, selection, await renderer.workspaceInitializeRequestDigest(request));
+  const requestDigest = await renderer.workspaceInitializeRequestDigest(request);
+  const plan = compile(draft, pack, selection, requestDigest);
   assert.equal(admit({ packs: [native] }, plan), native);
+  for (const components of [
+    pack.components.slice(1),
+    [...pack.components, pack.components[0]],
+    pack.components.map((entry, index) => index === 0 ? { ...entry, sourceDigest: "" } : entry),
+  ]) assert.throws(() => compile(draft, { ...pack, components }, selection, requestDigest), /one verified package snapshot/);
   for (const mutate of [
     (request) => { delete request.task; },
     (request) => { request.task.workerInterfaceId = request.home.workerInterfaceId; },
