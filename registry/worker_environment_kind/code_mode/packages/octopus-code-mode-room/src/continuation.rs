@@ -781,6 +781,33 @@ pub struct ReturnBoundary {
 }
 
 impl ReturnBoundary {
+    fn survives_checked_transition(&self, before: &[u8], after: &[u8]) -> Result<bool, String> {
+        if self.run_record_hash != ContentHash::of_bytes(before).to_hex() {
+            return Err("retained boundary differs from its exact pre-transition Run hash".into());
+        }
+        let before: Value = serde_json::from_slice(before).map_err(|e| e.to_string())?;
+        let after: Value = serde_json::from_slice(after).map_err(|e| e.to_string())?;
+        let checkpoints = before.get("checkpoints").and_then(Value::as_array)
+            .ok_or("checked boundary source has no checkpoints")?;
+        let Some(checkpoint) = checkpoints.iter().find(|row| row.get("id") == Some(&json!(self.checkpoint))) else {
+            return Ok(false);
+        };
+        let binding: octopus_interfaces::CheckpointBindingPolicySnapshot = serde_json::from_value(json!({
+            "inbound": checkpoint.get("interface_binding").ok_or("checked boundary lost its inbound binding")?,
+            "outbound": checkpoint.get("outbound_interface_bindings").ok_or("checked boundary lost its outbound bindings")?,
+        })).map_err(|e| e.to_string())?;
+        if checkpoint.get("epoch").and_then(Value::as_u64) != Some(self.epoch) || binding != self.binding {
+            return Err("retained boundary differs from its exact checkpoint epoch or binding".into());
+        }
+        let active = |record: &Value| -> Result<bool, String> {
+            Ok(record.get("active_checkpoints").and_then(Value::as_array)
+                .ok_or("checked boundary Run has no active checkpoints")?.contains(&json!(self.checkpoint)))
+        };
+        Ok(active(&before)? && active(&after)? && after.get("checkpoints").and_then(Value::as_array)
+            .ok_or("checked boundary target has no checkpoints")?.iter()
+            .find(|row| row.get("id") == Some(&json!(self.checkpoint))) == Some(checkpoint))
+    }
+
     pub fn matches(&self, envelope: &InterfaceInvocationEnvelope) -> Result<bool, String> {
         let runtime = envelope.runtime().map_err(|e| e.to_string())?;
         Ok(runtime.checkpoint.as_str() == self.checkpoint
@@ -1293,13 +1320,7 @@ fn read_record_bytes(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 pub fn prepare_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    if path.try_exists().map_err(|e| e.to_string())? {
-        if read_record_bytes(path)? != serde_json::to_vec(value).map_err(|e| e.to_string())? {
-            return Err(format!("code mode prospective record {} conflicts with its immutable bytes", path.display()));
-        }
-        return Ok(());
-    }
-    create_record(path, value)
+    publish_record(path, value, true)
 }
 
 pub fn create_record(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -2406,22 +2427,28 @@ pub fn reconcile_checked_provider_advance(
             let old_path = root.join(format!("{}.{}.return.json",call.digest,before_hash));
             if old_path.try_exists().map_err(|e| e.to_string())? {
                 let mut boundary: ReturnBoundary = read_record(&old_path)?;
-                boundary.run_record_hash = after_hash.clone();
-                prepare_return(root,call,&boundary)?;
+                if boundary.survives_checked_transition(&transition.before, &transition.after)? {
+                    boundary.run_record_hash = after_hash.clone();
+                    prepare_return(root,call,&boundary)?;
+                }
             }
         }
         let old_wake = root.join(format!("{before_hash}.wake-pin.json"));
         if old_wake.try_exists().map_err(|e| e.to_string())? {
             let mut boundary: ReturnBoundary = read_record(&old_wake)?;
-            boundary.run_record_hash = after_hash.clone();
-            create_record(&root.join(format!("{after_hash}.wake-pin.json")),&boundary)?;
+            if boundary.survives_checked_transition(&transition.before, &transition.after)? {
+                boundary.run_record_hash = after_hash.clone();
+                prepare_record(&root.join(format!("{after_hash}.wake-pin.json")),&boundary)?;
+            }
         }
         for application in applications(root)? {
             let old_path = root.join(format!("{}.{}.application-projected.json",application.pending_digest,before_hash));
             if old_path.try_exists().map_err(|e| e.to_string())? {
                 let mut projection: ApplicationProjection = read_record(&old_path)?;
-                projection.boundary.run_record_hash = after_hash.clone();
-                record_application_projection(root,&projection)?;
+                if projection.boundary.survives_checked_transition(&transition.before, &transition.after)? {
+                    projection.boundary.run_record_hash = after_hash.clone();
+                    record_application_projection(root,&projection)?;
+                }
             }
         }
         let result_artifact = transition.result.artifact.clone().ok_or("checked provider result has no artifact")?;

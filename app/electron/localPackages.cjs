@@ -364,6 +364,93 @@ async function repairLocalPackages(options) {
   });
 }
 
+async function adoptLocalPackageUpdates(options) {
+  const roots = normalizeRoots(options);
+  return withPackageStateLock(roots.stateRoot, async () => {
+    await ensurePackageState(roots);
+    await recoverLocalPackageTransactionsUnlocked(roots);
+    const receipts = new Map();
+    for (const entry of await fs.readdir(roots.receiptsRoot, { withFileTypes: true })) {
+      if (!entry.name.endsWith(".json")) continue;
+      if (!entry.isFile()) throw new Error(`Installed package receipt '${entry.name}' is not a regular file`);
+      const id = requiredId(entry.name.slice(0, -5), "installed package id");
+      const receipt = await readReceipt(roots, id);
+      if (!receipt) throw new Error(`Installed package receipt '${id}' disappeared before update`);
+      receipts.set(id, receipt);
+    }
+    if (receipts.size === 0) return { action: "adopt_package_updates", changed: false, packageIds: [] };
+    const library = await loadLocalPackageLibrary(roots);
+    const selected = requireReviewedPackageClosure(library, [...receipts.keys()].sort());
+    const updates = [];
+    const expectedRepairs = {};
+    for (const entry of selected) {
+      const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true });
+      await verifyPackageDefinition(entry);
+      const state = await readPackageState(roots, entry.manifest, source);
+      const receipt = receipts.get(entry.manifest.id);
+      if (!state.receipt || hashJson(state.receipt) !== hashJson(receipt)) {
+        throw new Error(`Installed package '${entry.manifest.id}' receipt changed before update`);
+      }
+      assertPackageUpdateOwnership(entry.manifest, source, state);
+      if (state.receiptState === "valid") continue;
+      await preparePackageRepair(entry.manifest, source, state);
+      updates.push(entry);
+      expectedRepairs[entry.manifest.id] = {
+        sourceDigest: source.sourceDigest,
+        installedDigest: state.installedDigest,
+        receiptState: state.receiptState,
+        receiptDigest: hashJson(receipt),
+      };
+    }
+    const packageIds = updates.map(entry => entry.manifest.id);
+    if (!updates.length) return { action: "adopt_package_updates", changed: false, packageIds };
+    await assertPackageMutationAllowed(roots, options?.assertMutable, packageIds);
+    const outcome = await repairResolvedPackages(roots, updates, {
+      operationId: `release_${hashJson(expectedRepairs)}`,
+      expectedRepairs,
+      assertMutable: options?.assertMutable,
+      onProgress: options?.onProgress,
+    });
+    return { ...outcome, action: "adopt_package_updates" };
+  });
+}
+
+function assertPackageUpdateOwnership(manifest, source, state) {
+  const receipt = state.receipt;
+  if (!state.materialized || state.partiallyMaterialized || receipt.product_kind !== manifest.product_kind
+    || receipt.product_id !== manifest.product_id || receipt.members.length !== source.members.length) {
+    throw new Error(`Installed package '${manifest.id}' changed its declared owner set; prior installation is preserved`);
+  }
+  for (const member of source.members) {
+    const baseline = receipt.members.find(candidate => memberKey(candidate) === memberKey(member));
+    const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
+    if (!baseline || baseline.target !== memberRelative(member) || !active?.present) {
+      throw new Error(`Installed package '${manifest.id}' changed ownership of '${memberKey(member)}'`);
+    }
+    const jsonFiles = new Map((baseline.json_files ?? []).map(file => [file.path, file]));
+    for (const [relative, saved] of jsonFiles) {
+      if (saved.configuration_digest !== undefined
+        && member.projectedFiles.get(relative)?.configuration_digest !== saved.configuration_digest) {
+        throw new Error(`Installed package '${manifest.id}' changed configuration ownership at '${memberKey(member)}/${relative}'; prior installation is preserved`);
+      }
+    }
+    const files = active.files.map(file => {
+      const relative = snapshotRelativePath(file.relative_path);
+      const saved = jsonFiles.get(relative);
+      if (!saved || saved.sha256 === file.sha256 && saved.size === file.size) return file;
+      const configured = active.projectedFiles.get(relative);
+      if (!configured || configured.configuration_digest !== saved.configuration_digest
+        || configured.owned_sha256 !== saved.owned_sha256) {
+        throw new Error(`Installed package '${manifest.id}' has unowned JSON changes at '${memberKey(member)}/${relative}'; prior installation is preserved`);
+      }
+      return { ...file, sha256: saved.sha256, size: saved.size };
+    });
+    if (snapshotDigest(files) !== baseline.digest) {
+      throw new Error(`Installed package '${manifest.id}' has changed source-owned files at '${memberKey(member)}'; prior installation is preserved`);
+    }
+  }
+}
+
 async function applyLocalApplicationPack(options) {
   const roots = normalizeRoots(options);
   return withPackageStateLock(roots.stateRoot, async () => {
@@ -1770,6 +1857,7 @@ async function repairResolvedPackages(roots, entries, operation) {
         throw new Error(`local package '${candidate.entry.manifest.id}' source changed while staging repair`);
       }
     }
+    await assertPackageMutationAllowed(roots, operation.assertMutable, pending.map(candidate => candidate.entry.manifest.id));
     journal.phase = "committing";
     await writeJournal(journalPath, journal);
     for (const [index, move] of journal.moves.entries()) {
@@ -2993,6 +3081,7 @@ function withPackageStateLock(stateRoot, operation) {
 }
 
 module.exports = {
+  adoptLocalPackageUpdates,
   withInstalledAgentPreset,
   applyLocalApplicationPack,
   inspectLocalPackageCatalog,

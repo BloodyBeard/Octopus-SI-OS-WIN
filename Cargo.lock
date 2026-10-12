@@ -6561,6 +6561,7 @@ dependencies = [
  "octopus-ledger",
  "octopus-process-session-tool-runtime",
  "octopus-provider-run-authoring",
+ "octopus-runtime",
  "octopus-tool-handlers",
  "octopus-worker-env",
  "serde",

@@ -10,6 +10,17 @@ use std::sync::{
     Arc,
 };
 
+fn enabled_preferences(root: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.canonicalize().unwrap().join("preferences");
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = path.join("computer-use.json");
+    std::fs::write(&file, b"{\"schema_version\":1,\"enabled\":true}").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
 struct NativeFixture {
     posted: AtomicUsize,
     hold: AtomicBool,
@@ -125,7 +136,7 @@ fn click(room: &str, id: &str, observation: &str, generation: u64) -> Request {
 async fn observed_input_is_owned_single_use_and_cancelled_without_waiting_for_executor() {
     let root = tempfile::tempdir().unwrap();
     let fixture = Arc::new(NativeFixture::default());
-    let host = Arc::new(DesktopHost::new(fixture.clone(), root.path().join("host")).unwrap());
+    let host = Arc::new(DesktopHost::new(fixture.clone(), root.path().join("host")).unwrap().with_application_preferences(Some(enabled_preferences(root.path()))).unwrap());
     let (observation, generation) = prepare(&host, "room-a", "first").await;
     let view = host
         .handle(
@@ -247,7 +258,7 @@ async fn observed_input_is_owned_single_use_and_cancelled_without_waiting_for_ex
 #[tokio::test]
 async fn stop_rejects_late_operator_release_or_takeover_under_the_same_control_lock() {
     let root = tempfile::tempdir().unwrap();
-    let host = DesktopHost::new(Arc::new(NativeFixture::default()), root.path().join("host")).unwrap();
+    let host = DesktopHost::new(Arc::new(NativeFixture::default()), root.path().join("host")).unwrap().with_application_preferences(Some(enabled_preferences(root.path()))).unwrap();
     let (_, before) = prepare(&host, "room", "start").await;
     let stopped = host.handle(request("room", "stop", json!({"type":"stop"})), true).await;
     assert!(stopped.accepted);
@@ -275,10 +286,12 @@ async fn physical_device_ownership_and_restart_require_explicit_recovery() {
     let fixture = Arc::new(NativeFixture::default());
     let a = DesktopHost::new(fixture.clone(), root.path().join("a"))
         .unwrap()
+        .with_application_preferences(Some(enabled_preferences(root.path()))).unwrap()
         .with_device_lock(device.clone())
         .unwrap();
     let b = DesktopHost::new(fixture.clone(), root.path().join("b"))
         .unwrap()
+        .with_application_preferences(Some(enabled_preferences(root.path()))).unwrap()
         .with_device_lock(device)
         .unwrap();
     prepare(&a, "room-a", "first").await;
@@ -294,7 +307,7 @@ async fn physical_device_ownership_and_restart_require_explicit_recovery() {
         .await;
     assert!(!denied.accepted);
     drop(a);
-    let restored = DesktopHost::new(fixture, root.path().join("a")).unwrap();
+    let restored = DesktopHost::new(fixture, root.path().join("a")).unwrap().with_application_preferences(Some(enabled_preferences(root.path()))).unwrap();
     let denied = restored
         .handle(
             request(

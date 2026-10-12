@@ -21,6 +21,17 @@ mod config;
 mod app_authorization;
 mod native_connection;
 pub use native_connection::prepare_private_desktop_host;
+
+pub fn application_settings(root: &std::path::Path, action: Value) -> Result<Value, String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, tag = "operation", rename_all = "snake_case")]
+    enum Action { List {}, Remove { bundle_id: String } }
+    let action: Action = serde_json::from_value(action).map_err(|error| error.to_string())?;
+    let bundle = match &action { Action::List {} => None, Action::Remove { bundle_id } => Some(bundle_id.as_str()) };
+    let mut result = app_authorization::application_preferences(root, bundle)?;
+    result["schema_version"] = json!(1);
+    Ok(result)
+}
 pub mod native_client;
 pub mod protocol;
 

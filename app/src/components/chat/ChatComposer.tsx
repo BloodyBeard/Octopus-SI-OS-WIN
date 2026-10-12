@@ -49,6 +49,8 @@ type Props = {
   canSubmit: boolean;
   canQueue?: boolean;
   onQueue?: () => void;
+  canSteer?: boolean;
+  onSteer?: () => void;
   editingQueuedTurn?: boolean;
   onCancelQueuedEdit?: () => void;
   submitBlockReason?: string;
@@ -115,6 +117,8 @@ export function ChatComposer({
   canSubmit,
   canQueue = false,
   onQueue,
+  canSteer = false,
+  onSteer,
   editingQueuedTurn = false,
   onCancelQueuedEdit,
   submitBlockReason = "",
@@ -239,7 +243,7 @@ export function ChatComposer({
       if (!turnOpen || editingQueuedTurn) return;
       if (id === "composer.queue") {
         if (canQueue) onQueue?.();
-      } else if (canSubmit && !isSubmitting) onSubmit();
+      } else if (canSteer && !isSubmitting) onSteer?.();
       return;
     }
     if (id === "focus_composer") {
@@ -271,7 +275,7 @@ export function ChatComposer({
       return;
     }
     void dictation.startDictation();
-  }), [availableProjectedFileSources, dictation.isDictating, dictation.isTranscribing, dictation.startDictation, dictation.stopDictation, listenToGlobalCommands, turnOpen, editingQueuedTurn, canQueue, canSubmit, isSubmitting, onQueue, onSubmit]);
+  }), [availableProjectedFileSources, dictation.isDictating, dictation.isTranscribing, dictation.startDictation, dictation.stopDictation, listenToGlobalCommands, turnOpen, editingQueuedTurn, canQueue, canSteer, isSubmitting, onQueue, onSteer]);
 
   useEffect(() => {
     setSlashMenuDismissed(false);
@@ -627,8 +631,8 @@ export function ChatComposer({
     </div>
     {onQueue && turnOpen && !editingQueuedTurn ? (
       <OcDropdown anchorRef={sendButtonRef} align="end" open={sendMenuOpen} onOpenChange={setSendMenuOpen}>
-        <OcMenuItem role="menuitem" label="Send now" description="Steer the current reply" leadingIcon="sendNow" disabled={!canSubmit || isSubmitting}
-          onClick={() => { setSendMenuOpen(false); onSubmit(); }} />
+        <OcMenuItem role="menuitem" label="Send now" description="Steer the current reply" leadingIcon="sendNow" disabled={!canSteer || !onSteer || isSubmitting}
+          onClick={() => { setSendMenuOpen(false); onSteer?.(); }} />
         <OcMenuItem role="menuitem" label="Queue message" description="Send after the current reply finishes" leadingIcon="steer" disabled={!canQueue}
           onClick={() => { setSendMenuOpen(false); onQueue(); }} />
       </OcDropdown>

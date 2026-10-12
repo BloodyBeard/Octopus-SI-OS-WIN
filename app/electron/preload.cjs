@@ -489,11 +489,17 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   desktopSavedApplicationPermissions(request) {
     return invokeAccess("octopus:desktop-saved-application-permissions", request);
   },
+  desktopComputerUseSettings(request) {
+    return invokeAccess("octopus:desktop-computer-use-settings", request);
+  },
   openDesktopPermissions(request) {
     return invokeAccess("octopus:desktop-permissions-open", request);
   },
   desktopSurfaceRequest(request) {
     return invokeAccess("octopus:desktop-surface-request", request);
+  },
+  desktopApplicationView(request) {
+    return invokeAccess("octopus:desktop-application-view", request);
   },
   cdpViewerAction(request) {
     return invokeAccess("octopus:cdp-viewer-action", request);

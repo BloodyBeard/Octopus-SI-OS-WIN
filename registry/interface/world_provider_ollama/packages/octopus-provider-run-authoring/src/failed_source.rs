@@ -259,9 +259,12 @@ impl ProviderHandoffSession {
             && !consumed_verified_input
             && consumed_context_free_independent_input.is_none();
         let context_artifacts = current_context_artifacts(&record, &config)?;
+        let current_bindings = if config.payload_artifact_bindings.is_empty() { Vec::new() }
+            else { provider_context_bindings(&record, &config.provider_interface)? };
         let static_context_artifacts = config
             .payload_artifact_bindings
             .iter()
+            .filter(|reference| current_bindings.iter().any(|binding| binding.id == reference.id && binding.access.read))
             .map(|reference| reference.id.clone())
             .collect::<Vec<_>>();
         let evidence_seq = self

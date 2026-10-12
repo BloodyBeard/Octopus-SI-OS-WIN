@@ -328,14 +328,22 @@ pub(super) fn wire(
             context_ids.push(id.clone());
         }
     }
+    let text_provider_context = octopus_provider_run_authoring::provider_context_bindings(
+        &RunRecord::from_bytes(content.as_bytes()).map_err(|e| e.to_string())?,
+        &InterfaceId::new(&identity.model_interface_id),
+    )?
+    .into_iter()
+    .map(|binding| serde_json::to_value(binding).map_err(|e| e.to_string()))
+    .collect::<Result<Vec<_>, _>>()?;
     let mut delegation = route(
-        BoundCheckpointRole::IndependentInput,
+        BoundCheckpointRole::Stable,
         &voice.context.delegation_interface_id,
         &identity.model_interface_id,
         &["realtime.delegation".into()],
     )?;
     delegation.static_artifact_bindings = context_ids
         .iter()
+        .filter(|id| text_provider_context.iter().any(|binding| binding["id"].as_str() == Some(id.as_str())))
         .map(|id| octopus_descriptors::ArtifactId::new(id))
         .collect();
     let incoming = home["checkpoints"]
@@ -357,8 +365,8 @@ pub(super) fn wire(
             &mut home,
             &identity.run_id,
             &delegation,
-            &role_bindings,
-            &context_ids,
+            &text_provider_context,
+            &[],
         )?;
     }
     home["interface_state"][&identity.model_interface_id]["run_authoring_binding"]["checkpoints"]

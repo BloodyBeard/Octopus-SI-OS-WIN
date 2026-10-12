@@ -21,6 +21,10 @@ struct OctopusDesktopNative {
     static let inputLeases = DesktopNativeInputLeases()
 
     static func main() async {
+        if CommandLine.arguments.dropFirst().elementsEqual(["--permission-setup"]) {
+            await permissionSetup()
+            return
+        }
         let device: DesktopInheritedDeviceReference
         do { device = try DesktopInheritedDeviceReference() }
         catch {
@@ -257,6 +261,29 @@ struct OctopusDesktopNative {
         result["completed"] = !interrupted
         result["events_posted"] = posted
         return result
+    }
+
+    static func permissionSetup() async {
+        let permissions = await MainActor.run { DesktopNativePermissions() }
+        do {
+            for try await bytes in parentChannel.packets() {
+                guard let packet = try JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                      Set(packet.keys) == ["id", "action"], let id = packet["id"] as? UInt64,
+                      let action = packet["action"] as? [String: Any] else {
+                    throw DesktopFailure(code: "invalid_request", message: "Expected an identified permission-only request")
+                }
+                do {
+                    let result = try await permissions.executeSetup(action)
+                    try output(["id": id, "ok": true, "result": result])
+                } catch let error as DesktopFailure {
+                    try output(["id": id, "ok": false, "code": error.code, "message": error.message])
+                } catch {
+                    try output(["id": id, "ok": false, "code": "permission_setup_failed", "message": String(describing: error)])
+                }
+            }
+        } catch {
+            FileHandle.standardError.write(Data("native permission setup owner disconnected\n".utf8))
+        }
     }
 
     static func same(_ a: Any, _ b: Any) -> Bool {
@@ -1645,6 +1672,51 @@ final class DesktopNativePermissions {
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary) else { return false }
             return rect.width > 600 && rect.height >= 470
         }
+    }
+
+    func executeSetup(_ action: [String: Any]) async throws -> [String: Any] {
+        guard Set(action.keys) == ["type", "operation", "permission"],
+              action["type"] as? String == "permissions",
+              let operation = action["operation"] as? String else {
+            throw DesktopFailure(code: "invalid_permission_action", message: "Settings setup accepts permission-only requests")
+        }
+        if operation == "status" {
+            guard action["permission"] is NSNull else {
+                throw DesktopFailure(code: "invalid_permission_action", message: "Permission status does not accept a target")
+            }
+            return try snapshot()
+        }
+        guard operation == "open_settings", let id = action["permission"] as? String,
+              let requirement = requirements.first(where: { $0.id == id }),
+              let url = URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?" + requirement.anchor) else {
+            throw DesktopFailure(code: "invalid_permission_action", message: "Open System Settings for an observed permission")
+        }
+        _ = try snapshot()
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        let application: NSRunningApplication = try await withCheckedThrowingContinuation { continuation in
+            NSWorkspace.shared.open(url, configuration: configuration) { application, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let application { continuation.resume(returning: application) }
+                else { continuation.resume(throwing: DesktopFailure(code: "permission_settings_unavailable", message: "System Settings did not open")) }
+            }
+        }
+        guard let expectedURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.systempreferences"),
+              application.bundleIdentifier == "com.apple.systempreferences",
+              application.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == expectedURL.resolvingSymlinksInPath().standardizedFileURL,
+              let birth = ProcessBirth(application), !application.isTerminated,
+              OctopusDesktopNative.parentChannel.isOpen else {
+            throw DesktopFailure(code: "permission_settings_closed", message: "The opened System Settings identity could not be validated")
+        }
+        if requirement.kind == "screen_capture" { _ = CGRequestScreenCaptureAccess() }
+        else if requirement.kind == "accessibility" {
+            _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        }
+        guard ProcessBirth(application) == birth, !application.isTerminated,
+              OctopusDesktopNative.parentChannel.isOpen else {
+            throw DesktopFailure(code: "permission_settings_incomplete", message: "System Settings changed during the explicit permission request; read current status before requesting again")
+        }
+        return try snapshot()
     }
 
     func execute(_ action: [String: Any]) async throws -> [String: Any] {

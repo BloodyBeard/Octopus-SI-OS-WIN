@@ -394,6 +394,8 @@ struct PendingHandoff {
 
 mod context_publication;
 mod output_connections;
+mod input_revision;
+pub use input_revision::{declared_owner_input_bindings, prepare_provider_input_revision, prepare_provider_input_rearm, prepare_provider_input_payloads, provider_input_rearm_ready, provider_input_payloads_ready, ProviderInputRevision};
 mod authoring_retry;
 mod failed_source;
 pub use failed_source::{payload_carries_session_context, FailedSourceHandoffError};
@@ -880,6 +882,12 @@ pub trait CheckedRunEvidenceReader {
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String>;
+    fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::reader_readiness(self, record, provider, before_seq)
+    }
+    fn input_payloads_ready(&mut self, record: &RunRecord, provider: &InterfaceId, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::reader_payload_readiness(self, record, provider, source, before_seq)
+    }
 }
 
 pub struct FileCheckedRunReader<'a> {
@@ -926,6 +934,12 @@ impl<'a> FileCheckedRunReader<'a> {
 
 impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
     fn max_payload_bytes(&self) -> u64 { self.evidence.max_payload_bytes }
+    fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::readiness(self.evidence, record, provider, before_seq)
+    }
+    fn input_payloads_ready(&mut self, record: &RunRecord, provider: &InterfaceId, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::payload_readiness(self.evidence, record, provider, source, before_seq)
+    }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         generated_artifacts::read_movement(self.evidence,seq).map(Some)
     }
@@ -1112,6 +1126,7 @@ fn checked_run_file_chain_with_reader(
                 generated_artifacts::validate_generated_transition(reader,&transition)?;
                 input_artifacts::validate_input_transition(reader, &transition)?;
                 validate_verified_input_transition(reader,&transition)?;
+                input_revision::validate_rearm_evidence(reader, &transition)?;
                 if transitions.len() >= 1024 { return Err("checked authoring transitions exceed their evidence bound".into()); }
                 transitions.push(transition);
                 continue;
@@ -1143,6 +1158,7 @@ fn checked_run_file_chain_with_reader(
             generated_artifacts::validate_generated_transition(reader,&transition)?;
             input_artifacts::validate_input_transition(reader, &transition)?;
             validate_verified_input_transition(reader, &transition)?;
+            input_revision::validate_rearm_evidence(reader, &transition)?;
             transitions.push(transition);
         }
     }
@@ -1492,7 +1508,12 @@ fn checked_selected_run_advance_state(
     config: &RunAuthoringConfig,
 ) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
     let mut writers = config.checkpoints.iter().filter_map(|cp| cp.owner_authoring.clone()).collect::<Vec<_>>();
-    if writers.is_empty() {
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let current = RunRecord::from_bytes(after).map_err(|error| error.to_string())?;
+    let payload_revision = input_revision::is_payload_revision(&original, &current, &config.provider_interface)?;
+    if writers.is_empty() && !payload_revision
+        && payload_artifact_bindings(&original, &config.provider_interface)?.is_empty()
+        && payload_artifact_bindings(&current, &config.provider_interface)?.is_empty() {
         if let Some(protected) = output_connections::protected_record(before, after, config)? {
             if ContentHash::of_bytes(before) != ContentHash::of_bytes(&protected) {
                 return Err("outgoing connection changed protected provider state without a checked writer chain".into());
@@ -1519,8 +1540,8 @@ fn checked_selected_run_advance_state(
     for transition in &chain {
         let original = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
         let next = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
-        if payload_artifact_bindings(&original, &config.provider_interface)? != config.payload_artifact_bindings
-            || payload_artifact_bindings(&next, &config.provider_interface)? != config.payload_artifact_bindings {
+        if payload_artifact_bindings(&original, &config.provider_interface)? != payload_artifact_bindings(&next, &config.provider_interface)?
+            && !(transition.writer == provider_writer && input_revision::is_payload_revision(&original, &next, &config.provider_interface)?) {
             return Err("checked owner advance changed the exact payload selection".into());
         }
         if transition.writer == provider_writer { validate_checked_provider_transition(transition)?; }
@@ -1642,6 +1663,13 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     next_topology.validate_identity(&after,provider)?;
     refuse_selected_consent_state(&before, provider)?;
     refuse_selected_consent_state(&after, provider)?;
+    if input_revision::is_payload_revision(&before, &after, provider)? {
+        return input_revision::validate_payload_revision(&transition.before, &transition.after, &transition.writer);
+    }
+    if input_revision::is_revision(&topology, &next_topology)
+        || input_revision::is_rearm(&before, &after, provider)? {
+        return input_revision::validate(&transition.before, &transition.after, &transition.writer);
+    }
     if !preserves_provider_topology(&topology, &next_topology)
         || topology.authoring_source_interface != transition.writer.source {
         return Err("coauthor changed the provider's exact topology or writer".into());
@@ -3461,6 +3489,63 @@ fn apply_run_json_patch(
         .map_err(|error| format!("provider patched run JSON is not UTF-8: {error}"))
 }
 
+fn attempt_config(record: &RunRecord, config: &RunAuthoringConfig) -> Result<RunAuthoringConfig, String> {
+    config_from_persisted_profile(record, &config.provider_interface, &RunAuthoringProfile {
+        file_write_tool: config.file_write_tool.clone(), file_write_label: config.file_write_label.clone(),
+        file_write_result_label: config.file_write_result_label.clone(), result_timeout_ms: config.result_timeout_ms,
+    })
+}
+
+// A definition write can occupy the generation of an already saved response.
+// Discover only predecessors of the exact current pending source, through its
+// admitted write chain; private files do not authorize an older generation.
+fn revision_attempt_generations(
+    ctx: &InterfaceLiftContext, record: &RunRecord, current: &[u8], config: &RunAuthoringConfig,
+) -> Result<BTreeMap<u64, String>, String> {
+    let mut generations = BTreeMap::new();
+    let Some(pending) = persisted_pending_handoff(record, &config.provider_interface)? else { return Ok(generations); };
+    let session = ProviderHandoffSession::new(ctx)?;
+    let (_, source) = session.index()?.exact_provider_source_outbound(
+        &record.id, &record.worker, &config.provider_interface, pending.source_movement_seq,
+    )?;
+    let hash = source.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+        .ok_or("input revision recovery source has no exact snapshot")?;
+    let (before, original) = pinned_run_record(ctx, &hash, "input revision recovery source")?;
+    let original_config = attempt_config(&original, config)?;
+    let path = ctx.root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
+        .join(format!("{}.json", record.id));
+    let chain = checked_selected_run_advance(ctx, &path, &before, current, pending.source_movement_seq, &original_config)?;
+    for transition in chain.iter().rev().filter(|transition| transition.writer.owner == config.provider_interface) {
+        if !input_revision::checked_revision(transition) { break; }
+        let prior = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
+        generations.insert(optional_u64(prior.interface_state.get(&config.provider_interface)
+            .ok_or("revision predecessor has no provider state")?, "authoring_generation")?
+            .checked_add(1).ok_or("revision predecessor generation overflow")?,
+            ContentHash::of_bytes(&transition.after).to_hex());
+    }
+    Ok(generations)
+}
+
+fn validate_revision_attempt_predecessor(
+    ctx: &InterfaceLiftContext, before: &[u8], current: &[u8], source: u64, config: &RunAuthoringConfig,
+) -> Result<(), String> {
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    if original.id != record.id || original.worker != record.worker || original.ee != record.ee || original.trace != record.trace {
+        return Err("revision predecessor changed its original run identity".into());
+    }
+    let path = ctx.root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
+        .join(format!("{}.json", record.id));
+    let chain = checked_selected_run_advance(ctx, &path, before, current, source, config)?;
+    let provider = chain.iter().filter(|transition| transition.writer.owner == config.provider_interface).collect::<Vec<_>>();
+    if provider.is_empty() || provider.iter().any(|transition| !input_revision::checked_revision(transition)) {
+        return Err("saved response has no exact input-revision predecessor proof".into());
+    }
+    input_revision::revision_delta(before, current, config)?
+        .ok_or("saved response revision changed its pending work or context")?;
+    Ok(())
+}
+
 fn persisted_authoring_attempt(
     ctx: &InterfaceLiftContext,
     hand_in_root: &Path,
@@ -3479,14 +3564,15 @@ fn persisted_authoring_attempt(
         .checked_add(1)
         .ok_or("provider authoring generation overflowed")?;
     let current_hash = ContentHash::of_bytes(record_bytes).to_hex();
+    let predecessors = revision_attempt_generations(ctx, record, record_bytes, config)?;
     let mut attempts = Vec::new();
     for (path, call) in private_authoring_calls(ctx, hand_in_root, config)? {
         let prefix = format!("provider-run-authoring:{}:", record.id);
-        if !call.correlation_id.starts_with(&prefix)
-            || correlation_generation(&record.id, &call.correlation_id)? != expected_generation
-        {
-            continue;
-        }
+        if !call.correlation_id.starts_with(&prefix) { continue; }
+        let generation = correlation_generation(&record.id, &call.correlation_id)?;
+        if generation != expected_generation && !predecessors.contains_key(&generation) { continue; }
+        // The admitted definition write itself is not an unfinished response.
+        if predecessors.get(&generation) == Some(&call.arguments.expected_after_hash) { continue; }
         let (before_bytes, before_record) = if call.arguments.expected_before_hash == current_hash {
             (record_bytes.to_vec(), record.clone())
         } else {
@@ -3497,8 +3583,8 @@ fn persisted_authoring_attempt(
                 || before.1.worker != record.worker
                 || before.1.ee != record.ee
                 || before.1.trace != record.trace
-                || before.1.interface_state.get(&config.provider_interface)
-                    != record.interface_state.get(&config.provider_interface)
+                || (generation == expected_generation && before.1.interface_state.get(&config.provider_interface)
+                    != record.interface_state.get(&config.provider_interface))
             {
                 return Err(
                     "provider authoring attempt changed its run or provider-owned state".into(),
@@ -3506,14 +3592,19 @@ fn persisted_authoring_attempt(
             }
             before
         };
+        let original_config = attempt_config(&before_record, config)?;
         let attempt = validate_authoring_attempt_source(AuthoringAttemptSourceValidation {
             ctx,
             record: &before_record,
             record_bytes: &before_bytes,
-            config,
+            config: &original_config,
             call,
             manifest_path: path,
         })?;
+        if generation != expected_generation {
+            validate_revision_attempt_predecessor(ctx, &before_bytes, record_bytes,
+                attempt.provider_source_movement_seq, &original_config)?;
+        }
         attempts.push((attempt, before_bytes));
     }
     if attempts.len() <= 1 {
@@ -3561,7 +3652,7 @@ fn persisted_authoring_attempt(
         if chain.is_empty()
             || chain
                 .iter()
-                .any(|transition| transition.writer.owner == config.provider_interface)
+                .any(|transition| transition.writer.owner == config.provider_interface && !input_revision::checked_revision(transition))
         {
             return Err("provider authoring retry changed its original intent or independent write evidence".into());
         }
@@ -3882,7 +3973,11 @@ fn recover_source_session_context(
             "provider source movement {source_movement_seq} does not name an active pinned checkpoint epoch"
         ));
     }
-    let matched = config
+    let source_config = config_from_persisted_profile(&pinned, &config.provider_interface, &RunAuthoringProfile {
+        file_write_tool: config.file_write_tool.clone(), file_write_label: config.file_write_label.clone(),
+        file_write_result_label: config.file_write_result_label.clone(), result_timeout_ms: config.result_timeout_ms,
+    })?;
+    let matched = source_config
         .checkpoints
         .iter()
         .filter(|template| {
@@ -3935,9 +4030,6 @@ fn recover_source_session_context(
         source.artifact_binding_refs.iter(),
     )?;
     let mut selected = payload_artifact_bindings(&pinned, &config.provider_interface)?;
-    if selected != config.payload_artifact_bindings {
-        return Err("cold source changed its exact pending payload selection".into());
-    }
     for reference in input_artifacts::bound_sources(&pinned, &config.provider_interface, &checkpoint.id, &source.artifact_binding_refs)? {
         if !selected.contains(&reference) { selected.push(reference); }
     }
@@ -4866,6 +4958,10 @@ impl ProviderLedgerEvidenceIndex {
     ) -> Result<Option<u64>, String> {
         self.require_interface(coordinate.interface)?;
         self.catch_up()?;
+        self.indexed_handoff_seq(coordinate, u64::MAX)
+    }
+
+    fn indexed_handoff_seq(&self, coordinate: PendingHandoffLedgerCoordinate<'_>, before_seq: u64) -> Result<Option<u64>, String> {
         let artifact_key = artifact_ref_key(coordinate.artifact);
         if let Some(error) = self
             .handoff_metadata_poison
@@ -4894,6 +4990,7 @@ impl ProviderLedgerEvidenceIndex {
                 ));
             }
         };
+        if arrival >= before_seq { return Ok(None); }
         if let Some((mark, verifier)) = coordinate.required_evidence {
             let mark_seq = match self.coordinate_marks.get(&(
                 artifact_key,
@@ -4920,6 +5017,7 @@ impl ProviderLedgerEvidenceIndex {
                     coordinate.checkpoint.as_str()
                 ));
             }
+            if mark_seq >= before_seq { return Ok(None); }
         }
         Ok(Some(arrival))
     }
@@ -5364,6 +5462,7 @@ impl ProviderOutputHandoff {
                 run_records_root.display()
             ).into());
         }
+        input_revision::validate_initial_history(ctx, &run_path, pinned_run_record, &config, source_movement_seq)?;
         let current_run_record = std::fs::read(&run_path).map_err(|error| {
             format!(
                 "provider run '{}' current record '{}' cannot be read: {error}",
@@ -5400,7 +5499,11 @@ impl ProviderOutputHandoff {
         )?;
         let independent_input_unchanged = consumed_context_free_independent_input.is_some()
             && current_record.checkpoint(&runtime.checkpoint) == Some(consumed_checkpoint)
-            && current_record.active_checkpoints.contains(&runtime.checkpoint);
+            && current_record.active_checkpoints.contains(&runtime.checkpoint)
+            && bound_topology.payload_artifact_bindings == current_topology.payload_artifact_bindings
+            && !input_revision::is_payload_revision(&initial_record, &current_record, &config.provider_interface)?
+            && bound_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput)
+                .eq(current_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput));
         let (coauthor_chain, run_record_evidence_seq) = stable_run_observation(
             &run_path, &current_run_record, ctx.required_host_io_limits()?.max_payload_bytes, || {
                 if independent_input_unchanged {
@@ -5441,7 +5544,12 @@ impl ProviderOutputHandoff {
             },
         )?;
         let added_outputs = output_connections::is_extension(&bound_topology, &current_topology);
-        let retired_verified_input = !independent_input_unchanged && !added_outputs
+        let revised_inputs = input_revision::is_revision(&bound_topology, &current_topology);
+        let revised_payloads = coauthor_chain.iter().any(|transition| {
+            transition.writer.owner == config.provider_interface
+                && input_revision::validate_payload_revision(&transition.before, &transition.after, &transition.writer).is_ok()
+        });
+        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads
             && (current_config != config || current_topology != bound_topology);
         if retired_verified_input {
             validate_retired_verified_input(
@@ -5462,7 +5570,7 @@ impl ProviderOutputHandoff {
         let effective_record = &current_record;
         let effective_record_bytes = current_run_record;
         let mut context_artifacts = current_context_artifacts(effective_record, &config)?;
-        let mut static_context_artifacts = config.payload_artifact_bindings.iter().map(|reference| reference.id.clone()).collect::<Vec<_>>();
+        let mut static_context_artifacts = config.payload_artifact_bindings.iter().filter(|reference| context_artifacts.contains(&reference.id)).map(|reference| reference.id.clone()).collect::<Vec<_>>();
         let mut session_context = ResolvedSessionContext {
             provider_interface: config.provider_interface.clone(),
             artifacts: Vec::new(),
@@ -6007,6 +6115,7 @@ impl ProviderOutputHandoff {
         ).map_err(|error| error.to_string())?;
         topology.validate_identity(&record, &self.config.provider_interface)?;
         active.config.checkpoints = topology.checkpoints.clone();
+        active.config.payload_artifact_bindings = topology.payload_artifact_bindings.clone();
         active.bound_topology = topology;
         let mut next_session_context = state.session_context.clone();
         let mut next_session_snapshot_head = state.session_snapshot_head.clone();
@@ -6135,11 +6244,20 @@ impl ProviderOutputHandoff {
     }
 
     async fn reconcile_checked_run_state(&self, state: &mut HandoffState) -> Result<(), String> {
-        if self
+        let has_owner = self
             .config
             .checkpoints
             .iter()
-            .any(|cp| cp.owner_authoring.is_some())
+            .any(|cp| cp.owner_authoring.is_some());
+        if !has_owner && self.config.payload_artifact_bindings.is_empty() {
+            let current = octopus_interfaces::read_artifact_carrier_file_bounded(
+                &self.run_path, self.ctx.required_host_io_limits()?.max_payload_bytes,
+            ).map_err(|error| error.to_string())?;
+            let current = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
+            if payload_artifact_bindings(&current, &self.config.provider_interface)?.is_empty() {
+                return Ok(());
+            }
+        }
         {
             let after_seq = state
                 .run_record_evidence_seq
@@ -6158,6 +6276,23 @@ impl ProviderOutputHandoff {
             if current != state.run_record_bytes {
                 let record = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
                 let mut advanced = state.clone();
+                let before = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+                let selected = payload_artifact_bindings(&record, &self.config.provider_interface)?;
+                let classified = payload_artifact_bindings(&before, &self.config.provider_interface)?.into_iter()
+                    .chain(selected.iter().cloned())
+                    .map(|reference| reference.id).collect::<BTreeSet<_>>();
+                if !classified.is_empty() {
+                    let readable = provider_context_bindings(&record, &self.config.provider_interface)?.into_iter()
+                        .filter(|binding| binding.access.read).map(|binding| binding.id).collect::<BTreeSet<_>>();
+                    // Attachment classification is not a future read grant. Keep
+                    // non-payload static sources and the original invocation intact.
+                    advanced.static_context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
+                    advanced.context_artifacts.retain(|id| !classified.contains(id) || readable.contains(id));
+                    for reference in selected.iter().filter(|reference| readable.contains(&reference.id)) {
+                        append_artifact(&mut advanced.static_context_artifacts, reference.id.clone());
+                        append_artifact(&mut advanced.context_artifacts, reference.id.clone());
+                    }
+                }
                 if let Some(last) = chain.last() {
                     advanced.run_record_evidence_seq = Some(last.call.seq.0);
                 }
@@ -6935,9 +7070,6 @@ impl ProviderOutputHandoff {
                 if !config.checkpoints.iter().any(|template| template.owner_authoring.is_some()) {
                     return Err("failed context recovery has no declared checked owner writers".into());
                 }
-                if config.payload_artifact_bindings != self.config.payload_artifact_bindings {
-                    return Err("failed context recovery changed its exact payload selection".into());
-                }
                 let chain = checked_selected_run_advance_state(
                     &self.ctx, &self.run_path, &before, current, sequence, &config,
                 )?;
@@ -7664,7 +7796,7 @@ impl ProviderOutputHandoff {
                     .await?;
                     if chain.is_empty()
                         || chain.iter().any(|transition| {
-                            transition.writer.owner == self.config.provider_interface
+                            transition.writer.owner == self.config.provider_interface && !input_revision::checked_revision(transition)
                         })
                     {
                         return Err(format!(
@@ -8004,7 +8136,8 @@ impl ProviderOutputHandoff {
             validate_bound_run_authoring_topology(&record, &self.config, None)?;
             if provider_state.contains_key("pending_handoff") {
                 frontier_checkpoint_ids(provider_state)?
-            } else if optional_u64(provider_state, "authoring_generation")? == 0 {
+            } else if optional_u64(provider_state, "context_generation")? == 0 {
+                input_revision::validate_initial_history(&self.ctx, &self.run_path, current, &self.config, self.source_movement_seq)?;
                 raw_frontier_checkpoint_ids(provider_state)?
             } else {
                 return Err(format!(
@@ -8959,19 +9092,15 @@ fn resolve_profile_invocation(
                         record.id.as_str()
                     ));
                 }
-            } else {
-                let pending = pending.ok_or_else(|| {
-                    format!(
-                        "provider run '{}' persisted run_authoring_binding without durable pending handoff evidence",
-                        record.id.as_str()
-                    )
-                })?;
+            } else if let Some(pending) = pending {
                 pending.items.first().ok_or_else(|| {
                     format!(
                         "provider run '{}' persisted run_authoring_binding with an empty pending handoff batch",
                         record.id.as_str()
                     )
                 })?;
+            } else if optional_u64(provider_state, "context_generation")? != 0 {
+                return Err("provider has context history without its pending handoff".into());
             }
             serde_json::from_value::<BoundRunAuthoringTopology>(value.clone()).map_err(|error| {
                 format!(
@@ -9448,11 +9577,10 @@ fn validate_bound_run_authoring_topology(
         if roles.iter().any(|binding| binding.id == reference.id) {
             return Err("payload selection collides with an authoring role binding".into());
         }
-        for template in config.checkpoints.iter().filter(|template| template.include_context) {
-            for checkpoint in record.checkpoints.iter().filter(|checkpoint| record.active_checkpoints.contains(&checkpoint.id) && checkpoint_record_matches_template(checkpoint, template, &record.id)) {
-                if checkpoint.artifact_bindings.iter().filter(|binding| binding.id == reference.id && binding.access.read).count() != 1 {
-                    return Err("context checkpoint lost an exact selected payload read binding".into());
-                }
+        for checkpoint in record.checkpoints.iter().filter(|checkpoint| record.active_checkpoints.contains(&checkpoint.id)) {
+            let bound = checkpoint.artifact_bindings.iter().filter(|binding| binding.id == reference.id).collect::<Vec<_>>();
+            if !bound.is_empty() && (bound.len() != 1 || !bound[0].access.read) {
+                return Err("payload classification has an ambiguous or unreadable checkpoint binding".into());
             }
         }
     }
@@ -9678,12 +9806,6 @@ fn validate_checkpoint_topology(
             Err(error) => return Err(error),
         }
     } else {
-        if optional_u64(provider_state, "authoring_generation")? != 0 {
-            return Err(format!(
-                "provider run '{}' has no pending handoff after authoring began",
-                record.id.as_str()
-            ));
-        }
         validate_rearmed_frontier()?;
     }
     let mut active_inputs = Vec::new();

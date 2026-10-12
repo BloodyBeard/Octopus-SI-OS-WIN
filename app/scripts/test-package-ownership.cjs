@@ -3,8 +3,9 @@ const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
 const { spawnSync, execFileSync } = require("node:child_process");
-const { installLocalPackages, repairLocalPackages, removeLocalPackages, readLocalPackageCatalog, recoverLocalPackageTransactions } = require("../electron/localPackages.cjs");
+const { adoptLocalPackageUpdates, registerLocalPackageMutationGuard, installLocalPackages, repairLocalPackages, removeLocalPackages, readLocalPackageCatalog, recoverLocalPackageTransactions } = require("../electron/localPackages.cjs");
 const { assertDeclaredGeneratedOutput, isGeneratedSourcePath, readGeneratedSourcePaths } = require("./generated-source-boundary.cjs");
 const { validatePublicPayload } = require("./publication-lib.cjs");
 
@@ -63,12 +64,83 @@ async function crash(mode, root) {
   else if (mode === "repair-copy") await repair(roots, "fixture_partial_001", (progress) => {
     if (progress.phase === "copying") process.kill(process.pid, "SIGKILL");
   });
+  else if (mode.startsWith("update-")) await adoptLocalPackageUpdates({ ...roots, onProgress(progress) {
+    if (progress.phase === mode.slice(7)) process.kill(process.pid, "SIGKILL");
+  } });
   else throw new Error(`unknown crash point ${mode}`);
   throw new Error(`crash point ${mode} was not reached`);
 }
 function child(mode, root) {
   const result = spawnSync(process.execPath, [__filename, "--crash", mode, root], { encoding: "utf8" });
   assert.equal(result.signal, "SIGKILL", result.stderr || result.stdout);
+}
+async function releaseUpdateFixture(root) {
+  const roots = await fixture(root);
+  await install(roots);
+  const manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath));
+  await json(path.join(roots.libraryRoot, "packages", "unselected.json"), { ...manifest, id: "unselected", product_id: "world_unused",
+    members: [{ registry_kind: "interface", owner: "world_unused", primary: true }] });
+  await json(path.join(roots.sourceRegistryRoot, "interface", "world_unused", "interface.json"), { id: "world_unused" });
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", endpoint: "private" }, contract: 1 });
+  const neighbor = path.join(roots.activeRegistryRoot, "interface", "private_task", "interface.json");
+  await json(neighbor, { pending: "original" });
+  const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"), calls = [];
+  let live = false;
+  const context = {
+    runtimeInitializationComplete: false, runtimeInitializationPromise: null, nativeBrowserHost: null,
+    ensureRuntimeHost: () => ({ probe: async () => ({ phase: live ? "ready" : "unmanaged", ready: live, ownership: live ? "external" : "none", pid: live ? 42 : null, error: null }) }),
+    resolveOctopusHome: () => root, clientSetupPackageRoots: () => roots, path,
+    registerLocalPackageMutationGuard, recoverLocalPackageTransactions, adoptLocalPackageUpdates,
+    recoverWorkspaceTransactions: async () => calls.push("workspace"),
+    startNativeBrowserEngine: async () => {
+      assert.equal(await fs.readFile(ownerFile(roots, true, "setup.cjs"), "utf8"), "module.exports = 4;\n");
+      calls.push("browser");
+    },
+    getOperatorChatClientLoader: () => ({ load: () => { calls.push("client"); return "loaded"; } }),
+    projectionStores: new Map(), appendClientLog: async (_level, _event, detail) => assert.fail(detail.message),
+  };
+  vm.createContext(context);
+  for (const pattern of [/async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/,
+    /async function loadOperatorChatClient\(\)[\s\S]*?\n}/]) {
+    const code = source.match(pattern)?.[0]; assert.ok(code); vm.runInContext(code, context);
+  }
+  await json(manifestPath, { ...manifest, version: "4.0.0" });
+  await json(ownerFile(roots, false, "interface.json"), { id: "world_fixture", config: { model: "new", effort: "high" }, contract: 4 });
+  await fs.writeFile(ownerFile(roots, false, "setup.cjs"), "module.exports = 4;\n");
+  await fs.writeFile(ownerFile(roots, false, "life-bin"), "version four\n");
+  const receiptPath = path.join(roots.stateRoot, "receipts", "fixture.json"), beforeReceipt = await fs.readFile(receiptPath);
+  live = true;
+  await assert.rejects(context.loadOperatorChatClient(), /Close the running Octopus runtime/);
+  assert.deepEqual(calls, []); assert.deepEqual(await fs.readFile(receiptPath), beforeReceipt);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version one\n");
+  live = false;
+  await Promise.all([context.initializeRuntimeHost(), context.loadOperatorChatClient()]);
+  assert.deepEqual(calls, ["workspace", "browser", "client"]);
+  assert.deepEqual(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))), { id: "world_fixture", config: { model: "mine", endpoint: "private" }, contract: 4 });
+  assert.deepEqual(JSON.parse(await fs.readFile(neighbor)), { pending: "original" });
+  assert.equal((await record(roots)).receipt_state, "valid");
+  await assert.rejects(fs.stat(path.join(roots.activeRegistryRoot, "interface", "world_unused")), { code: "ENOENT" });
+  const adoptedReceipt = await fs.readFile(receiptPath);
+  live = true; context.runtimeInitializationComplete = false;
+  await context.initializeRuntimeHost();
+  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine" }, contract: 999 });
+  await fs.writeFile(ownerFile(roots, false, "life-bin"), "version five\n");
+  live = false; context.runtimeInitializationComplete = false;
+  await assert.rejects(context.initializeRuntimeHost(), /unowned JSON changes/);
+  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version four\n");
+  assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", endpoint: "private" }, contract: 4 });
+  await fs.writeFile(ownerFile(roots, true, "local-notes.txt"), "keep me\n");
+  await assert.rejects(adoptLocalPackageUpdates(roots), /changed source-owned files/);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "local-notes.txt"), "utf8"), "keep me\n");
+  await fs.unlink(ownerFile(roots, true, "local-notes.txt"));
+  await json(manifestPath, { ...manifest, version: "5.0.0", required_packages: ["unselected"] });
+  await assert.rejects(adoptLocalPackageUpdates(roots), /reviewed dependency closure/);
+  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
 }
 async function sourceBoundaryFixture(root, repoRoot) {
   for (const relative of [".gitignore", "LICENSE", "CONTRIBUTING.md", "README.md", "AGENTS.md",
@@ -129,6 +201,18 @@ async function packageExportFixture(root, repoRoot) {
 async function run() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-ownership-"));
   try {
+    await releaseUpdateFixture(path.join(root, "release-update"));
+    for (const mode of ["update-backing_up", "update-finalizing"]) {
+      const directory = path.join(root, mode), roots = await fixture(directory);
+      await install(roots);
+      await fs.writeFile(ownerFile(roots, false, "new-module.cjs"), "module.exports = 2;\n");
+      child(mode, directory);
+      await adoptLocalPackageUpdates(roots);
+      assert.equal((await record(roots)).receipt_state, "valid");
+      assert.equal(await fs.readFile(ownerFile(roots, true, "new-module.cjs"), "utf8"), "module.exports = 2;\n");
+      assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+      assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+    }
     const roots = await fixture(path.join(root, "configuration"));
     await install(roots);
     await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "selected", endpoint: "configured" }, contract: 1 });

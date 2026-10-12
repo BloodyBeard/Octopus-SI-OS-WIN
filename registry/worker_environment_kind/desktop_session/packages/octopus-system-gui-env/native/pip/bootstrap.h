@@ -17,6 +17,10 @@ class ReceiverBootstrap : public std::enable_shared_from_this<ReceiverBootstrap>
   NSDictionary* BeginSource(NSDictionary* expected);
   void InstallSource(NSString* request_id, NSData* binding_bytes, NSData* key);
   void CancelSource(NSString* request_id);
+  void EmbedSource(NSString* request_id, NSString* view_id, NSString* view_generation,
+                   NSString* host_id, NSString* host_generation, NSWindow* window, CGRect rect);
+  void DetachEmbeddedSource(NSString* view_id, NSString* view_generation);
+  void HideEmbeddedSource(NSString* view_id, NSString* view_generation);
   NSDictionary* PrepareAutomationPermission(NSString* request_id);
   void BeginAutomationPermission(NSString* request_id, NSString* operation_id, NSString* operation, uint64_t timeout_ms);
   void CancelAutomationSettings(NSString* request_id, NSString* operation_id);

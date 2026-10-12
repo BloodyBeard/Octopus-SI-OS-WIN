@@ -435,6 +435,8 @@ export function ChatView({
         onRemoveAttachment={chat.removeAttachment}
         onResolvePausedQueueSubmission={chat.resolvePausedQueueSubmission}
         onSubmit={chat.submit}
+        canSteer={chat.canSteer}
+        onSteer={chat.steerCurrentTurn}
         onTextChange={chat.setText}
         onApplicationToggle={chat.toggleApplication}
         onDriverToggle={chat.toggleDriver}
@@ -449,7 +451,7 @@ export function ChatView({
         onServiceTierChange={chat.chooseServiceTier}
         resumeAvailable={chat.resumeAvailable}
         runId={chat.activeRunId}
-        submissionMode={chat.busy ? "steer" : "send"}
+        submissionMode={chat.busy ? "queue" : "send"}
         submitBlockReason={chat.submitBlockReason}
         text={chat.text}
         turnOpen={chat.turnOpen}

@@ -175,8 +175,11 @@ declare global {
       closeNativeBrowserPage(request: { home: string; workerEnvironmentId: string; surfaceId: string }): Promise<void>;
       browserSavedPermissions(request: { operation: "list" } | { operation: "remove"; home: string; hostGeneration: string; id: string }): Promise<OctopusSavedBrowserPermissions>;
       desktopSavedApplicationPermissions(request: OctopusSavedApplicationPermissionRequest): Promise<OctopusSavedApplicationPermissions>;
+      desktopComputerUseSettings(request: { operation: "status" } | { operation: "set_enabled"; enabled: boolean }): Promise<{ enabled: boolean; ready: boolean; permissions: Array<{ kind: "screen_capture" | "accessibility"; status: string }> }>;
+      desktopComputerUseSettings(request: { operation: "setup" }): Promise<{ opened: true }>;
       openDesktopPermissions(request: import("./components/worker-environment/desktopSurfaceModel").DesktopPermissionRequest): Promise<{ opened: true }>;
       desktopSurfaceRequest(request: import("./components/worker-environment/desktopSurfaceModel").DesktopSurfaceRequest): Promise<import("./components/worker-environment/desktopSurfaceModel").DesktopSurfaceResponse>;
+      desktopApplicationView(request: import("./components/worker-environment/desktopSurfaceModel").DesktopApplicationViewRequest): Promise<{ attached: boolean }>;
       cdpViewerAction(request: OctopusCdpViewerActionRequest): Promise<OctopusCdpViewerState | OctopusCdpViewerActionAccepted>;
       closeCdpViewer(request: OctopusCdpViewerCloseRequest): Promise<OctopusCdpViewerCloseOutcome>;
       openProcessViewer(request: OctopusProcessViewerOpenRequest): Promise<OctopusProcessViewerSnapshot>;

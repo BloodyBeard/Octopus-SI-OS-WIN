@@ -7,6 +7,7 @@ export type SettingsSectionId =
   | "account"
   | "appearance"
   | "voice-audio"
+  | "computer-use"
   | "gestures"
   | "shortcuts"
   | "access"
@@ -56,6 +57,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionDefinition[] = [
   { id: "account", label: "Account", glyph: "user", group: "Personal", profile: "live" },
   { id: "appearance", label: "Appearance", glyph: "sun", group: "Personal" },
   { id: "voice-audio", label: "Voice & Audio", glyph: "microphone", group: "Interaction" },
+  { id: "computer-use", label: "Computer use", glyph: "desktop", group: "Interaction", profile: "live" },
   { id: "gestures", label: "Gestures", glyph: "hand", group: "Interaction" },
   { id: "shortcuts", label: "Keyboard shortcuts", glyph: "keyboard", group: "Interaction" },
   { id: "access", label: "Access & Privacy", glyph: "dataControls", group: "Octopus" },
@@ -115,7 +117,8 @@ export const SETTINGS_DESTINATIONS: readonly SettingsDestination[] = [
   destination("access.camera", "access", "Camera", "Review or request camera access for gestures and client surfaces.", "action", ["permission"]),
   destination("access.microphone", "access", "Microphone", "Review or request microphone access for dictation and Voice.", "action", ["permission"]),
   destination("access.browser-permissions", "access", "Saved browser permissions", "Remove saved Always choices for file uploads and browsing history.", "action", ["browser", "upload", "history", "approval"], "live"),
-  destination("access.application-permissions", "access", "Saved application permissions", "Remove saved Always access through the current Computer Use host.", "action", ["computer use", "application", "approval"], "live"),
+  destination("computer-use.setup", "computer-use", "Computer use", "Enable application access and set up macOS permissions.", "action", ["computer use", "screen recording", "accessibility", "permission"], "live"),
+  destination("access.application-permissions", "computer-use", "Always-allowed apps", "Remove saved Always access through the current Computer Use host.", "action", ["computer use", "application", "approval"], "live"),
   destination("access.clear", "access", "Clear local client data", "Remove profile-local preferences, layouts, drafts, and Test fixtures.", "action", ["reset", "delete"]),
   destination("access.export", "access", "Export local settings", "Save profile-owned client settings as versioned JSON.", "action", ["backup", "json"]),
   destination("access.import", "access", "Import local settings", "Validate and merge a settings export for the exact current profile.", "action", ["restore", "json"]),

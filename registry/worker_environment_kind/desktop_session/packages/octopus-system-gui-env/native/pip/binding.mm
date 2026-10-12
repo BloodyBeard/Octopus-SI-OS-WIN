@@ -166,7 +166,7 @@ struct Wipe {
   ~Wipe() { volatile uint8_t* bytes = static_cast<volatile uint8_t*>(pointer); for (size_t i=0;i<length;++i) bytes[i]=0; }
 };
 
-enum class Method { PrepareAutomation, BeginAutomation, CancelAutomationSettings, ShowPermissions, UpdatePermissions, UpdateSettings, ClosePermissions, RegisterHost, RemoveHost, BeginSource, InstallSource, CancelSource, RevokeSource, UpsertBrowserImage, InvalidateBrowserImage, CompleteGroup, ClearCompletedGroup, Selection, Placement, MoveToHost, MaxDisplaySize, Status, Stop };
+enum class Method { PrepareAutomation, BeginAutomation, CancelAutomationSettings, ShowPermissions, UpdatePermissions, UpdateSettings, ClosePermissions, RegisterHost, RemoveHost, BeginSource, InstallSource, CancelSource, EmbedSource, DetachEmbeddedSource, HideEmbeddedSource, RevokeSource, UpsertBrowserImage, InvalidateBrowserImage, CompleteGroup, ClearCompletedGroup, Selection, Placement, MoveToHost, MaxDisplaySize, Status, Stop };
 template<Method method> napi_value Call(napi_env env,napi_callback_info info) {
   try {
     Require([NSThread isMainThread],"PiP host must run in Electron main"); size_t argc=2; napi_value args[2],self; void* data;
@@ -220,6 +220,20 @@ template<Method method> napi_value Call(napi_env env,napi_callback_info info) {
         host.InstallSource(NSStringValue(env,Get(env,input,"requestId")),Bytes(env,Get(env,input,"bindingBytes"),65536),key);
       } else if constexpr (method == Method::CancelSource) {
         Keys(env,input,{"requestId"}); host.CancelSource(NSStringValue(env,Get(env,input,"requestId")));
+      } else if constexpr (method == Method::EmbedSource) {
+        Keys(env,input,{"requestId","viewId","viewGeneration","hostId","hostGeneration","windowHandle","rect"});
+        NSData* bytes=Bytes(env,Get(env,input,"windowHandle"),sizeof(void*));Require(bytes.length==sizeof(void*),"Embedded owner has an invalid native pointer size");
+        const void* handle=nullptr;std::memcpy(&handle,bytes.bytes,sizeof(handle));NSWindow* window=nil;
+        for(NSWindow* candidate in NSApp.windows)if((__bridge const void*)candidate.contentView==handle){window=candidate;break;}
+        Require(window&&window.visible&&!window.miniaturized,"Embedded owner is not a visible current client window");
+        CGRect rect=Rect(env,Get(env,input,"rect"));
+        if(!window.contentView.isFlipped)rect.origin.y=window.contentView.bounds.size.height-rect.origin.y-rect.size.height;
+        host.EmbedSource(NSStringValue(env,Get(env,input,"requestId")),NSStringValue(env,Get(env,input,"viewId")),NSStringValue(env,Get(env,input,"viewGeneration")),
+          NSStringValue(env,Get(env,input,"hostId")),NSStringValue(env,Get(env,input,"hostGeneration")),window,rect);
+      } else if constexpr (method == Method::DetachEmbeddedSource) {
+        Keys(env,input,{"viewId","viewGeneration"});host.DetachEmbeddedSource(NSStringValue(env,Get(env,input,"viewId")),NSStringValue(env,Get(env,input,"viewGeneration")));
+      } else if constexpr (method == Method::HideEmbeddedSource) {
+        Keys(env,input,{"viewId","viewGeneration"});host.HideEmbeddedSource(NSStringValue(env,Get(env,input,"viewId")),NSStringValue(env,Get(env,input,"viewGeneration")));
       } else if constexpr (method == Method::RevokeSource) {
         Keys(env,input,{"scope","sourceWindowId"}); napi_value window=Get(env,input,"sourceWindowId"); napi_valuetype type; Check(napi_typeof(env,window,&type));
         host.RevokeSource(FoundationValue(env,Get(env,input,"scope")),type==napi_null ? nil : NSStringValue(env,window));
@@ -300,6 +314,9 @@ napi_value Create(napi_env env,napi_callback_info info) {
       {"beginSource",nullptr,Call<Method::BeginSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
       {"installSource",nullptr,Call<Method::InstallSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
       {"cancelSource",nullptr,Call<Method::CancelSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
+      {"embedSource",nullptr,Call<Method::EmbedSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
+      {"detachEmbeddedSource",nullptr,Call<Method::DetachEmbeddedSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
+      {"hideEmbeddedSource",nullptr,Call<Method::HideEmbeddedSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
       {"revokeSource",nullptr,Call<Method::RevokeSource>,nullptr,nullptr,nullptr,napi_default,nullptr},
       {"upsertBrowserImage",nullptr,Call<Method::UpsertBrowserImage>,nullptr,nullptr,nullptr,napi_default,nullptr},
       {"invalidateBrowserImage",nullptr,Call<Method::InvalidateBrowserImage>,nullptr,nullptr,nullptr,napi_default,nullptr},

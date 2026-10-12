@@ -6,18 +6,27 @@ const {test} = require('node:test');
 const {JSDOM} = require('jsdom');
 const React = require('react');
 const {createRoot} = require('react-dom/client');
-const rootPath=path.resolve(__dirname,'..');
-const cache=new Map();
+const rootPath=path.resolve(__dirname,'..'),cache=new Map(),settingsCommands=[];
 function load(relative) {
  const file=path.resolve(rootPath,relative); if(cache.has(file))return cache.get(file).exports;
  const module={exports:{}}; cache.set(file,module);
  const source=ts.transpileModule(fs.readFileSync(file,'utf8'),{fileName:file,compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText;
  function local(specifier) {
   if(specifier.endsWith('.css'))return {};
-  if(specifier.endsWith('design-system/components'))return {OcButton:({children,size,variant,...props})=>React.createElement('button',props,children),OcSelect:({options,label,onChange,placeholder,...props})=>React.createElement('select',{...props,'aria-label':label,onChange:e=>onChange(e.target.value)},React.createElement('option',{value:''},placeholder),options.map(o=>React.createElement('option',{key:o.value,value:o.value},o.label)))};
+  if(specifier.endsWith('design-system/components'))return {
+   OcButton:({children,size,variant,...props})=>React.createElement('button',props,children),
+   OcSelect:({options,label,onChange,placeholder,...props})=>React.createElement('select',{...props,'aria-label':label,onChange:e=>onChange(e.target.value)},options.map(o=>React.createElement('option',{key:o.value,value:o.value},o.label))),
+   OcCard:({children})=>React.createElement('div',null,children),OcGroup:({title,children})=>React.createElement('div',null,title,children),
+   OcSettingsRow:({label,description,control})=>React.createElement('div',null,label,description,control),OcStatus:({label})=>React.createElement('span',null,label),
+   OcSwitch:({label,checked,disabled,onCheckedChange})=>React.createElement('button',{'aria-label':label,role:'switch','aria-checked':checked,disabled,onClick:()=>onCheckedChange(!checked)})
+  };
+  if(specifier.endsWith('clientPreferences'))return {useSetClientPreferences:()=>value=>settingsCommands.push(value)};
+  if(specifier.endsWith('clientActions'))return {dispatchClientCommand:(...value)=>settingsCommands.push(value)};
   if(specifier.endsWith('IconGlyphs'))return {Glyph:()=>null};
   if(specifier.endsWith('shell/ShellTooltip'))return {ShellTooltip:({children})=>children};
-  if(specifier.endsWith('OctopusSurface'))return {OctopusNoteLine:({children})=>React.createElement('p',null,children)};
+  if(specifier.endsWith('SettingsHeading'))return {SettingsHeading:({title,description})=>React.createElement('h2',null,title,description)};
+  if(specifier.endsWith('SavedPermissionsSection'))return {SavedApplicationPermissionsSection:()=>React.createElement('div',null,'Always-allowed apps')};
+  if(specifier.endsWith('settingsCatalog'))return {settingsTargetProps:()=>({})};
   if(specifier.endsWith('RunEnvironmentSurfacePrimitives'))return {LiveSurfaceEmpty:({title,detail})=>React.createElement('div',null,title,detail),dataText:()=>'',ManualRoomControlWarning:({open,onContinue})=>open?React.createElement('button',{onClick:onContinue},'Confirm control'):null};
   if(!specifier.startsWith('.'))return require(specifier);
   const target=path.resolve(path.dirname(file),specifier); for(const suffix of ['', '.ts','.tsx'])if(fs.existsSync(target+suffix))return load(target+suffix);
@@ -26,61 +35,69 @@ function load(relative) {
  new Function('require','module','exports',source)(local,module,module.exports);return module.exports;
 }
 const {DesktopSurface}=load('src/components/worker-environment/DesktopSurface.tsx');
-const screen={id:'left',x:-960,y:0,width:960,height:540,pixel_width:1920,pixel_height:1080};
-const image={media_type:'image/png',data_base64:'aW1hZ2U=',sha256:'a'.repeat(64),byte_length:5,width:1920,height:1080};
-const evidence=(owner)=>({status:'ready',permissions:{screen_capture:true,accessibility:true},control:{mode:'model',owner,generation:1},screens:[screen],observation:{id:'first',screen,input_revision:'first',captured_at_unix_ms:1,focus:{app_id:'example.first',process_id:1,window_id:1},image}});
+const {ComputerUseSettingsSection}=load('src/components/settings/ComputerUseSettingsSection.tsx');
+const evidence=owner=>({status:'ready',permissions:{screen_capture:true,accessibility:true},control:{mode:'model',owner,generation:1},screens:[],observation:null});
+const surfaceFor=room=>({id:'desktop',mode:'direct',viewerUrl:'http://localhost/view',readOnly:false,data:{native_presentations:[{source_id:room+'-source',worker_environment_id:room,run_id:room+'-run',app_instance_id:'actual-app',source_window_id:'actual-window',display_name:'Actual App',window_title:'Document',phase:'published',completion_status:null,error:null}]}});
+function fixture() {
+ const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost',pretendToBeVisual:true}),w=dom.window;
+ for(const key of ['window','document','HTMLElement','Event','MouseEvent','MutationObserver'])Object.defineProperty(globalThis,key,{configurable:true,value:key==='window'?w:w[key]});
+ for(const key of ['getComputedStyle','requestAnimationFrame','cancelAnimationFrame'])globalThis[key]=w[key].bind(w);
+ globalThis.ResizeObserver=class {observe(){}disconnect(){}};globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ const bounds={x:20,y:80,width:700,height:500,left:20,top:80,right:720,bottom:580};
+ w.HTMLElement.prototype.getBoundingClientRect=function(){return this.matches('.we-desktop-application-view,[role="menu"]')?bounds:{x:0,y:0,width:0,height:0,left:0,top:0,right:0,bottom:0};};
+ const root=createRoot(w.document.querySelector('#root')),tick=ms=>React.act(async()=>new Promise(resolve=>setTimeout(resolve,ms??65)));
+ const button=label=>[...w.document.querySelectorAll('button')].find(b=>b.textContent===label||b.getAttribute('aria-label')===label);
+ return {dom,w,root,tick,button,click:label=>React.act(async()=>{assert(button(label),label);button(label).dispatchEvent(new w.MouseEvent('click',{bubbles:true}));}),close:async()=>{await React.act(async()=>root.unmount());dom.window.close();}};
+}
 
-test('actual desktop component keeps evidence and busy state scoped to attachment, not pixel digest',async()=>{
- const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost'});
- const w=dom.window; for(const key of ['window','document','HTMLElement','Event','MouseEvent'])Object.defineProperty(globalThis,key,{configurable:true,value:key==='window'?w:w[key]});
- globalThis.IS_REACT_ACT_ENVIRONMENT=true;
- const calls=[]; let value=evidence('room-a'); let fail=false; let pendingControl;
- w.octopusTransport={desktopSurfaceRequest:async request=>{
-  calls.push(request);
-  if(request.operation==='pause_view')return { ...request,evidence:value };
-  if(request.operation!=='view')return new Promise(resolve=>{pendingControl=resolve;});
-  if(fail)throw new Error('stream disconnected');
-  return {...request,evidence:request.screenId?structuredClone(value):{...structuredClone(value),observation:null}};
- }};
- const root=createRoot(w.document.querySelector('#root'));
- let environment={id:'room-a',runId:'run-a'}; const surface={id:'desktop',mode:'direct',viewerUrl:'http://localhost/view',readOnly:false};
- const render=async(active=true)=>React.act(async()=>root.render(React.createElement(DesktopSurface,{environment,surface,active})));
- const tick=async()=>React.act(async()=>new Promise(resolve=>setTimeout(resolve,85)));
- const text=()=>w.document.body.textContent; const button=label=>[...w.document.querySelectorAll('button')].find(b=>b.textContent===label||b.getAttribute('aria-label')===label);
- const click=async label=>React.act(async()=>button(label).dispatchEvent(new w.MouseEvent('click',{bubbles:true})));
+test('application pane hides native layer under overlays and detaches to the widget only on pane hide',async()=>{
+ const f=fixture(),calls=[],views=[];let resolveAttach;
+ f.w.octopusTransport={desktopSurfaceRequest:async request=>{calls.push(request);return request.operation==='pause_view'?{...request,paused:true}:{...request,evidence:evidence('room')};},desktopApplicationView:request=>{views.push(request);return request.operation==='attach'&&views.length===1?new Promise(resolve=>{resolveAttach=resolve;}):Promise.resolve({attached:request.operation==='attach'});}};
+ const props={environment:{id:'room',runId:'room-run'},surface:surfaceFor('room')},render=active=>React.act(async()=>f.root.render(React.createElement(DesktopSurface,{...props,active})));
  try {
-  await render();await tick(); assert(w.document.querySelector('img')); assert.match(text(),/Worker has control/);
-  value={...evidence('room-a'),control:{mode:'human',owner:null,generation:2},permissions:{screen_capture:true,accessibility:false}};
-  value.observation.focus={app_id:'example.changed',process_id:2,window_id:3};
-  value.view_image_ref={sha256:image.sha256};value.observation.image=null;
-  await tick();assert.match(text(),/You have control/);assert.match(text(),/Accessibility required/);assert.match(text(),/example.changed/);assert(w.document.querySelector('img'));
-  value={...value,view_image_ref:undefined,observation:null};await tick();assert.equal(w.document.querySelector('img'),null);
-  value=evidence('room-b');environment={id:'room-b',runId:'run-b'};await render();await tick();assert(w.document.querySelector('img'));assert.match(text(),/Worker has control/);
-  await click('Stop computer use');assert(button('Refresh').disabled);assert(pendingControl);
-  value=evidence('room-c');environment={id:'room-c',runId:'run-c'};await render();await tick();assert(!button('Refresh').disabled);
-  await React.act(async()=>pendingControl({evidence:{...evidence('room-b'),control:{mode:'stopped',owner:null,generation:99}}}));
-  assert.match(text(),/Worker has control/);assert(!button('Refresh').disabled);
-  await click('Stop computer use');await render(false);
-  await React.act(async()=>pendingControl({evidence:evidence('room-c')}));await render();await tick();assert(!button('Refresh').disabled);assert(w.document.querySelector('img'));
-  fail=true;await tick();assert.equal(w.document.querySelector('img'),null);assert.match(text(),/stream disconnected/);
-  const stopped={...evidence('room-c'),observation:null,control:{mode:'stopped',owner:null,generation:3}};
-  const viewCalls=calls.filter(c=>c.operation==='view').length;
-  assert(!button('Stop computer use').disabled);await click('Stop computer use');
-  await React.act(async()=>pendingControl({evidence:stopped}));
-  assert.match(text(),/Computer use stopped/);assert.equal(calls.filter(c=>c.operation==='view').length,viewCalls);
-  await click('Release control');const release=pendingControl;
-  assert.equal(calls.at(-1).controlGeneration,3);assert(!button('Stop computer use').disabled);
-  await click('Stop computer use');await React.act(async()=>pendingControl({evidence:{...stopped,control:{...stopped.control,generation:4}}}));
-  await React.act(async()=>release({evidence:{...stopped,control:{mode:'idle',owner:null,generation:3}}}));
-  assert.match(text(),/Computer use stopped/);assert(!button('Refresh').disabled);
-  fail=false;await click('Refresh');await tick();assert(w.document.querySelector('img'));
-  await React.act(async()=>w.document.querySelector('img').dispatchEvent(new w.Event('error')));
-  assert.equal(w.document.querySelector('img'),null);assert.match(text(),/could not be decoded/);
-  assert(!button('Stop computer use').disabled);await click('Stop computer use');
-  await React.act(async()=>pendingControl({evidence:stopped}));assert.match(text(),/Computer use stopped/);
-  await React.act(async()=>root.unmount());
-  const pauses=calls.filter(c=>c.operation==='pause_view');assert(pauses.length>3);
-  assert(calls.filter(c=>!['view','pause_view'].includes(c.operation)).every(c=>['stop','release_control'].includes(c.operation)));
-  console.log('PASS same pixels across rooms, control/focus/permissions delta, observation withdrawal, old control completion, hide/show busy, error/new-stream clear, viewer-only detach');
- } finally {await React.act(async()=>root.unmount());dom.window.close();}
+  await render(true);await f.tick();assert.equal(views[0].operation,'attach');assert.equal(views[0].appInstanceId,'actual-app');assert.equal(f.w.document.querySelector('img'),null);
+  assert(calls.filter(c=>c.operation==='view').every(c=>c.screenId===undefined),'viewer reads status, never starts a whole-display stream');
+  const overlay=f.w.document.createElement('div');overlay.setAttribute('role','menu');f.w.document.body.append(overlay);await f.tick();assert.equal(views.at(-1).operation,'hide');
+  await React.act(async()=>resolveAttach({attached:true}));assert.equal(f.w.document.querySelector('[data-attached]'),null,'late attach acknowledgement cannot cover an overlay');
+  overlay.remove();await f.tick();assert.equal(views.at(-1).operation,'attach');assert.equal(views.at(-1).viewId,views[0].viewId);assert(f.w.document.querySelector('[data-attached]'));
+  await f.click('Computer use settings');assert.deepEqual(settingsCommands.slice(-2),[{settingsSection:'computer-use'},['open_settings','surface']]);
+  await render(false);assert.equal(views.at(-1).operation,'detach');assert(calls.some(c=>c.operation==='pause_view'));
+  await render(true);await f.tick();assert.equal(views.at(-1).operation,'attach');assert.notEqual(views.at(-1).viewId,views[0].viewId);
+ } finally {await f.close();}
+});
+
+test('desktop controls reject stale room completions and allow Stop to preempt a pending control',async()=>{
+ const f=fixture(),pending=[],calls=[];let room='a',value=evidence(room),fail=false;
+ f.w.octopusTransport={desktopApplicationView:async r=>({attached:r.operation==='attach'}),desktopSurfaceRequest:async request=>{
+  calls.push(request);if(request.operation==='pause_view')return {...request,paused:true};
+  if(request.operation!=='view')return new Promise(resolve=>pending.push({request,resolve}));
+  if(fail)throw new Error('stream disconnected');return {...request,evidence:structuredClone(value)};
+ }};
+ const render=()=>React.act(async()=>f.root.render(React.createElement(DesktopSurface,{environment:{id:room,runId:room+'-run'},surface:surfaceFor(room)})));
+ try {
+  await render();await f.tick();await f.click('Stop computer use');const old=pending.at(-1);
+  room='b';value=evidence(room);await render();await f.tick();
+  await React.act(async()=>old.resolve({evidence:{...evidence('a'),control:{mode:'stopped',owner:null,generation:99}}}));assert.equal(f.w.document.querySelector('[data-control]').dataset.control,'model');
+  value={...value,control:{mode:'human',owner:null,generation:2}};await f.tick(550);await f.click('Release control');const release=pending.at(-1);
+  assert.equal(release.request.controlGeneration,2);assert(!f.button('Stop computer use').disabled);await f.click('Stop computer use');const stop=pending.at(-1);
+  const stopped={...value,control:{mode:'stopped',owner:null,generation:3}};
+  await React.act(async()=>stop.resolve({evidence:stopped}));await React.act(async()=>release.resolve({evidence:evidence('b')}));
+  assert.equal(f.w.document.querySelector('[data-control]').dataset.control,'stopped');assert.equal(f.w.document.querySelector('[data-attached]'),null);
+  fail=true;room='c';value=evidence(room);await render();await f.tick();assert.match(f.w.document.body.textContent,/stream disconnected/);assert(!f.button('Stop computer use').disabled);
+  await f.click('Stop computer use');await React.act(async()=>pending.at(-1).resolve({evidence:stopped}));assert.match(f.w.document.body.textContent,/Computer use stopped/);
+ } finally {await f.close();}
+});
+
+test('upfront settings persists the real enable gate, requests setup only explicitly, and refetches OS status on focus',async()=>{
+ const f=fixture(),calls=[];let enabled=false,ready=false;
+ const status=()=>({enabled,ready,permissions:[{kind:'screen_capture',status:ready?'granted':'not_granted'},{kind:'accessibility',status:ready?'granted':'not_granted'}]});
+ f.w.octopusTransport={desktopComputerUseSettings:async request=>{calls.push(request);if(request.operation==='set_enabled')enabled=request.enabled;return status();}};
+ try {
+  await React.act(async()=>f.root.render(React.createElement(ComputerUseSettingsSection)));await f.tick();assert.deepEqual(calls,[{operation:'status'}]);assert.equal(f.button('Enable Computer use').getAttribute('aria-checked'),'false');
+  await f.click('Enable Computer use');await f.tick();assert.deepEqual(calls.slice(1,3),[{operation:'set_enabled',enabled:true},{operation:'setup'}]);assert.equal(f.button('Enable Computer use').getAttribute('aria-checked'),'true');
+  ready=true;await React.act(async()=>f.w.dispatchEvent(new f.w.Event('focus')));await f.tick();assert.match(f.w.document.body.textContent,/Ready to use apps you approve/);
+  const setupCount=calls.filter(c=>c.operation==='setup').length;await f.click('Enable Computer use');await f.tick();assert.equal(enabled,false);assert.equal(calls.filter(c=>c.operation==='setup').length,setupCount);
+  await f.click('Enable Computer use');await f.tick();assert.equal(enabled,true);assert.equal(calls.filter(c=>c.operation==='setup').length,setupCount,'already granted OS access does not automatically request permission');
+  assert.match(f.w.document.body.textContent,/Always-allowed apps/);
+ } finally {await f.close();}
 });

@@ -683,6 +683,22 @@ pub(crate) fn remember_permission(private: &Path, shared: Option<&Path>, request
     result
 }
 
+pub(crate) fn computer_use_enabled(root: &Path) -> Result<bool, String> {
+    crate::native_connection::validate_directory(root)?;
+    let path = root.join("computer-use.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+        Ok(_) => {}
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Preference { schema_version: u32, enabled: bool }
+    let record: Preference = read_record_bounded(&path, 1024)?;
+    if record.schema_version != 1 { return Err("computer_use_preference_invalid: unsupported saved preference".into()); }
+    Ok(record.enabled)
+}
+
 pub(crate) fn application_preferences(root: &Path, bundle: Option<&str>) -> Result<Value, String> {
     let _lock = permission_lock(root)?;
     if bundle.is_some_and(|id| id.is_empty() || id.trim() != id || id.len() > 4096 || id.contains('\0')) {

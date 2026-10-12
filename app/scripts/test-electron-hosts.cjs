@@ -684,6 +684,7 @@ async function verifyBeforeQuitHandlerExecution(mainSource, source) {
     nativeBrowserPresentations: null,
     nativeBrowserDownloadHistory: null,
     nativeDesktopPermissions: null,
+    nativeDesktopSettings: null,
     nativeDesktopPresentations: null,
     nativeClientPresentations: null,
     nativeBrowserHost: null,

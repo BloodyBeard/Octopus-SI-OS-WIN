@@ -9,6 +9,27 @@ function orderedMessages(messages: readonly ChatRunMessage[]): ChatRunMessage[] 
   return [...messages].sort((left, right) => left.movementSeq - right.movementSeq);
 }
 
+export function isChatReplyTerminal(eventKind: string, eventData: Record<string, unknown>, terminal: boolean): boolean {
+  return eventKind === "turn_control"
+    ? value(eventData.status) === "acknowledged" && ["stop", "interrupt"].includes(value(eventData.action))
+    : terminal;
+}
+
+export function operatorTurnControlReceipt(
+  run: Pick<ChatRun, "runId" | "providerBoundInterfaceId" | "chatInterfaceId">,
+  messages: readonly ChatRunMessage[],
+  control: { controlId: string; action: string },
+): ChatRunMessage | undefined {
+  return orderedMessages(messages).reverse().find((message) => {
+    const movement = message.eventData._movement as { from?: { Interface?: string }; to?: { Interface?: string } } | undefined;
+    return message.runId === run.runId && message.direction === "out" && Boolean(message.artifactId)
+      && message.eventKind === "turn_control" && message.interfaceId === run.chatInterfaceId
+      && movement?.from?.Interface === run.providerBoundInterfaceId && movement?.to?.Interface === run.chatInterfaceId
+      && message.eventData.control_id === control.controlId && message.eventData.action === control.action
+      && ["acknowledged", "failed"].includes(value(message.eventData.status));
+  });
+}
+
 export function operatorTurnResumeAcknowledgedOpen(messages: readonly ChatRunMessage[], afterSequence = -1): boolean {
   let open = false;
   for (const message of orderedMessages(messages)) {
@@ -47,10 +68,10 @@ export function reconcileChatRunReceipts(run: ChatRun, artifacts: readonly Octop
         const completed = artifact.event_data.turn as Record<string, unknown> | undefined;
         turnOpen = false;
         turnState = value(artifact.event_data.status ?? completed?.status) === "failed" ? "failed" : "idle";
-      } else if (artifact.terminal || artifact.event_kind === "interrupted_result"
+      } else if ((artifact.terminal && artifact.event_kind !== "turn_control") || artifact.event_kind === "interrupted_result"
         || acknowledgedAction === "interrupt" || acknowledgedAction === "stop") {
         turnOpen = false;
-        turnState = artifact.error ? "failed" : "idle";
+        turnState = artifact.error || value(artifact.event_data.native_terminal_status) === "failed" ? "failed" : "idle";
       } else if (turnOpen && artifact.event_kind !== "rate_limits") {
         turnState = "working";
       }
@@ -81,7 +102,7 @@ export function operatorTurnResumeAvailable(
       continue;
     }
     if (message.eventKind === "interrupted_result" && message.terminal) {
-      available = true;
+      available = value(message.eventData.native_terminal_status) !== "completed";
       continue;
     }
     if (message.terminal && message.error) {

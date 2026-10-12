@@ -155,6 +155,7 @@ const acknowledgedResume = turnControlMessage({
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([successfulTurn], false), false);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([failedTurn], false), true);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([interruptedTurn], false), true);
+assert.equal(chatTurnControl.operatorTurnResumeAvailable([{ ...interruptedTurn, eventData: { native_terminal_status: "completed", turn_interrupted: false } }], false), false);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([interruptedTurn, failedResume], false), true);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([interruptedTurn, acknowledgedResume], false), false);
 assert.equal(chatTurnControl.operatorTurnResumeAvailable([failedTurn], true), false);
@@ -304,7 +305,7 @@ const queueEdit = sourceBetween(chatWorkspace, "async function editQueuedTurn(",
 assert.match(queueEdit, /applyDraft\(\{[\s\S]*?messageId: item\.messageId, messageHadAttachments: item\.hadAttachments[\s\S]*?attachments: savedEdit\?\.attachments \?\? item\.attachments/);
 const queueDraftSubmission = sourceBetween(chatWorkspace, "async function submitDraft(", "async function beginSubmission(");
 assert.match(queueDraftSubmission, /const queuedAttachmentBytesNeedRecovery = Boolean\([\s\S]*?editedQueuedTurn\?\.hadAttachments[\s\S]*?editedQueuedTurn\.attachments\.length === 0[\s\S]*?const editedQueuePayloadChanged = Boolean\([\s\S]*?body !== editedQueuedTurn\.text[\s\S]*?!queuedAttachmentBytesNeedRecovery[\s\S]*?const submissionMessageId = editedQueuePayloadChanged[\s\S]*?messageId: submissionMessageId[\s\S]*?status: "queued"/);
-assert.match(queueDraftSubmission, /if \(mode === "queue"\)[\s\S]*?await enqueueCurrentTurn\(body\);[\s\S]*?return;[\s\S]*?if \(replyOpen\) \{\s*await submitSteeringMessage\(\{[\s\S]*?messageId: submissionMessageId/);
+assert.match(queueDraftSubmission, /if \(mode === "queue" \|\| \(replyOpen && mode === "send"\)\)[\s\S]*?await enqueueCurrentTurn\(body\);[\s\S]*?return;[\s\S]*?if \(mode === "steer"\) \{\s*await submitSteeringMessage\(\{[\s\S]*?messageId: submissionMessageId/);
 assert.match(chatWorkspace, /submitOperatorSteer\(\{[\s\S]*?recoverPreparedMessage: input\.recoverPreparedMessage[\s\S]*?providerInterfaceId: run\.providerInterfaceId[\s\S]*?clientSurfaceRole: run\.clientSurfaceRole/);
 assert.match(chatWorkspace, /reportClientExtensionIncident\(\{[\s\S]*?interfaceId: turn\.providerInterfaceId \|\| artifact\.from_interface_id/);
 assert.match(electronProjection, /recordedSelection !== selected \|\| !bound[\s\S]*?id: selected,[\s\S]*?boundId: bound/);
@@ -845,7 +846,7 @@ assert.match(chatWorkspace, /const replyOpen = activeRunInFlight \|\| turnOpen;/
 assert.match(chatWorkspace, /const resumeAvailable = Boolean\([\s\S]*?operatorTurnResumeAvailable\(messages, turnOpen\)/);
 assert.match(chatWorkspace, /reconcileChatRunReceipts\(run, fresh\)/);
 assert.doesNotMatch(chatWorkspace, /\[runId\]: \{ interfaceId: latest\.interface_id, runId \}/);
-assert.match(chatWorkspace, /if \(latest\.terminal\) \{\s*setPendingTurnControls\(\(current\) => \{[\s\S]*?delete next\[runId\];/);
+assert.match(chatWorkspace, /if \(isChatReplyTerminal\(latest\.event_kind, latest\.event_data, latest\.terminal\)\) \{\s*setPendingTurnControls\(\(current\) => \{[\s\S]*?delete next\[runId\];/);
 const resumeAction = sourceBetween(chatWorkspace, "async function resumeActiveTurn()", "function reorderQueuedTurns(");
 assert.match(resumeAction, /const controlId = `control_\$\{randomId\(\)\}`;/);
 assert.match(resumeAction, /submitOperatorTurnControl\(\{[\s\S]*?interfaceId: run\.chatInterfaceId,[\s\S]*?runId: run\.runId,[\s\S]*?action: "resume",[\s\S]*?controlId/);

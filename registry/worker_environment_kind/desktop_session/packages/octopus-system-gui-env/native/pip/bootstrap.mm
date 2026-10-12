@@ -523,6 +523,25 @@ NSDictionary* ReceiverBootstrap::BeginSource(NSDictionary* expected) {
   });
   return @{@"requestId":Text(request),@"receiverPid":@(getpid()),@"receiverNonce":item->nonce,@"receiverInstanceNonce":impl_->instance_nonce};
 }
+void ReceiverBootstrap::EmbedSource(NSString* request, NSString* view, NSString* generation,
+                                   NSString* host, NSString* host_generation, NSWindow* window, CGRect rect) {
+  Main();auto found=impl_->pending.find(Name(request));
+  Require(!impl_->stopped&&found!=impl_->pending.end(),"Embedded application has no current authenticated source");
+  auto item=found->second;Name(view);Name(generation);Name(host);Name(host_generation);
+  Require(impl_->Current(item)&&item->phase==Impl::Pending::Phase::Active&&!item->completed
+          &&impl_->hosts->HasHost(host,host_generation,window),"Embedded application lost its active source or native host");
+  NSError* error=nil;
+  auto identity=[[OCTPIPStackIdentity alloc] initWithHostGeneration:Text(item->identity.host_generation)
+      presentationID:Text(item->identity.presentation_id) streamGeneration:item->identity.stream_generation];
+  Require([impl_->stack embedItem:identity viewID:view generation:generation hostID:host
+           hostGeneration:host_generation window:window contentRect:rect error:&error]&&!error,"Embedded application source was refused");
+}
+void ReceiverBootstrap::DetachEmbeddedSource(NSString* view, NSString* generation) {
+  Main();Name(view);Name(generation);if(!impl_->stopped)[impl_->stack detachEmbeddedView:view generation:generation];
+}
+void ReceiverBootstrap::HideEmbeddedSource(NSString* view, NSString* generation) {
+  Main();Name(view);Name(generation);if(!impl_->stopped)[impl_->stack hideEmbeddedView:view generation:generation];
+}
 void ReceiverBootstrap::InstallSource(NSString* request, NSData* bytes, NSData* key) {
   Main(); auto found = impl_->pending.find(Name(request)); Require(found != impl_->pending.end(), "Native PiP request was not prepared"); auto item = found->second;
   try {

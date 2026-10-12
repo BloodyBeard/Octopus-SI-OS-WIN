@@ -96,6 +96,8 @@ import {
 } from "./chatTurnObservation";
 import {
   operatorTurnResumeAcknowledgedOpen,
+  operatorTurnControlReceipt,
+  isChatReplyTerminal,
   reconcileChatRunReceipts,
   operatorTurnResumeAvailable,
 } from "./chatTurnControl";
@@ -367,10 +369,10 @@ export function useChatWorkspace(
     if (!fresh.length) return false;
     runReceiptSequenceRef.current.set(runId, Math.max(...fresh.map((artifact) => artifact.movement_seq)));
     setRuns((current) => current.map((run) => run.runId === runId ? reconcileChatRunReceipts(run, fresh) : run));
-    const latest = fresh.filter((artifact) => artifact.terminal || artifact.event_kind === "turn_control")
+    const latest = fresh.filter((artifact) => isChatReplyTerminal(artifact.event_kind, artifact.event_data, artifact.terminal))
       .reduce<OctopusOperatorChatMovementArtifact | null>((current, artifact) => !current || artifact.movement_seq > current.movement_seq ? artifact : current, null);
     if (!latest) return false;
-    if (latest.terminal) {
+    if (isChatReplyTerminal(latest.event_kind, latest.event_data, latest.terminal)) {
       setPendingTurnControls((current) => {
         if (!(runId in current)) return current;
         const next = { ...current };
@@ -384,8 +386,26 @@ export function useChatWorkspace(
         return next;
       });
     }
-    return latest.terminal;
+    return true;
   }, []);
+
+  useEffect(() => {
+    const pending = pendingTurnControls[activeRunId];
+    const run = runs.find((candidate) => candidate.runId === activeRunId);
+    if (!pending || !run) return;
+    const receipt = operatorTurnControlReceipt(run, messages, pending);
+    if (!receipt) return;
+    setPendingTurnControls((current) => {
+      if (current[run.runId]?.controlId !== pending.controlId) return current;
+      const next = { ...current };
+      delete next[run.runId];
+      return next;
+    });
+    if (receipt.eventData.status === "failed") {
+      const detail = eventString(eventRecord(receipt.eventData.detail).error) || receipt.text;
+      setError(`${pending.action === "stop" ? "Stop" : "Resume"} failed.${detail ? ` ${detail}` : ""}`);
+    }
+  }, [activeRunId, messages, pendingTurnControls, runs, setPendingTurnControls]);
 
   const acquireSubmission = useCallback((runKey: string) => {
     if (submitLockRef.current.has(runKey)) return false;
@@ -1131,7 +1151,7 @@ export function useChatWorkspace(
     && activeRun?.turnOpen
     && activeRun.chatInterfaceId,
   );
-  const activeRunSubmitAllowed = canSteer;
+  const activeRunSubmitAllowed = activeRun?.writable && canQueueOnActiveRun;
   const canSendQueued = Boolean(enabled && runtimeReady && queueReady && activeRun?.writable && !loadingMessages
     && !activeRunSteeringPending && !applicationMutationPending
     && (replyOpen ? canSteer : artifactWriterAvailable && !activeRun.turnOpen)
@@ -1150,12 +1170,12 @@ export function useChatWorkspace(
         ? "Task history is still loading."
         : !artifactWriterAvailable
           ? "No local writer is available for operator turns."
-          : activeRunSteeringPending || queuedTurns.some((item) => item.runKey === activeRunKey && ["sending", "unknown"].includes(item.status))
+          : !replyOpen && (activeRunSteeringPending || queuedTurns.some((item) => item.runKey === activeRunKey && ["sending", "unknown"].includes(item.status)))
             ? "A message is awaiting delivery confirmation. Check its status below."
             : applicationMutationPending
               ? "Wait for the application change to finish."
               : replyOpen && !activeRunSubmitAllowed
-                ? "The current turn cannot accept a steering message."
+                ? "This task cannot queue a follow-up right now."
                 : !activeRunId && executionContextsLoaded && providerInterfacesLoaded && !clientAgentSelectionReady
                   ? "Choose an Agent before sending."
                 : providerInterfacesRefreshing
@@ -2213,13 +2233,13 @@ export function useChatWorkspace(
               liveMessages = mergeChatRunMessages(liveMessages, incoming);
               mergeLiveRunMessages(submitted.runId, incoming);
               const terminalArtifact = artifacts.filter(movementArtifact).reduce<OctopusOperatorChatMovementArtifact | null>((latest, artifact) => (
-                artifact.terminal && (!latest || artifact.movement_seq > latest.movement_seq)
+                isChatReplyTerminal(artifact.event_kind, artifact.event_data, artifact.terminal) && (!latest || artifact.movement_seq > latest.movement_seq)
                   ? artifact
                   : latest
               ), null);
               if (terminalArtifact?.error) terminalErrorReceiptObserved = true;
               reconcileRunReceipt(submitted.runId, artifacts);
-              const turnTerminal = liveMessages.some((message) => message.terminal);
+              const turnTerminal = liveMessages.some((message) => isChatReplyTerminal(message.eventKind, message.eventData, message.terminal));
               replaceRunPending(submittedRunKey, [
                 { ...userBubble, interfaceId: submitted.chatInterfaceId, runId: submitted.runId },
                 ...liveMessages.map(toRender),
@@ -2294,7 +2314,7 @@ export function useChatWorkspace(
           if (!deliveryScopeCurrent()) break;
           const durableTerminalObserved = Boolean(projectedAfterFailure?.some((message) => (
             message.direction === "out"
-            && message.terminal
+            && isChatReplyTerminal(message.eventKind, message.eventData, message.terminal)
             && message.movementSeq > submittedAfterSeq
           )));
           const terminalObserved = terminalErrorReceiptObserved || durableTerminalObserved;
@@ -2325,7 +2345,7 @@ export function useChatWorkspace(
     }
   }
 
-  async function submit(event?: FormEvent, textOverride?: string, mode: "send" | "queue" = "send") {
+  async function submit(event?: FormEvent, textOverride?: string, mode: "send" | "queue" | "steer" = "send") {
     event?.preventDefault();
     const runKey = chatDraftKey(activeRunIdRef.current);
     if (composerActionRef.current.has(runKey)) return;
@@ -2343,7 +2363,7 @@ export function useChatWorkspace(
 
   async function submitDraft(
     event: FormEvent | undefined, textOverride: string | undefined,
-    mode: "send" | "queue", releaseComposerAction: () => void,
+    mode: "send" | "queue" | "steer", releaseComposerAction: () => void,
   ) {
     event?.preventDefault();
     if (!runtimeReady) {
@@ -2351,7 +2371,7 @@ export function useChatWorkspace(
       return;
     }
     if (!queueReady) { setError(queueError || "Message storage is not ready for this runtime Home."); return; }
-    if (!editingQueuedTurn && mode === "send" && queuedTurnsRef.current.some((item) => item.runKey === chatDraftKey(activeRunIdRef.current) && ["sending", "unknown"].includes(item.status))) {
+    if (!editingQueuedTurn && mode !== "queue" && !(replyOpen && mode === "send") && queuedTurnsRef.current.some((item) => item.runKey === chatDraftKey(activeRunIdRef.current) && ["sending", "unknown"].includes(item.status))) {
       setError("A message is awaiting delivery confirmation. Check its status below."); return;
     }
     const body = (textOverride ?? text).trim();
@@ -2400,12 +2420,12 @@ export function useChatWorkspace(
       return;
     }
     const recoverDraftAttachments = Boolean(draftMessageId && draftMessageHadAttachments && attachments.length === 0);
-    if (mode === "queue") {
+    if (mode === "queue" || (replyOpen && mode === "send")) {
       if (!canQueue) { setError("This task cannot queue a follow-up right now."); return; }
       await enqueueCurrentTurn(body);
       return;
     }
-    if (replyOpen) {
+    if (mode === "steer") {
       await submitSteeringMessage({
         attachments: [...attachments],
         fromComposer: true,
@@ -3004,6 +3024,7 @@ export function useChatWorkspace(
     cancelQueuedEdit: (...args: Parameters<typeof cancelQueuedEdit>) => cancelQueuedEdit(...args).catch((failure) => setError(formatRuntimeError(failure))),
     queueNotice,
     queueCurrentTurn: () => submit(undefined, undefined, "queue").catch((failure) => setError(formatRuntimeError(failure))),
+    steerCurrentTurn: () => submit(undefined, undefined, "steer").catch((failure) => setError(formatRuntimeError(failure))),
     submitBlockReason,
     steerQueuedTurn: (...args: Parameters<typeof steerQueuedTurn>) => steerQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
     startReviewTask,

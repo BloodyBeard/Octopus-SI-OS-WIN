@@ -14,7 +14,8 @@ async fn exercise_interrupted_source_order(
         let hash = ContentHash::of_bytes(bytes).to_hex();
         std::fs::write(h.ctx.blobs_dir.join(&hash), bytes).unwrap();
         let mut metadata = InvocationMetadata::new(GrantProjection {
-            tools: vec![h.config.file_write_tool.clone()], interfaces: vec![target.to_string()], ..Default::default()
+            tools: vec![h.config.file_write_tool.clone()], interfaces: vec![target.to_string()],
+            mark_outcomes: checkpoint.required_verified_artifacts.iter().map(|requirement| requirement.mark.to_string()).collect(), ..Default::default()
         }).with_runtime(RuntimeInvocationMetadata {
             run: record.id.clone(), ee: record.ee.clone(), worker: record.worker.clone(), checkpoint: cp.clone(),
             interface: if kind == MovementKind::InterfaceArrival { h.ctx.interface.clone() } else { target.clone() },
@@ -22,8 +23,9 @@ async fn exercise_interrupted_source_order(
         }).with_outbound_interface_bindings(checkpoint.outbound_interface_bindings.iter().map(|b| b.interface.clone()).collect())
             .with_checkpoint_binding_policy(CheckpointBindingPolicySnapshot {
                 inbound: checkpoint.interface_binding.clone().unwrap(), outbound: checkpoint.outbound_interface_bindings.clone(),
-            }).with_checkpoint_admission(octopus_ledger::CheckpointAdmissionMetadata {
-                artifact_label: file.read_manifest().unwrap().label, required_artifact_labels: vec![], complete: true,
+        }).with_required_verified_artifacts(checkpoint.required_verified_artifacts.clone()).with_checkpoint_admission(octopus_ledger::CheckpointAdmissionMetadata {
+                artifact_label: file.read_manifest().unwrap().label,
+                required_artifact_labels: checkpoint.required_verified_artifacts.iter().map(|requirement| requirement.artifact_label.clone()).collect(), complete: true,
             });
         metadata.artifact_binding_refs = checkpoint.artifact_bindings.iter().map(|binding| {
             let hash = binding.id.as_str().rsplit(':').next().and_then(ContentHash::from_hex).unwrap();
@@ -47,6 +49,41 @@ async fn exercise_interrupted_source_order(
                     "path":h.run_path,"before_hash":authored.before_hash,"after_hash":authored.after_hash,"bytes":authored.content.len()}]}})).unwrap()).unwrap();
         edge(h, rows, authored.content.as_bytes(), &authored.authoring_result_checkpoint, &result, h.ctx.interface.clone(), MovementKind::InterfaceOutbound);
     }
+    fn checked_call(h: &ProviderOutputHandoff, before: &[u8], edit: &CheckedRunEdit, root: &Path) -> InterfaceArtifactFile {
+        let writer = declared_provider_run_writer(&RunRecord::from_bytes(before).unwrap(), &h.ctx.interface,
+            &RunAuthoringProfile { file_write_tool:h.config.file_write_tool.clone(), file_write_label:h.config.file_write_label.clone(),
+                file_write_result_label:h.config.file_write_result_label.clone(), result_timeout_ms:1000 }).unwrap();
+        match OwnerWriterEdit::prepare(before, edit, &writer, h.ctx.required_host_io_limits().unwrap().max_payload_bytes).unwrap() {
+            Some(ordered) => ordered.materialize(root).unwrap(),
+            None => InterfaceArtifactFile::write(root, &writer.call_label,
+                &serde_json::to_vec(&serde_json::json!({"tool":writer.tool,"correlation_id":edit.correlation_id,"arguments":edit.arguments().unwrap()})).unwrap()).unwrap(),
+        }
+    }
+    fn install_edit(h: &ProviderOutputHandoff, rows: &mut Vec<Movement>, edit: &CheckedRunEdit) {
+        let before = std::fs::read(&h.run_path).unwrap();
+        let call = checked_call(h, &before, edit, &h.var_dir.join("revision-installs"));
+        let writer_path = h.config.writer_run.as_ref().map_or_else(||h.run_path.clone(), |binding|
+            h.run_path.parent().unwrap().join(format!("{}.json", binding.run)));
+        let writer_before = std::fs::read(&writer_path).unwrap();
+        let record = RunRecord::from_bytes(&writer_before).unwrap();
+        let select = |record: &RunRecord, role| record.checkpoints.iter().find(|cp| record.active_checkpoints.contains(&cp.id)
+            && checkpoint_record_matches_template(cp, h.config.checkpoint_for_role(role).unwrap(), &record.id)).unwrap().id.clone();
+        let door = h.config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult).unwrap().interface().clone();
+        edge(h, rows, &writer_before, &select(&record, RunAuthoringCheckpointRole::AuthoringCall), &call, door, MovementKind::InterfaceOutbound);
+        let envelope = InterfaceInvocationEnvelope { artifact:pin_artifact(&call, &h.ctx.blobs_dir),artifact_file:call.clone(),artifact_binding_payloads:vec![],
+            metadata:Some(InvocationMetadata::new(GrantProjection {worker_environment_kinds:vec!["system_room".into()],..Default::default()})) };
+        let payload: serde_json::Value = serde_json::from_slice(&call.read_payload_bytes().unwrap()).unwrap();
+        let body = octopus_system_room_env::execute_file_write_result(&envelope, &payload["arguments"], &["system_room".into()],
+            &BTreeMap::from([("run_records_root".into(),h.run_path.parent().unwrap().to_path_buf())]), &h.var_dir.join("revision-effects"),
+            h.ctx.required_host_io_limits().unwrap().max_payload_bytes).unwrap();
+        assert_eq!(std::fs::read(&h.run_path).unwrap(), edit.content.as_bytes());
+        let after = std::fs::read(writer_path).unwrap();
+        let result = InterfaceArtifactFile::write(h.var_dir.join("revision-results"), &h.config.file_write_result_label,
+            &serde_json::to_vec(&serde_json::json!({"label":h.config.file_write_result_label,"tool":h.config.file_write_tool,
+                "correlation_id":edit.correlation_id,"ok":true,"body":body})).unwrap()).unwrap();
+        edge(h, rows, &after, &select(&RunRecord::from_bytes(&after).unwrap(), RunAuthoringCheckpointRole::AuthoringResult),
+            &result, h.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+    }
     let mut ctx = original_ctx.clone();
     ctx.movements_path = ctx.var_dir.join("ordered-replay.jsonl");
     ctx.ledger_index_path = ctx.var_dir.join("ordered-replay.sqlite");
@@ -56,6 +93,11 @@ async fn exercise_interrupted_source_order(
     value["checkpoints"][0]["artifact_bindings"] = serde_json::json!([]);
     let run = RunRecord::from_bytes(initial).unwrap().id;
     let mut topology: BoundRunAuthoringTopology = serde_json::from_value(value["interface_state"][ctx.interface.as_str()][RUN_AUTHORING_BINDING].clone()).unwrap();
+    let profile = run_authoring_profile(descriptor).unwrap();
+    let requirements = serde_json::json!([{"mark":"tool.call.allowed","artifact_label":profile.file_write_label,
+        "verifier":"tool_call_allowed","params":{"tools":[profile.file_write_tool]}}]);
+    topology.checkpoints.iter_mut().find(|cp| cp.role == RunAuthoringCheckpointRole::AuthoringCall).unwrap().required_verified_artifacts = serde_json::from_value(requirements.clone()).unwrap();
+    value["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "authoring_call").unwrap()["required_verified_artifacts"] = requirements;
     let control: RunAuthoringCheckpoint = serde_json::from_value(serde_json::json!({"name":"control","role":"independent_input",
         "interface_binding":names_binding("system_worker_widget_return", &["client.surface.document"]),"outbound_interface_bindings":[names_binding(ctx.interface.as_str(), &["client.surface.document"]), names_binding("world_home_client", &["client.surface.document"])],
         "include_context":false,"required_verified_artifacts":[]})).unwrap();
@@ -66,6 +108,11 @@ async fn exercise_interrupted_source_order(
         "owner_authoring":{"owner":"system_owner_return","source":"system_owner_return","door":"system_owner_writer",
             "tool":"file.write.owner","call_label":"tool.call","result_label":"file.write.owner.result"}})).unwrap();
     topology.checkpoints.extend([control.clone(), owner_input.clone()]);
+    let mut future_input = owner_input.clone();
+    future_input.name = "future_owner_result".into();
+    future_input.interface_binding = names_binding(owner_input.interface().as_str(), &["owner.future.result"]);
+    future_input.outbound_interface_bindings = vec![names_binding(ctx.interface.as_str(), &["owner.future.result"])];
+    topology.checkpoints.push(future_input);
     value["interface_state"][ctx.interface.as_str()][RUN_AUTHORING_BINDING] = serde_json::to_value(topology).unwrap();
     value["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&control, "control", &run, &[]));
     value["active_checkpoints"].as_array_mut().unwrap().push(serde_json::json!("control"));
@@ -133,8 +180,9 @@ async fn exercise_interrupted_source_order(
             for (seq, role) in [(1477, RunAuthoringCheckpointRole::Stable), (1481, RunAuthoringCheckpointRole::OwnerInput)] {
                 while rows.len() < seq { rows.push(ledger_row(rows.len() as u64)); }
                 let record = RunRecord::from_bytes(published.content.as_bytes()).unwrap();
+                let template = if role == RunAuthoringCheckpointRole::OwnerInput { &owner_input } else { h.config.checkpoint_for_role(role).unwrap() };
                 let cp = record.checkpoints.iter().find(|cp| record.active_checkpoints.contains(&cp.id)
-                    && checkpoint_record_matches_template(cp, h.config.checkpoint_for_role(role).unwrap(), &run)).unwrap().id.clone();
+                    && checkpoint_record_matches_template(cp, template, &run)).unwrap().id.clone();
                 edge(&h, &mut rows, published.content.as_bytes(), &cp, if seq == 1477 { &queued } else { &owner_result }, ctx.interface.clone(), MovementKind::InterfaceOutbound);
             }
         }
@@ -160,6 +208,177 @@ async fn exercise_interrupted_source_order(
     context_bearing.config.checkpoints.iter_mut().find(|template| template.role == RunAuthoringCheckpointRole::OwnerInput).unwrap().include_context = true;
     let pending = persisted_pending_handoff(&RunRecord::from_bytes(&current).unwrap(), &h.config.provider_interface).unwrap().unwrap();
     assert!(context_bearing.recover_overtaken_source(&current, &pending).unwrap_err().contains("independent-input"));
+    for detached in [false, true] {
+        let mut cold = h.clone();
+        cold.ctx.movements_path = h.var_dir.join(format!("revision-cold-{detached}.jsonl"));
+        cold.ctx.ledger_index_path = h.var_dir.join(format!("revision-cold-{detached}.sqlite"));
+        cold.hand_in_root = h.var_dir.join(format!("revision-cold-calls-{detached}"));
+        let mut seed: serde_json::Value = serde_json::from_slice(&initial).unwrap();
+        if detached {
+            let writer_id = RunId::new("run_revision_cold_writer");
+            let writer = separate_writer_run(&mut seed, &cold.ctx.interface, &writer_id).unwrap();
+            std::fs::write(cold.run_path.parent().unwrap().join(format!("{writer_id}.json")), JsonFormat::Compact.encode(&writer).unwrap()).unwrap();
+        }
+        let seed = JsonFormat::Compact.encode(&seed).unwrap();
+        std::fs::write(&cold.run_path, &seed).unwrap();
+        cold.config = attempt_config(&RunRecord::from_bytes(&seed).unwrap(), &h.config).unwrap();
+        cold.bound_topology = test_bound_topology(&cold.config);
+        let mut proof = vec![ledger_row(0)];
+        let stable = |bytes: &[u8]| RunRecord::from_bytes(bytes).unwrap().checkpoints.into_iter().find(|cp|
+            checkpoint_record_matches_template(cp, cold.config.checkpoint_for_role(RunAuthoringCheckpointRole::Stable).unwrap(), &run)).unwrap().id;
+        edge(&cold, &mut proof, &seed, &stable(&seed), &input.artifact_file, cold.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+        cold.source_movement_seq = 1;
+        let seed_output = InterfaceArtifactFile::write(cold.var_dir.join("revision-output"), "interface.artifact.output", br#"{"text":"prior output"}"#).unwrap();
+        let make = |cold: &ProviderOutputHandoff, bytes: &[u8], file: &InterfaceArtifactFile| cold.author_run(bytes,
+            &[input.artifact.id.clone()], &[PreparedHandoff { identity:artifact_identity(file, &cold.var_dir).unwrap(),
+                output_checkpoint:cold.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),verified_inputs:vec![] }],
+            true,None,false,true).unwrap();
+        let edit = |authored: &AuthoredRun| CheckedRunEdit {path:cold.run_path.clone(),json_format:authored.json_format,
+            before_hash:authored.before_hash.clone(),after_hash:authored.after_hash.clone(),content:authored.content.clone(),
+            patch:authored.patch.clone(),correlation_id:authored.correlation_id.clone()};
+        let prior = make(&cold, &seed, &seed_output);
+        install_edit(&cold, &mut proof, &edit(&prior));
+        edge(&cold, &mut proof, prior.content.as_bytes(), &prior.pending_handoff.items[0].checkpoint.id,
+            &seed_output, cold.config.worker.clone(), MovementKind::InterfaceArrival);
+        let before = std::fs::read(&cold.run_path).unwrap();
+        cold.source_movement_seq = proof.len() as u64;
+        edge(&cold, &mut proof, &before, &stable(&before), &queued, cold.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+        let answer = InterfaceArtifactFile::write(cold.var_dir.join("revision-output"), "interface.artifact.output",
+            &serde_json::to_vec(&serde_json::json!({"text":"retained native answer","detached":detached})).unwrap()).unwrap();
+        let saved = make(&cold, &before, &answer);
+        let mut saved_edit = edit(&saved);
+        if detached { saved_edit.correlation_id = format!("provider-writer-run:{run}:2:2"); }
+        let carrier = checked_call(&cold, &before, &saved_edit, &cold.hand_in_root);
+        let record = RunRecord::from_bytes(&before).unwrap();
+        let writer = declared_provider_run_writer(&record, &cold.ctx.interface, &run_authoring_profile(descriptor).unwrap()).unwrap();
+        let desired = cold.config.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::OwnerInput).map(|cp| {
+            let mut cp = cp.clone(); if cp.name == "future_owner_result" { cp.include_context = true; }
+            serde_json::to_value(cp).unwrap()
+        }).collect();
+        let ProviderInputRevision::Prepared {edit:revision} = prepare_provider_input_revision(cold.run_path.clone(), &before, &writer, desired).unwrap() else { panic!("revision deferred"); };
+        install_edit(&cold, &mut proof, &revision);
+        let after = std::fs::read(&cold.run_path).unwrap();
+        let record = RunRecord::from_bytes(&after).unwrap();
+        cold.config = attempt_config(&record, &cold.config).unwrap();
+        cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
+        assert_eq!(revision_attempt_generations(&cold.ctx, &record, &after, &cold.config).unwrap(), BTreeMap::from([(2, revision.after_hash.clone())]));
+        let recover = || match cold.recover_authoring_attempt(&record, &after).unwrap() {
+            AuthoringAttemptRecovery::InFlight(attempt) => attempt, _ => panic!("lost saved native output"),
+        };
+        let recovered = recover();
+        assert_eq!(recovered.manifest_path.canonicalize().unwrap(), carrier.manifest_path().canonicalize().unwrap());
+        assert_eq!(recovered.provider_source_movement_seq, cold.source_movement_seq);
+        assert_eq!(recovered.authored.pending_handoff, saved.pending_handoff);
+        assert_eq!(recovered.authored.content, saved.content);
+        assert_eq!(recover().authored, recovered.authored);
+        let mut other_source = cold.clone(); other_source.source_movement_seq += 1;
+        assert!(matches!(other_source.recover_authoring_attempt(&record, &after).unwrap(),
+            AuthoringAttemptRecovery::OtherSource(source) if source == cold.source_movement_seq));
+        let journal = std::fs::read(&cold.ctx.movements_path).unwrap();
+        assert_eq!(std::fs::read(&cold.run_path).unwrap(), after);
+        assert!(!proof.iter().any(|row| row.artifact.as_ref().is_some_and(|artifact| artifact.id == saved.pending_handoff.items[0].artifact_id)));
+        let last = proof.pop().unwrap();
+        std::fs::write(&cold.ctx.movements_path, proof.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+        assert!(cold.recover_authoring_attempt(&record, &after).is_err(), "accepted a revision without its exact result");
+        proof.push(last);
+        std::fs::write(&cold.ctx.movements_path, journal).unwrap();
+    }
+    // Payload selection changes future grants; unchanged owner rows keep their pinned bytes.
+    let mut payload = h.clone();
+    payload.ctx.movements_path = h.var_dir.join("payload-cutover.jsonl");
+    payload.ctx.ledger_index_path = h.var_dir.join("payload-cutover.sqlite");
+    let a = pin_artifact(&InterfaceArtifactFile::write(h.var_dir.join("payload-a"), "selected.file", b"old binary file").unwrap(), &h.ctx.blobs_dir);
+    let b = pin_artifact(&InterfaceArtifactFile::write(h.var_dir.join("payload-b"), "selected.file", b"new binary file").unwrap(), &h.ctx.blobs_dir);
+    let mut seed: serde_json::Value = serde_json::from_slice(&initial).unwrap();
+    seed["status"] = serde_json::json!("idle");
+    let mut topology: BoundRunAuthoringTopology = serde_json::from_value(seed["interface_state"][h.ctx.interface.as_str()][RUN_AUTHORING_BINDING].clone()).unwrap();
+    topology.payload_artifact_bindings = vec![a.clone()];
+    topology.checkpoints.iter_mut().find(|cp| cp.name == "owner_result").unwrap().static_artifact_bindings.push(a.id.clone());
+    seed["interface_state"][h.ctx.interface.as_str()][RUN_AUTHORING_BINDING] = serde_json::to_value(topology).unwrap();
+    for cp in seed["checkpoints"].as_array_mut().unwrap() {
+        if cp["id"] == "stable_input" || cp["id"] == "owner_result" { cp["artifact_bindings"] = serde_json::json!([{"id":a.id}]); }
+    }
+    let seed = JsonFormat::Compact.encode(&seed).unwrap();
+    std::fs::write(&payload.run_path, &seed).unwrap();
+    payload.config = attempt_config(&RunRecord::from_bytes(&seed).unwrap(), &h.config).unwrap();
+    payload.bound_topology = test_bound_topology(&payload.config);
+    let source = payload.config.checkpoint_for_role(RunAuthoringCheckpointRole::Stable).unwrap().interface().clone();
+    let stable_template = payload.config.checkpoint_for_role(RunAuthoringCheckpointRole::Stable).unwrap().clone();
+    let stable_row = |record: &RunRecord| record.checkpoints.iter().find(|cp| record.active_checkpoints.contains(&cp.id)
+        && checkpoint_record_matches_template(cp, &stable_template, &run)).unwrap().clone();
+    let writer = declared_provider_run_writer(&RunRecord::from_bytes(&seed).unwrap(), &payload.ctx.interface, &run_authoring_profile(descriptor).unwrap()).unwrap();
+    let evidence = CheckedRunEvidence {movements_path:&payload.ctx.movements_path,ledger_index_path:&payload.ctx.ledger_index_path,
+        blobs_dir:&payload.ctx.blobs_dir,max_control_frame_bytes:1_048_576,max_manifest_bytes:1_048_576,max_payload_bytes:268_435_456};
+    let ready = |bytes: &[u8]| provider_input_payloads_ready(&evidence, &RunRecord::from_bytes(bytes).unwrap(), &payload.ctx.interface, &source).unwrap();
+    let mut proof = vec![]; append(&payload, &mut proof, ledger_row(0));
+    assert!(ready(&seed));
+    let first = prepare_provider_input_payloads(payload.run_path.clone(), &seed, &writer, source.clone(), vec![a.clone(),b.clone()]).unwrap();
+    install_edit(&payload, &mut proof, &first);
+    let first_record = RunRecord::from_bytes(first.content.as_bytes()).unwrap();
+    payload.config = attempt_config(&first_record, &payload.config).unwrap();
+    payload.bound_topology = test_bound_topology(&payload.config);
+    assert_eq!(first_record.interface_state[&payload.ctx.interface]["authoring_generation"], serde_json::json!(1));
+    assert!(persisted_pending_handoff(&first_record, &payload.ctx.interface).unwrap().is_none());
+    assert!(ready(first.content.as_bytes()), "an authored but unspent initial input remains ready");
+    let first_chain = checked_run_file_chain(&evidence, &payload.run_path, &seed, first.content.as_bytes(), 0, &[writer.clone()]).unwrap();
+    assert_eq!(first_chain.len(), 1); validate_checked_provider_transition(&first_chain[0]).unwrap();
+    payload.source_movement_seq = proof.len() as u64;
+    let stable = stable_row(&first_record);
+    edge(&payload, &mut proof, first.content.as_bytes(), &stable.id, &input.artifact_file, payload.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+    assert!(!ready(first.content.as_bytes()), "admitted input cannot be overtaken by payload selection");
+    let answer = InterfaceArtifactFile::write(h.var_dir.join("payload-answer"), "interface.artifact.output", br#"{"text":"settled payload source"}"#).unwrap();
+    let authored = payload.author_run(first.content.as_bytes(), &[a.id.clone(),b.id.clone()], &[PreparedHandoff {
+        identity:artifact_identity(&answer, &payload.var_dir).unwrap(), output_checkpoint:payload.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),verified_inputs:vec![],
+    }], true,None,false,true).unwrap();
+    let output_edit = CheckedRunEdit {path:payload.run_path.clone(),json_format:authored.json_format,before_hash:authored.before_hash.clone(),
+        after_hash:authored.after_hash.clone(),content:authored.content.clone(),patch:authored.patch.clone(),correlation_id:authored.correlation_id.clone()};
+    install_edit(&payload, &mut proof, &output_edit);
+    assert!(!ready(authored.content.as_bytes()), "terminal flag without actual admission is not readiness");
+    edge(&payload, &mut proof, authored.content.as_bytes(), &authored.pending_handoff.items[0].checkpoint.id,
+        &answer, payload.config.worker.clone(), MovementKind::InterfaceArrival);
+    assert!(ready(authored.content.as_bytes()));
+    let before = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+    let next = prepare_provider_input_payloads(payload.run_path.clone(), authored.content.as_bytes(), &writer, source.clone(), vec![b.clone()]).unwrap();
+    let after = RunRecord::from_bytes(next.content.as_bytes()).unwrap();
+    let owner = CheckpointId::new("owner_result");
+    assert_eq!(after.checkpoint(&owner), before.checkpoint(&owner));
+    assert!(after.checkpoint(&owner).unwrap().artifact_bindings.iter().any(|bound| bound.id == a.id));
+    assert_eq!(payload_artifact_bindings(&after, &payload.ctx.interface).unwrap(), vec![b.clone(),a.clone()]);
+    assert_eq!(provider_context_bindings(&after, &payload.ctx.interface).unwrap().iter().map(|bound| bound.id.clone()).collect::<Vec<_>>(), vec![b.id.clone()]);
+    assert_eq!(persisted_pending_handoff(&after, &payload.ctx.interface).unwrap(), Some(authored.pending_handoff.clone()));
+    let stable_before = stable_row(&before);
+    let stable_after = stable_row(&after);
+    assert_ne!(stable_before.id, stable_after.id);
+    assert_eq!(after.checkpoints.iter().filter(|cp| after.active_checkpoints.contains(&cp.id)
+        && checkpoint_record_matches_template(cp, payload.config.checkpoint_for_role(RunAuthoringCheckpointRole::Stable).unwrap(), &run)).count(), 1);
+    let after_seq = proof.last().unwrap().seq.0;
+    install_edit(&payload, &mut proof, &next);
+    let chain = checked_run_file_chain(&evidence, &payload.run_path, authored.content.as_bytes(), next.content.as_bytes(), after_seq, &[writer.clone()]).unwrap();
+    assert_eq!(chain.len(), 1); validate_checked_provider_transition(&chain[0]).unwrap();
+    assert!(ready(next.content.as_bytes()));
+    let mut hot = payload.clone(); hot.session = ProviderHandoffSession::new(&hot.ctx).unwrap();
+    let mut hot_state = hot.state.lock().await.clone(); hot_state.run_record_bytes = authored.content.as_bytes().to_vec();
+    hot_state.run_record_evidence_seq = Some(after_seq); hot_state.session_context.artifacts.clear();
+    hot_state.static_context_artifacts = vec![a.id.clone(),input.artifact.id.clone()];
+    hot_state.context_artifacts = hot_state.static_context_artifacts.clone();
+    hot.reconcile_checked_run_state(&mut hot_state).await.unwrap();
+    assert_eq!(hot_state.static_context_artifacts, vec![input.artifact.id.clone(),b.id.clone()]);
+    assert_eq!(hot_state.context_artifacts, hot_state.static_context_artifacts, "snapshot seed preserves current payload and non-payload static context");
+    let mut changed = chain[0].clone(); changed.writer.tool = "file.write.foreign".into();
+    assert!(validate_checked_provider_transition(&changed).is_err());
+    for field in ["source_movement_seq", "terminal"] {
+        let mut changed = chain[0].clone(); let mut value: serde_json::Value = serde_json::from_slice(&changed.after).unwrap();
+        value["interface_state"][payload.ctx.interface.as_str()]["pending_handoff"][field] = if field == "terminal" { serde_json::json!(false) } else { serde_json::json!(0) };
+        changed.after = serde_json::to_vec(&value).unwrap(); assert!(validate_checked_provider_transition(&changed).is_err());
+    }
+    let admitted = proof.iter().position(|row| row.kind == MovementKind::InterfaceArrival).unwrap();
+    let saved = proof[admitted].clone(); proof[admitted] = ledger_row(saved.seq.0);
+    std::fs::write(&payload.ctx.movements_path, proof.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+    assert!(!ready(next.content.as_bytes()));
+    assert!(checked_run_file_chain(&evidence, &payload.run_path, authored.content.as_bytes(), next.content.as_bytes(), after_seq, &[writer]).is_err());
+    proof[admitted] = saved;
+    std::fs::write(&payload.ctx.movements_path, proof.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+    std::fs::write(&h.run_path, &current).unwrap();
     let closure_row = rows.iter_mut().find(|row| row.artifact.as_ref() == closure.as_ref()).unwrap();
     *closure_row = ledger_row(closure_row.seq.0);
     std::fs::write(&h.ctx.movements_path, rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();

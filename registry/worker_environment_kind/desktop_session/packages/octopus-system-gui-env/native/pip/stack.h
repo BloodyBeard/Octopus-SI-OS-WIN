@@ -89,6 +89,11 @@ typedef BOOL (^OCTPIPStackSourcePrepare)(CGSize displaySize,
              spring:(nullable OCTPIPStackSpring *)spring
               error:(NSError *_Nullable *_Nullable)error;
 - (void)removeHost:(NSString *)hostID generation:(NSString *)generation;
+- (BOOL)embedItem:(OCTPIPStackIdentity *)identity viewID:(NSString *)viewID
+      generation:(NSString *)generation hostID:(NSString *)hostID hostGeneration:(NSString *)hostGeneration
+          window:(NSWindow *)window contentRect:(CGRect)rect error:(NSError *_Nullable *_Nullable)error;
+- (void)detachEmbeddedView:(NSString *)viewID generation:(NSString *)generation;
+- (void)hideEmbeddedView:(NSString *)viewID generation:(NSString *)generation;
 - (BOOL)publishRemoteItem:(OCTPIPStackIdentity *)identity sourceSize:(CGSize)size
                  groupID:(NSString *)groupID batchID:(NSString *)batchID
                  factory:(OCTPIPStackAttachmentFactory)factory animated:(BOOL)animated

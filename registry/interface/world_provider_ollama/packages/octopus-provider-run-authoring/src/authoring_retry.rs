@@ -751,7 +751,9 @@ pub(super) fn rebase_authored_run(
         != observed.interface_state.get(&config.provider_interface) {
         output_connections::extension(before, current, config)?
     } else { None };
-    let protected = extension.as_ref().map_or(current, |extension| extension.protected.as_slice());
+    let revision = input_revision::revision_delta(before, current, config)?;
+    if extension.is_some() && revision.is_some() { return Err("authoring retry has competing definition changes".into()); }
+    let protected = revision.as_ref().map_or_else(|| extension.as_ref().map_or(current, |extension| extension.protected.as_slice()), |revision| revision.protected.as_slice());
     let actual = RunRecord::from_bytes(protected).map_err(|error| error.to_string())?;
     if original.id != actual.id
         || original.worker != actual.worker
@@ -839,6 +841,7 @@ pub(super) fn rebase_authored_run(
     if let Some(extension) = extension {
         extension.restore(&mut merged, &config.provider_interface)?;
     }
+    let revised_generation = revision.as_ref().map(|revision| revision.restore(&mut merged, &config.provider_interface)).transpose()?;
     let content = String::from_utf8(json_format.unwrap_or(JsonFormat::Pretty).encode(&merged)?).map_err(|error| error.to_string())?;
     let candidate = RunRecord::from_bytes(content.as_bytes()).map_err(|error| error.to_string())?;
     validate_pending_items_are_active(
@@ -846,8 +849,14 @@ pub(super) fn rebase_authored_run(
         &config.provider_interface,
         &authored.pending_handoff,
     )?;
-    validate_bound_run_authoring_topology(&candidate, config, None)?;
+    let mut effective_config = config.clone();
+    if revision.is_some() {
+        let topology: BoundRunAuthoringTopology = serde_json::from_value(merged["interface_state"][config.provider_interface.as_str()][RUN_AUTHORING_BINDING].clone()).map_err(|error| error.to_string())?;
+        effective_config.checkpoints = topology.checkpoints;
+    }
+    validate_bound_run_authoring_topology(&candidate, &effective_config, None)?;
     let mut rebased = authored.clone();
+    if let Some(generation) = revised_generation { rebased.correlation_id = format!("provider-run-authoring:{}:{generation}", config.run); }
     rebased.before_hash = ContentHash::of_bytes(current).to_hex();
     rebased.after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
     rebased.patch = json_patch::diff(

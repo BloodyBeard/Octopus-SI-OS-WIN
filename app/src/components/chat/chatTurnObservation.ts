@@ -8,6 +8,7 @@ import type {
 import { readOperatorChatArtifacts } from "../../projectionClient";
 import { currentProjectionGeneration, nextProjectionChange } from "../../projectionLive";
 import type { ChatRenderMessage } from "./types";
+import { isChatReplyTerminal } from "./chatTurnControl";
 
 export type ObservedTerminalArtifact = {
   artifactId: string;
@@ -102,7 +103,7 @@ export async function observeChatReply(input: {
       cursor = batch.cursor;
       input.onArtifacts(batch.artifacts);
       const terminal = batch.artifacts.find((artifact): artifact is OctopusOperatorChatMovementArtifact => (
-        artifact.source === "movement" && artifact.terminal
+        artifact.source === "movement" && isChatReplyTerminal(artifact.event_kind, artifact.event_data, artifact.terminal)
       ));
       if (!terminal) continue;
       if (terminal.error) {
@@ -125,7 +126,7 @@ export async function observeChatReply(input: {
     const reply = messages.find((message) => (
       message.direction === "out"
       && message.movementSeq > input.afterSeq
-      && message.terminal
+      && isChatReplyTerminal(message.eventKind, message.eventData, message.terminal)
     ));
     if (reply?.error) throw new Error(reply.text || "The provider emitted a terminal error artifact.");
     if (reply) {

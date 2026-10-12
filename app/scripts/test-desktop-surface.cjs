@@ -101,6 +101,22 @@ test('native manifest binds private exact door, endpoint and generation without 
   projected.get('task').data.host_generation=task.manifest.host_generation;taskOwner.client_surfaces[0].data.host_generation=task.manifest.host_generation;sent=preferenceCalls.length;
   await assert.rejects(globalSettings.defaultApplicationPermissions({operation:'remove',sourceId:taskList.sourceId,bundleId:'example.app'},current),/source changed/);assert.equal(preferenceCalls.length,sent);
   rows=[otherOwner];await assert.rejects(globalSettings.defaultApplicationPermissions({operation:'list'},current),/unavailable/);assert.equal(preferenceCalls.length,sent);
+  const {createNativeDesktopSettingsHost}=require('../electron/nativeDesktopSettings.cjs');const {EventEmitter}=require('node:events'),{PassThrough,Writable}=require('node:stream');
+  let dispatched=0;const settingsOwner={id:17,identity:'operator',current};
+  const cold=createNativeDesktopSettingsHost({homePath:()=>currentHome,prepareHelper:async()=>{
+   const selected=await globalSettings.defaultPreferenceStore(current);assert.equal(typeof selected.identity,'string');assert.equal(typeof selected.generation,'string');
+   return {home:currentHome,preferenceRoot:selected.root,applicationIdentity:JSON.stringify([selected.identity,selected.generation]),current:selected.current,settingsProgram:'/installed/reader',directory:'/installed',timeout:1000};
+  },spawn(){++dispatched;const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>{};
+   child.stdin=new Writable({write(_bytes,_encoding,done){done();queueMicrotask(()=>{child.stdout.end('{"schema_version":1,"applications":[],"removed":false}');child.emit('close',0);});}});return child;}});
+  try {
+   const first=await cold.applicationPermissions({operation:'list'},settingsOwner),store=await globalSettings.defaultPreferenceStore(current);
+   await fs.rename(prefs,prefs+'-old');await fs.mkdir(prefs,{mode:0o700});
+   await assert.rejects(store.current(),/changed/);
+   await assert.rejects(cold.applicationPermissions({operation:'remove',sourceId:first.sourceId,bundleId:'example.app'},settingsOwner),/source changed/);assert.equal(dispatched,1);
+   const replaced=await cold.applicationPermissions({operation:'list'},settingsOwner);assert.notEqual(replaced.sourceId,first.sourceId);
+   const configFile=path.join(f.root,'registry/interface/system_gui/desktop.json'),configured=JSON.parse(await fs.readFile(configFile));configured.request_timeout_ms+=1;await fs.writeFile(configFile,JSON.stringify(configured));
+   await assert.rejects(cold.applicationPermissions({operation:'remove',sourceId:replaced.sourceId,bundleId:'example.app'},settingsOwner),/source changed/);assert.equal(dispatched,2);
+  } finally {cold.stop();}
   await fs.writeFile(f.connection,JSON.stringify(f.manifest));await fs.writeFile(path.join(f.dir,'desktop.json'),JSON.stringify(f.config));
   f.setNext(() => state());
   const viewed=await f.host.request(input('native'),40);assert(!JSON.stringify(viewed).includes(f.secret));
@@ -246,7 +262,7 @@ test('native PiP keeps multiple sources through tool-idle and completes only the
  const {createDesktopPresentationHost}=require('../electron/desktopSurface.cjs');let event,home='/actual-home',allowed=true;const calls=[],buffers=[],nonces=new Map();
  const fake={beginSource(v){calls.push(['begin',v]);const nonce=require('node:crypto').randomBytes(32).toString('hex');nonces.set(v.requestId,nonce);return{requestId:v.requestId,receiverPid:process.pid,receiverNonce:nonce,receiverInstanceNonce:'b'.repeat(64)};},
   installSource(v){buffers.push(v.key);calls.push(['install',v.requestId]);event({type:'source-authenticated',requestId:v.requestId,receiverNonce:nonces.get(v.requestId)});},
-  cancelSource(v){calls.push(['cancel',v.requestId]);},completeGroup(v){calls.push(['complete',v.groupId]);},clearCompletedGroup(v){calls.push(['clear',v.groupId]);},setSelection(){},stop(){calls.push(['stop']);}};
+  cancelSource(v){calls.push(['cancel',v.requestId]);},embedSource(v){calls.push(['embed',v]);},detachEmbeddedSource(v){calls.push(['detach',v]);},hideEmbeddedSource(v){calls.push(['hide',v]);},completeGroup(v){calls.push(['complete',v.groupId]);},clearCompletedGroup(v){calls.push(['clear',v.groupId]);},setSelection(){},stop(){calls.push(['stop']);}};
   const helper={process_id:77,executable_path:'/helper/bin',display_name:'helper',bundle:null,responsible_app:null};
  const origin={api:'AEDeterminePermissionToAutomateTarget',event_class:'OcPi',event_id:'BtV1',
   sender:{...helper,process_id:process.pid,executable_path:process.execPath,start_seconds:'1',start_microseconds:'0'},recipient:{...helper,start_seconds:'2',start_microseconds:'0'}};
@@ -256,16 +272,57 @@ test('native PiP keeps multiple sources through tool-idle and completes only the
  fake.cancelAutomationSettings=value=>calls.push(['cancel-settings',value]);
  fake.beginAutomationPermission=value=>{assert.equal(value.timeoutMs,1000);calls.push(['permission',value]);if(value.operation==='open_settings'){pendingSettings=value;return;}if(value.operation==='request')automationStatus='granted';event({type:'automation-permission-result',requestId:value.requestId,operationId:value.operationId,requirement:permission(),error:null});};
  const candidates=['w1','w2'].map(sourceWindowId=>({input:{workerEnvironmentId:'room',surfaceId:'desktop',runId:'run',appInstanceId:'app',sourceWindowId},
-  source:{scope:{formation_pin:'formation'},grant_request_id:'grant',source:{source_movement_seq:12}},identity:{sourceWindowId,grant:'grant'}}));
+  source:{scope:{formation_pin:'formation'},grant_request_id:'grant',application:{display_name:'Fixture'},windows:[{window_id:sourceWindowId,title:'Window'}],source:{source_movement_seq:12}},identity:{sourceWindowId,grant:'grant'}}));
+ let pendingSourceRead=null;
  const host=createDesktopPresentationHost({homePath:()=>home,requireAccess:()=>{if(!allowed)throw new Error('locked');},getNativeHost:cb=>{event=cb;return fake;},
-  prepareSource:async input=>({home,timeout:1000,scope:{grant_request_id:'grant'},source:candidates.find(c=>c.input.sourceWindowId===input.sourceWindowId).source,current:async()=>{},complete:async publication=>{calls.push(['complete-source',input.sourceWindowId,publication]);return{status:'ended'};},
+  prepareSource:async input=>({home,timeout:1000,scope:{grant_request_id:'grant'},source:candidates.find(c=>c.input.sourceWindowId===input.sourceWindowId).source,current:async()=>{if(pendingSourceRead){const pending=pendingSourceRead;pendingSourceRead=null;await pending;}},complete:async publication=>{calls.push(['complete-source',input.sourceWindowId,publication]);return{status:'ended'};},
     bootstrap:async pending=>({key:Buffer.alloc(32,8),bindingBytes:Buffer.from(JSON.stringify({host_generation:'host',presentation_id:pending.requestId,stream_generation:1}))})})});
  const flush=()=>new Promise(resolve=>setImmediate(resolve));
  const turn={run_id:'run',turn_open:true,turn_state:'working',turn_opened_movement_seq:10};
  await host.reconcile(candidates,[turn]);await flush();assert.equal(calls.filter(c=>c[0]==='install').length,2);assert(buffers.every(b=>b.every(v=>v===0)));
+ const sourceRequest=calls.find(c=>c[0]==='begin')[1].requestId;
+ event({type:'published',identity:{hostGeneration:'host',presentationId:sourceRequest,streamGeneration:1}});
+ const owner={id:123,current:()=>{if(!allowed)throw new Error('locked');},hostIdentity:()=>({hostId:'actual-window',generation:'window-generation'}),windowHandle:()=>Buffer.alloc(8)};
+ const view={workerEnvironmentId:'room',surfaceId:'desktop',runId:'run',viewId:'view',operation:'attach',appInstanceId:'app',sourceWindowId:'w1',rect:{x:20,y:30,width:500,height:300}};
+ assert.deepEqual(await host.applicationView(view,owner),{attached:true});
+ assert.equal(calls.at(-1)[1].requestId,sourceRequest);assert.equal(calls.at(-1)[1].hostId,'actual-window');
+ const attached=calls.at(-1)[1], count=calls.length;
+ await assert.rejects(host.applicationView(view,{...owner,id:124}),/another owner/);assert.equal(calls.length,count);
+ await assert.rejects(host.applicationView({...view,appInstanceId:'foreign'},owner),/not currently published/);
+ assert.equal(calls.filter(c=>c[0]==='begin').length,2,'embedding reuses the same authenticated source');
+ await host.applicationView({...view,rect:{...view.rect,width:550}},owner);assert.equal(calls.at(-1)[1].viewGeneration,attached.viewGeneration);
+ await host.applicationView({workerEnvironmentId:'room',surfaceId:'desktop',runId:'run',viewId:'view',operation:'hide'},owner);
+ assert.deepEqual(calls.at(-1),['hide',{viewId:'view',viewGeneration:attached.viewGeneration}]);
+ await host.applicationView(view,owner);assert.equal(calls.at(-1)[1].viewGeneration,attached.viewGeneration);
+ host.closeViewsOwner(124);assert.equal(calls.at(-1)[0],'embed');host.closeViewsOwner(123);assert.equal(calls.at(-1)[0],'detach');
+ assert.deepEqual(calls.at(-1)[1],{viewId:'view',viewGeneration:attached.viewGeneration});
+ let releaseSourceRead; pendingSourceRead=new Promise(resolve=>{releaseSourceRead=resolve;});
+ const outdatedAttach=host.applicationView(view,owner),outdatedResult=assert.rejects(outdatedAttach,/withdrawn/);
+ await flush();host.closeViewsOwner(123);await host.applicationView(view,owner);
+ const replacementView=calls.at(-1)[1],detachCount=calls.filter(c=>c[0]==='detach').length;
+ releaseSourceRead();await outdatedResult;
+ assert.notEqual(replacementView.viewGeneration,attached.viewGeneration);
+ assert.equal(calls.filter(c=>c[0]==='detach').length,detachCount,'stale attach failure must not remove a newer view');
+ pendingSourceRead=new Promise(resolve=>{releaseSourceRead=resolve;});
+ const coveredAttach=host.applicationView(view,owner),coveredResult=assert.rejects(coveredAttach,/withdrawn/);
+ await flush();await host.applicationView({workerEnvironmentId:'room',surfaceId:'desktop',runId:'run',viewId:'view',operation:'hide'},owner);
+ const coveredEmbedCount=calls.filter(c=>c[0]==='embed').length;
+ releaseSourceRead();await coveredResult;
+ assert.equal(calls.filter(c=>c[0]==='embed').length,coveredEmbedCount,'hide must invalidate a pending native embed');
+ assert.equal(calls.filter(c=>c[0]==='detach').length,detachCount,'stale attach must preserve the hidden view');
+ pendingSourceRead=new Promise(resolve=>{releaseSourceRead=resolve;});
+ const oldResize=host.applicationView({...view,rect:{...view.rect,width:600}},owner),oldResizeResult=assert.rejects(oldResize,/withdrawn/);
+ await flush();await host.applicationView({...view,rect:{...view.rect,width:700}},owner);
+ const resizeEmbedCount=calls.filter(c=>c[0]==='embed').length;
+ releaseSourceRead();await oldResizeResult;
+ assert.equal(calls.filter(c=>c[0]==='embed').length,resizeEmbedCount);
+ assert.equal(calls.at(-1)[1].rect.width,700,'late old resize must not overwrite the newest native rectangle');
+ assert.equal(calls.filter(c=>c[0]==='detach').length,detachCount);
+ await host.applicationView(view,owner);
  await host.reconcile(candidates,[{...turn,turn_state:'waiting'}]);assert.equal(calls.filter(c=>c[0]==='complete').length,0);assert.equal(calls.filter(c=>c[0]==='cancel').length,0);
  const lost=calls.find(c=>c[0]==='begin')[1].requestId;
  event({type:'source-disconnected',requestId:lost,receiverNonce:nonces.get(lost)});assert.equal(host.snapshot()[0].phase,'reconnecting');
+ assert.equal(calls.at(-1)[0],'detach','withdrawal immediately returns the exact embedded layer to native cleanup');
  await host.reconcile(candidates,[turn]);await flush();assert.equal(calls.filter(c=>c[0]==='install').length,3);
  const replacement=calls.filter(c=>c[0]==='begin').at(-1)[1].requestId;assert.notEqual(replacement,lost);assert.notEqual(nonces.get(replacement),nonces.get(lost));assert(buffers.every(b=>b.every(v=>v===0)));
  event({type:'source-permission-required',requestId:replacement,receiverNonce:nonces.get(replacement)});
@@ -312,7 +369,7 @@ test('browser-only Home uses one receipted client presentation factory without i
   assert.throws(()=>verifyClientPresentationArtifact({...artifact,isPackaged:false}),/packaged/);
   assert.throws(()=>verifyClientPresentationArtifact({...artifact,nodeVersion:'24.16.0'}),/runtime/);
   const calls=[],events=[];let currentHome=home,event;
-  const native=Object.fromEntries(['registerHost','removeHost','setSelection','upsertBrowserImage','invalidateBrowserImage','beginSource','installSource','cancelSource','completeGroup','clearCompletedGroup','stop'].map(name=>[name,value=>calls.push([name,value])]));
+  const native=Object.fromEntries(['registerHost','removeHost','setSelection','upsertBrowserImage','invalidateBrowserImage','beginSource','installSource','cancelSource','embedSource','detachEmbeddedSource','hideEmbeddedSource','completeGroup','clearCompletedGroup','stop'].map(name=>[name,value=>calls.push([name,value])]));
   const main=ts.createSourceFile('main.cjs',await fs.readFile(path.join(__dirname,'../electron/main.cjs'),'utf8'),ts.ScriptTarget.ES2022,true,ts.ScriptKind.JS);
   const names=new Set(['getNativeClientPresentations','getNativeBrowserPresentations','getNativeDesktopPresentations']);
   const functions=main.statements.filter(node=>ts.isFunctionDeclaration(node)&&names.has(node.name?.text)).map(node=>node.getText(main));assert.equal(functions.length,3);
@@ -322,7 +379,7 @@ test('browser-only Home uses one receipted client presentation factory without i
    createClientPresentationHost:options=>createClientPresentationHost({...options,loadAddon:file=>{calls.push(['load',file]);return{createPiPHost:config=>{event=config.onEvent;calls.push(['factory']);return native;}};}}),
    createBrowserPresentationHost:options=>({native:options.getNativeHost,onEvent:async value=>events.push(value)}),
    createDesktopPresentationHost:options=>({native:options.getNativeHost,onEvent:value=>events.push(value)}),
-   currentNativeBrowserPreviewTarget:()=>{},getDesktopSurfaceHost:()=>({preparePresentationSource(){throw new Error('No CU source in browser-only fixture');}}),
+   currentNativeBrowserPreviewTarget:()=>{},readNativeBrowserToolDescriptor:()=>{throw new Error('Factory-only fixture must not read browser tool descriptors');},getDesktopSurfaceHost:()=>({preparePresentationSource(){throw new Error('No CU source in browser-only fixture');}}),
    projectionStores:new Map(),appendClientLog:()=>{},scheduleNativeDesktopPresentations:()=>{},
    clientSetupPackageRoots:()=>{throw new Error('Presentation must not inspect installed driver state');},
    withLocalPackageInstallation:()=>{throw new Error('Presentation must not require/install driver.desktop_session');}});
@@ -344,7 +401,7 @@ test('browser-only Home uses one receipted client presentation factory without i
 test('native presentation reconciliation isolates one invalid source or browser without skipping unrelated withdrawal', async () => {
  const vm=require('node:vm'),ts=require('typescript'),calls=[],errors=[];
  const browser=id=>({worker_environment_id:id,run_id:id,lifecycle:'active',worker_environment_kind:'browser_session',formation_pin:'pin',
-  client_surfaces:[{id:`${id}:page`,protocol:'browser.native.v1',mode:'direct',data:{engine_handle:id,host_generation:'generation',browser_context_id:id}}]});
+  client_surfaces:[{id:`${id}:page`,protocol:'browser.native.v1',mode:'direct',data:{engine_handle:id,host_generation:'generation',browser_context_id:id}},...(id==='good-browser'?[{id:`${id}:history`,protocol:'browser.native.downloads.v1',mode:'direct'}]:[])]});
  const desktop=id=>({worker_environment_id:id,run_id:id,lifecycle:'active',worker_environment_kind:'desktop_session',formation_pin:'pin',
   client_surfaces:[{id:`${id}:desktop`,protocol:'desktop_session',mode:'direct',data:{desktop:{applications:[{application:{app:{app_instance_id:id}},windows:[{window_id:id,source_image:{}}]}]}}}]});
  const rooms=[desktop('invalid-source'),desktop('good-source'),browser('stale-browser'),browser('good-browser')];
@@ -354,7 +411,7 @@ test('native presentation reconciliation isolates one invalid source or browser 
  const browserHost={snapshot:()=>[],reconcile:async values=>{calls.push(['browser',values.map(value=>value.room.worker_environment_id)]);throw new Error('image artifact unavailable');},revokeAll:()=>calls.push(['revoke-browser'])};
  const history={reconcile:async values=>calls.push(['history',values.map(value=>value.room.worker_environment_id)]),revokeAll:()=>calls.push(['revoke-history'])};
  const context=vm.createContext({process:{platform:'darwin'},quitCleanupStarted:false,nativeDesktopRefreshScheduled:false,nativeDesktopRefreshRunning:false,nativeDesktopRefreshAgain:false,
-  queueMicrotask,nativeBrowserHost:{},nativeBrowserHome:'/home',resolveOctopusHome:()=>'/home',nativeDesktopAccessEntries:()=>authorized?[{}]:[],
+  queueMicrotask,nativeBrowserHost:{getEngineInfo:()=>({capabilities:{persistentDownloadHistory:true}})},nativeBrowserHome:'/home',resolveOctopusHome:()=>'/home',nativeDesktopAccessEntries:()=>authorized?[{}]:[],
   requireNativeDesktopAccess:()=>{if(!authorized)throw new Error('access withdrawn');},requireNativeBrowserHome:()=>{},
   getProjectionStore:()=>({read:async request=>request.kind==='projection.worker_environments.list'?{worker_environments:rooms}:{chats:turns}}),
   projectionReadRequest:(kind,args)=>({kind,args}),presentationSource:(_descriptor,input)=>{if(input.sourceWindowId==='invalid-source')throw new Error('invalid exact source');return{source:{},identity:{}};},

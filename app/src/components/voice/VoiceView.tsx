@@ -952,7 +952,9 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           serviceTier={workspace.serviceTier}
           resumeAvailable={workspace.resumeAvailable}
           isSubmitting={workspace.submitting}
-          submissionMode={workspace.turnOpen ? "steer" : "send"}
+          submissionMode={workspace.busy ? "queue" : "send"}
+          canSteer={workspace.canSteer}
+          onSteer={workspace.steerCurrentTurn}
           submitBlockReason={workspace.submitBlockReason}
           text={workspace.text}
           turnOpen={workspace.turnOpen}

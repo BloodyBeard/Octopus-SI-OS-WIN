@@ -22,11 +22,11 @@
     },
     {
       "path": "bootstrap.h",
-      "sha256": "7f58037794773064c86fc74f8c5c0aded77018e570e948c1facd48d263b6ec60"
+      "sha256": "b60223d7510370c95874dcf1976cfb505e013fc9d60e68699f88164b03f9103a"
     },
     {
       "path": "bootstrap.mm",
-      "sha256": "cc925c953713463a48379129105cef36b951fab0adc121e5f045ad131549bfe9"
+      "sha256": "e13c21fec34541e11951861b0804bff8d9d365b06443133eb3ba279b256c4acc"
     },
     {
       "path": "transport.h",
@@ -34,7 +34,7 @@
     },
     {
       "path": "binding.mm",
-      "sha256": "2673e8f8d1873d272d85addc8d4b29b8254e19eacd9d5b2ade7346f8c791bd4d"
+      "sha256": "66ce2a178f41f965c5cd4e6ffa592fae5b85889ec6b50ac4505c7b766f609b14"
     },
     {
       "path": "build.cjs",
@@ -46,11 +46,11 @@
     },
     {
       "path": "stack.h",
-      "sha256": "259d0269ffc7946a321f4a0b9673c1596c897356616d121ff3c058ec9fc41b6f"
+      "sha256": "ba46c2f8fb3d411c727d9173aa9f51b7566336bf1bb42c82fe2746681b9c330b"
     },
     {
       "path": "stack.mm",
-      "sha256": "cad386a3d6e96f416c3f5849834444131508a881da4c06765c17f53993d1c14d"
+      "sha256": "01c5f25e00c6032259012b95fd603fcc989a0c3ef7978fb76dcec91d1f3fb033"
     },
     {
       "path": "permissions.h",

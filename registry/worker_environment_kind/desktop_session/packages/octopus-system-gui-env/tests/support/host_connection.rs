@@ -32,7 +32,12 @@ async fn caller_disconnect_cancels_only_its_input_and_records_partial_effect() {
         started: tokio::sync::Notify::new(),
         cancelled: tokio::sync::Notify::new(),
     });
-    let host = Arc::new(DesktopHost::new(executor.clone(), root.path().join("private")).unwrap());
+    let preferences = root.path().canonicalize().unwrap().join("preferences"); std::fs::create_dir(&preferences).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&preferences, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::app_authorization::create_record(&preferences.join("computer-use.json"), &json!({"schema_version":1,"enabled":true})).unwrap();
+    let host = Arc::new(DesktopHost::new(executor.clone(), root.path().join("private")).unwrap()
+        .with_application_preferences(Some(preferences)).unwrap());
     let request = |id: &str, action| Request {
         schema_version: 2,
         worker_environment_id: "room".into(),
@@ -106,6 +111,111 @@ async fn caller_disconnect_cancels_only_its_input_and_records_partial_effect() {
         "Exact HTTP disconnect cancellation and partial receipt: {:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn computer_use_preference_denies_and_revokes_native_input() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let preferences = root.path().canonicalize().unwrap().join("preferences"); std::fs::create_dir(&preferences).unwrap();
+    std::fs::set_permissions(&preferences, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executor = Arc::new(HeldInput { started: tokio::sync::Notify::new(), cancelled: tokio::sync::Notify::new() });
+    let host = Arc::new(DesktopHost::new(executor.clone(), root.path().join("private")).unwrap()
+        .with_application_preferences(Some(preferences.clone())).unwrap());
+    let request = |id: &str, action| Request { schema_version: 2, worker_environment_id: "room".into(),
+        request_id: id.into(), tool: "gui.click".into(), action };
+    let unconfigured = DesktopHost::new(executor.clone(), root.path().join("unconfigured")).unwrap();
+    let refused = unconfigured.handle(request("unconfigured", json!({"type":"control","mode":"acquire"})), false).await;
+    assert!(!refused.accepted); assert!(refused.error.unwrap().message.contains("computer_use_preference_unavailable"));
+    for operation in ["observe","screenshot","view","click","move","type","key","scroll","drag","app_click","app_move","app_drag",
+        "app_scroll","app_key","app_type","app_set_value","app_select_text","app_secondary_action","app_paste","app_state","app_resume"] {
+        let result = host.handle(request(operation, json!({"type":operation})), operation == "view").await;
+        assert!(!result.accepted); assert!(result.error.unwrap().message.contains("computer_use_disabled"));
+    }
+    assert!(host.handle(request("status", json!({"type":"status"})), false).await.accepted);
+    let preference = preferences.join("computer-use.json");
+    crate::app_authorization::create_record(&preference, &json!({"schema_version":1,"enabled":true})).unwrap();
+    let generation = host.handle(request("control", json!({"type":"control","mode":"acquire"})), false).await.evidence.unwrap().control.generation;
+    let observation = host.handle(request("observe", json!({"type":"observe","screen_id":"screen"})), false).await.evidence.unwrap().observation.unwrap().id;
+    let call = request("input", json!({"type":"click","screen_id":"screen","observation_id":observation,
+        "control_generation":generation,"x":20,"y":30}));
+    let running = { let host = host.clone(); tokio::spawn(async move { host.handle(call, false).await }) };
+    tokio::time::timeout(std::time::Duration::from_secs(1), executor.started.notified()).await.unwrap();
+    std::fs::write(&preference, b"{\"schema_version\":1,\"enabled\":false}").unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), running).await.unwrap().unwrap();
+    assert!(!result.accepted); assert!(result.error.unwrap().message.contains("input_interrupted"));
+    assert_eq!(host.state.lock().unwrap().control.mode, "stopped");
+    let key = blake3::hash(b"room:input").to_hex().to_string();
+    let receipt: Value = serde_json::from_slice(&std::fs::read(root.path().join("private").join(format!("{key}.json"))).unwrap()).unwrap();
+    assert_eq!(receipt["completed"], false); assert_eq!(receipt["events_posted"], 1);
+    for operation in ["observe","screenshot","view"] {
+        let result = host.handle(request(operation, json!({"type":operation})), operation == "view").await;
+        assert!(!result.accepted); assert!(result.error.unwrap().message.contains("computer_use_disabled"));
+    }
+    std::fs::write(&preference, b"{\"schema_version\":1,\"enabled\":\"true\"}").unwrap();
+    assert!(crate::app_authorization::computer_use_enabled(&preferences).is_err());
+    assert!(!host.handle(request("bad", json!({"type":"click"})), false).await.accepted);
+    assert!(!host.handle(request("bad-capture", json!({"type":"screenshot"})), false).await.accepted);
+    assert!(host.handle(request("stop", json!({"type":"stop"})), true).await.accepted);
+}
+
+#[tokio::test]
+async fn saved_off_blocks_retained_source_bootstrap_and_cancels_exact_pending_stream() {
+    use crate::app_authorization::{OriginalCall, OperatorRequest, ApplicationTarget, PendingRequest};
+    use octopus_descriptors::{ArtifactId, InterfaceId};
+    use std::os::unix::fs::PermissionsExt;
+    struct BootstrapFixture { preference: PathBuf, disable_at: &'static str, calls: Mutex<Vec<Value>> }
+    impl DesktopExecutor for BootstrapFixture {
+        fn retained_process_id<'a>(&'a self) -> Pin<Box<dyn Future<Output=Result<u32,String>>+Send+'a>> { Box::pin(async { Ok(77) }) }
+        fn execute<'a>(&'a self, action: Value) -> Execution<'a> {
+            Box::pin(async move {
+                self.calls.lock().unwrap().push(action.clone());
+                if action["type"] == self.disable_at { std::fs::write(&self.preference,b"{\"schema_version\":1,\"enabled\":false}").unwrap(); }
+                match action["type"].as_str() {
+                    Some("pip_prepare") => Ok(json!({"schema_version":1,"producer_pid":77,"presentation_id":"presentation","stream_generation":1,
+                        "native_window_incarnation":"1","native_cg_window_id":10})),
+                    Some("pip_install") => Ok(json!({"schema_version":1,"installed":true,"bootstrap_id":action["bootstrap_id"],"producer_pid":77})),
+                    Some("pip_cancel") => Ok(json!({"cancelled":true})),
+                    _ => Err("unexpected native effect".into()),
+                }
+            })
+        }
+    }
+    for disable_at in ["disabled","pip_prepare","pip_install","enabled"] {
+        let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
+        let preferences = root.join("preferences"); std::fs::create_dir(&preferences).unwrap();
+        std::fs::set_permissions(&preferences,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let preference = preferences.join("computer-use.json");
+        crate::app_authorization::create_record(&preference,&json!({"schema_version":1,"enabled":disable_at!="disabled"})).unwrap();
+        let executor=Arc::new(BootstrapFixture {preference,disable_at,calls:Mutex::new(Vec::new())});
+        let mut host=DesktopHost::new(executor.clone(),root.join("host")).unwrap().with_application_preferences(Some(preferences)).unwrap();
+        host.app_approval=Some((crate::config::AppApprovalConfig {operator_interface:InterfaceId::new("operator"),resume_tool:"gui.app_resume".into()},"host".into()));
+        host.presentation_timeout=Some(std::time::Duration::from_secs(2));
+        let room=protocol::application::Scope {host_generation:"host".into(),worker_environment_id:"room".into(),formation_pin:"formation".into()};
+        let original=OriginalCall {run:"run".into(),ee:"ee".into(),worker:InterfaceId::new("worker"),door_interface:InterfaceId::new("door"),
+            tool:"gui.app_state".into(),correlation_id:"call".into(),arguments:json!({}),source_movement_seq:1,
+            source_artifact:octopus_ledger::ArtifactRef {id:ArtifactId::new("source"),content:octopus_ledger::ContentHash::of_bytes(b"source")} };
+        let grant=OperatorRequest::new(original.clone(),room.clone(),ApplicationTarget {bundle_id:"example.app".into(),bundle_path:"/Applications/Example.app".into(),display_name:"Example".into(),instance:None},"gui.app_resume".into(),None,None).unwrap();
+        let source:protocol::application::LiveAppSource=serde_json::from_value(json!({"scope":room,"grant_request_id":grant.request_id,
+            "application":{"app":{"host_generation":"host","app_instance_id":"app"},"bundle_id":"example.app","bundle_path":"/Applications/Example.app","display_name":"Example","process_id":1,"launch_time_unix_ms":null},
+            "source":original.source(),"observation":{"id":"observation","revision":1,"control_generation":0},
+            "windows":[{"window_id":"window","cg_window_id":10,"title":null,"frame_screen_points":{"x":0,"y":0,"width":100,"height":100},"on_screen":true,"window_layer":0,"capture_geometry":null,"source_image":null}]})).unwrap();
+        source.validate().unwrap();
+        host.app_grants.lock().unwrap().insert(grant.request_id.clone(),PendingRequest {request:grant.clone(),native_target_handle:"target".into(),operator_interface:InterfaceId::new("operator"),provider_interface:InterfaceId::new("provider"),native_policy:None,native_policy_digest:None});
+        host.app_sources.lock().unwrap().insert(("room".into(),"formation".into(),"app".into()),source);
+        let request=Request {schema_version:2,worker_environment_id:"room".into(),request_id:"bootstrap".into(),tool:"operator.desktop".into(),
+            action:json!({"type":"receiver_bootstrap","scope":{"host_generation":"host","worker_environment_id":"room","formation_pin":"formation","app_instance_id":"app","grant_request_id":grant.request_id},
+                "source_window_id":"window","receiver_pid":88,"receiver_nonce":"a".repeat(64),"receiver_instance_nonce":"b".repeat(64)})};
+        let result=host.handle(request,true).await;
+        let calls=executor.calls.lock().unwrap();
+        if disable_at=="enabled" {assert!(result.accepted);assert!(result.receiver_bootstrap.is_some());assert_eq!(calls.len(),2);}
+        else {
+            assert!(!result.accepted);assert!(result.receiver_bootstrap.is_none());assert!(result.error.unwrap().message.contains("computer_use_disabled"));
+            if disable_at=="disabled" {assert!(calls.is_empty());}
+            else {let cancel=calls.last().unwrap();assert_eq!(cancel["type"],"pip_cancel");assert_eq!(cancel["bootstrap_id"],calls[0]["bootstrap_id"]);
+                assert_eq!(calls.iter().filter(|action|action["type"]=="pip_install").count(),usize::from(disable_at=="pip_install"));}
+        }
+    }
 }
 
 #[tokio::test]

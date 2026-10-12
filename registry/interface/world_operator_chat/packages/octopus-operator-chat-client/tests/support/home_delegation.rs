@@ -514,6 +514,26 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     assert!(log.read_from(Seq(delegated_from as u64)).iter().any(|m|
         m.kind == MovementKind::InterfaceOutbound && m.to == Endpoint::Interface(plan.model_interface_id.clone().into())
         && m.runtime().is_some_and(|meta| meta.run.as_str() == plan.run_id)), "Voice delegates into the independent Home Run");
+    let mut home_ctx = ctx.clone();
+    home_ctx.interface = plan.model_interface_id.clone().into();
+    home_ctx.interface_dir = registry.join("interface").join(&plan.model_interface_id);
+    home_ctx.descriptor_snapshot = Some(load_interface_descriptor(&registry.join("interface"), &plan.model_interface_id).unwrap());
+    home_ctx.var_dir = root.join("home-provider");
+    std::fs::create_dir(&home_ctx.var_dir).unwrap();
+    let mut home_reader = LedgerTailReader::open(&home_ctx).unwrap();
+    let home_rows = home_reader.read_new().unwrap();
+    let delegated_source = home_rows.iter().find(|row| row.movement.seq.0 >= delegated_from as u64
+        && row.movement.artifact.as_ref().is_some_and(|artifact| artifact.id.as_str().starts_with("realtime.delegation:"))).unwrap();
+    let input = home_reader.envelope(delegated_source).unwrap();
+    let pinned = home_ctx.pinned_run_record_bytes(&input).unwrap();
+    let home_handoff = ProviderHandoffSession::new(&home_ctx).unwrap().from_invocation(&home_ctx,
+        home_ctx.descriptor_snapshot.as_ref().unwrap(), &current.id, &input, delegated_source.movement.seq.0, &pinned).unwrap();
+    assert!(!home_handoff.consumes_context_free_independent_input().await, "Voice delegation must reach model dispatch rather than the receipt-only path");
+    let model_context = home_handoff.current_session_context_artifacts().await;
+    assert!(model_context.iter().any(|entry| entry.label == "realtime.delegation" && entry.source_artifact == input.artifact && entry.payload == delegation));
+    let instructions = &input.metadata().unwrap().artifact_binding_refs;
+    assert!(instructions.iter().any(|entry| entry.id.as_str() == "artifact-worker-role-operator-home"));
+    assert!(instructions.iter().any(|entry| entry.id.as_str() == delivery_id));
     let update = json!({"call_id":delegation["call_id"],"correlation_id":delegation["correlation_id"],"delegation_id":delegation["delegation_id"],"update_id":"selected-task-progress","channel":"commentary","text":"The delegated Task produced its artifact."});
     let file = InterfaceArtifactFile::write(
         root.join("voice-update"),

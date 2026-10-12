@@ -5,6 +5,34 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+#[test]
+fn cold_application_settings_child_uses_only_the_declared_private_store() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let invoke = |action: serde_json::Value| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_octopus-desktop-host"))
+            .args(["--application-settings", root.to_str().unwrap()]).env_clear().current_dir(&root)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        child.stdin.take().unwrap().write_all(&serde_json::to_vec(&action).unwrap()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let result = invoke(json!({"operation":"list"}));
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap(),
+        json!({"schema_version":1,"applications":[],"removed":false}));
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    assert!(root.join("application-permissions.lock").is_file());
+    for action in [json!({"operation":"allow","bundle_id":"example.app"}),json!({"operation":"remove"}),json!({"operation":"list","run":"synthetic"})] {
+        assert!(!invoke(action).status.success());
+    }
+    std::fs::write(root.join("app-permission-always-invalid.json"), b"{}").unwrap();
+    assert!(!invoke(json!({"operation":"list"})).status.success());
+    assert!(root.join("app-permission-always-invalid.json").is_file());
+}
+
 #[tokio::test]
 #[cfg(target_os = "macos")]
 async fn declared_host_signals_life_readiness_only_after_native_status_admission() {

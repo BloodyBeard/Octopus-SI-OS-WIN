@@ -67,7 +67,7 @@ test('listener resume cannot leave an independent busy latch when projection see
  function visit(node){if(ts.isVariableDeclaration(node)&&node.name.getText()==='reconcileRunReceipt')callback=node.initializer.arguments[0].getText();ts.forEachChild(node,visit);}visit(ast);
  const compiled=ts.transpileModule('const callback='+callback+';',{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
  let rows=[idle],targets={};const projectedRunsRef={current:[idle]},runReceiptSequenceRef={current:new Map()};
- const listener=Function('projectedRunsRef','runReceiptSequenceRef','movementArtifact','setRuns','reconcileChatRunReceipts','setPendingTurnControls','setInFlightTurnControlTargets',compiled+'return callback;')(projectedRunsRef,runReceiptSequenceRef,a=>a.source==='movement',update=>rows=update(rows),reconcile,()=>{},update=>targets=update(targets));
+ const listener=Function('projectedRunsRef','runReceiptSequenceRef','movementArtifact','setRuns','reconcileChatRunReceipts','setPendingTurnControls','setInFlightTurnControlTargets','isChatReplyTerminal',compiled+'return callback;')(projectedRunsRef,runReceiptSequenceRef,a=>a.source==='movement',update=>rows=update(rows),reconcile,()=>{},update=>targets=update(targets),moduleExports.isChatReplyTerminal);
  listener('home',[resumed(101)]);assert.equal(rows[0].turnOpen,true);assert.deepEqual(targets,{});
  rows=[{...idle,lastMovementSeq:102}];projectedRunsRef.current=rows;
  listener('home',[terminal(102)]);assert.equal(rows[0].turnOpen,false);assert.deepEqual(targets,{});

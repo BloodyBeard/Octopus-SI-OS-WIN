@@ -1,0 +1,1400 @@
+use super::*;
+
+pub(super) fn validate_initial_history(
+    ctx: &InterfaceLiftContext,
+    path: &Path,
+    bytes: &[u8],
+    config: &RunAuthoringConfig,
+    before_seq: u64,
+) -> Result<(), String> {
+    let record = RunRecord::from_bytes(bytes).map_err(|error| error.to_string())?;
+    let state = record
+        .interface_state
+        .get(&config.provider_interface)
+        .ok_or("initial provider state absent")?;
+    if optional_u64(state, "authoring_generation")? == 0
+        || persisted_pending_handoff(&record, &config.provider_interface)?.is_some()
+    {
+        return Ok(());
+    }
+    if optional_u64(state, "context_generation")? != 0 {
+        return Err("initial provider state contains context without a handoff".into());
+    }
+    let writer = CheckedRunWriter {
+        owner: config.provider_interface.clone(),
+        source: config.authoring_source_interface.clone(),
+        door: config
+            .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?
+            .interface()
+            .clone(),
+        tool: config.file_write_tool.clone(),
+        call_label: config.file_write_label.clone(),
+        result_label: config.file_write_result_label.clone(),
+    };
+    let limits = ctx.required_host_io_limits()?;
+    let evidence = CheckedRunEvidence {
+        movements_path: &ctx.movements_path,
+        ledger_index_path: &ctx.ledger_index_path,
+        blobs_dir: &ctx.blobs_dir,
+        max_control_frame_bytes: limits.max_control_frame_bytes,
+        max_manifest_bytes: limits.max_manifest_bytes,
+        max_payload_bytes: limits.max_payload_bytes,
+    };
+    let mut reader = FileCheckedRunReader::open(&evidence, None)?;
+    let mut anchor: Option<(u64, Vec<u8>)> = None;
+    let correlation = format!("provider-run-authoring:{}:1", record.id);
+    while reader.next_sequence() < before_seq {
+        let Some(row) = reader.movement(reader.next_sequence())? else {
+            break;
+        };
+        if row.kind != MovementKind::InterfaceOutbound
+            || row.from != Endpoint::Interface(writer.source.clone())
+            || row.to != Endpoint::Interface(writer.door.clone())
+        {
+            continue;
+        }
+        let (manifest, payload) = reader.artifact(
+            row.artifact
+                .as_ref()
+                .ok_or("initial writer call has no artifact")?,
+        )?;
+        if manifest.label != writer.call_label {
+            continue;
+        }
+        let call: octopus_tool_handlers::ToolCallArtifact =
+            serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+        if call.tool != writer.tool || call.correlation_id.as_deref() != Some(&correlation) {
+            continue;
+        }
+        let runtime = row
+            .runtime()
+            .ok_or("initial writer call has no admitted coordinate")?;
+        let hash = runtime
+            .run_record_hash
+            .as_deref()
+            .and_then(ContentHash::from_hex)
+            .ok_or("initial writer call has no snapshot")?;
+        let snapshot = reader.snapshot(&hash)?;
+        if ContentHash::of_bytes(&snapshot) != hash {
+            return Err("initial writer snapshot failed integrity".into());
+        }
+        let before = if call.arguments.get("ordered").is_some() {
+            let ordered: writer_run::OrderedArguments =
+                serde_json::from_value(call.arguments).map_err(|error| error.to_string())?;
+            if !ordered.targets(path) {
+                continue;
+            }
+            ordered
+                .checked_call(&writer, &snapshot, path, limits.max_payload_bytes)?
+                .0
+        } else {
+            let arguments: FileWriteCallArguments =
+                serde_json::from_value(call.arguments).map_err(|error| error.to_string())?;
+            if runtime.run != record.id || arguments.path != path {
+                continue;
+            }
+            snapshot
+        };
+        let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
+        let state = original
+            .interface_state
+            .get(&writer.owner)
+            .ok_or("initial writer preimage lost its provider")?;
+        if original.id != record.id
+            || original.worker != record.worker
+            || original.ee != record.ee
+            || optional_u64(state, "authoring_generation")? != 0
+            || optional_u64(state, "context_generation")? != 0
+            || persisted_pending_handoff(&original, &writer.owner)?.is_some()
+        {
+            return Err("initial writer preimage is not the exact unspent task".into());
+        }
+        if anchor.replace((row.seq.0, before)).is_some() {
+            return Err("initial provider write is ambiguous".into());
+        }
+    }
+    let (first, original) =
+        anchor.ok_or("initial provider generation has no admitted definition write")?;
+    let writers = declared_writer_closure(
+        &RunRecord::from_bytes(&original).map_err(|error| error.to_string())?,
+        vec![writer.clone()],
+    )?;
+    let mut proof = FileCheckedRunReader::open(
+        &evidence,
+        Some(
+            first
+                .checked_sub(1)
+                .ok_or("initial write has no preceding coordinate")?,
+        ),
+    )?;
+    let scan_start = proof.next_sequence();
+    let chain = checked_run_file_chain_with_reader(
+        &mut proof,
+        path,
+        &original,
+        CheckedRunTarget::Snapshot(bytes),
+        first - 1,
+        scan_start,
+        Some(before_seq),
+        &writers,
+        &[],
+        None,
+        None,
+    )
+    .map_err(String::from)?;
+    if chain.is_empty() {
+        return Err("initial provider generation has no complete checked write".into());
+    }
+    for transition in &chain {
+        validate_checked_owner_transition(transition)?;
+        if transition.writer.owner == writer.owner
+            && !checked_revision(transition)
+            && validate_payload_revision(&transition.before, &transition.after, &writer).is_err()
+        {
+            return Err(
+                "initial provider history contains an execution write before its first input"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn profile(writer: &CheckedRunWriter) -> RunAuthoringProfile {
+    RunAuthoringProfile {
+        file_write_tool: writer.tool.clone(),
+        file_write_label: writer.call_label.clone(),
+        file_write_result_label: writer.result_label.clone(),
+        result_timeout_ms: 1,
+    }
+}
+
+fn topology(
+    record: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<BoundRunAuthoringTopology, String> {
+    serde_json::from_value(
+        record
+            .interface_state
+            .get(provider)
+            .and_then(|state| state.get(RUN_AUTHORING_BINDING))
+            .cloned()
+            .ok_or("provider input definition has no bound topology")?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub fn declared_owner_input_bindings(
+    record: &RunRecord,
+    provider_writer: &CheckedRunWriter,
+    owner_writer: &CheckedRunWriter,
+    binding: &CheckpointBindingPolicySnapshot,
+) -> Result<Vec<ArtifactBinding>, String> {
+    let declared = validate_declared_provider_writer(record, provider_writer)?;
+    let config = declared.config(&profile(provider_writer));
+    config.validate(&provider_writer.owner, &record.id)?;
+    validate_checkpoint_topology(record, &provider_writer.owner, &declared.checkpoints, None)?;
+    let candidates = declared
+        .checkpoints
+        .iter()
+        .filter(|template| {
+            template.role == RunAuthoringCheckpointRole::OwnerInput
+                && template.binding_policy_snapshot() == *binding
+        })
+        .collect::<Vec<_>>();
+    let [template] = candidates.as_slice() else {
+        return Err("owner output requires one exact declared provider input".into());
+    };
+    if template.owner_authoring.as_ref() != Some(owner_writer)
+        || !template.required_verified_artifacts.is_empty()
+    {
+        return Err("owner output differs from its declared writer or requirements".into());
+    }
+    if template.include_context {
+        return input_artifacts::read_bindings(
+            record,
+            &owner_writer.owner,
+            provider_context_bindings(record, &provider_writer.owner)?,
+        );
+    }
+    let mut bindings = current_mandatory_role_bindings(record, &config)?;
+    for id in &template.static_artifact_bindings {
+        if !bindings.iter().any(|binding| binding.id == *id) {
+            bindings.push(
+                serde_json::from_value(serde_json::json!({"id":id}))
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+    }
+    Ok(bindings)
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProviderInputRevision {
+    Unchanged,
+    Deferred { checkpoints: Vec<CheckpointId> },
+    Prepared { edit: CheckedRunEdit },
+}
+
+fn same_edge(before: &RunAuthoringCheckpoint, after: &RunAuthoringCheckpoint) -> bool {
+    before.role == RunAuthoringCheckpointRole::OwnerInput
+        && after.role == before.role
+        && before.owner_authoring == after.owner_authoring
+        && before.interface_binding == after.interface_binding
+        && before.outbound_interface_bindings == after.outbound_interface_bindings
+        && before.required_verified_artifacts == after.required_verified_artifacts
+}
+
+pub(super) fn replacements(
+    before: &BoundRunAuthoringTopology,
+    after: &BoundRunAuthoringTopology,
+) -> Result<Vec<RunAuthoringCheckpoint>, String> {
+    let mut protected = after.clone();
+    protected.checkpoints = before.checkpoints.clone();
+    if protected != *before || before.checkpoints.len() != after.checkpoints.len() {
+        return Err(
+            "input definition revision changed provider identity or topology membership".into(),
+        );
+    }
+    let mut changed = Vec::new();
+    for (old, new) in before.checkpoints.iter().zip(&after.checkpoints) {
+        if old == new {
+            continue;
+        }
+        if !same_edge(old, new) {
+            return Err(
+                "input definition revision changed an edge, writer, policy or requirement".into(),
+            );
+        }
+        changed.push(old.clone());
+    }
+    Ok(changed)
+}
+
+fn active_returns(record: &RunRecord, changed: &[RunAuthoringCheckpoint]) -> Vec<CheckpointId> {
+    record
+        .checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            record.active_checkpoints.contains(&checkpoint.id)
+                && changed.iter().any(|template| {
+                    checkpoint.interface_binding.as_ref() == Some(&template.interface_binding)
+                        && checkpoint.outbound_interface_bindings
+                            == template.outbound_interface_bindings
+                })
+        })
+        .map(|checkpoint| checkpoint.id.clone())
+        .collect()
+}
+
+pub fn provider_input_rearm_ready(
+    evidence: &CheckedRunEvidence<'_>,
+    record: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<bool, String> {
+    readiness(evidence, record, provider, u64::MAX)
+}
+
+pub fn provider_input_payloads_ready(
+    evidence: &CheckedRunEvidence<'_>,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    source: &InterfaceId,
+) -> Result<bool, String> {
+    payload_readiness(evidence, record, provider, source, u64::MAX)
+}
+
+fn payload_phase(
+    record: &RunRecord,
+    provider: &InterfaceId,
+    source: &InterfaceId,
+) -> Result<(), String> {
+    if record.status.as_str() != Some("idle") {
+        return Err("payload selection requires an idle input boundary".into());
+    }
+    let declared = topology(record, provider)?;
+    if declared
+        .checkpoints
+        .iter()
+        .filter(|template| {
+            template.role == RunAuthoringCheckpointRole::Stable
+                && template.include_context
+                && template.interface() == source
+        })
+        .count()
+        != 1
+    {
+        return Err("payload selection requires one declared stable input source".into());
+    }
+    match persisted_pending_handoff(record, provider)? {
+        Some(pending) if pending.terminal && pending.context_publication.is_none() => {}
+        None if optional_u64(
+            record
+                .interface_state
+                .get(provider)
+                .ok_or("provider state absent")?,
+            "context_generation",
+        )? == 0 => {}
+        _ => return Err("payload selection interrupts unfinished provider work".into()),
+    }
+    Ok(())
+}
+
+fn payload_index_ready(
+    index: &ProviderLedgerEvidenceIndex,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    source: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    payload_phase(record, provider, source)?;
+    let declared = topology(record, provider)?;
+    let pending = persisted_pending_handoff(record, provider)?;
+    if let Some(pending) = &pending {
+        if !all_admitted(index, pending, record, provider, before_seq)? {
+            return Ok(false);
+        }
+    }
+    // A source already admitted after the retained handoff must be consumed first.
+    // In a pristine task this also proves that its initial inputs are unspent.
+    for (coordinate, rows) in &index.coordinate_outbounds {
+        if coordinate.run != record.id.as_str() || coordinate.worker != record.worker.as_str() {
+            continue;
+        }
+        for row in rows.iter().filter(|row| row.seq < before_seq) {
+            if pending
+                .as_ref()
+                .is_some_and(|pending| row.seq <= pending.source_movement_seq)
+            {
+                continue;
+            }
+            if declared.checkpoints.iter().any(|template| {
+                template.role.is_provider_input()
+                    && template.interface() == &row.source
+                    && indexed_evidence_matches_checkpoint(row, template)
+            }) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn payload_readiness(
+    evidence: &CheckedRunEvidence<'_>,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    source: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    let mut index = ProviderLedgerEvidenceIndex::with_spotlight(
+        provider.clone(),
+        evidence.movements_path.to_path_buf(),
+        evidence.max_control_frame_bytes,
+        evidence.ledger_index_path,
+    );
+    index.catch_up()?;
+    if !payload_index_ready(&index, record, provider, source, before_seq)? {
+        return Ok(false);
+    }
+    if persisted_pending_handoff(record, provider)?.is_some()
+        && !readiness(evidence, record, provider, before_seq)?
+    {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+pub(super) fn reader_payload_readiness<R: CheckedRunEvidenceReader + ?Sized>(
+    reader: &mut R,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    source: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    let mut index = ProviderLedgerEvidenceIndex::new(provider.clone(), PathBuf::new(), 1);
+    for sequence in 0..before_seq {
+        let row = reader
+            .admitted_movement(sequence)?
+            .ok_or("payload selection admission interval is incomplete")?;
+        if row.seq.0 != sequence {
+            return Err("payload selection admission sequence changed".into());
+        }
+        index.note(&row)?;
+    }
+    payload_index_ready(&index, record, provider, source, before_seq)
+}
+
+fn ready_pending(
+    record: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<Option<PendingHandoff>, String> {
+    let Some(pending) = persisted_pending_handoff(record, provider)? else {
+        return Ok(None);
+    };
+    if !pending.terminal || pending.context_publication.is_some() {
+        return Ok(None);
+    }
+    validate_pending_items_are_active(record, provider, &pending)?;
+    Ok(Some(pending))
+}
+
+fn pending_ref(item: &PendingHandoffItem) -> Result<ArtifactRef, String> {
+    let hash = ContentHash::from_hex(&item.artifact_content_hash)
+        .filter(|hash| hash.to_hex() == item.artifact_content_hash)
+        .ok_or("input rearm pending artifact has no canonical hash")?;
+    Ok(ArtifactRef {
+        id: item.artifact_id.clone(),
+        content: hash,
+    })
+}
+
+fn all_admitted(
+    index: &ProviderLedgerEvidenceIndex,
+    pending: &PendingHandoff,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    let mut previous = pending.source_movement_seq;
+    for item in &pending.items {
+        let reference = pending_ref(item)?;
+        let Some(sequence) = index.indexed_handoff_seq(
+            PendingHandoffLedgerCoordinate {
+                interface: provider,
+                run: &record.id,
+                worker: &record.worker,
+                artifact: &reference,
+                required_evidence: pending_required_evidence(item)?,
+                checkpoint: &item.checkpoint.id,
+                epoch: item.checkpoint.epoch,
+            },
+            before_seq,
+        )?
+        else {
+            return Ok(false);
+        };
+        if sequence <= previous {
+            return Err("input rearm pending admissions are not in source order".into());
+        }
+        previous = sequence;
+    }
+    Ok(true)
+}
+
+pub(super) fn readiness(
+    evidence: &CheckedRunEvidence<'_>,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    let Some(pending) = ready_pending(record, provider)? else {
+        return Ok(false);
+    };
+    let mut index = ProviderLedgerEvidenceIndex::with_spotlight(
+        provider.clone(),
+        evidence.movements_path.to_path_buf(),
+        evidence.max_control_frame_bytes,
+        evidence.ledger_index_path,
+    );
+    index.catch_up()?;
+    if !all_admitted(&index, &pending, record, provider, before_seq)? {
+        return Ok(false);
+    }
+    for item in &pending.items {
+        let (manifest, _) = read_pinned_artifact_with_bounds(
+            evidence.blobs_dir,
+            evidence.max_manifest_bytes,
+            evidence.max_payload_bytes,
+            &pending_ref(item)?,
+        )?;
+        if manifest.label != item.artifact_label {
+            return Err("input rearm pending artifact changed its label".into());
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn reader_readiness<R: CheckedRunEvidenceReader + ?Sized>(
+    reader: &mut R,
+    record: &RunRecord,
+    provider: &InterfaceId,
+    before_seq: u64,
+) -> Result<bool, String> {
+    let Some(pending) = ready_pending(record, provider)? else {
+        return Ok(false);
+    };
+    let mut index = ProviderLedgerEvidenceIndex::new(provider.clone(), PathBuf::new(), 1);
+    for sequence in pending
+        .source_movement_seq
+        .checked_add(1)
+        .ok_or("input rearm source sequence overflow")?..before_seq
+    {
+        let row = reader
+            .admitted_movement(sequence)?
+            .ok_or("input rearm admission interval is incomplete")?;
+        if row.seq.0 != sequence {
+            return Err("input rearm admission sequence changed".into());
+        }
+        index.note(&row)?;
+    }
+    if !all_admitted(&index, &pending, record, provider, before_seq)? {
+        return Ok(false);
+    }
+    for item in &pending.items {
+        if reader.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {
+            return Err("input rearm pending artifact changed its label".into());
+        }
+    }
+    Ok(true)
+}
+
+pub(super) fn validate_rearm_evidence(
+    reader: &mut impl CheckedRunEvidenceReader,
+    transition: &CheckedRunTransition,
+) -> Result<(), String> {
+    let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
+    if !before
+        .interface_state
+        .get(&transition.writer.owner)
+        .is_some_and(|state| state.contains_key(RUN_AUTHORING_BINDING))
+    {
+        return Ok(());
+    }
+    let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+    let initial_revision = persisted_pending_handoff(&before, &transition.writer.owner)?.is_none()
+        && is_revision(
+            &topology(&before, &transition.writer.owner)?,
+            &topology(&after, &transition.writer.owner)?,
+        );
+    if is_payload_revision(&before, &after, &transition.writer.owner)? || initial_revision {
+        let declared = topology(&before, &transition.writer.owner)?;
+        let source = declared
+            .checkpoints
+            .iter()
+            .find(|template| {
+                template.role == RunAuthoringCheckpointRole::Stable && template.include_context
+            })
+            .ok_or("payload selection has no stable input")?
+            .interface();
+        if !reader.input_payloads_ready(
+            &before,
+            &transition.writer.owner,
+            source,
+            transition.call.seq.0,
+        )? {
+            return Err(
+                "payload selection has an unconsumed input or incomplete terminal output".into(),
+            );
+        }
+        return Ok(());
+    }
+    if is_rearm(&before, &after, &transition.writer.owner)?
+        && !reader.input_rearm_ready(&before, &transition.writer.owner, transition.call.seq.0)?
+    {
+        return Err(
+            "input rearm has no complete admitted terminal output batch before its write".into(),
+        );
+    }
+    Ok(())
+}
+
+pub fn prepare_provider_input_payloads(
+    path: PathBuf,
+    current: &[u8],
+    writer: &CheckedRunWriter,
+    source: InterfaceId,
+    selected: Vec<ArtifactRef>,
+) -> Result<CheckedRunEdit, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let value = payload_value(&record, current, writer, &source, &selected)?;
+    let generation = value["interface_state"][writer.owner.as_str()]["authoring_generation"]
+        .as_u64()
+        .ok_or("payload generation absent")?;
+    CheckedRunEdit::prepare(
+        path,
+        current,
+        value,
+        format!("provider-run-authoring:{}:{generation}", record.id),
+    )
+}
+
+fn payload_value(
+    record: &RunRecord,
+    bytes: &[u8],
+    writer: &CheckedRunWriter,
+    source: &InterfaceId,
+    selected: &[ArtifactRef],
+) -> Result<serde_json::Value, String> {
+    let declared = validate_declared_provider_writer(record, writer)?;
+    let config = declared.config(&profile(writer));
+    validate_bound_run_authoring_topology(record, &config, None)?;
+    payload_phase(record, &writer.owner, source)?;
+    validate_payload_artifact_selection(selected)?;
+    let original_context = provider_context_bindings(record, &writer.owner)?;
+    let old_ids = declared
+        .payload_artifact_bindings
+        .iter()
+        .map(|reference| &reference.id)
+        .collect::<BTreeSet<_>>();
+    for reference in selected {
+        if declared
+            .payload_artifact_bindings
+            .iter()
+            .any(|old| old.id == reference.id && old != reference)
+            || original_context
+                .iter()
+                .any(|binding| binding.id == reference.id && !old_ids.contains(&binding.id))
+        {
+            return Err(
+                "payload selection changed immutable content or collides with semantic context"
+                    .into(),
+            );
+        }
+    }
+    let mut context = original_context
+        .into_iter()
+        .filter(|binding| !old_ids.contains(&binding.id))
+        .collect::<Vec<_>>();
+    context.extend(selected.iter().map(|reference| ArtifactBinding {
+        id: reference.id.clone(),
+        access: Default::default(),
+    }));
+    let generation = optional_u64(
+        record
+            .interface_state
+            .get(&writer.owner)
+            .ok_or("provider state absent")?,
+        "authoring_generation",
+    )?
+    .checked_add(1)
+    .ok_or("payload selection generation overflow")?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let mut next = declared.clone();
+    for template in &mut next.checkpoints {
+        if template.role == RunAuthoringCheckpointRole::Stable && template.include_context {
+            template
+                .static_artifact_bindings
+                .retain(|id| !old_ids.contains(id));
+        }
+        if template.role == RunAuthoringCheckpointRole::ProviderToolOutput {
+            template
+                .static_artifact_bindings
+                .retain(|id| !old_ids.contains(id));
+            for reference in selected {
+                append_artifact(&mut template.static_artifact_bindings, reference.id.clone());
+            }
+        }
+    }
+    let pending = persisted_pending_handoff(record, &writer.owner)?;
+    for template in &declared.checkpoints {
+        let stable =
+            template.role == RunAuthoringCheckpointRole::Stable && template.include_context;
+        let authoring = config.writer_run.is_none()
+            && matches!(
+                template.role,
+                RunAuthoringCheckpointRole::AuthoringCall
+                    | RunAuthoringCheckpointRole::AuthoringResult
+            );
+        // Pending output rows and all foreign-owned rows retain their exact bindings.
+        let initial_tool =
+            pending.is_none() && template.role == RunAuthoringCheckpointRole::ProviderToolOutput;
+        if !stable && !authoring && !initial_tool {
+            continue;
+        }
+        let rows = record
+            .checkpoints
+            .iter()
+            .filter(|cp| {
+                record.active_checkpoints.contains(&cp.id)
+                    && checkpoint_record_matches_template(cp, template, &record.id)
+            })
+            .collect::<Vec<_>>();
+        let [row] = rows.as_slice() else {
+            return Err("payload selection has no unique declared checkpoint".into());
+        };
+        let id = format!(
+            "cp_input_payload_{}_{}_{}",
+            record.id, generation, template.name
+        );
+        if record.checkpoint(&CheckpointId::new(&id)).is_some() {
+            return Err("payload selection reused a checkpoint generation".into());
+        }
+        rename_checkpoint(&mut value, &writer.owner, &row.id, &id, true)?;
+        if stable || initial_tool {
+            let bindings = if stable {
+                context.clone()
+            } else {
+                let mut bindings = row
+                    .artifact_bindings
+                    .iter()
+                    .filter(|binding| !old_ids.contains(&binding.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                bindings.extend(selected.iter().map(|reference| ArtifactBinding {
+                    id: reference.id.clone(),
+                    access: Default::default(),
+                }));
+                bindings
+            };
+            let updated = value["checkpoints"]
+                .as_array_mut()
+                .ok_or("payload checkpoints absent")?
+                .iter_mut()
+                .find(|row| row["id"] == id)
+                .ok_or("payload checkpoint absent")?;
+            updated["artifact_bindings"] =
+                serde_json::to_value(bindings).map_err(|error| error.to_string())?;
+        }
+    }
+    // This list classifies bound bytes; the individual checkpoint supplies the read
+    // grant. Retain old classifications only where an unchanged row still binds them.
+    // New stable inputs and future tool outputs carry exactly `selected`.
+    let mut classified = selected.to_vec();
+    let live = value["active_checkpoints"]
+        .as_array()
+        .ok_or("payload active checkpoints absent")?;
+    for reference in &declared.payload_artifact_bindings {
+        if !classified.contains(reference)
+            && value["checkpoints"]
+                .as_array()
+                .ok_or("payload checkpoints absent")?
+                .iter()
+                .any(|row| {
+                    live.contains(&row["id"])
+                        && row["artifact_bindings"].as_array().is_some_and(|bindings| {
+                            bindings
+                                .iter()
+                                .any(|binding| binding["id"] == reference.id.as_str())
+                        })
+                })
+        {
+            classified.push(reference.clone());
+        }
+    }
+    next.payload_artifact_bindings = classified;
+    value["interface_state"][writer.owner.as_str()][RUN_AUTHORING_BINDING] =
+        serde_json::to_value(next).map_err(|error| error.to_string())?;
+    value["interface_state"][writer.owner.as_str()]["authoring_generation"] =
+        serde_json::json!(generation);
+    let after =
+        RunRecord::from_bytes(&serde_json::to_vec(&value).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    let next = topology(&after, &writer.owner)?;
+    validate_bound_run_authoring_topology(&after, &next.config(&profile(writer)), None)?;
+    Ok(value)
+}
+
+pub(super) fn is_payload_revision(
+    before: &RunRecord,
+    after: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<bool, String> {
+    let old = topology(before, provider)?;
+    let new = topology(after, provider)?;
+    if old.payload_artifact_bindings != new.payload_artifact_bindings {
+        return Ok(true);
+    }
+    if old.payload_artifact_bindings.is_empty() {
+        return Ok(false);
+    }
+    let old_ids = provider_context_bindings(before, provider)?
+        .into_iter()
+        .map(|binding| binding.id)
+        .collect::<Vec<_>>();
+    let new_ids = provider_context_bindings(after, provider)?
+        .into_iter()
+        .map(|binding| binding.id)
+        .collect::<Vec<_>>();
+    Ok(old
+        .payload_artifact_bindings
+        .iter()
+        .any(|reference| old_ids.contains(&reference.id) != new_ids.contains(&reference.id)))
+}
+
+pub(super) fn validate_payload_revision(
+    before: &[u8],
+    after: &[u8],
+    writer: &CheckedRunWriter,
+) -> Result<(), String> {
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let current = RunRecord::from_bytes(after).map_err(|error| error.to_string())?;
+    let declared = topology(&current, &writer.owner)?;
+    let context = provider_context_bindings(&current, &writer.owner)?;
+    let selected = declared
+        .payload_artifact_bindings
+        .iter()
+        .filter(|reference| context.iter().any(|binding| binding.id == reference.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let source = declared
+        .checkpoints
+        .iter()
+        .find(|template| {
+            template.role == RunAuthoringCheckpointRole::Stable && template.include_context
+        })
+        .ok_or("payload selection lost its stable input")?
+        .interface();
+    let expected = payload_value(&original, before, writer, source, &selected)?;
+    let actual: serde_json::Value =
+        serde_json::from_slice(after).map_err(|error| error.to_string())?;
+    if actual != expected {
+        return Err("payload selection changed protected state, pending work, grants or checkpoint identity".into());
+    }
+    Ok(())
+}
+
+pub fn prepare_provider_input_revision(
+    path: PathBuf,
+    current: &[u8],
+    writer: &CheckedRunWriter,
+    desired_inputs: Vec<serde_json::Value>,
+) -> Result<ProviderInputRevision, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let before = validate_declared_provider_writer(&record, writer)?;
+    let config = before.config(&profile(writer));
+    validate_bound_run_authoring_topology(&record, &config, None)?;
+    let desired = desired_inputs
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<RunAuthoringCheckpoint>, _>>()
+        .map_err(|error| error.to_string())?;
+    let old = before
+        .checkpoints
+        .iter()
+        .filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput)
+        .collect::<Vec<_>>();
+    if desired.len() != old.len()
+        || desired.iter().any(|template| {
+            old.iter()
+                .filter(|prior| same_edge(prior, template))
+                .count()
+                != 1
+        })
+    {
+        return Err("input revision must declare exactly the existing owner input edges".into());
+    }
+    let mut next = before.clone();
+    for template in &mut next.checkpoints {
+        if template.role == RunAuthoringCheckpointRole::OwnerInput {
+            let matches = desired
+                .iter()
+                .filter(|candidate| same_edge(template, candidate))
+                .collect::<Vec<_>>();
+            let [replacement] = matches.as_slice() else {
+                return Err("input revision repeats an owner input edge".into());
+            };
+            *template = (*replacement).clone();
+        }
+    }
+    let changed = replacements(&before, &next)?;
+    if changed.is_empty() {
+        return Ok(ProviderInputRevision::Unchanged);
+    }
+    next.config(&profile(writer))
+        .validate(&writer.owner, &record.id)?;
+    let pending = persisted_pending_handoff(&record, &writer.owner)?;
+    let blocked = active_returns(&record, &changed);
+    if !blocked.is_empty()
+        || pending
+            .as_ref()
+            .is_some_and(|pending| pending.context_publication.is_some())
+    {
+        return Ok(ProviderInputRevision::Deferred {
+            checkpoints: blocked,
+        });
+    }
+    if pending.is_none()
+        && optional_u64(
+            record
+                .interface_state
+                .get(&writer.owner)
+                .ok_or("provider state absent")?,
+            "context_generation",
+        )? != 0
+    {
+        return Err("input revision has no initial or retained provider context".into());
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_slice(current).map_err(|error| error.to_string())?;
+    value["interface_state"][writer.owner.as_str()][RUN_AUTHORING_BINDING] =
+        serde_json::to_value(next).map_err(|error| error.to_string())?;
+    let generation = optional_u64(
+        record
+            .interface_state
+            .get(&writer.owner)
+            .ok_or("provider state absent")?,
+        "authoring_generation",
+    )?
+    .checked_add(1)
+    .ok_or("input revision authoring generation overflow")?;
+    value["interface_state"][writer.owner.as_str()]["authoring_generation"] =
+        serde_json::json!(generation);
+    if config.writer_run.is_none() {
+        for role in [
+            RunAuthoringCheckpointRole::AuthoringCall,
+            RunAuthoringCheckpointRole::AuthoringResult,
+        ] {
+            let old = active_checkpoint_for_role(&record, &config, role)?;
+            let template = config.checkpoint_for_role(role)?;
+            let id = format!(
+                "cp_input_revision_{}_{}_{}",
+                record.id, generation, template.name
+            );
+            if record.checkpoint(&CheckpointId::new(&id)).is_some() {
+                return Err("input revision reused an existing checkpoint".into());
+            }
+            rename_checkpoint(&mut value, &writer.owner, &old.id, &id, true)?;
+        }
+    }
+    let edit = CheckedRunEdit::prepare(
+        path,
+        current,
+        value,
+        format!("provider-run-authoring:{}:{generation}", record.id),
+    )?;
+    validate(current, edit.content.as_bytes(), writer)?;
+    Ok(ProviderInputRevision::Prepared { edit })
+}
+
+pub fn prepare_provider_input_rearm(
+    path: PathBuf,
+    current: &[u8],
+    writer: &CheckedRunWriter,
+    source: InterfaceId,
+) -> Result<CheckedRunEdit, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let declared = validate_declared_provider_writer(&record, writer)?;
+    let config = declared.config(&profile(writer));
+    validate_bound_run_authoring_topology(&record, &config, None)?;
+    let pending = persisted_pending_handoff(&record, &writer.owner)?
+        .ok_or("input rearm has no settled handoff")?;
+    if !pending.terminal || pending.context_publication.is_some() {
+        return Err("input rearm must preserve an already settled context publication".into());
+    }
+    let candidates = declared
+        .checkpoints
+        .iter()
+        .filter(|template| {
+            template.role == RunAuthoringCheckpointRole::Stable
+                && template.interface() == &source
+                && template.include_context
+        })
+        .collect::<Vec<_>>();
+    let [input] = candidates.as_slice() else {
+        return Err("input rearm requires one exact stable input".into());
+    };
+    let generation = optional_u64(
+        record
+            .interface_state
+            .get(&writer.owner)
+            .ok_or("provider state absent")?,
+        "authoring_generation",
+    )?
+    .checked_add(1)
+    .ok_or("input rearm generation overflow")?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(current).map_err(|error| error.to_string())?;
+    let mut selected = vec![*input];
+    if config.writer_run.is_none() {
+        for role in [
+            RunAuthoringCheckpointRole::AuthoringCall,
+            RunAuthoringCheckpointRole::AuthoringResult,
+        ] {
+            selected.push(config.checkpoint_for_role(role)?);
+        }
+    }
+    for template in selected {
+        let candidates = record
+            .checkpoints
+            .iter()
+            .filter(|cp| {
+                record.active_checkpoints.contains(&cp.id)
+                    && checkpoint_record_matches_template(cp, template, &record.id)
+            })
+            .collect::<Vec<_>>();
+        let [old] = candidates.as_slice() else {
+            return Err("input rearm checkpoint is absent or ambiguous".into());
+        };
+        let id = format!(
+            "cp_input_rearm_{}_{}_{}",
+            record.id, generation, template.name
+        );
+        if record.checkpoint(&CheckpointId::new(&id)).is_some() {
+            return Err("input rearm reused an existing checkpoint".into());
+        }
+        rename_checkpoint(&mut value, &writer.owner, &old.id, &id, true)?;
+    }
+    value["interface_state"][writer.owner.as_str()]["authoring_generation"] =
+        serde_json::json!(generation);
+    let edit = CheckedRunEdit::prepare(
+        path,
+        current,
+        value,
+        format!("provider-run-authoring:{}:{generation}", record.id),
+    )?;
+    validate(current, edit.content.as_bytes(), writer)?;
+    Ok(edit)
+}
+
+fn rename_checkpoint(
+    value: &mut serde_json::Value,
+    provider: &InterfaceId,
+    old: &CheckpointId,
+    new: &str,
+    reset_epoch: bool,
+) -> Result<(), String> {
+    for row in value["checkpoints"]
+        .as_array_mut()
+        .ok_or("run checkpoints absent")?
+    {
+        if row["id"].as_str() == Some(old.as_str()) {
+            row["id"] = serde_json::json!(new);
+            if reset_epoch {
+                row["epoch"] = serde_json::json!(0);
+            }
+        }
+    }
+    for entry in value["active_checkpoints"]
+        .as_array_mut()
+        .ok_or("run active checkpoints absent")?
+    {
+        if entry.as_str() == Some(old.as_str()) {
+            *entry = serde_json::json!(new);
+        }
+    }
+    for entry in value["interface_state"][provider.as_str()][FRONTIER_CHECKPOINT_IDS]
+        .as_array_mut()
+        .ok_or("provider frontier absent")?
+    {
+        if entry.as_str() == Some(old.as_str()) {
+            *entry = serde_json::json!(new);
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn is_rearm(
+    before: &RunRecord,
+    after: &RunRecord,
+    provider: &InterfaceId,
+) -> Result<bool, String> {
+    let prior = before
+        .interface_state
+        .get(provider)
+        .ok_or("provider state absent")?;
+    let next = after
+        .interface_state
+        .get(provider)
+        .ok_or("provider state absent")?;
+    Ok(
+        prior.get(RUN_AUTHORING_BINDING) == next.get(RUN_AUTHORING_BINDING)
+            && prior.get("pending_handoff").is_some()
+            && prior.get("pending_handoff") == next.get("pending_handoff")
+            && prior.get("last_authored_artifact") == next.get("last_authored_artifact")
+            && prior.get("context_generation") == next.get("context_generation")
+            && prior.get("authoring_generation") != next.get("authoring_generation"),
+    )
+}
+
+pub(super) fn validate(
+    before: &[u8],
+    after: &[u8],
+    writer: &CheckedRunWriter,
+) -> Result<(), String> {
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let current = RunRecord::from_bytes(after).map_err(|error| error.to_string())?;
+    let old = validate_declared_provider_writer(&original, writer)?;
+    let next = validate_declared_provider_writer(&current, writer)?;
+    let changed = replacements(&old, &next)?;
+    if !active_returns(&original, &changed).is_empty()
+        || !active_returns(&current, &changed).is_empty()
+    {
+        return Err("input revision changes a materialized return".into());
+    }
+    let old_config = old.config(&profile(writer));
+    let new_config = next.config(&profile(writer));
+    new_config.validate(&writer.owner, &current.id)?;
+    validate_bound_run_authoring_topology(&original, &old_config, None)?;
+    validate_bound_run_authoring_topology(&current, &new_config, None)?;
+    if current_mandatory_role_bindings(&original, &old_config)?
+        != current_mandatory_role_bindings(&current, &new_config)?
+    {
+        return Err("input revision changed the mandatory role closure".into());
+    }
+    if persisted_pending_handoff(&original, &writer.owner)?
+        .is_some_and(|pending| pending.context_publication.is_some())
+    {
+        return Err("input revision interrupts a partial context publication".into());
+    }
+    if persisted_pending_handoff(&original, &writer.owner)?.is_none()
+        && optional_u64(
+            original
+                .interface_state
+                .get(&writer.owner)
+                .ok_or("provider state absent")?,
+            "context_generation",
+        )? != 0
+    {
+        return Err("input revision has no initial or retained provider context".into());
+    }
+    let prior = original
+        .interface_state
+        .get(&writer.owner)
+        .ok_or("provider state absent")?;
+    let state = current
+        .interface_state
+        .get(&writer.owner)
+        .ok_or("provider state absent")?;
+    if optional_u64(state, "authoring_generation")?
+        != optional_u64(prior, "authoring_generation")?
+            .checked_add(1)
+            .ok_or("input revision generation overflow")?
+    {
+        return Err("input revision skipped an authoring generation".into());
+    }
+    let mut old_value: serde_json::Value =
+        serde_json::from_slice(before).map_err(|error| error.to_string())?;
+    let mut new_value: serde_json::Value =
+        serde_json::from_slice(after).map_err(|error| error.to_string())?;
+    let mut rearmed = 0;
+    for template in old
+        .checkpoints
+        .iter()
+        .filter(|template| template.role == RunAuthoringCheckpointRole::Stable)
+    {
+        let select = |record: &RunRecord| -> Result<CheckpointId, String> {
+            let matches = record
+                .checkpoints
+                .iter()
+                .filter(|cp| {
+                    record.active_checkpoints.contains(&cp.id)
+                        && checkpoint_record_matches_template(cp, template, &record.id)
+                })
+                .collect::<Vec<_>>();
+            let [checkpoint] = matches.as_slice() else {
+                return Err("input rearm lost its unique stable checkpoint".into());
+            };
+            Ok(checkpoint.id.clone())
+        };
+        let original_id = select(&original)?;
+        let current_id = select(&current)?;
+        if original_id == current_id {
+            continue;
+        }
+        if !changed.is_empty()
+            || original.checkpoint(&current_id).is_some()
+            || current.checkpoint(&original_id).is_some()
+            || current
+                .checkpoint(&current_id)
+                .is_none_or(|cp| cp.epoch.0 != 0)
+            || !persisted_pending_handoff(&original, &writer.owner)?
+                .is_some_and(|pending| pending.terminal)
+        {
+            return Err("input rearm changed an unsettled or reused checkpoint generation".into());
+        }
+        let token = format!("stable_{}", template.name);
+        rename_checkpoint(&mut old_value, &writer.owner, &original_id, &token, true)?;
+        rename_checkpoint(&mut new_value, &writer.owner, &current_id, &token, true)?;
+        rearmed += 1;
+    }
+    if changed.is_empty() && rearmed != 1 {
+        return Err("input rearm must replace exactly one stable checkpoint".into());
+    }
+    for (value, record, config, is_current) in [
+        (&mut old_value, &original, &old_config, false),
+        (&mut new_value, &current, &new_config, true),
+    ] {
+        let state = value["interface_state"][writer.owner.as_str()]
+            .as_object_mut()
+            .ok_or("provider state malformed")?;
+        state.remove(RUN_AUTHORING_BINDING);
+        state.remove("authoring_generation");
+        if config.writer_run.is_none() {
+            for role in [
+                RunAuthoringCheckpointRole::AuthoringCall,
+                RunAuthoringCheckpointRole::AuthoringResult,
+            ] {
+                let checkpoint = active_checkpoint_for_role(record, config, role)?;
+                if is_current {
+                    let prior = active_checkpoint_for_role(&original, &old_config, role)?;
+                    if checkpoint.id == prior.id
+                        || original.checkpoint(&checkpoint.id).is_some()
+                        || checkpoint.epoch.0 != 0
+                    {
+                        return Err(
+                            "input revision did not author a fresh writer checkpoint".into()
+                        );
+                    }
+                }
+                let token = match role {
+                    RunAuthoringCheckpointRole::AuthoringCall => "call",
+                    _ => "result",
+                };
+                rename_checkpoint(value, &writer.owner, &checkpoint.id, token, true)?;
+            }
+        }
+    }
+    if old_value != new_value {
+        return Err(
+            "input revision changed pending work, context, status or neighboring state".into(),
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn is_revision(
+    before: &BoundRunAuthoringTopology,
+    after: &BoundRunAuthoringTopology,
+) -> bool {
+    replacements(before, after).is_ok_and(|changes| !changes.is_empty())
+}
+
+pub(super) fn checked_revision(transition: &CheckedRunTransition) -> bool {
+    let Ok(before) = RunRecord::from_bytes(&transition.before) else {
+        return false;
+    };
+    let Ok(after) = RunRecord::from_bytes(&transition.after) else {
+        return false;
+    };
+    let (Ok(old), Ok(next)) = (
+        topology(&before, &transition.writer.owner),
+        topology(&after, &transition.writer.owner),
+    ) else {
+        return false;
+    };
+    is_revision(&old, &next)
+        && validate(&transition.before, &transition.after, &transition.writer).is_ok()
+}
+
+pub(super) struct RevisionDelta {
+    pub protected: Vec<u8>,
+    before: BoundRunAuthoringTopology,
+    after: BoundRunAuthoringTopology,
+    generation_delta: u64,
+}
+
+pub(super) fn revision_delta(
+    before: &[u8],
+    current: &[u8],
+    config: &RunAuthoringConfig,
+) -> Result<Option<RevisionDelta>, String> {
+    let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
+    let actual = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let old = topology(&original, &config.provider_interface)?;
+    let next = topology(&actual, &config.provider_interface)?;
+    if !is_revision(&old, &next) {
+        return Ok(None);
+    }
+    let old_state = original
+        .interface_state
+        .get(&config.provider_interface)
+        .ok_or("provider state absent")?;
+    let new_state = actual
+        .interface_state
+        .get(&config.provider_interface)
+        .ok_or("provider state absent")?;
+    let generation_delta = optional_u64(new_state, "authoring_generation")?
+        .checked_sub(optional_u64(old_state, "authoring_generation")?)
+        .filter(|delta| *delta > 0)
+        .ok_or("input revision retry has no forward authoring generation")?;
+    let mut protected: serde_json::Value =
+        serde_json::from_slice(current).map_err(|error| error.to_string())?;
+    if config.writer_run.is_none() {
+        for role in [
+            RunAuthoringCheckpointRole::AuthoringCall,
+            RunAuthoringCheckpointRole::AuthoringResult,
+        ] {
+            let prior = active_checkpoint_for_role(&original, config, role)?;
+            let observed = active_checkpoint_for_role(&actual, config, role)?;
+            let mut normalized = observed.clone();
+            normalized.id = prior.id.clone();
+            normalized.epoch = prior.epoch;
+            if observed.epoch.0 != 0
+                || normalized != *prior
+                || observed.id == prior.id
+                || original.checkpoint(&observed.id).is_some()
+            {
+                return Err("input revision retry changed the writer checkpoint contract".into());
+            }
+            rename_checkpoint(
+                &mut protected,
+                &config.provider_interface,
+                &observed.id,
+                prior.id.as_str(),
+                false,
+            )?;
+            let rows = protected["checkpoints"]
+                .as_array_mut()
+                .ok_or("retry checkpoints absent")?;
+            let row = rows
+                .iter_mut()
+                .find(|row| row["id"] == prior.id.as_str())
+                .ok_or("retry original writer absent")?;
+            row["epoch"] = serde_json::json!(prior.epoch.0);
+        }
+    }
+    protected["interface_state"][config.provider_interface.as_str()][RUN_AUTHORING_BINDING] =
+        serde_json::to_value(&old).map_err(|error| error.to_string())?;
+    protected["interface_state"][config.provider_interface.as_str()]["authoring_generation"] =
+        serde_json::json!(optional_u64(old_state, "authoring_generation")?);
+    let checked =
+        RunRecord::from_bytes(&serde_json::to_vec(&protected).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    if checked.interface_state.get(&config.provider_interface) != Some(old_state) {
+        return Err("input revision retry changed pending work or provider context".into());
+    }
+    Ok(Some(RevisionDelta {
+        protected: JsonFormat::Compact.encode(&protected)?,
+        before: old,
+        after: next,
+        generation_delta,
+    }))
+}
+
+impl RevisionDelta {
+    pub fn restore(
+        &self,
+        value: &mut serde_json::Value,
+        provider: &InterfaceId,
+    ) -> Result<u64, String> {
+        let state = value["interface_state"][provider.as_str()]
+            .as_object_mut()
+            .ok_or("provider retry state absent")?;
+        let mut planned: BoundRunAuthoringTopology = serde_json::from_value(
+            state
+                .get(RUN_AUTHORING_BINDING)
+                .cloned()
+                .ok_or("provider retry topology absent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        for (old, next) in self.before.checkpoints.iter().zip(&self.after.checkpoints) {
+            if old == next {
+                continue;
+            }
+            let matches = planned
+                .checkpoints
+                .iter_mut()
+                .filter(|candidate| **candidate == *old)
+                .collect::<Vec<_>>();
+            let [selected] = matches.try_into().map_err(
+                |_: Vec<_>| "provider retry conflicts with the current input definition",
+            )?;
+            *selected = next.clone();
+        }
+        state.insert(
+            RUN_AUTHORING_BINDING.into(),
+            serde_json::to_value(planned).map_err(|error| error.to_string())?,
+        );
+        let generation = state
+            .get("authoring_generation")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or("provider retry generation absent")?
+            .checked_add(self.generation_delta)
+            .ok_or("provider retry generation overflow")?;
+        state.insert("authoring_generation".into(), serde_json::json!(generation));
+        Ok(generation)
+    }
+}

@@ -336,6 +336,11 @@ test("Stop pending acknowledgement waits for the exact durable interrupted resul
   assert.equal(settled.length, 1);
   assert.equal(settled[0].interrupted, true);
   assert.equal(reducer.currentTurn().outcome.kind, "interrupted_result");
+  const completed = createTranscriptReducer(); completed.beginTurn(receipt({ turnId: "turn", threadId: "thread" })); completed.pushBatch([ack]);
+  const finished = { ...closure, event_data: { ...closure.event_data, ok: false, turn_interrupted: false,
+    native_terminal_status: "completed", result_disposition: "durably_admitted_after_native_terminal" } };
+  const completedEvents = ended(completed.pushBatch([finished]));
+  assert.equal(completedEvents.length, 1); assert.equal(completedEvents[0].interrupted, false); assert.equal(completedEvents[0].state, "idle");
 });
 
 test("invalid receipts/batches fail explicitly and snapshots cannot mutate adapter state", () => {

@@ -132,6 +132,13 @@ static CIFilter *PIPControlColor(NSString *name,double white) {
 - (CGPoint)screenPoint:(CGPoint)p { NSWindow *w=_window; return [w convertPointToScreen:[w.contentView convertPoint:p toView:nil]]; }
 @end
 
+@interface PIPEmbeddedView : NSView
+@end
+@implementation PIPEmbeddedView
+- (NSView *)hitTest:(NSPoint)point { return nil; }
+- (BOOL)acceptsFirstResponder { return NO; }
+@end
+
 @interface PIPAnchor : NSObject
 @property(nonatomic) CGPoint point;
 @property(nonatomic) OCTPIPStackAlignment alignment;
@@ -145,6 +152,11 @@ static CIFilter *PIPControlColor(NSString *name,double white) {
 @end
 
 @interface PIPItem : NSObject
+@property(nonatomic,strong) PIPEmbeddedView *embeddedView;
+@property(nonatomic,copy) NSString *embeddedID;
+@property(nonatomic,copy) NSString *embeddedGeneration;
+@property(nonatomic,strong) PIPHost *embeddedHost;
+@property(nonatomic) BOOL embeddedVisible;
 @property(nonatomic,strong) OCTPIPStackIdentity *identity;
 @property(nonatomic,copy) NSString *groupID;
 @property(nonatomic,copy) NSString *batchID;
@@ -477,6 +489,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
 - (void)beginMove:(PIPAnchor *)anchor from:(CGPoint)start;
 - (void)commitAnchor:(PIPAnchor *)anchor;
 - (BOOL)installItem:(PIPItem *)item animated:(BOOL)animated error:(NSError **)error;
+- (BOOL)layoutEmbeddedItem:(PIPItem *)item error:(NSError **)error;
 - (void)hideFromMenu:(NSMenuItem *)sender;
 - (void)setReveal:(double)value animated:(BOOL)animated;
 - (NSCursor *)resizeCursor:(OCTPIPStackAlignment)alignment;
@@ -546,6 +559,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
 }
 - (void)removeHost:(NSString *)identifier generation:(NSString *)generation {
   PIPMain();PIPHost *h=_hosts[identifier];if(!h||![h.generation isEqual:generation])return;
+  for(PIPItem *item in _items.allValues.copy)if(item.embeddedHost==h)[self detachEmbeddedView:item.embeddedID generation:item.embeddedGeneration];
   [_hosts removeObjectForKey:identifier];
   if(_move.end.host==h)_move=nil;
   if(_target.host==h)_target=nil;
@@ -592,8 +606,61 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
   if(_drag||_resize||_move){_pendingLayout=YES;_pendingAnimated=YES;return;}
   [self refreshVisibilityAnimated:NO];[self layoutAnimated:NO];
 }
+- (BOOL)layoutEmbeddedItem:(PIPItem *)item error:(NSError **)error {
+  if(![self validItem:item]||!item.embeddedView||![self validHost:item.embeddedHost visible:NO]
+     ||item.embeddedView.superview!=item.embeddedHost.window.contentView)return PIPFail(error,@"Embedded application lost its native host.");
+  CGSize bounds=item.embeddedView.bounds.size;
+  if(!PIPSize(bounds))return PIPFail(error,@"Embedded application has no visible rectangle.");
+  double scale=std::min(bounds.width/item.sourceSize.width,bounds.height/item.sourceSize.height);
+  CGSize size=CGSizeMake(item.sourceSize.width*scale,item.sourceSize.height*scale);
+  BOOL show=item.embeddedVisible&&[self validHost:item.embeddedHost visible:YES];
+  [CATransaction begin];[CATransaction setDisableActions:YES];
+  item.scalesContent=YES;item.shadow.shadowOpacity=0;item.appearance.anchorPoint=CGPointMake(.5,.5);
+  [item appearanceVisible:show animated:NO completion:nil];
+  BOOL result=[item layout:CGRectMake((bounds.width-size.width)/2,(bounds.height-size.height)/2,size.width,size.height) error:error];
+  [CATransaction commit];return result&&[self validItem:item];
+}
+- (BOOL)embedItem:(OCTPIPStackIdentity *)identity viewID:(NSString *)viewID generation:(NSString *)generation
+          hostID:(NSString *)hostID hostGeneration:(NSString *)hostGeneration window:(NSWindow *)window
+     contentRect:(CGRect)rect error:(NSError **)error {
+  PIPMain();PIPItem *item=_items[identity];PIPHost *host=_hosts[hostID];
+  if(![self validItem:item]||item.imageItem||!item.attachment||!viewID.length||!generation.length
+     ||![host.generation isEqual:hostGeneration]||host.window!=window||![self validHost:host visible:YES]
+     ||!PIPRect(rect)||!CGRectContainsRect(window.contentView.bounds,rect))return PIPFail(error,@"Embedded application requires its exact live source, host and visible rectangle.");
+  for(PIPItem *other in _items.allValues)if(other!=item&&[other.embeddedID isEqual:viewID])return PIPFail(error,@"Embedded view already belongs to another application.");
+  if(item.embeddedView&&(![item.embeddedID isEqual:viewID]||![item.embeddedGeneration isEqual:generation]||item.embeddedHost!=host))
+    return PIPFail(error,@"Detach the previous embedded owner before replacement.");
+  if(!item.embeddedView){
+    item.embeddedView=[[PIPEmbeddedView alloc] initWithFrame:rect];item.embeddedView.wantsLayer=YES;
+    item.embeddedView.layer.masksToBounds=YES;item.embeddedView.layer.backgroundColor=NSColor.clearColor.CGColor;
+    item.embeddedID=viewID;item.embeddedGeneration=generation;item.embeddedHost=host;
+    if(_drag.leader==item)_drag=nil;if(_resize.leader==item){_resize=nil;_hasFrozenEnvelope=NO;}
+    [window.contentView addSubview:item.embeddedView positioned:NSWindowAbove relativeTo:nil];
+    [item.root removeFromSuperlayer];[item.embeddedView.layer addSublayer:item.root];
+  }else item.embeddedView.frame=rect;
+  item.embeddedVisible=YES;
+  if(![self layoutEmbeddedItem:item error:error]){[self detachEmbeddedView:viewID generation:generation];return NO;}
+  [self refreshVisibilityAnimated:NO];return [self validItem:item];
+}
+- (void)hideEmbeddedView:(NSString *)viewID generation:(NSString *)generation {
+  PIPMain();if(_closed)return;
+  for(PIPItem *item in _items.allValues.copy)if(item.embeddedView&&[item.embeddedID isEqual:viewID]&&[item.embeddedGeneration isEqual:generation]){
+    item.embeddedVisible=NO;NSError *error=nil;
+    if(![self layoutEmbeddedItem:item error:&error])[self invalidateIdentity:item.identity error:error?:PIPError(@"Embedded application is no longer current.")];
+  }
+}
+- (void)detachEmbeddedView:(NSString *)viewID generation:(NSString *)generation {
+  PIPMain();if(_closed)return;
+  for(PIPItem *item in _items.allValues.copy)if(item.embeddedView&&[item.embeddedID isEqual:viewID]&&[item.embeddedGeneration isEqual:generation]){
+    [item.root removeFromSuperlayer];[item.embeddedView removeFromSuperview];item.embeddedView=nil;item.embeddedHost=nil;
+    item.embeddedID=nil;item.embeddedGeneration=nil;item.shadow.shadowOpacity=.16;item.scalesContent=YES;
+    item.displaySize=PIPFit(item.sourceSize,item.maxSize);item.initialized=NO;
+    [item appearanceVisible:NO animated:NO completion:nil];[_view.layer addSublayer:item.root];
+  }
+  [self refreshVisibilityAnimated:YES];
+}
 - (NSArray<PIPItem *> *)orderedItems {
-  NSMutableArray *items=[NSMutableArray array];for(OCTPIPStackIdentity *identity in _order.copy){PIPItem *item=_items[identity];if(item)[items addObject:item];}return items;
+  NSMutableArray *items=[NSMutableArray array];for(OCTPIPStackIdentity *identity in _order.copy){PIPItem *item=_items[identity];if(item&&!item.embeddedView)[items addObject:item];}return items;
 }
 - (NSArray<PIPItem *> *)motionItems {
   NSMutableArray *items=[[self orderedItems] mutableCopy];[items addObjectsFromArray:_exits.allValues];return items;
@@ -631,6 +698,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
   if(!prepare(display,error))return NO;
   if(_items[identity]!=item||![self validItem:item])return PIPFail(error,@"PiP source resize was superseded during native preparation.");
   item.sourceSize=size;
+  if(item.embeddedView)return [self layoutEmbeddedItem:item error:error];
   if(phase!=OCTPIPStackSourceProgress){item.displaySize=display;for(PIPItem *other in [self motionItems])other.scalesContent=NO;[self layoutAnimated:YES];}
   return [self validItem:item];
 }
@@ -642,6 +710,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
 - (void)removeItem:(OCTPIPStackIdentity *)identity animated:(BOOL)animated completion:(void (^)(void))completion {
   PIPMain();if(!identity){if(completion)completion();return;}
   PIPItem *item=_items[identity];if(!item){PIPItem *exit=_exits[identity];if(exit&&!animated)[self finishExit:exit];if(completion)completion();return;}
+  if(item.embeddedView){[item.embeddedView removeFromSuperview];item.embeddedView=nil;item.embeddedHost=nil;animated=NO;}
   [_items removeObjectForKey:identity];[_order removeObject:identity];_exits[identity]=item;item.removalCompletion=completion;
   if(_drag.leader==item)_drag=nil;if(_resize.leader==item){_resize=nil;_hasFrozenEnvelope=NO;}
   if([_pendingPlacement isEqual:identity]){_pendingPlacement=nil;_pendingRole=-1;}
@@ -666,6 +735,7 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
 }
 - (void)refreshVisibilityAnimated:(BOOL)animated {
   PIPMain();if(_closed)return;
+  for(PIPItem *item in _items.allValues.copy)if(item.embeddedView){NSError *error=nil;if(![self layoutEmbeddedItem:item error:&error])[self invalidateIdentity:item.identity error:error?:PIPError(@"Embedded source is no longer available.")];}
   BOOL hostVisible=[self validHost:_host visible:YES],all=_host.scope==OCTPIPStackAll;
   NSUInteger visibleCount=0;
   for(PIPItem *item in [self orderedItems]){
@@ -1163,9 +1233,9 @@ struct PIPDisplayState : std::enable_shared_from_this<PIPDisplayState> {
   [self stopDisplayLink];_drag=nil;_resize=nil;_move=nil;_target=nil;_pendingPlacement=nil;
   [_view stopMonitoring];[_controlView stopMonitoring];_view.stack=nil;_controlView.stack=nil;
   for(id observer in _observers)[NSNotificationCenter.defaultCenter removeObserver:observer];[_observers removeAllObjects];
-  NSArray *items=[self motionItems];[_items removeAllObjects];[_exits removeAllObjects];[_order removeAllObjects];
+  NSMutableArray *items=[_items.allValues mutableCopy];[items addObjectsFromArray:_exits.allValues];[_items removeAllObjects];[_exits removeAllObjects];[_order removeAllObjects];
   NSMutableArray *completions=[NSMutableArray array];
-  for(PIPItem *item in items){if(item.removalCompletion)[completions addObject:item.removalCompletion];item.removalCompletion=nil;[item detach];}
+  for(PIPItem *item in items){[item.embeddedView removeFromSuperview];item.embeddedView=nil;item.embeddedHost=nil;if(item.removalCompletion)[completions addObject:item.removalCompletion];item.removalCompletion=nil;[item detach];}
   [_panel.parentWindow removeChildWindow:_panel];[_controlPanel.parentWindow removeChildWindow:_controlPanel];
   [_panel close];[_controlPanel close];_panel=nil;_controlPanel=nil;_view=nil;_controlView=nil;_host=nil;
   [_hosts removeAllObjects];[_preferences removeAllObjects];_callbacks=nil;

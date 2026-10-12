@@ -79,7 +79,7 @@ function createClientPresentationHost(options) {
         controlText: { closeTooltip: "Close preview", hide: "Hide", hideForGroup: "Hide for this task", hideForAllGroups: "Hide for all tasks", placementTooltip: "Move preview" } });
       try {
         current();
-        for (const method of ["registerHost", "removeHost", "setSelection", "upsertBrowserImage", "invalidateBrowserImage", "beginSource", "installSource", "cancelSource", "completeGroup", "clearCompletedGroup", "stop"]) {
+        for (const method of ["registerHost", "removeHost", "setSelection", "upsertBrowserImage", "invalidateBrowserImage", "beginSource", "installSource", "cancelSource", "embedSource", "detachEmbeddedSource", "hideEmbeddedSource", "completeGroup", "clearCompletedGroup", "stop"]) {
           if (typeof value?.[method] !== "function") throw new Error("Client presentation library API is incomplete");
         }
         host = value; options.syncHosts(value); return value;

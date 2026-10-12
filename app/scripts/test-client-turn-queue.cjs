@@ -77,6 +77,28 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(submission.attachments, attachments);
 }
 (async () => {
+  const submissions = [];
+  const busyDraft = workspaceActions(["submitDraft"], {
+    runtimeReady: true, queueReady: true, editingQueuedTurn: false, replyOpen: true,
+    queuedTurnsRef: { current: [] }, activeRunIdRef: { current: "run-a" }, chatDraftKey: (id) => id,
+    text: "follow-up", attachments: [{ id: "file", name: "proof.txt" }], draftMessageId: "", draftMessageHadAttachments: false,
+    randomId: () => "stable", canQueue: true,
+    enqueueCurrentTurn: async (body) => submissions.push(["queue", body]),
+    submitSteeringMessage: async (input) => submissions.push(["steer", input.text]),
+    setError: (message) => assert.fail(message),
+  }).submitDraft;
+  await busyDraft(undefined, undefined, "send", () => {});
+  assert.deepEqual(submissions, [["queue", "follow-up"]]);
+  await busyDraft(undefined, "explicit steering", "steer", () => {});
+  assert.deepEqual(submissions.at(-1), ["steer", "explicit steering"]);
+  const controlApi = load("src/components/chat/chatTurnControl.ts");
+  const controlRun = { runId: "run-a", chatInterfaceId: "client-a", providerBoundInterfaceId: "provider-a" };
+  const receipt = { runId: "run-a", interfaceId: "client-a", direction: "out", artifactId: "receipt", movementSeq: 12,
+    eventKind: "turn_control", eventData: { control_id: "stop-a", action: "stop", status: "failed",
+      _movement: { from: { Interface: "provider-a" }, to: { Interface: "client-a" } } } };
+  assert.equal(controlApi.operatorTurnControlReceipt(controlRun, [receipt], { controlId: "stop-a", action: "stop" }), receipt);
+  assert.equal(controlApi.operatorTurnControlReceipt(controlRun, [receipt], { controlId: "other", action: "stop" }), undefined);
+  assert.equal(controlApi.operatorTurnControlReceipt({ ...controlRun, providerBoundInterfaceId: "other" }, [receipt], { controlId: "stop-a", action: "stop" }), undefined);
   const db = atomicMemory();
   const key = queueNamespace("lab", "/exact/Home");
   const openings = [], persisted = { turns: [item("retained")], pausedRunKeys: [] };
@@ -524,9 +546,9 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     "../shell/ShellTooltip": shellTooltip,
     "./RichComposerEditor": { RichComposerEditor: ({ onKeyDown }) => React.createElement("textarea", { onKeyDown: (event) => onKeyDown(event.nativeEvent, event.currentTarget) }) },
   }).ChatComposer;
-  let sends = 0, stops = 0, queued = 0;
+  let sends = 0, steers = 0, stops = 0, queued = 0;
   const props = { accessProfile: "lab", text: "steer this", attachments: [], providerInterfaces: [], providerInterfaceId: "p", providerModel: "m", reasoningEffort: "high",
-    submissionMode: "steer", canSubmit: true, canQueue: true, onQueue: () => queued++, onSubmit: () => sends++, onInterrupt: () => stops++, turnOpen: true,
+    submissionMode: "queue", canSubmit: true, canQueue: true, canSteer: true, onSteer: () => steers++, onQueue: () => queued++, onSubmit: () => sends++, onInterrupt: () => stops++, turnOpen: true,
     onKeyDown: noop, onTextChange: noop, onFilesPicked: noop, onRemoveAttachment: noop, onProviderInterfaceChange: noop, onProviderModelChange: noop, onReasoningEffortChange: noop, fileInputRef: { current: null } };
   await act(async () => host.render(React.createElement(composer, props)));
   const send = document.querySelector('button[aria-label="Send"]'); assert.ok(send); assert.ok(document.querySelector('button[aria-label="Stop"]'));
@@ -537,7 +559,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await keydown(document.activeElement, "q");
   assert.equal(document.activeElement.getAttribute("data-text-value"), "Queue message");
   await keydown(document.activeElement, "Enter"); assert.equal(queued, 1); assert.equal(sends, 1);
-  await act(async () => host.render(React.createElement(composer, { ...props, canSubmit: false, isSubmitting: true })));
+  await act(async () => host.render(React.createElement(composer, { ...props, canSubmit: false, canSteer: false, isSubmitting: true })));
   const pendingSend = document.querySelector('button[aria-label="Send"]');
   assert.equal(pendingSend.disabled, false); assert.equal(pendingSend.getAttribute("aria-disabled"), "true");
   pendingSend.focus(); assert.equal(document.activeElement, pendingSend);
@@ -575,7 +597,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     React.createElement(composer, { ...props, key: "active", listenToGlobalCommands: true }))));
   await act(async () => document.querySelectorAll("textarea")[1].focus());
   await act(async () => { commands.dispatchClientCommand("composer.queue", "keyboard"); commands.dispatchClientCommand("composer.steer", "surface"); });
-  assert.equal(queued, 1); assert.equal(sends, 1, "only the active pane handles explicit commands");
+  assert.equal(queued, 1); assert.equal(steers, 1, "only the active pane handles explicit steering"); assert.equal(sends, 0);
   await act(async () => host.render(React.createElement(React.Fragment, null,
     React.createElement(composer, { ...props, key: "inactive", listenToGlobalCommands: true }),
     React.createElement(composer, { ...props, key: "active", listenToGlobalCommands: true }))));

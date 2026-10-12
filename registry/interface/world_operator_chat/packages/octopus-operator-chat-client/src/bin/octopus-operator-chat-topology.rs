@@ -5,19 +5,39 @@ use octopus_operator_chat_client::{
     OperatorWriterRunPlanRequest,
     plan_operator_writer_schema, OperatorWriterSchemaPlanRequest,
 };
+use octopus_operator_chat_client::run_revision::{
+    RunRevisionRequest, RunRevisionVerification, prepare_run_revision, verify_run_revision,
+};
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let writers_only = arguments.len() == 1 && arguments[0] == "--writer-runs";
     let writer_schema = arguments.len() == 1 && arguments[0] == "--writer-schema";
-    if !arguments.is_empty() && !writers_only && !writer_schema {
-        eprintln!("operator chat topology accepts only --writer-runs or --writer-schema");
+    let prepare_revision = arguments.len() == 1 && arguments[0] == "--prepare-input-revision";
+    let verify_revision = arguments.len() == 1 && arguments[0] == "--verify-input-revision";
+    if !arguments.is_empty() && !writers_only && !writer_schema && !prepare_revision && !verify_revision {
+        eprintln!("operator chat topology received an unknown planning operation");
         std::process::exit(1);
     }
     let mut input = String::new();
     if let Err(error) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("operator chat topology stdin read failed: {error}");
         std::process::exit(1);
+    }
+    if prepare_revision || verify_revision {
+        let result = if prepare_revision {
+            serde_json::from_str::<RunRevisionRequest>(&input).map_err(|error| error.to_string()).and_then(prepare_run_revision)
+        } else {
+            serde_json::from_str::<RunRevisionVerification>(&input).map_err(|error| error.to_string()).and_then(verify_run_revision)
+        };
+        match result {
+            Ok(value) => println!("{value}"),
+            Err(error) => {
+                eprintln!("operator input revision failed closed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     if writers_only || writer_schema {
         let result = if writer_schema {

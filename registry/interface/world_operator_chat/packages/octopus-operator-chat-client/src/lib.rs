@@ -37,6 +37,7 @@ mod retained_connections_tests;
 #[path = "../tests/support/input_intake.rs"]
 mod input_intake_tests;
 pub mod run_composition;
+pub mod run_revision;
 pub use run_composition::{RunCompositionPlan, RunCompositionRequest, plan_run_composition};
 
 pub const OPERATOR_CHAT_INTERFACE: &str = "world_operator_chat";
@@ -709,9 +710,9 @@ pub fn plan_operator_chat_topology(
             .as_ref()
             .map(|_| &previous_authoring_profile),
     )?;
-    let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
     let run_record_content = home_outputs::wire(&identity, &role_artifacts, &selected_context, run_record_content)?;
     let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)?;
+    let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
     let run_record_content = context_bindings::configure_tool_context(registry_root, &identity, run_record_content, request.existing_run_record.as_ref())?;
     if let Some(intake) = intake {
         for (id, component) in [
@@ -4773,7 +4774,7 @@ fn build_chat_run_record(
         let output = next_binding.checkpoints.iter_mut().find(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput && cp.outbound_interface_bindings.len()==1 && cp.outbound_interface_bindings[0].interface.as_str()==door).ok_or("persistent owner has no exact provider call template")?;
         output.static_artifact_bindings = ids.clone();
         let mut returned = bound_checkpoint_template(BoundCheckpointRole::OwnerInput,AuthoredInterfaceBinding::all(InterfaceId::new(door)),vec![AuthoredInterfaceBinding::all(InterfaceId::new(&identity.model_interface_id))],Vec::new())?;
-        returned.static_artifact_bindings = ids;
+        returned.include_context = true;
         returned.owner_authoring = Some(BoundAuthoringWriter {
             owner: InterfaceId::new(door),source:InterfaceId::new(door),door:InterfaceId::new(&owner.authoring_environment),tool:owner.authoring_tool.clone(),call_label:config.artifact_labels.tool_call.clone(),result_label:format!("{}.result",owner.authoring_tool),
         });
@@ -7114,7 +7115,8 @@ mod tests {
         assert_eq!(returned[0]["outbound_interface_bindings"][0]["interface"],persistent.model_interface_id);
         assert_eq!(returned[0]["owner_authoring"]["tool"],writer_tool);
         assert_eq!(returned[0]["owner_authoring"]["door"],writer["interface"]);
-        assert_eq!(returned[0]["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id]));
+        assert_eq!(returned[0]["include_context"], true);
+        assert!(returned[0].get("static_artifact_bindings").is_none());
         assert_eq!(run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["payload_artifact_bindings"], serde_json::json!([payload_ref]));
         let rows = run["checkpoints"].as_array().unwrap();
         let writer = &run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["writer_run"];
@@ -7122,7 +7124,7 @@ mod tests {
             && cp["outbound_interface_bindings"][0]["interface"] == persistent.authoring_environment_interface_id).unwrap();
         let output_template = templates.iter().find(|cp| cp["role"] == "provider_tool_output"
             && cp["outbound_interface_bindings"][0]["interface"] == *owner).unwrap();
-        assert_eq!(output_template["static_artifact_bindings"], returned[0]["static_artifact_bindings"]);
+        assert_eq!(output_template["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id]));
         let mut exact_bindings = authoring_row["artifact_bindings"].as_array().unwrap().clone();
         exact_bindings.extend(output_template["static_artifact_bindings"].as_array().unwrap().iter().map(|id| serde_json::json!({"id":id})));
         let owner_call = rows.iter().find(|cp| cp["interface_binding"] == output_template["interface_binding"]
@@ -7131,7 +7133,7 @@ mod tests {
         assert_eq!(bindings(&owner_call["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)));
         for id in run["interface_state"][owner]["owned_checkpoint_ids"].as_array().unwrap() {
             let row = rows.iter().find(|cp| cp["id"] == *id).unwrap();
-            assert_eq!(bindings(&row["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)), "owned checkpoint bindings differ from the exact provider return template");
+            assert_eq!(bindings(&row["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)), "owned execution checkpoint bindings differ from the exact provider tool output template");
         }
         assert!(!templates.iter().any(|cp| cp["interface_binding"]["interface"] == *gui || cp["outbound_interface_bindings"].as_array().unwrap().iter().any(|out| out["interface"] == *gui)));
         let provider = exact_json(&persistent,format!("interface:{}",persistent.model_interface_id));

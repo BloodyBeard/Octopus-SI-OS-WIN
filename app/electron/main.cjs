@@ -53,6 +53,7 @@ const {
 const { createCdpViewerManager } = require("./cdpViewer.cjs");
 const { createDesktopSurfaceHost, createDesktopPresentationHost, createDesktopPermissionHost, presentationSource } = require("./desktopSurface.cjs");
 const { createClientPresentationHost } = require("./nativePresentation.cjs");
+const { createNativeDesktopSettingsHost } = require("./nativeDesktopSettings.cjs");
 const { createProcessViewerManager } = require("./processViewer.cjs");
 const { createWorkerEnvironmentOperatorActions } = require("./workerEnvironmentActions.cjs");
 const { createWorkerEnvironmentFileReader } = require("./workerEnvironmentFiles.cjs");
@@ -91,6 +92,7 @@ const {
   isOperatorChatClientInterfaceCandidate,
 } = require("./operatorChatClientContract.cjs");
 const {
+  adoptLocalPackageUpdates,
   applyLocalApplicationPack,
   readLocalPackageCatalog,
   recoverLocalPackageTransactions,
@@ -129,6 +131,7 @@ let nativeBrowserMutationGuard = null;
 let nativeBrowserSurface = null;
 let desktopSurfaceHost = null;
 let nativeDesktopPermissions = null;
+let nativeDesktopSettings = null;
 const desktopSurfaceSenders = new WeakSet();
 let nativeDesktopPresentations = null;
 let nativeBrowserPresentations = null;
@@ -603,6 +606,7 @@ async function startNativeBrowserEngine() {
 }
 
 async function planBrowserNativeHost(request) {
+  await initializeRuntimeHost();
   const roots = clientSetupPackageRoots();
   guardNativeBrowserPackage();
   return withLocalPackageInstallation({ ...roots, packageId: "driver.browser_session" }, async (installation) => {
@@ -619,6 +623,7 @@ async function planBrowserNativeHost(request) {
 let desktopPreferencesSetupGuard = null;
 let desktopPreferencesSetupLoaded = false;
 async function planDesktopApplicationPreferences(request) {
+  await initializeRuntimeHost();
   const roots = clientSetupPackageRoots(), home = resolveOctopusHome();
   if (request.octopusHomeRoot !== home) throw new Error("Computer Use setup belongs to another Home.");
   if (!desktopPreferencesSetupGuard) desktopPreferencesSetupGuard = registerLocalPackageMutationGuard({ stateRoot: roots.stateRoot,
@@ -657,14 +662,17 @@ function getDesktopSurfaceHost(sender) {
         if (!Array.isArray(result?.worker_environments)) throw new Error("Saved application host projection is unavailable.");
         return result.worker_environments;
       },
-      withDefaultPreferenceDriver: operation => withLocalPackageInstallation({ ...clientSetupPackageRoots(), packageId: "driver.desktop_session" }, async installation => {
-        if (!installation.available || !installation.installed || installation.receipt_state !== "valid" || !/^[a-f0-9]{64}$/.test(installation.receipt_digest)) throw new Error("Saved application permissions require the verified installed Computer Use driver.");
-        for (const [kind, id] of [["interface", "system_gui"], ["worker_environment_kind", "desktop_session"]]) {
-          const member = installation.member_states?.find(value => value.registry_kind === kind && value.owner === id);
-          if (!member?.materialized || !/^[a-f0-9]{64}$/.test(member.source_digest) || member.source_digest !== member.installed_digest) throw new Error("The default Computer Use driver package has changed.");
-        }
-        return operation("system_gui");
-      }),
+      withDefaultPreferenceDriver: async operation => {
+        await initializeRuntimeHost();
+        return withLocalPackageInstallation({ ...clientSetupPackageRoots(), packageId: "driver.desktop_session" }, async installation => {
+          if (!installation.available || !installation.installed || installation.receipt_state !== "valid" || !/^[a-f0-9]{64}$/.test(installation.receipt_digest)) throw new Error("Saved application permissions require the verified installed Computer Use driver.");
+          for (const [kind, id] of [["interface", "system_gui"], ["worker_environment_kind", "desktop_session"]]) {
+            const member = installation.member_states?.find(value => value.registry_kind === kind && value.owner === id);
+            if (!member?.materialized || !/^[a-f0-9]{64}$/.test(member.source_digest) || member.source_digest !== member.installed_digest) throw new Error("The default Computer Use driver package has changed.");
+          }
+          return operation("system_gui");
+        });
+      },
       homePath: resolveOctopusHome,
       environment: () => process.env,
     });
@@ -674,10 +682,10 @@ function getDesktopSurfaceHost(sender) {
     const ownerId = sender.id;
     const host = desktopSurfaceHost;
     const report = (error) => console.error("Desktop viewer cleanup failed:", error);
-    sender.once("destroyed", () => { nativeDesktopPermissions?.closeOwner(ownerId); void host.closeOwner(ownerId).catch(report); });
-    sender.on("render-process-gone", () => { nativeDesktopPermissions?.closeOwner(ownerId); void host.pauseOwner(ownerId).catch(report); });
+    sender.once("destroyed", () => { nativeDesktopPresentations?.closeViewsOwner(ownerId); nativeDesktopPermissions?.closeOwner(ownerId); nativeDesktopSettings?.closeOwner(ownerId); void host.closeOwner(ownerId).catch(report); });
+    sender.on("render-process-gone", () => { nativeDesktopPresentations?.closeViewsOwner(ownerId); nativeDesktopPermissions?.closeOwner(ownerId); nativeDesktopSettings?.closeOwner(ownerId); void host.pauseOwner(ownerId).catch(report); });
     sender.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) { nativeDesktopPermissions?.closeOwner(ownerId); void host.pauseOwner(ownerId).catch(report); }
+      if (isMainFrame && !isInPlace) { nativeDesktopPresentations?.closeViewsOwner(ownerId); nativeDesktopPermissions?.closeOwner(ownerId); nativeDesktopSettings?.closeOwner(ownerId); void host.pauseOwner(ownerId).catch(report); }
     });
   }
   return desktopSurfaceHost;
@@ -685,11 +693,80 @@ function getDesktopSurfaceHost(sender) {
 
 function getNativeDesktopPermissions() {
   if (!nativeDesktopPermissions) nativeDesktopPermissions = createDesktopPermissionHost({
-    prepareSource: input => getDesktopSurfaceHost().preparePermissionSource(input),
+    prepareSource: (input, owner) => input.setup === true ? getNativeDesktopSettings().source(owner) : getDesktopSurfaceHost().preparePermissionSource(input),
     automationSources: (input, helper) => getNativeDesktopPresentations().permissionSources(input, helper),
     getNativeHost: () => getNativeClientPresentations().get(), homePath: resolveOctopusHome,
   });
   return nativeDesktopPermissions;
+}
+function getNativeDesktopSettings() {
+  if (!desktopPreferencesSetupGuard) desktopPreferencesSetupGuard = registerLocalPackageMutationGuard({ stateRoot: clientSetupPackageRoots().stateRoot,
+    guard: ids => { if (desktopPreferencesSetupLoaded && ids.includes("driver.desktop_session")) throw new Error("Restart the client before changing the loaded Computer Use Settings package."); } });
+  if (!nativeDesktopSettings) nativeDesktopSettings = createNativeDesktopSettingsHost({
+    homePath: resolveOctopusHome,
+    prepareHelper: async () => {
+      await initializeRuntimeHost();
+      const home = resolveOctopusHome(), roots = clientSetupPackageRoots();
+      const read = operation => withLocalPackageInstallation({ ...roots, packageId: "driver.desktop_session" }, async installation => {
+        const member = installation.member_states?.find(value => value.registry_kind === "worker_environment_kind" && value.owner === "desktop_session");
+        const descriptor = installation.member_states?.find(value => value.registry_kind === "interface" && value.owner === "system_gui");
+        if (resolveOctopusHome() !== home || !installation.available || !installation.installed || installation.receipt_state !== "valid"
+          || !/^[a-f0-9]{64}$/.test(installation.receipt_digest) || !member?.materialized || member.source_digest !== member.installed_digest
+          || !/^[a-f0-9]{64}$/.test(member.installed_digest) || !descriptor?.materialized || descriptor.source_digest !== descriptor.installed_digest
+          || !/^[a-f0-9]{64}$/.test(descriptor.installed_digest)) throw new Error("Computer Use setup requires its current verified installed driver.");
+        return operation(installation.receipt_digest, member.installed_digest);
+      });
+      const preferences = await getDesktopSurfaceHost().defaultPreferenceStore(() => {
+        if (home !== resolveOctopusHome()) throw new Error("Computer Use Settings Home changed.");
+      });
+      if (typeof preferences.identity !== "string" || !preferences.identity || typeof preferences.generation !== "string" || !preferences.generation) throw new Error("Computer Use preference store has no captured identity.");
+      return read(async (receipt, digest) => {
+        const configPath = path.join(roots.activeRegistryRoot, "interface", "system_gui", "desktop.json");
+        if (await fs.promises.realpath(configPath) !== configPath) throw new Error("Computer Use configuration must be canonical.");
+        const config = JSON.parse(await fs.promises.readFile(configPath, "utf8"));
+        const relative = config.host?.native_program;
+        if (config.schema_version !== 1 || typeof relative !== "string" || relative.split("/").some(part => !part || part === "." || part === "..")
+          || !relative.startsWith("desktop_session/packages/") || !Number.isSafeInteger(config.request_timeout_ms)
+          || config.request_timeout_ms <= 0 || config.request_timeout_ms > 600000) throw new Error("Computer Use setup has no exact installed native helper.");
+        const program = path.join(roots.activeRegistryRoot, "worker_environment_kind", relative);
+        const stat = await fs.promises.lstat(program);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 64 * 1024 * 1024 || !(stat.mode & 0o111) || await fs.promises.realpath(program) !== program) throw new Error("Computer Use setup helper is not the installed executable.");
+        const modulePath = path.join(roots.activeRegistryRoot, "worker_environment_kind", "desktop_session", "packages", "octopus-system-gui-env", "native", "setup-preferences.cjs");
+        if (await fs.promises.realpath(modulePath) !== modulePath) throw new Error("Computer Use preference module must be canonical.");
+        const lifePath = path.join(roots.activeRegistryRoot, "interface", "system_gui", "life.json");
+        const lifeStat = await fs.promises.lstat(lifePath);
+        if (!lifeStat.isFile() || lifeStat.isSymbolicLink() || lifeStat.size > 1024 * 1024 || await fs.promises.realpath(lifePath) !== lifePath) throw new Error("Computer Use Settings has no canonical installed lifecycle.");
+        const lifeBytes = await fs.promises.readFile(lifePath), life = JSON.parse(lifeBytes.toString("utf8"));
+        if (lifeBytes.length > 1024 * 1024 || !Array.isArray(life.processes)) throw new Error("Computer Use Settings lifecycle is malformed.");
+        const hosts = life.processes.filter(value => typeof value.bin === "string" && path.basename(value.bin) === "octopus-desktop-host");
+        const host = hosts.length === 1 ? hosts[0] : null;
+        const hostPath = host?.bin?.startsWith("owner://") ? host.bin.slice("owner://".length) : null;
+        if (!hostPath || hostPath.split("/").some(value => !value || value === "." || value === "..") || !Array.isArray(host.args) || host.args.length
+          || !Array.isArray(host.inherit_env) || host.inherit_env.length) throw new Error("Computer Use Settings requires its unique installed host executable.");
+        const settingsProgram = path.join(roots.activeRegistryRoot, "interface", "system_gui", hostPath);
+        const settingsStat = await fs.promises.lstat(settingsProgram);
+        if (!settingsStat.isFile() || settingsStat.isSymbolicLink() || settingsStat.size < 1 || settingsStat.size > 64 * 1024 * 1024
+          || !(settingsStat.mode & 0o111) || await fs.promises.realpath(settingsProgram) !== settingsProgram) throw new Error("Computer Use Settings reader is not its installed executable.");
+        const helper = require(modulePath); desktopPreferencesSetupLoaded = true;
+        if (typeof helper.readComputerUsePreference !== "function" || typeof helper.writeComputerUsePreference !== "function") throw new Error("The installed Computer Use preference module is incomplete.");
+        return { home, program, settingsProgram, preferenceRoot: preferences.root,
+          applicationIdentity: JSON.stringify([receipt,digest,preferences.identity,preferences.generation,settingsProgram]),
+          directory: path.dirname(program), timeout: config.request_timeout_ms,
+          preference: async enabled => {
+            await preferences.current();
+            const value = enabled === undefined ? await helper.readComputerUsePreference(preferences.root) : await helper.writeComputerUsePreference(preferences.root, enabled);
+            await preferences.current(); return value;
+          },
+          current: async () => {
+            await preferences.current();
+            return read((nextReceipt, nextDigest) => {
+              if (receipt !== nextReceipt || digest !== nextDigest) throw new Error("Computer Use installed helper changed during setup.");
+            });
+          } };
+      });
+    },
+  });
+  return nativeDesktopSettings;
 }
 function nativeDesktopAccessEntries() {
   return clientWindows.entries().filter((entry) => {
@@ -2364,6 +2441,7 @@ function startClientQuitCleanup() {
       nativeBrowserPresentations?.stop();
       nativeBrowserDownloadHistory?.stop();
       nativeDesktopPermissions?.stop();
+      nativeDesktopSettings?.stop();
       nativeDesktopPresentations?.stop();
       nativeClientPresentations?.stop();
       await nativeBrowserHost?.stop();
@@ -2470,12 +2548,22 @@ async function initializeRuntimeHost() {
   if (!runtimeInitializationPromise) {
     runtimeInitializationPromise = (async () => {
       const octopusHome = resolveOctopusHome();
-      await recoverLocalPackageTransactions({
-        sourceRegistryRoot: resolveLocalPackageRegistry(),
-        activeRegistryRoot: path.join(octopusHome, "registry"),
-        libraryRoot: resolveLocalPackageLibrary(),
-        stateRoot: path.join(octopusHome, "client", "package-state"),
+      const packageRoots = clientSetupPackageRoots();
+      const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: packageRoots.stateRoot,
+        guard: async () => {
+          if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during package release adoption.");
+          const state = await host.probe();
+          if (state.phase !== "unmanaged" || state.ready || state.ownership !== "none" || state.pid !== null || state.error) {
+            throw new Error("Close the running Octopus runtime before updating its installed packages. Your Home and tasks are preserved.");
+          }
+        },
       });
+      try {
+        await recoverLocalPackageTransactions(packageRoots);
+        await adoptLocalPackageUpdates(packageRoots);
+      } finally {
+        releaseGuard();
+      }
       await recoverWorkspaceTransactions({
         octopusHomeRoot: octopusHome,
         registryRoot: path.join(octopusHome, "registry"),
@@ -3182,7 +3270,7 @@ ipcMain.handle("octopus:access-lock", async (event, token) => {
       const cleanup = await Promise.allSettled([
         clientArtifactStreamStore?.abortOwner(token),
         clientAttachmentStagingStore?.abortOwner(token),
-        ...[...desktopOwners].map((ownerId) => { nativeDesktopPermissions?.closeOwner(ownerId); return desktopSurfaceHost?.pauseOwner(ownerId); }),
+        ...[...desktopOwners].map((ownerId) => { nativeDesktopPermissions?.closeOwner(ownerId); nativeDesktopSettings?.closeOwner(ownerId); return desktopSurfaceHost?.pauseOwner(ownerId); }),
       ]);
       const failures = cleanup.filter((item) => item.status === "rejected").map((item) => item.reason);
       if (failures.length) throw new AggregateError(failures, "Client access locked but resource cleanup failed.");
@@ -3715,7 +3803,34 @@ ipcMain.handle("octopus:desktop-saved-application-permissions", async (event, to
     if (!win || win.isDestroyed() || event.sender.isDestroyed() || win.webContents !== event.sender
       || event.senderFrame !== event.sender.mainFrame || resolveOctopusHome() !== home) throw new Error("Application Settings lost their exact live client window and Home.");
   };
-  current(); return getDesktopSurfaceHost(event.sender).defaultApplicationPermissions(request, current);
+  current(); getDesktopSurfaceHost(event.sender);
+  return getNativeDesktopSettings().applicationPermissions(request, { id: event.sender.id, current,
+    identity: createHash("sha256").update(token).digest("hex") });
+});
+
+ipcMain.handle("octopus:desktop-computer-use-settings", async (event, token, request) => {
+  if (!request || typeof request !== "object" || Array.isArray(request) || !["status", "setup", "set_enabled"].includes(request.operation)
+    || Object.keys(request).some(key => !["operation", "enabled"].includes(key))
+    || (request.operation === "set_enabled" ? typeof request.enabled !== "boolean" || Object.keys(request).length !== 2 : Object.keys(request).length !== 1)) throw new Error("Invalid Computer Use Settings request.");
+  const win = BrowserWindow.fromWebContents(event.sender), home = resolveOctopusHome();
+  const current = () => {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (!win || win.isDestroyed() || event.sender.isDestroyed() || win.webContents !== event.sender
+      || event.senderFrame !== event.sender.mainFrame || resolveOctopusHome() !== home) throw new Error("Computer Use Settings lost its current window or Home.");
+  };
+  current(); getDesktopSurfaceHost(event.sender);
+  const owner = { id: event.sender.id, current, windowHandle: () => { current(); return win.getNativeWindowHandle(); } };
+  if (request.operation === "setup") return getNativeDesktopPermissions().open({ setup: true }, owner);
+  const source = await getNativeDesktopSettings().source(owner);
+  const preference = await source.preference(request.operation === "set_enabled" ? request.enabled : undefined);
+  if (request.operation === "set_enabled" && !preference.enabled) {
+    nativeDesktopPresentations?.revokeAll();
+    await getDesktopSurfaceHost().stopConfiguredApplications(owner.id, current);
+  }
+  const snapshot = await source.exchange("status", null);
+  current();
+  return { enabled: preference.enabled, ready: snapshot.permissions.length === 2 && snapshot.permissions.every(row => row.status === "granted"),
+    permissions: snapshot.permissions.map(({ kind, status }) => ({ kind, status })) };
 });
 
 ipcMain.handle("octopus:desktop-permissions-open", async (event, token, request) => {
@@ -3734,6 +3849,27 @@ ipcMain.handle("octopus:desktop-surface-request", async (event, token, request) 
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || win.isDestroyed()) throw new Error("Desktop viewing requires an active window.");
   return getDesktopSurfaceHost(event.sender).request(request, event.sender.id);
+});
+
+ipcMain.handle("octopus:desktop-application-view", async (event, token, request) => {
+  const win = BrowserWindow.fromWebContents(event.sender), home = resolveOctopusHome();
+  const current = () => {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (!win || win.isDestroyed() || event.sender.isDestroyed() || win.webContents !== event.sender
+      || event.senderFrame !== event.sender.mainFrame || resolveOctopusHome() !== home) throw new Error("Application view lost its owning client window or Home.");
+  };
+  current(); getDesktopSurfaceHost(event.sender);
+  let input = request;
+  if (request?.operation === "attach") {
+    const rect = request.rect, zoom = event.sender.getZoomFactor(), [width, height] = win.getContentSize();
+    if (!rect || typeof rect !== "object" || Array.isArray(rect) || Object.keys(rect).length !== 4 || !Number.isFinite(zoom) || zoom <= 0
+      || !["x","y","width","height"].every(key => Number.isFinite(rect[key])) || rect.x < 0 || rect.y < 0 || rect.width <= 0 || rect.height <= 0
+      || (rect.x + rect.width) * zoom > width + 0.5 || (rect.y + rect.height) * zoom > height + 0.5 || !win.isVisible() || win.isMinimized()) throw new Error("Application view requires its visible client rectangle.");
+    input = { ...request, rect: Object.fromEntries(Object.entries(rect).map(([key, value]) => [key, value * zoom])) };
+  }
+  return getNativeDesktopPresentations().applicationView(input, { id: event.sender.id, current,
+    windowHandle: () => { current(); return win.getNativeWindowHandle(); },
+    hostIdentity: () => { current(); const owner = nativeDesktopWindowHosts.get(event.sender.id); if (!owner) throw new Error("Application view has no registered native window."); return owner; } });
 });
 
 ipcMain.handle("octopus:cdp-viewer-action", async (event, token, request) => {
@@ -4703,7 +4839,8 @@ function bufferFromIpcBytes(value) {
   throw new Error("attachment bytes must be an ArrayBuffer");
 }
 
-function loadOperatorChatClient() {
+async function loadOperatorChatClient() {
+  await initializeRuntimeHost();
   return getOperatorChatClientLoader().load();
 }
 

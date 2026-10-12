@@ -181,7 +181,7 @@ impl DesktopHost {
         self.application_policy = policy; self
     }
 
-    fn with_application_preferences(mut self, root: Option<PathBuf>) -> Result<Self, String> {
+    pub fn with_application_preferences(mut self, root: Option<PathBuf>) -> Result<Self, String> {
         if let Some(root) = &root { crate::native_connection::validate_directory(root)?; }
         self.application_preferences = root;
         Ok(self)
@@ -518,6 +518,7 @@ impl DesktopHost {
         use base64::Engine;
         use protocol::presentation::{Action, Binding, Bootstrap, PreparedSource};
         if !operator || request.tool != "operator.desktop" { return Err("native presentation bootstrap is a private operator route".into()); }
+        self.require_computer_use_enabled()?;
         let timeout = self.presentation_timeout.ok_or("native presentation timeout is not configured")?;
         let deadline = presentation_deadline(timeout)?;
         let Action::ReceiverBootstrap { scope, source_window_id, receiver_pid, receiver_nonce, receiver_instance_nonce } =
@@ -542,11 +543,13 @@ impl DesktopHost {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| "native presentation random identity unavailable")?;
         let bootstrap_id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        self.require_computer_use_enabled()?;
         let prepared = self.executor.execute(json!({"type":"pip_prepare","bootstrap_id":bootstrap_id,
             "request_id":request.request_id,"scope":scope,"source":source.source,"source_window_id":source_window_id,
             "receiver_pid":receiver_pid,"receiver_nonce":receiver_nonce,"receiver_instance_nonce":receiver_instance_nonce,
             "expires_at_mach_continuous_ticks":deadline.to_string()})).await;
         let result = async {
+            self.require_computer_use_enabled()?;
             let prepared: PreparedSource = serde_json::from_value(prepared?).map_err(|_| "native presentation preparation has invalid identity")?;
             let incarnation = prepared.native_window_incarnation.parse::<u64>().map_err(|_| "native window incarnation is invalid")?;
             if prepared.schema_version != 1 || prepared.producer_pid != producer_pid as i32 || incarnation == 0
@@ -574,8 +577,10 @@ impl DesktopHost {
                 bootstrap_key_base64: base64::engine::general_purpose::STANDARD.encode(key),
                 binding_bytes_base64: base64::engine::general_purpose::STANDARD.encode(bytes) };
             key.fill(0);
+            self.require_computer_use_enabled()?;
             let installed = self.executor.execute(json!({"type":"pip_install","schema_version":1,"bootstrap_id":bootstrap_id,
                 "bootstrap_key_base64":response.bootstrap_key_base64,"binding_bytes_base64":response.binding_bytes_base64})).await?;
+            self.require_computer_use_enabled()?;
             if installed["schema_version"] != 1 || installed["installed"] != true || installed["bootstrap_id"] != bootstrap_id
                 || installed["producer_pid"] != producer_pid || self.executor.retained_process_id().await? != producer_pid
                 || presentation_clock()? >= deadline {
@@ -597,6 +602,10 @@ impl DesktopHost {
         let operation = request.action["type"]
             .as_str()
             .ok_or("action type is missing")?;
+        if protocol::is_input(operation) || matches!(operation, "observe" | "screenshot" | "view")
+            || operation == "control" && request.action["mode"] == "acquire" {
+            self.require_computer_use_enabled()?;
+        }
         if operator
             && !matches!(
                 operation,
@@ -619,6 +628,7 @@ impl DesktopHost {
         }
         if operation == "view" {
             let native = self.executor.execute(request.action.clone()).await?;
+            self.require_computer_use_enabled()?;
             let mut observation: Observation =
                 serde_json::from_value(native["observation"].clone())
                     .map_err(|e| format!("native stream observation: {e}"))?;
@@ -776,6 +786,7 @@ impl DesktopHost {
             action["include_screenshot"] =
                 json!(operation != "observe" || request.action["include_screenshot"] == true);
             let native = self.executor.execute(action).await?;
+            self.require_computer_use_enabled()?;
             let mut observation: Observation =
                 serde_json::from_value(native["observation"].clone())
                     .map_err(|e| format!("native observation protocol: {e}"))?;
@@ -883,7 +894,7 @@ impl DesktopHost {
             state.active_cancel = Some(cancel.clone());
             state.observations.remove(&request.worker_environment_id);
         }
-        let result = self.executor.execute(action).await;
+        let result = self.with_computer_use_input(&cancel, self.executor.execute(action)).await;
         let interrupted = {
             let mut state = self
                 .state
@@ -925,6 +936,7 @@ impl DesktopHost {
     async fn perform_application(&self, request: &Request, operator: bool) -> Result<(Evidence, Value), String> {
         use crate::app_authorization::{self as authorization, AdmittedDecision, ApplicationResult, CallContext, Decision, OperatorRequest, PendingRequest};
         if operator { return Err("operator viewer cannot resolve, approve or execute application tools".into()); }
+        if request.action["type"] != "apps" { self.require_computer_use_enabled()?; }
         let (config, generation) = self.app_approval.as_ref().ok_or("application tools have no declared approval configuration")?;
         let context = CallContext::from_request(request)?;
         if context.scope.host_generation != *generation || request.action["resume_tool"].as_str() != Some(config.resume_tool.as_str())
@@ -1121,7 +1133,7 @@ impl DesktopHost {
             state.active_cancel = Some(cancel.clone());
             state.control.generation
         };
-        let result = async {
+        let result = self.with_computer_use_input(&cancel, async {
             if let Some(lease) = &preparation_lease {
                 let activated = self.executor.execute(json!({"type":"input_lease_begin","lease":lease})).await?;
                 if activated["input_lease"] != serde_json::to_value(lease).map_err(|error| error.to_string())? {
@@ -1130,7 +1142,7 @@ impl DesktopHost {
             }
             self.executor.execute(json!({"type":"app_state","scope":scope,"target_handle":target,
                 "include_screenshots":include,"capture_selection":capture_selection,"presentation_base":source.arguments.get("presentation_base"),"cancel_file":cancel,"control_generation":generation,"grant_request_id":grant_request_id,"source":source.source()})).await
-        }.await;
+        }).await;
         let interrupted = {
             let mut state = self.state.lock().map_err(|_| "desktop control lock poisoned")?;
             state.active_cancel = None;
@@ -1226,13 +1238,13 @@ impl DesktopHost {
             state.input_lease = Some(lease.clone());
             self.app_observations.lock().map_err(|_| "application observations lock poisoned")?.remove(&key);
         }
-        let native = async {
+        let native = self.with_computer_use_input(&cancel, async {
             let activated = self.executor.execute(json!({"type":"input_lease_begin","lease":lease})).await?;
             if activated["input_lease"] != serde_json::to_value(&lease).map_err(|error| error.to_string())? {
                 return Err("native input lease acknowledgement did not identify the exact held device".into());
             }
             self.executor.execute(json!({"type":"app_action","scope":context.scope,"call":call,"cancel_file":cancel})).await
-        }.await;
+        }).await;
         let interrupted = {
             let mut state = self.state.lock().map_err(|_| "desktop control lock poisoned")?;
             state.active_cancel = None;
@@ -1255,6 +1267,44 @@ impl DesktopHost {
         let result = serde_json::to_value(ApplicationResult::Action { schema_version: 3, action }).map_err(|error| error.to_string())?;
         authorization::create_record(&completed, &result)?;
         Ok((self.status_from_native(&native)?, result))
+    }
+
+    fn require_computer_use_enabled(&self) -> Result<(), String> {
+        match self.application_preferences.as_deref() {
+            Some(root) if crate::app_authorization::computer_use_enabled(root)? => Ok(()),
+            Some(_) => Err("computer_use_disabled: enable Computer use in Settings before using apps".into()),
+            None => Err("computer_use_preference_unavailable: native input has no declared preference store".into()),
+        }
+    }
+
+    async fn with_computer_use_input<F>(&self, cancel: &Path, input: F) -> Result<Value, String>
+    where F: Future<Output = Result<Value, String>> {
+        self.require_computer_use_enabled()?;
+        tokio::pin!(input);
+        let withdrawal = async {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                if let Err(error) = self.require_computer_use_enabled() { break error; }
+            }
+        };
+        tokio::pin!(withdrawal);
+        tokio::select! {
+            result = &mut input => result,
+            reason = &mut withdrawal => {
+                let revoked = {
+                    let mut state = self.state.lock().map_err(|_| "desktop control lock poisoned")?;
+                    std::fs::write(cancel, b"computer_use_disabled").map_err(|error| error.to_string())?;
+                    state.control.generation = state.control.generation.checked_add(1).ok_or("desktop control generation overflow")?;
+                    state.control.mode = "stopped".into(); state.control.owner = None;
+                    state.observations.clear();
+                    self.app_observations.lock().map_err(|_| "application observations lock poisoned")?.clear();
+                    let lease = state.input_lease.take(); state.input_revoking = lease.is_some();
+                    self.persist_control(&state.control)?; lease
+                };
+                if let Some(lease) = revoked { self.revoke_native_input(lease).await?; }
+                input.await.map_err(|error| format!("{reason}; native input was cancelled: {error}"))
+            }
+        }
     }
 
     async fn status(&self) -> Result<Evidence, String> {

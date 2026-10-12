@@ -12,6 +12,34 @@ pub fn write(root: &Path, relative: &str, value: Value) {
     std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 }
 
+pub fn client_fixture(root: &Path) -> RunCompositionRequest {
+    let mut request = fixture(root);
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
+    let declared: Value = serde_json::from_slice(&std::fs::read(source.join("registry/interface/world_provider_codex/interface.json")).unwrap()).unwrap();
+    let provider_file = "registry/interface/world_provider_fixture/interface.json";
+    let mut provider: Value = serde_json::from_slice(&std::fs::read(root.join(provider_file)).unwrap()).unwrap();
+    for field in ["context_output_labels", "session_snapshot_labels"] {
+        provider["interface_driver_config"]["private_config"][field] = declared["interface_driver_config"]["private_config"][field].clone();
+    }
+    write(root, provider_file, provider);
+    for name in ["interface.json", "life.json", "client.json"] {
+        let value = serde_json::from_slice(&std::fs::read(source.join("registry/interface/world_operator_chat").join(name)).unwrap()).unwrap();
+        write(root, &format!("registry/interface/world_operator_chat/{name}"), value);
+    }
+    for (file, pointer) in [
+        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces"),
+        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"),
+    ] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("world_operator_chat"));
+        write(root, file, value);
+    }
+    request.communication.client_template_interface_id = Some("world_operator_chat".into());
+    request.communication.client_title = Some("Context check".into());
+    request
+}
+
 pub fn fixture(root: &Path) -> RunCompositionRequest {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
     for relative in [
@@ -21,6 +49,8 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         "interface/system_interface_authoring/life.json",
         "worker_environment_kind/system_room/worker_environment_kind.json",
         "tool/file.write/tool.json",
+        "tool/file.read/tool.json",
+        "tool/artifact.read/tool.json",
         "tool/artifact.send/tool.json",
         "mark/tool.call.allowed/mark.json",
     ] {
@@ -73,7 +103,7 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         write(
             root,
             &format!("registry/artifact/role-{id}/artifact.json"),
-            json!({"label":"context.reference","text":format!("Role for {id}")}),
+            json!({"id":format!("role-{id}"),"label":"context.reference","text":format!("Role for {id}")}),
         );
     }
     write(

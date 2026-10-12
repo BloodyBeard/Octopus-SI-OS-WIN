@@ -2019,18 +2019,6 @@ test("ordinary existing submission hands into its active client without topology
 
   const ledgerRoot = path.join(root, "ledger");
   await fs.promises.mkdir(ledgerRoot, { recursive: true });
-  await fs.promises.writeFile(path.join(ledgerRoot, "movements.jsonl"), [
-    {
-      seq: 74, kind: "InterfaceArrival", from: { Interface: ACTIVE_CLIENT }, to: { Interface: ACTIVE_WORKER },
-      artifact: { id: `operator.message:${"a".repeat(64)}`, content: "a".repeat(64) },
-      invocation_metadata: { runtime: runtime({ run: ACTIVE_RUN, worker: ACTIVE_WORKER, checkpoint: "cp_active_client_input", interface: ACTIVE_CLIENT }) },
-    },
-    {
-      seq: 75, kind: "InterfaceOutbound", from: { Interface: ACTIVE_PROVIDER }, to: { Interface: ACTIVE_CLIENT },
-      artifact: { id: `turn.error:${"b".repeat(64)}`, content: "b".repeat(64) },
-      invocation_metadata: { runtime: runtime({ run: ACTIVE_RUN, worker: ACTIVE_WORKER, checkpoint: "cp_active_provider_output", interface: ACTIVE_CLIENT }) },
-    },
-  ].map(JSON.stringify).join("\n") + "\n");
   const clientRegistryRoot = path.join(registryRoot, "interface", ACTIVE_CLIENT);
   await fs.promises.mkdir(clientRegistryRoot, { recursive: true });
   await fs.promises.writeFile(path.join(clientRegistryRoot, "octopus_os.json"), JSON.stringify({
@@ -2044,10 +2032,41 @@ test("ordinary existing submission hands into its active client without topology
   const plannerPath = path.join(root, "target", "debug", "octopus-operator-chat-topology");
   await fs.promises.mkdir(path.dirname(plannerPath), { recursive: true });
   await fs.promises.writeFile(plannerPath, `#!/usr/bin/env node
+const fs = require("node:fs"), path = require("node:path");
 let data = "";
 process.stdin.on("data", chunk => { data += chunk; });
 process.stdin.on("end", () => {
   const request = JSON.parse(data);
+  fs.appendFileSync(path.join(path.dirname(__filename), "revision-requests.jsonl"), data + "\\n");
+  if (process.argv[2]) {
+    const root = path.join(request.artifact_root, "input-revisions");
+    fs.mkdirSync(root, { recursive: true });
+    const file = path.join(root, request.key + ".artifact.json");
+    if (process.argv[2] === "--prepare-input-revision") {
+      if (request.operation.kind === "owner_inputs") {
+        process.stdout.write(JSON.stringify({ status: "unchanged" })); return;
+      }
+      if (!fs.existsSync(file)) {
+        const current = JSON.parse(request.expected_before_content), next = structuredClone(current);
+        const old = next.checkpoints.find(cp => next.active_checkpoints.includes(cp.id) && cp.interface_binding.interface === request.source);
+        const id = old.id + "_checked";
+        next.active_checkpoints = next.active_checkpoints.map(item => item === old.id ? id : item);
+        next.interface_state[request.provider].frontier_checkpoint_ids = next.interface_state[request.provider].frontier_checkpoint_ids.map(item => item === old.id ? id : item);
+        old.id = id;
+        fs.writeFileSync(file, JSON.stringify({ key: request.key, path: request.run_path, before: request.expected_before_content, after: JSON.stringify(next) }));
+      }
+      process.stdout.write(JSON.stringify({ status: "prepared" })); return;
+    }
+    if (process.argv[2] !== "--verify-input-revision") throw new Error("unknown revision flag");
+    const pending = JSON.parse(fs.readFileSync(file)), sent = fs.existsSync(file + ".sent"), done = fs.existsSync(file + ".result");
+    if (done) process.stdout.write(JSON.stringify({ status: "installed", path: request.run_path, before_hash: "a".repeat(64), after_hash: "b".repeat(64), install: { call: { movement_seq: 76 }, result: { movement_seq: 78 } } }));
+    else if (sent) process.stdout.write(JSON.stringify({ status: "awaiting_result" }));
+    else {
+      if (fs.readFileSync(request.run_path, "utf8") !== pending.before) throw new Error("changed before writer hand-in");
+      process.stdout.write(JSON.stringify({ status: "ready", source_interface: "system_checked_writer", manifest: { label: "tool.call", payload_path: file } }));
+    }
+    return;
+  }
   const run = request.existing_run_record;
   const client = \`world_operator_chat_\${request.chat_id}\`;
   const provider = run.interface_state[client].provider_runtime_interface;
@@ -2060,13 +2079,69 @@ process.stdin.on("end", () => {
   run.interface_state[client].cycle_checkpoint_ids = [checkpoint];
   run.interface_state[client].ledger_offset = request.conversation.ledger_offset;
   run.interface_state[provider].frontier_checkpoint_ids = [checkpoint];
+  run.interface_state[provider].unselected_new_default = "must-not-replace-retained-state";
   const profile = { ee_id: request.ee_id, worker_choice_interface: request.worker_interface_id, door_host_slots: request.door_host_slots };
   process.stdout.write(JSON.stringify({ run_id: run.id, chat_interface_id: client, model_interface_id: provider, worker_interface_id: run.worker, client_surface_role: "task", model: request.model, reasoning_effort: "high", expected_before_hash_algorithm: "sha256", authoring_profile: profile, required_interface_ids: [client, provider], required_tool_ids: ["file.write"], interface_writes: [], run_writes: [], removals: [], run_record_content: JSON.stringify(run, null, 2) + "\\n" }));
 });
 `);
   await fs.promises.chmod(plannerPath, 0o755);
-
-  const resumed = await submitOperatorTurn(options, {
+  const initialRun = activeRun(); initialRun.status = "idle";
+  const initialBytes = `${JSON.stringify(initialRun, null, 2)}\n`;
+  await fs.promises.writeFile(runPath, initialBytes);
+  await fs.promises.writeFile(path.join(ledgerRoot, "movements.jsonl"), "");
+  const initialRequest = { messageId: "msg_existing_initial", runId: ACTIVE_RUN,
+    providerInterfaceId: "world_provider_codex", providerModel: "gpt-5.6-sol",
+    clientSurfaceRole: "task", text: "First input after updating the app.", attachments: [], timeoutMs: 2_000 };
+  const initialResult = await submitOperatorTurn(options, initialRequest);
+  assert.deepEqual(initialResult.clientWrites, []);
+  assert.equal(await fs.promises.readFile(runPath, "utf8"), initialBytes);
+  assert.equal(await fs.promises.readFile(providerPath, "utf8"), providerBytes);
+  const initialRevisionRoot = path.join(options.clientArtifactsRoot(ACTIVE_CLIENT), "operator-chat", "input-revisions");
+  const retainedDefinition = path.join(initialRevisionRoot, "msg_existing_initial_retained-definition.artifact.json");
+  await fs.promises.writeFile(retainedDefinition, JSON.stringify({ key: "msg_existing_initial_retained-definition", path: runPath,
+    before: initialBytes, after: initialBytes }));
+  await fs.promises.writeFile(retainedDefinition + ".result", "checked");
+  const initialRetried = await submitOperatorTurn(options, { ...initialRequest, messageId: "msg_existing_initial_retained" });
+  assert.equal(initialRetried.clientWrites.length, 1);
+  assert.equal(await fs.promises.readFile(runPath, "utf8"), initialBytes);
+  const initialCommands = (await fs.promises.readFile(path.join(path.dirname(plannerPath), "revision-requests.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.deepEqual(initialCommands.filter(row => row.operation).map(row => row.operation.kind), ["owner_inputs"]);
+  assert.equal(initialCommands.some(row => row.key?.endsWith("-rearm")), false);
+  assert.equal(initialCommands.filter(row => row.existing_run_record).every(row => row.reasoning_effort === "high"), true);
+  assert.equal(handed.length, 3);
+  await fs.promises.writeFile(runPath, runBytes);
+  await fs.promises.writeFile(path.join(ledgerRoot, "movements.jsonl"), [
+    {
+      seq: 74, kind: "InterfaceArrival", from: { Interface: ACTIVE_CLIENT }, to: { Interface: ACTIVE_WORKER },
+      artifact: { id: `operator.message:${"a".repeat(64)}`, content: "a".repeat(64) },
+      invocation_metadata: { runtime: runtime({ run: ACTIVE_RUN, worker: ACTIVE_WORKER, checkpoint: "cp_active_client_input", interface: ACTIVE_CLIENT }) },
+    },
+    {
+      seq: 75, kind: "InterfaceOutbound", from: { Interface: ACTIVE_PROVIDER }, to: { Interface: ACTIVE_CLIENT },
+      artifact: { id: `turn.error:${"b".repeat(64)}`, content: "b".repeat(64) },
+      invocation_metadata: { runtime: runtime({ run: ACTIVE_RUN, worker: ACTIVE_WORKER, checkpoint: "cp_active_provider_output", interface: ACTIVE_CLIENT }) },
+    },
+  ].map(JSON.stringify).join("\n") + "\n");
+  const writerServer = await listenForInterface(root, "system_checked_writer");
+  t.after(() => closeServer(writerServer));
+  let writerCalls = 0;
+  let retainedCall;
+  options.handInArtifact = async (input) => {
+    if (input.interfaceId === "system_checked_writer") {
+      writerCalls++;
+      retainedCall = input.manifest.payload_path;
+      const edit = JSON.parse(await fs.promises.readFile(retainedCall, "utf8"));
+      assert.equal(await fs.promises.readFile(edit.path, "utf8"), runBytes);
+      await fs.promises.writeFile(edit.path, edit.after);
+      await fs.promises.writeFile(retainedCall + ".sent", "accepted");
+      throw new Error("lost writer verdict before checked result");
+    }
+    assert.equal(fs.existsSync(retainedCall + ".result"), true);
+    handed.push(input);
+    return { admitted: { seq: 79 } };
+  };
+  const nextRequest = {
     messageId: "msg_existing_after_provider_failure",
     runId: ACTIVE_RUN,
     providerInterfaceId: "world_provider_codex",
@@ -2074,12 +2149,22 @@ process.stdin.on("end", () => {
     clientSurfaceRole: "task",
     text: "Continue after the terminal provider failure.",
     attachments: [],
-    timeoutMs: 2_000,
-  });
+    timeoutMs: 1_000,
+  };
+  await assert.rejects(submitOperatorTurn(options, nextRequest), /awaits its checked writer result/);
+  assert.equal(writerCalls, 1);
+  assert.equal(handed.length, 3);
+  await fs.promises.writeFile(retainedCall + ".result", "checked");
+  delete require.cache[require.resolve(sourcePath)];
+  const resumed = await require(sourcePath).submitOperatorTurn(options, nextRequest);
   const reauthored = JSON.parse(await fs.promises.readFile(runPath, "utf8"));
   assert.equal(resumed.clientWrites.length, 1);
-  assert.match(reauthored.interface_state[ACTIVE_CLIENT].cycle_checkpoint_ids[0], /^cp_rearmed_/);
-  assert.equal(handed.length, 2);
+  assert.equal(writerCalls, 1);
+  assert.equal(reauthored.active_checkpoints.includes("cp_active_client_input_checked"), true);
+  assert.deepEqual(reauthored.interface_state[ACTIVE_PROVIDER].pending_handoff, providerState.pending_handoff);
+  assert.deepEqual(reauthored.interface_state[ACTIVE_CLIENT], ordinary.interface_state[ACTIVE_CLIENT]);
+  assert.equal(reauthored.interface_state[ACTIVE_PROVIDER].unselected_new_default, undefined);
+  assert.equal(handed.length, 4);
 });
 
 test("attachment crash before admission resumes only from an exact reattachment", async (t) => {
@@ -2627,7 +2712,7 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
     for (const change of [
       { status: "running" }, { interface_state: {} },
       ...[undefined, null, "7", -1].map(authoring_generation => ({ provider: { authoring_generation } })),
-      ...[undefined, null, {}, [], { terminal: false }, { terminal: "true" },
+      ...[...(conversation.operatorMessageCheckpointAdmitted ? [undefined] : []), null, {}, [], { terminal: false }, { terminal: "true" },
         { terminal: true, context_publication: {} }].map(pending_handoff => ({ provider: { pending_handoff } })),
     ]) {
       const invalid = JSON.parse(JSON.stringify(run));
@@ -2640,6 +2725,9 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
   const untouched = activeRun();
   untouched.status = "idle";
   assert.doesNotThrow(() => ready(untouched, ACTIVE_PROVIDER, fresh));
+  untouched.interface_state[ACTIVE_PROVIDER].authoring_generation = 7;
+  assert.doesNotThrow(() => ready(untouched, ACTIVE_PROVIDER, fresh));
+  assert.throws(() => ready(untouched, ACTIVE_PROVIDER, spent), /completed provider handoff evidence/);
   run.interface_state[ACTIVE_CLIENT].client_surface_role = "home";
   const document = { value: run, text: JSON.stringify(run) };
   const first = { id: "fixture.first", content: Array(32).fill(1) };

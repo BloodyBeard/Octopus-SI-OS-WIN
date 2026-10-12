@@ -1200,6 +1200,7 @@ struct FrontierAdmission {
     file_writes: std::sync::atomic::AtomicUsize,
     conflict_next: AtomicBool,
     reject_next_owner_arrival: AtomicBool,
+    fail_after_nested_output: AtomicBool,
     interleave_next_write: AtomicBool,
     provider_wins_next_write: AtomicBool,
     provider_writes_before_owner_call: AtomicBool,
@@ -1490,7 +1491,11 @@ impl FrontierAdmission {
                 result=&mut execution=>break result?,
                 artifact=peer.next_artifact()=>{
                     let (request,event,file)=artifact?;
+                    let nested = file.read_manifest().map_err(|error| error.to_string())?.label == "tool.call";
                     let verdict=hand_owned_output(&ctx,&source,&callback,file).await?;
+                    if nested && self.fail_after_nested_output.swap(false, Ordering::SeqCst) {
+                        return Err("fixture interrupted after admitted nested output".into());
+                    }
                     peer.acknowledge(request,event,verdict).await?;
                 }
             }
@@ -1595,7 +1600,7 @@ async fn actual_owner_failure_return(
     assert_eq!(serde_json::from_slice::<octopus_tool_handlers::ToolResultArtifact>(&delivered[0].file.read_payload_bytes().unwrap()).unwrap(), result);
 }
 
-enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, DetachedFailure, InterleavedResult, RefusedFailure, RefusedFailurePretty, NestedFailure }
+enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, DetachedFailure, InterleavedResult, RefusedFailure, RefusedFailurePretty, NestedFailure, ReadinessFailure }
 
 fn exact_install_does_not_claim_later_state(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
@@ -1734,7 +1739,8 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         InterfaceClass, InterfaceRuntimeDisposition, InterfaceType, Runtime,
         RuntimeInterfaceCatalog, RuntimeServices,
     };
-    let root = tempfile::Builder::new().prefix("oct-cm-").tempdir_in("/tmp").unwrap().keep().canonicalize().unwrap();
+    let root_guard = tempfile::Builder::new().prefix("oct-cm-").tempdir_in("/tmp").unwrap();
+    let root = root_guard.path().canonicalize().unwrap();
     eprintln!("owner fixture artifacts: {}",root.display());
     bounded_room_media_preserves_the_actual_image_carrier(&root);
     let interface_dir = root.join("interface");
@@ -1877,7 +1883,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     let provider_directory = root.join("provider-interface");
     std::fs::create_dir_all(&provider_directory).unwrap();
     let mut provider_descriptor:octopus_interfaces::InterfaceDescriptor=serde_json::from_value(json!({"id":"world_provider_test","interface_type":"world","role":"provider","direction":"bidirectional","source_names":["fixture"],"interface_driver_ref":"fixture","interface_driver_config":{"private_config":{"model_hidden_tools":["file.write.provider"],"run_authoring_profile":{"file_write_tool":"file.write.provider","file_write_label":"tool.call","file_write_result_label":"file.write.provider.result","result_timeout_ms":5000},"context_output_labels":["provider.fixture.snapshot"],"session_snapshot_labels":["provider.fixture.snapshot"]}}})).unwrap();
-    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty | FrontierCase::NestedFailure) {
         provider_descriptor.interface_driver_config.as_mut().unwrap().private_config["context_output_labels"] = json!(["provider.fixture.snapshot", "tool.call"]);
     }
     let control = root.join("control");std::fs::create_dir_all(&control).unwrap();
@@ -1929,7 +1935,12 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
             if id == "model-input" { *run["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"]==id).unwrap()=row; }
             else { run["checkpoints"].as_array_mut().unwrap().push(row);run["active_checkpoints"].as_array_mut().unwrap().push(json!(id)); }
         }
-        bound.push(json!({"name":"owner-output","role":"owner_input","interface_binding":binding(DOOR,"world_provider_test")["inbound"],"outbound_interface_bindings":binding(DOOR,"world_provider_test")["outbound"],"static_artifact_bindings":[prelude.id,topology_ref.id,input_ref.id],"owner_authoring":{"owner":DOOR,"source":DOOR,"door":"system_file_test","tool":"file.write","call_label":"tool.call","result_label":"file.write.result"},"include_context":false,"required_verified_artifacts":[]}));
+        let mut owner_input = json!({"name":"owner-output","role":"owner_input","interface_binding":binding(DOOR,"world_provider_test")["inbound"],"outbound_interface_bindings":binding(DOOR,"world_provider_test")["outbound"],"owner_authoring":{"owner":DOOR,"source":DOOR,"door":"system_file_test","tool":"file.write","call_label":"tool.call","result_label":"file.write.result"},"include_context":true,"required_verified_artifacts":[]});
+        if matches!(case, FrontierCase::NestedFailure) {
+            owner_input["include_context"] = json!(false);
+            owner_input["static_artifact_bindings"] = json!([prelude.id,topology_ref.id,input_ref.id]);
+        }
+        bound.push(owner_input);
         run["interface_state"]["world_provider_test"] = json!({"context_generation":0,"authoring_generation":0,"frontier_checkpoint_ids":["model-input","provider-output","provider-authoring-call","provider-authoring-result"],"run_authoring_binding":{"schema_version":2,"run":"run_code_mode_test","worker":WORKER,"provider_interface":"world_provider_test","authoring_source_interface":"system_provider_author_test","payload_artifact_bindings":[input_ref],"checkpoints":bound}});
         run["interface_state"][DOOR]["owned_checkpoint_ids"] = json!(["initial-owner".to_string(),"initial-authoring".to_string()].into_iter().chain(returns.keys().cloned()).collect::<Vec<_>>());
         let source_provenance = Value::Array([
@@ -2055,6 +2066,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         file_writes: std::sync::atomic::AtomicUsize::new(0),
         conflict_next: AtomicBool::new(false),
         reject_next_owner_arrival: AtomicBool::new(false),
+        fail_after_nested_output: AtomicBool::new(false),
         interleave_next_write: AtomicBool::new(false),
         provider_wins_next_write: AtomicBool::new(false),
         provider_writes_before_owner_call: AtomicBool::new(false),
@@ -2140,7 +2152,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         &root,
         300,
         "code_mode.run",
-        json!({"script":if matches!(case, FrontierCase::InterleavedResult) { "const docs = await prelude.cua.documentation(); return docs;" } else { "let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);" },"yield_time_ms":20}),
+        json!({"script":if matches!(case, FrontierCase::InterleavedResult) { "const docs = await prelude.cua.documentation(); return docs;" } else { "let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);" },"yield_time_ms":if matches!(case, FrontierCase::InterleavedResult) { 1000 } else { 20 }}),
     );
     if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
         let handoff = admission.provider_handoff().unwrap().unwrap();
@@ -2321,7 +2333,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     .unwrap()
     .unwrap();
     assert_eq!(started["body"]["state"], "yielded", "{started}");
-    if matches!(case, FrontierCase::NestedFailure) {
+    if matches!(case, FrontierCase::NestedFailure | FrontierCase::ReadinessFailure) {
         let ctx = admission.door.lock().await.context.clone();
         octopus_worker_env::WorkerEnvironmentRecordStore::new(ctx.interface_var_dir()).activate(&formation, initial_seq).unwrap();
     }
@@ -2402,8 +2414,11 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     let first_return = admission.next().await.unwrap();
     let second_return = admission.next().await.unwrap();
     if matches!(case, FrontierCase::NestedFailure) {
-        Box::pin(failure_return_tests::actual_nested_failure_return(&admission, &handoff, &formation, &second_return, &durable, &room, &kind)).await;
-        room.release_room(&formation).await.unwrap();
+        let phase_admission = admission.clone();
+        tokio::spawn(async move {
+            Box::pin(failure_return_tests::actual_nested_failure_return(&phase_admission, &handoff, &formation, &second_return, &first_return, &durable, &room, &kind, &parsed_config)).await;
+            room.release_room(&formation).await.unwrap();
+        }).await.unwrap();
         admission.door.lock().await.context.owner_cancel().cancel();
         provider_socket.abort(); provider_pump.abort(); pump.abort();
         let _ = tokio::join!(provider_socket, provider_pump, pump);
@@ -2502,7 +2517,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         &root,
         302 + order * 20,
         "code_mode.run",
-        json!({"script":"await new Promise(resolve => setTimeout(resolve, 70)); if (both[1].id !== 't' || typeof both[1].info !== 'function' || !Object.isFrozen(both[1])) throw new Error('browser Tab closure did not survive the next cell'); text(sum.value + 1);","yield_time_ms":5}),
+        json!({"script":if matches!(case, FrontierCase::ReadinessFailure) { "await new Promise(resolve => setTimeout(resolve, 70)); await tools.process_list({}); text(sum.value + 1);" } else { "await new Promise(resolve => setTimeout(resolve, 70)); if (both[1].id !== 't' || typeof both[1].info !== 'function' || !Object.isFrozen(both[1])) throw new Error('browser Tab closure did not survive the next cell'); text(sum.value + 1);" },"yield_time_ms":5}),
     );
     admission
         .model_call(&source.artifact_file)
@@ -2527,6 +2542,16 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         wake.2.read_artifact_manifest().unwrap().label,
         "code_mode.frontier_ready"
     );
+    if matches!(case, FrontierCase::ReadinessFailure) {
+        Box::pin(failure_return_tests::actual_readiness_failure_return(&admission, &handoff, &formation, &wake, &durable, &room, &kind)).await;
+        observer.abort();
+        let _ = observer.await;
+        room.release_room(&formation).await.unwrap();
+        admission.door.lock().await.context.owner_cancel().cancel();
+        provider_socket.abort(); provider_pump.abort(); pump.abort();
+        let _ = tokio::join!(provider_socket, provider_pump, pump);
+        return;
+    }
     let receipt = admission
         .run(&room, &handoff, &formation, &kind, wake.clone())
         .await

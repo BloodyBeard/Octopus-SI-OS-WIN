@@ -38,6 +38,7 @@ function constants(source, prefix) {
 
 const model = evaluate(read("src/components/chat/commandActivityModel.ts"));
 const observationSource = read("src/components/chat/chatTurnObservation.ts");
+const { isChatReplyTerminal } = evaluate(read("src/components/chat/chatTurnControl.ts"));
 const observations = evaluate(observationSource.replace(/^import .* from "[^"\n]+";$/gm, ""), {
   readOperatorChatArtifacts: async () => { throw new Error("connection closed before the next result"); },
 });
@@ -386,6 +387,22 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   assert.doesNotMatch(render({ ...preview, eventData: { ...preview.eventData, _payload_projection: { truncated: true, resolved: true } } }), /partial preview/);
 
   let observedFailure;
+  for (const accessProfile of ["live", "lab"]) {
+    let reads = 0;
+    const failed = { source: "movement", direction: "out", movementSeq: 11, terminal: true, error: true,
+      event_kind: "turn_control", event_data: { action: "stop", status: "failed" }, eventKind: "turn_control", eventData: { action: "stop", status: "failed" } };
+    const completed = { ...failed, movementSeq: 12, artifact_id: "answer", artifactId: "answer", error: false,
+      event_kind: "message", event_data: {}, eventKind: "message", eventData: {} };
+    const reader = evaluate(observationSource.replace(/^import .* from "[^"\n]+";$/gm, ""), {
+      isChatReplyTerminal,
+      readOperatorChatArtifacts: async () => ({ cursor: {}, artifacts: [++reads === 1 ? failed : completed] }),
+      loadChatRunMessages: async () => ++reads === 1 ? [failed] : [failed, completed],
+      currentProjectionGeneration: () => 1, nextProjectionChange: async () => {},
+    });
+    const result = await reader.observeChatReply({ accessProfile, knownRunId: "run-a", interfaceId: "interface-a", afterSeq: 10,
+      cursor: {}, isCurrent: () => true, onArtifacts: () => {} });
+    assert.equal(reads, 2); assert.equal(result.terminal.artifactId, "answer");
+  }
   await assert.rejects(async () => {
     try { await observations.observeChatReply({ accessProfile: "live", knownRunId: "run-a", interfaceId: "interface-a", afterSeq: 10, cursor: {}, isCurrent: () => true, onArtifacts: () => assert.fail("no receipt was delivered") }); }
     catch (failure) { observedFailure = failure; throw failure; }
@@ -426,7 +443,7 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   let pending = [], targets = { "run-a": { runId: "run-a", interfaceId: "interface-a" } };
   let scopeCurrent = true, switchDuringRead = false, readResult = [];
   const catchProbe = evaluate(`async function probe(failure) { let current; while (true) ${catchBlock.slice(0, -1)} break; } } module.exports = probe;`, {
-    ...observations, formatRuntimeError: (e) => e.message, turn: { queueId: "q1", runKey: "run-a", runId: "run-a" },
+    ...observations, isChatReplyTerminal, formatRuntimeError: (e) => e.message, turn: { queueId: "q1", runKey: "run-a", runId: "run-a" },
     queueId: "q1", owner: "view1", submittedToRuntime: true, lockedRunKey: "run-a", effectiveRunId: "run-a", messageId: "m1",
     queueStore: { settle: () => assert.fail("accepted turn must not be resubmitted or reclassified") },
     replacePausedQueueRunKeys: (update) => update([]), deliveryScopeCurrent: () => scopeCurrent,

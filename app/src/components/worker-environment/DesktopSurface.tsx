@@ -1,74 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 import type { WorkerEnvironmentProjection, WorkerEnvironmentSurfaceProjection } from "../../data/topology";
 import { OcButton, OcSelect } from "../../design-system/components";
+import { useSetClientPreferences } from "../../clientPreferences";
+import { dispatchClientCommand } from "../../clientActions";
 import { Glyph, type GlyphName } from "../IconGlyphs";
 import { ShellTooltip } from "../shell/ShellTooltip";
 import { LiveSurfaceEmpty, ManualRoomControlWarning, dataText } from "./RunEnvironmentSurfacePrimitives";
-import type { DesktopEvidence, DesktopSurfaceRequest } from "./desktopSurfaceModel";
-import { desktopEvidenceRevision, resolveDesktopViewEvidence } from "./desktopSurfaceModel";
+import type { DesktopApplicationPresentation, DesktopEvidence, DesktopSurfaceRequest } from "./desktopSurfaceModel";
+import { desktopApplicationPresentations, desktopEvidenceRevision } from "./desktopSurfaceModel";
 import "./desktopSurface.css";
 
 export function DesktopSurface({ active = true, environment, surface }: {
-  active?: boolean;
-  environment: WorkerEnvironmentProjection;
-  surface?: WorkerEnvironmentSurfaceProjection;
+  active?: boolean; environment: WorkerEnvironmentProjection; surface?: WorkerEnvironmentSurfaceProjection;
 }) {
+  const setPreferences = useSetClientPreferences();
   const [evidence, setEvidence] = useState<DesktopEvidence | null>(null);
-  const [screenId, setScreenId] = useState("");
   const [error, setError] = useState("");
+  const [selected, setSelected] = useState("");
   const [pendingControl, setPendingControl] = useState<DesktopSurfaceRequest["operation"] | null>(null);
-  const busy = pendingControl !== null;
   const [warning, setWarning] = useState(false);
-  const [openingPermissions, setOpeningPermissions] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const [loadedFrame, setLoadedFrame] = useState("");
-  const generation = useRef(0);
-  const requestGeneration = useRef(0);
+  const generation = useRef(0), requestGeneration = useRef(0), viewId = useRef("");
   const controlPending = useRef<{ operation: DesktopSurfaceRequest["operation"] } | null>(null);
-  const frame = useRef<HTMLDivElement>(null);
-  const viewId = useRef("");
   const identity = `${environment.id}\0${environment.runId}\0${surface?.id}\0${surface?.viewerUrl}`;
   const activeIdentity = useRef(identity); activeIdentity.current = identity;
+  const busy = pendingControl !== null;
+  let presentations: DesktopApplicationPresentation[] = [], inventoryError = "";
+  try { presentations = desktopApplicationPresentations(surface?.data ?? {}).filter(value => value.worker_environment_id === environment.id && value.run_id === environment.runId && value.completion_status === null && value.phase !== "ended"); }
+  catch (failure) { inventoryError = failure instanceof Error ? failure.message : String(failure); }
+  const application = presentations.find(value => value.source_id === selected) ?? presentations[0];
 
   useEffect(() => {
-    setEvidence(null); setError(""); setScreenId(""); setWarning(false); setPendingControl(null); controlPending.current = null;
+    setEvidence(null); setError(""); setSelected(""); setWarning(false); setPendingControl(null); controlPending.current = null;
   }, [identity]);
-
   useEffect(() => {
-    const current = ++generation.current;
-    const attachment = crypto.randomUUID(); viewId.current = attachment;
-    let latest: DesktopEvidence | null = null;
-    let revision = "";
-    setEvidence(null); setError(""); setLoadedFrame("");
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const current = ++generation.current, attachment = crypto.randomUUID(); viewId.current = attachment;
+    let timer: ReturnType<typeof setTimeout> | undefined, revision = "";
     const transport = window.octopusTransport?.desktopSurfaceRequest;
     if (!active || !surface || surface.mode === "fixture" || !transport) return;
-    const selectedSurface = surface;
+    const target = { workerEnvironmentId: environment.id, surfaceId: surface.id, runId: environment.runId, viewId: attachment };
     async function read() {
       if (generation.current !== current) return;
-      if (controlPending.current) { timer = setTimeout(() => void read(), 67); return; }
+      if (controlPending.current) { timer = setTimeout(() => void read(), 500); return; }
       const readGeneration = ++requestGeneration.current;
       try {
-        const result = await transport!({ workerEnvironmentId: environment.id, surfaceId: selectedSurface.id,
-          runId: environment.runId, operation: "view", viewId: attachment, ...(screenId ? { screenId } : {}) });
+        const result = await transport!({ ...target, operation: "view" });
         if (generation.current !== current || requestGeneration.current !== readGeneration) return;
-        if (!("evidence" in result)) throw new Error("Desktop view returned no observation evidence");
-        latest = resolveDesktopViewEvidence(latest, result.evidence);
-        const nextRevision = desktopEvidenceRevision(latest);
-        if (revision !== nextRevision) { setEvidence(latest); revision = nextRevision; }
-        setError("");
-        if (!screenId && result.evidence.screens.length >= 1) setScreenId(result.evidence.screens[0].id);
-        timer = setTimeout(() => void read(), 67);
+        if (!("evidence" in result)) throw new Error("Desktop status returned no observation evidence");
+        const nextRevision = desktopEvidenceRevision(result.evidence);
+        if (revision !== nextRevision) { setEvidence(result.evidence); revision = nextRevision; }
+        setError(""); timer = setTimeout(() => void read(), 500);
       } catch (failure) {
-        if (generation.current === current && requestGeneration.current === readGeneration) { latest = null; revision = ""; setEvidence(null); setError(failure instanceof Error ? failure.message : String(failure)); }
+        if (generation.current === current && requestGeneration.current === readGeneration) { setEvidence(null); setError(failure instanceof Error ? failure.message : String(failure)); }
       }
     }
     void read();
     return () => {
       ++generation.current; if (timer) clearTimeout(timer);
-      void transport!({workerEnvironmentId: environment.id, surfaceId: selectedSurface.id, runId: environment.runId, operation: "pause_view", viewId: attachment}).catch((failure) => console.error("Desktop viewer detach failed", failure));
+      void transport!({ ...target, operation: "pause_view" }).catch(failure => console.error("Desktop viewer detach failed", failure));
     };
-  }, [active, identity, screenId, refresh]);
+  }, [active, identity, refresh]);
 
   async function control(operation: DesktopSurfaceRequest["operation"]) {
     const transport = window.octopusTransport?.desktopSurfaceRequest;
@@ -85,90 +76,115 @@ export function DesktopSurface({ active = true, environment, surface }: {
       if (!("evidence" in result)) throw new Error("Desktop control returned no acknowledgement evidence");
       if (operation === "stop" && result.evidence.control.mode !== "stopped") throw new Error("Desktop Stop response did not confirm stopped control");
       setEvidence(result.evidence);
-      if (operation !== "stop") { setError(""); setRefresh((value) => value + 1); }
-    } catch (failure) {
-      if (isCurrent()) setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      if (controlPending.current === pending) { controlPending.current = null; setPendingControl(null); }
-    }
+      if (operation !== "stop") { setError(""); setRefresh(value => value + 1); }
+    } catch (failure) { if (isCurrent()) setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { if (controlPending.current === pending) { controlPending.current = null; setPendingControl(null); } }
   }
-
-  async function openPermissions() {
-    const transport = window.octopusTransport?.openDesktopPermissions;
-    if (!surface || !transport || openingPermissions) return;
-    const targetIdentity = identity; setOpeningPermissions(true);
-    try { await transport({ workerEnvironmentId: environment.id, surfaceId: surface.id, runId: environment.runId }); }
-    catch (failure) { if (activeIdentity.current === targetIdentity) setError(failure instanceof Error ? failure.message : String(failure)); }
-    finally { setOpeningPermissions(false); }
+  function openSettings() {
+    setPreferences({ settingsSection: "computer-use" }); dispatchClientCommand("open_settings", "surface");
   }
-
-  function invalidFrame() {
-    ++generation.current; ++requestGeneration.current;
-    setEvidence(null); setLoadedFrame(""); setError("Desktop frame could not be decoded");
-    if (surface) void window.octopusTransport?.desktopSurfaceRequest({ workerEnvironmentId: environment.id, surfaceId: surface.id, runId: environment.runId, viewId: viewId.current, operation: "pause_view" }).catch((failure) => console.error("Desktop viewer detach failed", failure));
-  }
-
-  if (surface?.mode === "fixture") return (
-    <div className="we-desktop-shell"><div className="we-desktop-fixture">
-      <div className="we-desktop-fixture-toolbar"><span /><span /><span /><strong>{dataText(surface.data, "title") || surface.label}</strong></div>
-      <div><Glyph name="desktop" size={28} /><strong>{dataText(surface.data, "detail") || "Test desktop room"}</strong><small>No host desktop is connected.</small></div>
-    </div></div>
-  );
-  if (!surface || !window.octopusTransport?.desktopSurfaceRequest) return (
-    <LiveSurfaceEmpty glyph="desktop" title="Desktop viewer unavailable" detail="The desktop room needs its declared host connection before its screen can be viewed." />
-  );
-  const observation = evidence?.observation;
-  const image = observation?.image;
+  if (surface?.mode === "fixture") return <div className="we-desktop-shell"><div className="we-desktop-fixture">
+    <div className="we-desktop-fixture-toolbar"><span /><span /><span /><strong>{dataText(surface.data, "title") || surface.label}</strong></div>
+    <div><Glyph name="desktop" size={28} /><strong>{dataText(surface.data, "detail") || "Test desktop room"}</strong><small>No host desktop is connected.</small></div>
+  </div></div>;
+  if (!surface || !window.octopusTransport?.desktopSurfaceRequest) return <LiveSurfaceEmpty glyph="desktop" title="Computer use unavailable" detail="This task has no connected application view." />;
   const mode = evidence?.control.mode;
-  const controlling = mode === "model" && evidence?.control.owner === environment.id;
-  const state = mode === "stopped" ? "Computer use stopped" : error ? "View interrupted" : mode === "human" ? "You have control"
-    : controlling ? "Worker has control" : mode === "model" ? "Another room has control"
-      : evidence?.status === "permission_required" ? "Screen permission required" : evidence ? "Observing" : "Connecting to desktop";
-  const screens = evidence?.screens || [];
-  const missingPermissions = evidence ? [
-    evidence.permissions.screen_capture ? "" : "Screen Recording",
-    evidence.permissions.accessibility ? "" : "Accessibility",
-  ].filter(Boolean) : [];
-  const permissionLabel = missingPermissions.length ? `${missingPermissions.join(" and ")} required` : "";
-  const permissionButton = permissionLabel ? (
-    <OcButton disabled={openingPermissions || !window.octopusTransport?.openDesktopPermissions} onClick={() => void openPermissions()} size="sm" variant="secondary">{permissionLabel}</OcButton>
-  ) : null;
-  return (
-    <div className="we-browser-shell" data-control={mode || "unknown"}>
-      <div className="we-browser-toolbar">
-        <span aria-live="polite" className="mr-auto flex items-center gap-2 text-sm text-token-description-foreground"><Glyph name="desktop" size={14} />{state}</span>
-        {image ? permissionButton : null}
-        {screens.length > 1 ? <OcSelect label="Display" disabled={busy} onChange={setScreenId} value={screenId} placeholder="Choose a display" options={screens.map((screen) => ({value:screen.id,label:`Display ${screen.id} · ${screen.pixel_width} × ${screen.pixel_height}`}))} /> : null}
-        <div className="we-browser-history">
-          <DesktopToolbarButton disabled={busy} glyph="refresh" label="Refresh" onClick={() => setRefresh((value) => value + 1)} />
-          {image ? <DesktopToolbarButton glyph="expand" label="Expand" onClick={() => void frame.current?.requestFullscreen().catch((failure) => setError(String(failure)))} /> : null}
-          {mode === "human" || mode === "stopped"
-            ? <DesktopToolbarButton disabled={busy || surface.readOnly} glyph="resume" label="Release control" onClick={() => void control("release_control")} selected />
-            : <DesktopToolbarButton disabled={busy || surface.readOnly || !evidence} glyph="hand" label="Take control" onClick={() => setWarning(true)} />}
-          <DesktopToolbarButton disabled={pendingControl === "stop" || surface.readOnly || (mode === "stopped" && !busy)} glyph="stop" label="Stop computer use" onClick={() => void control("stop")} />
-        </div>
+  const permissionsMissing = evidence && (!evidence.permissions.screen_capture || !evidence.permissions.accessibility);
+  const state = mode === "stopped" ? "Stopped" : mode === "human" ? "You have control" : "Computer use";
+  return <div className="we-browser-shell we-desktop-application-shell" data-control={mode || "unknown"}>
+    <div className="we-browser-toolbar we-desktop-application-toolbar">
+      <span className="we-desktop-application-heading"><Glyph name="desktop" size={16} />
+        {presentations.length > 1 ? <OcSelect label="Application" onChange={setSelected} value={application?.source_id ?? ""}
+          options={presentations.map(value => ({ value: value.source_id, label: value.window_title ? `${value.display_name} · ${value.window_title}` : value.display_name }))} />
+          : <span>{application?.display_name ?? state}</span>}
+      </span>
+      <div className="we-browser-history">
+        <DesktopToolbarButton glyph="settings" label="Computer use settings" onClick={openSettings} />
+        {mode === "human" || mode === "stopped"
+          ? <DesktopToolbarButton disabled={busy || surface.readOnly} glyph="resume" label="Release control" onClick={() => void control("release_control")} selected />
+          : <DesktopToolbarButton disabled={busy || surface.readOnly || !evidence} glyph="hand" label="Take control" onClick={() => setWarning(true)} />}
+        <DesktopToolbarButton disabled={pendingControl === "stop" || surface.readOnly || (mode === "stopped" && !busy)} glyph="stop" label="Stop computer use" onClick={() => void control("stop")} />
       </div>
-      {error ? <div className="we-browser-control-error" role="alert">{error} Refresh to check the connection again.</div> : null}
-      <div className="we-desktop-native-viewport" ref={frame}>
-        <div className="we-desktop-native-frame" style={image ? {width:`min(100cqw, ${100*image.width/image.height}cqh)`,height:`min(100cqh, ${100*image.height/image.width}cqw)`} : {width:"100%",height:"100%"}} data-streaming={(image && loadedFrame === image.sha256) || undefined}>
-        {image ? <img alt={`Display ${observation.screen.id}, observed ${new Date(observation.captured_at_unix_ms).toLocaleTimeString()}`} onLoad={() => setLoadedFrame(image.sha256)} onError={invalidFrame} draggable={false} src={`data:${image.media_type};base64,${image.data_base64}`} />
-          : permissionLabel ? <div className="we-desktop-permission">
-            <LiveSurfaceEmpty glyph="desktop" title="Allow Octopus to see this Mac" detail={`${missingPermissions.join(" and ")} ${missingPermissions.length > 1 ? "are" : "is"} off in System Settings. Viewing never takes control.`} />
-            {permissionButton}
-          </div>
-          : <LiveSurfaceEmpty glyph="desktop" title={screenId || !evidence ? "Waiting for the screen" : "Choose a display"} detail="Viewing never takes control of the Mac." />}
-        {observation?.focus ? <span className="absolute inset-x-0 top-full flex h-12 items-center justify-center px-4 text-center text-sm text-token-description-foreground">{observation.focus.app_id}</span> : null}
-      </div>
-      </div>
-      <ManualRoomControlWarning glyph="desktop" onCancel={() => setWarning(false)} onContinue={() => void control("take_control")} open={warning} title="Take control of the desktop" />
     </div>
-  );
+    <div className="we-desktop-native-viewport">
+      {application?.phase === "published" && !permissionsMissing && mode !== "stopped"
+        ? <NativeApplicationView key={`${identity}:${application.source_id}`} active={active} application={application} environment={environment} surface={surface} retry={refresh} />
+        : <div className="we-desktop-permission">
+          <LiveSurfaceEmpty glyph="desktop" title={permissionsMissing ? "Set up computer use" : mode === "stopped" ? "Computer use stopped" : "Waiting for an app"}
+            detail={permissionsMissing ? "Enable computer use and allow access in Settings." : mode === "stopped" ? "You can resume when you’re ready." : "The app this task uses will appear here."} />
+          {permissionsMissing ? <OcButton onClick={openSettings} size="sm" variant="secondary">Open Settings</OcButton> : null}
+        </div>}
+    </div>
+    {error || inventoryError || application?.error ? <div className="we-desktop-view-error" role="alert"><span>Application view unavailable.</span>
+      <details><summary>Error details</summary>{error || inventoryError || application?.error}</details>
+      <OcButton onClick={() => setRefresh(value => value + 1)} size="sm" variant="ghost">Try again</OcButton></div> : null}
+    <ManualRoomControlWarning glyph="desktop" onCancel={() => setWarning(false)} onContinue={() => void control("take_control")} open={warning} title="Take control of the desktop" />
+  </div>;
+}
+
+function NativeApplicationView({ active, application, environment, surface, retry }: {
+  active: boolean; application: DesktopApplicationPresentation; environment: WorkerEnvironmentProjection; surface: WorkerEnvironmentSurfaceProjection;
+  retry: number;
+}) {
+  const frame = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState("");
+  const [attached, setAttached] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const transport = window.octopusTransport?.desktopApplicationView;
+    if (!active || !frame.current) return;
+    if (!transport) { setAttached(false); setError("Native application preview is unavailable."); return; }
+    setError(""); setAttached(false);
+    const node = frame.current, target = { workerEnvironmentId: environment.id, surfaceId: surface.id, runId: environment.runId, viewId: crypto.randomUUID() };
+    let cancelled = false, previous = "", scheduled = 0, revision = 0, failed = false;
+    const report = (failure: unknown, expectedRevision: number) => { if (!cancelled && revision === expectedRevision) { failed = true; setAttached(false); setError(failure instanceof Error ? failure.message : String(failure)); } };
+    const update = () => {
+      cancelAnimationFrame(scheduled);
+      scheduled = requestAnimationFrame(() => {
+        if (cancelled || failed) return;
+        const bounds = node.getBoundingClientRect(), style = getComputedStyle(node);
+        const occluded = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper], .we-download-peek'))
+          .some(overlay => {
+            if (overlay.contains(node) || overlay.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+            const rect = overlay.getBoundingClientRect(), style = getComputedStyle(overlay);
+            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
+              && rect.left < bounds.right && rect.right > bounds.left && rect.top < bounds.bottom && rect.bottom > bounds.top;
+          });
+        if (document.visibilityState === "hidden" || !node.isConnected || style.display === "none" || style.visibility === "hidden"
+          || node.closest('[inert], [aria-hidden="true"], [hidden]') || occluded
+          || bounds.width <= 0 || bounds.height <= 0 || bounds.x < 0 || bounds.y < 0 || bounds.right > window.innerWidth + .5 || bounds.bottom > window.innerHeight + .5) {
+          if (previous === "hidden") return;
+          previous = "hidden"; const requestRevision = ++revision; setAttached(false);
+          void transport({ ...target, operation: "hide" }).catch(failure => report(failure, requestRevision)); return;
+        }
+        const rect = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }, geometry = JSON.stringify(rect);
+        if (geometry === previous) return; previous = geometry;
+        const requestRevision = ++revision;
+        void transport({ ...target, operation: "attach", appInstanceId: application.app_instance_id, sourceWindowId: application.source_window_id, rect })
+          .then(value => { if (!cancelled && revision === requestRevision) {
+            if (!value.attached) throw new Error("Native application preview did not confirm attachment.");
+            setAttached(true); setError("");
+          } })
+          .catch(failure => report(failure, requestRevision));
+      });
+    };
+    const resize = new ResizeObserver(update); resize.observe(node);
+    const mutations = new MutationObserver(update); mutations.observe(document.body, { attributes: true, attributeFilter: ["class","style","hidden","inert","aria-hidden"], childList: true, subtree: true });
+    window.addEventListener("resize", update); window.addEventListener("scroll", update, true); document.addEventListener("visibilitychange", update); update();
+    return () => {
+      cancelled = true; cancelAnimationFrame(scheduled); resize.disconnect(); mutations.disconnect();
+      window.removeEventListener("resize", update); window.removeEventListener("scroll", update, true); document.removeEventListener("visibilitychange", update);
+      void transport({ ...target, operation: "detach" }).catch(failure => console.error("Application preview detach failed", failure));
+    };
+  }, [active, application.source_id, environment.id, environment.runId, surface.id, retry, attempt]);
+  return <div className="we-desktop-application-view" ref={frame} aria-label={`${application.display_name} application view`} data-attached={attached || undefined}>
+    {!attached ? <LiveSurfaceEmpty glyph="desktop" title={error ? "Application view interrupted" : "Connecting to app"} detail={error || application.display_name} /> : null}
+    {error ? <OcButton onClick={() => setAttempt(value => value + 1)} size="sm" variant="ghost">Try again</OcButton> : null}
+  </div>;
 }
 
 function DesktopToolbarButton({ disabled = false, glyph, label, onClick, selected = false }: {
   disabled?: boolean; glyph: GlyphName; label: string; onClick: () => void; selected?: boolean;
 }) {
-  return <ShellTooltip label={label}><button aria-label={label} aria-pressed={selected || undefined} className="we-browser-control" disabled={disabled} onClick={onClick} type="button">
-    <Glyph name={glyph} size={16} />
-  </button></ShellTooltip>;
+  return <ShellTooltip label={label}><button aria-label={label} aria-pressed={selected || undefined} className="we-browser-control" disabled={disabled} onClick={onClick} type="button"><Glyph name={glyph} size={16} /></button></ShellTooltip>;
 }

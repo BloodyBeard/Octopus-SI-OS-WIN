@@ -4653,6 +4653,8 @@ function createProjectionStore(options) {
     if (eventKind === "user_input") return stringValue(payload?.message) || stringValue(payload?.title);
     if (eventKind === "interrupted_result") {
       const kind = stringValue(payload?.result_kind).replaceAll("_", " ");
+      const nativeStatus = stringValue(payload?.native_terminal_status);
+      if (nativeStatus) return `${kind || "exact result"} retained · provider turn ${nativeStatus} · not returned to model`;
       return `${kind || "exact result"} admitted after interruption · not returned to model`;
     }
     if (eventKind === "turn_control") {

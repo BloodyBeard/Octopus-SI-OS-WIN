@@ -256,7 +256,12 @@ fn app_resume_projects_exact_native_sources_and_materializes_original_windows() 
     decision.selected_persistence=Some(Persistence::Always);
     authorization::remember_permission(&private,Some(&shared),&offered_request,&decision).unwrap();
     assert_eq!(authorization::lookup_permission(&private,Some(&shared),&next).unwrap().unwrap().decision.selected_persistence,Some(Persistence::Always));
-    assert_eq!(authorization::application_preferences(&shared,Some("example.app")).unwrap()["removed"],true);
+    let saved = super::application_settings(&shared,json!({"operation":"list"})).unwrap();
+    assert_eq!(saved["schema_version"],1); assert_eq!(saved["applications"][0]["bundle_id"],"example.app");
+    for invalid in [json!({"operation":"allow","bundle_id":"example.app"}),json!({"operation":"list","bundle_id":"example.app"}),json!({"operation":"remove"})] {
+        assert!(super::application_settings(&shared,invalid).is_err());
+    }
+    assert_eq!(super::application_settings(&shared,json!({"operation":"remove","bundle_id":"example.app"})).unwrap()["removed"],true);
     assert!(authorization::lookup_permission(&private,Some(&shared),&next).unwrap().is_none());
     assert!(authorization::lookup_permission(&private,Some(&shared),&fresh).unwrap().is_some());
     decision.selected_persistence=Some(Persistence::Session);decision.decision=Decision::Decline;

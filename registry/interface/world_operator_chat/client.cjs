@@ -337,7 +337,7 @@ async function submitOperatorTurn(options, request) {
         operatorMessageCheckpoint,
         continuation,
       });
-      const providerSelectionWrites = await planExistingProviderSelection(options, {
+      const selection = await planExistingProviderSelection(options, {
         chatId,
         chatInterfaceId,
         clientSurfaceRole,
@@ -351,13 +351,25 @@ async function submitOperatorTurn(options, request) {
         preparedPayloadSelection,
         runId,
         authorNextCycle: conversationState.terminalAfterOperatorMessage,
+        artifactRoot,
+        messageId,
       });
+      const revisionWrites = await applyOperatorInputRevision(options, {
+        ...selection,
+        artifactRoot,
+        messageId,
+        runId,
+        chatInterfaceId,
+        providerInterfaceId: activeRun.modelInterfaceId,
+        timeoutMs,
+      });
+      const providerSelectionWrites = selection.writes;
       const clientDirectory = path.join(resolveRegistryRoot(options), "interface", chatInterfaceId);
       const changesClientConfiguration = (filePath) => path.dirname(filePath) === clientDirectory
         && path.extname(filePath) === ".json";
       const previousSocket = providerSelectionWrites.some((write) => changesClientConfiguration(write.filePath))
         ? await interfaceSocketIdentity(octopusHome, chatInterfaceId) : null;
-      const clientWrites = await commitClientWrites(providerSelectionWrites);
+      const clientWrites = [...revisionWrites, ...await commitClientWrites(providerSelectionWrites)];
       return {
         submission: activeRun,
         clientWrites,
@@ -536,7 +548,14 @@ async function planExistingProviderSelection(options, input) {
     input.chatInterfaceId,
     "octopus_os.json",
   );
-  if (!providerSelectionChanged && !input.authorNextCycle && input.payloadArtifactBindings === undefined) return [];
+  const retainedPhases = await operatorInputRevisionPhases(input.artifactRoot, input.messageId);
+  const retainedRevision = retainedPhases.definition || retainedPhases.rearm;
+  const providerState = requiredObject(input.currentRunDocument.value.interface_state[providerInterfaceId], "provider authoring state");
+  const initialInput = input.currentRunDocument.value.status === "idle"
+    && providerState.pending_handoff === undefined
+    && input.conversationState.operatorMessageCheckpointAdmitted === false;
+  const unchanged = { writes: [], desiredInputs: null, rearm: false };
+  if (!providerSelectionChanged && !input.authorNextCycle && input.payloadArtifactBindings === undefined && !retainedRevision && !initialInput) return unchanged;
   if (input.preparedPayloadSelection && input.preparedPayloadSelection.sidecarPath !== sidecarPath) {
     throw new Error("operator payload staging changed its original registry owner path");
   }
@@ -556,9 +575,9 @@ async function planExistingProviderSelection(options, input) {
     assertPayloadInputCycleReady(input.currentRunDocument.value, providerInterfaceId, input.conversationState);
     authorNextCycle = true;
   }
-  if (!providerSelectionChanged && !authorNextCycle) return [];
+  if (!providerSelectionChanged && !authorNextCycle && !retainedRevision && !initialInput) return unchanged;
   const topologyServiceTier = requestedServiceTier || currentServiceTier;
-  const topologyReasoningEffort = !providerSelectionChanged && authorNextCycle
+  const topologyReasoningEffort = !providerSelectionChanged
     ? currentReasoningEffort
     : requestedReasoningEffort;
   const expectedProfile = { ...authoringProfile };
@@ -628,8 +647,11 @@ async function planExistingProviderSelection(options, input) {
   if (providerSelectionChanged && !providerWrite) {
     throw new Error("operator chat provider selection produced no exact provider write");
   }
-  const selectedWrites = plannedAdditionalRunWrites(topologyPlan, await resolveRunRecordsRoot(octopusHome));
-  if (providerWrite) {
+  if (plannedAdditionalRunWrites(topologyPlan, await resolveRunRecordsRoot(octopusHome)).length > 0) {
+    throw new Error("operator input revision cannot create undeclared replacement writer Runs");
+  }
+  const selectedWrites = [];
+  if (providerWrite && providerSelectionChanged) {
     const providerDescriptorHash = sha256Hex(Buffer.from(providerDescriptor.text));
     if (providerWrite.expectedBeforeHash !== providerDescriptorHash) {
       throw new Error("operator chat provider selection did not preserve its exact descriptor revision");
@@ -644,7 +666,8 @@ async function planExistingProviderSelection(options, input) {
     );
     if (providerDescriptor.text !== providerWrite.content) selectedWrites.push(providerWrite);
   }
-  if (authorNextCycle) {
+  let desiredInputs = null;
+  if (authorNextCycle || retainedRevision || initialInput) {
     const profileWrite = writes.find((write) => write.filePath === sidecarPath);
     if (payloadSelectionChanged) {
       if (!profileWrite || profileWrite.expectedBeforeHash !== sha256Hex(Buffer.from(sidecar.text))) {
@@ -671,44 +694,113 @@ async function planExistingProviderSelection(options, input) {
       safeSegment(input.currentRunDocument.value.worker, "run.worker"),
       input.clientSurfaceRole,
     );
-    const plannedCheckpoint = activeOperatorMessageCheckpoint(
-      plannedRun,
-      input.runId,
-      input.chatInterfaceId,
-      providerInterfaceId,
-      config.artifact_labels.message,
-    );
-    const currentCheckpoint = activeOperatorMessageCheckpoint(
-      input.currentRunDocument.value,
-      input.runId,
-      input.chatInterfaceId,
-      providerInterfaceId,
-      config.artifact_labels.message,
-    );
-    if (
-      plannedCheckpoint.id === currentCheckpoint.id
-      && plannedCheckpoint.epoch === currentCheckpoint.epoch
-    ) {
-      throw new Error("operator chat topology planner did not author a fresh message checkpoint");
-    }
-    const plannedClientState = requiredObject(
-      requiredObject(plannedRun.interface_state, "plan run record.interface_state")[input.chatInterfaceId],
-      `plan run record.interface_state.${input.chatInterfaceId}`,
-    );
-    if (
-      nonNegativeInteger(plannedClientState.ledger_offset, "plan client ledger_offset")
-      !== input.conversationState.ledgerOffset
-    ) {
-      throw new Error("operator chat topology planner did not advance the next cycle ledger offset");
-    }
-    selectedWrites.push({
-      filePath: path.join(await resolveRunRecordsRoot(octopusHome), `${input.runId}.json`),
-      content: topologyPlan.run_record_content,
-      tag: `run:${input.runId}:next-cycle`,
-      expectedBeforeHash: sha256Hex(Buffer.from(input.currentRunDocument.text)),
-    });
+    desiredInputs = requiredArray(plannedRun.interface_state?.[providerInterfaceId]?.run_authoring_binding?.checkpoints,
+      "fresh planner provider input templates").filter((template) => template.role === "owner_input");
   }
-  return selectedWrites;
+  return { writes: selectedWrites, desiredInputs, rearm: authorNextCycle || retainedPhases.rearm,
+    payloadArtifactBindings, payloadSelectionChanged };
+}
+
+async function operatorInputRevisionPhases(artifactRoot, messageId) {
+  const phases = {};
+  for (const phase of ["definition", "rearm"]) {
+    phases[phase] = await fileExists(path.join(artifactRoot, "input-revisions", `${messageId}-${phase}.artifact.json`));
+  }
+  return phases;
+}
+
+async function applyOperatorInputRevision(options, input) {
+  if (input.desiredInputs === null && !input.rearm) return [];
+  const config = await readConfig();
+  const octopusHome = absolutePath(options.octopusHome(), "octopusHome");
+  const registryRoot = resolveRegistryRoot(options);
+  const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), registryRoot, "topology_planner");
+  const runPath = path.join(await resolveRunRecordsRoot(octopusHome), `${input.runId}.json`);
+  const scope = { registry_root: registryRoot, run_path: runPath,
+    ledger_root: path.join(octopusHome, "ledger"), artifact_root: input.artifactRoot,
+    provider: input.providerInterfaceId, source: input.chatInterfaceId };
+  const operations = [];
+  if (input.desiredInputs !== null) operations.push(["definition", { kind: "owner_inputs", desired_inputs: input.desiredInputs }]);
+  if (input.rearm) operations.push(["rearm", input.payloadSelectionChanged
+    ? { kind: "payloads", selected: input.payloadArtifactBindings } : { kind: "rearm" }]);
+  const writes = [];
+  const deadline = Date.now() + input.timeoutMs;
+  for (const [phase, operation] of operations) {
+    const request = { ...scope, key: `${input.messageId}-${phase}` };
+    const retained = await fileExists(path.join(input.artifactRoot, "input-revisions", `${request.key}.artifact.json`));
+    const prepared = retained ? { status: "prepared" }
+      : await runOperatorRevisionCommand(planner, "--prepare-input-revision", {
+        ...request, operation, expected_before_content: await fs.readFile(runPath, "utf8"),
+      });
+    request.selected_payloads = phase === "rearm" ? input.payloadArtifactBindings : null;
+    if (prepared.status === "unchanged") continue;
+    if (prepared.status === "deferred") throw operatorRevisionDeferred(prepared);
+    if (prepared.status !== "prepared") throw new Error("operator input revision returned an unknown preparation state");
+    let sent = false;
+    let sendError = null;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      const change = watchLedgerChange(path.join(scope.ledger_root, "movements.jsonl"), Math.max(1, remaining));
+      try {
+        const checked = await runOperatorRevisionCommand(planner, "--verify-input-revision", request);
+        if (checked.status === "installed") {
+          if (checked.path !== runPath) throw new Error("checked revision changed its exact Run path");
+          requiredObject(checked.install, "checked revision installation");
+          writes.push({ path: runPath, tag: `run:${input.runId}:${phase}`, changed: true,
+            hashAlgorithm: "blake3", beforeHash: requiredString(checked.before_hash, "checked revision before hash"),
+            afterHash: requiredString(checked.after_hash, "checked revision after hash"), install: checked.install });
+          break;
+        }
+        if (checked.status === "deferred") throw operatorRevisionDeferred(checked);
+        if (!["ready", "awaiting_result"].includes(checked.status)) throw new Error("operator input revision returned an unknown proof state");
+        if (remaining <= 0) throw new Error(`operator input revision '${request.key}' awaits its checked writer result; the retained call will be recovered on retry`);
+        if (checked.status === "ready" && !sent) {
+          const source = safeSegment(checked.source_interface, "checked writer source");
+          const manifest = requiredObject(checked.manifest, "checked writer manifest");
+          await waitForInterfaceSocket(octopusHome, source, Math.max(1, deadline - Date.now()));
+          sent = true;
+          try {
+            const verdict = await requiredFunction(options.handInArtifact, "handInArtifact")({
+              endpoint: interfaceEndpoint(octopusHome, source), interfaceId: source,
+              manifest, timeoutMs: Math.max(1, deadline - Date.now()),
+            });
+            assertAdmitted(verdict, requiredString(manifest.label, "checked writer artifact label"));
+          } catch (error) { sendError = error; }
+          continue;
+        }
+        if (checked.status === "ready" && sendError) throw sendError;
+        await change.promise;
+      } finally { change.cancel(); }
+    }
+  }
+  return writes;
+}
+
+function operatorRevisionDeferred(proof) {
+  const error = new Error("The task's accepted work must finish before its next input contract can be updated");
+  error.code = "operator_input_revision_deferred";
+  error.checkpoints = proof.checkpoints ?? [];
+  return error;
+}
+
+async function runOperatorRevisionCommand(planner, flag, request) {
+  const output = await new Promise((resolve, reject) => {
+    const child = spawn(planner, [flag], { stdio: ["pipe", "pipe", "pipe"] });
+    const stdout = [], stderr = [];
+    let size = 0;
+    child.stdout.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) { child.kill(); reject(new Error("operator input revision response exceeds its bound")); }
+      else stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk) => { if (Buffer.concat(stderr).length < 256 * 1024) stderr.push(chunk); });
+    child.on("error", reject);
+    child.on("close", (code) => code === 0 ? resolve(Buffer.concat(stdout).toString("utf8"))
+      : reject(new Error(Buffer.concat(stderr).toString("utf8").trim() || `operator input revision exited with code ${code}`)));
+    child.stdin.on("error", reject);
+    child.stdin.end(JSON.stringify(request));
+  });
+  return requiredObject(JSON.parse(output), "operator input revision proof");
 }
 
 function assertPayloadInputCycleReady(record, providerInterfaceId, conversation) {
@@ -719,9 +811,9 @@ function assertPayloadInputCycleReady(record, providerInterfaceId, conversation)
     throw new Error("Attachments can change after the task's current input has settled");
   }
   const state = requiredObject(record.interface_state?.[providerInterfaceId], "provider authoring state");
-  const generation = nonNegativeInteger(state.authoring_generation, "provider authoring_generation");
+  nonNegativeInteger(state.authoring_generation, "provider authoring_generation");
   if (state.pending_handoff === undefined) {
-    if (generation !== 0) throw new Error("Attachment selection has no completed provider handoff evidence");
+    if (conversation.operatorMessageCheckpointAdmitted) throw new Error("Attachment selection has no completed provider handoff evidence");
     return;
   }
   const pending = requiredObject(state.pending_handoff, "provider pending_handoff");

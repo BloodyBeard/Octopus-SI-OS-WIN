@@ -22,10 +22,13 @@ function pendingStop(message) {
 
 function interruptedClosure(message) {
   const data = message.data;
+  const nativeTerminal = ["completed", "failed", "interrupted"].includes(data.native_terminal_status);
   return message.kind === "interrupted_result" && ["tool_result", "interface_operation_result"].includes(data.result_kind)
     && [data.correlation_id, data.thread_id, data.turn_id, record(data.source_artifact).id].every((value) => typeof value === "string" && value.trim() === value && value.length > 0)
-    && typeof data.ok === "boolean" && data.turn_interrupted === true && data.returned_to_model === false
-    && data.result_disposition === "durably_admitted_after_interrupt";
+    && typeof data.ok === "boolean" && data.returned_to_model === false
+    && (nativeTerminal ? data.turn_interrupted === (data.native_terminal_status === "interrupted")
+      && data.result_disposition === "durably_admitted_after_native_terminal"
+      : data.turn_interrupted === true && data.result_disposition === "durably_admitted_after_interrupt");
 }
 
 function safeText(value) {
@@ -477,7 +480,8 @@ function createTranscriptReducer(options = {}) {
   function statusEvent(message, correlated) {
     const m = message.metadata, data = message.data;
     const final = Boolean(correlated && durableOutcome(message));
-    const failed = message.error || data.status === "failed" || record(data.turn).status === "failed" || message.kind === "interrupted_result" && data.ok === false;
+    const failed = message.error || data.status === "failed" || record(data.turn).status === "failed" || data.native_terminal_status === "failed"
+      || message.kind === "interrupted_result" && data.ok === false && data.native_terminal_status !== "completed";
     const pending = requestKinds.has(message.kind) && data.resolved !== true;
     const state = final ? failed ? "failed" : "idle" : turn?.stopPending ? "stopping" : pending ? "waiting" : failed && !message.willRetry ? "failed" : "working";
     if (correlated && !turn.terminal) {
@@ -491,7 +495,7 @@ function createTranscriptReducer(options = {}) {
       }
     }
     return { type: "status", state, terminal: Boolean(final), correlated,
-      interrupted: final && (message.kind === "interrupted_result" || message.kind === "turn_control" && ["stop", "interrupt"].includes(data.action)),
+      interrupted: final && (message.kind === "interrupted_result" && data.turn_interrupted === true || message.kind === "turn_control" && ["stop", "interrupt"].includes(data.action)),
       ...(final ? { proof: "durable_movement_after_admission" } : {}),
       messageId: correlated ? turn.messageId : undefined, turnId: m.turnId || undefined,
       runId: m.runId, interfaceId: m.interfaceId, entry: present(messages.get(entryIds.get(receiptKey(message))) || message) };

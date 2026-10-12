@@ -66,6 +66,7 @@ export const clientSettingsSections = [
   "account",
   "appearance",
   "voice-audio",
+  "computer-use",
   "gestures",
   "shortcuts",
   "access",

@@ -393,6 +393,34 @@ function createDesktopSurfaceHost(options) {
     return { home, root, driver: descriptor.interface_driver_ref, generation: before,
       identity: JSON.stringify([home, root, String(stat.dev), String(stat.ino), String(stat.uid), String(stat.mode)]) };
   }
+  async function defaultPreferenceStore(revalidate) {
+    return options.withDefaultPreferenceDriver(async door => {
+      await revalidate(); const selected = await preferenceStore(door);
+      if (!selected) throw new Error('Computer Use has no declared preference store');
+      return { root: selected.root, identity: selected.identity, generation: selected.generation, current: async () => options.withDefaultPreferenceDriver(async nextDoor => {
+        await revalidate(); if (nextDoor !== door || !isDeepStrictEqual(await preferenceStore(door), selected)) throw new Error('Computer Use preference store changed');
+        await revalidate();
+      }) };
+    });
+  }
+  async function stopConfiguredApplications(ownerId, revalidate) {
+    return options.withDefaultPreferenceDriver(async door => {
+      await revalidate(); const selected = await preferenceStore(door);
+      if (!selected) throw new Error('Computer Use has no declared preference store');
+      const rows = await options.resolvePreferenceEnvironments();
+      if (!Array.isArray(rows)) throw new Error('Computer Use host inventory is unavailable');
+      for (const row of rows) {
+        if (row.lifecycle !== 'active' || row.worker_environment_kind !== 'desktop_session') continue;
+        const store = await preferenceStore(row.door);
+        if (!store || store.root !== selected.root || store.driver !== selected.driver) continue;
+        for (const surface of row.client_surfaces ?? []) if (surface.protocol === 'desktop_session' && surface.mode === 'direct') {
+          await revalidate(); if (!isDeepStrictEqual(await preferenceStore(door), selected)) throw new Error('Computer Use preference store changed during Stop');
+          await request({ workerEnvironmentId: row.worker_environment_id, surfaceId: surface.id, runId: row.run_id, viewId: randomUUID(), operation: 'stop' }, ownerId);
+          await revalidate();
+        }
+      }
+    });
+  }
   async function defaultApplicationPermissions(raw, revalidate) {
     const keys = raw?.operation === 'list' ? ['operation'] : ['operation','sourceId','bundleId'];
     if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length !== keys.length || keys.some(key => !Object.hasOwn(raw,key))
@@ -485,7 +513,7 @@ function createDesktopSurfaceHost(options) {
       return { home: connection.home, hostGeneration: raw.hostGeneration, applications: result.applications, removed: result.removed };
     } finally { clearTimeout(timer); }
   }
-  return { request, pauseOwner, closeOwner, preparePresentationSource, preparePermissionSource, applicationPermissions, defaultApplicationPermissions };
+  return { request, pauseOwner, closeOwner, preparePresentationSource, preparePermissionSource, applicationPermissions, defaultApplicationPermissions, defaultPreferenceStore, stopConfiguredApplications };
 }
 
 function validateInput(input) {
@@ -592,11 +620,14 @@ function createDesktopPresentationHost(options) {
   for (const field of ['getNativeHost', 'prepareSource', 'requireAccess', 'homePath']) {
     if (typeof options?.[field] !== 'function') throw new Error(`Native desktop presentation requires ${field}`);
   }
-  const sources = new Map(), completedBatches = new Map(), automationWaits = new Map();
+  const sources = new Map(), completedBatches = new Map(), automationWaits = new Map(), views = new Map();
   let native = null, nativePromise = null, closed = false, home = null;
   const snapshot = () => [...sources.values()].map(record => ({
     worker_environment_id: record.input.workerEnvironmentId, run_id: record.input.runId,
+    source_id: createHash('sha256').update(JSON.stringify([record.id,record.nativeIdentity])).digest('hex'),
     app_instance_id: record.input.appInstanceId, source_window_id: record.input.sourceWindowId,
+    display_name: record.source.application.display_name,
+    window_title: record.source.windows.find(window => window.window_id === record.input.sourceWindowId)?.title ?? null,
     phase: record.phase, batch_movement_seq: record.batch, completion_status: record.completionStatus || null, error: record.error || null,
   }));
   function changed() { options.onChange?.(snapshot()); }
@@ -606,14 +637,57 @@ function createDesktopPresentationHost(options) {
   }
   function withdraw(record) {
     if (sources.get(record.id) !== record) return;
-    sources.delete(record.id); record.abort.abort();
+    closeSourceViews(record); sources.delete(record.id); record.abort.abort();
     const requestId = record.permissionRequestId || record.requestId;
     for (const pending of automationWaits.values()) if (pending.requestId === requestId) pending.finish(new Error('Native Automation source was withdrawn'));
     if (requestId && native) native.cancelSource({ requestId });
   }
+  function closeView(view) {
+    if (views.get(view.id) !== view) return;
+    views.delete(view.id); native?.detachEmbeddedSource({ viewId: view.id, viewGeneration: view.generation });
+  }
+  function closeSourceViews(record) { for (const view of [...views.values()]) if (view.source === record) closeView(view); }
+  function closeViewsOwner(ownerId) { for (const view of [...views.values()]) if (view.owner.id === ownerId) closeView(view); }
+  async function applicationView(raw, owner) {
+    const fields = ['workerEnvironmentId','surfaceId','runId','viewId','operation','appInstanceId','sourceWindowId','rect'];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some(key => !fields.includes(key))
+      || !['attach','detach','hide'].includes(raw.operation)) throw new Error('Invalid native application view request');
+    for (const key of fields.slice(0, 4)) required(raw[key], key);
+    owner.current(); options.requireAccess();
+    const previous = views.get(raw.viewId);
+    if (previous && (previous.owner.id !== owner.id || !sameTarget(previous.input, raw))) throw new Error('Native application view belongs to another owner or room');
+    if (raw.operation === 'detach' || raw.operation === 'hide') {
+      if (Object.keys(raw).length !== 5) throw new Error('Native detach requires only its exact view identity');
+      if (previous) {
+        if (raw.operation === 'detach') closeView(previous);
+        else { ++previous.revision; previous.visible = false; native?.hideEmbeddedSource({ viewId: previous.id, viewGeneration: previous.generation }); }
+      }
+      return { attached: false };
+    }
+    if (Object.keys(raw).length !== fields.length || !raw.rect || Object.keys(raw.rect).length !== 4
+      || !['x','y','width','height'].every(key => Number.isFinite(raw.rect[key])) || raw.rect.x < 0 || raw.rect.y < 0
+      || raw.rect.width <= 0 || raw.rect.height <= 0 || Object.values(raw.rect).some(value => value > 16384)) throw new Error('Native application view requires its visible rectangle');
+    required(raw.appInstanceId,'appInstanceId'); required(raw.sourceWindowId,'sourceWindowId');
+    const source = [...sources.values()].find(record => sameTarget(record.input, raw) && record.input.appInstanceId === raw.appInstanceId
+      && record.input.sourceWindowId === raw.sourceWindowId && record.phase === 'published' && !record.completionStatus);
+    if (!source?.authenticated || !source.requestId) throw new Error('Application preview is not currently published');
+    if (previous && previous.source !== source) throw new Error('Detach the previous application before replacing the view');
+    const view = previous || { id: raw.viewId, generation: randomUUID(), owner, input: raw, source, revision: 0, visible: false };
+    const revision = ++view.revision; view.visible = true;
+    views.set(view.id, view);
+    const check = () => { owner.current(); current(source); if (views.get(view.id) !== view || view.revision !== revision || !view.visible || source.phase !== 'published' || source.completionStatus) throw new Error('Native application view was withdrawn'); };
+    try {
+      check(); await source.preparedSource.current(); check();
+      const host = await getNative(); check(); options.syncHosts?.(host);
+      const hostIdentity = owner.hostIdentity();
+      host.embedSource({ requestId: source.requestId, viewId: view.id, viewGeneration: view.generation,
+        hostId: hostIdentity.hostId, hostGeneration: hostIdentity.generation, windowHandle: owner.windowHandle(), rect: raw.rect });
+      check(); return { attached: true };
+    } catch (error) { if (view.revision === revision) closeView(view); throw error; }
+  }
   async function getNative() {
     if (!nativePromise) nativePromise = Promise.resolve().then(() => options.getNativeHost(onEvent)).then(value => {
-      for (const method of ['beginSource', 'installSource', 'cancelSource', 'completeGroup', 'clearCompletedGroup']) {
+      for (const method of ['beginSource', 'installSource', 'cancelSource', 'completeGroup', 'clearCompletedGroup','embedSource','detachEmbeddedSource','hideEmbeddedSource']) {
         if (typeof value?.[method] !== 'function') throw new Error('Client native presentation API is incomplete');
       }
       if (closed) throw new Error('Native presentation client was closed during startup');
@@ -675,6 +749,7 @@ function createDesktopPresentationHost(options) {
       if (!record) return;
       if (event.type === 'source-authenticated') { record.authenticated = true; if (record.phase !== 'published') record.phase = 'authenticated'; }
       else if (['source-failed', 'source-timeout', 'source-disconnected', 'source-withdrawn', 'source-cancelled', 'source-permission-required'].includes(event.type)) {
+        closeSourceViews(record);
         const reconnect = event.type === 'source-disconnected' && record.authenticated === true;
         record.permissionRequired = event.type === 'source-permission-required';
         record.phase = reconnect ? 'reconnecting' : 'failed'; record.error = event.type === 'source-permission-required' ? 'macOS Automation permission for the client’s native presentation connection has not been granted' : 'Native presentation source is unavailable';
@@ -686,13 +761,14 @@ function createDesktopPresentationHost(options) {
     if (event.identity) {
       const record = [...sources.values()].find(value => value.nativeIdentity && JSON.stringify(value.nativeIdentity) === JSON.stringify(event.identity));
       if (record && event.type === 'published') { record.phase = 'published'; changed(); }
-      if (record && event.type === 'invalidated') { record.phase = 'ended'; changed(); }
+      if (record && event.type === 'invalidated') { closeSourceViews(record); record.phase = 'ended'; changed(); }
     }
     options.onNativeEvent?.(event);
   }
   async function reconcile(candidates, turns) {
     if (closed) return;
     options.requireAccess();
+    for (const view of [...views.values()]) { try { view.owner.current(); } catch { closeView(view); } }
     const currentHome = options.homePath();
     if (home !== null && home !== currentHome) {
       for (const record of [...sources.values()]) withdraw(record);
@@ -710,6 +786,7 @@ function createDesktopPresentationHost(options) {
       if (existing && JSON.stringify(existing.identity) !== JSON.stringify(candidate.identity)) { withdraw(existing); }
       admitted.add(key);
       if (!turn.turn_open) {
+        if (existing) closeSourceViews(existing);
         if (existing && !existing.authenticated) withdraw(existing);
         else if (existing && !existing.completionStatus) void completeSource(existing);
         if (native && completedBatches.get(turn.run_id) !== batch) { native.completeGroup({ groupId: turn.run_id }); completedBatches.set(turn.run_id, batch); }
@@ -798,7 +875,7 @@ function createDesktopPresentationHost(options) {
   }
   function revokeAll() { const hadSources = sources.size > 0; for (const record of [...sources.values()]) withdraw(record); completedBatches.clear(); if (hadSources) changed(); }
   function stop() { if (closed) return; revokeAll(); closed = true; }
-  return { reconcile, onEvent, snapshot, permissionSources, revokeAll, stop };
+  return { reconcile, onEvent, snapshot, permissionSources, applicationView, closeViewsOwner, revokeAll, stop };
 }
 
 function presentationSource(descriptor, request) {
@@ -889,11 +966,12 @@ function createDesktopPermissionHost(options) {
     if (records.get(record.id) !== record) return;
     records.delete(record.id); if (byOwner.get(record.owner.id) === record) byOwner.delete(record.owner.id);
     record.abort.abort(); record.native?.closePermissions({ presentationId: record.id, generation: record.generation });
+    if (record.input.setup === true) record.source?.close?.();
   }
   const presentation = record => ({ ...record.snapshot, automation: record.automationRows });
   async function refresh(record) {
     record.snapshot = await record.source.exchange('status', null, record.abort.signal); current(record);
-    const refs = await options.automationSources(record.input, record.snapshot.helper); current(record);
+    const refs = record.input.setup === true ? [] : await options.automationSources(record.input, record.snapshot.helper); current(record);
     if (!Array.isArray(refs) || refs.length + record.snapshot.permissions.length > 64) throw new Error('Native Automation requirement list exceeds its bound');
     const map = new Map(), rows = [];
     for (const ref of refs) {
@@ -905,14 +983,14 @@ function createDesktopPermissionHost(options) {
     record.automations = map; record.automationRows = rows;
   }
   async function open(raw, owner) {
-    const input = permissionSurfaceInput(raw);
+    const input = raw?.setup === true && Object.keys(raw).length === 1 ? { setup: true } : permissionSurfaceInput(raw);
     if (!owner || !Number.isSafeInteger(owner.id) || owner.id <= 0 || typeof owner.current !== 'function' || typeof owner.windowHandle !== 'function') throw new Error('Permission presentation requires its actual client owner');
     owner.current(); if (closed) throw new Error('Permission presentation client is closed');
     const old = byOwner.get(owner.id); if (old) remove(old);
     const record = { id: randomUUID(), generation: randomUUID(), input, owner, home: options.homePath(), abort: new AbortController(), sequence: 0, busy: false, snapshot: null, automations: new Map(), automationRows: [], native: null, source: null };
     records.set(record.id, record); byOwner.set(owner.id, record);
     try {
-      const source = await options.prepareSource(input); current(record);
+      const source = await options.prepareSource(input, owner); current(record);
       if (source.home !== record.home) throw new Error('Permission helper belongs to another Home'); record.source = source;
       await refresh(record); await source.current(); current(record);
       const native = await options.getNativeHost(); current(record);

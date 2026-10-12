@@ -1309,6 +1309,7 @@ fn history(
                 validate_checked_owner_transition(&transition)?;
                 generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
                 validate_verified_input_transition(&mut reader, &transition)?;
+                input_revision::validate_rearm_evidence(&mut reader, &transition)?;
             }
             current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
             let hash = args.writes[1].after_hash();
@@ -1450,9 +1451,10 @@ impl ProviderOutputHandoff {
             if generation != authoring_generation {
                 continue;
             }
-            validate_bound_run_authoring_topology(&record, &self.config, None)?;
-            let result_template = self
-                .config
+            let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
+            let original_config = attempt_config(&original, &self.config)?;
+            validate_bound_run_authoring_topology(&record, &original_config, None)?;
+            let result_template = original_config
                 .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
             let result = writer_record
                 .checkpoints
@@ -1504,17 +1506,27 @@ impl ProviderOutputHandoff {
         let expected = generation
             .checked_add(1)
             .ok_or("provider recovery generation overflow")?;
-        let attempts = self.writer_attempts(expected)?;
+        let mut generations = revision_attempt_generations(&self.ctx, record, record_bytes, &self.config)?
+            .into_keys().collect::<BTreeSet<_>>();
+        generations.insert(expected);
+        let mut attempts = Vec::new();
+        for generation in &generations { attempts.extend(self.writer_attempts(*generation)?); }
+        attempts.sort_by_key(|attempt| attempt.generation);
+        if attempts.windows(2).any(|pair| pair[0].generation == pair[1].generation) {
+            return Err("writer recovery has competing attempts for one writer generation".into());
+        }
         let mut selected = None;
         for attempt in attempts {
-            if correlation_generation(&record.id, &attempt.authored.correlation_id)? != expected {
-                continue;
-            }
+            let generation = correlation_generation(&record.id, &attempt.authored.correlation_id)?;
+            if !generations.contains(&generation) { return Err("writer recovery selected an unproven generation".into()); }
             let before_bytes = attempt.args.writes[1].before(self.ctx.required_host_io_limits()?.max_payload_bytes)?;
             let before =
                 RunRecord::from_bytes(before_bytes.as_bytes())
                     .map_err(|e| e.to_string())?;
-            if before.interface_state.get(&self.config.provider_interface)
+            if generation != expected {
+                validate_revision_attempt_predecessor(&self.ctx, before_bytes.as_bytes(), record_bytes,
+                    attempt.authored.pending_handoff.source_movement_seq, &attempt_config(&before, &self.config)?)?;
+            } else if before.interface_state.get(&self.config.provider_interface)
                 != record.interface_state.get(&self.config.provider_interface)
             {
                 let protected = output_connections::protected_record(before_bytes.as_bytes(), record_bytes, &self.config)?
@@ -1533,6 +1545,17 @@ impl ProviderOutputHandoff {
                     .is_none_or(|(_, ok)| *ok)
                 {
                     return Err("writer recovery has an unexplained overlapping attempt".into());
+                }
+                if previous.authored.correlation_id != attempt.authored.correlation_id {
+                    let original = previous.args.writes[1].before(self.ctx.required_host_io_limits()?.max_payload_bytes)?;
+                    let original_config = attempt_config(&RunRecord::from_bytes(original.as_bytes())
+                        .map_err(|error| error.to_string())?, &self.config)?;
+                    // The detached writer's fresh return is already proved by
+                    // OrderedArguments::checked_call; the target intent is exact.
+                    let mut target = attempt.authored.clone();
+                    target.authoring_result_checkpoint = previous.authored.authoring_result_checkpoint.clone();
+                    authoring_retry::validate_rebased_authored_run(original.as_bytes(), before_bytes.as_bytes(),
+                        &previous.authored, &target, &original_config)?;
                 }
             }
             selected = Some(attempt);
@@ -1607,7 +1630,7 @@ impl ProviderOutputHandoff {
                     .is_some_and(|protected| ContentHash::of_bytes(&protected) == ContentHash::of_bytes(before));
                 if (chain.is_empty() && !routing_only) || chain
                         .iter()
-                        .any(|t| t.writer.owner == self.config.provider_interface)
+                        .any(|t| t.writer.owner == self.config.provider_interface && !input_revision::checked_revision(t))
                 {
                     return Err(
                         "refused target write has no exact independent checked advance".into(),

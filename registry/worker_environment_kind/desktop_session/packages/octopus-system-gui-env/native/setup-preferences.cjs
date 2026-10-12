@@ -128,4 +128,37 @@ async function planDesktopApplicationPreferences({ octopusHomeRoot, plannedWrite
   }
 }
 
-module.exports = { planDesktopApplicationPreferences, needsDesktopApplicationPreferences };
+async function readComputerUsePreference(root) {
+  await directoryState(root, true);
+  let handle;
+  try { handle = await fs.open(path.join(root, 'computer-use.json'), constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch (error) { if (error.code === 'ENOENT') return { schema_version: 1, enabled: false }; throw error; }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o600 || stat.size > 1024) throw new Error('Computer Use preference must be an owned private file');
+    const bytes = await handle.readFile();
+    if (bytes.length > 1024) throw new Error('Computer Use preference exceeded its bound');
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2
+        || value.schema_version !== 1 || typeof value.enabled !== 'boolean') throw new Error('Computer Use preference is malformed');
+    return value;
+  } finally { await handle.close(); }
+}
+
+async function writeComputerUsePreference(root, enabled) {
+  if (typeof enabled !== 'boolean') throw new Error('Computer Use selection requires an explicit Boolean');
+  await readComputerUsePreference(root);
+  const temporary = path.join(root, `.computer-use-${crypto.randomBytes(16).toString('hex')}.json`);
+  const handle = await fs.open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await handle.writeFile(JSON.stringify({ schema_version: 1, enabled }) + '\n'); await handle.sync();
+  } finally { await handle.close(); }
+  try {
+    await directoryState(root, true); await fs.rename(temporary, path.join(root, 'computer-use.json'));
+    const directory = await fs.open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
+    return await readComputerUsePreference(root);
+  } finally { await fs.rm(temporary, { force: true }); }
+}
+
+module.exports = { planDesktopApplicationPreferences, needsDesktopApplicationPreferences, readComputerUsePreference, writeComputerUsePreference };

@@ -5,6 +5,7 @@ import type { ClientExtensionRegistryState } from "../../extensions/types";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import { AppearanceSection } from "./AppearanceSection";
 import { AccountSettingsSection } from "./AccountSettingsSection";
+import { ComputerUseSettingsSection } from "./ComputerUseSettingsSection";
 import { ExtensionsSection } from "./ExtensionsSection";
 import {
   AboutSection,
@@ -36,6 +37,7 @@ const SETTINGS_SECTION_CONTENT: Record<SettingsSectionId, (context: SettingsSect
   account: () => <AccountSettingsSection />,
   appearance: () => <div {...settingsTargetProps("appearance.theme")}><AppearanceSection /></div>,
   "voice-audio": ({ accessProfile }) => <VoiceAudioSection accessProfile={accessProfile} />,
+  "computer-use": () => <ComputerUseSettingsSection />,
   gestures: ({ accessProfile }) => <GesturesSection accessProfile={accessProfile} />,
   shortcuts: ({ accessProfile }) => <ShortcutsSection accessProfile={accessProfile} />,
   access: ({ accessProfile }) => <AccessSection accessProfile={accessProfile} />,
