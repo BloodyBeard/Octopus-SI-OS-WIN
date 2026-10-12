@@ -35,7 +35,7 @@ pub fn plan_operator_writer_runs(
     }
     let existing: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     let (content, mut writes) = wire_record_at_root(
-        root, &request.run_id, Some(&existing), pretty_json(&existing)?,
+        root, &request.run_id, Some(&existing), pretty_json(&existing)?, false,
     )?;
     if serde_json::from_str::<serde_json::Value>(&content).map_err(|e| e.to_string())? != existing {
         writes.push(PlannedClientWrite {
@@ -59,6 +59,15 @@ pub(super) fn wire(
     )
 }
 
+pub(super) fn wire_preserving_existing(
+    request: &OperatorChatPlanRequest,
+    identity: &PlannedIdentity,
+    content: String,
+) -> Result<(String, Vec<PlannedClientWrite>), String> {
+    let root = require_absolute("run_records_root",request.run_records_root.as_deref().ok_or("client writer Runs require their declared run_records_root")?)?;
+    wire_record_at_root(root,&identity.run_id,request.existing_run_record.as_ref(),content,true)
+}
+
 pub(super) fn wire_record(
     request: &OperatorChatPlanRequest,
     run_id: &str,
@@ -72,7 +81,7 @@ pub(super) fn wire_record(
             .as_deref()
             .ok_or("client writer Runs require their declared run_records_root")?,
     )?;
-    wire_record_at_root(root, run_id, existing, content)
+    wire_record_at_root(root, run_id, existing, content, false)
 }
 
 fn wire_record_at_root(
@@ -80,6 +89,7 @@ fn wire_record_at_root(
     run_id: &str,
     existing: Option<&serde_json::Value>,
     content: String,
+    preserve_existing: bool,
 ) -> Result<(String, Vec<PlannedClientWrite>), String> {
     let mut record: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| e.to_string())?;
@@ -109,6 +119,10 @@ fn wire_record_at_root(
             .map(serde_json::from_value)
             .transpose()
             .map_err(|e| e.to_string())?;
+        if preserve_existing && prior.is_none()
+            && existing.and_then(|record|record.get("interface_state")).and_then(|states|states.get(&owner)).is_some() {
+            continue;
+        }
         let id = prior.as_ref().map(|w| w.run.clone()).unwrap_or_else(|| {
             let hash = blake3::hash(format!("{run_id}:{owner}").as_bytes()).to_hex();
             octopus_descriptors::RunId::new(format!("run_writer_{}", &hash[..24]))

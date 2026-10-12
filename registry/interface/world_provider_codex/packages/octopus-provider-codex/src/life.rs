@@ -393,6 +393,9 @@ enum DeferredProviderTurnRelease {
         action: String,
         observed_ledger_next_seq: u64,
     },
+    SettledEnvelope {
+        observed_ledger_next_seq: u64,
+    },
     RecoveredResult {
         source_session_carrier: Option<ArtifactRef>,
         failed_source_movement_seq: u64,
@@ -2922,6 +2925,9 @@ fn persist_deferred_provider_turn_release(
             *observed_ledger_next_seq,
         )?;
     }
+    if let DeferredProviderTurnRelease::SettledEnvelope { observed_ledger_next_seq } = release {
+        validate_settled_envelope_release(ctx, descriptor, run, turn, *observed_ledger_next_seq)?;
+    }
     let path = deferred_provider_turn_path(ctx, turn.seq);
     let bytes = std::fs::read(&path).map_err(|error| {
         format!(
@@ -3255,6 +3261,7 @@ fn operator_turn_requires_deferral(
     descriptor: &InterfaceDescriptor,
     run: &RunId,
     turn: &QueuedTurn,
+    current: &[octopus_provider_run_authoring::SessionContextArtifact],
 ) -> Result<bool, String> {
     let source_snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
     let continuity = recover_provider_turn_continuity(
@@ -3265,6 +3272,9 @@ fn operator_turn_requires_deferral(
         &ctx.pinned_run_record_bytes(&turn.envelope)?,
     )
     .map_err(|error| error.to_string())?;
+    let continuity = reconcile_operator_session_continuity(
+        descriptor, &turn.envelope, continuity, current,
+    ).map_err(|error| error.to_string())?;
     if continuity
         .as_ref()
         .is_some_and(codex_continuity_waits_for_result)
@@ -3283,29 +3293,13 @@ async fn operator_turn_requires_deferral_with_context(
     run: &RunId,
     turn: &QueuedTurn,
 ) -> Result<bool, String> {
-    if !operator_turn_requires_deferral(ctx, descriptor, run, turn)? {
-        return Ok(false);
-    }
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
-    let snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
-    let bound = recover_provider_turn_continuity(
-        descriptor, &turn.envelope, snapshot.as_ref().map(|(_, snapshot)| snapshot), run, &pinned,
-    ).map_err(|error| error.to_string())?;
-    if !bound.as_ref().is_some_and(codex_continuity_waits_for_result) {
-        return Ok(true);
-    }
     let handoff = session.from_invocation_when_ready(
         ctx, descriptor, run, &turn.envelope, turn.seq, &pinned,
     ).await.map_err(|error| error.to_string())?;
-    let continuity = reconcile_operator_session_continuity(
-        descriptor, &turn.envelope, bound, &handoff.current_session_context_artifacts().await,
-    ).map_err(|error| error.to_string())?;
-    if continuity.as_ref().is_some_and(codex_continuity_waits_for_result) {
-        return Ok(true);
-    }
-    let labels = codex_session_snapshot_labels(descriptor).map_err(|error| error.to_string())?;
-    latest_provider_session_carrier(ctx, run, turn.seq, &labels, None)
-        .map(|scan| scan.latest.is_some())
+    operator_turn_requires_deferral(
+        ctx, descriptor, run, turn, &handoff.current_session_context_artifacts().await,
+    )
 }
 
 async fn prepare_deferred_provider_turn(
@@ -3330,6 +3324,10 @@ async fn prepare_deferred_provider_turn(
     .map_err(|error| error.to_string())?;
     if let Some(release) = deferred.release.as_ref() {
         match release {
+            DeferredProviderTurnRelease::SettledEnvelope { observed_ledger_next_seq } => {
+                validate_settled_envelope_release(ctx, descriptor, run, &deferred.turn, *observed_ledger_next_seq)?;
+                return Ok(DeferredTurnReadiness::Ready(deferred.turn.clone()));
+            }
             DeferredProviderTurnRelease::InterruptedResult { source_session_carrier: released_source, .. } => {
                 if released_source != &source_session_carrier {
                     return Err(format!("deferred provider turn {} changed its interrupted-result source carrier", deferred.turn.seq));
@@ -3444,7 +3442,80 @@ async fn prepare_deferred_provider_turn(
         persist_deferred_provider_turn_release(ctx, descriptor, run, &deferred.turn, &release)?;
         return Ok(DeferredTurnReadiness::Ready(deferred.turn.clone()));
     }
+    if let Some(observed_ledger_next_seq) = settled_envelope_prefix(ctx, descriptor, run, &deferred.turn, None)? {
+        let release = DeferredProviderTurnRelease::SettledEnvelope { observed_ledger_next_seq };
+        persist_deferred_provider_turn_release(ctx, descriptor, run, &deferred.turn, &release)?;
+        return Ok(DeferredTurnReadiness::Ready(deferred.turn.clone()));
+    }
     Ok(DeferredTurnReadiness::AwaitingSessionSettlement)
+}
+
+fn settled_envelope_prefix(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    run: &RunId,
+    turn: &QueuedTurn,
+    stop_before_seq: Option<u64>,
+) -> Result<Option<u64>, String> {
+    if stop_before_seq.is_some_and(|stop| stop <= turn.seq) {
+        return Err("settled input release has an invalid ledger boundary".into());
+    }
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&pinned).map_err(|error| error.to_string())?;
+    if record.id != *run || record.status != serde_json::json!("idle") { return Ok(None); }
+    let Some(pending) = record.interface_state.get(&ctx.interface).and_then(|state| state.get("pending_handoff")) else {
+        return Ok(None);
+    };
+    let terminal = pending.get("terminal").and_then(serde_json::Value::as_bool).ok_or("settled input has malformed source finality")?;
+    let prior = pending.get("source_movement_seq").and_then(serde_json::Value::as_u64).ok_or("settled input has malformed source ownership")?;
+    if !terminal || prior >= turn.seq { return Ok(None); }
+    let snapshot = bound_operator_session_snapshot(ctx, descriptor, turn)?;
+    let continuity = recover_provider_turn_continuity(descriptor, &turn.envelope,
+        snapshot.as_ref().map(|(_, snapshot)| snapshot), run, &pinned).map_err(|error| error.to_string())?;
+    if continuity.as_ref().is_some_and(codex_continuity_waits_for_result) { return Ok(None); }
+    let (mut file, length, limit) = open_arbitration_snapshot(ctx)?;
+    let decoder = DurableMovementDecoder::for_log(&ctx.movements_path);
+    let (offset, expected) = authoritative_source_scan_start(ctx, &mut file, length, limit, &decoder, turn.seq);
+    let mut source_verified = false;
+    let mut advanced = false;
+    let mut next_seq = turn.seq;
+    let scan = scan_authoritative_snapshot(ctx, &mut file, length, limit, &decoder, offset, expected, stop_before_seq, |movement| {
+        next_seq = movement.seq.0.checked_add(1).ok_or("settled input ledger sequence overflowed")?;
+        if movement.seq.0 < turn.seq { return Ok(None::<()>); }
+        if movement.seq.0 == turn.seq {
+            if !movement_is_provider_source(ctx, run, &movement) || movement.artifact.as_ref() != Some(&turn.envelope.artifact) {
+                return Err("settled input release changed its admitted source".into());
+            }
+            source_verified = true;
+        } else if movement.from == Endpoint::Interface(ctx.interface.clone())
+            && movement.runtime().is_some_and(|runtime| &runtime.run == run)
+        {
+            advanced = true;
+        }
+        Ok(None)
+    })?;
+    ensure_arbitration_snapshot_length(ctx, &file, length)?;
+    if !source_verified {
+        return Err("settled input release has no complete authoritative source prefix".into());
+    }
+    if !scan.complete_boundary && stop_before_seq.is_none() { return Ok(None); }
+    if !scan.complete_boundary || stop_before_seq.is_some_and(|stop| stop != next_seq) {
+        return Err("settled input release has no complete authoritative source prefix".into());
+    }
+    Ok((!advanced).then_some(next_seq))
+}
+
+fn validate_settled_envelope_release(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    run: &RunId,
+    turn: &QueuedTurn,
+    observed_ledger_next_seq: u64,
+) -> Result<(), String> {
+    if settled_envelope_prefix(ctx, descriptor, run, turn, Some(observed_ledger_next_seq))? != Some(observed_ledger_next_seq) {
+        return Err("deferred input was not settled at its recorded release boundary".into());
+    }
+    Ok(())
 }
 
 async fn checked_deferred_interrupted_result(
@@ -4934,7 +5005,7 @@ async fn drive_turn_with_retries(
         Ok(handoff) => handoff,
         Err(error) => {
             if recover_interrupted_result_without_context(
-                ctx, descriptor, handoff_session, interrupted_effects, run, &turn,
+                ctx, descriptor, handoff_session, interrupted_effects, control, run, &turn,
             ).await? {
                 control.finish();
                 return Ok(());
@@ -4945,11 +5016,34 @@ async fn drive_turn_with_retries(
             return Ok(());
         }
     };
+    let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
+    // Classify exact, completed duplicate results before interruption arbitration:
+    // an older result must neither resolve nor cancel its successor's pending effect.
+    if crate::handler::correlated_tool_result(&turn.envelope).map_err(|error| error.to_string())?.is_some()
+        && let Some(completed_source) = handoff.completed_input_artifact_source(&turn.envelope.artifact).await?
+    {
+        if source_recovery == ProviderSourceRecovery::Completed { return Ok(()); }
+        if source_recovery != ProviderSourceRecovery::Process {
+            return Err("duplicate result retains an unfinished source handoff".into());
+        }
+        handoff.validate_client_output_routes(&codex_projection_output_labels(descriptor).map_err(|error| error.to_string())?)?;
+        let receipt = crate::handler::duplicate_tool_result_receipt(
+            descriptor, &turn.envelope, turn.seq, completed_source,
+            &handoff.current_run_record_bytes().await,
+            &handoff.current_session_context_artifacts().await,
+            &ctx.interface_var_dir().join("emitted"),
+        ).map_err(|error| error.to_string())?;
+        match handoff.hand_observation(receipt, true).await? {
+            ProviderHandoffOutcome::Admitted { .. } => return Ok(()),
+            ProviderHandoffOutcome::TerminalFailure { failure_seq, failure_class, .. } => {
+                return Err(format!("duplicate tool result receipt failed: {failure_class} at {failure_seq}"));
+            }
+        }
+    }
     let durable_interrupted_continuity = interrupted_effects.durable_continuity(run).await?;
     let resolving_interrupted_result = interrupted_effects
         .begin_result(run, turn.seq, &turn.envelope)
         .await?;
-    let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
     let (mut interrupted_after_artifact, mut recovered_handoff_artifacts) = match source_recovery {
         ProviderSourceRecovery::Process => {
             if !recovered_outcomes.is_empty() {
@@ -4982,6 +5076,24 @@ async fn drive_turn_with_retries(
         ).await?;
         control.finish();
         return Ok(());
+    }
+    if interrupted_after_artifact.is_some() && !resolving_interrupted_result {
+        let record = handoff.current_run_record_bytes().await;
+        let session = handoff.current_session_context_artifacts().await;
+        if let Some(receipt) = crate::handler::recovered_tool_handoff_receipt(
+            descriptor, &turn.envelope, turn.seq, &record, &session, &recovered_outcomes,
+            &ctx.interface_var_dir().join("emitted"),
+        ).map_err(|error| error.to_string())? {
+            match handoff.hand_final(receipt).await? {
+                ProviderHandoffOutcome::Admitted { .. } => {
+                    control.finish();
+                    return Ok(());
+                }
+                ProviderHandoffOutcome::TerminalFailure { failure_seq, failure_class, .. } => {
+                    return Err(format!("recovered tool handoff failed to close its source: {failure_class} at {failure_seq}"));
+                }
+            }
+        }
     }
     if interrupted_after_artifact.is_none()
         && !resolving_interrupted_result
@@ -5027,19 +5139,20 @@ async fn drive_turn_with_retries(
         if let Some((emissions, closure)) = recover_sealed_interrupted_result(
             ctx, descriptor, &turn, continuity,
         )? {
-            admit_interrupted_result(ctx, &handoff, Some(interrupted_effects), run, turn.seq, &closure, emissions).await?;
+            admit_interrupted_result(ctx, &handoff, control, Some(interrupted_effects), run, turn.seq, &closure, emissions).await?;
             control.finish();
             return Ok(());
         }
     }
     let native_terminal_source = if resolving_interrupted_result { None } else {
         let snapshot = handoff.invocation_session_snapshot();
-        recover_provider_result_continuity(descriptor, &turn.envelope, snapshot.as_ref(), run, &pinned_run_record)
+        let current_session = handoff.current_session_context_artifacts().await;
+        recover_provider_result_continuity(descriptor, &turn.envelope, snapshot.as_ref(), &current_session, run, &pinned_run_record)
             .map_err(|error| error.to_string())?
     };
     if let Some(source) = native_terminal_source.as_ref() {
         if let Some((emissions, closure)) = recover_sealed_interrupted_result(ctx, descriptor, &turn, source)? {
-            admit_interrupted_result(ctx, &handoff, None, run, turn.seq, &closure, emissions).await?;
+            admit_interrupted_result(ctx, &handoff, control, None, run, turn.seq, &closure, emissions).await?;
             control.finish();
             return Ok(());
         }
@@ -5262,6 +5375,31 @@ async fn drive_turn_with_retries(
                         );
                     }
                     match stream_emission {
+                        ProviderStreamEmission::CurrentRunRecord { expected_before, reply } => {
+                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                            batch_started_at = None;
+                            let current = handoff.reconciled_run_record_bytes().await?;
+                            let current = match expected_before {
+                                Some((hash, record)) => handoff.checked_capability_baseline(&hash, &record).await,
+                                None => Ok(current),
+                            };
+                            reply.send(current).map_err(|_| "checked run reader closed before its response".to_string())?;
+                        }
+                        ProviderStreamEmission::WithCapabilityAmendment { emission, amendment } => {
+                            if resolving_interrupted_result {
+                                return Err("interrupted result cannot amend its capability contract".into());
+                            }
+                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                            batch_started_at = None;
+                            // The bridge ends this input's handoff. Its external result
+                            // remains pending in the emitted native continuity.
+                            let outcomes = handoff.hand_batch_with_capability_amendment(vec![emission], true, &amendment).await?;
+                            if outcomes.len() != 1 || !outcomes.iter().all(|outcome| matches!(outcome, ProviderHandoffOutcome::Admitted { .. })) {
+                                return Err("capability amendment has no exact admitted bridge effect".into());
+                            }
+                            forwarded.outputs += 1;
+                            terminal_group_handed = true;
+                        }
                         ProviderStreamEmission::WithOutgoingBindings { emission, bindings } => {
                             if resolving_interrupted_result {
                                 return Err("interrupted result cannot create outgoing bindings".into());
@@ -5353,11 +5491,34 @@ async fn drive_turn_with_retries(
                             emissions.extend(retained_outputs);
                             emissions.push(closure);
                             forwarded.outputs += admit_interrupted_result(
-                                &ctx, &handoff, resolving_interrupted_result.then_some(&interrupted_effects), &run, result_source_movement_seq,
+                                &ctx, &handoff, control, resolving_interrupted_result.then_some(&interrupted_effects), &run, result_source_movement_seq,
                                 &closure_ref, emissions,
                             ).await?;
                             interrupted_closure = Some(closure_ref);
                             terminal_group_handed = true;
+                        }
+                        ProviderStreamEmission::ContextBoundary { emissions, admitted } => {
+                            let result = async {
+                                if resolving_interrupted_result {
+                                    return Err("interrupted exact-result recovery cannot refresh provider context".to_string());
+                                }
+                                if !pending.is_empty() {
+                                    forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                                }
+                                let count = emissions.len();
+                                if count == 0 || count > 3 {
+                                    return Err("provider context boundary has an invalid emission count".to_string());
+                                }
+                                let outcomes = handoff.hand_batch_with_outgoing_bindings(emissions, false, &[]).await?;
+                                if outcomes.len() != count || outcomes.iter().any(|outcome| !matches!(outcome, ProviderHandoffOutcome::Admitted { .. })) {
+                                    return Err("provider context boundary was not fully admitted".to_string());
+                                }
+                                forwarded.outputs += count;
+                                batch_started_at = None;
+                                Ok(())
+                            }.await;
+                            let _ = admitted.send(result.clone());
+                            result?;
                         }
                         ProviderStreamEmission::Control { emission, source_movement_seq, admitted } => {
                             if resolving_interrupted_result {
@@ -5911,6 +6072,7 @@ async fn recover_interrupted_result_without_context(
     descriptor: &InterfaceDescriptor,
     handoff_session: &ProviderHandoffSession,
     interrupted_effects: &InterruptedEffectArbiter,
+    control: &CodexTurnControlBroker,
     run: &RunId,
     turn: &QueuedTurn,
 ) -> Result<bool, String> {
@@ -5930,7 +6092,7 @@ async fn recover_interrupted_result_without_context(
         ctx, descriptor, run, &turn.envelope, turn.seq,
     )?;
     admit_interrupted_result(
-        ctx, &handoff, Some(interrupted_effects), run, turn.seq, &closure, emissions,
+        ctx, &handoff, control, Some(interrupted_effects), run, turn.seq, &closure, emissions,
     ).await?;
     Ok(true)
 }
@@ -6084,6 +6246,7 @@ fn native_result_admitted_prefix(
 async fn admit_interrupted_result(
     ctx: &InterfaceLiftContext,
     handoff: &ProviderOutputHandoff,
+    control: &CodexTurnControlBroker,
     interrupted_effects: Option<&InterruptedEffectArbiter>,
     run: &RunId,
     source_movement_seq: u64,
@@ -6183,6 +6346,7 @@ async fn admit_interrupted_result(
             ));
         }
     }
+    control.finish();
     Ok(outcomes.len())
 }
 
@@ -6508,6 +6672,7 @@ fn prepare_private_auth_store_home(
 mod tests {
     use super::*;
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/native_terminal_handoff.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/turn_deferral.rs"));
 
     use futures::{SinkExt, StreamExt};
     use octopus_interface_transport::InterfaceHostIoLimits;
@@ -7557,11 +7722,12 @@ mod tests {
             replay.seq += 1;
             assert!(recover_sealed_interrupted_result(&ctx, &descriptor, &replay, &interrupted).is_err());
             let failed_context_session = ProviderHandoffSession::new(&ctx).unwrap();
+            let replay_control = CodexTurnControlBroker::new(Some(result_seq));
             assert!(recover_interrupted_result_without_context(
-                &ctx, &descriptor, &failed_context_session, &resolving_restart, &run, &replay,
+                &ctx, &descriptor, &failed_context_session, &resolving_restart, &replay_control, &run, &replay,
             ).await.is_err());
             assert!(!recover_interrupted_result_without_context(
-                &ctx, &descriptor, &failed_context_session, &resolving_restart, &run,
+                &ctx, &descriptor, &failed_context_session, &resolving_restart, &replay_control, &run,
                 &QueuedTurn { envelope: message_envelope.clone(), seq: result_seq + 1 },
             ).await.unwrap());
             replay.seq = result_seq;
@@ -8303,7 +8469,7 @@ mod tests {
             ],
         );
 
-        assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn).unwrap());
+        assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn, &[]).unwrap());
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
         upgrade_deferred_fixture(&ctx, &descriptor, &run, &turn).await;
         let deferred = DeferredProviderTurn {
@@ -8464,7 +8630,7 @@ mod tests {
         );
 
         assert!(is_provider_turn_input(&descriptor, &turn.envelope).unwrap());
-        assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn).unwrap());
+        assert!(operator_turn_requires_deferral(&ctx, &descriptor, &run, &turn, &[]).unwrap());
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
         persist_deferred_provider_turn(&ctx, &run, &turn).unwrap();
         let deferred = DeferredProviderTurn {

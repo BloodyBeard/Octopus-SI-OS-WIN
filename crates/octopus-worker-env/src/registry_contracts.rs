@@ -36,7 +36,6 @@ pub struct WorkerEnvironmentRegistryIssue {
 #[derive(Clone, Debug, Default)]
 struct WorkerEnvironmentToolSurface<'a> {
     kinds_by_tool: BTreeMap<&'a str, BTreeSet<&'a str>>,
-    tools_by_kind: BTreeMap<&'a str, Vec<&'a WorkerEnvironmentToolView<'a>>>,
 }
 
 impl<'a> WorkerEnvironmentToolSurface<'a> {
@@ -47,22 +46,12 @@ impl<'a> WorkerEnvironmentToolSurface<'a> {
                 tool.tool,
                 tool.worker_environment_kinds.iter().copied().collect(),
             );
-            for kind in &tool.worker_environment_kinds {
-                surface.tools_by_kind.entry(kind).or_default().push(tool);
-            }
         }
         surface
     }
 
     fn kinds_for(&self, tool: &str) -> Option<&BTreeSet<&'a str>> {
         self.kinds_by_tool.get(tool)
-    }
-
-    fn tools_for_kind(&self, kind: &str) -> &[&'a WorkerEnvironmentToolView<'a>] {
-        self.tools_by_kind
-            .get(kind)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
     }
 }
 
@@ -154,38 +143,6 @@ pub fn worker_environment_registry_issues(
                     reason: format!(
                         "tool '{}' exact door '{}' driver ref '{}' is not declared by worker_environment_kind '{}'",
                         tool.tool, door.id, door.interface_driver_ref, kind
-                    ),
-                });
-            }
-        }
-    }
-
-    for (_, kind) in worker_environment_kinds {
-        let kind_id = kind.worker_environment_kind_id.as_str();
-        let kind_tools = environment_surface.tools_for_kind(kind_id);
-        for process_bin in &kind.tool_process_bins {
-            if !kind_tools
-                .iter()
-                .any(|tool| tool.process_bin == process_bin)
-            {
-                issues.push(WorkerEnvironmentRegistryIssue {
-                    subject: WorkerEnvironmentRegistrySubject::Kind(kind_id.to_string()),
-                    reason: format!(
-                        "worker_environment_kind '{kind_id}' declares unused tool process bin '{process_bin}'"
-                    ),
-                });
-            }
-        }
-        for driver_ref in &kind.door_driver_refs {
-            if !kind_tools.iter().any(|tool| {
-                interfaces_by_id
-                    .get(tool.interface.as_str())
-                    .is_some_and(|interface| interface.interface_driver_ref == *driver_ref)
-            }) {
-                issues.push(WorkerEnvironmentRegistryIssue {
-                    subject: WorkerEnvironmentRegistrySubject::Kind(kind_id.to_string()),
-                    reason: format!(
-                        "worker_environment_kind '{kind_id}' declares unused door driver ref '{driver_ref}'"
                     ),
                 });
             }
@@ -331,6 +288,27 @@ mod tests {
             &dispositions,
         )
         .expect("exact worker, exact door, tool process, and code kind form bidirectionally");
+    }
+
+    #[test]
+    fn declared_bins_can_precede_tools_without_weakening_actual_ownership_edges() {
+        let mut spec = kind();
+        spec.tool_process_bins.push("owner://packages/authored-tool".into());
+        spec.door_driver_refs.push("authored_door".into());
+        let kinds = [(DescriptorName::new("worker_environment_kind/git_worktree"), spec)];
+        let door = door();
+        let interfaces = [(DescriptorName::new("interface/system_coder_env_exact"), door.clone())];
+        let dispositions = BTreeMap::from([(door.id.clone(), InterfaceRuntimeDisposition::ExternalReader)]);
+        validate_worker_environment_registry(&[], &kinds, &[], &interfaces, &dispositions).unwrap();
+        let worker = InterfaceId::new("system_worker_repair");
+        let workers = [WorkerEnvironmentCeilingView {worker: &worker, wek: vec!["git_worktree"], tools: vec!["repair"]}];
+        let mut tool = WorkerEnvironmentToolView {tool: "repair", interface: &door.id,
+            process_bin: "target/debug/octopus-coder-fs-tool", worker_environment_kinds: vec!["git_worktree"]};
+        validate_worker_environment_registry(&workers, &kinds, &[tool.clone()], &interfaces, &dispositions).unwrap();
+        tool.process_bin = "owner://packages/undeclared";
+        let issues = worker_environment_registry_issues(&workers, &kinds, &[tool], &interfaces, &dispositions);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].subject, WorkerEnvironmentRegistrySubject::Tool("repair".into()));
     }
 
     #[test]

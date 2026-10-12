@@ -340,6 +340,18 @@ async function run() {
     assert.equal(staleClientDoctor.findings[0].code, "client.package_owner_stale");
     assert.match(staleClientDoctor.findings[0].next_step, /owner-authorized package repair/);
     assert.match(staleClientDoctor.errors[0], /differs from its package source/);
+    const unboundPackageDoctor = await runClientDoctor({ roots,
+      inspectInstallation: async () => ({ id: "world_operator_chat", available: true, file_snapshot: clientSnapshot(),
+        member_states: [{ registry_kind: "interface", owner: "world_operator_chat", materialized: true,
+          source_digest: exactDigest, installed_digest: exactDigest }] }),
+      inspectCatalog: async () => ({ errors: [], packages: [{ id: "driver.unbound", materialized: true,
+        installed: false, receipt_state: "stale", source_digest: exactDigest, installed_digest: exactDigest,
+        receipt_digest: "b".repeat(64), error: "source-owned executable receipt is stale" }] }),
+    });
+    assert.equal(unboundPackageDoctor.findings[0].code, "package.installation_inconsistent");
+    assert.equal(unboundPackageDoctor.findings[0].evidence.package_id, "driver.unbound");
+    assert.equal(unboundPackageDoctor.checks, 2);
+    await assert.rejects(fs.stat(roots.stateRoot), { code: "ENOENT" });
     await writeJson(path.join(roots.sourceRegistryRoot, "artifact", "artifact-unowned-context", "artifact.json"), {
       id: "artifact-unowned-context",
       label: "context.reference",

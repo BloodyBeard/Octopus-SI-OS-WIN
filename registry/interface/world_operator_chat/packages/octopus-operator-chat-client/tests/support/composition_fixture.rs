@@ -53,12 +53,18 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         "tool/artifact.read/tool.json",
         "tool/artifact.send/tool.json",
         "mark/tool.call.allowed/mark.json",
+        "verifier/tool_call_allowed/verifier.json",
     ] {
         let value =
             serde_json::from_slice(&std::fs::read(source.join("registry").join(relative)).unwrap())
                 .unwrap();
         write(&root.join("registry"), relative, value);
     }
+    std::fs::copy(
+        source.join("registry/verifier/tool_call_allowed/verify.py"),
+        root.join("registry/verifier/tool_call_allowed/verify.py"),
+    )
+    .unwrap();
     write(
         root,
         "registry/interface/world_provider_fixture/interface.json",

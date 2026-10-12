@@ -1,6 +1,178 @@
 use super::*;
 
 impl ProviderOutputHandoff {
+    pub async fn completed_input_artifact_source(
+        &self,
+        artifact: &ArtifactRef,
+    ) -> Result<Option<u64>, String> {
+        let state = self.state.lock().await;
+        let key = artifact_ref_key(artifact);
+        let inputs = self.session.index()?.session_evidence(&self.config.run, &self.config.provider_interface,
+            std::iter::once(key.clone()))?;
+        let sequences = inputs.get(&key).into_iter().flat_map(|evidence|
+            evidence.provider_inputs.range(..self.source_movement_seq).map(|(sequence, _)| *sequence)
+        ).collect::<Vec<_>>();
+        if sequences.is_empty() { return Ok(None); }
+        if state.session_context.provider_interface != self.config.provider_interface {
+            return Err("completed input context belongs to another provider".into());
+        }
+        let mut matching = state.session_context.artifacts.iter().enumerate()
+            .filter(|(_, entry)| entry.source_artifact == *artifact);
+        if let Some((position, entry)) = matching.next() {
+            if matching.next().is_some() {
+                return Err("completed input context repeats an exact artifact".into());
+            }
+            validate_session_source_payload(entry, &self.ctx.blobs_dir, self.ctx.required_host_io_limits()?,
+                &self.session_snapshot_labels, position, &self.config.provider_interface)?;
+        }
+        let mut completed = None;
+        for sequence in sequences {
+            if let Some(source) = self.completed_input_source_evidence(&state.run_record_bytes, sequence, artifact)? {
+                completed.get_or_insert(source);
+            }
+        }
+        Ok(completed)
+    }
+
+    fn completed_input_source_evidence(
+        &self, current_bytes: &[u8], sequence: u64, artifact: &ArtifactRef,
+    ) -> Result<Option<u64>, String> {
+        let limits = self.ctx.required_host_io_limits()?;
+        let (before, original) = self.checked_input_artifact_record(sequence, artifact)?;
+        let (_, invocation) = self.checked_input_artifact_record(self.source_movement_seq, artifact)?;
+        let current = RunRecord::from_bytes(current_bytes).map_err(|error| error.to_string())?;
+        if invocation.ee != original.ee || current.ee != original.ee {
+            return Err("completed input evidence changed its EE".into());
+        }
+        let provider_writer = CheckedRunWriter {
+            owner: self.config.provider_interface.clone(),
+            source: self.config.authoring_source_interface.clone(),
+            door: self.config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?.interface().clone(),
+            tool: self.config.file_write_tool.clone(),
+            call_label: self.config.file_write_label.clone(),
+            result_label: self.config.file_write_result_label.clone(),
+        };
+        let mut writers = self.config.checkpoints.iter()
+            .filter_map(|checkpoint| checkpoint.owner_authoring.clone()).collect::<Vec<_>>();
+        writers.push(provider_writer.clone());
+        let writers = declared_writer_closure(&original, writers)?;
+        let evidence = CheckedRunEvidence {
+            movements_path: &self.ctx.movements_path,
+            ledger_index_path: &self.ctx.ledger_index_path,
+            blobs_dir: &self.ctx.blobs_dir,
+            max_control_frame_bytes: limits.max_control_frame_bytes,
+            max_manifest_bytes: limits.max_manifest_bytes,
+            max_payload_bytes: limits.max_payload_bytes,
+        };
+        stable_run_observation(&self.run_path, current_bytes, limits.max_payload_bytes, || {
+            let start = concurrent_writer_evidence_start(&evidence, &original, &before, sequence)?;
+            let chain = checked_run_file_chain_state(&evidence, &self.run_path, &before,
+                current_bytes, start, &writers)?;
+            let mut previous = persisted_pending_handoff(&original, &self.config.provider_interface)?;
+            let mut sources = BTreeMap::new();
+            if let Some(prior) = &previous {
+                if prior.source_movement_seq >= sequence {
+                    return Err("completed input pinned record already claims this or a later source".into());
+                }
+                sources.insert(prior.source_movement_seq, prior.clone());
+            }
+            for transition in &chain {
+                if transition.writer == provider_writer {
+                    validate_checked_provider_transition(transition)?;
+                } else {
+                    validate_checked_owner_transition(transition)?;
+                }
+                let record = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+                let next = persisted_pending_handoff(&record, &self.config.provider_interface)?;
+                if previous == next { continue; }
+                let next = next.ok_or("completed input chain lost its pending handoff")?;
+                validate_pending_items_are_active(&record, &self.config.provider_interface, &next)?;
+                let publication = previous.as_ref().is_some_and(|prior|
+                    context_publication::is_publication_completion(prior, &next)
+                        && prior.source_without_context == next.source_without_context);
+                if let Some(prior) = &previous {
+                    if prior.context_publication.is_some() && !publication {
+                        return Err("completed input handoff was superseded before context publication".into());
+                    }
+                    for (item, outcome) in prior.items.iter().zip(self.admitted_replay_handoff(prior)?) {
+                        let ProviderHandoffOutcome::Admitted { artifact, .. } = outcome else {
+                            return Err("completed input handoff has a refused output".into());
+                        };
+                        if self.session.index()?.indexed_handoff_seq(PendingHandoffLedgerCoordinate {
+                            interface: &self.config.provider_interface, run: &self.config.run, worker: &self.config.worker,
+                            artifact: &artifact, required_evidence: pending_required_evidence(item)?,
+                            checkpoint: &item.checkpoint.id, epoch: item.checkpoint.epoch,
+                        }, transition.call.seq.0)?.is_none() {
+                            return Err("completed input handoff was superseded before output admission".into());
+                        }
+                    }
+                }
+                if let Some(prior) = sources.get(&next.source_movement_seq) {
+                    if prior.terminal && !publication {
+                        return Err("completed input chain repeats a terminal source".into());
+                    }
+                    if prior.items == next.items && !publication {
+                        return Err("completed input chain conflicts with a prior pending batch".into());
+                    }
+                }
+                sources.insert(next.source_movement_seq, next.clone());
+                previous = Some(next);
+            }
+            if previous != persisted_pending_handoff(&current, &self.config.provider_interface)? {
+                return Err("completed input chain differs from the current pending handoff".into());
+            }
+            let Some(completed) = sources.get(&sequence) else { return Ok(None); };
+            if !completed.terminal || completed.context_publication.is_some() {
+                return Err("earlier exact input has no completed terminal handoff".into());
+            }
+            self.admitted_replay_handoff(completed)?;
+            Ok(Some(sequence))
+        }).map_err(String::from)
+    }
+
+    fn checked_input_artifact_record(
+        &self, sequence: u64, artifact: &ArtifactRef,
+    ) -> Result<(Vec<u8>, RunRecord), String> {
+        let mut index = self.session.index()?;
+        let (coordinate, source) = index.exact_provider_source_outbound(
+            &self.config.run, &self.config.worker, &self.config.provider_interface, sequence,
+        )?;
+        if source.artifact != *artifact {
+            return Err("completed input source has a different exact artifact".into());
+        }
+        let key = artifact_ref_key(artifact);
+        let inputs = index.session_evidence(&self.config.run, &self.config.provider_interface,
+            std::iter::once(key.clone()))?;
+        let label = inputs.get(&key).and_then(|evidence| evidence.provider_inputs.get(&sequence))
+            .ok_or("completed input source has no admitted provider input evidence")?;
+        let (manifest, _) = read_pinned_artifact(&self.ctx, artifact)?;
+        if *label != manifest.label {
+            return Err("completed input admission differs from its pinned artifact".into());
+        }
+        drop(index);
+        let hash = source.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+            .ok_or("completed input source has no pinned run record")?;
+        let (bytes, record) = pinned_run_record(&self.ctx, &hash, "completed input source")?;
+        let config = config_from_persisted_profile(&record, &self.config.provider_interface, &RunAuthoringProfile {
+            file_write_tool: self.config.file_write_tool.clone(), file_write_label: self.config.file_write_label.clone(),
+            file_write_result_label: self.config.file_write_result_label.clone(), result_timeout_ms: self.config.result_timeout_ms,
+        })?;
+        let checkpoint_id = CheckpointId::new(&coordinate.checkpoint);
+        let checkpoint = record.checkpoint(&checkpoint_id).ok_or("completed input lost its pinned checkpoint")?;
+        let templates = config.checkpoints.iter().filter(|template|
+            template.role.is_provider_input() && template.interface() == &source.source
+                && checkpoint_record_matches_template(checkpoint, template, &self.config.run)
+        ).collect::<Vec<_>>();
+        if record.id != self.config.run || record.worker != self.config.worker
+            || !record.active_checkpoints.contains(&checkpoint_id) || checkpoint.epoch.0 != coordinate.epoch
+            || templates.len() != 1 || !indexed_evidence_matches_checkpoint(&source, templates[0])
+            || !artifact_refs_match_bindings(&source.artifact_binding_refs, &checkpoint.artifact_bindings)
+        {
+            return Err("completed input source differs from its exact pinned input contract".into());
+        }
+        Ok((bytes, record))
+    }
+
     pub(super) fn recover_overtaken_source(
         &self,
         current: &[u8],

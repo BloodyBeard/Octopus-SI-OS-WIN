@@ -23,6 +23,67 @@ pub struct WorkerEnvKindRegistry {
 }
 
 impl WorkerEnvKindRegistry {
+    pub fn load_kind_from_dir(
+        root: &Path,
+        id: &WorkerEnvironmentKindId,
+    ) -> Result<Self, WorkerEnvError> {
+        let mut components = Path::new(id.as_str()).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(name)) if name.to_str() == Some(id.as_str()))
+            || components.next().is_some()
+            || id.as_str().trim().is_empty()
+        {
+            return Err(WorkerEnvError::UnknownKind(id.as_str().to_string()));
+        }
+        let file = root.join(id.as_str()).join("worker_environment_kind.json");
+        let registry_root =
+            std::fs::canonicalize(root).map_err(|error| WorkerEnvError::MalformedDescriptor {
+                path: root.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        let owner = std::fs::canonicalize(root.join(id.as_str())).map_err(|error| {
+            WorkerEnvError::MalformedDescriptor {
+                path: file.display().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        let metadata = std::fs::symlink_metadata(&file).map_err(|error| {
+            WorkerEnvError::MalformedDescriptor {
+                path: file.display().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        if owner != registry_root.join(id.as_str())
+            || !metadata.is_file()
+            || metadata.file_type().is_symlink()
+        {
+            return Err(WorkerEnvError::MalformedDescriptor {
+                path: file.display().to_string(),
+                reason: "kind descriptor is not a regular file in its exact registry owner".into(),
+            });
+        }
+        let raw = std::fs::read(&file).map_err(|error| WorkerEnvError::MalformedDescriptor {
+            path: file.display().to_string(),
+            reason: error.to_string(),
+        })?;
+        let (spec, hash) = Self::parse_one(&raw, &file.display().to_string())?;
+        if spec.worker_environment_kind_id != *id {
+            return Err(WorkerEnvError::MalformedDescriptor {
+                path: file.display().to_string(),
+                reason: format!("directory/body identity mismatch for '{id}'"),
+            });
+        }
+        let mut registry = Self::default();
+        registry.head.insert(id.clone(), hash.clone());
+        registry.by_hash.insert(
+            hash.clone(),
+            PinnedWek {
+                spec: Arc::new(spec),
+                hash,
+            },
+        );
+        Ok(registry)
+    }
+
     pub fn register_driver(
         &mut self,
         driver: Arc<dyn WorkerEnvDriver>,
@@ -243,17 +304,17 @@ impl WorkerEnvKindRegistry {
             [pinned] => *pinned,
             _ => {
                 return Err(WorkerEnvError::NoCompatibleFormation(format!(
-                "door={} driver_ref={} tool={} worker={} resolves multiple descriptor-owned code kinds=[{}]",
-                request.door_interface,
-                request.door_driver_ref,
-                request.tool,
-                request.worker,
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.spec.worker_environment_kind_id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
+                    "door={} driver_ref={} tool={} worker={} resolves multiple descriptor-owned code kinds=[{}]",
+                    request.door_interface,
+                    request.door_driver_ref,
+                    request.tool,
+                    request.worker,
+                    candidates
+                        .iter()
+                        .map(|candidate| candidate.spec.worker_environment_kind_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
             }
         };
 

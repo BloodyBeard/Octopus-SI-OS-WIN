@@ -1,5 +1,174 @@
 use super::*;
 
+#[test]
+#[ignore = "requires an explicitly selected Home for read-only authoring inspection"]
+fn selected_home_authoring_inspector_reads_actual_selection() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(home.join("registry/interface").join(provider.as_str()).join("interface.json")).unwrap()).unwrap();
+    let path=home.join("state/runs").join(format!("{run}.json"));
+    let before=std::fs::read(&path).unwrap();
+    let ledger_path=home.join("ledger/movements.jsonl");let ledger=std::fs::read(&ledger_path).unwrap();
+    let roots: octopus_operator_chat_client::run_composition::CompositionRoots = serde_json::from_value(
+        descriptor.interface_driver_config.as_ref().unwrap().private_config["run_affordances"]["roots"].clone()).unwrap();
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&before).unwrap();
+    let selection = octopus_operator_chat_client::run_composition::current_run::current_selection(&roots,&record,&provider).unwrap().unwrap();
+    assert!(!selection.selected_tools.is_empty());
+    let inspected = octopus_operator_chat_client::run_composition::validate_registry_candidate(&octopus_operator_chat_client::run_composition::RegistryValidationRoots {
+        registry_root:roots.registry_root,ee_instances_root:roots.ee_instances_root,run_records_root:roots.run_records_root,
+    },&[]).unwrap();
+    eprintln!("authoring inspection: {} actual selected tools, {} installed subjects, {} diagnosed registry issues",
+        selection.selected_tools.len(),inspected.stages[0].available.len(),inspected.stages[0].issues.len());
+    assert_eq!(std::fs::read(path).unwrap(),before);assert_eq!(std::fs::read(ledger_path).unwrap(),ledger);
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected duplicate result with a completed earlier input"]
+async fn selected_home_duplicate_result_preserves_current_wait() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1); drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(provider.clone(),dir,Some(descriptor.clone()),home.join("interfaces").join(provider.as_str()),
+        home.join("ledger/movements.jsonl"),home.join("ledger/blobs"),scratch.path().join("unused-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(),home.join("state/runs")),("interface_hand_in_root".into(),home.join("interface-hand-in"))]),arrivals,Default::default())
+        .with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path = home.join("state/runs").join(format!("{run}.json"));
+    let before = std::fs::read(&path).unwrap(); let ledger = std::fs::read(&ctx.movements_path).unwrap();
+    let turn = replay_provider_source(&ctx,&run,source).unwrap().unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
+    let handoff = ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&turn.envelope,source,&pinned).unwrap();
+    // Match life's post-recovery read boundary. This selected case has only a
+    // fully admitted earlier terminal handoff; it must emit and write nothing.
+    let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let pending = &record["interface_state"][provider.as_str()]["pending_handoff"];
+    assert_eq!(pending["terminal"],true);
+    assert!(pending["source_movement_seq"].as_u64().unwrap() < source);
+    assert!(pending["context_publication"].is_null());
+    let (recovery,outcomes) = handoff.recover_source_with_outcomes().await.unwrap();
+    assert_eq!(recovery,ProviderSourceRecovery::Process);assert!(outcomes.is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+    let observed = handoff.current_session_context_artifacts().await;
+    for entry in observed.iter().filter(|entry| entry.source_artifact == turn.envelope.artifact).chain(observed.iter().rev().take(3)) {
+        eprintln!("context source={:?} label={} exact_input={} generation={}",entry.source_movement_seq,entry.label,
+            entry.source_artifact==turn.envelope.artifact,entry.payload["codex_continuity"]["context_generation"]);
+    }
+    let prior = handoff.completed_input_artifact_source(&turn.envelope.artifact).await.unwrap().unwrap();
+    assert!(prior < source);
+    let session = handoff.current_session_context_artifacts().await;
+    let continuity = reconcile_operator_session_continuity(&descriptor,&turn.envelope,None,&session).unwrap().unwrap();
+    let receipt = crate::handler::duplicate_tool_result_receipt(&descriptor,&turn.envelope,source,prior,
+        &handoff.current_run_record_bytes().await,&session,scratch.path()).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&receipt.artifact.read_payload_bytes().unwrap()).unwrap();
+    let original = serde_json::to_value(&continuity).unwrap();
+    assert!(value.get("codex_continuity").is_none());
+    assert_eq!(value["context_generation"],original["context_generation"]);
+    assert_eq!(value["completed_source_movement_seq"],prior);
+    let mut other = turn.envelope.artifact.clone(); other.content=ContentHash::of_bytes(b"different result");
+    assert!(handoff.completed_input_artifact_source(&other).await.unwrap().is_none());
+    assert_eq!(std::fs::read(path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+    eprintln!("duplicate source {source} proves completed source {prior}; current native wait preserved");
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected deferred input whose native result is already settled"]
+async fn selected_home_new_input_observes_the_settled_native_result() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1); drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(provider.clone(),dir,Some(descriptor.clone()),home.join("interfaces").join(provider.as_str()),
+        home.join("ledger/movements.jsonl"),home.join("ledger/blobs"),scratch.path().join("unused-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(),home.join("state/runs")),("interface_hand_in_root".into(),home.join("interface-hand-in"))]),arrivals,Default::default())
+        .with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path = home.join("state/runs").join(format!("{run}.json"));
+    let before = std::fs::read(&path).unwrap(); let ledger = std::fs::read(&ctx.movements_path).unwrap();
+    let turn = replay_provider_source(&ctx,&run,source).unwrap().unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
+    let snapshot = bound_operator_session_snapshot(&ctx,&descriptor,&turn).unwrap();
+    let bound = recover_provider_turn_continuity(&descriptor,&turn.envelope,snapshot.as_ref().map(|(_,snapshot)|snapshot),&run,&pinned).unwrap();
+    let handoff = ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&turn.envelope,source,&pinned).unwrap();
+    let current = handoff.current_session_context_artifacts().await;
+    let settled = reconcile_operator_session_continuity(&descriptor,&turn.envelope,bound.clone(),&current).unwrap();
+    for (name,state) in [("bound",bound.as_ref()),("current",settled.as_ref())] {
+        let state=serde_json::to_value(state).unwrap();eprintln!("{name}: generation={} pending={} interrupted={}",state["context_generation"],!state["pending"].is_null(),!state["interrupted_pending"].is_null());
+    }
+    assert!(!settled.as_ref().is_some_and(codex_continuity_waits_for_result));
+    assert!(!operator_turn_requires_deferral(&ctx,&descriptor,&run,&turn,&current).unwrap());
+    let prefix = settled_envelope_prefix(&ctx,&descriptor,&run,&turn,None).unwrap().unwrap();
+    validate_settled_envelope_release(&ctx,&descriptor,&run,&turn,prefix).unwrap();
+    assert!(validate_settled_envelope_release(&ctx,&descriptor,&run,&turn,source).is_err());
+    assert!(validate_settled_envelope_release(&ctx,&descriptor,&run,&turn,prefix+1).is_err());
+    #[cfg(unix)] {
+        let mut partial = ctx.clone();
+        let dir = scratch.path().join("partial-ledger");std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(ctx.movements_path.parent().unwrap().join("metadata"),dir.join("metadata")).unwrap();
+        partial.movements_path=dir.join("movements.jsonl");
+        let mut bytes=ledger.clone();bytes.extend_from_slice(br#"{"seq":"#);std::fs::write(&partial.movements_path,bytes).unwrap();
+        assert!(settled_envelope_prefix(&partial,&descriptor,&run,&turn,None).unwrap().is_none());
+        validate_settled_envelope_release(&partial,&descriptor,&run,&turn,prefix).unwrap();
+        assert!(validate_settled_envelope_release(&partial,&descriptor,&run,&turn,prefix+1).is_err());
+    }
+    assert_eq!(std::fs::read(path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+}
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected Home with an admitted nonterminal tool handoff"]
+async fn selected_home_recovers_admitted_tool_handoff_without_replaying_the_effect() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let interface_dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(interface_dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(interface_dir.join("life.json")).unwrap()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(
+        provider.clone(), interface_dir, Some(descriptor.clone()), home.join("interfaces").join(provider.as_str()),
+        home.join("ledger/movements.jsonl"), home.join("ledger/blobs"), scratch.path().join("unused-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(),home.join("state/runs")),("interface_hand_in_root".into(),home.join("interface-hand-in"))]),
+        arrivals, Default::default(),
+    ).with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let run_path = home.join("state/runs").join(format!("{run}.json"));
+    let before = std::fs::read(&run_path).unwrap();
+    let ledger = std::fs::read(&ctx.movements_path).unwrap();
+    let turn = replay_provider_source(&ctx, &run, source).unwrap().unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
+    let session = ProviderHandoffSession::new(&ctx).unwrap();
+    let handoff = session.from_invocation(&ctx, &descriptor, &run, &turn.envelope, source, &pinned).unwrap();
+    let current = handoff.current_session_context_artifacts().await;
+    let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let pending = &record["interface_state"][provider.as_str()]["pending_handoff"];
+    assert_eq!(pending["source_movement_seq"],source);
+    assert_eq!(pending["terminal"],false);
+    let id = pending["items"].as_array().unwrap().last().unwrap()["artifact_id"].as_str().unwrap();
+    // The constructor checks this publication against the run's write history
+    // and exact ledger admissions. No handoff/effect method is called here.
+    let effect = current.iter().find(|entry|entry.source_artifact.id.as_str()==id).unwrap();
+    let outcomes = [ProviderHandoffOutcome::Admitted {seq:effect.source_movement_seq.unwrap(),artifact:effect.source_artifact.clone()}];
+    let receipt = crate::handler::recovered_tool_handoff_receipt(&descriptor,&turn.envelope,source,&before,
+        &current,&outcomes,scratch.path()).unwrap().expect("the exact admitted effect must close its consumed source");
+    let value: serde_json::Value = serde_json::from_slice(&receipt.artifact.read_payload_bytes().unwrap()).unwrap();
+    assert_eq!(value["effect_artifact"],serde_json::to_value(&effect.source_artifact).unwrap());
+    assert_eq!(value["codex_continuity"]["pending"],effect.payload["codex_continuity"]["pending"]);
+    assert_eq!(value["codex_continuity"]["context_generation"].as_u64().unwrap(),record["interface_state"][provider.as_str()]["context_generation"].as_u64().unwrap()+1);
+    assert_eq!(std::fs::read(run_path).unwrap(),before);
+    assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+}
+
 #[tokio::test]
 #[ignore = "requires explicitly selected read-only replay evidence"]
 async fn selected_home_deferred_continuity_preserves_exact_evidence() {

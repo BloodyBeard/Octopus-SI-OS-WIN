@@ -382,6 +382,7 @@ async function adoptLocalPackageUpdates(options) {
     const library = await loadLocalPackageLibrary(roots);
     const selected = requireReviewedPackageClosure(library, [...receipts.keys()].sort());
     const updates = [];
+    const localChanges = [];
     const expectedRepairs = {};
     for (const entry of selected) {
       const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true });
@@ -390,6 +391,15 @@ async function adoptLocalPackageUpdates(options) {
       const receipt = receipts.get(entry.manifest.id);
       if (!state.receipt || hashJson(state.receipt) !== hashJson(receipt)) {
         throw new Error(`Installed package '${entry.manifest.id}' receipt changed before update`);
+      }
+      if (receipt.source_digest === source.sourceDigest && receipt.manifest_digest === source.manifestDigest) {
+        if (state.receiptState !== "valid") {
+          localChanges.push({ packageId: entry.manifest.id, receiptState: state.receiptState,
+            materialized: state.materialized, installedDigest: state.installedDigest,
+            receiptDigest: hashJson(receipt) });
+          reportProgress(options?.onProgress, { phase: "preserving_local_changes", packageId: entry.manifest.id, percent: 0 });
+        }
+        continue;
       }
       assertPackageUpdateOwnership(entry.manifest, source, state);
       if (state.receiptState === "valid") continue;
@@ -403,7 +413,7 @@ async function adoptLocalPackageUpdates(options) {
       };
     }
     const packageIds = updates.map(entry => entry.manifest.id);
-    if (!updates.length) return { action: "adopt_package_updates", changed: false, packageIds };
+    if (!updates.length) return { action: "adopt_package_updates", changed: false, packageIds, localChanges };
     await assertPackageMutationAllowed(roots, options?.assertMutable, packageIds);
     const outcome = await repairResolvedPackages(roots, updates, {
       operationId: `release_${hashJson(expectedRepairs)}`,
@@ -411,7 +421,7 @@ async function adoptLocalPackageUpdates(options) {
       assertMutable: options?.assertMutable,
       onProgress: options?.onProgress,
     });
-    return { ...outcome, action: "adopt_package_updates" };
+    return { ...outcome, action: "adopt_package_updates", localChanges };
   });
 }
 

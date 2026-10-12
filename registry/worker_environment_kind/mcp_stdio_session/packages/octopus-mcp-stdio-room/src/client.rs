@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{oneshot, Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::config::McpStdioConfig;
@@ -98,6 +98,15 @@ impl StdioMcpClient {
         cwd: &Path,
         room_root: &Path,
     ) -> Result<Self, String> {
+        let executable = std::fs::canonicalize(&config.command).map_err(|error| {
+            format!(
+                "MCP stdio command '{}' is unavailable: {error}",
+                config.command
+            )
+        })?;
+        if executable != Path::new(&config.command) {
+            return Err("MCP stdio executable changed after command resolution".to_string());
+        }
         std::fs::create_dir_all(room_root).map_err(|error| {
             format!(
                 "MCP stdio room root '{}' cannot be created: {error}",
@@ -116,7 +125,7 @@ impl StdioMcpClient {
             config.max_stderr_segment_bytes,
             config.stderr_retained_segments,
         )?;
-        let mut command = tokio::process::Command::new(&config.command);
+        let mut command = tokio::process::Command::new(&executable);
         command
             .args(&config.args)
             .current_dir(cwd)

@@ -109,7 +109,7 @@ test("submission, watch and restored idle projections wait past Stop ACK and rej
   }
 });
 
-test("noninteractive Stop waits for closure, reports failure explicitly, and pending ACK only times out", async () => {
+test("noninteractive results retain only the selected turn reply through Stop, failure, replay and streaming", async () => {
   const Module = require("node:module"), file = path.resolve(__dirname, "../cli/index.cjs");
   const source = await fs.readFile(file, "utf8");
   const ack = movement(110, { event_kind: "turn_control", event_data: { action: "stop", status: "acknowledged",
@@ -117,14 +117,35 @@ test("noninteractive Stop waits for closure, reports failure explicitly, and pen
   const closure = movement(120, { event_kind: "interrupted_result", event_data: { result_kind: "tool_result", correlation_id: "call",
     turn_id: "turn", thread_id: "thread", ok: true, turn_interrupted: true, returned_to_model: false,
     result_disposition: "durably_admitted_after_interrupt", source_artifact: { id: "result", content: Array(32).fill(10) } } });
-  for (const [result, expectedCode] of [["stopped", 130], ["failed", 1], ["timeout", 124]]) await fixture(async (index) => {
-    if (!index) return [ack];
+  const oldReply = movement(90, { text: "Old baseline answer", event_data: { turn_id: "old", thread_id: "thread" } });
+  for (const [result, expectedCode, command, restored, partial] of [
+    ["stopped", 130, "watch", false, false], ["failed", 1, "watch", false, false], ["timeout", 124, "watch", false, false],
+    ["stopped", 130, "watch", true, false], ["stopped", 130, "watch", true, true],
+    ["stopped", 130, "send", false, true], ["failed", 1, "send", false, true], ["completed", 0, "send", false, true],
+  ]) {
+    const ending = result === "completed" ? movement(120, { text: "Current final", event_data: { turn_id: "turn", thread_id: "thread" } })
+      : { ...closure, event_data: { ...closure.event_data, ok: result !== "failed" } };
+    const fragments = ["Current ", "partial"].map((text, index) => ({
+      source: "stream", run_id: run.run_id, interface_id: run.chat_interface_id,
+      from_interface_id: run.provider_bound_interface_id, from_interface_role: "provider", recorded_at_unix_ms: 105 + index,
+      source_movement_seq: 100, stream_id: "b".repeat(64), stream_seq: index + 1,
+      byte_start_offset: index * 100, byte_end_offset: (index + 1) * 100, terminal: false, event_kind: "message_delta", text,
+      event_data: { text, turn_id: "turn", thread_id: "thread", item_id: "current-reply" },
+    }));
+    const history = [oldReply, ...(restored ? [
+      ...(partial ? [movement(105, { text: "Current partial", terminal: false, event_data: { turn_id: "turn", thread_id: "thread" } })] : []),
+      movement(108, { text: "Other provider reply", terminal: false, from_interface_id: "other-provider", event_data: { turn_id: "turn", thread_id: "thread" } }),
+      ack, ending,
+    ] : [])];
+    await fixture(async (index) => {
+    if (!index) return [...(partial ? fragments : []), ...(result === "completed" ? [] : [ack])];
+    if (result !== "timeout") assert.equal(index, 1);
     await new Promise((resolve) => setTimeout(resolve, 30));
-    return result === "timeout" ? [] : [{ ...closure, event_data: { ...closure.event_data, ok: result !== "failed" } }];
+    return result === "timeout" ? [] : [ending];
   }, async (client, reads) => {
     const unit = new Module(file, module); unit.filename = file; unit.paths = Module._nodeModulePaths(path.dirname(file));
     const nativeRequire = Module.createRequire(file);
-    const observed = { ...client, async *follow(...args) {
+    const observed = { ...client, async send(input) { assert.equal(input.runId, run.run_id); return receipt; }, async *follow(...args) {
       yield { type: "message", entry: { id: "commentary", role: "assistant", kind: "commentary", text: "I am working" } };
       yield { type: "delta", id: "commentary", role: "assistant", text: " on this." };
       yield* client.follow(...args);
@@ -133,20 +154,25 @@ test("noninteractive Stop waits for closure, reports failure explicitly, and pen
       : id === "./client.cjs" ? { createClient: () => observed } : nativeRequire(id);
     unit._compile(source, file);
     let output = "";
-    const code = await unit.exports.main(["watch", run.run_id, "--json", ...(result === "timeout" ? ["--timeout", "0.01"] : [])], {
+    const destination = path.join(client.env.home, "last-message.txt");
+    const code = await unit.exports.main([command, run.run_id, ...(command === "send" ? ["Continue"] : []), "--json", "--output-last-message", destination,
+      ...(result === "timeout" ? ["--timeout", "0.01"] : [])], {
       stdin: { isTTY: false }, stdout: { write: (text) => { output += text; } }, stderr: { write() {} },
     });
     const rows = output.trim().split("\n").map(JSON.parse);
-    assert.equal(code, expectedCode);
-    assert.equal(reads(), 2);
-    assert.ok(rows.some((row) => row.type === "status" && row.state === "stopping" && !row.terminal));
-    assert.equal(rows.some((row) => row.type === "result" && row.status === "completed"), false);
+    assert.equal(code, expectedCode, JSON.stringify({ result, command, restored, partial, final: rows.at(-1) }));
+    assert.equal(reads(), restored ? 0 : 2);
+    if (!restored && result !== "completed") assert.ok(rows.some((row) => row.type === "status" && row.state === "stopping" && !row.terminal));
+    assert.equal(rows.some((row) => row.type === "result" && row.status === "completed"), result === "completed");
     assert.equal(rows.at(-1).type, result === "timeout" ? "timeout" : "result");
     if (result !== "timeout") {
       assert.equal(rows.at(-1).status, result);
-      assert.equal(rows.at(-1).text, "");
-    }
-  });
+      const expected = result === "completed" ? "Current final" : partial ? "Current partial" : "";
+      assert.equal(rows.at(-1).text, expected);
+      assert.equal(await fs.readFile(destination, "utf8"), expected);
+    } else await assert.rejects(fs.access(destination), { code: "ENOENT" });
+  }, { turnOpen: !restored, messages: history });
+  }
 });
 
 test("task deletion and follow-up refuse active work or an unresolved Stop even with an idle projection", async () => {

@@ -18,7 +18,11 @@ pub use artifact_arrival::{
 
 mod context_artifact_cache;
 mod registry_reference_graph;
-pub use registry_reference_graph::registry_tool_output_sources;
+pub use registry_reference_graph::{
+    RegistryCandidateValidation, RegistryCandidateWrite, RegistryValidationIssue,
+    RegistryValidationRoots, RegistryValidationStage, registry_tool_output_sources,
+    validate_registry_candidate, validate_registry_candidate_with_inspector,
+};
 pub mod spine_root;
 pub use spine_root::{
     EmbeddedRuntime, SharedBlobHandle, SharedBlobs, SpineRootConfig, build_embedded_spine,

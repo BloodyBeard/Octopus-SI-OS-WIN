@@ -149,6 +149,13 @@ pub(crate) fn project(value: &Value) -> Result<Option<ProjectedMedia>, Interface
     Ok(Some(ProjectedMedia { value, images }))
 }
 
+pub(crate) fn text_exceeds_limit(text: &str) -> Result<bool, InterfaceBoundaryError> {
+    let item = DynamicToolCallOutputContentItem::InputText { text: text.into() };
+    let encoded = serde_json::to_vec(&item)
+        .map_err(|error| invalid(format!("native text cannot be encoded: {error}")))?;
+    Ok(encoded.len() > MAX_NATIVE_TEXT_BYTES)
+}
+
 pub(crate) fn validate_content(
     content: &[DynamicToolCallOutputContentItem],
 ) -> Result<(), InterfaceBoundaryError> {

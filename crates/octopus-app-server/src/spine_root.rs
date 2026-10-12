@@ -294,6 +294,224 @@ struct RegistryRunGrantResolver {
     blobs: SharedBlobs,
 }
 
+/// The prospective run uses the same descriptor snapshot and policy formation
+/// as an arrival. No artifact is admitted, verifier executed, mark recorded or
+/// runtime state changed. Dependencies are for bounded candidate revalidation;
+/// the public report contains faults, never unrelated run bodies or grants.
+pub fn inspect_registry_run_grant(
+    registry_root: &Path,
+    ee_instances_root: &Path,
+    record: &octopus_runtime::run_record::RunRecord,
+    checkpoint: &octopus_descriptors::CheckpointId,
+) -> Result<octopus_interfaces::GrantProjection, String> {
+    if !record.active_checkpoints.contains(checkpoint) { return Err("prospective grant requires an active checkpoint".into()); }
+    let checkpoint = record.checkpoint(checkpoint).ok_or("prospective checkpoint is absent")?;
+    let interfaces = record.active_checkpoints.iter().filter_map(|id|record.checkpoint(id))
+        .flat_map(|cp|cp.inbound_interface().into_iter().chain(cp.outbound_interfaces())).cloned().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    let artifacts = checkpoint.artifact_bindings.iter().map(|binding|binding.id.clone()).collect::<Vec<_>>();
+    let access = checkpoint.artifact_bindings.iter().map(|binding|(binding.id.clone(),binding.access)).collect();
+    let query = RunGrantQuery {run:&record.id,checkpoint:&checkpoint.id,ee:&record.ee,worker:&record.worker,epoch:checkpoint.epoch,
+        authored_interfaces:&interfaces,artifact_bindings:&artifacts,artifact_access:&access,required_verified_artifacts:&checkpoint.required_verified_artifacts};
+    let snapshot = LoadedRegistrySnapshot::load(registry_root,ee_instances_root)?;
+    snapshot.form_run_contract(&query).map(|(_,_,grant)|grant)
+}
+
+pub(crate) fn validate_registry_run_contracts(
+    registry_root: &Path,
+    ee_instances_root: &Path,
+    records: &[octopus_runtime::run_record::RunRecord],
+) -> Result<
+    (
+        Vec<crate::RegistryValidationIssue>,
+        BTreeMap<String, BTreeSet<String>>,
+        BTreeSet<String>,
+    ),
+    String,
+> {
+    let snapshot = LoadedRegistrySnapshot::load(registry_root, ee_instances_root)?;
+    let mut issues = Vec::new();
+    let available_ee = snapshot
+        .ee_tree
+        .instances()
+        .map(|(id, _)| format!("ee/{id}"))
+        .collect::<BTreeSet<_>>();
+    for entry in std::fs::read_dir(ee_instances_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || !entry.file_type().map_err(|error| error.to_string())?.is_file()
+        {
+            continue;
+        }
+        let id = path.file_stem().unwrap_or_default().to_string_lossy();
+        let subject = format!("ee/{id}");
+        if !available_ee.contains(&subject) {
+            let reason = snapshot
+                .ee_instance_issues
+                .iter()
+                .find(|reason| {
+                    reason.contains(&path.display().to_string())
+                        || reason.contains(&format!("instance '{id}'"))
+                })
+                .cloned()
+                .unwrap_or_else(|| {
+                    "EE instance is unavailable to the persisted EE loader and topology former".into()
+                });
+            issues.push(crate::RegistryValidationIssue { subject, checkpoint: None, reason });
+        }
+    }
+    let mut dependencies = BTreeMap::new();
+    for record in records {
+        let subject = format!("run/{}", record.id);
+        let active = record
+            .active_checkpoints
+            .iter()
+            .filter_map(|id| record.checkpoint(id))
+            .collect::<Vec<_>>();
+        let interfaces = active
+            .iter()
+            .flat_map(|checkpoint| {
+                checkpoint
+                    .inbound_interface()
+                    .into_iter()
+                    .chain(checkpoint.outbound_interfaces())
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut roots = vec![RegistryNode::interface(record.worker.as_str())];
+        roots.extend(
+            interfaces
+                .iter()
+                .map(|interface| RegistryNode::interface(interface.as_str())),
+        );
+        let mut inputs = BTreeSet::from([format!("ee/{}", record.ee), subject.clone()]);
+        if let Ok(chain) = snapshot.ee_tree.ancestors(&record.ee) {
+            for ee in chain {
+                inputs.insert(format!("ee/{ee}"));
+                if let Some(instance) = snapshot.ee_tree.get(&ee) {
+                    roots.push(RegistryNode::ee_template(instance.template.as_str()));
+                }
+            }
+        }
+        for checkpoint in &active {
+            roots.extend(
+                checkpoint
+                    .artifact_bindings
+                    .iter()
+                    .filter(|binding| !artifact_id_carries_content_hash(&binding.id))
+                    .map(|binding| RegistryNode::artifact(binding.id.as_str())),
+            );
+            roots.extend(
+                checkpoint
+                    .required_verified_artifacts
+                    .iter()
+                    .flat_map(|required| {
+                        [
+                            RegistryNode::mark(required.mark.as_str()),
+                            RegistryNode::verifier(required.verifier.as_str()),
+                        ]
+                    }),
+            );
+        }
+        inputs.extend(
+            snapshot
+                .reference_graph
+                .dependency_nodes(roots)
+                .into_iter()
+                .map(|node| node.to_string()),
+        );
+        for checkpoint in active {
+            let artifacts = checkpoint
+                .artifact_bindings
+                .iter()
+                .map(|binding| binding.id.clone())
+                .collect::<Vec<_>>();
+            let access = checkpoint
+                .artifact_bindings
+                .iter()
+                .map(|binding| (binding.id.clone(), binding.access))
+                .collect::<BTreeMap<_, _>>();
+            let query = RunGrantQuery {
+                run: &record.id,
+                checkpoint: &checkpoint.id,
+                ee: &record.ee,
+                worker: &record.worker,
+                epoch: checkpoint.epoch,
+                authored_interfaces: &interfaces,
+                artifact_bindings: &artifacts,
+                artifact_access: &access,
+                required_verified_artifacts: &checkpoint.required_verified_artifacts,
+            };
+            let checked = (|| -> Result<(), String> {
+                let (formed, _, _) = snapshot.form_run_contract(&query)?;
+                for interface in checkpoint
+                    .inbound_interface()
+                    .into_iter()
+                    .chain(checkpoint.outbound_interfaces())
+                {
+                    if !snapshot.interface_dispositions.contains_key(interface)
+                        || !formed.context.interfaces.contains(interface)
+                    {
+                        return Err(format!(
+                            "authored interface '{interface}' is unavailable or did not survive worker/EE/binding formation"
+                        ));
+                    }
+                }
+                for (artifact, rights) in &access {
+                    if formed.context.artifact_access.get(artifact) != Some(rights) {
+                        return Err(format!(
+                            "authored artifact rights for '{artifact}' did not survive worker/EE/binding formation"
+                        ));
+                    }
+                }
+                for required in &checkpoint.required_verified_artifacts {
+                    if !formed.context.mark_outcomes.contains(&required.mark) {
+                        return Err(format!(
+                            "required mark '{}' did not survive worker/EE formation",
+                            required.mark
+                        ));
+                    }
+                    let package_dir = registry_root
+                        .join("verifier")
+                        .join(required.verifier.as_str());
+                    let descriptor = parse_strict::<VerifierDescriptor>(
+                        &std::fs::read(package_dir.join("verifier.json"))
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    pin_verifier_package(&VerifierPackageContext {
+                        descriptor,
+                        package_dir: Some(package_dir),
+                        repository_root: registry_root
+                            .parent()
+                            .unwrap_or(registry_root)
+                            .to_path_buf(),
+                        scratch_root: registry_root.to_path_buf(),
+                    })
+                    .map_err(|details| {
+                        format!(
+                            "required verifier package '{}' is unavailable: {details}",
+                            required.verifier
+                        )
+                    })?;
+                }
+                Ok(())
+            })();
+            if let Err(reason) = checked {
+                issues.push(crate::RegistryValidationIssue {
+                    subject: subject.clone(),
+                    checkpoint: Some(checkpoint.id.to_string()),
+                    reason: format!("checkpoint '{}': {reason}", checkpoint.id),
+                });
+            }
+        }
+        dependencies.insert(subject, inputs);
+    }
+    Ok((issues, dependencies, available_ee))
+}
+
 fn insert_formation_source(
     hashes: &mut BTreeMap<DescriptorName, DescriptorHash>,
     sources: &mut BTreeMap<DescriptorName, Vec<u8>>,
@@ -318,38 +536,7 @@ impl RunGrantResolver for RegistryRunGrantResolver {
             .live_registry
             .read()
             .map_err(|_| "live registry snapshot lock is poisoned".to_string())?;
-        snapshot.validate_run_reference_closure(&query)?;
-        let policy = snapshot.worker_interface_policy(query.worker)?;
-        let authored = crate::worker_policy::AuthoredBindings {
-            interfaces: query.authored_interfaces,
-            tool_ownership: &snapshot.tool_ownership,
-            tool_supported_weks: &snapshot.tool_supported_weks,
-            artifact_access: query.artifact_access,
-        };
-        let mut formed = crate::worker_policy::form_worker_run_policy(
-            query.worker,
-            policy,
-            &snapshot.ee_tree,
-            query.ee,
-            &snapshot.formation_source_hashes,
-            &authored,
-        )
-        .map_err(|e| {
-            format!(
-                "grant formation for run '{}' checkpoint '{}' worker interface '{}' failed: {e}",
-                query.run.as_str(),
-                query.checkpoint.as_str(),
-                query.worker.as_str()
-            )
-        })?;
-        snapshot.form_interface_policy(&mut formed, query.ee, policy)?;
-        let role_artifacts = snapshot.pin_mandatory_role_artifacts(&query, policy, &mut formed)?;
-        let metadata_projection = snapshot.metadata_projection_for_grant(
-            query.worker,
-            query.ee,
-            &formed,
-            &role_artifacts,
-        )?;
+        let (formed, role_artifacts, metadata_projection) = snapshot.form_run_contract(&query)?;
         let mut blobs = self
             .blobs
             .lock()
@@ -360,6 +547,48 @@ impl RunGrantResolver for RegistryRunGrantResolver {
 }
 
 impl LoadedRegistrySnapshot {
+    fn form_run_contract(
+        &self,
+        query: &RunGrantQuery<'_>,
+    ) -> Result<
+        (
+            FormedPolicy,
+            Vec<ArtifactId>,
+            octopus_interfaces::GrantProjection,
+        ),
+        String,
+    > {
+        self.validate_run_reference_closure(query)?;
+        let policy = self.worker_interface_policy(query.worker)?;
+        let authored = crate::worker_policy::AuthoredBindings {
+            interfaces: query.authored_interfaces,
+            tool_ownership: &self.tool_ownership,
+            tool_supported_weks: &self.tool_supported_weks,
+            artifact_access: query.artifact_access,
+        };
+        let mut formed = crate::worker_policy::form_worker_run_policy(
+            query.worker,
+            policy,
+            &self.ee_tree,
+            query.ee,
+            &self.formation_source_hashes,
+            &authored,
+        )
+        .map_err(|e| {
+            format!(
+                "grant formation for run '{}' checkpoint '{}' worker interface '{}' failed: {e}",
+                query.run.as_str(),
+                query.checkpoint.as_str(),
+                query.worker.as_str()
+            )
+        })?;
+        self.form_interface_policy(&mut formed, query.ee, policy)?;
+        let role_artifacts = self.pin_mandatory_role_artifacts(query, policy, &mut formed)?;
+        let metadata_projection =
+            self.metadata_projection_for_grant(query.worker, query.ee, &formed, &role_artifacts)?;
+        Ok((formed, role_artifacts, metadata_projection))
+    }
+
     fn from_loaded(
         interfaces_loaded: Vec<(DescriptorName, InterfaceDescriptor)>,
         interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
@@ -1120,7 +1349,7 @@ fn registry_ee_state(
                 .expect("ready EE instance remains pending");
             if let Err(error) = tree.insert_persisted_instance(instance) {
                 issues.push(format!(
-                    "{source}: persisted EE materialization isolated one instance: {error}"
+                    "{source}: persisted EE instance '{id}' materialization is isolated: {error}"
                 ));
             }
         }

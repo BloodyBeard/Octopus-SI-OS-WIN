@@ -11,6 +11,7 @@ const { normalizedEndpoint } = require("../electron/interfaceTransport.cjs");
 const { createChatgptSignIn } = require("../electron/chatgptSignIn.cjs");
 const { createProjectionStore } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
+const { adoptLocalPackageUpdates, recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
 
 const privateEnvironments = new WeakMap();
 const starts = new Map();
@@ -186,11 +187,34 @@ async function start(environment, options = {}) {
 async function launchRuntime(environment, options) {
   const host = runtimeHost(environment);
   let observed = await host.probe();
+  if (observed.error) throw runtimeError(observed.error, environment);
   let child = null;
   let exit = null;
   if (observed.pid == null) {
     requireExecutable(environment.runtimeBinary, "release runtime");
     requireDistribution(environment);
+    const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: environment.packageRoots.stateRoot,
+      guard: async () => {
+        assertNotAborted(options.signal);
+        const current = await host.probe();
+        if (current.phase !== "unmanaged" || current.ready || current.ownership !== "none" || current.pid !== null || current.error) {
+          throw runtimeError("Close the running Octopus runtime before updating its installed packages. Your Home and tasks are preserved.", environment);
+        }
+      },
+    });
+    try {
+      await recoverLocalPackageTransactions(environment.packageRoots);
+      const reportedPhases = new Set();
+      await adoptLocalPackageUpdates({ ...environment.packageRoots,
+        onProgress: (progress) => {
+          const phase = progress.phase === "preserving_local_changes" ? "preserving_local_package_changes" : "updating_packages";
+          if (reportedPhases.has(phase)) return;
+          reportedPhases.add(phase);
+          options.onProgress({ phase, home: environment.home });
+        },
+      });
+    } finally { releaseGuard(); }
+    assertNotAborted(options.signal);
     await fsp.mkdir(path.dirname(environment.logPath), { recursive: true, mode: 0o700 });
     const log = await fsp.open(environment.logPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW, 0o600);
     try {

@@ -1,12 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::{BufRead, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod door_life;
+mod execution_inputs;
+
+#[cfg(test)]
+#[path = "../tests/support/execution_loading.rs"]
+mod execution_loading_tests;
 mod process_authority;
 
 #[cfg(unix)]
@@ -51,10 +56,7 @@ pub use door_life::{
 pub use notify;
 #[cfg(test)]
 use process_authority::ProcessAuthority;
-use process_authority::{
-    ProcessAuthoritySpecExecution, ProcessInvocationAuthorityError,
-    resolve_required_repository_file,
-};
+use process_authority::{ProcessAuthoritySpecExecution, ProcessInvocationAuthorityError};
 
 const TOOL_PROCESS_DURABLE_VAR_DIR_ENV: &str = "OCTOPUS_TOOL_PROCESS_DURABLE_VAR_DIR";
 const TOOL_PROCESS_OWNER_FILE: &str = "owner.json";
@@ -62,7 +64,6 @@ const TOOL_PROCESS_OWNER_LOCK_FILE: &str = "owner.lock";
 const TOOL_PROCESS_OWNER_TERM_GRACE_MS: u64 = 2_000;
 const TOOL_PROCESS_OWNER_KILL_GRACE_MS: u64 = 2_000;
 const TOOL_PROCESS_OWNER_POLL_MS: u64 = 25;
-const OWNER_EXECUTABLE_PREFIX: &str = "owner://";
 const INTERFACE_LOCAL_IPC_ROOT_SLOT: &str = "interface_local_ipc_root";
 
 #[derive(Clone, Debug)]
@@ -375,6 +376,46 @@ impl ToolProcessEnvironment {
                     name
                 )
             })
+    }
+
+    pub fn resolve_package_file(
+        &self,
+        declared: &str,
+        kind: &WorkerEnvKindSpec,
+    ) -> Result<PathBuf, String> {
+        if declared.starts_with("owner://") {
+            let owner =
+                execution_inputs::kind_owner_root_from_interface(&self.interface_dir, kind)?;
+            execution_inputs::owner_file(declared, &owner)
+        } else {
+            process_authority::resolve_required_repository_file(
+                declared,
+                self.root_slot("interface_life_install_root")?,
+            )
+        }
+    }
+
+    pub fn resolve_program(
+        &self,
+        declared: &str,
+        kind: &WorkerEnvKindSpec,
+        search_path: Option<&std::ffi::OsStr>,
+    ) -> Result<PathBuf, String> {
+        let program = if declared.starts_with("owner://") {
+            self.resolve_package_file(declared, kind)?.into_os_string()
+        } else {
+            std::ffi::OsString::from(declared)
+        };
+        let base = if Path::new(&program).is_absolute() {
+            self.interface_dir.as_path()
+        } else {
+            self.root_slot("interface_life_install_root")?
+        };
+        process_authority::resolve_executable(
+            program.to_str().ok_or("tool program path is not UTF-8")?,
+            base,
+            search_path,
+        )
     }
 
     pub fn private_read_path(&self, handle: &str) -> Result<&Path, String> {
@@ -2001,7 +2042,9 @@ impl ToolProcessPrimaryInput {
                 return Err(format!("tool-process primary input retirement failed: {}", std::io::Error::last_os_error()));
             }
         }
-        self.directory.sync_all().map_err(|error| format!("tool-process primary input retirement directory sync failed: {error}"))
+        self.directory.sync_all().map_err(|error| {
+            format!("tool-process primary input retirement directory sync failed: {error}")
+        })
     }
 }
 
@@ -2024,6 +2067,7 @@ struct ToolProcessKey {
     private_read_snapshot_hash: String,
     effective_environment_hash: String,
     invocation_authority_hash: String,
+    execution_inputs_hash: String,
 }
 
 fn attest_tool_process_source_interface(
@@ -2050,54 +2094,6 @@ fn attest_tool_process_source_interface(
     Ok(())
 }
 
-fn resolve_tool_executable_base(
-    declared_program: &str,
-    ctx: &InterfaceLiftContext,
-    worker_environment_kind: Option<&WorkerEnvKindSpec>,
-    installation_root: &Path,
-) -> Result<(String, PathBuf), String> {
-    let Some(relative) = declared_program.strip_prefix(OWNER_EXECUTABLE_PREFIX) else {
-        return Ok((
-            declared_program.to_string(),
-            installation_root.to_path_buf(),
-        ));
-    };
-    let relative_path = Path::new(relative);
-    if relative.is_empty()
-        || relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!(
-            "owner-relative tool executable is invalid: {declared_program}"
-        ));
-    }
-    let kind = worker_environment_kind.ok_or_else(|| {
-        "owner-relative tool executable has no formed worker-environment kind".to_string()
-    })?;
-    let interface_registry_dir = ctx.interface_registry_dir();
-    let registry_root = interface_registry_dir
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| {
-            format!(
-                "tool door interface directory '{}' has no registry root",
-                ctx.interface_registry_dir().display()
-            )
-        })?;
-    let owner_root = registry_root
-        .join("worker_environment_kind")
-        .join(kind.worker_environment_kind_id.as_str());
-    let owner_root = std::fs::canonicalize(&owner_root).map_err(|error| {
-        format!(
-            "tool executable owner '{}' cannot be canonicalized: {error}",
-            owner_root.display()
-        )
-    })?;
-    Ok((relative.to_string(), owner_root))
-}
-
 impl ToolProcessClient {
     fn spawn(
         ctx: &InterfaceLiftContext,
@@ -2110,6 +2106,7 @@ impl ToolProcessClient {
         expected_private_read_snapshot_hash: &str,
         expected_effective_environment_hash: &str,
         expected_invocation_authority_hash: &str,
+        expected_execution_inputs_hash: &str,
     ) -> Result<Self, ToolProcessInvokeError> {
         if formation.is_some() != worker_environment_kind.is_some() {
             return Err(ToolProcessInvokeError::Unavailable(
@@ -2123,18 +2120,17 @@ impl ToolProcessClient {
                 "tool process declaration changed during spawn".to_string(),
             ));
         }
-        let installation_root = ctx
-            .installation_root()
-            .map_err(ToolProcessInvokeError::Unavailable)?;
-        let (declared_program, executable_base) = resolve_tool_executable_base(
-            &declaration.bin,
-            ctx,
-            worker_environment_kind,
-            &installation_root,
-        )
-        .map_err(ToolProcessInvokeError::Unavailable)?;
         let environment = effective_tool_process_environment(ctx, declaration)
             .map_err(ToolProcessInvokeError::Unavailable)?;
+        let execution = execution_inputs::ExecutionInputCache::default()
+            .resolve(ctx, declaration, worker_environment_kind, &environment)
+            .map_err(ToolProcessInvokeError::Unavailable)?;
+        if execution.hash != expected_execution_inputs_hash {
+            return Err(ToolProcessInvokeError::Unavailable(
+                "tool executable or support files changed during spawn".into(),
+            ));
+        }
+        let executable_base = execution.base.clone();
         let effective_environment_hash = tool_process_environment_hash(&environment);
         if effective_environment_hash != expected_effective_environment_hash {
             return Err(ToolProcessInvokeError::Unavailable(
@@ -2172,6 +2168,7 @@ impl ToolProcessClient {
             expected_private_read_snapshot_hash,
             expected_effective_environment_hash,
             expected_invocation_authority_hash,
+            expected_execution_inputs_hash,
         )
         .map_err(ToolProcessInvokeError::Unavailable)?;
         let process_root =
@@ -2226,13 +2223,7 @@ impl ToolProcessClient {
                     "tool process private read handles did not encode: {error}"
                 ))
             })?;
-        let mut package_files = Vec::new();
-        for required_file in &declaration.required_files {
-            package_files.push(
-                resolve_required_repository_file(required_file, &installation_root)
-                    .map_err(ToolProcessInvokeError::Unavailable)?,
-            );
-        }
+        let mut package_files = execution.readable_files.clone();
         package_files.push(ctx.interface_registry_dir());
         let authority = declaration.authority.clone();
         let interface_local_ipc_root = tool_process_interface_local_ipc_root(ctx)
@@ -2287,6 +2278,11 @@ impl ToolProcessClient {
         }
         .map_err(ToolProcessInvokeError::Unavailable)?;
         let mut exposed_root_slots = resolved.root_slots;
+        exposed_root_slots.insert(
+            "interface_life_install_root".to_string(),
+            ctx.installation_root()
+                .map_err(ToolProcessInvokeError::Unavailable)?,
+        );
         if let Some(path) = interface_local_ipc_root {
             exposed_root_slots.insert(INTERFACE_LOCAL_IPC_ROOT_SLOT.to_string(), path);
         }
@@ -2328,20 +2324,26 @@ impl ToolProcessClient {
                 "tool process host I/O limits failed to encode: {error}"
             ))
         })?;
-        let process_arguments = declaration
-            .args
-            .iter()
-            .map(std::ffi::OsString::from)
-            .collect::<Vec<_>>();
         let prepared = resolved
             .authority
             .prepare(
-                &declared_program,
-                &process_arguments,
+                &execution.program,
+                &execution.arguments,
                 &executable_base,
                 environment.get("PATH").map(std::ffi::OsString::as_os_str),
             )
             .map_err(ToolProcessInvokeError::Unavailable)?;
+        if prepared.executable != execution.executable
+            || execution_inputs::ExecutionInputCache::default()
+                .resolve(ctx, declaration, worker_environment_kind, &environment)
+                .map_err(ToolProcessInvokeError::Unavailable)?
+                .hash
+                != expected_execution_inputs_hash
+        {
+            return Err(ToolProcessInvokeError::Unavailable(
+                "tool execution inputs changed after process authority formation".into(),
+            ));
+        }
         let executable = prepared.executable.clone();
         let mut command = tokio::process::Command::new(&prepared.program);
         #[cfg(unix)]
@@ -3213,6 +3215,7 @@ struct ToolProcessBrokerState {
     tool_descriptors: BTreeMap<String, CachedToolDescriptor>,
     tool_owners: BTreeMap<String, CachedToolOwner>,
     worker_environment_registry: Option<CachedWorkerEnvironmentRegistry>,
+    execution_inputs: execution_inputs::ExecutionInputCache,
 }
 
 impl ToolProcessBrokerHost {
@@ -3264,7 +3267,8 @@ struct CachedToolOwner {
 }
 
 struct CachedWorkerEnvironmentRegistry {
-    fingerprint: String,
+    fingerprint: RegistryFileFingerprint,
+    kind: WorkerEnvironmentKindId,
     registry: WorkerEnvKindRegistry,
 }
 
@@ -3401,7 +3405,9 @@ impl ToolProcessBrokerHost {
             &self.owner, self.output_callback.as_ref(), &mut primary_input,
         ).await;
         match result {
-            ToolProcessBrokerResult::Completed => ToolProcessBrokerInvocation::Completed(primary_input),
+            ToolProcessBrokerResult::Completed => {
+                ToolProcessBrokerInvocation::Completed(primary_input)
+            }
             result => ToolProcessBrokerInvocation::Outcome(result),
         }
     }
@@ -3788,6 +3794,14 @@ fn spawn_worker_environment_release_process(
         maximum_bytes,
     )?;
     let invocation_authority_hash = empty_invocation_authority_hash();
+    let execution_inputs_hash = execution_inputs::ExecutionInputCache::default()
+        .resolve(
+            &release_ctx,
+            &contract.process,
+            Some(&contract.kind),
+            &environment,
+        )?
+        .hash;
     ToolProcessClient::spawn(
         &release_ctx,
         &contract.process,
@@ -3799,6 +3813,7 @@ fn spawn_worker_environment_release_process(
         &private_read_hash,
         &environment_hash,
         &invocation_authority_hash,
+        &execution_inputs_hash,
     )
     .map_err(tool_process_error_message)
 }
@@ -3837,7 +3852,7 @@ impl ToolProcessBrokerState {
         let root = ctx
             .root_slot("registry_worker_environment_kind_root")
             .map_err(|error| ToolProcessBrokerResult::Unavailable { error })?;
-        self.refresh_worker_environment_registry(root)
+        self.refresh_worker_environment_registry(root, &owner.worker_environment_kind)
             .map_err(|error| ToolProcessBrokerResult::Unavailable { error })?;
         let formed = form_worker_environment(
             ctx,
@@ -3900,6 +3915,16 @@ impl ToolProcessBrokerState {
             private_read_max_bytes,
         )
         .map_err(|error| ToolProcessBrokerResult::Unavailable { error })?;
+        let execution_inputs_hash = self
+            .execution_inputs
+            .resolve(
+                ctx,
+                &effective_declaration,
+                Some(&formed.kind),
+                &effective_environment,
+            )
+            .map_err(|error| ToolProcessBrokerResult::Unavailable { error })?
+            .hash;
         Ok(ToolProcessKey {
             declaration: descriptor.process,
             effective_declaration_hash,
@@ -3908,6 +3933,7 @@ impl ToolProcessBrokerState {
             private_read_snapshot_hash,
             effective_environment_hash,
             invocation_authority_hash,
+            execution_inputs_hash,
         })
     }
 
@@ -3974,7 +4000,9 @@ impl ToolProcessBrokerState {
             Ok(root) => root,
             Err(error) => return ToolProcessBrokerResult::Unavailable { error },
         };
-        if let Err(error) = self.refresh_worker_environment_registry(wek_root) {
+        if let Err(error) =
+            self.refresh_worker_environment_registry(wek_root, &owner.worker_environment_kind)
+        {
             return ToolProcessBrokerResult::Unavailable { error };
         }
         let registry = self
@@ -4069,6 +4097,15 @@ impl ToolProcessBrokerState {
             private_read_snapshot_hash,
             effective_environment_hash,
             invocation_authority_hash,
+            execution_inputs_hash: match self.execution_inputs.resolve(
+                ctx,
+                &effective_declaration,
+                Some(&worker_environment_kind),
+                &effective_environment,
+            ) {
+                Ok(inputs) => inputs.hash,
+                Err(error) => return ToolProcessBrokerResult::Unavailable { error },
+            },
         };
         if process_key != routed_process_key {
             return ToolProcessBrokerResult::Unavailable {
@@ -4108,6 +4145,7 @@ impl ToolProcessBrokerState {
                 &process_key.private_read_snapshot_hash,
                 &process_key.effective_environment_hash,
                 &process_key.invocation_authority_hash,
+                &process_key.execution_inputs_hash,
             ) {
                 Ok(process) => process,
                 Err(ToolProcessInvokeError::Capability(error)) => {
@@ -4182,9 +4220,13 @@ impl ToolProcessBrokerState {
             }
         }
         match result {
-            Ok(completion) if completion.artifacts.is_empty() && !completion.streamed_output_admitted => ToolProcessBrokerResult::CapabilityFailed {
-                error: format!("tool process for '{tool}' emitted no artifacts"),
-            },
+            Ok(completion)
+                if completion.artifacts.is_empty() && !completion.streamed_output_admitted =>
+            {
+                ToolProcessBrokerResult::CapabilityFailed {
+                    error: format!("tool process for '{tool}' emitted no artifacts"),
+                }
+            }
             Ok(completion) => {
                 let mut refusal = None;
                 // Streamed artifacts already have their own gate verdict and must not be handed twice.
@@ -4209,7 +4251,7 @@ impl ToolProcessBrokerState {
                     None => {
                         *primary_input = completion.primary_input;
                         ToolProcessBrokerResult::Completed
-                    },
+                    }
                 }
             }
             Err(ToolProcessInvokeError::Capability(error)) => {
@@ -4385,25 +4427,36 @@ impl ToolProcessBrokerState {
         Ok((hashes, process_bins))
     }
 
-    fn refresh_worker_environment_registry(&mut self, root: &Path) -> Result<(), String> {
-        let fingerprint =
-            registry_descriptor_tree_fingerprint(root, "worker_environment_kind.json")?;
+    fn refresh_worker_environment_registry(
+        &mut self,
+        root: &Path,
+        kind: &WorkerEnvironmentKindId,
+    ) -> Result<(), String> {
+        let path = registry_entry_file(root, kind.as_str(), "worker_environment_kind.json")?;
+        let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+        let canonical_path = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        if canonical_path != canonical_root.join(kind.as_str()).join("worker_environment_kind.json") {
+            self.worker_environment_registry = None;
+            return Err("worker-environment descriptor escapes its exact kind owner".into());
+        }
+        let fingerprint = registry_file_fingerprint(&path)?
+            .ok_or_else(|| format!("worker-environment kind '{kind}' is unavailable"))?;
         if self
             .worker_environment_registry
             .as_ref()
-            .is_some_and(|cached| cached.fingerprint == fingerprint)
+            .is_some_and(|cached| cached.fingerprint == fingerprint && cached.kind == *kind)
         {
             return Ok(());
         }
-        let registry =
-            WorkerEnvKindRegistry::load_from_dir(root).map_err(|error| error.to_string())?;
-        if registry_descriptor_tree_fingerprint(root, "worker_environment_kind.json")?
-            != fingerprint
-        {
+        self.worker_environment_registry = None;
+        let registry = WorkerEnvKindRegistry::load_kind_from_dir(root, kind)
+            .map_err(|error| error.to_string())?;
+        if registry_file_fingerprint(&path)? != Some(fingerprint.clone()) {
             return Err("worker-environment descriptors changed while being loaded".to_string());
         }
         self.worker_environment_registry = Some(CachedWorkerEnvironmentRegistry {
             fingerprint,
+            kind: kind.clone(),
             registry,
         });
         Ok(())
@@ -4443,7 +4496,7 @@ impl ToolProcessBrokerState {
         }
 
         let kind_root = ctx.root_slot("registry_worker_environment_kind_root")?;
-        self.refresh_worker_environment_registry(kind_root)?;
+        self.refresh_worker_environment_registry(kind_root, &owner.worker_environment_kind)?;
         let registry = self
             .worker_environment_registry
             .as_ref()
@@ -4951,64 +5004,6 @@ fn registry_file_fingerprint(path: &Path) -> Result<Option<RegistryFileFingerpri
             )
         },
     }))
-}
-
-fn registry_descriptor_tree_fingerprint(root: &Path, file: &str) -> Result<String, String> {
-    let entries = std::fs::read_dir(root).map_err(|error| {
-        format!(
-            "registry descriptor root '{}' cannot be read: {error}",
-            root.display()
-        )
-    })?;
-    let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            format!(
-                "registry descriptor root '{}' contains an unreadable entry: {error}",
-                root.display()
-            )
-        })?;
-        if entry
-            .file_type()
-            .map_err(|error| {
-                format!(
-                    "registry descriptor package '{}' cannot be inspected: {error}",
-                    entry.path().display()
-                )
-            })?
-            .is_dir()
-        {
-            paths.push(entry.path().join(file));
-        }
-    }
-    paths.sort();
-    let mut material = Vec::new();
-    for path in paths {
-        let Some(fingerprint) = registry_file_fingerprint(&path)? else {
-            continue;
-        };
-        material.extend_from_slice(path.as_os_str().as_encoded_bytes());
-        material.extend_from_slice(&fingerprint.len.to_le_bytes());
-        match fingerprint.modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(elapsed) => {
-                material.push(1);
-                material.extend_from_slice(&elapsed.as_nanos().to_le_bytes());
-            }
-            Err(before_epoch) => {
-                material.push(0);
-                material.extend_from_slice(&before_epoch.duration().as_nanos().to_le_bytes());
-            }
-        }
-        #[cfg(unix)]
-        {
-            let (device, inode, changed, changed_nanos) = fingerprint.identity_and_change;
-            material.extend_from_slice(&device.to_le_bytes());
-            material.extend_from_slice(&inode.to_le_bytes());
-            material.extend_from_slice(&changed.to_le_bytes());
-            material.extend_from_slice(&changed_nanos.to_le_bytes());
-        }
-    }
-    Ok(blake3::hash(&material).to_hex().to_string())
 }
 
 fn narrow_process_declaration(
@@ -6357,6 +6352,7 @@ fn tool_process_generation_key(
     private_read_snapshot_hash: &str,
     effective_environment_hash: &str,
     invocation_authority_hash: &str,
+    execution_inputs_hash: &str,
 ) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(
         effective_declaration_hash,
@@ -6364,6 +6360,7 @@ fn tool_process_generation_key(
         private_read_snapshot_hash,
         effective_environment_hash,
         invocation_authority_hash,
+        execution_inputs_hash,
     ))
     .map_err(|error| format!("tool process declaration did not encode: {error}"))?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
@@ -6376,6 +6373,7 @@ fn tool_process_generation_key_from_process_key(key: &ToolProcessKey) -> Result<
         &key.private_read_snapshot_hash,
         &key.effective_environment_hash,
         &key.invocation_authority_hash,
+        &key.execution_inputs_hash,
     ))
     .map_err(|error| format!("tool process key did not encode: {error}"))?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
@@ -8300,7 +8298,9 @@ async fn hand_tool_failure(
         None => ctx.failure_artifact(source_movement_seq, failure_class, details)?,
     };
     let verdict = match output {
-        Some((callback, source)) => hand_tool_process_output(ctx, Some(&source), Some(callback), artifact).await?,
+        Some((callback, source)) => {
+            hand_tool_process_output(ctx, Some(&source), Some(callback), artifact).await?
+        }
         None => ctx.hand_arrival(artifact, Vec::new()).await?,
     };
     match verdict {
@@ -8800,9 +8800,12 @@ fn record_tool_door_completion(
         if state != ToolDoorJournalState::Completed {
             return Err("tool-process input retirement requires durable completion".into());
         }
-        primary_input.retire().map_err(|error| format!(
-            "tool input retirement failed after durable completion of movement {}: {error}", completion.seq,
-        ))?;
+        primary_input.retire().map_err(|error| {
+            format!(
+                "tool input retirement failed after durable completion of movement {}: {error}",
+                completion.seq,
+            )
+        })?;
     }
     Ok(())
 }
@@ -9286,6 +9289,7 @@ mod tool_process_private_boundary_tests {
             private_read_snapshot_hash: "c".repeat(64),
             effective_environment_hash: "d".repeat(64),
             invocation_authority_hash: "e".repeat(64),
+            execution_inputs_hash: "f".repeat(64),
         }
     }
 
@@ -9685,6 +9689,7 @@ mod tool_process_private_boundary_tests {
             &expected_hash,
             &environment_hash,
             &authority_hash,
+            "execution-inputs",
         )
         .unwrap();
         let old = materialize_private_read_generation(
@@ -9713,6 +9718,7 @@ mod tool_process_private_boundary_tests {
             &rotated_hash,
             &environment_hash,
             &authority_hash,
+            "execution-inputs",
         )
         .unwrap();
         let new = materialize_private_read_generation(
@@ -9779,6 +9785,7 @@ mod tool_process_private_boundary_tests {
             &expected,
             &tool_process_environment_hash(&BTreeMap::new()),
             &empty_invocation_authority_hash(),
+            "execution-inputs",
         )
         .unwrap();
         std::fs::write(source.path().join("secret"), b"after").unwrap();
@@ -9810,6 +9817,7 @@ mod tool_process_private_boundary_tests {
             private_read_snapshot_hash: "a".repeat(64),
             effective_environment_hash: "c".repeat(64),
             invocation_authority_hash: "d".repeat(64),
+            execution_inputs_hash: "f".repeat(64),
         };
         let new = ToolProcessKey {
             effective_declaration_hash: canonical_hash(&declaration).unwrap(),
@@ -9819,6 +9827,7 @@ mod tool_process_private_boundary_tests {
             private_read_snapshot_hash: "b".repeat(64),
             effective_environment_hash: "c".repeat(64),
             invocation_authority_hash: "d".repeat(64),
+            execution_inputs_hash: "f".repeat(64),
         };
         let state = Arc::new(tokio::sync::Mutex::new(ToolProcessBrokerState::default()));
         let mut shards = ToolProcessBrokerShards::default();
@@ -9855,6 +9864,7 @@ mod tool_process_private_boundary_tests {
             private_read_snapshot_hash: "a".repeat(64),
             effective_environment_hash: "b".repeat(64),
             invocation_authority_hash: "c".repeat(64),
+            execution_inputs_hash: "f".repeat(64),
         };
         let mut shards = ToolProcessBrokerShards::default();
         let (first, stale, _) = shards.route("file.read".to_string(), key.clone());
@@ -10039,6 +10049,7 @@ mod tool_process_private_boundary_tests {
             &hash,
             &tool_process_environment_hash(&BTreeMap::new()),
             &empty_invocation_authority_hash(),
+            "execution-inputs",
         )
         .unwrap();
         let materialized = materialize_private_read_generation(

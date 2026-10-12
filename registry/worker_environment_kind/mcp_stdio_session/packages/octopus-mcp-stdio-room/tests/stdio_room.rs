@@ -371,9 +371,16 @@ async fn invoke_with_io(
 #[tokio::test]
 async fn one_formed_room_keeps_the_stdio_server_across_catalog_tool_resource_and_prompt_calls() {
     let root = tempfile::tempdir().unwrap();
-    let interface_dir = root.path().join("interface");
+    let interface_dir = root.path().join("registry/interface/system_mcp");
     let interface_var = root.path().join("interface-var");
     write_interface(&interface_dir);
+    let executable = root.path().join("registry/worker_environment_kind/mcp_stdio_session/packages/bin/server");
+    std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_octopus-mcp-stdio-room-tool"), &executable).unwrap();
+    let config_path = interface_dir.join("mcp_stdio.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["command"] = json!("owner://packages/bin/server");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let room = McpStdioRoom::new(ToolProcessEnvironment {
         interface: InterfaceId::new(DOOR),
         interface_dir: interface_dir.clone(),

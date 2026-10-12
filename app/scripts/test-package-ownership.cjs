@@ -127,6 +127,11 @@ async function releaseUpdateFixture(root) {
   assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
   assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
   await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine" }, contract: 999 });
+  const localChanges = await adoptLocalPackageUpdates(roots);
+  assert.equal(localChanges.changed, false);
+  assert.deepEqual(localChanges.localChanges.map(entry => entry.packageId), ["fixture"]);
+  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 999);
   await fs.writeFile(ownerFile(roots, false, "life-bin"), "version five\n");
   live = false; context.runtimeInitializationComplete = false;
   await assert.rejects(context.initializeRuntimeHost(), /unowned JSON changes/);

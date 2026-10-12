@@ -22,6 +22,7 @@ pub mod input_intake;
 mod retained_connections;
 mod home_voice;
 mod home_outputs;
+mod native_run_authoring;
 mod writer_runs;
 pub use writer_runs::{OperatorWriterRunPlanRequest, OperatorWriterSchemaPlanRequest, plan_operator_writer_runs, plan_operator_writer_schema};
 #[cfg(test)]
@@ -284,6 +285,7 @@ struct PlannedIdentity {
     worker_choice_interface: String,
     capability_doors: BTreeMap<String, String>,
     capability_tools: BTreeMap<String, String>,
+    capability_tool_sources: BTreeMap<String, ToolDescriptor>,
     authoring_tool_id: String,
     code_mode_owners: BTreeMap<String, PlannedCodeModeOwner>,
 }
@@ -441,6 +443,16 @@ struct BoundRunAuthoringTopology {
 pub fn plan_operator_chat_topology(
     request: &OperatorChatPlanRequest,
 ) -> Result<OperatorChatPlan, String> {
+    let plan = plan_operator_chat_topology_files(request, false)?;
+    validate_ee_capability_allowances(&request.registry_root, &plan.ee_template_chain.iter().map(|id|octopus_descriptors::EeTemplateId::new(id)).collect::<Vec<_>>(),
+        &plan.required_interface_ids, &plan.required_tool_ids)?;
+    Ok(plan)
+}
+
+fn plan_operator_chat_topology_files(
+    request: &OperatorChatPlanRequest,
+    preserve_existing_writers: bool,
+) -> Result<OperatorChatPlan, String> {
     let chat_id = safe_segment(&request.chat_id, "chat_id")?;
     let cycle = safe_segment(&request.cycle, "cycle")?;
     let registry_root = require_absolute("registry_root", &request.registry_root)?;
@@ -473,14 +485,20 @@ pub fn plan_operator_chat_topology(
             return Err("Home requires the declared bootstrap-root EE".into());
         }
     }
-    let topology = form_capability_topology(
+    let current_worker = if preserve_existing_writers {
+        let current = RunRecord::from_bytes(&serde_json::to_vec(request.existing_run_record.as_ref()
+            .ok_or("current-run planning requires its existing record")?).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        Some(run_composition::current_run::form_current_worker(registry_root, ee_policy_root, &current,
+            selection.chat_interface_id.as_deref().ok_or("current-run planning has no client owner")?, &chat_id)?)
+    } else { None };
+    let topology = if let Some(current) = &current_worker { current.topology.clone() } else { form_capability_topology(
         registry_root,
         &CapabilityFormationRequest::from_live_chain(
             InterfaceId::new(&selection.worker_choice_interface),
             chain.iter().cloned(),
         ),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())? };
     ensure_external_interfaces_admitted_by_ee(&topology, &external_interfaces)?;
     let topology = select_capability_topology(
         topology,
@@ -518,6 +536,7 @@ pub fn plan_operator_chat_topology(
         &topology,
     )?;
     let mut identity = plan_identity(&config, &chat_id, &provider, &topology, &selection)?;
+    if let Some(current) = &current_worker { identity.capability_tool_sources = current.tools.clone(); }
     preserve_selected_file_writer(&config, &chat_id, &topology, &request.selected_tools,
         &request.selected_worker_environment_kinds, &mut identity)?;
     identity.voice = home_voice::select(&interface_root, &config, &identity, &topology)?;
@@ -624,10 +643,12 @@ pub fn plan_operator_chat_topology(
     plan_private_tools(registry_root, &config, &topology, &identity, &mut writes)?;
     let private_worker_role_artifacts = plan_worker_pin(
         &interface_root,
+        &config,
         &selection.worker_choice_interface,
         &topology,
         &identity,
         &external_interfaces,
+        current_worker.as_ref().map(|current| &current.policy),
         &mut writes,
     )?;
     retained_connections::preserve_policy(&identity, &retained_policy, &mut writes)?;
@@ -660,6 +681,33 @@ pub fn plan_operator_chat_topology(
     )?;
     home_voice::plan_descriptors(registry_root, &config, &topology, &identity, &mut writes)?;
     if let Some(binding) = home_outputs::plan(request, &identity, &mut writes)? { selected_context.push(binding); }
+    if let Some(binding) = native_run_authoring::plan(native_run_authoring::PlanContext {
+        registry_root,
+        ee_instances_root: &request.ee_instances_root,
+        run_records_root: request.run_records_root.as_deref(),
+        interface_private_state_root: request.interface_private_state_root.as_deref(),
+        config: &config,
+        identity: &identity,
+        provider: &provider,
+        topology: &topology,
+        door_host_slots: &request.door_host_slots,
+    }, &mut writes)? { selected_context.push(binding); }
+    if let Some(current) = &current_worker {
+        for write in &mut writes {
+            let owner=write.path.parent().and_then(Path::file_name).and_then(|name|name.to_str());
+            let file=write.path.file_name().and_then(|name|name.to_str());
+            if owner.is_some_and(|owner|current.retained_doors.contains(owner)) && matches!(file,Some("interface.json" | "life.json")) {
+                write.content=std::fs::read_to_string(&write.path).map_err(|e|e.to_string())?;
+            } else if file==Some("interface.json") {
+                if let Some((source,_))=identity.capability_doors.iter().find(|(_,exact)|Some(exact.as_str())==owner) {
+                    let policy=topology.interface_policies.get(&InterfaceId::new(source)).ok_or("planned current capability has no formed interface policy")?;
+                    let mut descriptor:InterfaceDescriptor=parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
+                    descriptor.interface_policy.values=policy.context.clone();
+                    write.content=pretty_json(&serde_json::to_value(descriptor).map_err(|e|e.to_string())?)?;
+                }
+            }
+        }
+    }
     let exact_interfaces = exact_topology_interface_ids(&identity, &external_interfaces);
     let mut required_interface_ids = exact_interfaces.clone();
     required_interface_ids.extend(worker_relays.iter().cloned());
@@ -680,16 +728,6 @@ pub fn plan_operator_chat_topology(
     if let Some(voice) = &identity.voice { required_tool_ids.push(voice.writer.clone()); }
     required_tool_ids.sort();
     required_tool_ids.dedup();
-    validate_ee_capability_allowances(
-        registry_root,
-        &chain
-            .iter()
-            .map(|layer| layer.template.clone())
-            .collect::<Vec<_>>(),
-        &exact_interfaces,
-        &required_tool_ids,
-    )?;
-
     let run_record_content = build_chat_run_record(
         &config,
         &identity,
@@ -730,9 +768,10 @@ pub fn plan_operator_chat_topology(
         required_interface_ids.dedup();
         required_tool_ids.sort();
         required_tool_ids.dedup();
-        validate_ee_capability_allowances(registry_root, &chain.iter().map(|layer| layer.template.clone()).collect::<Vec<_>>(), &required_interface_ids, &required_tool_ids)?;
     }
-    let (run_record_content, mut run_writes) = writer_runs::wire(request, &identity, run_record_content)?;
+    let (run_record_content, mut run_writes) = if preserve_existing_writers {
+        writer_runs::wire_preserving_existing(request, &identity, run_record_content)?
+    } else { writer_runs::wire(request, &identity, run_record_content)? };
     run_writes.append(&mut voice_run_writes);
     let retained_paths = planned_retained_registry_paths(registry_root, &identity, &writes);
     let removals = previous_owned
@@ -1457,6 +1496,7 @@ fn plan_identity(
         worker_choice_interface: selection.worker_choice_interface.clone(),
         capability_doors,
         capability_tools,
+        capability_tool_sources: BTreeMap::new(),
         authoring_tool_id,
         code_mode_owners: BTreeMap::new(),
     })
@@ -2738,9 +2778,11 @@ fn planned_tool_descriptor(
                 )
             })?
     };
-    let mut descriptor = load_tool_descriptor_from_dir(&tool_root, base_tool_id)
+    let mut descriptor = if let Some(descriptor) = identity.capability_tool_sources.get(base_tool_id) {
+        descriptor.clone()
+    } else { load_tool_descriptor_from_dir(&tool_root, base_tool_id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("formed tool descriptor '{base_tool_id}' is absent"))?;
+        .ok_or_else(|| format!("formed tool descriptor '{base_tool_id}' is absent"))? };
     if descriptor.interface != *source_interface_id {
         return Err(format!(
             "formed tool '{base_tool_id}' belongs to '{}' instead of '{}'",
@@ -2832,13 +2874,15 @@ fn narrow_run_authoring_tool_authority(descriptor: &mut ToolDescriptor) -> Resul
 
 fn plan_worker_pin(
     interface_root: &Path,
+    config: &ClientConfig,
     worker_choice_interface: &str,
     topology: &FormedCapabilityTopology,
     identity: &PlannedIdentity,
     external_interfaces: &[String],
+    current_policy: Option<&WorkerInterfacePolicy>,
     writes: &mut Vec<PlannedClientWrite>,
 ) -> Result<Vec<String>, String> {
-    let source_interface = load_interface_descriptor(interface_root, worker_choice_interface)?;
+    let source_interface = load_interface_descriptor(interface_root, current_policy.map(|policy|policy.id.as_str()).unwrap_or(worker_choice_interface))?;
     let descriptor =
         sibling_descriptor_bytes(&source_interface, &identity.worker_interface_id, None, None)?;
     push_json_write(
@@ -2861,7 +2905,7 @@ fn plan_worker_pin(
     )?;
 
     let policy_path = interface_root
-        .join(worker_choice_interface)
+        .join(current_policy.map(|policy|policy.id.as_str()).unwrap_or(worker_choice_interface))
         .join("policy.json");
     let policy_bytes = std::fs::read(&policy_path).map_err(|error| {
         format!(
@@ -2925,11 +2969,19 @@ fn plan_worker_pin(
             .map(|kind| kind.as_str().to_string()),
     )?;
     let policy_content = pretty_json(&policy_value)?;
-    let parsed: WorkerInterfacePolicy = serde_json::from_slice(policy_content.as_bytes())
+    let mut parsed: WorkerInterfacePolicy = serde_json::from_slice(policy_content.as_bytes())
         .map_err(|error| format!("private worker policy failed validation: {error}"))?;
     if parsed.id.as_str() != identity.worker_interface_id {
         return Err("private worker policy changed identity during encoding".to_string());
     }
+    run_composition::remap_private_worker_policy(&mut parsed,&run_composition::private_interface_mapping(config,identity));
+    if let Some(current) = current_policy {
+        for id in &current.ceiling.interfaces { if !parsed.ceiling.interfaces.contains(id) { parsed.ceiling.interfaces.push(id.clone()); } }
+        for id in &current.ceiling.tools { if !parsed.ceiling.tools.contains(id) { parsed.ceiling.tools.push(id.clone()); } }
+        for id in &current.ceiling.wek { if !parsed.ceiling.wek.contains(id) { parsed.ceiling.wek.push(id.clone()); } }
+        parsed.ceiling.interface_policy.extend(current.ceiling.interface_policy.clone());
+    }
+    let policy_content = pretty_json(&serde_json::to_value(&parsed).map_err(|e|e.to_string())?)?;
     push_json_write(
         interface_root
             .join(&identity.worker_interface_id)
@@ -3102,7 +3154,7 @@ fn plan_provider_interface(
     )?;
     if let Some(value) = driver_config.private_config.get_mut("run_affordances") {
         let config = value.as_object_mut().ok_or("run_affordances must be an object")?;
-        for key in ["file_write_tool", "artifact_send_tool"] {
+        for key in ["file_write_tool", "file_read_tool", "artifact_send_tool"] {
             if let Some(value) = config.get_mut(key) {
                 if value.is_null() { continue; }
                 let original = value.as_str().filter(|id| !id.is_empty() && id.trim() == *id)
@@ -6212,6 +6264,7 @@ mod tests {
             worker_choice_interface: "system_worker_test".to_string(),
             capability_doors: BTreeMap::new(),
             capability_tools: BTreeMap::new(),
+            capability_tool_sources: BTreeMap::new(),
             authoring_tool_id: "file.write__test".to_string(),
         };
         let checkpoint =
@@ -7124,7 +7177,7 @@ mod tests {
             && cp["outbound_interface_bindings"][0]["interface"] == persistent.authoring_environment_interface_id).unwrap();
         let output_template = templates.iter().find(|cp| cp["role"] == "provider_tool_output"
             && cp["outbound_interface_bindings"][0]["interface"] == *owner).unwrap();
-        assert_eq!(output_template["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id]));
+        assert_eq!(output_template["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id,format!("artifact-run-authoring-coordinates-{}", persistent_request.chat_id)]));
         let mut exact_bindings = authoring_row["artifact_bindings"].as_array().unwrap().clone();
         exact_bindings.extend(output_template["static_artifact_bindings"].as_array().unwrap().iter().map(|id| serde_json::json!({"id":id})));
         let owner_call = rows.iter().find(|cp| cp["interface_binding"] == output_template["interface_binding"]
@@ -7134,6 +7187,35 @@ mod tests {
         for id in run["interface_state"][owner]["owned_checkpoint_ids"].as_array().unwrap() {
             let row = rows.iter().find(|cp| cp["id"] == *id).unwrap();
             assert_eq!(bindings(&row["artifact_bindings"]), bindings(&serde_json::json!(exact_bindings)), "owned execution checkpoint bindings differ from the exact provider tool output template");
+        }
+        let seed = ArtifactBindingSeed { id: "fixture.selected.context".into() };
+        for inherit in [true, false] {
+            let mut rebound = run.clone();
+            let mut call = authoring_row.clone();
+            call["run"] = rebound["id"].clone();
+            rebound["active_checkpoints"].as_array_mut().unwrap().push(call["id"].clone());
+            rebound["checkpoints"].as_array_mut().unwrap().push(call);
+            let owned = rebound["interface_state"][owner]["owned_checkpoint_ids"].as_array().unwrap().clone();
+            let templates = rebound["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["checkpoints"].as_array_mut().unwrap();
+            let returned = templates.iter_mut().find(|cp| cp["role"] == "owner_input" && cp["interface_binding"]["interface"] == *owner).unwrap();
+            returned["include_context"] = serde_json::json!(inherit);
+            if !inherit { returned["static_artifact_bindings"] = output_template["static_artifact_bindings"].clone(); }
+            let rights = serde_json::json!({"read":true,"change":true,"create":true,"delete":true});
+            for row in rebound["checkpoints"].as_array_mut().unwrap().iter_mut().filter(|row| owned.contains(&row["id"])) {
+                row["artifact_bindings"].as_array_mut().unwrap().iter_mut().find(|binding| binding["id"] == prelude["id"]).unwrap()["access"] = rights.clone();
+            }
+            context_bindings::bind_selected_context(&mut rebound, None, &persistent.model_interface_id, [&seed], []).unwrap();
+            let returned = rebound["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter().find(|cp| cp["role"] == "owner_input" && cp["interface_binding"]["interface"] == *owner).unwrap();
+            assert_eq!(returned["include_context"], inherit);
+            assert_eq!(returned.get("static_artifact_bindings").is_none(), inherit);
+            for row in rebound["checkpoints"].as_array().unwrap().iter().filter(|row| owned.contains(&row["id"])) {
+                let actual = bindings(&row["artifact_bindings"]);
+                assert_eq!(row["artifact_bindings"].as_array().unwrap().iter().find(|binding| binding["id"] == prelude["id"]).unwrap()["access"], rights);
+                assert_eq!(actual.iter().find(|binding| binding.id.as_str() == seed.id).unwrap().access, octopus_runtime::ArtifactAccess::read_only());
+            }
+            let denied = rebound["checkpoints"].as_array_mut().unwrap().iter_mut().find(|row| owned.contains(&row["id"])).unwrap()["artifact_bindings"].as_array_mut().unwrap().iter_mut().find(|binding| binding["id"] == seed.id).unwrap();
+            denied["access"] = serde_json::json!({"read":false,"create":true});
+            assert!(context_bindings::bind_selected_context(&mut rebound, None, &persistent.model_interface_id, [&seed], []).unwrap_err().contains("cannot widen an existing denied read"));
         }
         assert!(!templates.iter().any(|cp| cp["interface_binding"]["interface"] == *gui || cp["outbound_interface_bindings"].as_array().unwrap().iter().any(|out| out["interface"] == *gui)));
         let provider = exact_json(&persistent,format!("interface:{}",persistent.model_interface_id));
@@ -7250,6 +7332,7 @@ mod tests {
         let make_request = |profile: &OctopusOsAuthoringProfile, role: &str, id: &str| -> OperatorChatPlanRequest {
             serde_json::from_value(serde_json::json!({
                 "registry_root":registry_root,"ee_instances_root":ee_root,"run_records_root":ee_root.join("runs"),"write_hash_algorithm":"sha256",
+                "interface_private_state_root":ee_root.join("interface-private"),
                 "chat_id":id,"provider_interface_id":home["provider_interface_id"],"ee_id":profile.ee_id,
                 "worker_interface_id":profile.worker_choice_interface,"client_surface_role":role,"cycle":format!("{id}_cycle"),
                 "door_host_slots":profile.door_host_slots,"external_inputs":profile.external_inputs,"external_relays":profile.external_relays,
@@ -7278,6 +7361,24 @@ mod tests {
             request.ee_policy_root = Some(ee_root.to_path_buf());
             request.ee_instances_root = ee_root.join("published-ee-instances");
             let plan = plan_operator_chat_topology(&request).expect("actual Home/task chain forms the declared Browser/CU defaults");
+            let provider: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
+                .find(|write| write.tag == format!("interface:{}", plan.model_interface_id)).unwrap().content).unwrap();
+            let native = &provider["interface_driver_config"]["private_config"]["run_affordances"];
+            assert_eq!(native["file_read_tool"], serde_json::json!(plan.capability_tools["file.read"]));
+            let catalog_id = format!("artifact-run-affordances-{id}");
+            let catalog: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
+                .find(|write| write.tag == format!("artifact:{catalog_id}")).unwrap().content).unwrap();
+            assert_eq!(native["catalog_artifact"], serde_json::json!(octopus_ledger::ArtifactRef {
+                id: catalog_id.as_str().into(),
+                content: octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&catalog)),
+            }));
+            assert_eq!(native["roots"]["ee_instances_root"], serde_json::json!(request.ee_instances_root));
+            assert_eq!(native["file_write_tool"], serde_json::json!(plan.capability_tools["file.write"]));
+            assert_ne!(native["file_write_tool"], serde_json::json!(plan.authoring_tool_id));
+            let authored = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
+            assert!(authored.checkpoints.iter().filter(|cp| cp.interface_binding.as_ref()
+                .is_some_and(|binding| binding.interface.as_str() == plan.model_interface_id))
+                .any(|cp| cp.artifact_bindings.iter().any(|binding| binding.id.as_str() == catalog_id && binding.access.read)));
             if role == "home" {
                 let delivery: serde_json::Value = serde_json::from_str(&plan.interface_writes.iter()
                     .find(|write| write.tag == format!("artifact:artifact-home-delivery-{id}")).unwrap().content).unwrap();

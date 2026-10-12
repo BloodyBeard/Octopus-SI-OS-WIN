@@ -1361,13 +1361,18 @@ fn macos_runtime_library_paths(
     bundle_roots: &BTreeSet<PathBuf>,
     runtime_roots: &BTreeSet<PathBuf>,
 ) -> Result<BTreeSet<PathBuf>, String> {
-    let mut pending = BTreeSet::from([executable.to_path_buf()]);
+    let executable_bytes = std::fs::read(executable).map_err(|error| error.to_string())?;
+    let (_, executable_rpaths) = macos_imported_libraries(&executable_bytes);
+    let inherited_rpaths = executable_rpaths.iter()
+        .filter_map(|path| resolve_macos_import(path, executable, executable)).collect::<Vec<_>>();
+    let mut candidates = BTreeSet::from([executable.to_path_buf()]);
     for root in bundle_roots {
-        collect_macos_runtime_candidates(root, &mut pending)?;
+        collect_macos_runtime_candidates(root, &mut candidates)?;
     }
+    let mut pending = candidates.into_iter().map(|path| (path, inherited_rpaths.clone())).collect::<BTreeMap<_, _>>();
     let mut inspected = BTreeSet::new();
     let mut libraries = BTreeSet::new();
-    while let Some(path) = pending.pop_first() {
+    while let Some((path, inherited_rpaths)) = pending.pop_first() {
         let resolved = match std::fs::canonicalize(&path) {
             Ok(path) => path,
             Err(_) => continue,
@@ -1379,9 +1384,21 @@ fn macos_runtime_library_paths(
             Ok(bytes) => bytes,
             Err(_) => continue,
         };
-        let imports = macos_imported_libraries(&bytes);
+        let (imports, declared_rpaths) = macos_imported_libraries(&bytes);
+        let mut rpaths = declared_rpaths.iter()
+            .filter_map(|path| resolve_macos_import(path, &resolved, executable)).collect::<Vec<_>>();
+        for inherited in inherited_rpaths {
+            if !rpaths.contains(&inherited) { rpaths.push(inherited); }
+        }
         for import in imports {
-            let Some(import) = resolve_macos_import(&import, &resolved, executable) else {
+            let selected = if let Some(relative) = import.strip_prefix(b"@rpath/") {
+                use std::os::unix::ffi::OsStrExt;
+                rpaths.iter().map(|root| root.join(OsStr::from_bytes(relative)))
+                    .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
+            } else {
+                resolve_macos_import(&import, &resolved, executable)
+            };
+            let Some(import) = selected else {
                 continue;
             };
             if bundle_roots.iter().any(|root| import.starts_with(root))
@@ -1398,7 +1415,7 @@ fn macos_runtime_library_paths(
             }
             libraries.insert(import);
             libraries.insert(canonical.clone());
-            pending.insert(canonical);
+            pending.entry(canonical).or_insert_with(|| rpaths.clone());
         }
     }
     Ok(libraries)
@@ -1455,10 +1472,10 @@ fn macos_runtime_candidate(path: &Path, metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
-    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+fn macos_imported_libraries(bytes: &[u8]) -> (BTreeSet<Vec<u8>>, Vec<Vec<u8>>) {
+    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64, LoadCommandVariant};
 
-    fn thin(bytes: &[u8], imports: &mut BTreeSet<Vec<u8>>) {
+    fn thin(bytes: &[u8], imports: &mut BTreeSet<Vec<u8>>, rpaths: &mut Vec<Vec<u8>>) {
         let Ok(file) = object::File::parse(bytes) else {
             return;
         };
@@ -1474,6 +1491,12 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
                         Ok(Some(command)) => command,
                         Ok(None) | Err(_) => break,
                     };
+                    if let Ok(LoadCommandVariant::Rpath(rpath)) = command.variant() {
+                        if let Ok(path) = command.string(endian, rpath.path) {
+                            let path = path.to_vec();
+                            if !rpaths.contains(&path) { rpaths.push(path); }
+                        }
+                    }
                     let Ok(Some(dylib)) = command.dylib() else {
                         continue;
                     };
@@ -1491,15 +1514,16 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     }
 
     let mut imports = BTreeSet::new();
+    let mut rpaths = Vec::new();
     match object::FileKind::parse(bytes) {
         Ok(object::FileKind::MachO32 | object::FileKind::MachO64) => {
-            thin(bytes, &mut imports);
+            thin(bytes, &mut imports, &mut rpaths);
         }
         Ok(object::FileKind::MachOFat32) => {
             if let Ok(file) = MachOFatFile32::parse(bytes) {
                 for arch in file.arches() {
                     if let Ok(bytes) = arch.data(bytes) {
-                        thin(bytes, &mut imports);
+                        thin(bytes, &mut imports, &mut rpaths);
                     }
                 }
             }
@@ -1508,14 +1532,14 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
             if let Ok(file) = MachOFatFile64::parse(bytes) {
                 for arch in file.arches() {
                     if let Ok(bytes) = arch.data(bytes) {
-                        thin(bytes, &mut imports);
+                        thin(bytes, &mut imports, &mut rpaths);
                     }
                 }
             }
         }
         _ => {}
     }
-    imports
+    (imports, rpaths)
 }
 
 #[cfg(target_os = "macos")]

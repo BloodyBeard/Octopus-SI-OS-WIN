@@ -68,6 +68,10 @@ use crate::run_affordances::{NativePending, NativeStep, PeerAction, PeerMessage,
 mod tool_operator_request;
 use tool_operator_request::{ToolOperatorContinuity, ToolOperatorPhase, ToolOperatorRequest};
 
+#[path = "context_refresh.rs"]
+mod context_refresh;
+use context_refresh::{ContextRefresh, CurrentNativeContext};
+
 pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
 
 pub(crate) const PROVIDER_TRANSPORT_DISPATCH_LABEL: &str = "provider.transport.dispatch";
@@ -1604,6 +1608,8 @@ pub(crate) struct CodexContinuityState {
     tool_operator_request: Option<ToolOperatorContinuity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_terminal: Option<NativeTerminalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_refresh: Option<ContextRefresh>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -1808,6 +1814,10 @@ pub(crate) enum ProviderStreamEmission {
         emission: ProviderEmission,
         bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
     },
+    WithCapabilityAmendment {
+        emission: ProviderEmission,
+        amendment: octopus_provider_run_authoring::ProviderCapabilityAmendment,
+    },
     TerminalGroup {
         stream: ProviderEmission,
         terminal: ProviderEmission,
@@ -1826,6 +1836,14 @@ pub(crate) enum ProviderStreamEmission {
     TransportDispatch {
         artifact: InterfaceArtifactFile,
         admitted: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    ContextBoundary {
+        emissions: Vec<ProviderEmission>,
+        admitted: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    CurrentRunRecord {
+        expected_before: Option<(String, serde_json::Value)>,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>,
     },
 }
 
@@ -1958,6 +1976,15 @@ impl ProviderOutputStream {
                 )
             })?
             .map_err(ControlOutputError::Failed)
+    }
+
+    async fn current_run_record(&self, expected_before: Option<(String, serde_json::Value)>) -> Result<Vec<u8>, InterfaceDriverError> {
+        let (reply, receipt) = tokio::sync::oneshot::channel();
+        self.sender.send(ProviderStreamEmission::CurrentRunRecord { expected_before, reply })
+            .map_err(|_| InterfaceDriverError::Transport("provider output stream closed before the checked run read".into()))?;
+        receipt.await
+            .map_err(|_| InterfaceDriverError::Transport("provider output stream dropped the checked run read".into()))?
+            .map_err(InterfaceDriverError::FailedClosed)
     }
 
     async fn hand_transport_dispatch(
@@ -4346,6 +4373,7 @@ pub(crate) fn recover_provider_result_continuity(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
     snapshot: Option<&ProviderInvocationSessionSnapshot>,
+    current_session: &[SessionContextArtifact],
     run: &octopus_descriptors::RunId,
     pinned: &[u8],
 ) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
@@ -4366,7 +4394,8 @@ pub(crate) fn recover_provider_result_continuity(
     let payloads = resolve_instruction_context(input.metadata()?, &payloads)
         .map_err(InterfaceDriverError::FailedClosed)?.remaining_payloads;
     let contexts = CodexAppServerInterfaceDriver::resolve_bound_session_contexts(&payloads, &runtime.interface, &snapshots, snapshot)?;
-    let Some(source) = recover_codex_continuity_resolved(&payloads, &contexts, &runtime.interface, run.as_str(), &labels, &snapshots)? else { return Ok(None); };
+    let bound = recover_codex_continuity_resolved(&payloads, &contexts, &runtime.interface, run.as_str(), &labels, &snapshots)?;
+    let Some(source) = reconcile_operator_session_continuity(descriptor, input, bound, current_session)? else { return Ok(None); };
     if source.interrupted_pending.is_some() || source.pending.as_ref().is_none_or(|pending| !interrupted_pending_has_external_result(pending)) {
         return Ok(None);
     }
@@ -4376,6 +4405,144 @@ pub(crate) fn recover_provider_result_continuity(
         return Ok(None);
     }
     Ok(Some(source))
+}
+
+pub(crate) fn recovered_tool_handoff_receipt(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    source_movement_seq: u64,
+    current_record: &[u8],
+    session: &[SessionContextArtifact],
+    outcomes: &[octopus_provider_run_authoring::ProviderHandoffOutcome],
+    output_root: &Path,
+) -> Result<Option<ProviderEmission>, InterfaceDriverError> {
+    use octopus_provider_run_authoring::ProviderHandoffOutcome;
+    let Some(ProviderHandoffOutcome::Admitted { seq, artifact }) = outcomes.last() else {
+        return Ok(None);
+    };
+    let matches = session.iter().filter(|entry| entry.source_artifact == *artifact).collect::<Vec<_>>();
+    let [effect] = matches.as_slice() else { return Ok(None); };
+    if effect.label != TOOL_CALL_LABEL { return Ok(None); }
+    let refused = |message: &str| InterfaceDriverError::FailedClosed(message.to_string());
+    let runtime = invocation_runtime_metadata(input)?;
+    if runtime.interface != descriptor.id || *seq <= source_movement_seq
+        || effect.source_movement_seq != Some(*seq)
+        || effect.payload.get("label").and_then(serde_json::Value::as_str) != Some(TOOL_CALL_LABEL)
+    {
+        return Err(refused("recovered tool handoff has conflicting source admission evidence"));
+    }
+    let raw = effect.payload.get(CODEX_CONTINUITY_FIELD)
+        .ok_or_else(|| refused("recovered tool handoff has no pending continuity"))?;
+    let mut state = parse_codex_continuity(raw, &runtime.interface, runtime.run.as_str())?;
+    let Some(CodexPendingContinuity::DynamicTool { call_id, tool, .. }) = state.pending.as_ref() else {
+        return Err(refused("recovered tool handoff has no exact pending tool"));
+    };
+    if state.interrupted_pending.is_some()
+        || effect.payload.get("correlation_id").and_then(serde_json::Value::as_str) != Some(call_id.as_str())
+        || effect.payload.get("tool").and_then(serde_json::Value::as_str) != Some(tool.as_str())
+        || !effect.payload.get("arguments").is_some_and(serde_json::Value::is_object)
+    {
+        return Err(refused("recovered tool handoff differs from its durable pending effect"));
+    }
+    if let Some(operation) = native_pending_operation(state.pending.as_ref().expect("checked above"))?
+        && effect.payload.get("arguments") != Some(&operation.effect.arguments)
+    {
+        return Err(refused("recovered native handoff changed its declared effect arguments"));
+    }
+    if reconcile_operator_session_continuity(descriptor, input, Some(state.clone()), session)? != Some(state.clone()) {
+        return Err(refused("recovered tool handoff is not the current pending continuity"));
+    }
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(current_record)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if record.id != runtime.run || record.ee != runtime.ee || record.worker != runtime.worker
+        || record.interface_state.get(&runtime.interface).and_then(|state| state.get("context_generation"))
+            .and_then(serde_json::Value::as_u64) != Some(state.context_generation)
+    {
+        return Err(refused("recovered tool handoff differs from its checked run generation"));
+    }
+    state.context_generation = state.context_generation.checked_add(1)
+        .ok_or_else(|| refused("recovered tool handoff context generation overflowed"))?;
+    let payload = serde_json::json!({
+        "label": INTERFACE_CONTEXT_UPDATED_LABEL,
+        "code": "recovered_tool_handoff",
+        "source_movement_seq": source_movement_seq,
+        "source_artifact": input.artifact,
+        "effect_artifact": artifact,
+        "effect_movement_seq": seq,
+        CODEX_CONTINUITY_FIELD: state,
+    });
+    let artifact = materialize_codex_emitted_artifact(output_root, INTERFACE_CONTEXT_UPDATED_LABEL,
+        &serde_json::to_vec(&payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?)?;
+    Ok(Some(ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection }))
+}
+
+pub(crate) fn correlated_tool_result(
+    input: &InterfaceInvocationEnvelope,
+) -> Result<Option<ToolResultArtifact>, InterfaceDriverError> {
+    let payload = serde_json::from_slice(&input.read_artifact_payload()?)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let Some(result) = decode_tool_result_artifact(&payload)? else { return Ok(None); };
+    if result.label != input.read_artifact_manifest()?.label {
+        return Err(InterfaceDriverError::FailedClosed("tool result changed its admitted manifest label".into()));
+    }
+    Ok(result.correlation_id.is_some().then_some(result))
+}
+
+/// A second admitted route may deliver the same immutable tool result. The
+/// caller must first prove completion of its earlier input through checked run
+/// history. A non-context acknowledgement preserves the current native wait,
+/// context generation and live control target without submitting the result twice.
+pub(crate) fn duplicate_tool_result_receipt(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    source_movement_seq: u64,
+    completed_source: u64,
+    current_record: &[u8],
+    session: &[SessionContextArtifact],
+    output_root: &Path,
+) -> Result<ProviderEmission, InterfaceDriverError> {
+    let refused = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+    let result = correlated_tool_result(input)?
+        .ok_or_else(|| refused("duplicate result has no exact tool correlation"))?;
+    let prior = session.iter().filter(|entry| entry.source_artifact == input.artifact).collect::<Vec<_>>();
+    let payload: serde_json::Value = serde_json::from_slice(&input.read_artifact_payload()?)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if completed_source >= source_movement_seq || prior.len() > 1 {
+        return Err(refused("duplicate result differs from its completed input"));
+    }
+    // A completed input need not have been retained as context. Completion is
+    // proved by the handoff's ledger query, while any retained copy must agree.
+    if prior.first().is_some_and(|prior| prior.label != result.label || prior.payload != payload
+        || prior.source_movement_seq.is_none_or(|sequence| sequence > source_movement_seq)) {
+        return Err(refused("duplicate result conflicts with its checked context copy"));
+    }
+    let runtime = invocation_runtime_metadata(input)?;
+    let state = reconcile_operator_session_continuity(descriptor, input, None, session)?
+        .ok_or_else(|| refused("duplicate result has no current checked continuity"))?;
+    if state.pending.iter().chain(state.interrupted_pending.iter()).any(|pending| {
+        matches!(pending, CodexPendingContinuity::DynamicTool { call_id, .. }
+            if Some(call_id.as_str()) == result.correlation_id.as_deref())
+    }) {
+        return Err(refused("completed duplicate result still owns the current native wait"));
+    }
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(current_record)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if record.id != runtime.run || record.ee != runtime.ee || record.worker != runtime.worker
+        || record.interface_state.get(&runtime.interface).and_then(|state| state.get("context_generation"))
+            .and_then(serde_json::Value::as_u64) != Some(state.context_generation)
+    {
+        return Err(refused("duplicate result differs from its checked run generation"));
+    }
+    let payload = serde_json::json!({
+        "label": TURN_INPUT_ACKNOWLEDGED_LABEL, "code": "duplicate_tool_result",
+        "action": "receive", "status": "acknowledged",
+        "source_movement_seq": source_movement_seq, "source_artifact": input.artifact,
+        "completed_source_movement_seq": completed_source,
+        "context_generation": state.context_generation,
+    });
+    let artifact = materialize_codex_emitted_artifact(output_root, TURN_INPUT_ACKNOWLEDGED_LABEL,
+        &serde_json::to_vec(&payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?)?;
+    Ok(ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection })
 }
 
 pub(crate) fn codex_continuity_waits_for_result(state: &CodexContinuityState) -> bool {
@@ -4394,21 +4561,24 @@ pub(crate) fn codex_continuity_successor_is_settled(
         "deferred operator turn release has no Codex continuity coordinates".to_string()
     })?;
     let Some(source) = source else {
-        return Ok(!codex_continuity_waits_for_result(rebased));
+        return Ok(!codex_continuity_waits_for_result(rebased)
+            && rebased.context_refresh.as_ref().is_none_or(|refresh| refresh.settled_replacement()));
     };
     if source.provider_interface != rebased.provider_interface
         || source.run != rebased.run
-        || source.thread_id != rebased.thread_id
-        || source.thread_shape_fingerprint != rebased.thread_shape_fingerprint
-        || source.static_context_fingerprint != rebased.static_context_fingerprint
         || rebased.context_generation < source.context_generation
+        || ((source.thread_id != rebased.thread_id
+            || source.thread_shape_fingerprint != rebased.thread_shape_fingerprint
+            || source.static_context_fingerprint != rebased.static_context_fingerprint)
+            && !rebased.context_refresh.as_ref().is_some_and(|refresh| refresh.connects(source, rebased)))
     {
         return Err(
             "deferred operator turn release is not a monotonic successor of its source continuity"
                 .to_string(),
         );
     }
-    Ok(!codex_continuity_waits_for_result(rebased))
+    Ok(!codex_continuity_waits_for_result(rebased)
+        && rebased.context_refresh.as_ref().is_none_or(|refresh| refresh.settled_replacement()))
 }
 
 fn validate_durable_interruption_output_labels(
@@ -5969,6 +6139,10 @@ impl CodexAppServerInterfaceDriver {
                 }
             }
         }
+        let early_model_context = if recovered.as_ref().is_some_and(|state| state.interrupted_pending.is_none() && (state.pending.is_some() || state.context_refresh.is_some()))
+            && matches!(&provider_input, ProviderInput::ToolResult(_) | ProviderInput::InterfaceOperationResult(_)) {
+            Some(self.resolve_model_context(&input, &assembled_context).await?)
+        } else { None };
         let effect_gate = Arc::new(tokio::sync::Mutex::new(()));
         let turn_interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let native_parent_record = octopus_runtime::run_record::RunRecord::from_bytes(current_run_record)
@@ -5992,6 +6166,18 @@ impl CodexAppServerInterfaceDriver {
             lifecycle: lifecycle.as_ref(),
             lifecycle_prompt: lifecycle_prompt_event.as_ref(),
         };
+        if let Some(model_context) = &early_model_context
+            && self.refresh_native_context(
+                turn_context, &provider_input, recovered.as_ref(), context_generation,
+                CurrentNativeContext {
+                    model: &model_context.model, instructions: &model_context.bound_instructions, tools: &native_catalog.specs,
+                    static_fingerprint: &model_context.static_context_fingerprint,
+                    conversation: model_context.conversation_block.as_deref(), obligations: model_context.obligations_grant_block.as_deref(),
+                    session_available: assembled_context.session_context_available,
+                    reasoning_effort: model_context.reasoning_effort.clone(), reasoning_summary: model_context.reasoning_summary.clone(),
+                    recovered_dispatches: &recovered_turn_start_dispatches,
+                },
+            ).await? { return Ok(()); }
         if durable_interrupt_override {
             emit_lifecycle_trigger(
                 &sink,
@@ -6216,7 +6402,11 @@ impl CodexAppServerInterfaceDriver {
                         let receipt = serde_json::to_value(result).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
                         match operation.advance(&receipt).map_err(InterfaceDriverError::FailedClosed)? {
                             NativeStep::Effect { pending: next, outgoing_bindings, .. } => {
-                                emit_native_effect(&sink, turn_id, next, outgoing_bindings)?;
+                                emit_native_effect(&sink, turn_id, next, outgoing_bindings, None)?;
+                                return Ok(());
+                            }
+                            NativeStep::AmendmentEffect { pending: next, amendment, .. } => {
+                                emit_native_effect(&sink, turn_id, next, Vec::new(), Some(amendment))?;
                                 return Ok(());
                             }
                             NativeStep::Complete { result: value } => {
@@ -6238,7 +6428,7 @@ impl CodexAppServerInterfaceDriver {
                         item: recovered_function_call_output(
                             call_id,
                             recovered_result_output(dynamic_tool_response_content(
-                                result,
+                                result, &effective_source_artifact, self.model_result_projection()?,
                             )?)?,
                         ),
                         activity: CodexTurnOutput::dynamic_tool_completed(
@@ -6432,7 +6622,7 @@ impl CodexAppServerInterfaceDriver {
                         item: recovered_function_call_output(
                             call_id,
                             recovered_result_output(interface_operation_response_content(
-                                result,
+                                result, &effective_source_artifact, self.model_result_projection()?,
                             )?)?,
                         ),
                         activity: CodexTurnOutput::interface_operation_completed(
@@ -6526,45 +6716,11 @@ impl CodexAppServerInterfaceDriver {
             }
         }
 
-        let model = self
-            .resolve_private_config_string("model")?
-            .ok_or_else(|| {
-                InterfaceDriverError::FailedClosed(format!(
-                    "no model bound to interface '{}'; its interface_driver_config.private_config \
-                     carries no model, and the app-server may not pick a hidden default — bind the run \
-                     to an interface descriptor whose folder config declares a model (constitution §3, \
-                     fail-closed)",
-                    runtime.interface.as_str()
-                ))
-            })?;
-        let formed_models = required_formed_models(&input)?;
-        if !formed_models.contains(&model) {
-            return Err(InterfaceDriverError::FailedClosed(format!(
-                "Codex interface '{}' selected model '{}' outside its freshly formed interface policy models [{}]",
-                runtime.interface.as_str(),
-                model,
-                formed_models.iter().cloned().collect::<Vec<_>>().join(", ")
-            )));
-        }
-        let reasoning_effort = parse_reasoning_effort(
-            self.resolve_private_config_string("reasoning_effort")?
-                .as_deref(),
-        )?;
-        self.validate_native_service_tier(&model).await?;
-        let reasoning_summary = parse_reasoning_summary(
-            self.resolve_private_config_string("reasoning_summary")?
-                .as_deref(),
-        )?;
-
-        let static_context_fingerprint = sha256_hex(&assembled_context.static_context_bytes);
-        let assembled_role =
-            (!assembled_context.role.is_empty()).then(|| assembled_context.role.join("\n\n"));
-        let bound_instructions = resolve_bound_instructions(assembled_role.as_deref())?;
-        let conversation_block = (!assembled_context.conversation.is_empty())
-            .then(|| assembled_context.conversation.join("\n\n"));
-
-        let obligations_grant_block = input.metadata.as_ref().and_then(render_model_context_block);
-
+        let context_refresh::ResolvedModelContext { model, reasoning_effort, reasoning_summary,
+            static_context_fingerprint, bound_instructions, conversation_block, obligations_grant_block } = match early_model_context {
+                Some(context) => context,
+                None => self.resolve_model_context(&input, &assembled_context).await?,
+            };
         let native_affordances = &native_catalog.specs;
 
         if let Some((response, pending)) = recovered_operator_continuation {
@@ -6620,6 +6776,8 @@ impl CodexAppServerInterfaceDriver {
             native_affordances,
             &static_context_fingerprint,
         )?;
+        let retained_refresh = recovered.as_ref().and_then(|state| state.context_refresh.as_ref())
+            .filter(|refresh| refresh.matches_thread(&thread_id, &thread_shape_fingerprint, &static_context_fingerprint)).cloned();
         sink.set_continuity(CodexContinuityState {
             schema_version: 1,
             provider_interface: runtime.interface.clone(),
@@ -6633,6 +6791,7 @@ impl CodexAppServerInterfaceDriver {
                 .and_then(|_| recovered.as_ref().and_then(|state| state.pending.clone())),
             interrupted_pending: None,
             native_terminal: None,
+            context_refresh: retained_refresh,
             tool_operator_request: recovered_tool_continuation.as_ref().and_then(|_| {
                 recovered
                     .as_ref()
@@ -7266,7 +7425,16 @@ impl CodexAppServerInterfaceDriver {
                     next.kind = PendingServerRequestKind::DynamicTool { call_id: effect.correlation_id, tool: effect.tool };
                     self.remove_pending_request(context.scope, &pending).await?;
                     self.record_drain_outcome(context.scope, TurnDrainOutcome::Suspended(next.clone())).await?;
-                    self.publish_native_effect(context, &next, next_operation, outgoing_bindings, self.client.lock().await.request_handle())?;
+                    self.publish_native_effect(context, &next, next_operation, outgoing_bindings, None, self.client.lock().await.request_handle())?;
+                    return Ok(true);
+                }
+                NativeStep::AmendmentEffect { effect, pending: next_operation, amendment } => {
+                    let mut next = pending.clone();
+                    next.key = format!("tool:{}", effect.correlation_id);
+                    next.kind = PendingServerRequestKind::DynamicTool { call_id: effect.correlation_id, tool: effect.tool };
+                    self.remove_pending_request(context.scope, &pending).await?;
+                    self.record_drain_outcome(context.scope, TurnDrainOutcome::Suspended(next.clone())).await?;
+                    self.publish_native_effect(context, &next, next_operation, Vec::new(), Some(amendment), self.client.lock().await.request_handle())?;
                     return Ok(true);
                 }
                 NativeStep::Complete { result } => {
@@ -7291,7 +7459,7 @@ impl CodexAppServerInterfaceDriver {
             result.body.clone(),
             result.error.clone(),
         ))?;
-        let response = dynamic_tool_response_value(&result)?;
+        let response = dynamic_tool_response_value(&result, context.source_artifact, self.model_result_projection()?)?;
         self.resolve_and_continue(context, pending, response, effect_guard)
             .await?;
         Ok(true)
@@ -7303,9 +7471,10 @@ impl CodexAppServerInterfaceDriver {
         pending: &PendingServerRequest,
         operation: NativePending,
         bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+        amendment: Option<octopus_provider_run_authoring::ProviderCapabilityAmendment>,
         handle: AppServerRequestHandle,
     ) -> Result<(), InterfaceDriverError> {
-        emit_native_effect(context.sink, &pending.turn_id, operation, bindings)?;
+        emit_native_effect(context.sink, &pending.turn_id, operation, bindings, amendment)?;
         context.control.publish(CodexTurnControlTarget::Suspended {
             handle, request_ids: self.next_request_id.clone(), pending_requests: self.pending_server_requests.clone(),
             scope: context.scope.clone(), output: Arc::downgrade(context.sink.emit), continuity: context.sink.continuity_snapshot(),
@@ -7475,7 +7644,7 @@ impl CodexAppServerInterfaceDriver {
                 result.ok,
                 result.value.clone(),
             ))?;
-        let response = interface_operation_response_value(result)?;
+        let response = interface_operation_response_value(result, context.source_artifact, self.model_result_projection()?)?;
         self.resolve_and_continue(context, pending, response, effect_guard)
             .await?;
         Ok(true)
@@ -8279,6 +8448,20 @@ impl TurnSink<'_> {
         let emission = self.materialize_normalized(output, true)?;
         self.emit.sender.send(ProviderStreamEmission::WithOutgoingBindings { emission, bindings })
             .map_err(|_| InterfaceDriverError::Transport("provider binding emission lost its interface life".into()))
+    }
+
+    fn send_with_capability_amendment(
+        &self,
+        mut output: CodexTurnOutput,
+        amendment: octopus_provider_run_authoring::ProviderCapabilityAmendment,
+    ) -> Result<(), InterfaceDriverError> {
+        if !matches!(output.route, ProviderEmissionRoute::Tool { .. }) {
+            return Err(InterfaceDriverError::FailedClosed("a capability amendment requires an ordinary tool emission".into()));
+        }
+        self.normalize_output_label(&mut output)?;
+        let emission = self.materialize_normalized(output, true)?;
+        self.emit.sender.send(ProviderStreamEmission::WithCapabilityAmendment { emission, amendment })
+            .map_err(|_| InterfaceDriverError::Transport("provider amendment emission lost its interface life".into()))
     }
 
     fn seal_live_stream(
@@ -9998,7 +10181,42 @@ impl CodexAppServerInterfaceDriver {
                             if let Some(native) = context.run_invocation
                                 && native.affordances.affordances().iter().any(|row| row.name.as_str() == tool)
                             {
-                                let step = native.affordances.plan_call(native.metadata, native.admitted_record, native.current_record, &call_id, &tool, &arguments)
+                                let baseline = match native.affordances.planning_baseline(&tool, &arguments) {
+                                    Ok(baseline) => baseline,
+                                    Err(error) => {
+                                        let result = serde_json::json!({"ok":false,"error":error});
+                                        sink.send(CodexTurnOutput::dynamic_tool_completed(
+                                            self.native_tool_namespace()?.name, tool, call_id,
+                                            thread_id.into(), turn_id.into(), false, Some(result.clone()), None,
+                                        ))?;
+                                        client.resolve_server_request(request_id, native_operation_response(&result)?).await
+                                            .map_err(|error| InterfaceDriverError::Transport(error.to_string()))?;
+                                        continue;
+                                    }
+                                };
+                                let checking_baseline = baseline.is_some();
+                                let current_bytes = match sink.emit.current_run_record(baseline).await {
+                                    Ok(bytes) => bytes,
+                                    Err(InterfaceDriverError::FailedClosed(error)) if checking_baseline => {
+                                        let result = serde_json::json!({"ok":false,"error":error});
+                                        sink.send(CodexTurnOutput::dynamic_tool_completed(
+                                            self.native_tool_namespace()?.name, tool, call_id,
+                                            thread_id.into(), turn_id.into(), false, Some(result.clone()), None,
+                                        ))?;
+                                        client.resolve_server_request(request_id, native_operation_response(&result)?).await
+                                            .map_err(|error| InterfaceDriverError::Transport(error.to_string()))?;
+                                        continue;
+                                    }
+                                    Err(error) => return Err(error),
+                                };
+                                let current = octopus_runtime::run_record::RunRecord::from_bytes(&current_bytes)
+                                    .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+                                if current.id != native.current_record.id || current.ee != native.current_record.ee
+                                    || current.worker != native.current_record.worker
+                                {
+                                    return Err(InterfaceDriverError::FailedClosed("checked native planning read changed run identity".into()));
+                                }
+                                let step = native.affordances.plan_call(native.metadata, native.admitted_record, &current, &call_id, &tool, &arguments)
                                     .unwrap_or_else(|error| NativeStep::Complete { result: serde_json::json!({"ok": false, "error": error}) });
                                 match step {
                                     NativeStep::Effect { effect, pending: operation, outgoing_bindings } => {
@@ -10009,7 +10227,18 @@ impl CodexAppServerInterfaceDriver {
                                             effect_gate: context.effect_gate.clone(), turn_interrupted: context.turn_interrupted.clone(),
                                         };
                                         self.record_drain_outcome(scope, TurnDrainOutcome::Suspended(pending.clone())).await?;
-                                        self.publish_native_effect(context, &pending, operation, outgoing_bindings, client.request_handle())?;
+                                        self.publish_native_effect(context, &pending, operation, outgoing_bindings, None, client.request_handle())?;
+                                        return Ok(TurnDrainOutcome::Suspended(pending));
+                                    }
+                                    NativeStep::AmendmentEffect { effect, pending: operation, amendment } => {
+                                        let pending = PendingServerRequest {
+                                            request_id, thread_id: thread_id.into(), turn_id: turn_id.into(),
+                                            key: format!("tool:{}", effect.correlation_id),
+                                            kind: PendingServerRequestKind::DynamicTool { call_id: effect.correlation_id.clone(), tool: effect.tool.clone() },
+                                            effect_gate: context.effect_gate.clone(), turn_interrupted: context.turn_interrupted.clone(),
+                                        };
+                                        self.record_drain_outcome(scope, TurnDrainOutcome::Suspended(pending.clone())).await?;
+                                        self.publish_native_effect(context, &pending, operation, Vec::new(), Some(amendment), client.request_handle())?;
                                         return Ok(TurnDrainOutcome::Suspended(pending));
                                     }
                                     NativeStep::Complete { result } => {
@@ -10023,7 +10252,7 @@ impl CodexAppServerInterfaceDriver {
                                     }
                                     NativeStep::Wait { request } => {
                                         drop(_effect_guard);
-                                        let wait = self.wait_for_peer_artifact(native.current_record, &call_id, request.timeout_ms, context.turn_interrupted).await?;
+                                        let wait = self.wait_for_peer_artifact(&current, &call_id, request.timeout_ms, context.turn_interrupted).await?;
                                         if context.turn_interrupted.load(std::sync::atomic::Ordering::Acquire) { continue; }
                                         let _guard = context.effect_gate.lock().await;
                                         if context.turn_interrupted.load(std::sync::atomic::Ordering::Acquire) { continue; }
@@ -12464,9 +12693,11 @@ fn response_string(
 
 fn dynamic_tool_response_value(
     result: &ToolResultArtifact,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
 ) -> Result<serde_json::Value, InterfaceDriverError> {
     serde_json::to_value(DynamicToolCallResponse {
-        content_items: dynamic_tool_response_content(result)?,
+        content_items: dynamic_tool_response_content(result, source_artifact, projection)?,
         success: result.ok,
     })
     .map_err(|error| {
@@ -12488,6 +12719,7 @@ fn native_pending_operation(pending: &CodexPendingContinuity) -> Result<Option<N
 fn emit_native_effect(
     sink: &TurnSink<'_>, turn_id: &str, operation: NativePending,
     bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
+    amendment: Option<octopus_provider_run_authoring::ProviderCapabilityAmendment>,
 ) -> Result<(), InterfaceDriverError> {
     let value = serde_json::to_value(&operation).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
     let effect = operation.effect;
@@ -12495,7 +12727,12 @@ fn emit_native_effect(
         turn_id: turn_id.into(), call_id: effect.correlation_id.clone(), tool: effect.tool.clone(), native_operation: Some(value),
     }));
     let output = CodexTurnOutput::native_tool_call(effect.tool, effect.arguments, effect.correlation_id);
-    if bindings.is_empty() { sink.send(output) } else { sink.send_with_outgoing_bindings(output, bindings) }
+    if let Some(amendment) = amendment {
+        if !bindings.is_empty() {
+            return Err(InterfaceDriverError::FailedClosed("one native effect cannot carry two different contract amendments".into()));
+        }
+        sink.send_with_capability_amendment(output, amendment)
+    } else if bindings.is_empty() { sink.send(output) } else { sink.send_with_outgoing_bindings(output, bindings) }
 }
 
 fn native_result_success(value: &serde_json::Value) -> bool {
@@ -12510,6 +12747,8 @@ fn native_operation_response(value: &serde_json::Value) -> Result<serde_json::Va
 
 fn dynamic_tool_response_content(
     result: &ToolResultArtifact,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
 ) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
     let mut value = serde_json::json!({
         "tool": result.tool,
@@ -12526,7 +12765,35 @@ fn dynamic_tool_response_content(
         }
         None => Vec::new(),
     };
-    native_result_content(&value, images)
+    native_artifact_result_content(&value, images, serde_json::json!({
+        "tool": result.tool, "correlation_id": result.correlation_id, "ok": result.ok,
+    }), source_artifact, projection)
+}
+
+fn native_artifact_result_content(
+    value: &serde_json::Value,
+    images: Vec<DynamicToolCallOutputContentItem>,
+    identity: serde_json::Value,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
+) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
+    let mut text = serde_json::to_string(value)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if crate::result_media::text_exceeds_limit(&text)? {
+        let mut budget = projection.max_tokens;
+        loop {
+            text = model_result_text(value, identity.clone(), source_artifact, ModelResultProjection { max_tokens: budget })?;
+            if !crate::result_media::text_exceeds_limit(&text)? { break; }
+            if budget <= 512 {
+                return Err(InterfaceDriverError::FailedClosed("native result projection cannot retain its evidence header within the transport text limit".into()));
+            }
+            budget = (budget / 2).max(512);
+        }
+    }
+    let mut content = vec![DynamicToolCallOutputContentItem::InputText { text }];
+    content.extend(images);
+    crate::result_media::validate_content(&content)?;
+    Ok(content)
 }
 
 fn native_result_content(
@@ -12887,9 +13154,11 @@ fn reconcile_recovered_successor_dispatch(
 
 fn interface_operation_response_value(
     result: &InterfaceOperationResultArtifact,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
 ) -> Result<serde_json::Value, InterfaceDriverError> {
     serde_json::to_value(DynamicToolCallResponse {
-        content_items: interface_operation_response_content(result)?,
+        content_items: interface_operation_response_content(result, source_artifact, projection)?,
         success: result.ok,
     })
     .map_err(|error| {
@@ -12901,10 +13170,13 @@ fn interface_operation_response_value(
 
 fn interface_operation_response_content(
     result: &InterfaceOperationResultArtifact,
+    source_artifact: &ArtifactRef,
+    projection: ModelResultProjection,
 ) -> Result<Vec<DynamicToolCallOutputContentItem>, InterfaceDriverError> {
+    let identity = serde_json::json!({"operation": result.operation, "correlation_id": result.correlation_id, "ok": result.ok});
     match crate::result_media::project(&result.value)? {
-        Some(media) => native_result_content(&media.value, media.images),
-        None => native_result_content(&result.value, Vec::new()),
+        Some(media) => native_artifact_result_content(&media.value, media.images, identity, source_artifact, projection),
+        None => native_artifact_result_content(&result.value, Vec::new(), identity, source_artifact, projection),
     }
 }
 
@@ -14702,6 +14974,7 @@ fn reconcile_current_session_continuity(
         && (current.thread_id != bound.thread_id
             || current.thread_shape_fingerprint != bound.thread_shape_fingerprint
             || current.static_context_fingerprint != bound.static_context_fingerprint)
+        && !current.context_refresh.as_ref().is_some_and(|refresh| refresh.connects(&bound, &current))
     {
         return Err(InterfaceDriverError::FailedClosed(
             "Codex current session detached a pending result from its exact private thread"
@@ -14988,6 +15261,7 @@ fn parse_codex_continuity(
                 .to_string(),
         ));
     }
+    if let Some(refresh) = &state.context_refresh { refresh.validate(&state)?; }
     validate_pending_continuity_coordinates(state.pending.as_ref(), "pending")?;
     validate_pending_continuity_coordinates(
         state.interrupted_pending.as_ref(),
@@ -15819,10 +16093,14 @@ pub fn into_interface_driver_with_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("../tests/support/context_refresh.rs");
     include!("../tests/support/steering_compatibility.rs");
     include!("../tests/support/pending_history.rs");
     include!("../tests/support/recovery_call_ownership.rs");
     include!("../tests/support/completed_messages.rs");
+    include!("../tests/support/result_continuity.rs");
+    include!("../tests/support/native_planning_read.rs");
+    include!("../tests/support/native_catalog.rs");
 
     fn metadata_input(
         interface_affordance_specs: serde_json::Value,
@@ -16326,6 +16604,7 @@ mod tests {
             interrupted_pending: None,
             tool_operator_request: None,
             native_terminal: None,
+            context_refresh: None,
         }
     }
 
@@ -17529,6 +17808,10 @@ mod tests {
         assert!(validate_live_pending_continuity(None, &pending, 8, &live).is_err());
     }
 
+    fn native_result_test_source(value: &impl serde::Serialize) -> ArtifactRef {
+        bound("native.result", serde_json::to_value(value).unwrap()).artifact
+    }
+
     #[test]
     fn structured_tool_failure_reaches_the_codex_continuation_intact() {
         let mut details = serde_json::Map::new();
@@ -17542,7 +17825,7 @@ mod tests {
             )
             .with_details(details),
         );
-        let response = dynamic_tool_response_value(&result).unwrap();
+        let response = dynamic_tool_response_value(&result, &native_result_test_source(&result), ModelResultProjection { max_tokens: 512 }).unwrap();
         assert_eq!(response["success"], false);
         let text = response["contentItems"][0]["text"].as_str().unwrap();
         let wire: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -17556,7 +17839,7 @@ mod tests {
             Some("call-3".to_string()),
             serde_json::json!({"unified_diff": full_text}),
         );
-        let raw = dynamic_tool_response_value(&large).unwrap();
+        let raw = dynamic_tool_response_value(&large, &native_result_test_source(&large), ModelResultProjection { max_tokens: 512 }).unwrap();
         let raw_text = raw["contentItems"][0]["text"].as_str().unwrap();
         let raw_value: serde_json::Value = serde_json::from_str(raw_text).unwrap();
         assert_eq!(raw_value["body"], large.body.as_ref().unwrap().clone());
@@ -17588,7 +17871,7 @@ mod tests {
 
         let recovered = recovered_function_call_output(
             "call-3",
-            recovered_result_output(dynamic_tool_response_content(&large).unwrap()).unwrap(),
+            recovered_result_output(dynamic_tool_response_content(&large, &native_result_test_source(&large), ModelResultProjection { max_tokens: 512 }).unwrap()).unwrap(),
         );
         assert_eq!(recovered["output"], raw_text);
         let rollout = tempfile::NamedTempFile::new().unwrap();
@@ -17603,13 +17886,37 @@ mod tests {
             label: "room.result".into(), operation: "observe".into(),
             correlation_id: "call-4".into(), ok: true, value: large.body.clone().unwrap(),
         };
-        let operation_response = interface_operation_response_value(&operation).unwrap();
+        let operation_response = interface_operation_response_value(&operation, &native_result_test_source(&operation.value), ModelResultProjection { max_tokens: 512 }).unwrap();
         let operation_text = operation_response["contentItems"][0]["text"].as_str().unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(operation_text).unwrap(), operation.value);
         operation.value = serde_json::json!({"text": "x".repeat(8 * 1024 * 1024)});
-        assert!(interface_operation_response_value(&operation).is_err());
+        let source = native_result_test_source(&operation.value);
+        let operation_output = interface_operation_response_value(&operation, &source, ModelResultProjection { max_tokens: 512 }).unwrap();
+        let projected: serde_json::Value = serde_json::from_str(operation_output["contentItems"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(projected["truncated"], true);
+        assert_eq!(projected["source_artifact"], serde_json::to_value(&source).unwrap());
+        assert_eq!(projected["identity"]["correlation_id"], "call-4");
+        assert_eq!(operation_output["success"], true);
         let oversized = ToolResultArtifact::success("room.observe", Some("call-5".into()), operation.value);
-        assert!(dynamic_tool_response_value(&oversized).is_err());
+        let original = serde_json::to_vec(&oversized).unwrap();
+        let source = native_result_test_source(&oversized);
+        for max_tokens in [512, 8 * 1024 * 1024] {
+            let projection = ModelResultProjection { max_tokens };
+            let live = dynamic_tool_response_value(&oversized, &source, projection).unwrap();
+            let text = live["contentItems"][0]["text"].as_str().unwrap();
+            let projected: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(projected["truncated"], true);
+            assert_eq!(projected["source_artifact"], serde_json::to_value(&source).unwrap());
+            assert_eq!(projected["identity"]["correlation_id"], "call-5");
+            assert!(!crate::result_media::text_exceeds_limit(text).unwrap());
+            let recovered = recovered_result_output(dynamic_tool_response_content(&oversized, &source, projection).unwrap()).unwrap();
+            assert_eq!(recovered, text);
+            assert_eq!(serde_json::to_vec(&oversized).unwrap(), original);
+            let rollout = tempfile::NamedTempFile::new().unwrap();
+            let expected = recovered_function_call_output("call-5", recovered);
+            std::fs::write(rollout.path(), format!("{}\n", serde_json::json!({"type":"response_item", "payload":expected}))).unwrap();
+            assert!(recovered_function_call_output_is_persisted(rollout.path(), &expected).unwrap());
+        }
     }
 
     #[test]
@@ -17623,8 +17930,8 @@ mod tests {
                 "payload_content_hash": blake3::hash(&bytes).to_hex().to_string()}
         }], "observation_id": "exact-observation"});
         let result = ToolResultArtifact::success("room.observe", Some("call-image".into()), body.clone());
-        let content = dynamic_tool_response_content(&result).unwrap();
-        let live = dynamic_tool_response_value(&result).unwrap();
+        let content = dynamic_tool_response_content(&result, &native_result_test_source(&result), ModelResultProjection { max_tokens: 512 }).unwrap();
+        let live = dynamic_tool_response_value(&result, &native_result_test_source(&result), ModelResultProjection { max_tokens: 512 }).unwrap();
         assert_eq!(live["contentItems"][1]["imageUrl"], format!("data:image/png;base64,{encoded}"));
         assert!(!live["contentItems"][0]["text"].as_str().unwrap().contains(encoded));
         assert!(live["contentItems"][0]["text"].as_str().unwrap().contains("exact-observation"));
@@ -17635,9 +17942,9 @@ mod tests {
         assert_eq!(recovered["output"][1]["image_url"], live["contentItems"][1]["imageUrl"]);
         let operation = InterfaceOperationResultArtifact { label: "room.result".into(), operation: "observe".into(),
             correlation_id: "call-image".into(), ok: true, value: body.clone() };
-        let operation_live = interface_operation_response_value(&operation).unwrap();
+        let operation_live = interface_operation_response_value(&operation, &native_result_test_source(&operation.value), ModelResultProjection { max_tokens: 512 }).unwrap();
         assert_eq!(operation_live["contentItems"][1], live["contentItems"][1]);
-        let operation_recovered = recovered_result_output(interface_operation_response_content(&operation).unwrap()).unwrap();
+        let operation_recovered = recovered_result_output(interface_operation_response_content(&operation, &native_result_test_source(&operation.value), ModelResultProjection { max_tokens: 512 }).unwrap()).unwrap();
         assert_eq!(operation_recovered[1], recovered["output"][1]);
         let rollout = tempfile::NamedTempFile::new().unwrap();
         for detail in ["high", "original", "low", "auto"] {
@@ -18621,7 +18928,7 @@ mod tests {
         }))).unwrap();
         let mut restored_thread = thread.clone();
         restored_thread.path = Some(rollout_path);
-        let resume_response = serde_json::json!({"id":1, "result": ThreadResumeResponse {
+        let resume_response = serde_json::json!({"id":2, "result": ThreadResumeResponse {
             thread: restored_thread.clone(), model: "gpt-5.5".into(), model_provider: "openai".into(),
             service_tier: None, cwd: cwd.clone(), runtime_workspace_roots: Vec::new(),
             instruction_sources: Vec::new(), approval_policy: AskForApproval::OnFailure,
@@ -18629,9 +18936,16 @@ mod tests {
             active_permission_profile: None, reasoning_effort: None, multi_agent_mode: None,
             initial_turns_page: None,
         }}).to_string();
-        let read_response = serde_json::json!({"id":2, "result": ThreadReadResponse {
-            thread: restored_thread,
+        let read_response = serde_json::json!({"id":3, "result": ThreadReadResponse {
+            thread: restored_thread.clone(),
         }}).to_string();
+        let mut pending_thread = restored_thread;
+        pending_thread.turns = vec![serde_json::from_value(serde_json::json!({
+            "id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null
+        })).unwrap()];
+        let terminal_probe = serde_json::json!({"id":1,"result":{"thread":pending_thread}}).to_string();
+        pending_thread.turns[0].id = "turn-continued".into();
+        let next_terminal_probe = serde_json::json!({"id":7,"result":{"thread":pending_thread}}).to_string();
         let script_path = temp.path().join("app-server.sh");
         std::fs::write(
             &script_path,
@@ -18639,23 +18953,29 @@ mod tests {
 IFS= read -r _
 printf '%s\n' '{"id":"initialize","result":{"userAgent":"codex/test","codexHome":"/tmp"}}'
 IFS= read -r _
+IFS= read -r probe
+case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
+printf '%s\n' "$5"
 IFS= read -r _
 printf '%s\n' "$3"
 IFS= read -r _
 printf '%s\n' "$4"
 IFS= read -r inject
 printf '%s\n' "$inject" > "$1"
-printf '%s\n' '{"id":3,"result":{}}'
+printf '%s\n' '{"id":4,"result":{}}'
 IFS= read -r turn
 case "$turn" in *'"input":[]'*) ;; *) exit 1;; esac
-printf '%s\n' '{"id":4,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
+printf '%s\n' '{"id":5,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
 printf '%s\n' '{"method":"item/started","params":{"threadId":"thr-exact","turnId":"turn-continued","startedAtMs":1,"item":{"type":"webSearch","id":"web-1","query":"example","action":null}}}'
 printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":2,"item":{"type":"webSearch","id":"web-1","query":"example","action":{"type":"search","query":"example"},"results":[{"url":"https://example.com","title":"Example","snippet":"search evidence"}]}}}'
 printf '%s\n' '{"id":"server-tool-1","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-2","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"pwd"}}}'
 printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":3,"item":{"type":"agentMessage","id":"commentary-after-result","text":"Continuing","phase":"commentary"}}}'
 printf '%s\n' '{"id":"server-tool-2","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-3","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"ls"}}}'
 IFS= read -r _
-printf '%s\n' '{"id":5,"result":{"data":[]}}'
+printf '%s\n' '{"id":6,"result":{"data":[]}}'
+IFS= read -r probe
+case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
+printf '%s\n' "$6"
 IFS= read -r response
 printf '%s\n' "$response" > "$2"
 while IFS= read -r _; do :; done
@@ -18673,6 +18993,8 @@ while IFS= read -r _; do :; done
                     .to_string(),
                 resume_response,
                 read_response,
+                terminal_probe,
+                next_terminal_probe,
             ],
             cwd: Some(temp.path().to_path_buf()),
             codex_home: None,

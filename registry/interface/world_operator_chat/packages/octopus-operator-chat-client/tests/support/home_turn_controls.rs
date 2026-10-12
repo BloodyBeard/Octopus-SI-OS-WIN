@@ -83,7 +83,7 @@ async fn home_stop_rearms_through_real_admission_and_file_effect_across_restart(
     tests::copy_planner_descriptors(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry"), &registry);
     std::fs::create_dir(&ees).unwrap(); std::fs::create_dir(&runs).unwrap(); tests::boot_operator_space_ee_instances(&ees);
     let request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ees,"run_records_root":runs,"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ees,"run_records_root":runs,"interface_private_state_root":root.join("interface-private-state"),"write_hash_algorithm":"sha256",
         "chat_id":"home_controls","provider_interface_id":"world_provider_codex","ee_id":"ee_existence",
         "worker_interface_id":"system_worker_operator_home","client_surface_role":surface,"cycle":"initial",
         "selected_worker_environment_kinds":["system_room"],

@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use octopus_descriptors::{ArtifactId, Descriptor, DescriptorHash, DescriptorName, InterfaceId};
 use octopus_ee::EeTemplateDescriptor;
@@ -131,6 +131,26 @@ impl RegistryReferenceGraph {
 
     pub(crate) fn is_available(&self, node: &RegistryNode) -> bool {
         self.available.contains(node) && !self.unavailable.contains_key(node)
+    }
+
+    pub(crate) fn dependency_nodes(
+        &self,
+        roots: impl IntoIterator<Item = RegistryNode>,
+    ) -> BTreeSet<RegistryNode> {
+        let mut pending = roots.into_iter().collect::<Vec<_>>();
+        let mut found = BTreeSet::new();
+        while let Some(node) = pending.pop() {
+            if found.insert(node.clone()) {
+                pending.extend(
+                    self.edges
+                        .get(&node)
+                        .into_iter()
+                        .flatten()
+                        .map(|edge| edge.target.clone()),
+                );
+            }
+        }
+        found
     }
 
     pub(crate) fn artifact_descriptor_hash(
@@ -454,6 +474,602 @@ pub fn registry_tool_output_sources(
         [("descriptor".to_string(), owner_node)],
     )?;
     Ok(BTreeSet::from([owner]))
+}
+
+/// Inputs to a prospective file view. No caller-owned file is changed by validation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryValidationRoots {
+    pub registry_root: PathBuf,
+    pub ee_instances_root: PathBuf,
+    pub run_records_root: PathBuf,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryCandidateWrite {
+    pub path: PathBuf,
+    pub content: String,
+    pub expected_before_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryValidationIssue {
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryValidationStage {
+    pub after_write: usize,
+    pub issues: Vec<RegistryValidationIssue>,
+    pub available: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryCandidateValidation {
+    pub safe_to_apply: bool,
+    pub checked_subjects: Vec<String>,
+    pub stages: Vec<RegistryValidationStage>,
+    pub regressions: Vec<RegistryValidationIssue>,
+}
+
+impl RegistryValidationRoots {
+    fn relative_target(&self, path: &Path) -> Result<PathBuf, String> {
+        normal_absolute_path(path)?;
+        for (name, root) in [
+            ("registry", &self.registry_root),
+            ("ee", &self.ee_instances_root),
+            ("runs", &self.run_records_root),
+        ] {
+            normal_absolute_path(root)?;
+            if let Ok(relative) = path.strip_prefix(root) {
+                let parts = relative.components().collect::<Vec<_>>();
+                let allowed = if name == "registry" {
+                    parts.len() >= 3
+                        && parts[0].as_os_str().to_str().is_some_and(|kind| {
+                            [
+                                "interface",
+                                "tool",
+                                "worker_environment_kind",
+                                "ee_template",
+                                "artifact",
+                                "mark",
+                                "verifier",
+                            ]
+                            .contains(&kind)
+                        })
+                } else {
+                    parts.len() == 1
+                        && relative.extension().and_then(|value| value.to_str()) == Some("json")
+                };
+                if !allowed {
+                    return Err(format!(
+                        "candidate path '{}' is outside descriptor/EE/run file shapes",
+                        path.display()
+                    ));
+                }
+                return Ok(Path::new(name).join(relative));
+            }
+        }
+        Err(format!(
+            "candidate path '{}' is outside the declared registry, EE and run roots",
+            path.display()
+        ))
+    }
+}
+
+fn normal_absolute_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+    {
+        return Err(format!(
+            "candidate path '{}' must be absolute without traversal",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Check the complete candidate and every publication prefix through the same
+/// loaders and grant formers used on arrival. Temporary files are a private view
+/// only; applying remains an ordinary granted file tool. Existing isolated faults
+/// remain evidence and do not prevent an unrelated repair. New active run faults,
+/// regressions of existing packages, and unresolved final writes refuse apply.
+pub fn validate_registry_candidate(
+    roots: &RegistryValidationRoots,
+    writes: &[RegistryCandidateWrite],
+) -> Result<RegistryCandidateValidation, String> {
+    validate_registry_candidate_with_inspector(roots, writes, |_, _| Ok(()))
+}
+
+pub fn validate_registry_candidate_with_inspector(
+    roots: &RegistryValidationRoots,
+    writes: &[RegistryCandidateWrite],
+    mut inspect: impl FnMut(usize, &RegistryValidationRoots) -> Result<(), String>,
+) -> Result<RegistryCandidateValidation, String> {
+    let mut targets = BTreeSet::new();
+    for write in writes {
+        roots.relative_target(&write.path)?;
+        if !targets.insert(write.path.clone()) {
+            return Err(format!(
+                "candidate repeats target '{}'",
+                write.path.display()
+            ));
+        }
+        let before = match std::fs::symlink_metadata(&write.path) {
+            Ok(metadata) if metadata.is_file() => {
+                Some(std::fs::read(&write.path).map_err(|error| error.to_string())?)
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "candidate target '{}' must be a regular file",
+                    write.path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if before
+            .as_deref()
+            .map(octopus_ledger::ContentHash::of_bytes)
+            .map(|hash| hash.to_hex())
+            != write.expected_before_hash
+        {
+            return Err(format!(
+                "candidate preimage changed at '{}'",
+                write.path.display()
+            ));
+        }
+    }
+    let mut view = CandidateView::new(roots)?;
+    let mut stages = vec![view.inspect(0, None)?];
+    let prospective = RegistryValidationRoots {
+        registry_root:view.root.join("registry"), ee_instances_root:view.root.join("ee"), run_records_root:view.root.join("runs"),
+    };
+    inspect(0, &prospective)?;
+    for (index, write) in writes.iter().enumerate() {
+        let path = view.root.join(roots.relative_target(&write.path)?);
+        view.materialize_parent(&path)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                std::fs::remove_file(&path).map_err(|error| error.to_string())?
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        std::fs::write(&path, &write.content).map_err(|error| error.to_string())?;
+        let relative = roots.relative_target(&write.path)?;
+        if relative.starts_with("runs") {
+            view.refresh_run_record(&path)?;
+        }
+        stages.push(view.inspect(index + 1, Some(&relative))?);
+        inspect(index + 1, &prospective)?;
+    }
+    let baseline = stages[0].issues.iter().cloned().collect::<BTreeSet<_>>();
+    let existing = stages[0].available.iter().cloned().collect::<BTreeSet<_>>();
+    let mut regressions = BTreeSet::new();
+    for stage in stages.iter().skip(1) {
+        for issue in &stage.issues {
+            if (!baseline.contains(issue)
+                || (issue.subject == "snapshot" && stage.after_write == writes.len()))
+                && (stage.after_write == writes.len()
+                    || issue.subject.starts_with("run/")
+                    || existing.contains(&issue.subject)
+                    || issue.subject == "snapshot")
+            {
+                regressions.insert(issue.clone());
+            }
+        }
+    }
+    for write in writes {
+        let relative = roots.relative_target(&write.path)?;
+        if relative.starts_with("registry") || relative.starts_with("ee") {
+            let parts = relative.components().collect::<Vec<_>>();
+            let subject = if relative.starts_with("registry") {
+                format!(
+                    "{}/{}",
+                    parts[1].as_os_str().to_string_lossy(),
+                    parts[2].as_os_str().to_string_lossy()
+                )
+            } else {
+                format!("ee/{}", relative.file_stem().unwrap_or_default().to_string_lossy())
+            };
+            let complete = stages.last().ok_or("candidate has no complete validation stage")?;
+            if !complete.available.contains(&subject) {
+                let issue = complete.issues.iter().find(|issue| issue.subject == subject)
+                    .cloned().unwrap_or_else(|| RegistryValidationIssue {
+                        subject,
+                        checkpoint: None,
+                        reason: "authored package or EE is unavailable in the complete candidate".into(),
+                    });
+                regressions.insert(issue);
+            }
+        }
+    }
+    let mut checked_subjects = BTreeSet::new();
+    for write in writes {
+        let relative = roots.relative_target(&write.path)?;
+        let parts = relative.components().collect::<Vec<_>>();
+        checked_subjects.insert(if relative.starts_with("registry") {
+            format!(
+                "{}/{}",
+                parts[1].as_os_str().to_string_lossy(),
+                parts[2].as_os_str().to_string_lossy()
+            )
+        } else {
+            format!(
+                "{}/{}",
+                parts[0].as_os_str().to_string_lossy().trim_end_matches('s'),
+                relative.file_stem().unwrap_or_default().to_string_lossy()
+            )
+        });
+    }
+    let changed_subjects = checked_subjects.clone();
+    for (run, dependencies) in &view.dependencies {
+        if !dependencies.is_disjoint(&changed_subjects) {
+            checked_subjects.insert(run.clone());
+            checked_subjects.extend(dependencies.iter().cloned());
+        }
+    }
+    checked_subjects.extend(regressions.iter().map(|issue| issue.subject.clone()));
+    if !writes.is_empty() {
+        for stage in &mut stages {
+            stage
+                .available
+                .retain(|subject| checked_subjects.contains(subject));
+            stage.issues.retain(|issue| {
+                issue.subject == "snapshot" || checked_subjects.contains(&issue.subject)
+            });
+        }
+    }
+    Ok(RegistryCandidateValidation {
+        safe_to_apply: regressions.is_empty(),
+        checked_subjects: checked_subjects.into_iter().collect(),
+        stages,
+        regressions: regressions.into_iter().collect(),
+    })
+}
+
+struct CandidateView {
+    root: PathBuf,
+    roots: RegistryValidationRoots,
+    records: BTreeMap<String, octopus_runtime::run_record::RunRecord>,
+    record_issues: BTreeMap<String, RegistryValidationIssue>,
+    run_issues: Vec<RegistryValidationIssue>,
+    dependencies: BTreeMap<String, BTreeSet<String>>,
+    snapshot_failed: bool,
+}
+
+impl Drop for CandidateView {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl CandidateView {
+    fn new(roots: &RegistryValidationRoots) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = loop {
+            let candidate = std::env::temp_dir().join(format!(
+                "octopus-registry-candidate-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        let mut view = Self {
+            root,
+            roots: roots.clone(),
+            records: BTreeMap::new(),
+            record_issues: BTreeMap::new(),
+            run_issues: Vec::new(),
+            dependencies: BTreeMap::new(),
+            snapshot_failed: false,
+        };
+        normal_absolute_path(&roots.registry_root)?;
+        normal_absolute_path(&roots.ee_instances_root)?;
+        normal_absolute_path(&roots.run_records_root)?;
+        std::fs::create_dir(view.root.join("registry")).map_err(|error| error.to_string())?;
+        for kind in [
+            "interface",
+            "tool",
+            "worker_environment_kind",
+            "ee_template",
+            "artifact",
+            "mark",
+            "verifier",
+        ] {
+            view.copy_directory(
+                &roots.registry_root.join(kind),
+                &view.root.join("registry").join(kind),
+                if kind == "verifier" { usize::MAX } else { 1 },
+                kind == "verifier",
+            )?;
+        }
+        view.copy_directory(&roots.ee_instances_root, &view.root.join("ee"), 0, false)?;
+        view.copy_directory(&roots.run_records_root, &view.root.join("runs"), 0, false)?;
+        for entry in std::fs::read_dir(view.root.join("runs")).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_file()
+                && entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            {
+                view.refresh_run_record(&entry.path())?;
+            }
+        }
+        Ok(view)
+    }
+
+    fn copy_directory(
+        &self,
+        source: &Path,
+        target: &Path,
+        depth: usize,
+        copy_all_files: bool,
+    ) -> Result<(), String> {
+        std::fs::create_dir(target).map_err(|error| error.to_string())?;
+        let entries = match std::fs::read_dir(source) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let target = target.join(entry.file_name());
+            let kind = entry.file_type().map_err(|error| error.to_string())?;
+            if kind.is_dir() && depth > 0 {
+                self.copy_directory(&path, &target, depth - 1, copy_all_files)?;
+            } else if kind.is_file()
+                && (copy_all_files
+                    || path.extension().and_then(|value| value.to_str()) == Some("json"))
+            {
+                self.copy_observed_file(&path, &target)?;
+            } else {
+                retained_link(&path, &target)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_observed_file(&self, source: &Path, target: &Path) -> Result<(), String> {
+        use std::io::Read;
+        let observed = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+        if !observed.is_file() {
+            return Err(format!("candidate input '{}' is not a regular file", source.display()));
+        }
+        let mut input = std::fs::File::open(source).map_err(|error| error.to_string())?;
+        let opened = input.metadata().map_err(|error| error.to_string())?;
+        if !opened.is_file() || opened.len() != observed.len()
+            || opened.modified().map_err(|error| error.to_string())?
+                != observed.modified().map_err(|error| error.to_string())?
+        {
+            return Err(format!("candidate input '{}' changed before copying", source.display()));
+        }
+        let limit = observed.len().checked_add(1).ok_or("candidate input length overflow")?;
+        let mut output = std::fs::File::create(target).map_err(|error| error.to_string())?;
+        let copied = std::io::copy(&mut (&mut input).take(limit), &mut output)
+            .map_err(|error| error.to_string())?;
+        let current = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+        if copied != observed.len() || !current.is_file() || current.len() != observed.len()
+            || current.modified().map_err(|error| error.to_string())?
+                != observed.modified().map_err(|error| error.to_string())?
+        {
+            return Err(format!("candidate input '{}' changed while copying", source.display()));
+        }
+        output.set_permissions(observed.permissions()).map_err(|error| error.to_string())
+    }
+
+    fn materialize_parent(&self, path: &Path) -> Result<(), String> {
+        let parent = path.parent().ok_or("candidate target has no parent")?;
+        let relative = parent
+            .strip_prefix(&self.root)
+            .map_err(|error| error.to_string())?;
+        let mut current = self.root.clone();
+        for part in relative.components() {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let source = std::fs::read_link(&current).map_err(|error| error.to_string())?;
+                    std::fs::remove_file(&current).map_err(|error| error.to_string())?;
+                    self.copy_directory(&source, &current, 0, false)?;
+                }
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Err("candidate parent is not a directory".into()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&current).map_err(|error| error.to_string())?
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_run_record(&mut self, path: &Path) -> Result<(), String> {
+        let id = path
+            .file_stem()
+            .ok_or("candidate run path has no id")?
+            .to_string_lossy()
+            .to_string();
+        let subject = format!("run/{id}");
+        self.records.remove(&subject);
+        self.record_issues.remove(&subject);
+        let result = std::fs::read(path)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                octopus_runtime::run_record::RunRecord::from_bytes(&bytes)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(record) if record.id.as_str() == id => {
+                self.records.insert(subject, record);
+            }
+            Ok(_) => {
+                self.record_issues.insert(
+                    subject.clone(),
+                    RegistryValidationIssue {
+                        subject,
+                        checkpoint: None,
+                        reason: "run identity differs from its filename".into(),
+                    },
+                );
+            }
+            Err(reason) => {
+                self.record_issues
+                    .insert(subject.clone(), RegistryValidationIssue { subject, checkpoint: None, reason });
+            }
+        }
+        Ok(())
+    }
+
+    fn inspect(
+        &mut self,
+        after_write: usize,
+        changed: Option<&Path>,
+    ) -> Result<RegistryValidationStage, String> {
+        let registry = self.root.join("registry");
+        let packages = RegistryPackages::load(&registry)?;
+        let mut issues = packages
+            .graph
+            .unavailable
+            .iter()
+            .map(|(node, reason)| RegistryValidationIssue {
+                subject: node.to_string(),
+                checkpoint: None,
+                reason: self.original_paths(reason),
+            })
+            .collect::<Vec<_>>();
+        let changed_subject = changed.map(|path| {
+            let parts = path.components().collect::<Vec<_>>();
+            if parts[0].as_os_str() == "registry" {
+                format!(
+                    "{}/{}",
+                    parts[1].as_os_str().to_string_lossy(),
+                    parts[2].as_os_str().to_string_lossy()
+                )
+            } else {
+                format!(
+                    "{}/{}",
+                    parts[0].as_os_str().to_string_lossy().trim_end_matches('s'),
+                    path.file_stem().unwrap_or_default().to_string_lossy()
+                )
+            }
+        });
+        let records = self
+            .records
+            .iter()
+            .filter(|(subject, _)| {
+                changed_subject.as_ref().is_none_or(|changed| {
+                    self.snapshot_failed
+                        || self
+                            .run_issues
+                            .iter()
+                            .any(|issue| &issue.subject == *subject)
+                        || self
+                            .dependencies
+                            .get(*subject)
+                            .is_none_or(|inputs| inputs.contains(changed))
+                })
+            })
+            .map(|(_, record)| record.clone())
+            .collect::<Vec<_>>();
+        let affected = records
+            .iter()
+            .map(|record| format!("run/{}", record.id))
+            .collect::<BTreeSet<_>>();
+        let mut available_ee = BTreeSet::new();
+        match crate::spine_root::validate_registry_run_contracts(
+            &registry,
+            &self.root.join("ee"),
+            &records,
+        ) {
+            Ok((faults, dependencies, ee)) => {
+                self.snapshot_failed = false;
+                available_ee = ee;
+                self.run_issues
+                    .retain(|issue| issue.subject.starts_with("run/") && !affected.contains(&issue.subject));
+                let faults = faults
+                    .into_iter()
+                    .map(|mut fault| {
+                        fault.reason = self.original_paths(&fault.reason);
+                        fault
+                    })
+                    .collect::<Vec<_>>();
+                self.run_issues.extend(faults);
+                self.dependencies.extend(dependencies);
+            }
+            Err(reason) => {
+                self.snapshot_failed = true;
+                issues.push(RegistryValidationIssue {
+                    subject: "snapshot".into(),
+                    checkpoint: None,
+                    reason: self.original_paths(&reason),
+                });
+            }
+        }
+        issues.extend(self.record_issues.values().cloned());
+        issues.extend(self.run_issues.iter().cloned());
+        issues.sort();
+        Ok(RegistryValidationStage {
+            after_write,
+            issues,
+            available: packages
+                .graph
+                .available
+                .iter()
+                .filter(|node| packages.graph.is_available(node))
+                .map(ToString::to_string)
+                .chain(available_ee)
+                .collect(),
+        })
+    }
+
+    fn original_paths(&self, value: &str) -> String {
+        value
+            .replace(
+                &self.root.join("registry").to_string_lossy().to_string(),
+                &self.roots.registry_root.to_string_lossy(),
+            )
+            .replace(
+                &self.root.join("ee").to_string_lossy().to_string(),
+                &self.roots.ee_instances_root.to_string_lossy(),
+            )
+            .replace(
+                &self.root.join("runs").to_string_lossy().to_string(),
+                &self.roots.run_records_root.to_string_lossy(),
+            )
+    }
+}
+
+#[cfg(unix)]
+fn retained_link(source: &Path, target: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(source, target).map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
+fn retained_link(source: &Path, target: &Path) -> Result<(), String> {
+    if source.is_dir() {
+        std::os::windows::fs::symlink_dir(source, target)
+    } else {
+        std::os::windows::fs::symlink_file(source, target)
+    }
+    .map_err(|error| error.to_string())
 }
 
 fn load_kind<T: Descriptor>(
@@ -966,6 +1582,155 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("scratch path has a parent"))
             .expect("scratch dir writes");
         std::fs::write(path, body).expect("scratch file writes");
+    }
+
+    #[test]
+    fn candidate_checks_publication_prefixes_without_exposing_or_changing_other_runs() {
+        use serde_json::json;
+        let temp = tempfile::tempdir().unwrap();
+        let roots = RegistryValidationRoots {
+            registry_root: temp.path().join("registry"),
+            ee_instances_root: temp.path().join("ee"),
+            run_records_root: temp.path().join("runs"),
+        };
+        for kind in [
+            "interface",
+            "tool",
+            "worker_environment_kind",
+            "ee_template",
+        ] {
+            std::fs::create_dir_all(roots.registry_root.join(kind)).unwrap();
+        }
+        write(
+            &roots
+                .registry_root
+                .join("interface/world_present/interface.json"),
+            r#"{"id":"world_present","interface_type":"world","role":"probe","direction":"bidirectional","source_names":["p"],"interface_driver_ref":"probe"}"#,
+        );
+        worker_pin(
+            &roots.registry_root,
+            "system_worker_present",
+            r#"{"interfaces":["world_present"],"tools":[],"wek":[],"mark_outcomes":[],"hard_blocked_tools":[]}"#,
+        );
+        write(
+            &roots
+                .registry_root
+                .join("ee_template/existence/ee_template.json"),
+            r#"{"id":"existence","goal_class":"existence","bootstrap_root":true,"allowed_child_ee_templates":["existence"]}"#,
+        );
+        write(
+            &roots.ee_instances_root.join("ee_existence.json"),
+            r#"{"ee_id":"ee_existence","template_name":"existence","parent_ee_id":null,"goal":"existence"}"#,
+        );
+        let run = |id: &str, worker: &str| {
+            json!({"id":id,"worker":worker,"ee":"ee_existence","trace":"trace","status":"idle",
+            "interface_state":{"world_present":{"private":"unrelated-private-payload"}},
+            "checkpoints":[{"id":"wait","run":id,"trace":"trace","epoch":0,"interface_binding":octopus_runtime::AuthoredInterfaceBinding::all("world_present".into())}],"active_checkpoints":["wait"]})
+        };
+        let original = serde_json::to_string(&run("existing", "system_worker_present")).unwrap();
+        write(&roots.run_records_root.join("existing.json"), &original);
+        let new_interface = RegistryCandidateWrite {path:roots.registry_root.join("interface/system_worker_new/interface.json"),
+            content:r#"{"id":"system_worker_new","interface_type":"system","role":"worker","direction":"bidirectional","source_names":["new"]}"#.into(),expected_before_hash:None};
+        let new_policy = RegistryCandidateWrite {path:roots.registry_root.join("interface/system_worker_new/policy.json"),
+            content:r#"{"id":"system_worker_new","ceiling":{"interfaces":["world_present"],"tools":[],"wek":[],"mark_outcomes":[],"hard_blocked_tools":[]},"role_artifacts":[]}"#.into(),expected_before_hash:None};
+        let new_run = RegistryCandidateWrite {
+            path: roots.run_records_root.join("new.json"),
+            content: serde_json::to_string(&run("new", "system_worker_new")).unwrap(),
+            expected_before_hash: None,
+        };
+        let report = validate_registry_candidate(
+            &roots,
+            &[new_interface.clone(), new_policy.clone(), new_run.clone()],
+        )
+        .unwrap();
+        assert!(report.safe_to_apply, "{:?}", report.regressions);
+        assert!(
+            report.stages[1]
+                .issues
+                .iter()
+                .any(|issue| issue.subject == "interface/system_worker_new")
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("unrelated-private-payload")
+        );
+        assert_eq!(
+            std::fs::read_to_string(roots.run_records_root.join("existing.json")).unwrap(),
+            original
+        );
+        assert!(!new_run.path.exists());
+        let report =
+            validate_registry_candidate(&roots, &[new_interface, new_run, new_policy]).unwrap();
+        assert!(!report.safe_to_apply);
+        assert!(
+            report
+                .regressions
+                .iter()
+                .any(|issue| issue.subject == "run/new")
+        );
+        let path = roots
+            .registry_root
+            .join("interface/system_worker_present/policy.json");
+        let before = std::fs::read(&path).unwrap();
+        let mut policy: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        policy["ceiling"]["mark_outcomes"] = json!(["future"]);
+        let change = RegistryCandidateWrite {
+            path,
+            content: serde_json::to_string(&policy).unwrap(),
+            expected_before_hash: Some(octopus_ledger::ContentHash::of_bytes(&before).to_hex()),
+        };
+        let mark = RegistryCandidateWrite {
+            path: roots.registry_root.join("mark/future/mark.json"),
+            content: r#"{"id":"future","package":"future","class":"success"}"#.into(),
+            expected_before_hash: None,
+        };
+        assert!(
+            !validate_registry_candidate(&roots, &[change.clone(), mark.clone()])
+                .unwrap()
+                .safe_to_apply
+        );
+        assert!(
+            validate_registry_candidate(&roots, &[mark, change])
+                .unwrap()
+                .safe_to_apply
+        );
+        let malformed_ee = RegistryCandidateWrite {
+            path: roots.ee_instances_root.join("ee_authored.json"),
+            content: "{\"unexpected\":true}".into(),
+            expected_before_hash: None,
+        };
+        let report = validate_registry_candidate(&roots, &[malformed_ee.clone()]).unwrap();
+        assert!(!report.safe_to_apply);
+        assert!(report.regressions.iter().any(|issue| issue.subject == "ee/ee_authored"));
+        write(&malformed_ee.path, &malformed_ee.content);
+        let repair = RegistryCandidateWrite {
+            path: malformed_ee.path.clone(),
+            content: r#"{"ee_id":"ee_authored","template_name":"existence","parent_ee_id":"ee_existence","goal":"authored goal"}"#.into(),
+            expected_before_hash: Some(octopus_ledger::ContentHash::of_bytes(malformed_ee.content.as_bytes()).to_hex()),
+        };
+        let report = validate_registry_candidate(&roots, &[repair]).unwrap();
+        assert!(report.safe_to_apply, "{:?}", report.regressions);
+        assert_eq!(std::fs::read_to_string(&malformed_ee.path).unwrap(), malformed_ee.content);
+        std::fs::remove_file(&malformed_ee.path).unwrap();
+        let scale_context = "x".repeat(71_000);
+        for index in 0..999 {
+            let id = format!("ee_scale_{index}");
+            write(&roots.ee_instances_root.join(format!("{id}.json")), &serde_json::to_string(&json!({
+                "ee_id":id,"template_name":"existence","parent_ee_id":"ee_existence","goal":"scale contract",
+                "config":{"context":scale_context},
+            })).unwrap());
+        }
+        let report = validate_registry_candidate(&roots, &[]).unwrap();
+        assert!(report.stages[0].issues.is_empty(), "{:?}", report.stages[0].issues);
+        assert_eq!(report.stages[0].available.iter().filter(|subject| subject.starts_with("ee/")).count(), 1000);
+        let scale_write = RegistryCandidateWrite {
+            path: roots.registry_root.join("mark/scale/mark.json"),
+            content: r#"{"id":"scale","package":"scale","class":"success"}"#.into(),
+            expected_before_hash: None,
+        };
+        let report = validate_registry_candidate(&roots, &[scale_write]).unwrap();
+        assert!(report.safe_to_apply, "{:?}", report.regressions);
     }
 
     fn worker_pin(root: &Path, id: &str, ceiling_json: &str) {

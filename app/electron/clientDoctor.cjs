@@ -54,6 +54,20 @@ async function runClientDoctor(options) {
       "Correct the exact local package manifest in source before any production repair.",
     ));
   }
+  for (const entry of catalog.packages ?? []) {
+    if (!entry.materialized && !entry.partially_materialized && !["valid", "stale"].includes(entry.receipt_state)) continue;
+    checks += 1;
+    if (entry.installed === true && entry.receipt_state === "valid" && !entry.error) continue;
+    findings.push(finding(
+      "package.installation_inconsistent",
+      entry.id,
+      entry.error || `Installed package '${entry.id}' has receipt state '${entry.receipt_state}' and materialized=${entry.materialized === true}.`,
+      `Inspect package '${entry.id}' and its exact source/installed differences. With the runtime stopped, the client update path adopts unchanged package owners; conflicting local edits require an explicit reviewed package repair.`,
+      { package_id: entry.id, receipt_state: entry.receipt_state, materialized: entry.materialized === true,
+        partially_materialized: entry.partially_materialized === true, source_digest: entry.source_digest,
+        installed_digest: entry.installed_digest, receipt_digest: entry.receipt_digest },
+    ));
+  }
   const bound = await collectBoundContextArtifacts(roots);
   const owners = contextPackageOwners(catalog.packages ?? []);
   for (const [artifactId, bindings] of bound) {

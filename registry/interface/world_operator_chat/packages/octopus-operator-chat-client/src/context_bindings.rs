@@ -66,7 +66,7 @@ pub(crate) fn bind_selected_context<'a>(
     });
     let mut changed_rows = BTreeSet::new();
     let mut owner_updates = BTreeMap::new();
-    let mut tool_doors = BTreeSet::new();
+    let mut tool_contexts = BTreeMap::new();
     for template in topology
         .checkpoints
         .iter_mut()
@@ -89,29 +89,51 @@ pub(crate) fn bind_selected_context<'a>(
             return Err("selected context has no unique active checkpoint".into());
         };
         changed_rows.insert(checkpoint.id.clone());
-        if template.role == BoundCheckpointRole::ProviderToolOutput {
-            tool_doors.insert(door.interface.clone());
-        }
-        append_static_bindings(&mut template.static_artifact_bindings, &additions);
-    }
-    for template in topology.checkpoints.iter_mut().filter(|t| {
-        t.role == BoundCheckpointRole::OwnerInput
-            && !t.include_context
-            && tool_doors.contains(&t.interface_binding.interface)
-    }) {
-        let owner = &template.interface_binding.interface;
         let old_static = previous_topology
             .as_ref()
             .and_then(|topology| {
-                topology.checkpoints.iter().find(|t| {
-                    t.role == BoundCheckpointRole::OwnerInput
-                        && !t.include_context
-                        && t.interface_binding.interface == *owner
+                topology.checkpoints.iter().find(|old| {
+                    old.role == template.role
+                        && old.interface_binding == template.interface_binding
+                        && old.outbound_interface_bindings == template.outbound_interface_bindings
+                        && old.required_verified_artifacts == template.required_verified_artifacts
                 })
             })
-            .map(|t| t.static_artifact_bindings.clone())
+            .map(|old| old.static_artifact_bindings.clone())
             .unwrap_or_else(|| template.static_artifact_bindings.clone());
-        append_static_bindings(&mut template.static_artifact_bindings, &additions);
+        if !template.include_context || template.role == BoundCheckpointRole::ProviderToolOutput {
+            append_static_bindings(&mut template.static_artifact_bindings, &additions);
+        }
+        if template.role == BoundCheckpointRole::ProviderToolOutput {
+            tool_contexts
+                .entry(door.interface.clone())
+                .or_insert_with(Vec::new)
+                .push((old_static, template.static_artifact_bindings.clone()));
+        }
+    }
+    for template in topology.checkpoints.iter_mut().filter(|t| {
+        t.role == BoundCheckpointRole::OwnerInput
+            && tool_contexts.contains_key(&t.interface_binding.interface)
+    }) {
+        let owner = &template.interface_binding.interface;
+        let updates = if template.include_context {
+            tool_contexts[owner].clone()
+        } else {
+            let old_static = previous_topology
+                .as_ref()
+                .and_then(|topology| {
+                    topology.checkpoints.iter().find(|t| {
+                        t.role == BoundCheckpointRole::OwnerInput
+                            && !t.include_context
+                            && t.interface_binding == template.interface_binding
+                            && t.outbound_interface_bindings == template.outbound_interface_bindings
+                    })
+                })
+                .map(|t| t.static_artifact_bindings.clone())
+                .unwrap_or_else(|| template.static_artifact_bindings.clone());
+            append_static_bindings(&mut template.static_artifact_bindings, &additions);
+            vec![(old_static, template.static_artifact_bindings.clone())]
+        };
         let owned = parsed
             .interface_state
             .get(owner)
@@ -136,19 +158,22 @@ pub(crate) fn bind_selected_context<'a>(
             }) {
                 return Err("tool context checkpoint is claimed by another owner".into());
             }
-            if old_static.iter().all(|id| {
-                checkpoint
-                    .artifact_bindings
-                    .iter()
-                    .any(|binding| &binding.id == id)
-            }) {
-                owner_updates.insert(
-                    checkpoint.id.clone(),
-                    (
-                        old_static.clone(),
-                        template.static_artifact_bindings.clone(),
-                    ),
-                );
+            for (old, new) in &updates {
+                if !old.iter().all(|id| {
+                    checkpoint
+                        .artifact_bindings
+                        .iter()
+                        .any(|binding| &binding.id == id)
+                }) {
+                    continue;
+                }
+                if owner_updates
+                    .get(&checkpoint.id)
+                    .is_some_and(|prior| prior != &(old.clone(), new.clone()))
+                {
+                    return Err("tool context owner checkpoint has conflicting calling contexts".into());
+                }
+                owner_updates.insert(checkpoint.id.clone(), (old.clone(), new.clone()));
             }
         }
     }

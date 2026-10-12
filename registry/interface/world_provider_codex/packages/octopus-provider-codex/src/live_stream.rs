@@ -887,14 +887,18 @@ pub(crate) fn recover_sealed_terminal_stream(
     if manifest.label != rules.artifact_label || manifest.payload_path != turn_root.join("turn-stream.body.jsonl") {
         return Err("sealed stream recovery changed its exact turn manifest".into());
     }
-    let Some(expected_hash) = manifest.payload_content_hash else { return Ok(None); };
+    let expected_hash = manifest.payload_content_hash;
     let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&manifest.payload_path, MAX_RECOVERY_BODY_BYTES)
         .map_err(|error| error.to_string())?;
-    if bytes.last() != Some(&b'\n') || blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+    if bytes.last() != Some(&b'\n') || expected_hash.as_ref().is_some_and(|expected| blake3::hash(&bytes).to_hex().as_str() != expected) {
         return Err("sealed stream recovery failed its immutable body hash".into());
     }
     let (_, terminal, _, _) = validate_complete_rows(&bytes, identity, source_movement_seq)?;
-    let terminal = terminal.ok_or("sealed stream recovery has no terminal boundary")?;
+    let terminal = match terminal {
+        Some(terminal) => terminal,
+        None if expected_hash.is_none() => return Ok(None),
+        None => return Err("sealed stream recovery has no terminal boundary".into()),
+    };
     let last: serde_json::Value = serde_json::from_slice(bytes.split(|byte| *byte == b'\n')
         .rfind(|line| !line.is_empty()).ok_or("sealed stream recovery has no rows")?)
         .map_err(|error| error.to_string())?;
@@ -903,6 +907,10 @@ pub(crate) fn recover_sealed_terminal_stream(
     {
         return Err("sealed stream recovery differs from its exact terminal source".into());
     }
+    let artifact = if expected_hash.is_none() {
+        LiveTurnStream::open(root, rules, identity.clone(), source_movement_seq)?
+            .seal_terminal(source_movement_seq, terminal_label, &terminal.artifact_payload_blake3)?
+    } else { artifact };
     Ok(Some((artifact, terminal.artifact_payload_blake3)))
 }
 

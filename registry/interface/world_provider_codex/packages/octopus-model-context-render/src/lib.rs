@@ -33,11 +33,27 @@ fn render_model_context_block_with_visible_tools(
     if let Some(goal) = render_goal(metadata) {
         sections.push(goal);
     }
+    if let Some(runtime) = &metadata.runtime {
+        sections.push(format!(
+            "CURRENT RUN — runtime-attested coordinates:\nrun: {}\nEE: {}\nworker: {}\ncheckpoint: {}\nepoch: {}\nreceiving interface: {}",
+            runtime.run, runtime.ee, runtime.worker, runtime.checkpoint, runtime.epoch,
+            runtime.interface,
+        ));
+    }
     if let Some(obligations) = render_obligations(&metadata.required_verified_artifacts) {
         sections.push(obligations);
     }
     if let Some(grant) = render_grant(metadata, visible_tools) {
         sections.push(grant);
+    }
+    if let Some(bindings) = render_checkpoint_bindings(metadata) {
+        sections.push(bindings);
+    }
+    if let Some(failure) = &metadata.verification_failure {
+        sections.push(format!(
+            "VERIFICATION FAILURE — evidence to inspect before repairing or repeating an effect:\n{}",
+            serde_json::json!(failure),
+        ));
     }
 
     if sections.is_empty() {
@@ -103,11 +119,15 @@ fn render_grant(metadata: &InvocationMetadata, visible_tools: &[String]) -> Opti
         "mark outcomes this grant can close",
     );
     if let Some(slots) = &grant.ee_root_slot_allowance {
-        push_grant_line(
-            &mut lines,
-            slots,
-            "EE root-slot ceiling (each tool may be narrower; slot names are not filesystem paths)",
-        );
+        if slots.is_empty() {
+            lines.push("EE root-slot ceiling: [] (this EE permits no named filesystem roots)".into());
+        } else {
+            push_grant_line(
+                &mut lines,
+                slots,
+                "EE root-slot ceiling (each tool may be narrower; slot names are not filesystem paths)",
+            );
+        }
     }
 
     if lines.is_empty() {
@@ -125,10 +145,28 @@ fn render_grant(metadata: &InvocationMetadata, visible_tools: &[String]) -> Opti
         "\n\nTool effects belong to their declared worker environments. The provider transport's \
          cwd, workspace roots and sandbox permissions are not tool path authority and do not set \
          a tool's working directory. Use the target tool's declared path scope and explicit paths \
-         from bound context or tool results. Inspect authorized tool/workspace metadata for paths; \
-         if the applicable filesystem root is still unknown, ask for the missing path scope.",
+         from bound context or tool results. This metadata supplies root-slot names, not resolved \
+         filesystem paths. Read the bound authoring/workspace coordinate artifact and the exact \
+         tool and door declarations when available. A registry installation root is not evidence \
+         of a writable source workspace. If a required path or execution capability is absent, \
+         identify that missing declaration and use an authorized binding to request or configure \
+         it; do not infer access from a project name or the provider's working directory.",
     );
     Some(out)
+}
+
+fn render_checkpoint_bindings(metadata: &InvocationMetadata) -> Option<String> {
+    let snapshot = metadata.checkpoint_binding_policy.as_ref()?;
+    let allowed = |interface: &str| metadata.grant.interfaces.iter().any(|id| id == interface);
+    let inbound = std::iter::once(&snapshot.inbound).filter(|binding| allowed(binding.interface.as_str())).collect::<Vec<_>>();
+    let outbound = snapshot.outbound.iter().filter(|binding| allowed(binding.interface.as_str())).collect::<Vec<_>>();
+    let attached = metadata.grant.attached_interface_bindings.iter()
+        .filter(|binding| metadata.grant.interfaces.iter().any(|id| id == binding.interface.as_str()))
+        .collect::<Vec<_>>();
+    Some(format!(
+        "CHECKPOINT BINDINGS — exact interfaces and their admitted artifact vocabulary:\n{}\nThese are this checkpoint's authored routes within the current grant. Other reachable interfaces still require an authored binding; a registry entry alone does not create a route.",
+        serde_json::json!({"inbound":inbound,"outbound":outbound,"interface_descriptions":attached}),
+    ))
 }
 
 fn push_grant_line(lines: &mut Vec<String>, values: &[String], label: &str) {
@@ -303,7 +341,7 @@ mod tests {
         assert!(!block.contains("system_coder_env"));
         assert!(block.contains("EE root-slot ceiling (each tool may be narrower; slot names are not filesystem paths): workspace_root"));
         assert!(block.contains("provider transport's cwd, workspace roots and sandbox permissions are not tool path authority"));
-        assert!(block.contains("Inspect authorized tool/workspace metadata for paths; if the applicable filesystem root is still unknown, ask for the missing path scope."));
+        assert!(block.contains("This metadata supplies root-slot names, not resolved filesystem paths."));
         assert!(!block.contains("/workspace_root"));
     }
 
@@ -311,6 +349,39 @@ mod tests {
     fn empty_envelope_renders_nothing() {
         let metadata = metadata_with(Vec::new(), GrantProjection::default(), Vec::new());
         assert!(render_model_context_block(&metadata).is_none());
+    }
+
+    #[test]
+    fn current_coordinates_and_binding_filters_survive_model_projection() {
+        let mut metadata = InvocationMetadata::new(grant_axes(&[], &["provider", "new_room"], &[], &[]));
+        metadata.runtime = Some(serde_json::from_value(json!({
+            "run":"task_7","ee":"project_2","worker":"worker_7",
+            "checkpoint":"input_3","interface":"provider","epoch":4,
+        })).unwrap());
+        let binding = |id| json!({"interface":id,"config":{"artifact_policy":{"mode":"allow","names":["assignment"],"namespaces":[]}}});
+        metadata.checkpoint_binding_policy = Some(serde_json::from_value(json!({
+            "inbound":binding("provider"),"outbound":[binding("new_room"),binding("denied_room")],
+        })).unwrap());
+        let block = render_model_context_block(&metadata).unwrap();
+        for expected in ["run: task_7", "EE: project_2", "epoch: 4", "\"interface\":\"new_room\"", "\"names\":[\"assignment\"]"] {
+            assert!(block.contains(expected), "missing {expected}: {block}");
+        }
+        assert!(!block.contains("denied_room"));
+        metadata.grant.interfaces.retain(|id| id != "new_room");
+        assert!(!render_model_context_block(&metadata).unwrap().contains("new_room"));
+    }
+
+    #[test]
+    fn empty_root_ceiling_and_failure_details_remain_actionable() {
+        let mut metadata = InvocationMetadata::new(GrantProjection::default().with_ee_root_slot_allowance(Some(Vec::new())));
+        metadata.verification_failure = Some(serde_json::from_value(json!({
+            "error":"verification_failed","verifier":"schema_check","details":{"path":"/required_field","reason":"missing"},
+        })).unwrap());
+        let block = render_model_context_block(&metadata).unwrap();
+        assert!(block.contains("EE root-slot ceiling: []"));
+        assert!(block.contains("\"path\":\"/required_field\""));
+        assert!(block.contains("missing"));
+        assert!(block.contains("not resolved filesystem paths"));
     }
 
     #[test]

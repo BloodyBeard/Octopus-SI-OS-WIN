@@ -214,6 +214,7 @@ async function main(argv = process.argv.slice(2), io = process) {
     process.on("SIGINT", signalHandler);
     const deadline = parsed.timeoutMs ? setTimeout(() => controller.abort(), parsed.timeoutMs) : null;
     const messages = new Map();
+    const selectedTurn = { sourceMovementSeq: submitted?.afterSeq };
     const renderer = createEventRenderer(io);
     let lastMessage = "";
     let failed = false;
@@ -225,18 +226,36 @@ async function main(argv = process.argv.slice(2), io = process) {
         if (json) report(event);
         else renderer(event);
         if (event.type === "message" && event.entry?.role === "assistant" && ["message", "message_delta"].includes(event.entry.kind)) {
-          messages.set(event.entry.id, event.entry.text);
-          lastMessage = event.entry.text || lastMessage;
+          messages.delete(event.entry.id);
+          messages.set(event.entry.id, event.entry);
         }
         if (event.type === "delta" && event.role === "assistant" && messages.has(event.id)) {
-          const text = messages.get(event.id) + event.text;
-          messages.set(event.id, text);
-          lastMessage = text;
+          const entry = { ...messages.get(event.id), text: messages.get(event.id).text + event.text };
+          messages.delete(event.id);
+          messages.set(event.id, entry);
+        }
+        if (event.type === "status" && event.correlated) {
+          const metadata = event.entry?.metadata;
+          for (const field of ["runId", "interfaceId", "fromInterfaceId", "fromInterfaceRole", "direction", "turnId", "threadId"]) {
+            if (metadata?.[field]) selectedTurn[field] = metadata[field];
+          }
+          if (event.turnId) selectedTurn.turnId = event.turnId;
+          if (Number.isSafeInteger(metadata?.sourceMovementSeq)) selectedTurn.sourceMovementSeq = metadata.sourceMovementSeq;
         }
         if (event.type === "status" && event.terminal && event.correlated) {
           completed = true;
           failed = event.state === "failed";
           stopped = event.interrupted === true;
+          lastMessage = [...messages.values()].findLast((entry) => {
+            if (!entry.text) return false;
+            if (entry.id === event.entry?.id) return true;
+            const metadata = entry.metadata;
+            if (!metadata || metadata.fromInterfaceRole !== "provider" || metadata.direction !== "out"
+              || ["runId", "interfaceId", "fromInterfaceId"].some((field) => metadata[field] !== selectedTurn[field])
+              || ["turnId", "threadId"].some((field) => metadata[field] && selectedTurn[field] && metadata[field] !== selectedTurn[field])) return false;
+            return Boolean(selectedTurn.turnId && metadata.turnId === selectedTurn.turnId)
+              || Number.isSafeInteger(selectedTurn.sourceMovementSeq) && metadata.sourceMovementSeq === selectedTurn.sourceMovementSeq;
+          })?.text || "";
         }
         if (event.type === "request" && event.status !== "resolved") { pending = true; break; }
       }

@@ -190,19 +190,53 @@ pub fn pin_verifier_package(
         }));
     }
     let files = pin_package_files(&package_dir, &ctx.descriptor)?;
-    if !files.contains_key(&ctx.descriptor.script) {
+    let Some(entrypoint) = files.get(&ctx.descriptor.script) else {
         return Err(serde_json::json!({
             "runner": "package_process",
             "verifier": ctx.descriptor.id.as_str(),
             "error": "pinned verifier package does not contain its declared script"
         }));
-    }
+    };
+    validate_pinned_entrypoint(&ctx.descriptor, &entrypoint.contents)?;
     Ok(PinnedVerifierPackage {
         descriptor: ctx.descriptor.clone(),
         repository_root: ctx.repository_root.clone(),
         scratch_root: ctx.scratch_root.clone(),
         files,
     })
+}
+
+fn validate_pinned_entrypoint(
+    descriptor: &VerifierDescriptor,
+    contents: &[u8],
+) -> Result<(), serde_json::Value> {
+    if contents.starts_with(b"#!") || native_executable_header(contents) {
+        return Ok(());
+    }
+    Err(serde_json::json!({
+        "runner": "package_process",
+        "verifier": descriptor.id.as_str(),
+        "script": descriptor.script,
+        "error": "verifier entrypoint has no explicit executable format",
+        "required_contract": "The declared script must be a native executable or begin with #!/absolute/interpreter. Declare any additional executable commands in authority. The runner makes the pinned entrypoint executable; it does not infer an interpreter from the filename or script body.",
+    }))
+}
+
+fn native_executable_header(contents: &[u8]) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(
+            object::FileKind::parse(contents),
+            Ok(object::FileKind::MachO32
+                | object::FileKind::MachO64
+                | object::FileKind::MachOFat32
+                | object::FileKind::MachOFat64)
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        contents.starts_with(b"\x7fELF")
+    }
 }
 
 fn pin_package_files(
@@ -897,31 +931,116 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn package_verifier_executes_declared_system_interpreter() {
+    fn authored_text_verifier_requires_explicit_interpreter_and_preserves_pins() {
+        use std::os::unix::fs::PermissionsExt;
+
         let package = tempfile::tempdir().unwrap();
-        std::fs::write(
-            package.path().join("verify.py"),
-            "#!/usr/bin/python3\nimport json,sys\nrequest=json.load(sys.stdin)\nprint(json.dumps({'passed':request['payload_utf8']=='verified payload','details':{'received':request['payload_utf8']}}))\n",
-        ).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "not granted").unwrap();
+        let script = package.path().join("verify.py");
+        let body = "import json,sys\nrequest=json.load(sys.stdin)\ntry:\n open(request['params']['outside_path']).read()\n isolated=False\nexcept PermissionError:\n isolated=True\nprint(json.dumps({'passed':request['payload_utf8']=='verified payload' and isolated,'details':{'received':request['payload_utf8'],'isolated':isolated}}))\n";
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
         let mut ctx = package_ctx("system_interpreter");
         ctx.package_dir = Some(package.path().to_path_buf());
         ctx.repository_root = package.path().to_path_buf();
         ctx.scratch_root = package.path().join("scratch");
         ctx.descriptor.authority.executable_commands =
-            std::collections::BTreeSet::from(["/usr/bin/python3".to_string()]);
-        let pinned = pin_verifier_package(&ctx).unwrap();
+            std::collections::BTreeSet::from(["/usr/bin/env".to_string(), "python3".to_string()]);
         let (_, artifact) = blob(b"verified payload");
-        let input = test_input(artifact, serde_json::json!({}));
+        let input = test_input(
+            artifact,
+            serde_json::json!({"outside_path": outside.path()}),
+        );
+        let missing = run_verifier_process(&ctx, &input, b"verified payload".to_vec());
+        assert!(!missing.passed);
+        assert_eq!(
+            missing.details["error"],
+            "verifier entrypoint has no explicit executable format"
+        );
+
+        std::fs::write(&script, format!("#!/usr/bin/env python3\n{body}")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let pinned = pin_verifier_package(&ctx).unwrap();
+        let pinned_closure = pinned.closure_bytes();
         let passed = run_pinned_verifier_process(&pinned, &input, b"verified payload".to_vec());
         assert!(passed.passed, "unexpected verdict: {:?}", passed.details);
+        assert_eq!(passed.details["isolated"], true);
         let (_, other) = blob(b"other payload");
         let refused = run_pinned_verifier_process(
             &pinned,
-            &test_input(other, serde_json::json!({})),
+            &test_input(other, input.params.clone()),
             b"other payload".to_vec(),
         );
         assert!(!refused.passed);
         assert_eq!(refused.details["received"], "other payload");
+
+        ctx.descriptor
+            .authority
+            .executable_commands
+            .remove("python3");
+        let denied = run_verifier_process(&ctx, &input, b"verified payload".to_vec());
+        assert!(
+            !denied.passed,
+            "undeclared env-selected command executed: {:?}",
+            denied.details
+        );
+        ctx.descriptor
+            .authority
+            .executable_commands
+            .insert("python3".to_string());
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env python3\nprint('{\"passed\":false,\"details\":{\"revision\":2}}')\n",
+        )
+        .unwrap();
+        let updated = pin_verifier_package(&ctx).unwrap();
+        assert_ne!(pinned_closure, updated.closure_bytes());
+        let retained = run_pinned_verifier_process(&pinned, &input, b"verified payload".to_vec());
+        assert!(
+            retained.passed,
+            "pinned code changed: {:?}",
+            retained.details
+        );
+        let changed = run_pinned_verifier_process(&updated, &input, b"verified payload".to_vec());
+        assert!(!changed.passed);
+        assert_eq!(changed.details["revision"], 2);
+
+        std::fs::write(&script, format!("#!/usr/bin/python3\n{body}")).unwrap();
+        ctx.descriptor.authority.executable_commands =
+            std::collections::BTreeSet::from(["/usr/bin/python3".to_string()]);
+        let absolute = run_verifier_process(&ctx, &input, b"verified payload".to_vec());
+        assert!(
+            absolute.passed,
+            "explicit absolute interpreter failed: {:?}",
+            absolute.details
+        );
+
+        let authoring: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../registry/artifact/artifact-codebase-layout/artifact.json"
+        )))
+        .unwrap();
+        let example = &authoring["executable_authoring"]["examples"]["python_verifier"];
+        ctx.descriptor = serde_json::from_value(example["descriptor"].clone()).unwrap();
+        ctx.descriptor.validate().unwrap();
+        std::fs::write(&script, example["source"].as_str().unwrap()).unwrap();
+        let payload = br#"{"label":"example.echo.result","tool":"example.echo","ok":true,"body":{"value":"example"}}"#;
+        let (blobs, artifact) = blob(payload);
+        let mut input = test_input(artifact, example["params"].clone());
+        let verdict = verify_package_process(&ctx, &input, &blobs);
+        assert!(
+            verdict.passed,
+            "published example failed: {:?}",
+            verdict.details
+        );
+        input.params["expected"] = serde_json::json!("different");
+        let verdict = verify_package_process(&ctx, &input, &blobs);
+        assert!(!verdict.passed);
+        assert_eq!(verdict.details["observed"], "example");
     }
 
     #[cfg(unix)]

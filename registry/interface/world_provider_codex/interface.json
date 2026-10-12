@@ -19,7 +19,12 @@
       },
       "web_search_modes": {
         "reduce": "intersection",
-        "default": ["disabled", "cached", "indexed", "live"]
+        "default": [
+          "disabled",
+          "cached",
+          "indexed",
+          "live"
+        ]
       },
       "models": {
         "reduce": "intersection",
@@ -59,7 +64,1805 @@
       "model_tool_names": {},
       "web_search": "live",
       "native_mcp_resource_discovery": true,
-      "input_intake": {"template_interface_id": "system_service_input"},
+      "run_affordance_profile": {
+        "catalog": {
+          "label": "context.reference",
+          "text": "These provider-owned operations compose ordinary Octopus runs, bindings and file effects. inspect_authoring reports the current selection and grant. To attach tools, worker environments, context or interface routes to this run, use preview_current_run and amend_current_run with the same amendment_key and explicit complete selection; use authored for an exact future contract. For a separate full run, use preview_run and create_run with the same creation_key. Inspect concrete edits and missing dependencies before applying. A new run forms authority from its own worker ceiling and EE chain. Author result verification requirements and exact return interfaces. Ordinary granted file tools can create or repair descriptor and executable packages; a descriptor on disk alone does not grant access. Each operation is exposed only under its declared effect-tool grants.",
+          "operations": [
+            {
+              "name": "inspect_authoring",
+              "operation": "inspect_authoring",
+              "description": "Inspect the selected Home roots, native authoring defaults, current grant and installed descriptor/validation facts. Installed capabilities are candidates; each requested run must pass its own policy formation. This call makes no edits.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            },
+            {
+              "name": "preview_current_run",
+              "operation": "preview_current_run",
+              "description": "Preview adding or repairing capabilities on this current run. First inspect_authoring for the complete current selection. Supply every selection field explicitly, or an authored future run_record and its dependency writes. The preview checks real descriptor references, policy formation, each publication stage and preservation of accepted work. It applies no effects. Keep one amendment_key for the matching apply.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amendment_key"
+                ],
+                "properties": {
+                  "amendment_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "selection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "selected_tools",
+                      "selected_worker_environment_kinds",
+                      "door_host_slots",
+                      "external_inputs",
+                      "external_relays",
+                      "model_outputs",
+                      "context_artifact_bindings",
+                      "payload_artifact_bindings"
+                    ],
+                    "properties": {
+                      "selected_tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "tool",
+                            "interface",
+                            "worker_environment_kind"
+                          ],
+                          "properties": {
+                            "tool": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "worker_environment_kind": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      },
+                      "selected_worker_environment_kinds": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "door_host_slots": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "external_inputs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "required_verified_artifacts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "mark",
+                                  "artifact_label",
+                                  "verifier"
+                                ],
+                                "properties": {
+                                  "mark": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "artifact_label": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "verifier": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "params": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "external_relays": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id",
+                            "outbound_interface_ids"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "outbound_interface_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required_verified_artifacts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "mark",
+                                  "artifact_label",
+                                  "verifier"
+                                ],
+                                "properties": {
+                                  "mark": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "artifact_label": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "verifier": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "params": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "model_outputs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id",
+                            "required_verified_artifact"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "required_verified_artifact": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "mark",
+                                "artifact_label",
+                                "verifier"
+                              ],
+                              "properties": {
+                                "mark": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "artifact_label": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "verifier": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "params": {}
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "context_artifact_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      },
+                      "payload_artifact_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "expected_before_hash",
+                      "expected_before",
+                      "run_record",
+                      "writes"
+                    ],
+                    "properties": {
+                      "run_record": {
+                        "type": "object",
+                        "description": "Complete proposed future record based on expected_before. Preserve private continuity, accepted checkpoints and current identity; the owner rebases only the validated future-contract delta onto the checked tip."
+                      },
+                      "writes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "expected_before_hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "description": "Exact content_hash returned by the granted file.read of this run before editing its future contract."
+                      },
+                      "expected_before": {
+                        "type": "object",
+                        "description": "The complete observed run record before the proposed edit. Its hash and checked history must be proved before any effect."
+                      }
+                    }
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "selection"
+                    ],
+                    "not": {
+                      "required": [
+                        "authored"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "authored"
+                    ],
+                    "not": {
+                      "required": [
+                        "selection"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "amend_current_run",
+              "operation": "amend_current_run",
+              "description": "Apply the same reviewed current-run amendment using ordinary granted file effects and the provider-owned checked run edit. Preserve accepted waits, pending results, writer and provider identity. Add dependencies before activation, then read back the installed run. Newly granted tools and context become available after the final checked result. A partial or refused effect returns evidence for repair; it is never reported as a successful rollback.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "amendment_key"
+                ],
+                "properties": {
+                  "amendment_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "selection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "selected_tools",
+                      "selected_worker_environment_kinds",
+                      "door_host_slots",
+                      "external_inputs",
+                      "external_relays",
+                      "model_outputs",
+                      "context_artifact_bindings",
+                      "payload_artifact_bindings"
+                    ],
+                    "properties": {
+                      "selected_tools": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "tool",
+                            "interface",
+                            "worker_environment_kind"
+                          ],
+                          "properties": {
+                            "tool": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "worker_environment_kind": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      },
+                      "selected_worker_environment_kinds": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "door_host_slots": {
+                        "type": "object",
+                        "additionalProperties": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "external_inputs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "required_verified_artifacts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "mark",
+                                  "artifact_label",
+                                  "verifier"
+                                ],
+                                "properties": {
+                                  "mark": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "artifact_label": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "verifier": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "params": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "external_relays": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id",
+                            "outbound_interface_ids"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "outbound_interface_ids": {
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            },
+                            "required_verified_artifacts": {
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "mark",
+                                  "artifact_label",
+                                  "verifier"
+                                ],
+                                "properties": {
+                                  "mark": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "artifact_label": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "verifier": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  },
+                                  "params": {}
+                                }
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "model_outputs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "checkpoint_id",
+                            "interface_id",
+                            "required_verified_artifact"
+                          ],
+                          "properties": {
+                            "checkpoint_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "interface_id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "required_verified_artifact": {
+                              "type": "object",
+                              "additionalProperties": false,
+                              "required": [
+                                "mark",
+                                "artifact_label",
+                                "verifier"
+                              ],
+                              "properties": {
+                                "mark": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "artifact_label": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "verifier": {
+                                  "type": "string",
+                                  "minLength": 1
+                                },
+                                "params": {}
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "context_artifact_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            }
+                          }
+                        }
+                      },
+                      "payload_artifact_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "expected_before_hash",
+                      "expected_before",
+                      "run_record",
+                      "writes"
+                    ],
+                    "properties": {
+                      "run_record": {
+                        "type": "object",
+                        "description": "Complete proposed future record based on expected_before. Preserve private continuity, accepted checkpoints and current identity; the owner rebases only the validated future-contract delta onto the checked tip."
+                      },
+                      "writes": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "expected_before_hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$",
+                        "description": "Exact content_hash returned by the granted file.read of this run before editing its future contract."
+                      },
+                      "expected_before": {
+                        "type": "object",
+                        "description": "The complete observed run record before the proposed edit. Its hash and checked history must be proved before any effect."
+                      }
+                    }
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "selection"
+                    ],
+                    "not": {
+                      "required": [
+                        "authored"
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "authored"
+                    ],
+                    "not": {
+                      "required": [
+                        "selection"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "preview_run",
+              "operation": "preview_run",
+              "description": "Prepare a complete run and its exact descriptor, policy and binding file edits without applying them. Choose a stable creation_key and reuse it with create_run. Inspect required writes and missing dependencies; the plan grants no authority. Use authored for a complete explicit run graph with checkpoint waits, verifier requirements and return bindings; it cannot be mixed with template-selection fields.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "creation_key"
+                ],
+                "properties": {
+                  "creation_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ee_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "worker_template_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "provider_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasoning_effort": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "service_tier": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "client_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "context_artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "worker_environment_kinds": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "return_interface_ids": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tool",
+                        "interface",
+                        "worker_environment_kind"
+                      ],
+                      "properties": {
+                        "tool": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "worker_environment_kind": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "door_host_slots": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "output_selection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "return_labels",
+                      "record_labels"
+                    ],
+                    "properties": {
+                      "return_labels": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "record_labels": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "run_id",
+                      "writes",
+                      "outgoing_bindings"
+                    ],
+                    "properties": {
+                      "run_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "writes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "outgoing_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "interface",
+                            "artifact_label",
+                            "artifact_bindings"
+                          ],
+                          "properties": {
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_bindings": {
+                              "type": "array",
+                              "uniqueItems": true,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "seed": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "interface_id",
+                          "label",
+                          "payload"
+                        ],
+                        "properties": {
+                          "interface_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "payload": {}
+                        }
+                      }
+                    }
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "artifacts"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "authored"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "create_run",
+              "operation": "create_run",
+              "description": "Create a run through checked ordinary file writes, connect its exact interfaces and admit its initial artifact. Use the reviewed creation_key and request. Returns installation and seed evidence; completion of the requested work requires its own artifacts and verification. Use authored for a complete explicit run graph with checkpoint waits, verifier requirements and return bindings; it cannot be mixed with template-selection fields.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "creation_key"
+                ],
+                "properties": {
+                  "creation_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ee_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "worker_template_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "provider_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reasoning_effort": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "service_tier": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "client_interface_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "context_artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "worker_environment_kinds": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "return_interface_ids": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "tools": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "tool",
+                        "interface",
+                        "worker_environment_kind"
+                      ],
+                      "properties": {
+                        "tool": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "worker_environment_kind": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "door_host_slots": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  },
+                  "output_selection": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "return_labels",
+                      "record_labels"
+                    ],
+                    "properties": {
+                      "return_labels": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "record_labels": {
+                        "type": "array",
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "run_id",
+                      "writes",
+                      "outgoing_bindings"
+                    ],
+                    "properties": {
+                      "run_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "writes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "outgoing_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "interface",
+                            "artifact_label",
+                            "artifact_bindings"
+                          ],
+                          "properties": {
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_bindings": {
+                              "type": "array",
+                              "uniqueItems": true,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "seed": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "interface_id",
+                          "label",
+                          "payload"
+                        ],
+                        "properties": {
+                          "interface_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "payload": {}
+                        }
+                      }
+                    }
+                  }
+                },
+                "anyOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "artifacts"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "authored"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "list_runs",
+              "operation": "list_runs",
+              "description": "Inspect this run and its declared connected peer interfaces from the current admitted grant and record.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            },
+            {
+              "name": "send_message",
+              "operation": "send_message",
+              "description": "Queue an artifact-backed message for a connected run at its exact receive interface.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "interface"
+                ],
+                "properties": {
+                  "interface": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "followup_task",
+              "operation": "followup_task",
+              "description": "Send a follow-up to a connected run through its declared receive interface under the current grant.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "interface"
+                ],
+                "properties": {
+                  "interface": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "interrupt_run",
+              "operation": "interrupt",
+              "description": "Request interruption through a connected run's declared receive interface; the result proves admission, not that work has stopped.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "interface"
+                ],
+                "properties": {
+                  "interface": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id",
+                        "content"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "content": {
+                          "type": "array",
+                          "minItems": 32,
+                          "maxItems": 32,
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 255
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "wait_for_runs",
+              "operation": "wait",
+              "description": "Wait for admitted run communication without inventing a runtime scheduler or resending work.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "timeout_ms"
+                ],
+                "properties": {
+                  "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 60000
+                  }
+                }
+              }
+            },
+            {
+              "name": "preview_revision",
+              "operation": "preview_revision",
+              "description": "Validate exact edits to an existing peer run and related descriptors without applying them. Preserve accepted checkpoint contracts and inspect every publication stage. Do not edit the in-flight caller through this operation.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "creation_key",
+                  "authored"
+                ],
+                "properties": {
+                  "creation_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "run_id",
+                      "writes",
+                      "outgoing_bindings"
+                    ],
+                    "properties": {
+                      "run_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "writes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "outgoing_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "interface",
+                            "artifact_label",
+                            "artifact_bindings"
+                          ],
+                          "properties": {
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_bindings": {
+                              "type": "array",
+                              "uniqueItems": true,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "seed": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "interface_id",
+                          "label",
+                          "payload"
+                        ],
+                        "properties": {
+                          "interface_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "payload": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "revise_run",
+              "operation": "revise_run",
+              "description": "Apply checked, validated file edits to an existing peer run and its descriptor dependencies. Optional seed emits through its exact declared interface; without seed, publishes the authored waits. Do not edit the in-flight caller through this operation.",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "creation_key",
+                  "authored"
+                ],
+                "properties": {
+                  "creation_key": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "authored": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "run_id",
+                      "writes",
+                      "outgoing_bindings"
+                    ],
+                    "properties": {
+                      "run_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "writes": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "path",
+                            "content",
+                            "expected_before_hash"
+                          ],
+                          "properties": {
+                            "path": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "string"
+                            },
+                            "expected_before_hash": {
+                              "type": [
+                                "string",
+                                "null"
+                              ],
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "outgoing_bindings": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "interface",
+                            "artifact_label",
+                            "artifact_bindings"
+                          ],
+                          "properties": {
+                            "interface": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_bindings": {
+                              "type": "array",
+                              "uniqueItems": true,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "seed": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "interface_id",
+                          "label",
+                          "payload"
+                        ],
+                        "properties": {
+                          "interface_id": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "payload": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "file_write_tool": "file.write",
+        "artifact_send_tool": "artifact.send",
+        "output_selection": {
+          "return_labels": [
+            "interface.artifact.output",
+            "turn.error",
+            "turn.interrupted.result"
+          ],
+          "record_labels": [
+            "turn.input.acknowledged",
+            "interface.context.updated",
+            "tool.call",
+            "turn.control.acknowledged",
+            "turn.control.failed",
+            "operator.approval.request",
+            "operator.elicitation.request",
+            "operator.user_input.request",
+            "provider.models.catalog",
+            "provider.operation.error",
+            "provider.account.login.completed",
+            "provider.account.updated",
+            "provider.account.rate_limits.updated",
+            "provider.account.login.started",
+            "provider.account.login.cancelled",
+            "provider.account.login.status",
+            "provider.account.logged_out",
+            "provider.account.snapshot",
+            "provider.account.rate_limits",
+            "provider.account.rate_limit_reset.consumed",
+            "provider.account.usage",
+            "provider.account.workspace_messages",
+            "provider.capabilities",
+            "turn.stream",
+            "agent.message.delta",
+            "turn.agent_message",
+            "turn.reasoning",
+            "turn.reasoning.delta",
+            "turn.plan.update",
+            "turn.plan.delta",
+            "turn.exec.command",
+            "turn.exec.output_delta",
+            "turn.exec.terminal_interaction",
+            "turn.file.change",
+            "turn.file.change_delta",
+            "turn.diff.updated",
+            "turn.web_search",
+            "lifecycle.event",
+            "hook.catalog",
+            "hook.catalog.error",
+            "hook.result",
+            "turn.hook.prompt",
+            "turn.mcp.tool_call",
+            "turn.mcp.progress",
+            "turn.mcp.status",
+            "turn.dynamic_tool_call",
+            "turn.collaboration",
+            "turn.subagent.activity",
+            "turn.image.view",
+            "turn.sleep",
+            "turn.image.generation",
+            "turn.review.entered",
+            "turn.review.exited",
+            "turn.context.compaction",
+            "turn.started",
+            "turn.completed",
+            "turn.model.rerouted",
+            "turn.model.verification",
+            "turn.auth_recovery.started",
+            "turn.auth_recovery.completed",
+            "turn.warning",
+            "turn.auto_review.started",
+            "turn.auto_review.completed",
+            "turn.operator_request.resolved",
+            "goal.status",
+            "account.rate_limits"
+          ]
+        },
+        "return_to_source": true,
+        "read_root_slots": [
+          "registry_interface_root",
+          "registry_tool_root",
+          "registry_worker_environment_kind_root",
+          "registry_ee_template_root",
+          "registry_artifact_root",
+          "registry_mark_root",
+          "registry_verifier_root",
+          "ee_instances_root",
+          "run_records_root"
+        ],
+        "file_read_tool": "file.read"
+      },
+      "input_intake": {
+        "template_interface_id": "system_service_input"
+      },
       "run_authoring_profile": {
         "file_write_tool": "file.write",
         "file_write_label": "tool.call",
@@ -523,7 +2326,20 @@
           }
         ]
       },
-      "context_output_labels": ["interface.artifact.output", "interface.context.updated", "tool.call", "turn.control.acknowledged", "turn.interrupted.result", "turn.context.compaction", "turn.error", "operator.approval.request", "operator.elicitation.request", "turn.agent_message", "turn.reasoning", "turn.plan.update"],
+      "context_output_labels": [
+        "interface.artifact.output",
+        "interface.context.updated",
+        "tool.call",
+        "turn.control.acknowledged",
+        "turn.interrupted.result",
+        "turn.context.compaction",
+        "turn.error",
+        "operator.approval.request",
+        "operator.elicitation.request",
+        "turn.agent_message",
+        "turn.reasoning",
+        "turn.plan.update"
+      ],
       "client_projection_output_labels": [
         "turn.input.acknowledged",
         "interface.artifact.output",
@@ -619,8 +2435,8 @@
         },
         "extra_argv": [],
         "isolation_overrides": [
-        "project_doc_max_bytes=0",
-        "suppress_unstable_features_warning=true",
+          "project_doc_max_bytes=0",
+          "suppress_unstable_features_warning=true",
           "model_context_window=371851",
           "model_auto_compact_token_limit=350000",
           "features.shell_tool=false",
@@ -653,7 +2469,7 @@
           "features.instant_interrupt=true",
           "features.unified_image_budget=true",
           "features.image_resize_notice=true",
-        "personality=none",
+          "personality=none",
           "sandbox_mode=read-only",
           "skills.include_instructions=false",
           "include_apps_instructions=false",

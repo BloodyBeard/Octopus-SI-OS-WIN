@@ -7,6 +7,132 @@ mod support;
 use support::{fixture, write};
 
 #[test]
+fn current_selection_materializes_defaults_and_preserves_provider_life_while_attaching() {
+    use octopus_operator_chat_client::{SelectedToolSeed,run_composition::current_run::*};
+    use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+    use octopus_ledger::ContentHash;
+    let temp=tempfile::tempdir().unwrap();let root=temp.path().canonicalize().unwrap();
+    let mut request=support::client_fixture(&root);
+    let amend_json=|relative:&str,change:&dyn Fn(&mut Value)| {
+        let mut value:Value=serde_json::from_slice(&std::fs::read(root.join(relative)).unwrap()).unwrap();change(&mut value);write(&root,relative,value);
+    };
+    for (path,pointer) in [("registry/interface/system_worker_template/policy.json","/ceiling/tools"),
+        ("registry/ee_template/existence/ee_template.json","/allowed_tools"),("ee/ee_existence.json","/policy_narrowing/allowed_tools")] {
+        amend_json(path,&|value|value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("file.read")));
+    }
+    amend_json("registry/interface/world_operator_chat/client.json",&|value| {
+        value.as_object_mut().unwrap().remove("home_voice");value["run"]["context_artifact_bindings"]=json!([]);
+    });
+    let source=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/interface/world_provider_codex/interface.json");
+    let source:Value=serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
+    amend_json("registry/interface/world_provider_fixture/interface.json",&|value|value["interface_driver_config"]["private_config"]["run_affordance_profile"]=source["interface_driver_config"]["private_config"]["run_affordance_profile"].clone());
+    request.selected_tools.clear();request.selected_worker_environment_kinds=vec!["system_room".into()];
+    let composition=plan_run_composition(&request).unwrap();
+    for write in composition_candidate_writes(&composition) {
+        std::fs::create_dir_all(write.path.parent().unwrap()).unwrap();std::fs::write(write.path,write.content).unwrap();
+    }
+    let current=RunRecord::from_bytes(composition.run_write.content.as_bytes()).unwrap();
+    let provider=composition.provider_interface_id.clone().into();
+    let mut selection=current_selection(&request.roots,&current,&provider).unwrap().unwrap();
+    assert_eq!(selection.selected_tools.len(),3);assert!(selection.selected_tools.iter().any(|tool|tool.tool=="file.read"));
+    let source_policy=std::fs::read(root.join("registry/interface/system_worker_template/policy.json")).unwrap();
+    for file in ["interface.json","life.json"] {
+        let mut value:Value=serde_json::from_slice(&std::fs::read(root.join(format!("registry/interface/system_room/{file}"))).unwrap()).unwrap();
+        if file=="interface.json" {value["id"]=json!("system_extra_room");}
+        write(&root,&format!("registry/interface/system_extra_room/{file}"),value);
+    }
+    let mut tool:Value=serde_json::from_slice(&std::fs::read(root.join("registry/tool/file.read/tool.json")).unwrap()).unwrap();tool["id"]=json!("file.peek");tool["interface"]=json!("system_extra_room");
+    write(&root,"registry/tool/file.peek/tool.json",tool);
+    let worker_policy=format!("registry/interface/{}/policy.json",current.worker);
+    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/tools"),
+        ("registry/ee_template/existence/ee_template.json","/allowed_tools"),("ee/ee_existence.json","/policy_narrowing/allowed_tools")] {
+        amend_json(path,&|value|value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("file.peek")));
+    }
+    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/interfaces"),
+        ("registry/ee_template/existence/ee_template.json","/allowed_interfaces"),("ee/ee_existence.json","/policy_narrowing/allowed_interfaces")] {
+        amend_json(path,&|value|value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("system_extra_room")));
+    }
+    assert_eq!(current_selection(&request.roots,&current,&provider).unwrap().unwrap().selected_tools,selection.selected_tools);
+    selection.selected_tools.push(SelectedToolSeed {tool:"file.peek".into(),interface:"system_extra_room".into(),worker_environment_kind:"system_room".into()});
+    let writer=composition.authoring.capability_tools["file.write"].clone();let reader=composition.authoring.capability_tools["file.read"].clone();
+    let door:octopus_descriptors::InterfaceId=composition.authoring.capability_doors["system_room"].clone().into();
+    let bridge=ProviderCapabilityBridge {tool:reader.clone(),correlation_id:"readback".into(),arguments_hash:ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone()};
+    let retained=vec![(writer,door.clone()),(reader,door)];
+    let allowed=std::fs::read(root.join(&worker_policy)).unwrap();
+    for blocked in [false,true] {
+        amend_json(&worker_policy,&|value| {
+            if blocked {value["ceiling"]["hard_blocked_tools"]=json!(["file.peek"]);}
+            else {value["ceiling"]["tools"].as_array_mut().unwrap().retain(|tool|tool!="file.peek");}
+        });
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"denied".into(),selection:Some(selection.clone()),authored:None},bridge.clone(),&retained).unwrap_err().contains("outside the formed worker/EE grant"));
+        std::fs::write(root.join(&worker_policy),&allowed).unwrap();
+    }
+    let plan=plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"attach".into(),selection:Some(selection),authored:None},bridge.clone(),&retained).unwrap();
+    assert!(plan.validation.safe_to_apply,"{:?}",plan.validation.regressions);
+    let owner=request.roots.registry_root.join("interface").join(provider.as_str());
+    assert!(plan.dependency_writes.iter().chain(&plan.activation_writes).all(|write|!write.path.starts_with(&owner)));
+    assert!(plan.dependency_writes.iter().any(|write|write.path.to_string_lossy().contains("file.peek__")));
+    let amended_policy:Value=serde_json::from_str(&plan.activation_writes.iter().find(|write|write.path==root.join(&worker_policy)).unwrap().content).unwrap();
+    for field in ["interfaces","tools","wek","mark_outcomes","hard_blocked_tools"] {
+        let old:Value=serde_json::from_slice(&allowed).unwrap();
+        assert!(old["ceiling"][field].as_array().unwrap().iter().all(|value|amended_policy["ceiling"][field].as_array().unwrap().contains(value)),"retained {field}");
+    }
+    let private_peek=format!("file.peek{}",composition.authoring.capability_tools["file.read"].strip_prefix("file.read").unwrap());
+    assert!(plan.dependency_writes.iter().any(|write|write.path==root.join("registry/tool").join(&private_peek).join("tool.json")));
+    assert_eq!(std::fs::read(root.join("registry/interface/system_worker_template/policy.json")).unwrap(),source_policy);
+    let profile_path=owner.join("interface.json");let before=std::fs::read(&profile_path).unwrap();
+    let mut value:Value=serde_json::from_slice(&before).unwrap();value["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["tools"]=json!([]);
+    let mut writes=vec![RegistryCandidateWrite {path:profile_path,content:serde_json::to_string(&value).unwrap(),expected_before_hash:Some(ContentHash::of_bytes(&before).to_hex())}];
+    for new_file in [false,true] {
+        if new_file {writes=vec![RegistryCandidateWrite {path:owner.join("new.json"),content:"{}".into(),expected_before_hash:None}];}
+        let authored=AuthoredCurrentRun {expected_before_hash:ContentHash::of_bytes(composition.run_write.content.as_bytes()).to_hex(),expected_before:json!(current),run_record:json!(current),writes:writes.clone()};
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"unsafe".into(),selection:None,authored:Some(authored)},bridge.clone(),&retained).unwrap_err().contains("in-flight provider"));
+    }
+    assert_eq!(std::fs::read(&composition.run_write.path).unwrap(),composition.run_write.content.as_bytes());
+    for write in plan.dependency_writes.iter().chain(&plan.activation_writes) {
+        std::fs::create_dir_all(write.path.parent().unwrap()).unwrap();std::fs::write(&write.path,&write.content).unwrap();
+    }
+    let next=RunRecord::from_bytes(&serde_json::to_vec(&plan.amendment.after).unwrap()).unwrap();
+    std::fs::write(&composition.run_write.path,serde_json::to_vec(&next).unwrap()).unwrap();
+    let next_selection=current_selection(&request.roots,&next,&provider).unwrap().unwrap();
+    assert_eq!(next_selection.selected_tools.len(),4);
+    assert!(next_selection.selected_tools.iter().any(|tool|tool.tool=="file.peek" && tool.interface=="system_extra_room"));
+    let repeated=plan_current_run_amendment(&request.roots,&next,&provider,CurrentRunRequest {amendment_key:"repeat".into(),selection:Some(next_selection.clone()),authored:None},bridge,&retained).unwrap();
+    assert!(repeated.validation.safe_to_apply,"{:?}",repeated.validation.regressions);
+    assert!(repeated.dependency_writes.is_empty(),"existing private IDs must be reused");
+    let owner=&composition.authoring.capability_doors["system_room"];
+    let authoring_door=format!("system_room_authoring_{owner}");let authoring_tool=format!("file.write__authoring_{owner}");
+    for file in ["interface.json","life.json","octopus_os.json"] {
+        let mut value:Value=serde_json::from_slice(&std::fs::read(root.join(format!("registry/interface/{owner}/{file}"))).unwrap()).unwrap();
+        if file=="interface.json" {value["id"]=json!(authoring_door);}
+        if file=="octopus_os.json" {value["interface"]=json!(authoring_door);}
+        write(&root,&format!("registry/interface/{authoring_door}/{file}"),value);
+    }
+    let mut tool:Value=serde_json::from_slice(&std::fs::read(root.join(format!("registry/tool/{}/tool.json",composition.authoring.tool_id))).unwrap()).unwrap();
+    tool["id"]=json!(authoring_tool);tool["interface"]=json!(authoring_door);
+    write(&root,&format!("registry/tool/{authoring_tool}/tool.json"),tool);
+    for (file,interfaces,tools) in [(worker_policy.as_str(),"/ceiling/interfaces","/ceiling/tools"),
+        ("registry/ee_template/existence/ee_template.json","/allowed_interfaces","/allowed_tools"),
+        ("ee/ee_existence.json","/policy_narrowing/allowed_interfaces","/policy_narrowing/allowed_tools")] {
+        amend_json(file,&|value| {
+            value.pointer_mut(interfaces).unwrap().as_array_mut().unwrap().push(json!(authoring_door));
+            value.pointer_mut(tools).unwrap().as_array_mut().unwrap().push(json!(authoring_tool));
+        });
+    }
+    let mut authored=json!(next);
+    let returned=authored["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array_mut().unwrap().iter_mut()
+        .find(|cp|cp["role"]=="stable" && cp["interface_binding"]["interface"]==*owner).unwrap();
+    returned["role"]=json!("owner_input");returned["owner_authoring"]=json!({"owner":owner,"source":owner,"door":authoring_door,"tool":authoring_tool,
+        "call_label":"tool.call","result_label":format!("{authoring_tool}.result")});
+    let authored=RunRecord::from_bytes(&serde_json::to_vec(&authored).unwrap()).unwrap();
+    let inspected=current_selection(&request.roots,&authored,&provider).unwrap().unwrap();
+    assert_eq!(inspected.selected_tools.len(),4);
+    assert_eq!(inspected.selected_tools,next_selection.selected_tools);
+    assert!(!root.join("registry/interface/system_room_authoring_system_room/interface.json").exists());
+    assert!(current_selection(&request.roots,&next,&provider).unwrap_err().contains("system_room_authoring_system_room/interface.json"));
+}
+
+#[test]
 fn selected_model_and_reasoning_effort_preserve_service_tier() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = fixture(dir.path());
@@ -355,6 +481,168 @@ fn selected_client_template_authors_a_private_client_without_reusing_the_callers
     request.communication.client_template_interface_id = Some("world_operator_chat".into());
     request.communication.client_interface_id = Some("world_operator_chat".into());
     assert!(plan_run_composition(&request).unwrap_err().contains("not both"));
+}
+
+#[test]
+fn owner_input_revision_retry_keeps_the_original_exact_request() {
+    use octopus_operator_chat_client::run_revision::{RunRevisionRequest, prepare_run_revision};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let request = support::client_fixture(&root);
+    let plan = plan_run_composition(&request).unwrap();
+    for edit in plan
+        .descriptor_writes
+        .iter()
+        .chain(
+            plan.required_policy_updates
+                .iter()
+                .map(|update| &update.write),
+        )
+        .chain(std::iter::once(&plan.run_write))
+    {
+        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap();
+        std::fs::write(&edit.path, &edit.content).unwrap();
+    }
+    let mut record: Value = serde_json::from_str(&plan.run_write.content).unwrap();
+    let client = record["interface_state"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, state)| state["client_surface_role"] == "task")
+        .unwrap()
+        .0
+        .clone();
+    let mut owner_input = json!({
+        "name":"owner_result", "role":"owner_input", "include_context":false, "required_verified_artifacts":[],
+        "interface_binding":octopus_runtime::AuthoredInterfaceBinding::all("system_worker_parent".into()),
+        "outbound_interface_bindings":[octopus_runtime::AuthoredInterfaceBinding::all(plan.provider_interface_id.clone().into())],
+        "owner_authoring":{"owner":"system_worker_parent", "source":"system_worker_parent",
+            "door":"system_room", "tool":"file.write", "call_label":"tool.call", "result_label":"file.write.result"}
+    });
+    record["interface_state"][&plan.provider_interface_id]["run_authoring_binding"]["checkpoints"]
+        .as_array_mut()
+        .unwrap()
+        .push(owner_input.clone());
+    let before = serde_json::to_string_pretty(&record).unwrap();
+    std::fs::write(&plan.run_write.path, &before).unwrap();
+    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap();
+    std::fs::write(root.join("ledger/movements.jsonl"), b"").unwrap();
+    owner_input["name"] = json!("revised_owner_result");
+    let prepare = |desired: Value| {
+        let request: RunRevisionRequest = serde_json::from_value(json!({
+            "registry_root":request.roots.registry_root, "run_path":plan.run_write.path,
+            "ledger_root":root.join("ledger"), "artifact_root":root.join("client"),
+            "provider":plan.provider_interface_id, "source":client, "key":"owner-input-retry",
+            "operation":{"kind":"owner_inputs", "desired_inputs":[desired]}, "expected_before_content":before
+        })).unwrap();
+        prepare_run_revision(request)
+    };
+    assert_eq!(prepare(owner_input.clone()).unwrap()["status"], "prepared");
+    assert_eq!(prepare(owner_input.clone()).unwrap()["status"], "prepared");
+    owner_input["name"] = json!("different_requested_result");
+    assert!(
+        prepare(owner_input)
+            .unwrap_err()
+            .contains("retry changed its original requested operation")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&plan.run_write.path).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn composition_binds_planned_native_catalog_and_task_coordinates_before_validation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let request = fixture(&root);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
+    let declared: Value = serde_json::from_slice(
+        &std::fs::read(source.join("registry/interface/world_provider_codex/interface.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    let provider_path = "registry/interface/world_provider_fixture/interface.json";
+    let mut provider: Value =
+        serde_json::from_slice(&std::fs::read(root.join(provider_path)).unwrap()).unwrap();
+    provider["interface_driver_config"]["private_config"]["run_affordance_profile"] =
+        declared["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
+    write(&root, provider_path, provider);
+    let plan = plan_run_composition(&request).unwrap();
+    let provider: Value = serde_json::from_str(
+        &plan
+            .descriptor_writes
+            .iter()
+            .find(|write| write.tag == format!("interface:{}", plan.provider_interface_id))
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    let config = &provider["interface_driver_config"]["private_config"]["run_affordances"];
+    assert_eq!(
+        config["file_write_tool"],
+        plan.authoring.capability_tools["file.write"]
+    );
+    assert_eq!(
+        config["artifact_send_tool"],
+        plan.authoring.capability_tools["artifact.send"]
+    );
+    let catalog_id = config["catalog_artifact"]["id"].as_str().unwrap();
+    let catalog: Value = serde_json::from_str(
+        &plan
+            .descriptor_writes
+            .iter()
+            .find(|write| write.tag == format!("artifact:{catalog_id}"))
+            .unwrap()
+            .content,
+    )
+    .unwrap();
+    assert_eq!(
+        config["catalog_artifact"]["content"],
+        json!(octopus_ledger::ContentHash::of_bytes(
+            &octopus_descriptors::canonical_bytes(&catalog)
+        ))
+    );
+    let record = RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
+    let input = record
+        .checkpoints
+        .iter()
+        .find(|checkpoint| {
+            checkpoint
+                .inbound_interface()
+                .is_some_and(|interface| interface.as_str() == plan.receive_interface_id)
+        })
+        .unwrap();
+    assert!(
+        input
+            .artifact_bindings
+            .iter()
+            .any(|binding| binding.id.as_str() == catalog_id && binding.access.read)
+    );
+    let coordinates = plan
+        .descriptor_writes
+        .iter()
+        .find(|write| {
+            write
+                .tag
+                .starts_with("artifact:artifact-run-authoring-coordinates-")
+        })
+        .unwrap();
+    let coordinates: Value = serde_json::from_str(&coordinates.content).unwrap();
+    assert!(
+        input
+            .artifact_bindings
+            .iter()
+            .any(|binding| json!(binding.id) == coordinates["id"] && binding.access.read)
+    );
+    let validation = validate_registry_candidate(
+        &validation_roots(&request.roots),
+        &composition_candidate_writes(&plan),
+    )
+    .unwrap();
+    assert!(validation.safe_to_apply, "{:?}", validation.regressions);
+    assert!(!request.roots.run_records_root.exists());
 }
 
 #[tokio::test]

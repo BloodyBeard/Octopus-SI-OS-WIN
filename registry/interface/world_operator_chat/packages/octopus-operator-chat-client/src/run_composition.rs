@@ -1,8 +1,15 @@
 use super::*;
+pub use octopus_app_server::{
+    RegistryCandidateValidation, RegistryCandidateWrite, RegistryValidationIssue,
+    RegistryValidationRoots, validate_registry_candidate,
+};
 use octopus_ee::EeInstance;
 use octopus_ledger::{ArtifactRef, InvocationMetadata};
+use octopus_provider_run_authoring::ProviderOutgoingBinding;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub mod current_run;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +167,183 @@ pub struct RunCompositionPlan {
     pub required_binding_updates: Vec<RequiredBindingUpdate>,
     pub authoring: CompositionAuthoringResult,
     pub seed: PlannedCompositionSeed,
+}
+
+/// Exact authored files are the contract, including every checkpoint, wait,
+/// result route, artifact right and verifier parameter. This mode makes no
+/// template choices and adds no run fields or descriptor defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredRunComposition {
+    pub run_id: String,
+    pub writes: Vec<RegistryCandidateWrite>,
+    pub outgoing_bindings: Vec<ProviderOutgoingBinding>,
+    #[serde(default)]
+    pub seed: Option<PlannedCompositionSeed>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredRunCompositionPlan {
+    pub authored: AuthoredRunComposition,
+    pub run: RunRecord,
+    pub validation: RegistryCandidateValidation,
+}
+
+pub fn validation_roots(roots: &CompositionRoots) -> RegistryValidationRoots {
+    RegistryValidationRoots {
+        registry_root: roots.registry_root.clone(),
+        ee_instances_root: roots.ee_instances_root.clone(),
+        run_records_root: roots.run_records_root.clone(),
+    }
+}
+
+pub fn composition_candidate_writes(plan: &RunCompositionPlan) -> Vec<RegistryCandidateWrite> {
+    plan.descriptor_writes
+        .iter()
+        .chain(
+            plan.required_policy_updates
+                .iter()
+                .map(|update| &update.write),
+        )
+        .chain(std::iter::once(&plan.run_write))
+        .map(|write| RegistryCandidateWrite {
+            path: write.path.clone(),
+            content: write.content.clone(),
+            expected_before_hash: write.expected_before_hash.clone(),
+        })
+        .collect()
+}
+
+/// Preview and application share the same exact plan. Caller connection changes
+/// are returned to the provider's existing fresh-generation outgoing owner;
+/// they are never a direct rewrite of an in-flight caller record.
+pub fn plan_authored_run_composition(
+    roots: &CompositionRoots,
+    source: &RunRecord,
+    authored: AuthoredRunComposition,
+    revise: bool,
+) -> Result<AuthoredRunCompositionPlan, String> {
+    safe_segment(&authored.run_id, "authored run id")?;
+    if authored.writes.is_empty() {
+        return Err("authored run requires exact file writes".into());
+    }
+    let path = roots
+        .run_records_root
+        .join(format!("{}.json", authored.run_id));
+    let run_write = authored
+        .writes
+        .iter()
+        .find(|write| write.path == path)
+        .ok_or("authored run requires its complete exact run-record file")?;
+    let run =
+        RunRecord::from_bytes(run_write.content.as_bytes()).map_err(|error| error.to_string())?;
+    if run.id.as_str() != authored.run_id {
+        return Err("authored run id differs from its record".into());
+    }
+    if run.id == source.id {
+        return Err("in-flight caller edits must use its checked provider generation owner".into());
+    }
+    let existing = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if revise != existing.is_some() {
+        return Err(if revise {
+            "revise_run requires an existing target run"
+        } else {
+            "create_run requires a new run identity"
+        }
+        .into());
+    }
+    for write in &authored.writes {
+        if write.path == roots.run_records_root.join(format!("{}.json", source.id)) {
+            return Err("authored graph cannot rewrite its in-flight caller".into());
+        }
+        if write.path.parent() == Some(roots.run_records_root.as_path()) {
+            let after = RunRecord::from_bytes(write.content.as_bytes())
+                .map_err(|error| error.to_string())?;
+            if write.path.file_stem().and_then(|id| id.to_str()) != Some(after.id.as_str()) {
+                return Err("authored graph run identity differs from its filename".into());
+            }
+            match std::fs::read(&write.path) {
+                Ok(before) => crate::run_revision::validate_checkpoint_extension(
+                    &before,
+                    write.content.as_bytes(),
+                )?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    }
+    let mut connections = BTreeSet::new();
+    for binding in &authored.outgoing_bindings {
+        safe_segment(binding.interface.as_str(), "authored connection interface")?;
+        if binding.artifact_label.is_empty()
+            || binding.artifact_label.trim() != binding.artifact_label
+            || !connections.insert((binding.interface.clone(), binding.artifact_label.clone()))
+        {
+            return Err(
+                "authored outgoing bindings must have exact unique interface/label pairs".into(),
+            );
+        }
+        let descriptor_path = roots
+            .registry_root
+            .join("interface")
+            .join(binding.interface.as_str())
+            .join("interface.json");
+        let bytes = authored
+            .writes
+            .iter()
+            .find(|write| write.path == descriptor_path)
+            .map(|write| Ok(write.content.as_bytes().to_vec()))
+            .unwrap_or_else(|| {
+                std::fs::read(&descriptor_path).map_err(|error| error.to_string())
+            })?;
+        let descriptor =
+            parse_strict::<InterfaceDescriptor>(&bytes).map_err(|error| error.to_string())?;
+        if descriptor.id != binding.interface
+            || descriptor.interface_type != octopus_interfaces::InterfaceType::System
+        {
+            return Err("authored connection must address an exact System interface".into());
+        }
+    }
+    if authored.seed.is_none() && !authored.outgoing_bindings.is_empty() {
+        return Err("caller connection publication requires an explicit seed; a parked run without emission declares no caller connections".into());
+    }
+    if let Some(seed) = &authored.seed {
+        if seed.label.is_empty()
+            || seed.label.trim() != seed.label
+            || !authored.outgoing_bindings.iter().any(|binding| {
+                binding.interface.as_str() == seed.interface_id
+                    && binding.artifact_label == seed.label
+            })
+        {
+            return Err(
+                "authored seed requires an explicitly declared exact outgoing interface/label"
+                    .into(),
+            );
+        }
+        if !run
+            .active_checkpoints
+            .iter()
+            .filter_map(|id| run.checkpoint(id))
+            .any(|checkpoint| {
+                checkpoint
+                    .inbound_interface()
+                    .is_some_and(|interface| interface.as_str() == seed.interface_id)
+            })
+        {
+            return Err("authored seed has no active checkpoint on the target run".into());
+        }
+    }
+    let validation = validate_registry_candidate(&validation_roots(roots), &authored.writes)?;
+    Ok(AuthoredRunCompositionPlan {
+        authored,
+        run,
+        validation,
+    })
 }
 
 /// Interface-owned authoring compiles ordinary descriptors and run bindings.
@@ -328,17 +512,19 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
     )?;
     let private_roles = plan_worker_pin(
         &interface_root,
+        &config,
         &request.worker_template_interface_id,
         &topology,
         &identity,
         &external,
+        None,
         &mut writes,
     )?;
     let dependency_workers =
         worker_role_dependency_interfaces(&interface_root, std::iter::empty(), &external)?;
     let roles =
         formed_worker_role_artifacts(&interface_root, &private_roles, dependency_workers.iter())?;
-    let selected_context = context_bindings::with_instruction_source_bindings(
+    let mut selected_context = context_bindings::with_instruction_source_bindings(
         &roots.registry_root,
         roles
             .iter()
@@ -356,6 +542,29 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         Some(&roots.interface_private_state_root),
         &mut writes,
     )?;
+    if let Some(binding) = native_run_authoring::plan(
+        native_run_authoring::PlanContext {
+            registry_root: &roots.registry_root,
+            ee_instances_root: &roots.ee_instances_root,
+            run_records_root: Some(&roots.run_records_root),
+            interface_private_state_root: Some(&roots.interface_private_state_root),
+            config: &config,
+            identity: &identity,
+            provider: &provider,
+            topology: &topology,
+            door_host_slots: &request.door_host_slots,
+        },
+        &mut writes,
+    )? {
+        selected_context.push(binding);
+    }
+    selected_context.push(home_outputs::plan_task_coordinates(
+        &roots.registry_root,
+        &roots.ee_instances_root,
+        Some(&roots.run_records_root),
+        &identity,
+        &mut writes,
+    )?);
     let mut required_interface_ids = exact_topology_interface_ids(&identity, &external);
     let mut required_tool_ids = identity
         .capability_tools
@@ -371,7 +580,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let interface_mapping = private_interface_mapping(request, &identity);
+    let interface_mapping = private_interface_mapping(&config, &identity);
     preserve_formed_private_policies(request, &topology, &interface_mapping, &mut writes)?;
     validate_context_and_marks(request, &chain, &roles, &selected_context)?;
     validate_new_descriptor_targets(&writes)?;
@@ -672,33 +881,7 @@ fn validate_request(request: &RunCompositionRequest) -> Result<(), String> {
         return Err("malformed reasoning effort or authoring timeout".into());
     }
     let parent = &request.admitted_parent_record;
-    for (name, value) in [
-        ("parent run", parent.id.as_str()),
-        ("parent worker", parent.worker.as_str()),
-    ] {
-        if safe_segment(value, name)? != value {
-            return Err(format!("{name} must be exact"));
-        }
-    }
-    parent.validate_artifact_arrival_shape()?;
-    let runtime = request
-        .metadata
-        .runtime
-        .as_ref()
-        .ok_or("composition requires explicit runtime metadata")?;
-    if runtime.run != parent.id
-        || runtime.ee != parent.ee
-        || runtime.worker != parent.worker
-        || !parent.active_checkpoints.contains(&runtime.checkpoint)
-    {
-        return Err("composition metadata and admitted parent record disagree".into());
-    }
-    let checkpoint = parent
-        .checkpoint(&runtime.checkpoint)
-        .ok_or("parent checkpoint is absent")?;
-    if checkpoint.epoch.0 != runtime.epoch {
-        return Err("composition metadata checkpoint epoch is stale".into());
-    }
+    validate_run_authoring_source(&request.metadata, parent)?;
     let mut endpoints = BTreeSet::from([request.communication.receive_interface_id.clone()]);
     for id in request
         .communication
@@ -721,26 +904,59 @@ fn validate_request(request: &RunCompositionRequest) -> Result<(), String> {
     Ok(())
 }
 
-fn private_interface_mapping(
-    request: &RunCompositionRequest,
+pub fn validate_run_authoring_source(
+    metadata: &InvocationMetadata,
+    parent: &RunRecord,
+) -> Result<(), String> {
+    for (name, value) in [
+        ("parent run", parent.id.as_str()),
+        ("parent worker", parent.worker.as_str()),
+    ] {
+        if safe_segment(value, name)? != value {
+            return Err(format!("{name} must be exact"));
+        }
+    }
+    parent.validate_artifact_arrival_shape()?;
+    let runtime = metadata
+        .runtime
+        .as_ref()
+        .ok_or("composition requires explicit runtime metadata")?;
+    if runtime.run != parent.id
+        || runtime.ee != parent.ee
+        || runtime.worker != parent.worker
+        || !parent.active_checkpoints.contains(&runtime.checkpoint)
+    {
+        return Err("composition metadata and admitted parent record disagree".into());
+    }
+    let checkpoint = parent
+        .checkpoint(&runtime.checkpoint)
+        .ok_or("parent checkpoint is absent")?;
+    if checkpoint.epoch.0 != runtime.epoch {
+        return Err("composition metadata checkpoint epoch is stale".into());
+    }
+    Ok(())
+}
+
+pub(super) fn private_interface_mapping(
+    config: &ClientConfig,
     identity: &PlannedIdentity,
 ) -> BTreeMap<String, Vec<String>> {
     let mut mapping = BTreeMap::<String, Vec<String>>::new();
-    if let Some(template) = &request.communication.client_template_interface_id {
-        mapping.insert(template.clone(), vec![identity.chat_interface_id.clone()]);
+    if identity.owns_client() {
+        mapping.insert(config.interface.clone(), vec![identity.chat_interface_id.clone()]);
     }
     for (source, exact) in [
-        (&request.provider_interface_id, &identity.model_interface_id),
+        (&identity.provider_choice_interface, &identity.model_interface_id),
         (
-            &request.worker_template_interface_id,
+            &identity.worker_choice_interface,
             &identity.worker_interface_id,
         ),
         (
-            &request.authoring.source_interface_id,
+            &config.authoring.source_interface,
             &identity.authoring_source_id,
         ),
         (
-            &request.authoring.room_interface_id,
+            &config.authoring.room_interface,
             &identity.authoring_environment_id,
         ),
     ] {
@@ -757,7 +973,7 @@ fn private_interface_mapping(
     }
     for owner in identity.code_mode_owners.values() {
         mapping
-            .entry(request.authoring.room_interface_id.clone())
+            .entry(config.authoring.room_interface.clone())
             .or_default()
             .push(owner.authoring_environment.clone());
     }
@@ -794,23 +1010,24 @@ fn preserve_formed_private_policies(
         {
             let mut policy: WorkerInterfacePolicy =
                 serde_json::from_str(&write.content).map_err(|e| e.to_string())?;
-            let original = std::mem::take(&mut policy.ceiling.interface_policy);
-            for (source, overrides) in original {
-                if let Some(exact) = mapping.get(source.as_str()) {
-                    for id in exact {
-                        policy
-                            .ceiling
-                            .interface_policy
-                            .insert(InterfaceId::new(id), overrides.clone());
-                    }
-                } else if policy.ceiling.interfaces.contains(&source) {
-                    policy.ceiling.interface_policy.insert(source, overrides);
-                }
-            }
+            remap_private_worker_policy(&mut policy, mapping);
             write.content = pretty_json(&serde_json::to_value(policy).map_err(|e| e.to_string())?)?;
         }
     }
     Ok(())
+}
+
+pub(super) fn remap_private_worker_policy(policy: &mut WorkerInterfacePolicy, mapping: &BTreeMap<String, Vec<String>>) {
+    let original = std::mem::take(&mut policy.ceiling.interface_policy);
+    for (source, overrides) in original {
+        if let Some(exact) = mapping.get(source.as_str()) {
+            for id in exact {
+                policy.ceiling.interface_policy.insert(InterfaceId::new(id), overrides.clone());
+            }
+        } else if policy.ceiling.interfaces.contains(&source) {
+            policy.ceiling.interface_policy.insert(source, overrides);
+        }
+    }
 }
 
 fn validate_new_descriptor_targets(writes: &[PlannedClientWrite]) -> Result<(), String> {

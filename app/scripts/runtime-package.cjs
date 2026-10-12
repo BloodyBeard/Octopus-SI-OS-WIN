@@ -284,6 +284,14 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
           materializeOwnerExecutable(root, registryKind, owner, binary, ownerExecutables);
           return `owner://packages/bin/${binary}`;
         }
+        if (registryKind === "interface" && key === "command" && ownership.doorInterfaceKinds.has(owner)) {
+          const kind = executableKindForInterface(ownership, owner, binary);
+          if (!kind || !ownership.doorInterfaceKinds.get(owner).has(kind)) {
+            throw new Error(`door '${owner}' has no exact kind owner for command '${binary}'`);
+          }
+          materializeOwnerExecutable(root, "worker_environment_kind", kind, binary, ownerExecutables);
+          return `owner://packages/bin/${binary}`;
+        }
         if (registryKind === "interface" && keys.includes("executable_paths")) {
           const kind = executableKindForInterface(ownership, owner, binary);
           if (kind) {

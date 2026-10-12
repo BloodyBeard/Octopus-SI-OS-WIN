@@ -172,17 +172,20 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
             assert!(handoff.hand_observation(ProviderEmission{artifact:emissions[1].artifact.clone(),route:emissions[1].route.clone()},false).await.unwrap_err().contains("cannot change the selected context"));
         }
         let mut all_delivered=Vec::new();
+        let control = CodexTurnControlBroker::new(Some(source_seq));
+        assert!(!control.is_finished());
         for phase in 0..if with_answer {2}else{1} {
         let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&result_ref,all_delivered.len(),count,with_answer,phase,false);
         let supplied=if phase==0 {emissions.iter().map(|e|ProviderEmission{artifact:e.artifact.clone(),route:e.route.clone()}).collect()} else {recover_sealed_interrupted_result(&ctx,&descriptor,&turn,&original).unwrap().unwrap().0};
         let admit=async {
-            let result=admit_interrupted_result(&ctx,&handoff,with_stop.then_some(&arbiter),&run,source_seq,&source_closure,supplied).await;
+            let result=admit_interrupted_result(&ctx,&handoff,&control,with_stop.then_some(&arbiter),&run,source_seq,&source_closure,supplied).await;
             if let Err(error)=&result { eprintln!("native terminal handoff stop={with_stop} answer={with_answer} phase={phase}: {error}"); }
             result
         };
         let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async {tokio::join!(admit,gate)}).await.unwrap();
         all_delivered.extend(delivered);
         if with_answer && phase==0 {
+            assert!(!control.is_finished(),"a refused closure must retain its control owner");
             assert!(result.unwrap_err().contains("refused")); assert_eq!(all_delivered.len(),2);
             let labels=codex_context_output_labels(&descriptor).unwrap(); let snapshots=codex_session_snapshot_labels(&descriptor).unwrap();
             assert_eq!(native_result_admitted_prefix(&ctx,&run,source_seq,&emissions,&snapshots,&labels).unwrap().len(),2);
@@ -193,7 +196,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
             assert!(native_result_admitted_prefix(&ctx,&run,source_seq,&shuffled,&snapshots,&labels).unwrap_err().contains("semantic payload"));
             drop(handoff); arbiter=InterruptedEffectArbiter::new(ctx.clone());
             handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation_when_ready(&ctx,&descriptor,&run,&envelope,source_seq,&initial).await.unwrap();
-        } else { assert_eq!(result.unwrap(),count); }
+        } else { assert_eq!(result.unwrap(),count); assert!(control.is_finished(),"an admitted closure must release the next operator input"); }
         }
         assert_eq!(all_delivered.len(),count); assert_eq!(all_delivered[count-1].0,TURN_INTERRUPTED_RESULT_LABEL); assert_ne!(all_delivered[count-1].1,source_closure);
         let current=RunRecord::from_bytes(&std::fs::read(&plan.run_write.path).unwrap()).unwrap();

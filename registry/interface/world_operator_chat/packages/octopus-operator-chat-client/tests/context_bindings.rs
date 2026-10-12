@@ -75,6 +75,10 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
     let retained: RunCompositionPlan =
         serde_json::from_slice(&serde_json::to_vec(&planned).unwrap()).unwrap();
     assert_eq!(planned.run_write.content, retained.run_write.content);
+    let coordinates = retained.descriptor_writes.iter().find(|write| write.tag.starts_with("artifact:artifact-run-authoring-coordinates-")).unwrap();
+    let coordinates: serde_json::Value = serde_json::from_str(&coordinates.content).unwrap();
+    assert_eq!(coordinates["authoring"]["registry_root"], json!(request.roots.registry_root));
+    assert_eq!(coordinates["authoring"]["run_records_root"], json!(request.roots.run_records_root));
     let record = RunRecord::from_bytes(retained.run_write.content.as_bytes()).unwrap();
     let provider = InterfaceId::new(&retained.provider_interface_id);
     let door = octopus_provider_run_authoring::bound_tool_door(
@@ -105,7 +109,7 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
         })
         .unwrap();
     assert_eq!(template["include_context"], false);
-    assert_eq!(template["static_artifact_bindings"], json!([source.id]));
+    assert_eq!(template["static_artifact_bindings"], json!([source.id, coordinates["id"]]));
     assert!(call
         .artifact_bindings
         .iter()
@@ -133,15 +137,12 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
             let payload = if binding.id == source.id {
                 bytes.to_vec()
             } else {
-                std::fs::read(
-                    request
-                        .roots
-                        .registry_root
-                        .join("artifact")
-                        .join(binding.id.as_str())
-                        .join("artifact.json"),
-                )
-                .unwrap()
+                let path = request.roots.registry_root.join("artifact")
+                    .join(binding.id.as_str()).join("artifact.json");
+                match retained.descriptor_writes.iter().find(|write| write.path == path) {
+                    Some(write) => write.content.as_bytes().to_vec(),
+                    None => std::fs::read(path).unwrap(),
+                }
             };
             ArtifactBindingPayload::new(
                 ArtifactRef {

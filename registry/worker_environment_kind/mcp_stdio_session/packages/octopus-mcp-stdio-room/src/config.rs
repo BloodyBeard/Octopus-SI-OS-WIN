@@ -60,8 +60,24 @@ impl McpStdioConfig {
         kind: &WorkerEnvKindSpec,
     ) -> Result<Self, String> {
         let path = environment.interface_dir.join(CONFIG_FILE);
-        let config: Self = environment.load_formed_json_sidecar(formation, kind, CONFIG_FILE)?;
+        let mut config: Self =
+            environment.load_formed_json_sidecar(formation, kind, CONFIG_FILE)?;
         config.validate(&path, environment)?;
+        let search_path = std::env::var_os("PATH");
+        let command = environment.resolve_program(&config.command, kind, search_path.as_deref())?;
+        config.command = command
+            .to_str()
+            .ok_or("MCP stdio command path is not UTF-8")?
+            .to_string();
+        for argument in &mut config.args {
+            if argument.starts_with("owner://") {
+                *argument = environment
+                    .resolve_package_file(argument, kind)?
+                    .to_str()
+                    .ok_or("MCP stdio argument path is not UTF-8")?
+                    .to_string();
+            }
+        }
         Ok(config)
     }
 

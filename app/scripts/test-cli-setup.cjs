@@ -11,6 +11,7 @@ const { createClientSetupStore } = require("../electron/clientSetup.cjs");
 const { readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
 const { readProviderInterfaceDescriptors } = require("../electron/projection.cjs");
 const { createClientProviderMetadata } = require("../electron/clientProviderMetadata.cjs");
+const { installLocalPackages, inspectLocalPackageInstallation } = require("../electron/localPackages.cjs");
 
 const execute = promisify(execFile);
 
@@ -75,6 +76,7 @@ async function fixtureRuntime(root) {
   for (const file of ["registry/.octopus-source.json", "local-packages/registry/.octopus-source.json"]) await json(path.join(installationRoot, file), { schema_version: 1, id: "test-source" });
   const binary = path.join(installationRoot, "bin/octopus");
   await fs.writeFile(binary, `#!${process.execPath}\nconst fs=require('node:fs'),net=require('node:net'),path=require('node:path'),crypto=require('node:crypto');
+if(process.argv[2]!=='up')process.exit(64);
 const home=process.env.OCTOPUS_HOME, state=path.join(home,'state/runtime-instance'), now=Date.now();
 fs.mkdirSync(state,{recursive:true});fs.appendFileSync(path.join(home,'starts'),'start\\n');
 fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({schema_version:3,pid:process.pid,phase:'starting',started_at_unix_ms:now,updated_at_unix_ms:now,launch_owner:null}));
@@ -85,12 +87,34 @@ process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force
 `, { mode: 0o700 });
   const options = { home, installationRoot, env: { PATH: process.env.PATH } };
   const first = createEnvironment(options), second = createEnvironment(options);
+  const source = path.join(first.packageRoots.sourceRegistryRoot, "interface", "world_cli_fixture", "interface.json");
+  const active = path.join(first.packageRoots.activeRegistryRoot, "interface", "world_cli_fixture", "interface.json");
+  const original = { id: "world_cli_fixture", interface_type: "world", role: "provider", direction: "bidirectional", source_names: ["fixture"], config: { model: "default" }, contract: 1 };
+  await json(source, original);
+  await json(path.join(first.packageRoots.libraryRoot, "packages", "cli.fixture.json"), {
+    schema: "octopus.local_package", schema_version: 1, id: "cli.fixture", version: "1.0.0", product_kind: "application", product_id: original.id, release_status: "optional",
+    display: { name: "Fixture", description: "CLI package update contract", developer: "Octopus", category: "provider" },
+    members: [{ registry_kind: "interface", owner: original.id, primary: true, configuration: [{ path: "interface.json", fields: [{ pointer: "/config/model", schema: { type: "string" } }] }] }],
+  });
+  const packageState = () => inspectLocalPackageInstallation({ ...first.packageRoots, packageId: "cli.fixture" });
+  await fs.mkdir(first.packageRoots.activeRegistryRoot, { recursive: true });
+  await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_install_001", packageIds: ["cli.fixture"], expectedSourceDigests: { "cli.fixture": (await packageState()).source_digest } });
+  await json(active, { ...original, config: { model: "selected" } });
+  await json(source, { ...original, contract: 2 });
+  const pendingRecord = path.join(home, "state/runs/private_task/run.json");
+  await json(pendingRecord, { pending: "preserve" });
   try {
     assert.equal((await first.status()).runtimeReady, false);
     const results = await Promise.all([first.start({ interfaceId: "fixture_home", timeoutMs: 5000 }), second.start({ interfaceId: "fixture_home", timeoutMs: 5000 })]);
     assert.equal(results[0].pid, results[1].pid);
     assert.equal(results[0].clientReady, true);
     assert.equal(await fs.readFile(path.join(home, "starts"), "utf8"), "start\n");
+    assert.deepEqual(JSON.parse(await fs.readFile(active)), { ...original, config: { model: "selected" }, contract: 2 });
+    assert.equal((await packageState()).receipt_state, "valid");
+    assert.deepEqual(JSON.parse(await fs.readFile(pendingRecord)), { pending: "preserve" });
+    await json(source, { ...original, contract: 3 });
+    await first.start({ interfaceId: "fixture_home", timeoutMs: 5000 });
+    assert.equal(JSON.parse(await fs.readFile(active)).contract, 2);
     first.close(); second.close();
     assert.equal((await first.status({ interfaceId: "fixture_home" })).runtimeReady, true);
     const absent = await first.status({ interfaceId: "unbound_home" });
@@ -102,6 +126,10 @@ process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force
     const current = await first.status({ interfaceId: "fixture_home" });
     if (current.pid) { process.kill(current.pid, "SIGTERM"); await waitStopped(first); }
   }
+  await json(active, { ...original, config: { model: "selected" }, contract: 999 });
+  await assert.rejects(first.start({ interfaceId: "fixture_home", timeoutMs: 5000 }), /unowned JSON changes/);
+  assert.equal(await fs.readFile(path.join(home, "starts"), "utf8"), "start\n");
+  assert.equal(JSON.parse(await fs.readFile(active)).contract, 999);
   const missing = createEnvironment({ ...options, home: path.join(root, "missing"), runtimeBinary: path.join(installationRoot, "bin/missing") });
   await assert.rejects(missing.start(), /node app\/scripts\/package-cli.cjs/);
   const broken = path.join(installationRoot, "bin/broken");
@@ -204,6 +232,6 @@ async function stop(environment) {
   await execute(environment.runtimeBinary, ["down"], { env: { ...process.env, ...environment.launchEnv }, timeout: 10_000 }).catch(() => {});
   await waitStopped(environment);
 }
-async function json(file, value) { await fs.writeFile(file, `${JSON.stringify(value)}\n`); }
+async function json(file, value) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value)}\n`); }
 
 main().catch((error) => { console.error(error.stack); process.exitCode = 1; });

@@ -799,7 +799,15 @@ pub fn resolve_spawn_life_config(
     append_life_repository_file_fingerprints(
         &mut fingerprint_material,
         registry_root,
+        interface,
         &loaded.config,
+    )?;
+    append_owner_life_dependencies(
+        &mut fingerprint_material,
+        registry_root,
+        interface,
+        &loaded.config,
+        true,
     )?;
     append_imported_life_dependency_fingerprints(
         &mut fingerprint_material,
@@ -915,7 +923,7 @@ pub(crate) fn resolved_spawn_life_source_fingerprint(
         )
     })?;
     for declared in life_repository_files(&resolved.config) {
-        let path = resolve_required_repository_file(&declared, repository_root)?;
+        let path = resolve_life_file(&declared, registry_root, interface, repository_root)?;
         append_path_metadata_fingerprint(
             &mut material,
             &format!("repository-file/{declared}"),
@@ -928,6 +936,13 @@ pub(crate) fn resolved_spawn_life_source_fingerprint(
         &resolved.config,
         ImportedDependencyFingerprint::Source,
         Some(verification),
+    )?;
+    append_owner_life_dependencies(
+        &mut material,
+        registry_root,
+        interface,
+        &resolved.config,
+        false,
     )?;
     Ok(ContentHash::of_bytes(&material))
 }
@@ -1054,6 +1069,7 @@ fn append_path_metadata_fingerprint(
 fn append_life_repository_file_fingerprints(
     material: &mut Vec<u8>,
     registry_root: &Path,
+    interface: &InterfaceId,
     config: &SpawnLifeConfig,
 ) -> Result<(), String> {
     let repository_root = registry_root.parent().ok_or_else(|| {
@@ -1063,14 +1079,14 @@ fn append_life_repository_file_fingerprints(
         )
     })?;
     for declared in life_repository_files(config) {
-        let path = resolve_required_repository_file(&declared, repository_root)?;
-        let bytes = std::fs::read(&path).map_err(|error| {
-            format!(
-                "life repository file '{}' cannot be read for fingerprinting: {error}",
-                path.display()
-            )
-        })?;
-        append_fingerprint_part(material, &format!("repository-file/{declared}"), &bytes);
+        let path = resolve_life_file(&declared, registry_root, interface, repository_root)?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        let digest = ImportedExecutableVerification::default().digest(&path, &metadata)?;
+        append_fingerprint_part(
+            material,
+            &format!("repository-file/{declared}"),
+            digest.sha256.as_bytes(),
+        );
     }
     Ok(())
 }
@@ -1081,10 +1097,75 @@ fn life_repository_files(config: &SpawnLifeConfig) -> BTreeSet<String> {
         declared_files.extend(process.required_files.iter().cloned());
         declared_files.extend(process.args.iter().filter_map(|argument| match argument {
             SpawnLifeArgument::RepositoryFile(argument) => Some(argument.repository_file.clone()),
+            SpawnLifeArgument::Literal(value) if value.starts_with(OWNER_EXECUTABLE_PREFIX) => {
+                Some(value.clone())
+            }
             SpawnLifeArgument::Literal(_) => None,
         }));
     }
     declared_files
+}
+
+fn resolve_life_file(
+    declared: &str,
+    registry_root: &Path,
+    interface: &InterfaceId,
+    repository_root: &Path,
+) -> Result<PathBuf, String> {
+    let Some(relative) = declared.strip_prefix(OWNER_EXECUTABLE_PREFIX) else {
+        return resolve_required_repository_file(declared, repository_root);
+    };
+    let interface_root = std::fs::canonicalize(registry_root.join("interface"))
+        .map_err(|error| error.to_string())?;
+    let owner = std::fs::canonicalize(interface_root.join(interface.as_str()))
+        .map_err(|error| error.to_string())?;
+    if owner != interface_root.join(interface.as_str())
+        || !Path::new(relative).starts_with("packages")
+    {
+        return Err(format!(
+            "owner life file '{declared}' escapes its exact interface package"
+        ));
+    }
+    let file = resolve_required_repository_file(relative, &owner)?;
+    if file != owner.join(relative) {
+        return Err(format!(
+            "owner life file '{declared}' traverses a symbolic link"
+        ));
+    }
+    Ok(file)
+}
+
+fn append_owner_life_dependencies(
+    material: &mut Vec<u8>,
+    registry_root: &Path,
+    interface: &InterfaceId,
+    config: &SpawnLifeConfig,
+    content: bool,
+) -> Result<(), String> {
+    let root = registry_root
+        .parent()
+        .ok_or("interface registry has no installation parent")?;
+    let files = config
+        .processes
+        .iter()
+        .map(|process| &process.bin)
+        .filter(|bin| bin.starts_with(OWNER_EXECUTABLE_PREFIX))
+        .collect::<BTreeSet<_>>();
+    for declared in files {
+        let file = resolve_life_file(&declared, registry_root, interface, root)?;
+        crate::process_authority::resolve_executable(
+            file.to_str().ok_or("life executable path is not UTF-8")?,
+            root,
+            None,
+        )?;
+        append_path_metadata_fingerprint(material, &declared, &file)?;
+        if content {
+            let metadata = std::fs::symlink_metadata(&file).map_err(|error| error.to_string())?;
+            let digest = ImportedExecutableVerification::default().digest(&file, &metadata)?;
+            append_fingerprint_part(material, declared, digest.sha256.as_bytes());
+        }
+    }
+    Ok(())
 }
 
 struct ResolvedImportedExecutableDependency {
@@ -1218,6 +1299,9 @@ impl ImportedExecutableVerification {
                 break;
             }
             bytes += read as u64;
+            if bytes > before.len() {
+                return Err(changed());
+            }
             sha2::Digest::update(&mut hash, &buffer[..read]);
         }
         let after = file.metadata().map_err(inspect)?;
@@ -1318,7 +1402,7 @@ fn resolve_imported_executable_dependency(
             resolved_source.interface_dir.display()
         )
     })?;
-    if source_owner.parent() != Some(interface_root.as_path()) {
+    if source_owner != interface_root.join(source_interface.as_str()) {
         return Err(format!(
             "interface executable owner '{}' escapes the interface registry root",
             source_owner.display()
@@ -2532,12 +2616,30 @@ fn spawn_process_command_life(
         let mut arguments = Vec::with_capacity(command_config.args.len());
         for argument in &command_config.args {
             match argument {
+                SpawnLifeArgument::Literal(value) if value.starts_with(OWNER_EXECUTABLE_PREFIX) => {
+                    let registry = ctx.interface_registry_dir();
+                    let registry = registry
+                        .parent()
+                        .and_then(Path::parent)
+                        .ok_or("interface life has no registry root")?;
+                    let file =
+                        resolve_life_file(value, registry, &ctx.interface, &registry_install_root)?;
+                    readable.push(file.clone());
+                    arguments.push(file.into_os_string());
+                }
                 SpawnLifeArgument::Literal(value) => {
                     arguments.push(std::ffi::OsString::from(value));
                 }
                 SpawnLifeArgument::RepositoryFile(argument) => {
-                    let path = resolve_required_repository_file(
+                    let registry = ctx.interface_registry_dir();
+                    let registry = registry
+                        .parent()
+                        .and_then(Path::parent)
+                        .ok_or("interface life has no registry root")?;
+                    let path = resolve_life_file(
                         &argument.repository_file,
+                        registry,
+                        &ctx.interface,
                         &registry_install_root,
                     )?;
                     readable.push(path.clone());
@@ -2546,8 +2648,15 @@ fn spawn_process_command_life(
             }
         }
         for required_file in &command_config.required_files {
-            readable.push(resolve_required_repository_file(
+            let registry = ctx.interface_registry_dir();
+            let registry = registry
+                .parent()
+                .and_then(Path::parent)
+                .ok_or("interface life has no registry root")?;
+            readable.push(resolve_life_file(
                 required_file,
+                registry,
+                &ctx.interface,
                 &registry_install_root,
             )?);
         }
@@ -2638,6 +2747,12 @@ fn spawn_process_command_life(
             environment.get("PATH").map(std::ffi::OsString::as_os_str),
         )?;
         let executable = prepared.executable.clone();
+        if (command_config.bin.starts_with(OWNER_EXECUTABLE_PREFIX)
+            || command_config.bin.starts_with(INTERFACE_EXECUTABLE_PREFIX))
+            && !executable.starts_with(&executable_base)
+        {
+            return Err("interface life executable escapes its exact owner before spawn".into());
+        }
         let mut command = tokio::process::Command::new(&prepared.program);
         #[cfg(unix)]
         command.process_group(0);
@@ -2856,30 +2971,36 @@ fn resolve_executable_base(
             dependency.source_owner,
         ));
     }
-    let Some(relative) = declared_program.strip_prefix(OWNER_EXECUTABLE_PREFIX) else {
+    if !declared_program.starts_with(OWNER_EXECUTABLE_PREFIX) {
         return Ok((
             declared_program.to_string(),
             installation_root.to_path_buf(),
         ));
-    };
-    let relative_path = Path::new(relative);
-    if relative.is_empty()
-        || relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!(
-            "owner-relative interface executable is invalid: {declared_program}"
-        ));
     }
+    let registry = owner_root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("interface executable owner has no registry root")?;
+    let interface = InterfaceId::new(
+        owner_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("interface executable owner has no valid folder name")?,
+    );
+    let executable = resolve_life_file(declared_program, registry, &interface, installation_root)?;
     let owner_root = std::fs::canonicalize(owner_root).map_err(|error| {
         format!(
             "interface executable owner '{}' cannot be canonicalized: {error}",
             owner_root.display()
         )
     })?;
-    Ok((relative.to_string(), owner_root))
+    Ok((
+        executable
+            .to_str()
+            .ok_or("interface executable path is not UTF-8")?
+            .to_string(),
+        owner_root,
+    ))
 }
 
 fn spawned_private_output_roots(ctx: &InterfaceLiftContext, var_dir: &Path) -> Vec<PathBuf> {
@@ -4405,6 +4526,55 @@ mod tests {
                 .private_config["profile"],
             "beta"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn own_life_fingerprint_tracks_executable_and_readable_owner_script_revisions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("registry");
+        let owner = registry.join("interface/world_authored");
+        let executable = owner.join("packages/life");
+        let script = owner.join("packages/script.py");
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::write(owner.join("interface.json"), serde_json::to_vec(&serde_json::json!({
+            "id":"world_authored", "interface_type":"world", "role":"service", "direction":"bidirectional",
+            "source_names":["authored"], "interface_driver_ref":"authored"
+        })).unwrap()).unwrap();
+        write_test_life(&owner.join("life.json"));
+        let mut life: serde_json::Value = serde_json::from_slice(&std::fs::read(owner.join("life.json")).unwrap()).unwrap();
+        life["processes"][0]["bin"] = serde_json::json!("owner://packages/life");
+        life["processes"][0]["args"] = serde_json::json!(["owner://packages/script.py"]);
+        life["processes"][0]["required_files"] = serde_json::json!(["owner://packages/script.py"]);
+        std::fs::write(owner.join("life.json"), serde_json::to_vec(&life).unwrap()).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(&script, "print('alpha')").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let interface = InterfaceId::new("world_authored");
+        let first = resolve_spawn_life_config(&registry, &interface).unwrap().unwrap();
+        let source = |resolved: &ResolvedSpawnLifeConfig| resolved_spawn_life_source_fingerprint(&registry, &interface, resolved,
+            &mut ImportedExecutableVerification::default()).unwrap();
+        let first_source = source(&first);
+        std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+        let second = resolve_spawn_life_config(&registry, &interface).unwrap().unwrap();
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(first_source, source(&second));
+        std::fs::write(&script, "print('omega')").unwrap();
+        let third = resolve_spawn_life_config(&registry, &interface).unwrap().unwrap();
+        assert_ne!(second.fingerprint, third.fingerprint);
+        std::fs::remove_file(&executable).unwrap();
+        assert!(resolved_spawn_life_source_fingerprint(&registry, &interface, &third, &mut ImportedExecutableVerification::default()).is_err());
+        symlink("/bin/true", &executable).unwrap();
+        assert!(resolve_spawn_life_executable(&registry, &interface, root.path(), &third.config.processes[0]).is_err());
+        std::fs::remove_file(&executable).unwrap();
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sibling = registry.join("interface/world_sibling");
+        std::fs::rename(&owner, &sibling).unwrap();
+        symlink(&sibling, &owner).unwrap();
+        assert!(resolve_spawn_life_executable(&registry, &interface, root.path(), &third.config.processes[0]).is_err());
     }
 
     #[test]

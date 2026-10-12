@@ -25,6 +25,7 @@ test("CLI and desktop share exact owner executable materialization", () => {
     put(path.join(source, "interface/test_door/life.json"), {
       processes: [{ bin: "target/debug/test-life", authority: { executable_paths: ["target/debug/test-tool"] } }],
     });
+    put(path.join(source, "interface/test_door/stdio.json"), { command: "target/debug/test-tool", args: ["--server"] });
     put(path.join(source, "interface/test_door/target/excluded"), "development output");
     put(path.join(root, "target/release/test-tool"), "tool executable");
     put(path.join(root, "target/release/test-life"), "door executable");
@@ -39,6 +40,7 @@ test("CLI and desktop share exact owner executable materialization", () => {
     const read = file => JSON.parse(fs.readFileSync(path.join(registry, file), "utf8"));
     assert.equal(read("tool/test.run/tool.json").process.bin, "owner://packages/bin/test-tool");
     assert.deepEqual(read("worker_environment_kind/test/worker_environment_kind.json").tool_process_bins, ["owner://packages/bin/test-tool"]);
+    assert.deepEqual(read("interface/test_door/stdio.json"), { command: "owner://packages/bin/test-tool", args: ["--server"] });
     const process = read("interface/test_door/life.json").processes[0];
     assert.equal(process.bin, "owner://packages/bin/test-life");
     assert.deepEqual(process.authority.executable_paths, []);

@@ -1,0 +1,57 @@
+#[test]
+fn current_run_catalogs_match_the_typed_authoring_request() {
+    use octopus_operator_chat_client::run_composition::current_run::{
+        AuthoredCurrentRun, CurrentRunRequest, CurrentRunSelection,
+    };
+    let before = serde_json::json!({
+        "id":"run-a","ee":"ee-a","worker":"worker-a","trace":"trace-a",
+        "status":"running","checkpoints":[],"active_checkpoints":[],
+    });
+    let requests = [
+        CurrentRunRequest {
+            amendment_key:"attach".into(), authored:None,
+            selection:Some(CurrentRunSelection {
+                selected_tools:vec![], selected_worker_environment_kinds:vec![],
+                door_host_slots:BTreeMap::new(), external_inputs:vec![], external_relays:vec![],
+                model_outputs:vec![], context_artifact_bindings:vec![], payload_artifact_bindings:vec![],
+            }),
+        },
+        CurrentRunRequest {
+            amendment_key:"attach".into(), selection:None,
+            authored:Some(AuthoredCurrentRun {
+                expected_before_hash:octopus_ledger::ContentHash::of_bytes(
+                    &serde_json::to_vec(&before).unwrap(),
+                ).to_hex(),
+                expected_before:before.clone(), run_record:before, writes:vec![],
+            }),
+        },
+    ];
+    for owner in ["world_provider_codex", "world_provider_chatgpt"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..").join(owner).join("interface.json");
+        let descriptor:serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let profile = &descriptor["interface_driver_config"]["private_config"]["run_affordance_profile"];
+        assert_eq!(profile["file_read_tool"], "file.read");
+        for operation in ["preview_current_run", "amend_current_run"] {
+            let entry = profile["catalog"]["operations"].as_array().unwrap().iter()
+                .find(|entry| entry["operation"] == operation).unwrap();
+            let validator = octopus_tool_registry::ToolArgumentValidator::compile(&entry["input_schema"]).unwrap();
+            for request in &requests {
+                let value = serde_json::to_value(request).unwrap();
+                validator.validate(&value).unwrap();
+                serde_json::from_value::<CurrentRunRequest>(value.clone()).unwrap();
+                let mode = if request.selection.is_some() { "selection" } else { "authored" };
+                for field in value[mode].as_object().unwrap().keys() {
+                    let mut incomplete = value.clone();
+                    incomplete[mode].as_object_mut().unwrap().remove(field);
+                    assert!(validator.validate(&incomplete).is_err(), "{owner} {operation} permits missing {mode}.{field}");
+                    assert!(serde_json::from_value::<CurrentRunRequest>(incomplete).is_err());
+                }
+                let mut ambiguous = value;
+                let other = if mode == "selection" { "authored" } else { "selection" };
+                ambiguous[other] = serde_json::json!({});
+                assert!(validator.validate(&ambiguous).is_err());
+            }
+        }
+    }
+}

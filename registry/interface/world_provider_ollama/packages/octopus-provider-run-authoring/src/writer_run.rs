@@ -1091,6 +1091,7 @@ pub(super) struct WriterHistory {
     pending: Option<(String, OrderedArguments, Movement)>,
     completed: BTreeMap<String, (u64, bool)>,
     applied_calls: BTreeMap<String, u64>,
+    last_applied_target: Option<(u64, Vec<u8>)>,
     cursor: Option<(u64, u64, ContentHash)>,
 }
 
@@ -1125,6 +1126,7 @@ fn history(
         pending: None,
         completed: BTreeMap::new(),
         applied_calls: BTreeMap::new(),
+        last_applied_target: None,
         cursor: None,
     });
     if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record || saved.binding.initial_record_format != binding.initial_record_format {
@@ -1310,6 +1312,7 @@ fn history(
                 generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
                 validate_verified_input_transition(&mut reader, &transition)?;
                 input_revision::validate_rearm_evidence(&mut reader, &transition)?;
+                current.last_applied_target = Some((seq, transition.after));
             }
             current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
             let hash = args.writes[1].after_hash();
@@ -1353,6 +1356,15 @@ pub(super) fn success_evidence(
         .get(&authored.after_hash)
         .filter(|(seq, ok)| *ok && after_seq.is_none_or(|after| *seq > after))
         .map(|(seq, _)| *seq))
+}
+
+pub(super) fn last_applied_target(
+    ctx: &InterfaceLiftContext,
+    session: &ProviderHandoffSession,
+    config: &RunAuthoringConfig,
+) -> Result<Option<(u64, Vec<u8>)>, String> {
+    let history = history(ctx, &session.writer_history, config)?;
+    Ok(if history.pending.is_none() { history.last_applied_target } else { None })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1495,6 +1507,7 @@ impl ProviderOutputHandoff {
         &self,
         record: &RunRecord,
         record_bytes: &[u8],
+        recover_predecessors: bool,
     ) -> Result<AuthoringAttemptRecovery, String> {
         let generation = optional_u64(
             record
@@ -1506,8 +1519,10 @@ impl ProviderOutputHandoff {
         let expected = generation
             .checked_add(1)
             .ok_or("provider recovery generation overflow")?;
-        let mut generations = revision_attempt_generations(&self.ctx, record, record_bytes, &self.config)?
-            .into_keys().collect::<BTreeSet<_>>();
+        let mut generations = if recover_predecessors {
+            revision_attempt_generations(&self.ctx, record, record_bytes, &self.config)?
+                .into_keys().collect::<BTreeSet<_>>()
+        } else { BTreeSet::new() };
         generations.insert(expected);
         let mut attempts = Vec::new();
         for generation in &generations { attempts.extend(self.writer_attempts(*generation)?); }

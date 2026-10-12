@@ -243,6 +243,7 @@ struct ProviderLedgerEvidenceIndex {
     provider_run_arrivals: HashMap<(String, String, String), BTreeSet<u64>>,
     session_run_movements: HashMap<(String, String), BTreeSet<u64>>,
     session_provider_arrivals: HashMap<(String, String, String), BTreeSet<u64>>,
+    session_provider_inputs: HashMap<(String, String), BTreeMap<u64, String>>,
     coordinate_arrivals: HashMap<(String, RuntimeCoordinateKey), UniqueEvidence>,
     mark_arrival_coordinates: HashMap<(String, String, String, u64), UniqueArrivalCoordinate>,
     coordinate_artifacts: HashMap<RuntimeCoordinateKey, Vec<(ArtifactRef, u64)>>,
@@ -402,6 +403,9 @@ pub use failed_source::{payload_carries_session_context, FailedSourceHandoffErro
 mod writer_run;
 pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_writer_binding, OwnerWriterEdit, OwnerWriterEvidence, WriterRunBinding};
 mod source_replay;
+mod settled_definition;
+pub mod capability_amendment;
+pub use capability_amendment::ProviderCapabilityAmendment;
 
 #[cfg(test)]
 #[path = "../tests/support/source_replay.rs"]
@@ -1593,6 +1597,22 @@ pub fn checked_provider_run_advance(
     checked_selected_run_advance(ctx, path, before, after, after_seq, &config)
 }
 
+fn extend_amendment_context_bindings(
+    record: &RunRecord,
+    provider: &InterfaceId,
+    context: &mut Vec<ArtifactId>,
+    static_context: &mut Vec<ArtifactId>,
+) -> Result<(), String> {
+    let prior_context = context.iter().cloned().collect::<BTreeSet<_>>();
+    for binding in provider_context_bindings(record, provider)? {
+        if binding.access.read && !prior_context.contains(&binding.id) {
+            append_artifact(static_context, binding.id.clone());
+            append_artifact(context, binding.id);
+        }
+    }
+    Ok(())
+}
+
 pub fn provider_context_bindings(record: &RunRecord, provider: &InterfaceId) -> Result<Vec<ArtifactBinding>, String> {
     let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state.get(provider)
         .and_then(|state| state.get(RUN_AUTHORING_BINDING)).ok_or("provider context has no declared topology")?.clone())
@@ -1650,6 +1670,7 @@ pub fn validate_unchanged_admitted_checkpoint(before: &[u8], after: &[u8], check
 }
 
 pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -> Result<(), String> {
+    if capability_amendment::validate_transition(transition)? { return Ok(()); }
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
     let provider = &transition.writer.owner;
@@ -2566,6 +2587,7 @@ fn validate_authoring_failure_source(
         record,
         record_bytes,
         config,
+        true,
     )?
         .ok_or_else(|| {
             format!(
@@ -3555,6 +3577,7 @@ fn persisted_authoring_attempt(
     record: &RunRecord,
     record_bytes: &[u8],
     config: &RunAuthoringConfig,
+    recover_predecessors: bool,
 ) -> Result<Option<ValidatedAuthoringAttempt>, String> {
     let current_generation = optional_u64(
         record
@@ -3571,7 +3594,9 @@ fn persisted_authoring_attempt(
     if calls.is_empty() {
         return Ok(None);
     }
-    let predecessors = revision_attempt_generations(ctx, record, record_bytes, config)?;
+    let predecessors = if recover_predecessors {
+        revision_attempt_generations(ctx, record, record_bytes, config)?
+    } else { BTreeMap::new() };
     let mut attempts = Vec::new();
     for (path, call) in calls {
         let prefix = format!("provider-run-authoring:{}:", record.id);
@@ -4120,11 +4145,14 @@ fn ground_session_context_movements(
             .index()?
             .bound_provenance(run, &config.provider_interface, refs.iter())?;
     for artifact in session_context.artifacts.iter_mut() {
+        if artifact.source_movement_seq.is_some() {
+            continue;
+        }
         let grounded = provenance
             .get(&artifact_ref_key(&artifact.source_artifact))
             .and_then(|found| found.provider_arrival_seq.or(found.movement_seq));
         artifact.source_movement_seq =
-            Some(grounded.or(artifact.source_movement_seq).ok_or_else(|| {
+            Some(grounded.ok_or_else(|| {
                 format!(
                     "session context artifact '{}' has no movement in run '{}'",
                     artifact.source_artifact.id.as_str(),
@@ -4392,6 +4420,7 @@ impl ProviderLedgerEvidenceIndex {
             provider_run_arrivals: HashMap::new(),
             session_run_movements: HashMap::new(),
             session_provider_arrivals: HashMap::new(),
+            session_provider_inputs: HashMap::new(),
             coordinate_arrivals: HashMap::new(),
             mark_arrival_coordinates: HashMap::new(),
             coordinate_artifacts: HashMap::new(),
@@ -4698,6 +4727,29 @@ impl ProviderLedgerEvidenceIndex {
                 .push((artifact.clone(), movement.seq.0));
         } else {
             let Endpoint::Interface(source) = &movement.from;
+            if let (Some(admission), Some(binding)) = (
+                metadata.checkpoint_admission.as_ref(),
+                metadata.checkpoint_binding_policy.as_ref(),
+            ) {
+                if source != &self.interface
+                    && admission.complete
+                    && metadata.verification_failure.is_none()
+                    && binding.inbound.interface == *source
+                    && binding.inbound.admits(&admission.artifact_label)
+                    && metadata.outbound_interface_bindings.contains(&self.interface)
+                    && binding.outbound.iter().any(|target| {
+                        target.interface == self.interface
+                            && target.admits(&admission.artifact_label)
+                    })
+                    && admission.required_artifact_labels == metadata.required_verified_artifacts
+                        .iter().map(|required| required.artifact_label.clone()).collect::<Vec<_>>()
+                {
+                    self.session_provider_inputs
+                        .entry((artifact_key, run_key))
+                        .or_default()
+                        .insert(movement.seq.0, admission.artifact_label.clone());
+                }
+            }
             self.coordinate_outbounds
                 .entry(coordinate)
                 .or_default()
@@ -4941,6 +4993,11 @@ impl ProviderLedgerEvidenceIndex {
                 SessionSourceLedgerEvidence {
                     movements: self
                         .session_run_movements
+                        .get(&(artifact_key.clone(), run.as_str().to_string()))
+                        .cloned()
+                        .unwrap_or_default(),
+                    provider_inputs: self
+                        .session_provider_inputs
                         .get(&(artifact_key.clone(), run.as_str().to_string()))
                         .cloned()
                         .unwrap_or_default(),
@@ -5556,7 +5613,10 @@ impl ProviderOutputHandoff {
             transition.writer.owner == config.provider_interface
                 && input_revision::validate_payload_revision(&transition.before, &transition.after, &transition.writer).is_ok()
         });
-        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads
+        let amended_capabilities = capability_amendment::checked_topology_advance(
+            &config.provider_interface, &bound_topology, &current_topology, &coauthor_chain,
+        )?;
+        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads && !amended_capabilities
             && (current_config != config || current_topology != bound_topology);
         if retired_verified_input {
             validate_retired_verified_input(
@@ -5825,6 +5885,12 @@ impl ProviderOutputHandoff {
         self.state.lock().await.run_record_bytes.clone()
     }
 
+    pub async fn reconciled_run_record_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut state = self.state.lock().await;
+        self.reconcile_checked_run_state(&mut state).await?;
+        Ok(state.run_record_bytes.clone())
+    }
+
     pub async fn consumes_context_free_independent_input(&self) -> bool {
         self.state
             .lock()
@@ -5954,7 +6020,7 @@ impl ProviderOutputHandoff {
         if self.context_output_labels.contains(&label) || self.session_snapshot_labels.contains(&label) {
             return Err("a progress observation cannot change the selected context".into());
         }
-        self.hand_batch_with_bindings(vec![emission.into()], terminal, &[], false, None).await?
+        self.hand_batch_with_bindings(vec![emission.into()], terminal, &[], false, None, None).await?
             .into_iter().next().ok_or_else(|| "provider observation produced no outcome".into())
     }
 
@@ -5985,6 +6051,7 @@ impl ProviderOutputHandoff {
             &[],
             consume_context,
             Some(source_movement_seq),
+            None,
         )
         .await?
         .into_iter()
@@ -6060,7 +6127,21 @@ impl ProviderOutputHandoff {
         terminal: bool,
         bindings: &[ProviderOutgoingBinding],
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
-        self.hand_batch_with_bindings(emissions.into_iter().map(Into::into).collect(), terminal, bindings, true, None).await
+        self.hand_batch_with_bindings(emissions.into_iter().map(Into::into).collect(), terminal, bindings, true, None, None).await
+    }
+
+    pub async fn hand_batch_with_capability_amendment(
+        &self,
+        emissions: Vec<ProviderEmission>,
+        terminal: bool,
+        amendment: &ProviderCapabilityAmendment,
+    ) -> Result<Vec<ProviderHandoffOutcome>, String> {
+        let emissions = emissions.into_iter().map(Into::into).collect::<Vec<_>>();
+        if emissions.len() != 1 {
+            return Err("a capability amendment requires one exact tool effect".into());
+        }
+        capability_amendment::validate_emission(amendment, &emissions[0])?;
+        self.hand_batch_with_bindings(emissions, terminal, &[], true, None, Some(amendment)).await
     }
 
     async fn hand_batch_with_terminal(
@@ -6068,7 +6149,7 @@ impl ProviderOutputHandoff {
         emissions: Vec<ProviderHandoffEmission>,
         terminal: bool,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
-        self.hand_batch_with_bindings(emissions, terminal, &[], true, None).await
+        self.hand_batch_with_bindings(emissions, terminal, &[], true, None, None).await
     }
 
     async fn hand_batch_with_bindings(
@@ -6078,12 +6159,13 @@ impl ProviderOutputHandoff {
         bindings: &[ProviderOutgoingBinding],
         consume_input: bool,
         independent_source: Option<u64>,
+        amendment: Option<&ProviderCapabilityAmendment>,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         if emissions.is_empty() {
             return Err("provider response batch contains no emissions".to_string());
         }
         if let HandoffDeliveryMode::OneShot(plan) = &self.delivery_mode {
-            if !bindings.is_empty() {
+            if !bindings.is_empty() || amendment.is_some() {
                 return Err("an outgoing binding requires a granted file-authoring continuation".into());
             }
             return self.hand_one_shot_batch(emissions, plan, terminal).await;
@@ -6092,7 +6174,7 @@ impl ProviderOutputHandoff {
         let batch_count = batches.len();
         let mut outcomes = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0))
+            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment)
                 .await?;
             let failed = delivered.iter().any(|outcome| matches!(outcome, ProviderHandoffOutcome::TerminalFailure { .. }));
             outcomes.extend(delivered);
@@ -6110,6 +6192,7 @@ impl ProviderOutputHandoff {
         bindings: &[ProviderOutgoingBinding],
         consume_input: bool,
         independent_source: Option<u64>,
+        amendment: Option<&ProviderCapabilityAmendment>,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         let mut state = self.state.lock().await;
         self.reconcile_checked_run_state(&mut state).await?;
@@ -6206,8 +6289,8 @@ impl ProviderOutputHandoff {
         }
         let independent_input = additional_input.as_ref().or(state.consumed_context_free_independent_input.as_ref());
         let context_changed = next_context != state.context_artifacts;
-        let refresh_context = (consume_input && state.consumed_input) || context_changed;
-        let authored = active.author_run_with_bindings(
+        let refresh_context = (consume_input && state.consumed_input) || context_changed || amendment.is_some();
+        let mut authored = active.author_run_with_bindings(
             &state.run_record_bytes,
             &next_context,
             &prepared,
@@ -6217,6 +6300,18 @@ impl ProviderOutputHandoff {
             terminal,
             bindings,
         )?;
+        if let Some(amendment) = amendment {
+            let topology = capability_amendment::apply_to_authored_run(
+                &state.run_record_bytes, &mut authored, amendment, &active.config, &active.var_dir,
+            )?;
+            active.config.checkpoints = topology.checkpoints.clone();
+            active.config.payload_artifact_bindings = topology.payload_artifact_bindings.clone();
+            active.bound_topology = topology;
+            let amended = RunRecord::from_bytes(authored.content.as_bytes()).map_err(|error| error.to_string())?;
+            extend_amendment_context_bindings(
+                &amended, &active.config.provider_interface, &mut next_context, &mut next_static_context,
+            )?;
+        }
         let pending = authored.pending_handoff.clone();
         match active.install_authored_run(&mut state, &authored).await? {
             AuthoredRunInstallOutcome::Installed => {}
@@ -6645,13 +6740,15 @@ impl ProviderOutputHandoff {
         record: &RunRecord,
         record_bytes: &[u8],
     ) -> Result<AuthoringAttemptRecovery, String> {
-        if self.config.writer_run.is_some() { return self.recover_writer_attempt(record, record_bytes); }
+        let recover_predecessors = !self.settled_input_definition(record, record_bytes)?;
+        if self.config.writer_run.is_some() { return self.recover_writer_attempt(record, record_bytes, recover_predecessors); }
         let attempt = persisted_authoring_attempt(
             &self.ctx,
             &self.hand_in_root,
             record,
             record_bytes,
             &self.config,
+            recover_predecessors,
         )?;
         Ok(match attempt {
             None => AuthoringAttemptRecovery::None,
@@ -7166,6 +7263,12 @@ impl ProviderOutputHandoff {
     ) -> Result<BTreeMap<String, u64>, String> {
         let mut publications = BTreeMap::new();
         let mut sources = BTreeSet::new();
+        let profile = RunAuthoringProfile {
+            file_write_tool: self.config.file_write_tool.clone(),
+            file_write_label: self.config.file_write_label.clone(),
+            file_write_result_label: self.config.file_write_result_label.clone(),
+            result_timeout_ms: self.config.result_timeout_ms,
+        };
         for transition in chain {
             let authored = RunRecord::from_bytes(&transition.after)
                 .map_err(|error| error.to_string())?;
@@ -7174,7 +7277,8 @@ impl ProviderOutputHandoff {
             else {
                 continue;
             };
-            let visible = current_context_artifacts(&authored, &self.config)?
+            let authored_config = config_from_persisted_profile(&authored, &self.config.provider_interface, &profile)?;
+            let visible = current_context_artifacts(&authored, &authored_config)?
                 .into_iter().collect::<BTreeSet<_>>();
             pending.items.retain(|item| visible.contains(&item.artifact_id)
                 && self.context_output_labels.contains(&item.artifact_label));
@@ -7184,7 +7288,7 @@ impl ProviderOutputHandoff {
                 && !self.source_is_context_free(pending.source_movement_seq)?
             {
                 let (context, _) = recover_source_session_context(
-                    &self.ctx, &self.session, &authored, &self.config,
+                    &self.ctx, &self.session, &authored, &authored_config,
                     pending.source_movement_seq, &self.context_output_labels,
                     &self.session_snapshot_labels,
                 )?;
@@ -12530,6 +12634,7 @@ fn artifact_ref_key(artifact: &ArtifactRef) -> String {
 struct SessionSourceLedgerEvidence {
     movements: BTreeSet<u64>,
     provider_arrivals: BTreeSet<u64>,
+    provider_inputs: BTreeMap<u64, String>,
 }
 
 struct SessionContextEvidenceScope<'a> {
@@ -12570,6 +12675,16 @@ fn validate_session_context_evidence(
         let found = evidence.get(&key).ok_or_else(|| {
             format!("session context artifact[{index}] has no ledger evidence slot")
         })?;
+        if let Some(label) = entry.source_movement_seq
+            .and_then(|sequence| found.provider_inputs.get(&sequence))
+        {
+            if label != &entry.label {
+                return Err(format!(
+                    "session context artifact[{index}] label differs from its exact admitted input"
+                ));
+            }
+            continue;
+        }
         let eligible = if scope.context_output_labels.contains(&entry.label) {
             &found.provider_arrivals
         } else {
@@ -15157,6 +15272,74 @@ mod tests {
                 "sequence" => "does not prove its artifact",
                 _ => unreachable!(),
             }), "{corruption}: {error}");
+        }
+
+        let input_file = InterfaceArtifactFile::write(&source_root, "tool.call", br#"{"tool":"new.tool","arguments":{}}"#).unwrap();
+        let input_ref = pin_artifact(&input_file, &blobs_dir);
+        let input_context = ResolvedSessionContext {
+            provider_interface: context.provider_interface.clone(),
+            artifacts: vec![SessionContextArtifact {
+                label: "tool.call".into(), payload: serde_json::json!({"tool":"new.tool","arguments":{}}),
+                source_artifact: input_ref.clone(), source_movement_seq: Some(0),
+            }],
+        };
+        let mut incoming = movement.clone();
+        incoming.kind = MovementKind::InterfaceOutbound;
+        incoming.from = Endpoint::Interface(InterfaceId::new("system_worker_test"));
+        incoming.to = Endpoint::Interface(context.provider_interface.clone());
+        incoming.artifact = Some(input_ref.clone());
+        let mut metadata = typed_invocation_metadata(&RunId::new("run_test"), "input", &context.provider_interface, 0);
+        metadata.checkpoint_admission = Some(serde_json::from_value(serde_json::json!({"artifact_label":"tool.call","complete":true,"required_artifact_labels":[]})).unwrap());
+        metadata.checkpoint_binding_policy = Some(CheckpointBindingPolicySnapshot {
+            inbound: all_binding("system_worker_test"), outbound: vec![all_binding("world_provider_test")],
+        });
+        metadata.outbound_interface_bindings = vec![context.provider_interface.clone()];
+        incoming.invocation_metadata = Some(metadata.into());
+        let from_rows = |rows: &[Movement]| {
+            std::fs::write(&movements_path, rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+            ProviderHandoffSession {
+                evidence: Arc::new(Mutex::new(ProviderLedgerEvidenceIndex::new(context.provider_interface.clone(), movements_path.clone(), limits.max_control_frame_bytes))),
+                ..session.clone()
+            }
+        };
+        let check = |context: &mut ResolvedSessionContext, session: &ProviderHandoffSession| validate_session_context_evidence(
+            context, SessionContextEvidenceScope {
+                blobs_dir: &blobs_dir, limits, run: &RunId::new("run_test"), provider: &InterfaceId::new("world_provider_test"),
+                context_output_labels: &BTreeSet::from(["tool.call".into(), "interface.artifact.output".into()]), session_snapshot_labels: &BTreeSet::new(),
+            }, session,
+        );
+        for case in ["valid", "unadmitted", "incomplete", "binding", "recipient", "run", "label", "verification", "sequence", "unpinned", "output_without_arrival", "outbound_binding"] {
+            let mut row = serde_json::to_value(&incoming).unwrap();
+            let mut candidate = input_context.clone();
+            match case {
+                "unadmitted" => row["invocation_metadata"]["checkpoint_admission"] = serde_json::Value::Null,
+                "incomplete" => row["invocation_metadata"]["checkpoint_admission"]["complete"] = serde_json::json!(false),
+                "binding" => row["invocation_metadata"]["checkpoint_binding_policy"]["inbound"]["interface"] = serde_json::json!("other_source"),
+                "recipient" => row["to"] = serde_json::json!({"Interface":"other_provider"}),
+                "run" => row["invocation_metadata"]["runtime"]["run"] = serde_json::json!("other_run"),
+                "label" => row["invocation_metadata"]["checkpoint_admission"]["artifact_label"] = serde_json::json!("other.label"),
+                "verification" => row["invocation_metadata"]["verification_failure"] = serde_json::json!({"error":"verification_failed","verifier":"check","details":{}}),
+                "sequence" => candidate.artifacts[0].source_movement_seq = Some(1),
+                "unpinned" => candidate.artifacts[0].source_movement_seq = None,
+                "output_without_arrival" => {
+                    row["from"] = serde_json::json!({"Interface":"world_provider_test"});
+                    row["invocation_metadata"]["checkpoint_binding_policy"]["inbound"]["interface"] = serde_json::json!("world_provider_test");
+                }
+                "outbound_binding" => row["invocation_metadata"]["checkpoint_binding_policy"]["outbound"] = serde_json::json!([]),
+                _ => {}
+            }
+            let session = from_rows(&[serde_json::from_value(row).unwrap()]);
+            let result = check(&mut candidate, &session);
+            assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+        }
+        let later = one_shot_movement(1, &input_ref, "output", MovementKind::InterfaceArrival);
+        let session = from_rows(&[incoming, later]);
+        for sequence in [0, 2] {
+            let mut candidate = input_context.clone();
+            candidate.artifacts[0].source_movement_seq = Some(sequence);
+            ground_session_context_movements(&mut candidate, &session, &RunId::new("run_test"), &config_with_tool_routes(&[])).unwrap();
+            assert_eq!(candidate.artifacts[0].source_movement_seq, Some(sequence));
+            assert_eq!(check(&mut candidate, &session).is_ok(), sequence == 0);
         }
     }
 

@@ -7,11 +7,16 @@ use octopus_ledger::{
     ArtifactRef, ContentHash, DeliveryVerdict, InterfaceToolAffordance, InvocationMetadata,
 };
 use octopus_operator_chat_client::run_composition::{
-    CompositionAuthoring, CompositionCommunication, CompositionRoots, CompositionSeed,
-    RunCompositionPlan, RunCompositionRequest, plan_run_composition,
+    AuthoredRunComposition, AuthoredRunCompositionPlan, CompositionAuthoring,
+    CompositionCommunication, CompositionRoots, CompositionSeed, RegistryValidationIssue,
+    RegistryValidationRoots, RunCompositionPlan, RunCompositionRequest,
+    composition_candidate_writes, plan_authored_run_composition, plan_run_composition,
+    validate_registry_candidate, validate_run_authoring_source, validation_roots,
 };
 use octopus_operator_chat_client::{PlannedClientWrite, SelectedToolSeed};
+use octopus_operator_chat_client::run_composition::current_run::{CurrentRunRequest, current_selection, plan_current_run_amendment};
 use octopus_provider_run_authoring::ProviderOutgoingBinding;
+use octopus_provider_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, validate_installed};
 use octopus_runtime::run_record::RunRecord;
 use octopus_tool_handlers::ToolResultArtifact;
 use octopus_tool_registry::ToolArgumentValidator;
@@ -91,6 +96,12 @@ impl PeerMessage {
 #[serde(rename_all = "snake_case")]
 pub enum RunOperation {
     CreateRun,
+    PreviewRun,
+    ReviseRun,
+    PreviewRevision,
+    PreviewCurrentRun,
+    AmendCurrentRun,
+    InspectAuthoring,
     SendMessage,
     FollowupTask,
     ListRuns,
@@ -124,6 +135,8 @@ pub struct RunAffordanceConfig {
     pub catalog_artifact: ArtifactRef,
     #[serde(default)]
     pub file_write_tool: Option<String>,
+    #[serde(default)]
+    pub file_read_tool: Option<String>,
     #[serde(default)]
     pub artifact_send_tool: Option<String>,
     #[serde(default)]
@@ -164,6 +177,10 @@ pub struct RunDefaults {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateRunRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authored: Option<AuthoredRunComposition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default)]
@@ -248,6 +265,25 @@ pub struct CreatedRun {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativePhase {
+    CurrentRun {
+        stage: CurrentRunStage,
+        plan: Box<PendingCurrentRun>,
+    },
+    Applying {
+        created: Value,
+        files: Vec<FileProof>,
+        validation_roots: RegistryValidationRoots,
+        allowed_issues: Vec<RegistryValidationIssue>,
+        checked_subjects: Vec<String>,
+        seed: Option<NativeEffect>,
+        outgoing_bindings: Vec<ProviderOutgoingBinding>,
+    },
+    AppliedSeeding {
+        created: Value,
+        files: Vec<FileProof>,
+        write_receipt: Value,
+        validation: Value,
+    },
     Writing {
         created: CreatedRun,
         files: Vec<FileProof>,
@@ -266,6 +302,24 @@ pub enum NativePhase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CurrentRunStage { Dependencies, Activation, Readback }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingCurrentRun {
+    pub amendment: ProviderCapabilityAmendment,
+    pub dependency_files: Vec<FileProof>,
+    pub activation_files: Vec<FileProof>,
+    pub activation: Option<NativeEffect>,
+    pub readback: NativeEffect,
+    pub validation_roots: RegistryValidationRoots,
+    pub checked_subjects: Vec<String>,
+    pub allowed_issues: Vec<RegistryValidationIssue>,
+    pub receipts: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativePending {
     pub call_id: String,
@@ -277,6 +331,11 @@ pub struct NativePending {
 
 #[derive(Clone, Debug)]
 pub enum NativeStep {
+    AmendmentEffect {
+        effect: NativeEffect,
+        pending: NativePending,
+        amendment: ProviderCapabilityAmendment,
+    },
     Effect {
         effect: NativeEffect,
         pending: NativePending,
@@ -291,6 +350,61 @@ pub enum NativeStep {
 }
 
 impl NativePending {
+    fn advance_current_run(&self, stage: &CurrentRunStage, plan: &PendingCurrentRun, body: &Value, receipt: &Value) -> Result<NativeStep, String> {
+        let mut next = plan.clone();
+        next.receipts.push(receipt.clone());
+        match stage {
+            CurrentRunStage::Dependencies => {
+                validate_file_receipt(&self.effect, body, &plan.dependency_files)?;
+                readback_files(&plan.dependency_files)?;
+                let (effect, stage) = match &plan.activation {
+                    Some(effect) => (effect.clone(), CurrentRunStage::Activation),
+                    None => (plan.readback.clone(), CurrentRunStage::Readback),
+                };
+                Ok(NativeStep::AmendmentEffect {
+                    amendment: plan.amendment.clone(), effect: effect.clone(),
+                    pending: Self { effect, state:NativePhase::CurrentRun { stage, plan:Box::new(next) }, ..self.clone() },
+                })
+            }
+            CurrentRunStage::Activation => {
+                validate_file_receipt(&self.effect, body, &plan.activation_files)?;
+                readback_files(&plan.activation_files)?;
+                let effect = plan.readback.clone();
+                Ok(NativeStep::Effect {
+                    effect: effect.clone(), outgoing_bindings:Vec::new(),
+                    pending: Self { effect, state:NativePhase::CurrentRun { stage:CurrentRunStage::Readback, plan:Box::new(next) }, ..self.clone() },
+                })
+            }
+            CurrentRunStage::Readback => {
+                let path = self.effect.arguments.get("path").and_then(Value::as_str).ok_or("current-run readback lost its exact path")?;
+                let content = body.get("content").and_then(Value::as_str).ok_or("current-run readback has no content")?;
+                let hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
+                if body.get("path").and_then(Value::as_str) != Some(path)
+                    || body.get("content_hash").and_then(Value::as_str) != Some(hash.as_str())
+                    || body.get("bytes").and_then(Value::as_u64) != Some(content.len() as u64) {
+                    return Err("current-run readback differs from its exact file receipt".into());
+                }
+                let record = RunRecord::from_bytes(content.as_bytes()).map_err(|e| e.to_string())?;
+                if record.id.as_str() != self.source_run { return Err("current-run readback names another run".into()); }
+                validate_installed(&record, &plan.amendment)?;
+                readback_files(&plan.dependency_files)?;
+                readback_files(&plan.activation_files)?;
+                let live = RunRecord::from_bytes(&std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                validate_installed(&live, &plan.amendment)?;
+                let validation = validate_registry_candidate(&plan.validation_roots, &[])?;
+                let issues = validation.stages.first().ok_or("current-run validation has no stage")?.issues.iter()
+                    .filter(|issue| (issue.subject == "snapshot" || plan.checked_subjects.contains(&issue.subject)) && !plan.allowed_issues.contains(issue))
+                    .cloned().collect::<Vec<_>>();
+                Ok(NativeStep::Complete { result:json!({
+                    "ok":issues.is_empty(), "call_id":self.call_id, "operation":self.operation_name,
+                    "run_id":self.source_run, "amendment_key":plan.amendment.amendment_key,
+                    "installed":true, "readback_hash":hash, "receipts":next.receipts,
+                    "unmet_dependencies":issues, "work_completed":false,
+                }) })
+            }
+        }
+    }
+
     pub fn advance(&self, result: &Value) -> Result<NativeStep, String> {
         let receipt: ToolResultArtifact = serde_json::from_value(result.clone())
             .map_err(|error| format!("native operation result is malformed: {error}"))?;
@@ -306,26 +420,94 @@ impl NativePending {
         }
         let body = receipt.body.ok_or("native result has no body")?;
         match &self.state {
+            NativePhase::CurrentRun { stage, plan } => self.advance_current_run(stage, plan, &body, result),
+            NativePhase::Applying {
+                created,
+                files,
+                validation_roots,
+                allowed_issues,
+                checked_subjects,
+                seed,
+                outgoing_bindings,
+            } => {
+                validate_file_receipt(&self.effect, &body, files)?;
+                readback_files(files)?;
+                let mut validation = validate_registry_candidate(validation_roots, &[])?;
+                let unexpected = validation.stages[0]
+                    .issues
+                    .iter()
+                    .filter(|issue| {
+                        (issue.subject == "snapshot" || checked_subjects.contains(&issue.subject))
+                            && !allowed_issues.contains(issue)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                validation.checked_subjects = checked_subjects.clone();
+                for stage in &mut validation.stages {
+                    stage
+                        .available
+                        .retain(|subject| checked_subjects.contains(subject));
+                    stage.issues.retain(|issue| {
+                        issue.subject == "snapshot" || checked_subjects.contains(&issue.subject)
+                    });
+                }
+                if !unexpected.is_empty() {
+                    return Ok(NativeStep::Complete {
+                        result: json!({
+                            "ok":false,"installed":true,"seed_admitted":false,"work_completed":false,
+                            "created":created,"files":files,"write_receipt":result,
+                            "validation":validation,"unmet_dependencies":unexpected,
+                        }),
+                    });
+                }
+                let Some(seed) = seed else {
+                    return Ok(NativeStep::Complete {
+                        result: json!({
+                            "ok":true,"installed":true,"seed_admitted":false,"work_completed":false,
+                            "created":created,"files":files,"write_receipt":result,"validation":validation,
+                        }),
+                    });
+                };
+                Ok(NativeStep::Effect {
+                    effect: seed.clone(),
+                    outgoing_bindings: outgoing_bindings.clone(),
+                    pending: Self {
+                        effect: seed.clone(),
+                        state: NativePhase::AppliedSeeding {
+                            created: created.clone(),
+                            files: files.clone(),
+                            write_receipt: result.clone(),
+                            validation: json!(validation),
+                        },
+                        ..self.clone()
+                    },
+                })
+            }
+            NativePhase::AppliedSeeding {
+                created,
+                files,
+                write_receipt,
+                validation,
+            } => {
+                let verdict = parse_delivery_verdict(body)?;
+                let admitted = matches!(verdict, DeliveryVerdict::Admitted { .. });
+                Ok(NativeStep::Complete {
+                    result: json!({
+                        "ok":admitted,"call_id":self.call_id,"operation":self.operation_name,
+                        "created":created,"installed":true,"files":files,"write_receipt":write_receipt,
+                        "validation":validation,"seed_receipt":result,"seed_admitted":admitted,"work_completed":false,
+                    }),
+                })
+            }
             NativePhase::Writing {
                 created,
                 files,
                 seed,
                 outgoing_bindings,
             } => {
-                #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct Written {
-                    result: String,
-                    writes: Vec<FileProof>,
-                }
-                let written: Written = serde_json::from_value(body).map_err(|error| {
-                    format!("native creation file evidence is malformed: {error}")
-                })?;
-                if written.result != "files_written" || written.writes != *files {
-                    return Err(
-                        "native creation file result does not prove the exact planned writes"
-                            .into(),
-                    );
+                validate_file_receipt(&self.effect, &body, files)?;
+                if self.effect.arguments.get("ordered") == Some(&Value::Bool(true)) {
+                    readback_files(files)?;
                 }
                 let next = Self {
                     effect: seed.clone(),
@@ -381,6 +563,32 @@ impl NativePending {
             "ok": false, "receipt": receipt, "work_completed": false,
         });
         match &self.state {
+            NativePhase::CurrentRun { stage, plan } => {
+                result["run_id"] = json!(self.source_run);
+                result["amendment_key"] = json!(plan.amendment.amendment_key);
+                result["stage"] = json!(stage);
+                result["receipts"] = json!(plan.receipts);
+                result["installed"] = Value::Null;
+            }
+            NativePhase::Applying { created, files, .. } => {
+                result["created"] = created.clone();
+                result["planned_files"] = json!(files);
+                result["installed"] = Value::Null;
+                result["seed_admitted"] = json!(false);
+            }
+            NativePhase::AppliedSeeding {
+                created,
+                files,
+                write_receipt,
+                validation,
+            } => {
+                result["created"] = created.clone();
+                result["files"] = json!(files);
+                result["write_receipt"] = write_receipt.clone();
+                result["validation"] = validation.clone();
+                result["installed"] = json!(true);
+                result["seed_admitted"] = Value::Null;
+            }
             NativePhase::Writing { created, files, .. } => {
                 result["created"] = json!(created);
                 result["planned_files"] = json!(files);
@@ -417,6 +625,61 @@ pub struct RunAffordances {
 }
 
 impl RunAffordances {
+    fn current_run_step(&self, metadata: &InvocationMetadata, current: &RunRecord, call_id: &str, operation_name: &str,
+        request: CurrentRunRequest, preview: bool) -> Result<NativeStep, String> {
+        let roots = self.config.roots.as_ref().ok_or("current-run authoring roots are absent")?;
+        let writer = self.config.file_write_tool.as_ref().ok_or("current-run file_write_tool is absent")?;
+        let reader = self.config.file_read_tool.as_ref().ok_or("current-run file_read_tool is absent")?;
+        if writer == reader { return Err("current-run writer and reader must be distinct exact tools".into()); }
+        let runtime = metadata.runtime.as_ref().ok_or("current-run operation has no runtime coordinate")?;
+        let provider = &runtime.interface;
+        let source_path = roots.run_records_root.join(format!("{}.json", current.id));
+        let retained_tools = [writer, reader].into_iter().map(|tool| {
+            let descriptor = octopus_tool_registry::load_tool_descriptor_from_dir(&roots.registry_root.join("tool"), tool).map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("current-run bridge descriptor '{tool}' is absent"))?;
+            if descriptor.id.as_str() != tool || !metadata.grant.tools.contains(tool)
+                || metadata.grant.hard_blocked_tools.contains(tool) { return Err("current-run bridge tool is not exactly granted".to_string()); }
+            Ok((tool.clone(), descriptor.interface))
+        }).collect::<Result<Vec<_>, String>>()?;
+        let identity = call_identity(current.id.as_str(), &request.amendment_key)?;
+        let readback = NativeEffect { tool:reader.clone(), arguments:json!({"path":source_path}), correlation_id:format!("{identity}:readback") };
+        let read_bridge = current_run_bridge(&readback, retained_tools[1].1.clone())?;
+        let mut plan = plan_current_run_amendment(roots, current, provider, request, read_bridge, &retained_tools)?;
+        let batch = |writes: &[octopus_operator_chat_client::run_composition::RegistryCandidateWrite], suffix: &str| -> Result<Option<(NativeEffect, Vec<FileProof>)>, String> {
+            if writes.is_empty() { return Ok(None); }
+            let writes = writes.iter().map(|write| PlannedClientWrite { path:write.path.clone(), content:write.content.clone(),
+                expected_before_hash:write.expected_before_hash.clone(), tag:format!("amendment:{}",write.path.display()) }).collect::<Vec<_>>();
+            let (arguments, files) = file_write_batch(&writes, &source_path)?;
+            Ok(Some((NativeEffect { tool:writer.clone(), arguments, correlation_id:format!("{identity}:{suffix}") }, files)))
+        };
+        let dependencies = batch(&plan.dependency_writes, "dependencies")?;
+        let activation = batch(&plan.activation_writes, "activation")?;
+        if let Some((effect, _)) = &activation { plan.amendment.bridge = current_run_bridge(effect, retained_tools[0].1.clone())?; }
+        if preview || !plan.validation.safe_to_apply {
+            return Ok(NativeStep::Complete { result:json!({
+                "ok":plan.validation.safe_to_apply, "preview":preview, "installed":false, "run_id":current.id,
+                "amendment_key":plan.amendment.amendment_key, "future_run_contract":plan.amendment.after,
+                "dependency_writes":plan.dependency_writes, "activation_writes":plan.activation_writes,
+                "bridge":plan.amendment.bridge, "validation":plan.validation, "awaiting_activation":plan.awaiting_activation, "work_completed":false,
+            }) });
+        }
+        let pending_plan = PendingCurrentRun {
+            amendment:plan.amendment.clone(), dependency_files:dependencies.as_ref().map(|(_, files)|files.clone()).unwrap_or_default(),
+            activation_files:activation.as_ref().map(|(_, files)|files.clone()).unwrap_or_default(),
+            activation:activation.as_ref().map(|(effect, _)|effect.clone()), readback:readback.clone(),
+            validation_roots:validation_roots(roots), checked_subjects:plan.validation.checked_subjects,
+            allowed_issues:plan.validation.stages.last().ok_or("amendment validation has no final stage")?.issues.clone(), receipts:Vec::new(),
+        };
+        let (effect, stage, attach) = match dependencies {
+            Some((effect, _)) => (effect, CurrentRunStage::Dependencies, false),
+            None => match activation { Some((effect, _)) => (effect, CurrentRunStage::Activation, true), None => (readback, CurrentRunStage::Readback, true) },
+        };
+        let pending = NativePending { call_id:call_id.into(), operation_name:operation_name.into(), source_run:current.id.to_string(), effect:effect.clone(),
+            state:NativePhase::CurrentRun { stage, plan:Box::new(pending_plan) } };
+        if attach { Ok(NativeStep::AmendmentEffect { effect, pending, amendment:plan.amendment }) }
+        else { Ok(NativeStep::Effect { effect, pending, outgoing_bindings:Vec::new() }) }
+    }
+
     pub fn from_invocation(
         input: &InterfaceInvocationEnvelope,
         private_config: &Value,
@@ -456,6 +719,7 @@ impl RunAffordances {
         for id in config
             .file_write_tool
             .iter()
+            .chain(config.file_read_tool.iter())
             .chain(config.artifact_send_tool.iter())
         {
             exact_string(id, "configured tool")?;
@@ -517,13 +781,21 @@ impl RunAffordances {
                 ));
             }
             ToolArgumentValidator::compile(&row.input_schema)?;
-            if row.operation == RunOperation::CreateRun
-                && (config.roots.is_none()
-                    || config.defaults.is_none()
-                    || config.file_write_tool.is_none()
-                    || config.artifact_send_tool.is_none())
+            if matches!(row.operation, RunOperation::PreviewCurrentRun | RunOperation::AmendCurrentRun)
+                && (config.roots.is_none() || config.file_write_tool.is_none() || config.file_read_tool.is_none()) {
+                return Err("current-run authoring requires explicit roots, file_write_tool and file_read_tool".into());
+            }
+            if matches!(
+                row.operation,
+                RunOperation::CreateRun
+                    | RunOperation::PreviewRun
+                    | RunOperation::ReviseRun
+                    | RunOperation::PreviewRevision
+            ) && (config.roots.is_none()
+                || config.file_write_tool.is_none()
+                || config.artifact_send_tool.is_none())
             {
-                return Err("create_run catalog row requires roots, defaults, file_write_tool and artifact_send_tool".into());
+                return Err("run authoring catalog row requires roots, file_write_tool and artifact_send_tool".into());
             }
             if matches!(
                 row.operation,
@@ -558,6 +830,24 @@ impl RunAffordances {
 
     pub fn contains(&self, name: &str) -> bool {
         self.enabled.contains(name)
+    }
+
+    pub fn planning_baseline(&self, operation_name: &str, arguments: &Value) -> Result<Option<(String, Value)>, String> {
+        let row = self.catalog.operations.iter().find(|row|row.name == operation_name).ok_or("native operation is absent from its declared catalog")?;
+        if !self.contains(operation_name) { return Err("native operation is not granted".into()); }
+        if !matches!(row.operation,RunOperation::PreviewCurrentRun | RunOperation::AmendCurrentRun) { return Ok(None); }
+        let request: CurrentRunRequest = serde_json::from_value(arguments.clone()).map_err(|e|e.to_string())?;
+        match (request.selection,request.authored) {
+            (Some(_),None)=>Ok(None),
+            (None,Some(authored))=>{
+                if ContentHash::from_hex(&authored.expected_before_hash).is_none_or(|hash|hash.to_hex()!=authored.expected_before_hash) {
+                    return Err("authored current-run baseline requires an exact content hash".into());
+                }
+                RunRecord::from_bytes(&serde_json::to_vec(&authored.expected_before).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+                Ok(Some((authored.expected_before_hash,authored.expected_before)))
+            }
+            _=>Err("current-run amendment requires exactly one complete selection or authored record".into()),
+        }
     }
 
     pub fn plan_call(
@@ -598,13 +888,99 @@ impl RunAffordances {
         ToolArgumentValidator::compile(&row.input_schema)?.validate(arguments)?;
         let control_id = call_identity(runtime.run.as_str(), call_id)?;
         match row.operation {
-            RunOperation::CreateRun => {
-                let args: CreateRunRequest =
+            RunOperation::PreviewCurrentRun | RunOperation::AmendCurrentRun => {
+                validate_run_authoring_source(metadata, admitted_parent)?;
+                self.current_run_step(metadata, parent_record, call_id, operation_name,
+                    serde_json::from_value(arguments.clone()).map_err(|e| e.to_string())?,
+                    row.operation == RunOperation::PreviewCurrentRun)
+            }
+            RunOperation::CreateRun
+            | RunOperation::PreviewRun
+            | RunOperation::ReviseRun
+            | RunOperation::PreviewRevision => {
+                validate_run_authoring_source(metadata, admitted_parent)?;
+                let mut args: CreateRunRequest =
                     serde_json::from_value(arguments.clone()).map_err(|e| e.to_string())?;
+                let creation_key = args.creation_key.as_deref().unwrap_or(call_id).to_string();
+                exact_string(&creation_key, "creation_key")?;
+                let identity = call_identity(runtime.run.as_str(), &creation_key)?;
+                let preview = matches!(
+                    row.operation,
+                    RunOperation::PreviewRun | RunOperation::PreviewRevision
+                );
+                let revise = matches!(
+                    row.operation,
+                    RunOperation::ReviseRun | RunOperation::PreviewRevision
+                );
+                if let Some(authored) = args.authored.take() {
+                    if arguments
+                        .as_object()
+                        .ok_or("native authoring requires an object")?
+                        .keys()
+                        .any(|key| key != "creation_key" && key != "authored")
+                    {
+                        return Err("exact authored files cannot be combined with template selection arguments".into());
+                    }
+                    let plan = plan_authored_run_composition(
+                        self.config
+                            .roots
+                            .as_ref()
+                            .ok_or("creation roots are absent")?,
+                        parent_record,
+                        authored,
+                        revise,
+                    )?;
+                    return self.authored_step(
+                        parent_record,
+                        call_id,
+                        operation_name,
+                        &control_id,
+                        creation_key,
+                        plan,
+                        preview,
+                    );
+                }
+                if revise {
+                    return Err(
+                        "revise_run requires exact authored files and an existing run identity"
+                            .into(),
+                    );
+                }
                 let request =
-                    self.composition_request(metadata, admitted_parent, &control_id, args)?;
+                    self.composition_request(metadata, admitted_parent, &identity, args)?;
                 let plan = plan_run_composition(&request)?;
-                self.creation_step(parent_record, call_id, operation_name, &control_id, plan)
+                self.creation_step(
+                    parent_record,
+                    call_id,
+                    operation_name,
+                    &control_id,
+                    creation_key,
+                    plan,
+                    preview,
+                )
+            }
+            RunOperation::InspectAuthoring => {
+                if arguments.as_object().is_none_or(|args| !args.is_empty()) {
+                    return Err("inspect_authoring expects an empty object".into());
+                }
+                let roots = self
+                    .config
+                    .roots
+                    .as_ref()
+                    .ok_or("inspect_authoring requires declared roots")?;
+                let inspected = validate_registry_candidate(&validation_roots(roots), &[])?;
+                Ok(NativeStep::Complete {
+                    result: json!({
+                        "roots":roots,"defaults":self.config.defaults,"source_grant":metadata.grant,
+                        "current_selection":current_selection(roots, parent_record, &runtime.interface)?,
+                        "installed":inspected.stages[0],
+                        "selection_contract":"Installed entries are candidates. Each run is validated against its own worker ceiling, EE chain and exact authored bindings; creation does not inherit the initiator grant.",
+                        "exact_contract":{"argument":"authored","run_id":"exact new run id (existing id for revise_run)",
+                            "writes":"ordered exact path/content/expected_before_hash entries including complete run JSON",
+                            "outgoing_bindings":"explicit interface/artifact_label/artifact_bindings for checked caller connections",
+                            "seed":"optional exact interface_id/label/payload; omitted means publish waits without immediate emission"},
+                    }),
+                })
             }
             RunOperation::SendMessage | RunOperation::FollowupTask | RunOperation::Interrupt => {
                 let args: PeerRequest =
@@ -771,22 +1147,15 @@ impl RunAffordances {
         call_id: &str,
         operation_name: &str,
         identity: &str,
+        creation_key: String,
         plan: RunCompositionPlan,
+        preview: bool,
     ) -> Result<NativeStep, String> {
         let roots = self
             .config
             .roots
             .as_ref()
             .ok_or("creation roots are absent")?;
-        let parent_path = roots.run_records_root.join(format!("{}.json", parent.id));
-        let mut writes = plan.descriptor_writes.clone();
-        writes.extend(
-            plan.required_policy_updates
-                .iter()
-                .map(|update| update.write.clone()),
-        );
-        writes.push(plan.run_write.clone());
-        let (arguments, files) = file_write_batch(&writes, &parent_path)?;
         let mut role_refs = BTreeSet::new();
         for update in &plan.required_binding_updates {
             if update.run_id != parent.id.as_str()
@@ -801,16 +1170,71 @@ impl RunAffordances {
                     .map(|binding| ArtifactId::new(&binding.id)),
             );
         }
-        let outgoing_bindings = vec![ProviderOutgoingBinding {
-            interface: InterfaceId::new(&plan.receive_interface_id),
-            artifact_label: plan.seed.label.clone(),
-            artifact_bindings: role_refs.into_iter().collect(),
-        }];
-        let seed = NativeEffect {
-            tool: self.sender()?.into(),
-            correlation_id: format!("{identity}:seed"),
-            arguments: json!({"interface": plan.seed.interface_id, "label": plan.seed.label, "payload": plan.seed.payload}),
+        let authored = AuthoredRunComposition {
+            run_id: plan.run_id.clone(),
+            writes: composition_candidate_writes(&plan),
+            outgoing_bindings: vec![ProviderOutgoingBinding {
+                interface: InterfaceId::new(&plan.receive_interface_id),
+                artifact_label: plan.seed.label.clone(),
+                artifact_bindings: role_refs.into_iter().collect(),
+            }],
+            seed: Some(plan.seed.clone()),
         };
+        let exact = plan_authored_run_composition(roots, parent, authored, false)?;
+        self.authored_step(
+            parent,
+            call_id,
+            operation_name,
+            identity,
+            creation_key,
+            exact,
+            preview,
+        )
+    }
+
+    fn authored_step(
+        &self,
+        parent: &RunRecord,
+        call_id: &str,
+        operation_name: &str,
+        identity: &str,
+        creation_key: String,
+        plan: AuthoredRunCompositionPlan,
+        preview: bool,
+    ) -> Result<NativeStep, String> {
+        let roots = self
+            .config
+            .roots
+            .as_ref()
+            .ok_or("creation roots are absent")?;
+        if preview || !plan.validation.safe_to_apply {
+            return Ok(NativeStep::Complete {
+                result: json!({
+                    "ok":plan.validation.safe_to_apply,"preview":preview,"installed":false,"seed_admitted":false,
+                    "creation_key":creation_key,"authored":plan.authored,"run_contract":plan.run,
+                    "validation":plan.validation,"work_completed":false,
+                }),
+            });
+        }
+        let writes = plan
+            .authored
+            .writes
+            .iter()
+            .map(|write| PlannedClientWrite {
+                path: write.path.clone(),
+                content: write.content.clone(),
+                expected_before_hash: write.expected_before_hash.clone(),
+                tag: format!("authored:{}", write.path.display()),
+            })
+            .collect::<Vec<_>>();
+        let (arguments, files) = file_write_batch(
+            &writes,
+            &roots.run_records_root.join(format!("{}.json", parent.id)),
+        )?;
+        let seed = plan.authored.seed.as_ref().map(|seed| -> Result<NativeEffect, String> {
+            Ok(NativeEffect { tool:self.sender()?.into(), correlation_id:format!("{identity}:seed"),
+                arguments:json!({"interface":seed.interface_id,"label":seed.label,"payload":seed.payload}) })
+        }).transpose()?;
         let effect = NativeEffect {
             tool: self
                 .config
@@ -820,26 +1244,28 @@ impl RunAffordances {
             arguments,
             correlation_id: format!("{identity}:write"),
         };
-        let created = CreatedRun {
-            run_id: plan.run_id,
-            worker_interface_id: plan.worker_interface_id,
-            provider_interface_id: plan.provider_interface_id,
-            receive_interface_id: plan.receive_interface_id,
-            return_interface_ids: plan.return_interface_ids,
-            model: plan.model,
-            reasoning_effort: plan.reasoning_effort,
-            service_tier: plan.service_tier,
-        };
+        let created = json!({"run_id":plan.run.id,"ee_id":plan.run.ee,"worker_interface_id":plan.run.worker,
+            "active_checkpoints":plan.run.active_checkpoints,"checkpoints":plan.run.checkpoints,
+            "creation_key":creation_key});
         let pending = NativePending {
             call_id: call_id.into(),
             operation_name: operation_name.into(),
-            source_run: parent.id.as_str().into(),
+            source_run: parent.id.to_string(),
             effect: effect.clone(),
-            state: NativePhase::Writing {
+            state: NativePhase::Applying {
                 created,
                 files,
+                validation_roots: validation_roots(roots),
+                allowed_issues: plan
+                    .validation
+                    .stages
+                    .last()
+                    .ok_or("candidate has no complete validation stage")?
+                    .issues
+                    .clone(),
+                checked_subjects: plan.validation.checked_subjects,
                 seed,
-                outgoing_bindings,
+                outgoing_bindings: plan.authored.outgoing_bindings,
             },
         };
         Ok(NativeStep::Effect {
@@ -856,6 +1282,11 @@ pub fn call_identity(source_run: &str, call_id: &str) -> Result<String, String> 
     let bytes = serde_json::to_vec(&["octopus.run.affordance.v1", source_run, call_id])
         .map_err(|e| e.to_string())?;
     Ok(format!("native_{}", ContentHash::of_bytes(&bytes).to_hex()))
+}
+
+fn current_run_bridge(effect: &NativeEffect, return_interface: InterfaceId) -> Result<ProviderCapabilityBridge, String> {
+    Ok(ProviderCapabilityBridge { tool:effect.tool.clone(), correlation_id:effect.correlation_id.clone(), return_interface,
+        arguments_hash:ContentHash::of_bytes(&serde_json::to_vec(&effect.arguments).map_err(|e| e.to_string())?).to_hex() })
 }
 
 fn peer_effect(
@@ -900,8 +1331,127 @@ fn file_write_batch(
             bytes: write.content.len() as u64,
         });
         entries.push(json!({"path": write.path, "content": write.content, "expected_before_hash": write.expected_before_hash}));
+        let before = match std::fs::symlink_metadata(&write.path) {
+            Ok(metadata) if metadata.is_file() => {
+                let bytes = std::fs::read(&write.path).map_err(|error| error.to_string())?;
+                if Some(ContentHash::of_bytes(&bytes).to_hex()) != write.expected_before_hash {
+                    return Err(format!(
+                        "native authoring preimage changed at '{}'",
+                        write.path.display()
+                    ));
+                }
+                Some(String::from_utf8(bytes).map_err(|error| error.to_string())?)
+            }
+            Ok(_) => {
+                return Err(format!(
+                    "native authoring target '{}' is not a regular file",
+                    write.path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if write.expected_before_hash.is_some() {
+                    return Err(format!(
+                        "native authoring preimage disappeared at '{}'",
+                        write.path.display()
+                    ));
+                }
+                None
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        entries.last_mut().ok_or("native write entry is absent")?["expected_before_content"] =
+            json!(before);
     }
-    Ok((json!({"writes": entries}), proofs))
+    Ok((json!({"ordered": true, "writes": entries}), proofs))
+}
+
+fn validate_file_receipt(
+    effect: &NativeEffect,
+    body: &Value,
+    files: &[FileProof],
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Written {
+        result: String,
+        writes: Vec<Value>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OrderedWrite {
+        path: PathBuf,
+        before_hash: Option<String>,
+        after_hash: String,
+        bytes: u64,
+        outcome: String,
+        observed_hash: Option<String>,
+        error: Option<String>,
+    }
+    let written: Written = serde_json::from_value(body.clone())
+        .map_err(|error| format!("native authoring file evidence is malformed: {error}"))?;
+    let ordered = match effect.arguments.get("ordered") {
+        Some(Value::Bool(true)) => true,
+        None => false,
+        Some(_) => return Err("native authoring call has an invalid ordered declaration".into()),
+    };
+    if written.result
+        != if ordered {
+            "ordered_file_writes"
+        } else {
+            "files_written"
+        }
+        || written.writes.len() != files.len()
+    {
+        return Err("native authoring file result does not prove the exact planned writes".into());
+    }
+    for (value, expected) in written.writes.into_iter().zip(files) {
+        let observed = if ordered {
+            let receipt: OrderedWrite =
+                serde_json::from_value(value).map_err(|error| error.to_string())?;
+            if receipt.outcome != "applied"
+                || receipt.error.is_some()
+                || receipt.observed_hash.as_ref() != Some(&receipt.after_hash)
+            {
+                return Err(
+                    "native authoring success contains an unapplied or uncertain entry".into(),
+                );
+            }
+            FileProof {
+                path: receipt.path,
+                before_hash: receipt.before_hash,
+                after_hash: receipt.after_hash,
+                bytes: receipt.bytes,
+            }
+        } else {
+            serde_json::from_value(value).map_err(|error| error.to_string())?
+        };
+        if observed != *expected {
+            return Err(
+                "native authoring file receipt differs from its exact prospective bytes".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn readback_files(files: &[FileProof]) -> Result<(), String> {
+    for proof in files {
+        let metadata = std::fs::symlink_metadata(&proof.path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.len() != proof.bytes {
+            return Err(format!(
+                "native authoring readback has no exact regular file at '{}'",
+                proof.path.display()
+            ));
+        }
+        let bytes = std::fs::read(&proof.path).map_err(|error| error.to_string())?;
+        if ContentHash::of_bytes(&bytes).to_hex() != proof.after_hash {
+            return Err(format!(
+                "native authoring readback changed at '{}'",
+                proof.path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_delivery_verdict(body: Value) -> Result<DeliveryVerdict, String> {
@@ -941,13 +1491,17 @@ fn operation_granted(
         Ok(true)
     };
     match operation {
-        RunOperation::CreateRun => Ok(granted(&config.file_write_tool)?
-            && granted(&config.artifact_send_tool)?
-            && metadata.grant.may_create_artifact()),
+        RunOperation::PreviewCurrentRun | RunOperation::AmendCurrentRun => Ok(granted(&config.file_write_tool)?
+            && granted(&config.file_read_tool)?),
+        RunOperation::CreateRun
+        | RunOperation::PreviewRun
+        | RunOperation::ReviseRun
+        | RunOperation::PreviewRevision => Ok(granted(&config.file_write_tool)?
+            && granted(&config.artifact_send_tool)?),
         RunOperation::SendMessage | RunOperation::FollowupTask | RunOperation::Interrupt => {
-            Ok(granted(&config.artifact_send_tool)? && metadata.grant.may_create_artifact())
+            granted(&config.artifact_send_tool)
         }
-        RunOperation::ListRuns | RunOperation::Wait => Ok(true),
+        RunOperation::InspectAuthoring | RunOperation::ListRuns | RunOperation::Wait => Ok(true),
     }
 }
 
@@ -1283,7 +1837,7 @@ mod tests {
             {"name":"declared_runs","description":"List recorded bindings","input_schema":{"type":"object"},"operation":"list_runs"}
         ]});
         let metadata: InvocationMetadata = serde_json::from_value(json!({
-            "grant":{"artifact_access":{"catalog":{"read":true}},"artifact_verbs":["create"]},"artifact_binding_refs":[reference]
+            "grant":{"artifact_access":{"catalog":{"read":true}},"artifact_verbs":["read"]},"artifact_binding_refs":[reference]
         })).unwrap();
         let mut input = InterfaceInvocationEnvelope {
             artifact: reference.clone(),
@@ -1330,6 +1884,39 @@ mod tests {
                 .unwrap()
                 .contains("queue_work")
         );
+        let all_effects: RunAffordanceConfig = serde_json::from_value(json!({
+            "catalog_artifact": reference, "artifact_send_tool": "selected.sender",
+            "file_write_tool": "selected.writer", "file_read_tool": "selected.reader"
+        })).unwrap();
+        let mut metadata = input.metadata.clone().unwrap();
+        assert!(!metadata.grant.may_create_artifact());
+        for id in ["selected.writer", "selected.reader"] {
+            metadata.grant.tools.push(id.into());
+            metadata.grant.interface_affordance_specs.push(InterfaceToolAffordance {
+                name: id.into(), description: id.into(), args_schema: json!({"type":"object"}),
+            });
+        }
+        for (operation, required) in [
+            (RunOperation::PreviewCurrentRun, vec!["selected.writer", "selected.reader"]),
+            (RunOperation::AmendCurrentRun, vec!["selected.writer", "selected.reader"]),
+            (RunOperation::CreateRun, vec!["selected.writer", "selected.sender"]),
+            (RunOperation::PreviewRun, vec!["selected.writer", "selected.sender"]),
+            (RunOperation::ReviseRun, vec!["selected.writer", "selected.sender"]),
+            (RunOperation::PreviewRevision, vec!["selected.writer", "selected.sender"]),
+            (RunOperation::SendMessage, vec!["selected.sender"]),
+            (RunOperation::FollowupTask, vec!["selected.sender"]),
+            (RunOperation::Interrupt, vec!["selected.sender"]),
+        ] {
+            assert!(operation_granted(operation, &all_effects, &metadata).unwrap());
+            for id in required {
+                let mut missing = metadata.clone();
+                missing.grant.tools.retain(|tool| tool != id);
+                assert!(!operation_granted(operation, &all_effects, &missing).unwrap());
+                let mut blocked = metadata.clone();
+                blocked.grant.hard_blocked_tools.push(id.into());
+                assert!(!operation_granted(operation, &all_effects, &blocked).unwrap());
+            }
+        }
         input.metadata.as_mut().unwrap().artifact_binding_refs[0].content =
             ContentHash::of_bytes(b"different");
         assert!(RunAffordances::from_invocation(&input, &config).is_err());
@@ -1381,7 +1968,7 @@ mod tests {
             "checkpoint":"input","interface":"world_provider","epoch":0})).unwrap());
         for operation in [RunOperation::SendMessage, RunOperation::FollowupTask, RunOperation::Interrupt] {
             let affordances = RunAffordances {
-                config: RunAffordanceConfig { catalog_artifact: reference.clone(), file_write_tool: None,
+                config: RunAffordanceConfig { catalog_artifact: reference.clone(), file_write_tool: None, file_read_tool:None,
                     artifact_send_tool: Some("selected.sender".into()), roots: None, defaults: None },
                 catalog: RunCatalog { id: "catalog".into(), label: "provider.run.affordances".into(), text: None,
                     operations: vec![RunCatalogEntry { name: "peer_action".into(), description: "Peer action".into(),

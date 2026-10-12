@@ -30,7 +30,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
     let runs = root.join("runs");
     std::fs::create_dir(&runs).unwrap();
     let request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ees,"run_records_root":runs,"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ees,"run_records_root":runs,"interface_private_state_root":root.join("interface-private-state"),"write_hash_algorithm":"sha256",
         "chat_id":"home_returns","provider_interface_id":"world_provider_codex","ee_id":"ee_existence",
         "worker_interface_id":"system_worker_operator_home","client_surface_role":"home","cycle":"first",
         "selected_worker_environment_kinds":["system_room"],

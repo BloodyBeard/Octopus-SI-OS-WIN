@@ -1,5 +1,203 @@
 {
   "label": "context.reference",
   "id": "artifact-codebase-layout",
-  "text": "How the Octopus codebase is laid out (coder grounding; you are editing your own system, not an arbitrary project):\n- The system is registry-first: capabilities are JSON descriptors under registry/<domain>/<name>/<domain>.json. Domains include interface, ee_template, verifier, worker_environment_kind, tool, artifact, and mark. A worker is itself an interface: a unique pin registry/interface/system_worker_<name>/ (role=\"worker\") whose policy.json sidecar carries its ceiling and role artifacts; run JSON pins it in \"worker\".\n- The boundary protocol is survival-critical: in/out only as artifacts, artifacts only through interfaces, interfaces only as bindings attached to active checkpoints in runs. Runs live inside EEs; worker environments are separately granted technical rooms for effects. Do not write or preserve any bypass.\n- A capability package is a portable layout of descriptors plus optional generic driver-family source code; after install, the runtime sees only descriptors/bindings/artifacts/policy/mark outcomes/worker environments/runs, not package identity.\n- For an existing interface driver family, adding a new interface/client/model-facing/artifact surface should be registry/interface/<id>/interface.json plus activation/binding/policy JSON; a new worker is a copied system_worker_<name> folder with a new id and edited lists. Do not add product-channel branches to app bootstrap or TUI session code.\n- Interface descriptor core shape: {\"id\":\"<id>\",\"interface_type\":\"world|system\",\"role\":\"<open role label>\",\"direction\":\"inbound|outbound|bidirectional\",\"source_names\":[\"<source>\"],\"interface_driver_ref\":\"<compiled driver family ref>\"}. The directory name under registry/interface/<id> must equal id. Artifact vocabulary is interpreted by the interface/room that handles the artifact, not by runtime.\n- Interface activation sidecars live at registry/interface/<id>/activation.json and declare enabled activation drivers plus the interface-owned arrival route they demux into. Unknown fields fail closed.\n- http_json_poll config is descriptor data behind an interface activation, not a worker-environment tool: request {method,url,headers,body_json/body,timeout_secs}; items_path and item_id_path as either dot strings (\"result\", \"message.text\") or string arrays; optional text_path/origin_target_path; optional filters {allow:[{path,equals}], mode:\"all|any\", deny_unmatched:true}; optional cursor {request_body_path, advance:\"copy|increment\"}; arrival {payload_template}. Same-boundary replies and other World effects leave only as artifacts through the origin/paired outbound interface binding authored in run JSON, with delivery evidence and an admitted mark outcome only when a checkpoint required_verified_artifact demands one; secret material must be referenced by visible secret:// handles from task, binding, or interface evidence, never by raw values or invented placeholder names.\n- Editing a descriptor is no different from editing any other file: you change it with ordinary file tool artifacts inside the granted worker environment. There is no special architecture-mutation lane.\n- A descriptor edit that lands in the live registry becomes visible when runtime/interface transport next handles the relevant artifact path and re-reads JSON; changing JSON alone does not create a runtime turn. Adding a live interface over an existing driver family must not require an app restart.\n- A source edit stays on your run/<run_id> worktree branch; it goes live only after a real admitted `coder.build.ok` build mark outcome from a `coder.build.result` artifact, never by direct write to a protected branch.\n- There is no constitution-lock or guardian safety primitive: authority is ordinary policy, and the granted worker environment's path coverage IS the permission (path = permission). A file tool call targeting a path your worker environment does not cover — or a boundary its floor holds read-only, such as .git — refuses closed at the tool boundary; there is no separate locked-namespace core to appeal to.\n- Prove work with artifacts and any checkpoint-required mark outcomes; a report alone is not done."
+  "text": "Octopus framework and capability layout. The assignment and declared workspace determine which project you are editing; this reference does not assign Octopus as every task target:\n- The system is registry-first: capabilities are JSON descriptors under registry/<domain>/<name>/<domain>.json. Domains include interface, ee_template, verifier, worker_environment_kind, tool, artifact, and mark. A worker is itself an interface: a unique pin registry/interface/system_worker_<name>/ (role=\"worker\") whose policy.json sidecar carries its ceiling and role artifacts; run JSON pins it in \"worker\".\n- The boundary protocol is survival-critical: in/out only as artifacts, artifacts only through interfaces, interfaces only as bindings attached to active checkpoints in runs. Runs live inside EEs; worker environments are separately granted technical rooms for effects. Do not write or preserve any bypass.\n- A capability package is a portable layout of descriptors plus optional generic driver-family source code; after install, the runtime sees only descriptors/bindings/artifacts/policy/mark outcomes/worker environments/runs, not package identity.\n- For an existing interface driver family, adding a new interface/client/model-facing/artifact surface should be registry/interface/<id>/interface.json plus activation/binding/policy JSON; a new worker is a copied system_worker_<name> folder with a new id and edited lists. Do not add product-channel branches to app bootstrap or TUI session code.\n- Interface descriptor core shape: {\"id\":\"<id>\",\"interface_type\":\"world|system\",\"role\":\"<open role label>\",\"direction\":\"inbound|outbound|bidirectional\",\"source_names\":[\"<source>\"],\"interface_driver_ref\":\"<compiled driver family ref>\"}. The directory name under registry/interface/<id> must equal id. Artifact vocabulary is interpreted by the interface/room that handles the artifact, not by runtime.\n- Interface activation sidecars live at registry/interface/<id>/activation.json and declare enabled activation drivers plus the interface-owned arrival route they demux into. Unknown fields fail closed.\n- http_json_poll config is descriptor data behind an interface activation, not a worker-environment tool: request {method,url,headers,body_json/body,timeout_secs}; items_path and item_id_path as either dot strings (\"result\", \"message.text\") or string arrays; optional text_path/origin_target_path; optional filters {allow:[{path,equals}], mode:\"all|any\", deny_unmatched:true}; optional cursor {request_body_path, advance:\"copy|increment\"}; arrival {payload_template}. Same-boundary replies and other World effects leave only as artifacts through the origin/paired outbound interface binding authored in run JSON, with delivery evidence and an admitted mark outcome only when a checkpoint required_verified_artifact demands one; secret material must be referenced by visible secret:// handles from task, binding, or interface evidence, never by raw values or invented placeholder names.\n- Editing a descriptor is no different from editing any other file: you change it with ordinary file tool artifacts inside the granted worker environment. There is no special architecture-mutation lane.\n- A descriptor edit that lands in the live registry becomes visible when runtime/interface transport next handles the relevant artifact path and re-reads JSON; changing JSON alone does not create a runtime turn. Adding a live interface over an existing driver family must not require an app restart.\n- Ordinary project work uses the explicitly bound filesystem_workspace and its workspace_root. A git_worktree is an explicit isolation choice; do not create another checkout merely to read or edit a granted direct workspace. The exact room, path declarations and task constraints govern source edits. Build/review obligations come from the checkpoint contract and its actual verifier/mark evidence; a written source file does not deploy itself.\n- There is no constitution-lock or guardian safety primitive: authority is ordinary policy, and the granted worker environment's path coverage IS the permission (path = permission). A file tool call targeting a path your worker environment does not cover — or a boundary its floor holds read-only, such as .git — refuses closed at the tool boundary; there is no separate locked-namespace core to appeal to.\n- Prove work with artifacts and any checkpoint-required mark outcomes; a report alone is not done.\n- Distinguish the selected source checkout, the installed active registry, and the distribution bundle. Registry authoring can change installed descriptors and owner packages; it does not grant a source workspace or a compiler. Obtain the actual path from a bound authoring/workspace artifact or an exact door override. When the source path or execution tool is missing, identify that capability gap and address it through authorized configuration or a bound request. Never derive source access from the provider cwd.\n- Inspect the current owner descriptor and argument schema before creating a capability. A tool names one owning worker-environment kind and a declared process; its executable belongs to that kind's code-world. An interface names its exact driver and owns its complete life/configuration. Use existing installed examples and their declared owner imports; a worker pin carries its own interface.json and policy.json. A new wire or execution family requires actual owner-package code and an authorized build path.\n- MCP is one possible interface/room protocol. Discover the connected server's tools and schemas through its declared surface, then author the exact descriptors, room, tools and bindings the selected grant permits. A connected server or registry file alone does not make its tools callable.\n- For a continuing run, include the new exact door/provider/relay bindings and readable role/context closure on the relevant fresh checkpoint generation. Read the next invocation's actual tool surface and artifact references to establish availability. Preserve admitted work and pending effects; do not resend an uncertain effect to obtain new context.\n- Executable authoring: this bound artifact contains executable_authoring with the actual generic process JSONL contract, lifecycle acknowledgement, portable owner-file launch declarations, verifier stdin/verdict contract, and runnable examples. Read that section with artifact.read before writing a tool or verifier; no source checkout or installed GUIDE is required to learn this wire. Its examples do not grant tools, paths, interpreters, or bindings.",
+  "description": "Octopus capability/source layout, exact owner folders and safe selection of an explicitly granted source workspace.",
+  "executable_authoring": {
+    "scope": "Generic contract of the installed process tool door and verifier package runner. JSONL kind below is a private wire tag, not an artifact type or routing rule. Example names are illustrative; select actual owner ids, paths and authority from the formed grant and installed descriptors.",
+    "ownership_and_launch": [
+      "A tool descriptor names exactly one supported_worker_environment_kinds entry. Its process.bin must be in that kind's tool_process_bins; the exact door interface driver must be in door_driver_refs. Every worker/EE allowance and authored binding still applies. Adding an unused bin or driver declaration is a legal publication step; it does not grant an unbound tool or require a reverse tool-id list.",
+      "For an interpreted tool, declare the interpreter in process.bin and its script as an explicit owner://packages/... argument. An owner URI in args is one regular contained file, never a shell fragment; the door resolves it under the selected kind, grants that file read access and keys process reuse to its bytes. Other args are literal strings. A readable 0644 script is sufficient when passed to an interpreter. A directly executed owner binary/script needs executable permission and an OS executable format.",
+      "Declare imported support files in required_files, using owner://packages/... for portable kind-owned files. Each must be a regular file in the exact owner folder, without symlink aliases or traversal. Changes to the executable, owner-file args or required_files invalidate reuse. The loader does not hash or automatically grant the entire source tree. Code dependencies and resources not listed there need their own declared authority.",
+      "Keep the process authority minimal: only declared read/write/executable paths, root slots, environment path declarations, commands, network and IPC. PATH lookup requires PATH in inherit_env; launching a declared primary interpreter does not grant arbitrary child commands. The life that hosts the door must also permit its declared subprocess. Never disable the sandbox to make an example work.",
+      "A new descriptor/package is authored by ordinary permitted file writes. Existing admitted effects and verifier pins retain their original evidence. Use a fresh admitted checkpoint generation for a changed contract; do not replay an uncertain effect to refresh a tool list."
+    ],
+    "tool_protocol": {
+      "framing": "stdin and stdout carry one UTF-8 JSON object per newline; flush each stdout frame. Only protocol frames go to stdout; diagnostics go to stderr. Keep the process alive for successive invoke and release requests. The broker supplies request_id; echo it exactly. event_id correlates acknowledged events within that request. Enforce OCTOPUS_INTERFACE_HOST_IO_LIMITS byte ceilings.",
+      "invoke": {
+        "kind": "invoke",
+        "request_id": 7,
+        "descriptor": "the actual ToolDescriptor object",
+        "envelope": {
+          "artifact": "the actual ArtifactRef object",
+          "label": "tool.call",
+          "manifest_path": "absolute materialized input manifest path",
+          "artifact_bindings": "array of bound artifact carriers",
+          "metadata": "attested invocation metadata or null",
+          "source_movement_seq": "integer source movement sequence",
+          "worker_environment": "the actual formed worker environment object",
+          "worker_environment_kind": "the actual selected kind descriptor"
+        }
+      },
+      "input_artifact": "Read envelope.manifest_path as JSON, then its payload_path (relative to that manifest if not absolute). The standard tool.call payload is {tool,arguments,correlation_id?}; arguments is an object. The door validates its schema and formed authority. The process uses the exact descriptor, door, kind and granted_tools it receives; it never invents a formation or derives rights from call arguments. Bound artifact carriers contain artifact, payload_hash and manifest_path and remain read-only input.",
+      "lifecycle": "Once the real substrate has been initialized, emit worker_environment_lifecycle with the received worker_environment_id and the true active/released/failed state. Await the matching worker_environment_lifecycle_recorded acknowledgement; null error means recorded. On an error, fail the request. A formed invocation cannot complete without a recorded real lifecycle. Do not emit an active claim for an unavailable substrate. The example's live interpreter process is its stateless computation substrate.",
+      "lifecycle_exchange": [
+        {
+          "direction": "process_to_door",
+          "frame": {
+            "kind": "worker_environment_lifecycle",
+            "request_id": 7,
+            "event_id": 1,
+            "worker_environment_id": "exact id from envelope.worker_environment",
+            "lifecycle": "active"
+          }
+        },
+        {
+          "direction": "door_to_process",
+          "frame": {
+            "kind": "worker_environment_lifecycle_recorded",
+            "request_id": 7,
+            "event_id": 1,
+            "error": null
+          }
+        },
+        {
+          "direction": "process_to_door",
+          "frame": {
+            "kind": "complete",
+            "request_id": 7,
+            "artifact_manifest_paths": [
+              "absolute output manifest path"
+            ]
+          }
+        }
+      ],
+      "outputs": "Write output payload and manifest as separate regular files under OCTOPUS_VAR_DIR, then send complete with their absolute manifest paths. The minimal manifest is {label,payload_path}; an optional payload_content_hash is a BLAKE3 hex digest. Do not alter emitted bytes. The door captures and hands these artifacts through the normal binding/verifier gates; complete itself is not a mark or a delivery receipt.",
+      "result_shape": {
+        "manifest": {
+          "label": "example.echo.result",
+          "payload_path": "absolute path to the result payload"
+        },
+        "success_payload": {
+          "label": "example.echo.result",
+          "tool": "example.echo",
+          "correlation_id": "copy the call correlation if present",
+          "ok": true,
+          "body": {
+            "value": "example"
+          }
+        },
+        "failure_payload": {
+          "label": "example.echo.result",
+          "tool": "example.echo",
+          "correlation_id": "copy the call correlation if present",
+          "ok": false,
+          "error": {
+            "code": "invalid_argument",
+            "message": "concrete failure"
+          }
+        }
+      },
+      "result_rules": "Preserve tool and optional correlation_id exactly. Standard result label is tool + .result. Success has non-null body and no error; failure has error {code,message,details?} and no body. Omit absent optional fields instead of writing null. For a process/protocol failure, emit {kind:failed,request_id,error} or {kind:unavailable,request_id,error}; never fabricate a successful result.",
+      "additional_acknowledged_events": "For streamed outputs use {kind:artifact_arrival,request_id,event_id,manifest_path}; receive delivery_verdict with verdict or delivery_failure with error. For a System emission use {kind:system_emission,request_id,event_id,artifact:{carrier:materialized,manifest_path}|{carrier:reference,artifact},to_interface}; the existing exact binding/grant gate decides admission. Optional durable room state uses {kind:worker_environment_live_state,request_id,event_id,worker_environment_id,state} and worker_environment_live_state_recorded with error. Await the matching acknowledgement before depending on the event; a receipt for another request/event is not success.",
+      "release": "The door may send {kind:release_worker_environment,request_id,formation,worker_environment_kind,mode}, where mode is live_owner or cold_recovery. Release the actual owned substrate before replying {kind:worker_environment_released,request_id}. Failure uses failed/unavailable. Cold recovery must identify and clean up the prior owned substrate from durable package evidence; do not claim cleanup from a new empty process. A stateless computation with requires_release=false owns no external resource. A package with requires_release=true needs a real release implementation."
+    },
+    "verifier_protocol": {
+      "package": "registry/verifier/<id>/verifier.json declares id=package=<id>, script as a plain filename, authority, default_params and optional timeout_ms. Its script and regular support files live in that exact package and are pinned together. No interpreter is inferred from a filename or body. A text entrypoint must start with #!/absolute/interpreter; an explicit /usr/bin/env selector additionally requires its selected command in authority.executable_commands. Native executable formats are also valid.",
+      "permissions": "Ordinary file.write can author a new 0644 text verifier. The runner makes its isolated pinned entrypoint executable; source chmod is unnecessary. #!/usr/bin/env python3 works with executable_commands:[/usr/bin/env,python3] when those commands are installed. #!/usr/bin/python3 explicitly selects that absolute interpreter. Use the corresponding explicit interpreter/command declarations for any other language; none is selected by the runner.",
+      "stdin": {
+        "run": "run id",
+        "checkpoint": "checkpoint id",
+        "epoch": 0,
+        "mark": "required mark id",
+        "artifact": {
+          "id": "artifact id",
+          "content": "content hash hex"
+        },
+        "artifact_label": "candidate label",
+        "params": "merged default_params and checkpoint params object",
+        "metadata": "invocation metadata",
+        "payload_path": "absolute readable payload file",
+        "payload_utf8": "UTF-8 text or null for binary"
+      },
+      "stdout": {
+        "passed": true,
+        "details": {
+          "observation": "deterministic evidence for this candidate"
+        }
+      },
+      "rules": "Read one JSON request from stdin and write exactly one JSON verdict to stdout. passed must be boolean; diagnostics belong on stderr. Check candidate bytes and params; do not merely claim success. Use payload_path for binary data. The runner supplies package read access and private scratch write access, and enforces the declared sandbox. params are data, never a command. Script error, invalid output, missing interpreter or timeout fail the checkpoint. default timeout_ms is 5000; params.timeout_ms can only narrow it. Editing package files changes future pins while already admitted pins retain their exact bytes."
+    },
+    "examples": {
+      "python_tool": {
+        "purpose": "Runnable stateless string echo demonstrating the wire, not an installed tool or a grant. Write source to the chosen kind packages/example/tool.py, admit python3 in that kind tool_process_bins and its exact door life authority, and author the descriptor below with actual ids. No shebang/chmod is needed because process.bin is the explicit interpreter.",
+        "descriptor": {
+          "id": "example.echo",
+          "interface": "system_example_room",
+          "supported_worker_environment_kinds": [
+            "example_room"
+          ],
+          "process": {
+            "bin": "python3",
+            "args": [
+              "-B",
+              "owner://packages/example/tool.py"
+            ],
+            "required_files": [],
+            "inherit_env": [
+              "PATH"
+            ],
+            "authority": {
+              "allow_network": false,
+              "allow_local_ipc": false,
+              "read_root_slots": [],
+              "write_root_slots": [],
+              "executable_root_slots": [],
+              "read_paths": [],
+              "write_paths": [],
+              "executable_paths": [],
+              "executable_commands": [],
+              "read_env_paths": [],
+              "write_env_paths": [],
+              "executable_env_paths": []
+            }
+          },
+          "args_schema": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "additionalProperties": false
+          },
+          "is_world_effect": false
+        },
+        "source": "import json, os, sys\nfrom pathlib import Path\n\nlimits = json.loads(os.environ['OCTOPUS_INTERFACE_HOST_IO_LIMITS'])\npending = {}\n\ndef send(frame):\n    data = json.dumps(frame, separators=(',', ':')).encode() + b'\\n'\n    if len(data) > limits['max_control_frame_bytes']:\n        raise ValueError('control frame exceeds declared limit')\n    sys.stdout.buffer.write(data)\n    sys.stdout.buffer.flush()\n\ndef read_json(path, limit):\n    with open(path, 'rb') as source:\n        data = source.read(limit + 1)\n    if len(data) > limit:\n        raise ValueError('artifact exceeds declared limit')\n    return json.loads(data)\n\nwhile True:\n    line = sys.stdin.buffer.readline(limits['max_control_frame_bytes'] + 1)\n    if not line:\n        break\n    if len(line) > limits['max_control_frame_bytes']:\n        raise ValueError('input control frame exceeds declared limit')\n    message = json.loads(line)\n    request = message['request_id']\n    try:\n        if type(request) is not int or request < 0:\n            raise ValueError('invalid request id')\n        if message['kind'] == 'invoke':\n            descriptor, envelope = message['descriptor'], message['envelope']\n            formation, kind = envelope['worker_environment'], envelope['worker_environment_kind']\n            if descriptor['interface'] != os.environ['OCTOPUS_INTERFACE_ID'] or formation['door_interface'] != descriptor['interface']:\n                raise ValueError('wrong door')\n            if descriptor['supported_worker_environment_kinds'] != [formation['worker_environment_kind']] or kind['worker_environment_kind_id'] != formation['worker_environment_kind']:\n                raise ValueError('wrong owner kind')\n            if descriptor['id'] not in formation['granted_tools'] or formation['requires_release']:\n                raise ValueError('tool grant missing or this stateless example cannot own required release')\n            manifest_path = Path(envelope['manifest_path'])\n            manifest = read_json(manifest_path, limits['max_manifest_bytes'])\n            if manifest['label'] != envelope['label'] or envelope['label'] != 'tool.call':\n                raise ValueError('wrong input label')\n            call = read_json(manifest_path.parent / manifest['payload_path'], limits['max_payload_bytes'])\n            if call['tool'] != descriptor['id'] or set(call['arguments']) != {'value'} or not isinstance(call['arguments']['value'], str):\n                raise ValueError('invalid echo arguments')\n            if request in pending:\n                raise ValueError('duplicate pending request')\n            pending[request] = call\n            send({'kind':'worker_environment_lifecycle','request_id':request,'event_id':1,'worker_environment_id':formation['worker_environment_id'],'lifecycle':'active'})\n        elif message['kind'] == 'worker_environment_lifecycle_recorded':\n            call = pending.pop(request)\n            if message['event_id'] != 1 or message['error'] is not None:\n                raise ValueError('lifecycle was not recorded: ' + str(message.get('error')))\n            result = {'label':call['tool']+'.result','tool':call['tool'],'ok':True,'body':{'value':call['arguments']['value']}}\n            if call.get('correlation_id') is not None:\n                result['correlation_id'] = call['correlation_id']\n            output = Path(os.environ['OCTOPUS_VAR_DIR']) / ('result-' + str(request))\n            payload = json.dumps(result, separators=(',', ':')).encode()\n            if len(payload) > limits['max_payload_bytes']:\n                raise ValueError('result exceeds declared limit')\n            output.write_bytes(payload)\n            manifest_path = output.with_suffix('.json')\n            manifest_path.write_text(json.dumps({'label':result['label'],'payload_path':str(output)}))\n            send({'kind':'complete','request_id':request,'artifact_manifest_paths':[str(manifest_path)]})\n        elif message['kind'] == 'release_worker_environment':\n            if pending or message['formation']['requires_release']:\n                raise ValueError('cannot acknowledge release of an owned resource')\n            send({'kind':'worker_environment_released','request_id':request})\n        else:\n            raise ValueError('unexpected input frame: ' + message['kind'])\n    except Exception as error:\n        pending.pop(request, None)\n        send({'kind':'failed','request_id':request,'error':str(error)})\n"
+      },
+      "python_verifier": {
+        "purpose": "Runnable verdict example checking the standard tool result body.value against params.expected. Adapt the deterministic check to the actual obligation. It has no authority to execute tools or create marks.",
+        "descriptor": {
+          "id": "example_value_match",
+          "package": "example_value_match",
+          "script": "verify.py",
+          "authority": {
+            "executable_commands": [
+              "/usr/bin/env",
+              "python3"
+            ],
+            "allow_network": false,
+            "allow_local_ipc": false,
+            "read_root_slots": [],
+            "write_root_slots": [],
+            "executable_root_slots": [],
+            "read_paths": [],
+            "write_paths": [],
+            "executable_paths": [],
+            "read_env_paths": [],
+            "write_env_paths": [],
+            "executable_env_paths": []
+          },
+          "default_params": {}
+        },
+        "params": {
+          "expected": "example"
+        },
+        "source": "#!/usr/bin/env python3\nimport json, sys\n\nrequest = json.load(sys.stdin)\nresult = json.loads(request['payload_utf8'])\nexpected = request['params']['expected']\nobserved = result.get('body', {}).get('value')\npassed = result.get('ok') is True and observed == expected\nprint(json.dumps({'passed':passed,'details':{'expected':expected,'observed':observed}}, separators=(',', ':')))\n"
+      }
+    }
+  }
 }
