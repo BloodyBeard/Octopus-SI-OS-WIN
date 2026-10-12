@@ -517,7 +517,7 @@ impl InterfaceLiftContext {
         }
     }
 
-    fn with_readiness_channel(
+    pub(crate) fn with_readiness_channel(
         mut self,
     ) -> (Self, tokio::sync::oneshot::Receiver<Result<(), String>>) {
         let (readiness, receiver) = InterfaceLifeReadiness::channel();
@@ -1418,6 +1418,7 @@ async fn pump_spawned_life_outputs(
     let mut readiness = Some(readiness);
     loop {
         let output = tokio::select! {
+            biased;
             ready = async {
                 readiness
                     .as_mut()
@@ -1849,13 +1850,13 @@ pub struct LedgerTailReader {
 }
 
 #[cfg(not(target_os = "macos"))]
-struct LedgerChangeWatch {
+pub(super) struct LedgerChangeWatch {
     _watcher: notify::RecommendedWatcher,
     events: tokio::sync::mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
 }
 
 #[cfg(target_os = "macos")]
-struct LedgerChangeWatch {
+pub(super) struct LedgerChangeWatch {
     events: tokio::sync::mpsc::UnboundedReceiver<Result<(), String>>,
     queue: std::os::fd::RawFd,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -2375,7 +2376,7 @@ fn strict_interface_outbound_metadata(
 
 #[cfg(not(target_os = "macos"))]
 impl LedgerChangeWatch {
-    async fn wait(&mut self, cancel: &CancellationToken, path: &Path) -> Result<(), String> {
+    pub(super) async fn wait(&mut self, cancel: &CancellationToken, path: &Path) -> Result<(), String> {
         let event = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             event = self.events.recv() => event,
@@ -2396,7 +2397,7 @@ impl LedgerChangeWatch {
 
 #[cfg(target_os = "macos")]
 impl LedgerChangeWatch {
-    async fn wait(&mut self, cancel: &CancellationToken, path: &Path) -> Result<(), String> {
+    pub(super) async fn wait(&mut self, cancel: &CancellationToken, path: &Path) -> Result<(), String> {
         let event = tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             event = self.events.recv() => event,
@@ -2412,7 +2413,7 @@ impl LedgerChangeWatch {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
+pub(super) fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
     if !path.is_file() {
         return Err(format!(
             "ledger '{}' must exist before an interface reader starts",
@@ -2444,7 +2445,7 @@ fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
+pub(super) fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
     use std::os::fd::AsRawFd;
 
     let file = std::fs::File::open(path).map_err(|error| {
@@ -2568,7 +2569,7 @@ fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, String> {
     })
 }
 
-fn resolve_artifact_binding_payload(
+pub(crate) fn resolve_artifact_binding_payload(
     blob_path: &Path,
     limits: InterfaceHostIoLimits,
 ) -> Result<Vec<u8>, String> {

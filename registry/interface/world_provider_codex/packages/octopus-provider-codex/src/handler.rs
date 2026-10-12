@@ -70,7 +70,11 @@ use tool_operator_request::{ToolOperatorContinuity, ToolOperatorPhase, ToolOpera
 
 #[path = "context_refresh.rs"]
 mod context_refresh;
-use context_refresh::{ContextRefresh, CurrentNativeContext};
+use context_refresh::{ContextRefresh, CurrentNativeContext, NativeHistoryProof, NativeHistoryRetirement};
+
+#[path = "native_history.rs"]
+mod native_history;
+use native_history::{read_native_turn, read_native_turn_items};
 
 pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
 
@@ -1610,6 +1614,8 @@ pub(crate) struct CodexContinuityState {
     native_terminal: Option<NativeTerminalEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_refresh: Option<ContextRefresh>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_history_retirement: Option<NativeHistoryRetirement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -1682,19 +1688,20 @@ async fn read_exact_terminal_turn(
 ) -> Result<Option<NativeTerminalEvidence>, String> {
     let response: ThreadReadResponse = handle.request_typed(ClientRequest::ThreadRead {
         request_id: RequestId::Integer(request_ids.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
-        params: ThreadReadParams { thread_id: thread_id.into(), include_turns: true },
+        params: ThreadReadParams { thread_id: thread_id.into(), include_turns: false },
     }).await.map_err(|error| format!("exact terminal thread/read failed: {error}"))?;
     if response.thread.id != thread_id {
         return Err("terminal thread/read returned a different thread".into());
     }
-    let mut turns = response.thread.turns.into_iter().filter(|turn| turn.id == turn_id);
-    let turn = turns.next().ok_or("terminal thread/read did not contain the exact turn")?;
-    if turns.next().is_some() {
-        return Err("terminal thread/read repeated the exact turn".into());
-    }
+    let mut turn = read_native_turn(handle, request_ids, thread_id, turn_id)
+        .await.map_err(|error| error.to_string())?
+        .ok_or("terminal thread/turns/list did not contain the exact turn")?;
     if turn.status == TurnStatus::InProgress {
         return Ok(None);
     }
+    turn.items = read_native_turn_items(handle, request_ids, thread_id, turn_id)
+        .await.map_err(|error| error.to_string())?;
+    turn.items_view = TurnItemsView::Full;
     let evidence = NativeTerminalEvidence {
         thread_id: thread_id.into(),
         turn: serde_json::to_value(turn).map_err(|error| error.to_string())?,
@@ -2316,6 +2323,12 @@ pub(crate) enum CodexTurnControl {
 #[derive(Clone)]
 enum CodexTurnControlTarget {
     Starting,
+    RecoveredPending {
+        handle: AppServerRequestHandle,
+        request_ids: Arc<std::sync::atomic::AtomicI64>,
+        continuity: CodexContinuityState,
+        effect_gate: Arc<tokio::sync::Mutex<()>>,
+    },
     Draining {
         handle: AppServerRequestHandle,
         request_ids: Arc<std::sync::atomic::AtomicI64>,
@@ -2463,6 +2476,22 @@ impl CodexTurnControlBroker {
         matches!(*self.state.borrow(), CodexTurnControlTarget::Starting)
     }
 
+    pub(crate) fn is_recovered_pending(&self) -> bool {
+        matches!(*self.state.borrow(), CodexTurnControlTarget::RecoveredPending { .. })
+    }
+
+    pub(crate) async fn prepare_recovered_result(&self) -> Result<(), String> {
+        let gate = match self.state.borrow().clone() {
+            CodexTurnControlTarget::RecoveredPending { effect_gate, .. } => Some(effect_gate),
+            _ => None,
+        };
+        if let Some(gate) = gate {
+            let _guard = gate.lock().await;
+            if self.is_recovered_pending() { self.publish_starting(); }
+        }
+        self.wait_for_durable_interrupt().await
+    }
+
     pub(crate) fn has_interrupted_pending(&self) -> bool {
         matches!(
             *self.state.borrow(),
@@ -2559,6 +2588,7 @@ impl CodexTurnControlBroker {
                     return output.upgrade();
                 }
                 CodexTurnControlTarget::Finished => return None,
+                CodexTurnControlTarget::RecoveredPending { .. } => return None,
             }
         }
     }
@@ -2572,6 +2602,33 @@ impl CodexTurnControlBroker {
         loop {
             let target = state.borrow_and_update().clone();
             match target {
+                CodexTurnControlTarget::RecoveredPending { handle, request_ids, continuity, effect_gate } => {
+                    let effect_guard = effect_gate.lock_owned().await;
+                    if state.has_changed().unwrap_or(true) { drop(effect_guard); continue; }
+                    let pending = continuity.pending.as_ref().ok_or("recovered control lost its exact pending effect")?;
+                    let thread_id = continuity.thread_id.clone();
+                    let turn_id = pending_turn_id(pending).to_string();
+                    if !matches!(&control, CodexTurnControl::Interrupt { .. }) {
+                        let disposition = if matches!(&control, CodexTurnControl::Inject { .. } | CodexTurnControl::Steer { .. }) {
+                            CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::PendingSettlement)
+                        } else { CodexTurnControlDisposition::Applied };
+                        return Ok(CodexTurnControlApplied {
+                            result: failed_control_result(&control, Some(thread_id), Some(turn_id), "the recovered provider turn still awaits its exact external result"),
+                            disposition, output: None, handoff_barrier: None, durable_interrupt_handoff: None, effect_guard: None,
+                        });
+                    }
+                    before_external_effect(CodexTurnControlEffectIntent::Initial)?;
+                    let application = apply_control_to_target(control, handle, request_ids, thread_id.clone(), turn_id.clone(), Some(continuity), &mut before_external_effect).await?;
+                    let durable_interrupt_handoff = if exact_interrupted_control_continuity(&application.result)?.is_some() {
+                        let barrier = ProviderHandoffBarrier::new();
+                        self.publish(CodexTurnControlTarget::InterruptedPending {
+                            output: std::sync::Weak::new(), durable_handoff: barrier.clone(), thread_id, turn_id,
+                        });
+                        Some(barrier)
+                    } else { None };
+                    return Ok(CodexTurnControlApplied { result: application.result, disposition: application.disposition,
+                        output: None, handoff_barrier: None, durable_interrupt_handoff, effect_guard: Some(effect_guard) });
+                }
                 CodexTurnControlTarget::Starting => {
                     if state.changed().await.is_err() {
                         return Ok(CodexTurnControlApplied {
@@ -3489,6 +3546,7 @@ fn validate_recovered_reseed_coordinates(
 
 struct ThreadAcquisition<'a> {
     recovered: Option<&'a CodexContinuityState>,
+    retired_history: Option<&'a NativeHistoryProof>,
     require_exact_resume: bool,
     context_generation: u64,
     model: Option<String>,
@@ -3641,6 +3699,7 @@ impl CodexAppServerInterfaceDriver {
     ) -> Result<(String, bool, bool), InterfaceDriverError> {
         let ThreadAcquisition {
             recovered,
+            retired_history,
             require_exact_resume,
             context_generation,
             model,
@@ -3660,7 +3719,23 @@ impl CodexAppServerInterfaceDriver {
             native_affordances,
             static_context_fingerprint,
         )?;
-        let recovered = if let Some(previous) = recovered
+        if let Some(proof) = retired_history {
+            let source = recovered.ok_or_else(|| InterfaceDriverError::FailedClosed("native history retirement lost its source continuity".into()))?;
+            proof.validate(source)?;
+            if require_exact_resume || self.private_thread_cold_start(Some(source))? != PrivateThreadColdStart::ResumeCompatible
+                || self.has_pending_request(scope).await
+            {
+                return Err(InterfaceDriverError::FailedClosed("native history retirement requires declared resume_compatible and no current native wait".into()));
+            }
+            validate_recovered_reseed_coordinates(source, context_generation, session_context_available)?;
+            let transport = self.transport_state.lock().await;
+            if let Some(cached) = transport.get(scope)
+                && (cached.thread_id.as_deref() != Some(source.thread_id.as_str()) || cached.context_generation > context_generation)
+            {
+                return Err(InterfaceDriverError::FailedClosed("native history retirement conflicts with the current transport".into()));
+            }
+        }
+        let recovered = if retired_history.is_some() { None } else if let Some(previous) = recovered
             && !require_exact_resume
             && self.private_thread_cold_start(Some(previous))? == PrivateThreadColdStart::ResumeCompatible
             && (previous.thread_shape_fingerprint != fingerprint
@@ -3819,7 +3894,8 @@ impl CodexAppServerInterfaceDriver {
         }
         let mut transport_state = self.transport_state.lock().await;
         let state = transport_state.entry(scope.clone()).or_default();
-        if let ThreadAction::Reuse { thread_id } = plan_thread_action(state, &fingerprint) {
+        if retired_history.is_none()
+            && let ThreadAction::Reuse { thread_id } = plan_thread_action(state, &fingerprint) {
             state.context_generation = context_generation;
             state.static_context_fingerprint = Some(static_context_fingerprint.to_string());
             let first_turn_of_run = !state.hooks_catalog_emitted;
@@ -4407,6 +4483,33 @@ pub(crate) fn recover_provider_result_continuity(
     Ok(Some(source))
 }
 
+#[path = "stopped_result.rs"]
+pub(crate) mod stopped_result;
+
+pub(crate) fn completed_source_pending_continuity(
+    descriptor: &InterfaceDescriptor, input: &InterfaceInvocationEnvelope,
+    current: &[u8], session: &[SessionContextArtifact],
+) -> Result<Option<CodexContinuityState>, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    let labels = codex_context_output_labels(descriptor)?;
+    let state = recover_codex_continuity_from_current_session(session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels)?;
+    let Some(state) = state.filter(|state| state.pending.as_ref().is_some_and(interrupted_pending_has_external_result)) else { return Ok(None); };
+    let record: serde_json::Value = serde_json::from_slice(current).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    if record.get("id").and_then(serde_json::Value::as_str) != Some(runtime.run.as_str())
+        || state.context_generation != read_codex_context_generation(&record, &runtime.interface)?
+    { return Err(InterfaceDriverError::FailedClosed("completed source retained a pending effect without exact checked context coordinates".into())); }
+    Ok(Some(state))
+}
+
+impl CodexAppServerInterfaceDriver {
+    pub(crate) async fn restore_pending_control(&self, control: &CodexTurnControlBroker, continuity: CodexContinuityState) {
+        control.publish(CodexTurnControlTarget::RecoveredPending {
+            handle: self.client.lock().await.request_handle(), request_ids: self.next_request_id.clone(),
+            continuity, effect_gate: Arc::new(tokio::sync::Mutex::new(())),
+        });
+    }
+}
+
 pub(crate) fn recovered_tool_handoff_receipt(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
@@ -4570,7 +4673,8 @@ pub(crate) fn codex_continuity_successor_is_settled(
         || ((source.thread_id != rebased.thread_id
             || source.thread_shape_fingerprint != rebased.thread_shape_fingerprint
             || source.static_context_fingerprint != rebased.static_context_fingerprint)
-            && !rebased.context_refresh.as_ref().is_some_and(|refresh| refresh.connects(source, rebased)))
+            && !rebased.context_refresh.as_ref().is_some_and(|refresh| refresh.connects(source, rebased))
+            && !rebased.native_history_retirement.as_ref().is_some_and(|retirement| retirement.connects(source, rebased)))
     {
         return Err(
             "deferred operator turn release is not a monotonic successor of its source continuity"
@@ -6748,17 +6852,22 @@ impl CodexAppServerInterfaceDriver {
             ProviderInput::Resume { control_id } => Some(control_id.clone()),
             _ => None,
         };
+        let inspect_settled_history = matches!(&provider_input, ProviderInput::Turn(_))
+            && !thread_compact_requested
+            && peer_message.as_ref().is_none_or(|peer| peer.action != PeerAction::Queue)
+            && recovered_turn_start_dispatches.is_empty();
         let turn_input = if recovered_tool_continuation.is_some() {
             Vec::new()
         } else {
             provider_input.into_turn_input()?
         };
 
-        let (thread_id, cold_thread, first_turn_of_run) = self
+        let (mut thread_id, mut cold_thread, mut first_turn_of_run) = self
             .acquire_transport_thread(
                 &scope,
                 ThreadAcquisition {
                     recovered: recovered.as_ref(),
+                    retired_history: None,
                     require_exact_resume: thread_compact_requested || resume_control_id.is_some(),
                     context_generation: invocation_context_generation,
                     model: Some(model.clone()),
@@ -6770,6 +6879,32 @@ impl CodexAppServerInterfaceDriver {
             )
             .await?;
 
+        let retirement = if inspect_settled_history {
+            self.settled_native_history_proof(&scope, &thread_id, recovered.as_ref(), &current_session_context, &sink).await?
+        } else { None };
+        let retirement = if let Some(proof) = retirement {
+            let source = recovered.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed("native history retirement lost its source".into()))?;
+            let (replacement, cold, first) = self.acquire_transport_thread(&scope, ThreadAcquisition {
+                recovered: Some(source), retired_history: Some(&proof), require_exact_resume: false,
+                context_generation: invocation_context_generation, model: Some(model.clone()),
+                bound_instructions: &bound_instructions, native_affordances,
+                static_context_fingerprint: &static_context_fingerprint,
+                session_context_available: assembled_context.session_context_available,
+            }).await?;
+            if replacement == source.thread_id || !cold {
+                return Err(InterfaceDriverError::FailedClosed("native history retirement did not create an independent replacement thread".into()));
+            }
+            let retirement = NativeHistoryRetirement {
+                source_thread: source.thread_id.clone(), source_generation: source.context_generation,
+                replacement_thread: replacement.clone(), source_artifact: effective_source_artifact.clone(),
+                source_movement_seq, proof,
+            };
+            thread_id = replacement;
+            cold_thread = cold;
+            first_turn_of_run |= first;
+            Some(retirement)
+        } else { None };
+
         let thread_shape_fingerprint = thread_shape_fingerprint(
             Some(&model),
             &bound_instructions,
@@ -6778,6 +6913,10 @@ impl CodexAppServerInterfaceDriver {
         )?;
         let retained_refresh = recovered.as_ref().and_then(|state| state.context_refresh.as_ref())
             .filter(|refresh| refresh.matches_thread(&thread_id, &thread_shape_fingerprint, &static_context_fingerprint)).cloned();
+        let retiring_history = retirement.is_some();
+        let native_history_retirement = retirement.or_else(|| recovered.as_ref()
+            .and_then(|state| state.native_history_retirement.as_ref())
+            .filter(|retirement| retirement.replacement_thread == thread_id).cloned());
         sink.set_continuity(CodexContinuityState {
             schema_version: 1,
             provider_interface: runtime.interface.clone(),
@@ -6792,12 +6931,16 @@ impl CodexAppServerInterfaceDriver {
             interrupted_pending: None,
             native_terminal: None,
             context_refresh: retained_refresh,
+            native_history_retirement,
             tool_operator_request: recovered_tool_continuation.as_ref().and_then(|_| {
                 recovered
                     .as_ref()
                     .and_then(|state| state.tool_operator_request.clone())
             }),
         });
+        if retiring_history {
+            sink.admit_native_history_retirement().await?;
+        }
 
         if let Some(peer) = peer_message.as_ref().filter(|peer| peer.action == PeerAction::Queue) {
             let mut items = Vec::new();
@@ -7656,78 +7799,17 @@ impl CodexAppServerInterfaceDriver {
         thread_id: &str,
         turn_id: &str,
     ) -> Result<Vec<ThreadItem>, InterfaceDriverError> {
-        let mut cursor = None;
-        let mut cursors = BTreeSet::new();
-        let mut turns = BTreeSet::new();
-        loop {
-            let page = client.request_typed::<ThreadTurnsListResponse>(ClientRequest::ThreadTurnsList {
-                request_id: self.mint_request_id(),
-                params: ThreadTurnsListParams {
-                    thread_id: thread_id.to_string(), cursor,
-                    limit: Some(100), sort_direction: Some(SortDirection::Desc),
-                    items_view: Some(TurnItemsView::NotLoaded),
-                },
-            }).await.map_err(typed_error)?;
-            if page.next_cursor.as_ref().is_some_and(|next| !cursors.insert(next.clone())) {
-                return Err(InterfaceDriverError::FailedClosed(
-                    "thread/turns/list repeated a pagination cursor".into(),
-                ));
-            }
-            for turn in &page.data {
-                if !turns.insert(turn.id.clone()) {
-                    return Err(InterfaceDriverError::FailedClosed(format!(
-                        "thread/turns/list repeated turn '{}'", turn.id,
-                    )));
-                }
-            }
-            if let Some(turn) = page.data.iter().find(|turn| turn.id == turn_id) {
-                if turn.status != TurnStatus::InProgress {
-                    return Err(InterfaceDriverError::FailedClosed(format!(
-                        "thread/turns/list pending operator turn '{turn_id}' is not in progress",
-                    )));
-                }
-                break;
-            }
-            cursor = page.next_cursor;
-            if cursor.is_none() {
-                return Err(InterfaceDriverError::FailedClosed(format!(
-                    "thread/turns/list did not restore pending operator turn '{turn_id}' on thread '{thread_id}'",
-                )));
-            }
+        let handle = client.request_handle();
+        let turn = read_native_turn(&handle, &self.next_request_id, thread_id, turn_id).await?
+            .ok_or_else(|| InterfaceDriverError::FailedClosed(format!(
+                "thread/turns/list did not restore pending operator turn '{turn_id}' on thread '{thread_id}'",
+            )))?;
+        if turn.status != TurnStatus::InProgress {
+            return Err(InterfaceDriverError::FailedClosed(format!(
+                "thread/turns/list pending operator turn '{turn_id}' is not in progress",
+            )));
         }
-        let mut cursor = None;
-        let mut cursors = BTreeSet::new();
-        let mut item_ids = BTreeSet::new();
-        let mut items = Vec::new();
-        loop {
-            let page = client.request_typed::<ThreadItemsListResponse>(ClientRequest::ThreadItemsList {
-                request_id: self.mint_request_id(),
-                params: ThreadItemsListParams {
-                    thread_id: thread_id.to_string(), turn_id: Some(turn_id.to_string()), cursor,
-                    limit: Some(100), sort_direction: Some(SortDirection::Asc),
-                },
-            }).await.map_err(typed_error)?;
-            if page.next_cursor.as_ref().is_some_and(|next| !cursors.insert(next.clone())) {
-                return Err(InterfaceDriverError::FailedClosed(
-                    "thread/items/list repeated a pagination cursor".into(),
-                ));
-            }
-            for entry in page.data {
-                if entry.turn_id != turn_id {
-                    return Err(InterfaceDriverError::FailedClosed(format!(
-                        "thread/items/list returned item for turn '{}', expected '{turn_id}'", entry.turn_id,
-                    )));
-                }
-                if !item_ids.insert(entry.item.id().to_string()) {
-                    return Err(InterfaceDriverError::FailedClosed(format!(
-                        "thread/items/list repeated item '{}'", entry.item.id(),
-                    )));
-                }
-                items.push(entry.item);
-            }
-            cursor = page.next_cursor;
-            if cursor.is_none() { return Ok(items); }
-        }
+        read_native_turn_items(&handle, &self.next_request_id, thread_id, turn_id).await
     }
 
     async fn resume_replayed_operator_response(
@@ -8559,8 +8641,13 @@ impl TurnSink<'_> {
         activity_already_admitted: bool,
         mut closure: CodexTurnOutput,
     ) -> Result<(), InterfaceDriverError> {
-        let native_terminal = self.continuity_snapshot().and_then(|state| state.native_terminal);
+        let source_continuity = self.continuity_snapshot();
+        let native_terminal = source_continuity.as_ref().and_then(|state| state.native_terminal.clone());
         if native_terminal.is_some() {
+            if closure.value.get("native_terminal_source_continuity").is_none() {
+                closure.value["native_terminal_source_continuity"] = serde_json::to_value(&source_continuity)
+                    .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+            }
             closure.value["native_terminal_input_context"] = serde_json::json!(
                 self.continuity.lock().expect("continuity lock").pending_input_context
             );
@@ -8634,6 +8721,42 @@ impl TurnSink<'_> {
         }
         self.emit.send_interrupted_result(activity, stream, retained_outputs, closure)
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn native_history_receipt_for_test(
+    descriptor: &InterfaceDescriptor, output_root: &Path, history: &Path,
+    source: CodexContinuityState, session: &[SessionContextArtifact],
+    input: &ArtifactRef, source_seq: u64,
+) -> ProviderEmission {
+    let config = &descriptor.interface_driver_config.as_ref().unwrap().private_config;
+    let labels = private_config_string_set(config, "context_output_labels").unwrap();
+    let projected = private_config_string_set(config, "client_projection_output_labels").unwrap();
+    let rules = LiveStreamRules::from_private_config(config).unwrap();
+    let proof = context_refresh::prove_native_history_retirement(history, &source, session, &labels).unwrap().unwrap();
+    let mut replacement = source.clone();
+    replacement.thread_id = "history-replacement".into();
+    replacement.native_terminal = None;
+    replacement.native_history_retirement = Some(NativeHistoryRetirement {
+        source_thread: source.thread_id, source_generation: source.context_generation,
+        replacement_thread: replacement.thread_id.clone(), source_artifact: input.clone(),
+        source_movement_seq: source_seq, proof,
+    });
+    let (emit, mut outputs) = ProviderOutputStream::channel();
+    let sink = TurnSink { emit: &emit, output_root, live_stream_root: output_root, provider_interface: &descriptor.id,
+        run: &source.run, source_movement_seq: source_seq, attempt: 1, context_output_labels: &labels,
+        client_projection_output_labels: &projected, live_stream_rules: &rules,
+        live_stream: std::sync::Mutex::new(None), continuity: emit.continuity.clone() };
+    sink.set_continuity(replacement);
+    let collect = async {
+        let ProviderStreamEmission::ContextBoundary { mut emissions, admitted } = outputs.recv().await.unwrap() else { panic!("native history boundary") };
+        assert_eq!(emissions.len(), 1);
+        admitted.send(Ok(())).unwrap();
+        emissions.remove(0)
+    };
+    let (result, emission) = tokio::join!(sink.admit_native_history_retirement(), collect);
+    result.unwrap();
+    emission
 }
 
 #[cfg(test)]
@@ -14975,6 +15098,7 @@ fn reconcile_current_session_continuity(
             || current.thread_shape_fingerprint != bound.thread_shape_fingerprint
             || current.static_context_fingerprint != bound.static_context_fingerprint)
         && !current.context_refresh.as_ref().is_some_and(|refresh| refresh.connects(&bound, &current))
+        && !current.native_history_retirement.as_ref().is_some_and(|retirement| retirement.connects(&bound, &current))
     {
         return Err(InterfaceDriverError::FailedClosed(
             "Codex current session detached a pending result from its exact private thread"
@@ -15262,6 +15386,7 @@ fn parse_codex_continuity(
         ));
     }
     if let Some(refresh) = &state.context_refresh { refresh.validate(&state)?; }
+    if let Some(retirement) = &state.native_history_retirement { retirement.validate(&state)?; }
     validate_pending_continuity_coordinates(state.pending.as_ref(), "pending")?;
     validate_pending_continuity_coordinates(
         state.interrupted_pending.as_ref(),
@@ -16605,6 +16730,7 @@ mod tests {
             tool_operator_request: None,
             native_terminal: None,
             context_refresh: None,
+            native_history_retirement: None,
         }
     }
 
@@ -18928,7 +19054,7 @@ mod tests {
         }))).unwrap();
         let mut restored_thread = thread.clone();
         restored_thread.path = Some(rollout_path);
-        let resume_response = serde_json::json!({"id":2, "result": ThreadResumeResponse {
+        let resume_response = serde_json::json!({"id":3, "result": ThreadResumeResponse {
             thread: restored_thread.clone(), model: "gpt-5.5".into(), model_provider: "openai".into(),
             service_tier: None, cwd: cwd.clone(), runtime_workspace_roots: Vec::new(),
             instruction_sources: Vec::new(), approval_policy: AskForApproval::OnFailure,
@@ -18936,16 +19062,20 @@ mod tests {
             active_permission_profile: None, reasoning_effort: None, multi_agent_mode: None,
             initial_turns_page: None,
         }}).to_string();
-        let read_response = serde_json::json!({"id":3, "result": ThreadReadResponse {
+        let read_response = serde_json::json!({"id":4, "result": ThreadReadResponse {
             thread: restored_thread.clone(),
         }}).to_string();
         let mut pending_thread = restored_thread;
         pending_thread.turns = vec![serde_json::from_value(serde_json::json!({
             "id":"turn-1","items":[],"itemsView":"full","status":"inProgress","error":null
         })).unwrap()];
-        let terminal_probe = serde_json::json!({"id":1,"result":{"thread":pending_thread}}).to_string();
+        pending_thread.turns[0].items_view = TurnItemsView::NotLoaded;
+        let first_turns = serde_json::json!({"id":2,"result":{"data":pending_thread.turns,"nextCursor":null,"backwardsCursor":null}}).to_string();
         pending_thread.turns[0].id = "turn-continued".into();
-        let next_terminal_probe = serde_json::json!({"id":7,"result":{"thread":pending_thread}}).to_string();
+        let next_turns = serde_json::json!({"id":9,"result":{"data":pending_thread.turns,"nextCursor":null,"backwardsCursor":null}}).to_string();
+        pending_thread.turns.clear();
+        let terminal_probe = serde_json::json!({"id":1,"result":{"thread":pending_thread}}).to_string();
+        let next_terminal_probe = serde_json::json!({"id":8,"result":{"thread":pending_thread}}).to_string();
         let script_path = temp.path().join("app-server.sh");
         std::fs::write(
             &script_path,
@@ -18956,26 +19086,32 @@ IFS= read -r _
 IFS= read -r probe
 case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
 printf '%s\n' "$5"
+IFS= read -r turns
+case "$turns" in *'"method":"thread/turns/list"'*) ;; *) exit 1;; esac
+printf '%s\n' "$7"
 IFS= read -r _
 printf '%s\n' "$3"
 IFS= read -r _
 printf '%s\n' "$4"
 IFS= read -r inject
 printf '%s\n' "$inject" > "$1"
-printf '%s\n' '{"id":4,"result":{}}'
+printf '%s\n' '{"id":5,"result":{}}'
 IFS= read -r turn
 case "$turn" in *'"input":[]'*) ;; *) exit 1;; esac
-printf '%s\n' '{"id":5,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
+printf '%s\n' '{"id":6,"result":{"turn":{"id":"turn-continued","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}'
 printf '%s\n' '{"method":"item/started","params":{"threadId":"thr-exact","turnId":"turn-continued","startedAtMs":1,"item":{"type":"webSearch","id":"web-1","query":"example","action":null}}}'
 printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":2,"item":{"type":"webSearch","id":"web-1","query":"example","action":{"type":"search","query":"example"},"results":[{"url":"https://example.com","title":"Example","snippet":"search evidence"}]}}}'
 printf '%s\n' '{"id":"server-tool-1","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-2","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"pwd"}}}'
 printf '%s\n' '{"method":"item/completed","params":{"threadId":"thr-exact","turnId":"turn-continued","completedAtMs":3,"item":{"type":"agentMessage","id":"commentary-after-result","text":"Continuing","phase":"commentary"}}}'
 printf '%s\n' '{"id":"server-tool-2","method":"item/tool/call","params":{"threadId":"thr-exact","turnId":"turn-continued","callId":"call-3","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"ls"}}}'
 IFS= read -r _
-printf '%s\n' '{"id":6,"result":{"data":[]}}'
+printf '%s\n' '{"id":7,"result":{"data":[]}}'
 IFS= read -r probe
 case "$probe" in *'"method":"thread/read"'*) ;; *) exit 1;; esac
 printf '%s\n' "$6"
+IFS= read -r turns
+case "$turns" in *'"method":"thread/turns/list"'*) ;; *) exit 1;; esac
+printf '%s\n' "$8"
 IFS= read -r response
 printf '%s\n' "$response" > "$2"
 while IFS= read -r _; do :; done
@@ -18995,6 +19131,8 @@ while IFS= read -r _; do :; done
                 read_response,
                 terminal_probe,
                 next_terminal_probe,
+                first_turns,
+                next_turns,
             ],
             cwd: Some(temp.path().to_path_buf()),
             codex_home: None,
@@ -19509,6 +19647,7 @@ while IFS= read -r _; do :; done
                 &TransportStateScope::Run("run-a".to_string()),
                 ThreadAcquisition {
                     recovered: Some(&recovered),
+                    retired_history: None,
                     require_exact_resume: false,
                     context_generation: 8,
                     model: Some("gpt-5.5".to_string()),
@@ -19531,6 +19670,7 @@ while IFS= read -r _; do :; done
                 &TransportStateScope::Run("run-a".to_string()),
                 ThreadAcquisition {
                     recovered: Some(&regressed),
+                    retired_history: None,
                     require_exact_resume: false,
                     context_generation: 7,
                     model: Some("gpt-5.5".to_string()),
@@ -22034,11 +22174,12 @@ while IFS= read -r _; do :; done
         use octopus_appserver_proto::{Thread, ThreadStatus, SessionSource};
         for (with_stop, cold, mode) in [
             (true, false, "completed"), (true, false, "completed_no_events"),
+            (true, true, "completed_no_events"), (true, true, "wrong_thread"), (true, true, "live"),
             (true, false, "wrong_thread"), (true, false, "wrong_turn"), (true, false, "absent"),
-            (true, false, "live"), (true, false, "read_error"), (true, false, "not_loaded"),
+            (true, false, "live"), (true, false, "read_error"), (true, false, "wrong_item_turn"),
             (false, false, "completed"), (false, false, "completed_no_events"), (false, true, "completed_no_events"),
             (false, false, "wrong_thread"), (false, false, "wrong_turn"), (false, false, "absent"),
-            (false, false, "live"), (false, false, "read_error"), (false, false, "not_loaded"),
+            (false, false, "live"), (false, false, "read_error"), (false, false, "wrong_item_turn"),
         ] {
             let terminal_case = matches!(mode, "completed" | "completed_no_events");
             let temp = tempfile::tempdir().unwrap();
@@ -22048,7 +22189,7 @@ while IFS= read -r _; do :; done
                 id: if mode == "wrong_turn" { "other-turn" } else { "turn-a" }.into(),
                 items: vec![ThreadItem::Reasoning { id: "reason-a".into(), summary: vec!["Actual progress".into()], content: vec![] },
                     ThreadItem::AgentMessage { id: "final-a".into(), text: "Already produced native answer.".into(), phase: Some(MessagePhase::FinalAnswer) }],
-                items_view: if mode == "not_loaded" { TurnItemsView::NotLoaded } else { TurnItemsView::Full },
+                items_view: TurnItemsView::Full,
                 status: if mode == "live" { TurnStatus::InProgress } else { TurnStatus::Completed },
                 error: None, started_at: Some(10), completed_at: Some(20), duration_ms: Some(10_000),
             };
@@ -22058,7 +22199,7 @@ while IFS= read -r _; do :; done
                 created_at: 10, updated_at: 20, recency_at: Some(20), status: ThreadStatus::Idle, path: None,
                 cwd: octopus_util_abspath::AbsolutePathBuf::from_absolute_path(temp.path()).unwrap(), cli_version: "test".into(),
                 source: SessionSource::Exec, thread_source: None, agent_nickname: None, agent_role: None, git_info: None, name: None,
-                turns: if mode == "absent" { vec![] } else { vec![turn.clone()] },
+                turns: vec![],
             };
             let server = tokio::spawn(async move {
                 let mut socket = tokio_tungstenite::accept_async(listener.accept().await.unwrap()).await.unwrap();
@@ -22073,7 +22214,7 @@ while IFS= read -r _; do :; done
                 }
                 let octopus_appserver_proto::JSONRPCMessage::Request(read) = next_test_rpc(&mut socket).await else { panic!("thread/read") };
                 assert_eq!(read.method, "thread/read");
-                assert_eq!(read.params.as_ref().unwrap(), &serde_json::json!({"threadId":"thread-a","includeTurns":true}));
+                assert_eq!(read.params.as_ref().unwrap(), &serde_json::json!({"threadId":"thread-a"}));
                 if mode == "read_error" {
                     send_test_error(&mut socket, read.id, "read unavailable").await;
                 } else {
@@ -22088,6 +22229,41 @@ while IFS= read -r _; do :; done
                         }
                     }
                     send_test_result(&mut socket, read.id, serde_json::to_value(ThreadReadResponse { thread }).unwrap()).await;
+                    if mode != "wrong_thread" {
+                        let mut metadata = serde_json::to_value(&turn).unwrap();
+                        metadata["items"] = serde_json::json!([]);
+                        metadata["itemsView"] = serde_json::json!("notLoaded");
+                        let mut newer = metadata.clone(); newer["id"] = serde_json::json!("newer-turn");
+                        for (cursor, data, next) in [
+                            (None, vec![newer], Some("older")),
+                            (Some("older"), if mode == "absent" { vec![] } else { vec![metadata] }, None),
+                        ] {
+                            let JSONRPCMessage::Request(page) = next_test_rpc(&mut socket).await else { panic!("turn page") };
+                            assert_eq!(page.method, "thread/turns/list");
+                            assert_eq!(page.params.unwrap(), serde_json::json!({
+                                "threadId":"thread-a", "cursor":cursor, "limit":100,
+                                "sortDirection":"desc", "itemsView":"notLoaded",
+                            }));
+                            send_test_result(&mut socket, page.id, serde_json::json!({
+                                "data":data, "nextCursor":next, "backwardsCursor":null,
+                            })).await;
+                        }
+                        if !matches!(mode, "absent" | "wrong_turn" | "live") {
+                            for (index, item) in turn.items.iter().enumerate() {
+                                let JSONRPCMessage::Request(page) = next_test_rpc(&mut socket).await else { panic!("item page") };
+                                assert_eq!(page.method, "thread/items/list");
+                                assert_eq!(page.params.unwrap(), serde_json::json!({
+                                    "threadId":"thread-a", "turnId":"turn-a", "limit":100,
+                                    "cursor": if index == 0 { None } else { Some("last") }, "sortDirection":"asc",
+                                }));
+                                send_test_result(&mut socket, page.id, serde_json::json!({
+                                    "data":[{"turnId":if mode == "wrong_item_turn" { "wrong" } else { "turn-a" }, "item":item}],
+                                    "nextCursor": if index == 0 { Some("last") } else { None }, "backwardsCursor":null,
+                                })).await;
+                                if mode == "wrong_item_turn" { break; }
+                            }
+                        }
+                    }
                 }
                 while let Some(Ok(frame)) = socket.next().await {
                     if let tokio_tungstenite::tungstenite::Message::Text(frame) = frame {
@@ -22128,13 +22304,30 @@ while IFS= read -r _; do :; done
                 continuity: Some(original.clone()), handoff_barrier: barrier.clone(), effect_gate: gate.clone(), turn_interrupted: interrupted.clone(),
                 thread_id: "thread-a".into(), turn_id: "turn-a".into(),
             });
+            if cold && with_stop { driver.restore_pending_control(&control, original.clone()).await; }
             let mut applied = if with_stop { Some(tokio::time::timeout(std::time::Duration::from_secs(3), control.apply(
                 CodexTurnControl::Interrupt { control_id: "stop-a".into(), action: "stop".into() }, |_| Ok(()),
             )).await.unwrap().unwrap()) } else { None };
             if let Some(applied) = applied.as_mut() {
                 assert_eq!(applied.result.acknowledged, terminal_case, "{mode}");
-                assert_eq!(driver.pending_request(&scope, "tool:call-a").await.unwrap().unwrap().request_id, pending.request_id);
+                if !cold { assert_eq!(driver.pending_request(&scope, "tool:call-a").await.unwrap().unwrap().request_id, pending.request_id); }
                 drop(applied.effect_guard.take());
+            }
+            if cold && with_stop {
+                let applied = applied.unwrap();
+                assert!(!driver.has_pending_request(&scope).await);
+                if terminal_case {
+                    let recovered = applied.result.continuity.unwrap();
+                    assert_eq!(recovered.interrupted_pending, original.pending);
+                    assert_eq!(recovered.context_generation, original.context_generation + 1);
+                    assert!(control.has_interrupted_pending());
+                    applied.durable_interrupt_handoff.unwrap().finish(Ok(()));
+                    control.prepare_recovered_result().await.unwrap();
+                    assert!(control.has_interrupted_pending());
+                } else { assert!(control.is_recovered_pending()); }
+                assert!(outputs.try_recv().is_err());
+                driver.shutdown().await.unwrap(); server.await.unwrap();
+                continue;
             }
             if terminal_case || !with_stop {
                 let recovered = if let Some(applied) = applied {

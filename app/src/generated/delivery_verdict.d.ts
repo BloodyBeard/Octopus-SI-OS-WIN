@@ -23,4 +23,5 @@ export type RefusedReason =
   | "stale_epoch"
   | "checkpoint_spent"
   | "settled"
+  | "registry_unstable"
   | "malformed";

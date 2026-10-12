@@ -45,6 +45,7 @@ async fn authored_interpreted_tool_loads_hot_and_repairs_in_the_same_run() {
         max_control_frame_bytes: 65536, max_stderr_bytes: 65536,
         max_manifest_bytes: 65536, max_payload_bytes: 65536,
     });
+    std::fs::write(&ctx.movements_path, b"").unwrap();
     let host = ToolProcessBrokerHost::default();
     let arguments = |sequence| if sequence == 8 { json!({"value":"artifact example"}) } else { json!({}) };
     let envelope = |sequence| {
@@ -156,7 +157,7 @@ require('readline').createInterface({input:process.stdin}).on('line', line => {
             let output = tokio::select! {
                 output = outputs.recv() => output.unwrap(),
                 result = &mut invoked => match result {
-                    ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable { error } | ToolProcessBrokerResult::CapabilityFailed { error }) => panic!("{error}\n{}", stderr(&ctx)),
+                    ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable { error } | ToolProcessBrokerResult::CapabilityFailed { error } | ToolProcessBrokerResult::OutputPending { error }) => panic!("{error}\n{}", stderr(&ctx)),
                     _ => panic!("invocation finished before its artifact arrived"),
                 },
             };
@@ -166,7 +167,7 @@ require('readline').createInterface({input:process.stdin}).on('line', line => {
         }).await.unwrap_or_else(|_| panic!("call {sequence} timed out\n{}", stderr(&ctx)));
         match result.0 {
             ToolProcessBrokerInvocation::Completed(_) => observed.push(result.1),
-            ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable { error } | ToolProcessBrokerResult::CapabilityFailed { error }) => panic!("{error}"),
+            ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable { error } | ToolProcessBrokerResult::CapabilityFailed { error } | ToolProcessBrokerResult::OutputPending { error }) => panic!("{error}"),
             _ => panic!("authored invocation did not complete"),
         }
     }

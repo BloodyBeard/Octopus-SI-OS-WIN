@@ -391,6 +391,8 @@ struct PendingHandoff {
     context_publication: Option<Vec<ArtifactId>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     source_without_context: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settlement_of: Option<ArtifactRef>,
 }
 
 mod context_publication;
@@ -403,6 +405,7 @@ pub use failed_source::{payload_carries_session_context, FailedSourceHandoffErro
 mod writer_run;
 pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_writer_binding, OwnerWriterEdit, OwnerWriterEvidence, WriterRunBinding};
 mod source_replay;
+mod source_settlement;
 mod settled_definition;
 pub mod capability_amendment;
 pub use capability_amendment::ProviderCapabilityAmendment;
@@ -886,11 +889,25 @@ pub trait CheckedRunEvidenceReader {
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String>;
+    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
+        let hash = ContentHash::of_bytes(before).to_hex();
+        let mut first = None;
+        let mut last_segment = None;
+        for sequence in 0..=after_seq {
+            let row = self.admitted_movement(sequence)?.ok_or("checked writer evidence interval is incomplete")?;
+            if row.kind != MovementKind::InterfaceOutbound { continue; }
+            let Some(runtime) = row.runtime().filter(|runtime| runtime.run == record.id) else { continue; };
+            if runtime.run_record_hash.as_deref() == Some(hash.as_str()) {
+                first.get_or_insert(sequence); last_segment = first;
+            } else { first = None; }
+        }
+        Ok(last_segment.map_or(after_seq, |sequence| sequence.saturating_sub(1)))
+    }
     fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
         input_revision::reader_readiness(self, record, provider, before_seq)
     }
-    fn input_payloads_ready(&mut self, record: &RunRecord, provider: &InterfaceId, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
-        input_revision::reader_payload_readiness(self, record, provider, source, before_seq)
+    fn input_payloads_ready(&mut self, path: &Path, current: &[u8], writer: &CheckedRunWriter, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::reader_payload_readiness(self, path, current, writer, source, before_seq)
     }
 }
 
@@ -938,11 +955,14 @@ impl<'a> FileCheckedRunReader<'a> {
 
 impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
     fn max_payload_bytes(&self) -> u64 { self.evidence.max_payload_bytes }
+    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
+        concurrent_writer_evidence_start(self.evidence, record, before, after_seq)
+    }
     fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
         input_revision::readiness(self.evidence, record, provider, before_seq)
     }
-    fn input_payloads_ready(&mut self, record: &RunRecord, provider: &InterfaceId, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
-        input_revision::payload_readiness(self.evidence, record, provider, source, before_seq)
+    fn input_payloads_ready(&mut self, path: &Path, current: &[u8], writer: &CheckedRunWriter, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        input_revision::payload_readiness(self.evidence, path, current, writer, source, before_seq)
     }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         generated_artifacts::read_movement(self.evidence,seq).map(Some)
@@ -1130,7 +1150,7 @@ fn checked_run_file_chain_with_reader(
                 generated_artifacts::validate_generated_transition(reader,&transition)?;
                 input_artifacts::validate_input_transition(reader, &transition)?;
                 validate_verified_input_transition(reader,&transition)?;
-                input_revision::validate_rearm_evidence(reader, &transition)?;
+                input_revision::validate_rearm_evidence(reader, &transition, path)?;
                 if transitions.len() >= 1024 { return Err("checked authoring transitions exceed their evidence bound".into()); }
                 transitions.push(transition);
                 continue;
@@ -1162,7 +1182,7 @@ fn checked_run_file_chain_with_reader(
             generated_artifacts::validate_generated_transition(reader,&transition)?;
             input_artifacts::validate_input_transition(reader, &transition)?;
             validate_verified_input_transition(reader, &transition)?;
-            input_revision::validate_rearm_evidence(reader, &transition)?;
+            input_revision::validate_rearm_evidence(reader, &transition, path)?;
             transitions.push(transition);
         }
     }
@@ -1670,10 +1690,11 @@ pub fn validate_unchanged_admitted_checkpoint(before: &[u8], after: &[u8], check
 }
 
 pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -> Result<(), String> {
-    if capability_amendment::validate_transition(transition)? { return Ok(()); }
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
     let provider = &transition.writer.owner;
+    source_settlement::validate_checked_transition(&before, &after, &transition.writer)?;
+    if capability_amendment::validate_transition(transition)? { return Ok(()); }
     let read = |record: &RunRecord| -> Result<BoundRunAuthoringTopology, String> {
         let state = record.interface_state.get(provider).ok_or("checked provider lost its state")?;
         serde_json::from_value(state.get(RUN_AUTHORING_BINDING).cloned().ok_or("checked provider lost its topology")?).map_err(|e| e.to_string())
@@ -2720,6 +2741,7 @@ fn validate_authoring_attempt_source(
     let candidate = RunRecord::from_bytes(content.as_bytes()).map_err(|error| {
         format!("provider authoring failure source call carries a malformed run: {error}")
     })?;
+    source_settlement::validate_transition(record, &candidate, config)?;
     if candidate.id != record.id || candidate.worker != record.worker {
         return Err(
             "provider authoring failure source call carries the wrong run topology".to_string(),
@@ -4282,7 +4304,7 @@ async fn await_checked_evidence<T>(
     ctx: &InterfaceLiftContext,
     timeout_ms: u64,
     mut validate: impl FnMut() -> Result<T, CheckedRunError>,
-) -> Result<T, String> {
+) -> Result<T, CheckedRunError> {
     let deadline = Instant::now()
         .checked_add(Duration::from_millis(timeout_ms))
         .ok_or("checked input evidence deadline overflow")?;
@@ -4293,17 +4315,17 @@ async fn await_checked_evidence<T>(
         }
         match validate() {
             Ok(value) => return Ok(value),
-            Err(CheckedRunError::Invalid(error)) => return Err(error),
+            Err(error @ CheckedRunError::Invalid(_)) => return Err(error),
             Err(changed @ CheckedRunError::ChangedDuringRead { .. }) => {
                 if Instant::now() >= deadline {
-                    return Err(format!("checked input evidence timeout: {changed}"));
+                    return Err(changed);
                 }
                 tokio::task::yield_now().await;
             }
             Err(waiting @ CheckedRunError::AwaitingResults { .. }) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(format!("checked input evidence timeout: {waiting}"));
+                    return Err(waiting);
                 }
                 if watcher.is_none() {
                     watcher = Some(LedgerTailReader::open_named(ctx, "checked-input-evidence")?);
@@ -4313,7 +4335,7 @@ async fn await_checked_evidence<T>(
                     watcher.as_mut().unwrap().wait_for_change(&ctx.cancel),
                 )
                 .await
-                .map_err(|_| format!("checked input evidence timeout: {waiting}"))??;
+                .map_err(|_| waiting)??;
             }
         }
     }
@@ -4357,7 +4379,7 @@ impl ProviderHandoffSession {
     pub async fn from_invocation_when_ready(
         &self, ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId,
         input: &InterfaceInvocationEnvelope, source_movement_seq: u64, pinned_run_record: &[u8],
-    ) -> Result<ProviderOutputHandoff, String> {
+    ) -> Result<ProviderOutputHandoff, CheckedRunError> {
         let profile = run_authoring_profile(descriptor)?;
         await_checked_evidence(ctx, profile.result_timeout_ms, || {
             self.from_invocation_state(ctx, descriptor, run, input, source_movement_seq, pinned_run_record)
@@ -6174,7 +6196,7 @@ impl ProviderOutputHandoff {
         let batch_count = batches.len();
         let mut outcomes = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment)
+            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None)
                 .await?;
             let failed = delivered.iter().any(|outcome| matches!(outcome, ProviderHandoffOutcome::TerminalFailure { .. }));
             outcomes.extend(delivered);
@@ -6193,11 +6215,20 @@ impl ProviderOutputHandoff {
         consume_input: bool,
         independent_source: Option<u64>,
         amendment: Option<&ProviderCapabilityAmendment>,
+        settlement_of: Option<(&ArtifactRef, u64)>,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         let mut state = self.state.lock().await;
         self.reconcile_checked_run_state(&mut state).await?;
         let mut active = self.clone();
         let record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+        if let Some((predecessor, _)) = settlement_of {
+            let prior = persisted_pending_handoff(&record, &self.config.provider_interface)?.ok_or("source settlement has no predecessor")?;
+            if !self.source_carries_context || prior.items.len() != 1
+                || !self.session_snapshot_labels.contains(&prior.items[0].artifact_label)
+                || state.session_snapshot_head.as_ref().map(|head| &head.artifact) != Some(predecessor) {
+                return Err("source settlement requires its exact currently selected parent snapshot".into());
+            }
+        }
         let topology: BoundRunAuthoringTopology = serde_json::from_value(
             record.interface_state.get(&self.config.provider_interface)
                 .and_then(|state| state.get(RUN_AUTHORING_BINDING)).cloned()
@@ -6311,6 +6342,9 @@ impl ProviderOutputHandoff {
             extend_amendment_context_bindings(
                 &amended, &active.config.provider_interface, &mut next_context, &mut next_static_context,
             )?;
+        }
+        if let Some((predecessor, context_generation)) = settlement_of {
+            active.attach_source_settlement(&state.run_record_bytes, &mut authored, predecessor, context_generation)?;
         }
         let pending = authored.pending_handoff.clone();
         match active.install_authored_run(&mut state, &authored).await? {
@@ -6953,7 +6987,8 @@ impl ProviderOutputHandoff {
                 }
                 if (prior.source_movement_seq < self.source_movement_seq && !prior.terminal)
                     || (prior.source_movement_seq == self.source_movement_seq && prior.terminal
-                        && !context_publication::is_publication_completion(&prior, &attempt.authored.pending_handoff))
+                        && !context_publication::is_publication_completion(&prior, &attempt.authored.pending_handoff)
+                        && !source_settlement::follows_completed_source(&prior, &attempt.authored.pending_handoff))
                 {
                     return Err(format!(
                         "provider authoring attempt for movement {} cannot supersede pending movement {} (terminal={})",
@@ -8440,6 +8475,7 @@ impl ProviderOutputHandoff {
             terminal,
             context_publication: (live_context != target_context).then_some(target_context),
             source_without_context: self.failed_source,
+            settlement_of: None,
         };
         provider_state.insert(
             "pending_handoff".to_string(),
@@ -11238,7 +11274,9 @@ fn materialize_checkpoint(
     let mut artifact_bindings = artifact_bindings.to_vec();
     for artifact in &checkpoint.static_artifact_bindings {
         let binding = serde_json::json!({"id":artifact});
-        if !artifact_bindings.contains(&binding) { artifact_bindings.push(binding); }
+        if !artifact_bindings.iter().any(|existing| existing.get("id") == binding.get("id")) {
+            artifact_bindings.push(binding);
+        }
     }
     serde_json::json!({
         "id": id,
@@ -15126,6 +15164,7 @@ mod tests {
             source_movement_seq: 41,
             context_publication: None,
             source_without_context: false,
+            settlement_of: None,
             items: vec![PendingHandoffItem {
                 artifact_id: source.id.clone(),
                 artifact_content_hash: source.content.to_hex(),
@@ -18211,6 +18250,7 @@ mod tests {
             source_movement_seq: 17,
             context_publication: None,
             source_without_context: false,
+            settlement_of: None,
             items: vec![PendingHandoffItem {
                 artifact_id: identity.artifact.id.clone(),
                 artifact_content_hash: identity.artifact.content.to_hex(),

@@ -6,6 +6,23 @@ use serde_json::{Value, json};
 mod support;
 use support::{fixture, write};
 
+fn enable_native_profile(root: &std::path::Path) {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/interface/world_provider_codex/interface.json");
+    let declared: Value = serde_json::from_slice(&std::fs::read(source).unwrap()).unwrap();
+    let path = "registry/interface/world_provider_fixture/interface.json";
+    let mut provider: Value = serde_json::from_slice(&std::fs::read(root.join(path)).unwrap()).unwrap();
+    provider["interface_driver_config"]["private_config"]["run_affordance_profile"] = declared["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
+    write(root, path, provider);
+}
+
+fn adoption_request(root: &std::path::Path, request: &RunCompositionRequest, plan: &RunCompositionPlan) -> Value {
+    use sha2::Digest;
+    let provider = request.roots.registry_root.join("interface").join(&plan.provider_interface_id).join("interface.json");
+    json!({"roots":request.roots,"ledger_root":root.join("ledger"),"client_template_interface":"world_operator_chat",
+        "run_id":plan.run_id,"expected_run_hash":format!("{:x}",sha2::Sha256::digest(std::fs::read(&plan.run_write.path).unwrap())),
+        "expected_provider_hash":format!("{:x}",sha2::Sha256::digest(std::fs::read(provider).unwrap()))})
+}
+
 #[test]
 fn current_selection_materializes_defaults_and_preserves_provider_life_while_attaching() {
     use octopus_operator_chat_client::{SelectedToolSeed,run_composition::current_run::*};
@@ -556,20 +573,33 @@ fn owner_input_revision_retry_keeps_the_original_exact_request() {
 fn composition_binds_planned_native_catalog_and_task_coordinates_before_validation() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    let request = fixture(&root);
+    let mut request = support::client_fixture(&root);
+    request.communication.client_template_interface_id = None;
+    request.communication.client_title = None;
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
-    let declared: Value = serde_json::from_slice(
-        &std::fs::read(source.join("registry/interface/world_provider_codex/interface.json"))
-            .unwrap(),
-    )
-    .unwrap();
-    let provider_path = "registry/interface/world_provider_fixture/interface.json";
-    let mut provider: Value =
-        serde_json::from_slice(&std::fs::read(root.join(provider_path)).unwrap()).unwrap();
-    provider["interface_driver_config"]["private_config"]["run_affordance_profile"] =
-        declared["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
-    write(&root, provider_path, provider);
+    for relative in ["interface/system_browser/interface.json", "interface/system_browser/life.json",
+        "worker_environment_kind/browser_session/worker_environment_kind.json", "tool/browser.navigate/tool.json",
+        "tool/browser.filechooser_set_files/tool.json", "tool/browser.filechooser_resume/tool.json"] {
+        let value=serde_json::from_slice(&std::fs::read(source.join("registry").join(relative)).unwrap()).unwrap();
+        write(&root.join("registry"),relative,value);
+    }
+    for (file, interfaces, tools) in [("registry/interface/system_worker_template/policy.json","/ceiling/interfaces","/ceiling/tools"),
+        ("registry/ee_template/existence/ee_template.json","/allowed_interfaces","/allowed_tools"),
+        ("ee/ee_existence.json","/policy_narrowing/allowed_interfaces","/policy_narrowing/allowed_tools")] {
+        let mut value:Value=serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(interfaces).unwrap().as_array_mut().unwrap().push(json!("system_browser"));
+        value.pointer_mut(tools).unwrap().as_array_mut().unwrap().extend([json!("browser.navigate"),json!("browser.filechooser_set_files"),json!("browser.filechooser_resume")]);
+        if let Some(kinds)=value.pointer_mut("/ceiling/wek") {kinds.as_array_mut().unwrap().push(json!("browser_session"));}
+        write(&root,file,value);
+    }
+    request.selected_tools.push(octopus_operator_chat_client::SelectedToolSeed {tool:"browser.navigate".into(),interface:"system_browser".into(),worker_environment_kind:"browser_session".into()});
+    request.selected_worker_environment_kinds=vec!["system_room".into(),"browser_session".into()];
+    enable_native_profile(&root);
     let plan = plan_run_composition(&request).unwrap();
+    assert_eq!(plan.authoring.capability_tools.len(),3);
+    assert!(plan.authoring.capability_tools.contains_key("browser.navigate"));
+    let browser:Value=serde_json::from_str(&plan.descriptor_writes.iter().find(|write|write.tag==format!("interface:{}",plan.authoring.capability_doors["system_browser"])).unwrap().content).unwrap();
+    assert!(browser["interface_driver_config"]["private_config"]["browser_room"].get("upload_approval").is_none());
     let provider: Value = serde_json::from_str(
         &plan
             .descriptor_writes
@@ -580,6 +610,7 @@ fn composition_binds_planned_native_catalog_and_task_coordinates_before_validati
     )
     .unwrap();
     let config = &provider["interface_driver_config"]["private_config"]["run_affordances"];
+    assert_eq!(config["defaults"]["client_template_interface_id"],Value::Null);
     assert_eq!(
         config["file_write_tool"],
         plan.authoring.capability_tools["file.write"]
@@ -643,6 +674,62 @@ fn composition_binds_planned_native_catalog_and_task_coordinates_before_validati
     .unwrap();
     assert!(validation.safe_to_apply, "{:?}", validation.regressions);
     assert!(!request.roots.run_records_root.exists());
+    let selected=request.selected_tools.clone();
+    request.selected_tools.clear();
+    assert!(plan_run_composition(&request).unwrap_err().contains("upload approval names another source client"));
+    request.selected_tools=selected;
+    request.selected_tools.retain(|tool|tool.tool!="file.write");
+    let without_writer=plan_run_composition(&request).unwrap();
+    assert_eq!(without_writer.authoring.capability_tools["file.write"],without_writer.authoring.tool_id);
+    request.communication.client_template_interface_id=Some("world_operator_chat".into());
+    request.communication.client_title=Some("Background task".into());
+    request.selected_tools.push(octopus_operator_chat_client::SelectedToolSeed {tool:"file.write".into(),interface:"system_room".into(),worker_environment_kind:"system_room".into()});
+    let child=plan_run_composition(&request).unwrap();
+    let provider:Value=serde_json::from_str(&child.descriptor_writes.iter().find(|write|write.tag==format!("interface:{}",child.provider_interface_id)).unwrap().content).unwrap();
+    assert_eq!(provider["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"],"world_operator_chat");
+    for edit in composition_candidate_writes(&child) {
+        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path,edit.content).unwrap();
+    }
+    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap();
+    std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
+    let provider_path=request.roots.registry_root.join("interface").join(&child.provider_interface_id).join("interface.json");
+    let mut old=provider.clone();
+    let defaults=old["interface_driver_config"]["private_config"]["run_affordances"]["defaults"].as_object_mut().unwrap();
+    defaults.remove("client_template_interface_id"); defaults.insert("return_interface_ids".into(),json!(["chosen.destination"]));
+    std::fs::write(&provider_path,serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    let source_path=root.join("registry/interface/world_provider_fixture/interface.json");
+    let mut source:Value=serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
+    source["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["operations"][0]["description"]=json!("Updated release description");
+    std::fs::write(&source_path,serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let original_run=std::fs::read(&child.run_write.path).unwrap();
+    let plan_adoption=|| {
+        octopus_operator_chat_client::native_run_authoring::plan_existing_adoption(&serde_json::from_value(adoption_request(&root,&request,&child)).unwrap())
+            .map(|plan|serde_json::to_value(plan).unwrap())
+    };
+    let adopted=plan_adoption().unwrap(); assert_eq!(adopted["status"],"planned"); assert_eq!(adopted["writes"].as_array().unwrap().len(),2);
+    let updated:Value=serde_json::from_str(adopted["writes"][1]["content"].as_str().unwrap()).unwrap();
+    let mut expected=old.clone();
+    let private=&mut expected["interface_driver_config"]["private_config"];
+    private["run_affordances"]["defaults"]["client_template_interface_id"]=json!("world_operator_chat");
+    private["run_affordances"]["catalog_artifact"]=updated["interface_driver_config"]["private_config"]["run_affordances"]["catalog_artifact"].clone();
+    private["run_affordance_profile"]=source["interface_driver_config"]["private_config"]["run_affordance_profile"].clone();
+    assert_eq!(updated,expected);
+    let catalog_path=adopted["writes"][0]["path"].as_str().unwrap();
+    let catalog_bytes=std::fs::read(catalog_path).unwrap();
+    let mut local:Value=serde_json::from_slice(&catalog_bytes).unwrap(); local["text"]=json!("Locally authored catalog");
+    std::fs::write(catalog_path,serde_json::to_vec(&local).unwrap()).unwrap();
+    assert!(plan_adoption().unwrap_err().contains("prior owner-generated"));
+    std::fs::write(catalog_path,catalog_bytes).unwrap();
+    let mut explicit=old.clone();
+    explicit["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"]=Value::Null;
+    std::fs::write(&provider_path,serde_json::to_vec(&explicit).unwrap()).unwrap();
+    let explicit=plan_adoption().unwrap();
+    let explicit:Value=serde_json::from_str(explicit["writes"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(explicit["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["client_template_interface_id"],Value::Null);
+    std::fs::write(&provider_path,serde_json::to_vec_pretty(&old).unwrap()).unwrap();
+    for edit in adopted["writes"].as_array().unwrap() {std::fs::write(edit["path"].as_str().unwrap(),edit["content"].as_str().unwrap()).unwrap();}
+    assert_eq!(plan_adoption().unwrap()["status"],"unchanged");
+    assert_eq!(std::fs::read(&child.run_write.path).unwrap(),original_run);
 }
 
 #[tokio::test]
@@ -745,7 +832,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
 
     for separate_writer in [false, true] {
         let temp = tempfile::Builder::new().prefix("oct-rev-").tempdir_in("/tmp").unwrap(); let root = temp.path().canonicalize().unwrap();
-        let request = support::client_fixture(&root); let plan = plan_run_composition(&request).unwrap();
+        let request = support::client_fixture(&root); enable_native_profile(&root); let plan = plan_run_composition(&request).unwrap();
         for edit in plan.descriptor_writes.iter().chain(plan.required_policy_updates.iter().map(|u| &u.write)).chain(std::iter::once(&plan.run_write)) {
             std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(&edit.path, &edit.content).unwrap();
         }
@@ -782,6 +869,10 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         let socket_path = octopus_app_server_interface::interface_control_socket_path_from_root(&root.join("control"), &author);
         std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap(); let socket = tokio::net::UnixListener::bind(socket_path).unwrap();
         let mut b = Boundary {runtime,log,blobs:SharedBlobHandle::new(blobs.clone()),ctx,arrivals,socket,author,door:door.clone(),writes:0};
+        let source_path=root.join("registry/interface/world_provider_fixture/interface.json");
+        let mut updated_source:Value=serde_json::from_slice(&std::fs::read(&source_path).unwrap()).unwrap();
+        updated_source["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["text"]=json!("New native catalog release");
+        std::fs::write(source_path,serde_json::to_vec(&updated_source).unwrap()).unwrap();
         let attachment = b.file("fixture.payload", &json!({"text":"exact selected payload"}));
         let selected = json!([attachment.load_into_blob(&mut *blobs.lock().unwrap()).unwrap().artifact]);
         let mut scope = json!({"registry_root":request.roots.registry_root,"run_path":plan.run_write.path,"ledger_root":root.join("ledger"),
@@ -820,8 +911,26 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         assert_eq!(prepare(&scope,json!({"kind":"owner_inputs","desired_inputs":[]}),&current()).unwrap()["status"], "deferred");
         let (seq,input) = b.input(&message,&provider); let pinned = b.ctx.pinned_run_record_bytes(&input).unwrap();
         let handoff = ProviderHandoffSession::new(&b.ctx).unwrap().from_invocation(&b.ctx,b.ctx.descriptor_snapshot.as_ref().unwrap(),&plan.run_id.clone().into(),&input,seq,&pinned).unwrap();
+        assert_eq!(cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap()["status"],"deferred");
+        let unfinished_ledger=std::fs::read(root.join("ledger/movements.jsonl")).unwrap();
         let output = b.file("interface.artifact.output", &json!({"text":"fixture settled"}));
         b.finish(async { handoff.hand_final(ProviderEmission {artifact:output,route:ProviderEmissionRoute::ClientProjection}).await.map(|_| ()) }).await;
+        let adoption=adoption_request(&root,&request,&plan);
+        assert_eq!(cli("--plan-native-adoption",&adoption).unwrap()["status"],"planned");
+        let mut missing=adoption.clone(); missing["ledger_root"]=json!(root.join("unadmitted"));
+        std::fs::create_dir(root.join("unadmitted")).unwrap(); std::fs::write(root.join("unadmitted/movements.jsonl"),unfinished_ledger).unwrap();
+        std::os::unix::fs::symlink(root.join("ledger/blobs"),root.join("unadmitted/blobs")).unwrap();
+        std::os::unix::fs::symlink(root.join("ledger/metadata"),root.join("unadmitted/metadata")).unwrap();
+        assert_eq!(cli("--plan-native-adoption",&missing).unwrap()["status"],"deferred");
+        let stop=b.file("operator.turn.control",&json!({"action":"stop","control_id":"adoption-stop"}));
+        assert!(matches!(b.admit(&stop,&client).await,DeliveryVerdict::Admitted{..}));
+        let stopped_plan=cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap();
+        assert_eq!(stopped_plan["status"],"deferred"); assert_eq!(stopped_plan["writes"],json!([]));
+        let (stop_seq,stop_input)=b.input(&stop,&provider); let stop_pin=b.ctx.pinned_run_record_bytes(&stop_input).unwrap();
+        let stopped=ProviderHandoffSession::new(&b.ctx).unwrap().from_invocation(&b.ctx,b.ctx.descriptor_snapshot.as_ref().unwrap(),&plan.run_id.clone().into(),&stop_input,stop_seq,&stop_pin).unwrap();
+        let acknowledged=b.file("turn.control.acknowledged",&json!({"action":"stop","source_movement_seq":stop_seq}));
+        b.finish(async {stopped.hand_final(ProviderEmission {artifact:acknowledged,route:ProviderEmissionRoute::ClientProjection}).await.map(|_|())}).await;
+        assert_eq!(cli("--plan-native-adoption",&adoption_request(&root,&request,&plan)).unwrap()["status"],"planned");
         let settled = current(); let writes = b.writes;
         scope["key"] = json!("ordinary-rearm");
         assert_eq!(prepare(&scope,json!({"kind":"rearm"}),&settled).unwrap()["status"], "prepared");

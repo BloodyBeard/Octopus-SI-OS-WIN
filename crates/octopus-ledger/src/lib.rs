@@ -109,6 +109,7 @@ pub enum RefusedReason {
     StaleEpoch,
     CheckpointSpent,
     Settled,
+    RegistryUnstable,
     Malformed,
 }
 
@@ -123,6 +124,7 @@ impl RefusedReason {
             RefusedReason::StaleEpoch => "stale_epoch",
             RefusedReason::CheckpointSpent => "checkpoint_spent",
             RefusedReason::Settled => "settled",
+            RefusedReason::RegistryUnstable => "registry_unstable",
             RefusedReason::Malformed => "malformed",
         }
     }

@@ -49,6 +49,19 @@ function HomeActivityDetail({ message, toolPresentations }: {
   if (["commentary", "commentary_delta", "reasoning", "reasoning_delta", "plan", "plan_delta"].includes(kind)) {
     return message.text ? <MessageContent text={message.text} streaming={kind.endsWith("_delta")} streamKey={message.id} variant={kind.startsWith("reasoning") ? "reasoning" : "assistant"} /> : null;
   }
+  const data = homeEventRecord(message.eventData);
+  if (kind === "warning" && homeEventText(data.source) !== "model_safety_buffering") {
+    const detail = homeEventText(data.detail);
+    return (
+      <div className="conversation-notice is-danger">
+        <Glyph name="warning" size={13} />
+        <div>
+          <strong>{homeEventText(data.message) || message.text || "Warning"}</strong>
+          {detail ? <span>{detail}</span> : null}
+        </div>
+      </div>
+    );
+  }
   const actions = projectHomeLiveActions(message, toolPresentations);
   if (!actions.length) return null;
   return (

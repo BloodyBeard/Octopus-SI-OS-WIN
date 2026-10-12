@@ -22,7 +22,7 @@ pub mod input_intake;
 mod retained_connections;
 mod home_voice;
 mod home_outputs;
-mod native_run_authoring;
+pub mod native_run_authoring;
 mod writer_runs;
 pub use writer_runs::{OperatorWriterRunPlanRequest, OperatorWriterSchemaPlanRequest, plan_operator_writer_runs, plan_operator_writer_schema};
 #[cfg(test)]

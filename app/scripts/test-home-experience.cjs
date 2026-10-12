@@ -354,7 +354,8 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     "../../toasts": { appToast: { warning: noop, info: () => assert.fail("Routine voice context must not toast") }, useAppErrorToast: error => assert.doesNotMatch(error, /Exact (call|device) diagnostic/) },
     "../chat/OperatorRequestSurface": { OperatorRequestSurface: () => null },
     "../chat/MessageContent": { MessageContent: ({ text }) => React.createElement("span", null, text) },
-    "../chat/TurnActivity": { TurnActivity: ({ activities, activityWindow, turnInProgress }) => React.createElement("div", { "data-activity-window": activityWindow, "data-working": turnInProgress }, activities.map(message => React.createElement("p", { key: message.id }, message.text))) },
+    "../chat/TurnActivity": { TurnActivity: ({ activities, activityWindow, renderActivity, turnInProgress }) => React.createElement("div", { "data-activity-window": activityWindow, "data-working": turnInProgress }, activities.map(message => React.createElement("div", { key: message.id }, renderActivity(message)))) },
+    "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
     "../chat/toolPresentation": {},
     "../CadencedShimmerText": { CadencedShimmerText: ({ children }) => React.createElement("span", null, children) },
     "../chat/ChatComposer": { ChatComposer: composer },
@@ -479,6 +480,11 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     assert.equal(body.querySelector('[aria-label="Current run activity"]').textContent, commentary.text);
     assert.equal(body.querySelector('[data-activity-window="latest-context"]').dataset.working, "true");
     assert.doesNotMatch(body.textContent, /Octopus is working|Previous turn|Private work|Other Home/);
+    const warning = { ...commentary, id: "warning", eventKind: "warning", text: "Provider diagnostic. ".repeat(20), eventData: { detail: "Diagnostic detail" } };
+    await view.render({ ...props, workspace: { ...workspace, busy: true, renderedMessages: [prompt, warning] } });
+    const notice = body.querySelector(".conversation-notice.is-danger");
+    assert.equal(notice.querySelector("svg").dataset.glyph, "warning");
+    assert.equal(notice.textContent, `${warning.text}Diagnostic detail`);
     await view.render({ ...props, workspace: { ...workspace, busy: true, renderedMessages: [prompt, { ...streaming, text: "Long streamed response. ".repeat(30) }] } });
     assert.ok(body.closest(".is-expanded"));
     const final = message("final", "home-client", "Hey! What's up?");

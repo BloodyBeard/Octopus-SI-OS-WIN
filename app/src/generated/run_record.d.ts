@@ -23,7 +23,7 @@ export interface RunRecord {
       [k: string]: unknown;
     };
   };
-  status: unknown;
+  status: "running" | "idle";
   trace: string;
   worker: string;
 }

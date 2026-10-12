@@ -2,6 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const net = require("node:net");
+const vm = require("node:vm");
+const crypto = require("node:crypto");
 const { promisify } = require("node:util");
 const { execFile } = require("node:child_process");
 const { setTimeout: delay } = require("node:timers/promises");
@@ -9,6 +11,8 @@ const { resolveEnvironment, createEnvironment } = require("../cli/environment.cj
 const { compileSetupPlan, setupReference, ensureSignIn } = require("../cli/setup.cjs");
 const { createClientSetupStore } = require("../electron/clientSetup.cjs");
 const { readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
+const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
+const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { readProviderInterfaceDescriptors } = require("../electron/projection.cjs");
 const { createClientProviderMetadata } = require("../electron/clientProviderMetadata.cjs");
 const { installLocalPackages, inspectLocalPackageInstallation } = require("../electron/localPackages.cjs");
@@ -21,6 +25,7 @@ async function main() {
   let verified = false;
   try {
     await resolution(root);
+    await nativeAdoptionContract(root);
     await fixtureRuntime(root);
     await setupEvidence(root);
     await signInContract();
@@ -68,6 +73,75 @@ async function resolution(root) {
   environment.close();
 }
 
+async function nativeAdoptionContract(root) {
+  const home = path.join(root, "native-adoption"), registry = path.join(home, "registry");
+  const owner = path.join(registry, "interface/world_operator_chat");
+  const provider = "provider_private", clientId = "world_operator_chat_home_fixture", runId = "run_fixture";
+  const runPath = path.join(home, "state/runs", `${runId}.json`);
+  const providerPath = path.join(registry, "interface", provider, "interface.json");
+  const catalogPath = path.join(registry, "artifact/artifact-run-affordances-home_fixture/artifact.json");
+  await fs.mkdir(path.join(home, "state/ee_instances"), { recursive: true });
+  await fs.mkdir(path.join(registry, "tool"), { recursive: true });
+  const run = { id: runId, interface_state: { [clientId]: { client_surface_role: "home", provider_runtime_interface: provider } } };
+  await json(runPath, run); await json(providerPath, { id: provider, declaration: 1 }); await json(catalogPath, { text: "prior catalog" });
+  const runBytes = await fs.readFile(runPath), providerBytes = await fs.readFile(providerPath), catalogBytes = await fs.readFile(catalogPath);
+  const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+  const replyPath = path.join(root, "native-plan.json"), planner = path.join(owner, "packages/bin/topology");
+  const clientSource = path.resolve(__dirname, "../../registry/interface/world_operator_chat/client.cjs");
+  const config = JSON.parse(await fs.readFile(path.join(path.dirname(clientSource), "client.json")));
+  config.executables.topology_planner = "owner://packages/bin/topology";
+  await json(path.join(owner, "client.json"), config); await fs.mkdir(path.dirname(planner), { recursive: true });
+  await fs.writeFile(planner, `#!${process.execPath}\nlet text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>{if(process.argv[2]!=='--plan-native-adoption')process.exit(64);JSON.parse(text);console.log(require('node:fs').readFileSync(${JSON.stringify(replyPath)},'utf8'))});\n`, { mode: 0o700 });
+  const module = { exports: {} };
+  Function("require", "module", "__dirname", await fs.readFile(clientSource, "utf8"))(require, module, owner);
+  const client = module.exports;
+  const nextCatalog = `${JSON.stringify({ text: "updated exact catalog" })}\n`, nextProvider = `${JSON.stringify({ id: provider, declaration: 2 })}\n`;
+  const planned = { status: "planned", run_id: runId, provider_interface_id: provider, source_movement_seq: 8240, reason: null,
+    writes: [{path:catalogPath,content:nextCatalog,expected_before_hash:hash(catalogBytes),tag:"catalog"},
+      {path:providerPath,content:nextProvider,expected_before_hash:hash(providerBytes),tag:"provider"}],
+    preimages: [{path:runPath,sha256:hash(runBytes)},{path:providerPath,sha256:hash(providerBytes)},{path:catalogPath,sha256:hash(catalogBytes)}] };
+  const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const initialization = source.match(/async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/)[0];
+  let packagePasses = 0, stopped = true;
+  const results = [];
+  const boot = () => {
+    const context = { path, fs:require("node:fs"), runtimeInitializationComplete:false, runtimeInitializationPromise:null, nativeBrowserHost:null,
+      ensureRuntimeHost:() => ({probe:async () => ({phase:stopped?"unmanaged":"ready",ready:!stopped,ownership:stopped?"none":"external",pid:stopped?null:123,error:null})}),
+      resolveOctopusHome:() => home, clientSetupPackageRoots:() => ({stateRoot:path.join(home,"client/package-state")}),
+      registerLocalPackageMutationGuard:() => () => {}, recoverLocalPackageTransactions:async () => {},
+      adoptLocalPackageUpdates:async () => {packagePasses += 1; return {changed:false};}, recoverWorkspaceTransactions,
+      createClientProjectionStore:() => ({read:async () => ({status:"ready",client_runs:[{run_id:runId,record_digest:hash(runBytes)}]}),close(){}}),
+      resolveRepoRoot:() => root, resolveSourceRegistry:() => registry, resolveLocalPackageRegistry:() => registry,
+      resolveLocalPackageLibrary:() => root, projectEePolicies:async () => ({}), projectionReadRequest:() => ({}),
+      getOperatorChatClientLoader:() => ({load:async () => client}), resolveInstallationRoot:() => root,
+      commitProjectionClientAuthoring, appendClientLog:async (_level,_event,result) => {results.push(result);},
+      startNativeBrowserEngine:async () => {}, projectionStores:new Map(),
+    };
+    return vm.runInNewContext(`${initialization}\ninitializeRuntimeHost()`, context);
+  };
+  await json(replyPath, {...planned,status:"deferred",reason:"accepted Stop awaits settlement",writes:[]});
+  await boot(); assert.equal(packagePasses,1); assert.equal(results.at(-1).status,"deferred");
+  assert.equal(results.at(-1).reason,"accepted Stop awaits settlement");
+  assert.deepEqual(await fs.readFile(providerPath),providerBytes); assert.deepEqual(await fs.readFile(catalogPath),catalogBytes);
+  await json(replyPath,planned); await boot(); assert.equal(packagePasses,2); assert.equal(results.at(-1).status,"adopted");
+  assert.equal(await fs.readFile(providerPath,"utf8"),nextProvider); assert.equal(await fs.readFile(catalogPath,"utf8"),nextCatalog);
+  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:[]}); await boot();
+  assert.equal(packagePasses,3); assert.equal(results.at(-1).status,"unchanged"); assert.deepEqual(await fs.readFile(runPath),runBytes);
+  await json(replyPath,planned); await assert.rejects(boot(),/preimage changed/);
+  stopped=false; await boot(); assert.equal(results.at(-1).reason,"runtime is already running"); stopped=true;
+  const thirdCatalog = "{\"text\":\"third catalog\"}\n", thirdProvider = `{\"id\":\"${provider}\",\"declaration\":3}\n`;
+  const transaction = {label:"native declaration publication",removals:[],publishBarrierPath:providerPath,
+    writes:[{file:catalogPath,content:thirdCatalog,beforeDigest:hash(nextCatalog),label:"catalog"},
+      {file:providerPath,content:thirdProvider,beforeDigest:hash(nextProvider),label:"provider"}]};
+  const transactionPath = path.join(root,"native-transaction.json"); await json(transactionPath,transaction);
+  const script = `const fs=require('node:fs/promises');const rename=fs.rename;fs.rename=async(a,b)=>{if(b===process.argv[4])process.exit(73);return rename(a,b)};require(process.argv[1]).commitProjectionClientAuthoring(process.argv[2],process.argv[3],JSON.parse(require('node:fs').readFileSync(process.argv[5]))).catch(e=>{console.error(e);process.exit(74)});`;
+  await assert.rejects(execute(process.execPath,["-e",script,path.resolve(__dirname,"../electron/clientWorkspaceAuthoring.cjs"),home,registry,providerPath,transactionPath]),error=>error.code===73);
+  assert.equal(await fs.readFile(catalogPath,"utf8"),thirdCatalog); assert.equal(await fs.readFile(providerPath,"utf8"),nextProvider);
+  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:[]}); await boot();
+  assert.equal(await fs.readFile(providerPath,"utf8"),thirdProvider); assert.equal(await fs.readFile(catalogPath,"utf8"),thirdCatalog);
+  assert.deepEqual(await fs.readFile(runPath),runBytes);
+}
+
 async function fixtureRuntime(root) {
   const installationRoot = path.join(root, "distribution"), home = path.join(root, "fixture");
   for (const directory of ["bin", "registry/interface", "local-packages/registry/interface", "local-packages/packages", "local-packages/packs"]) {
@@ -76,6 +150,7 @@ async function fixtureRuntime(root) {
   for (const file of ["registry/.octopus-source.json", "local-packages/registry/.octopus-source.json"]) await json(path.join(installationRoot, file), { schema_version: 1, id: "test-source" });
   const binary = path.join(installationRoot, "bin/octopus");
   await fs.writeFile(binary, `#!${process.execPath}\nconst fs=require('node:fs'),net=require('node:net'),path=require('node:path'),crypto=require('node:crypto');
+if(process.argv[2]==='project-ee-policies'){console.log(JSON.stringify({environments:[],issues:[]}));process.exit(0)}
 if(process.argv[2]!=='up')process.exit(64);
 const home=process.env.OCTOPUS_HOME, state=path.join(home,'state/runtime-instance'), now=Date.now();
 fs.mkdirSync(state,{recursive:true});fs.appendFileSync(path.join(home,'starts'),'start\\n');
@@ -86,6 +161,20 @@ const server=net.createServer(socket=>socket.end());server.listen(endpoint,()=>s
 process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force:true});process.exit(0)}));
 `, { mode: 0o700 });
   const options = { home, installationRoot, env: { PATH: process.env.PATH } };
+  const blank = createEnvironment({ ...options, home: path.join(root, "blank") });
+  const blankProgress = [];
+  try {
+    await blank.start({ interfaceId: "fixture_home", timeoutMs: 5000, onProgress: (row) => blankProgress.push(row) });
+    assert.ok(blankProgress.some((row) => row.phase === "client_package_unbound"));
+    await assert.rejects(fs.access(path.join(blank.home, "registry/interface")), { code: "ENOENT" });
+  } finally {
+    const current = await blank.status({ interfaceId: "fixture_home" });
+    if (current.pid) { process.kill(current.pid, "SIGTERM"); await waitStopped(blank); }
+    blank.close();
+  }
+  await json(path.join(blank.home, "state/runs/existing.json"), { id: "existing" });
+  await assert.rejects(blank.start({ timeoutMs: 5000 }), /Registry is absent for existing workspace state/);
+  assert.equal(await fs.readFile(path.join(blank.home, "starts"), "utf8"), "start\n");
   const first = createEnvironment(options), second = createEnvironment(options);
   const source = path.join(first.packageRoots.sourceRegistryRoot, "interface", "world_cli_fixture", "interface.json");
   const active = path.join(first.packageRoots.activeRegistryRoot, "interface", "world_cli_fixture", "interface.json");
@@ -127,7 +216,7 @@ process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force
     if (current.pid) { process.kill(current.pid, "SIGTERM"); await waitStopped(first); }
   }
   await json(active, { ...original, config: { model: "selected" }, contract: 999 });
-  await assert.rejects(first.start({ interfaceId: "fixture_home", timeoutMs: 5000 }), /unowned JSON changes/);
+  await assert.rejects(first.start({ interfaceId: "fixture_home", timeoutMs: 5000 }), /overlapping source-owned changes/);
   assert.equal(await fs.readFile(path.join(home, "starts"), "utf8"), "start\n");
   assert.equal(JSON.parse(await fs.readFile(active)).contract, 999);
   const missing = createEnvironment({ ...options, home: path.join(root, "missing"), runtimeBinary: path.join(installationRoot, "bin/missing") });

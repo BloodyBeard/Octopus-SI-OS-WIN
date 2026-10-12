@@ -39,7 +39,7 @@ async fn handoff_for(
     let pinned = ctx.pinned_run_record_bytes(envelope)?;
     session
         .from_invocation_when_ready(ctx, descriptor, &runtime.run, envelope, seq, &pinned)
-        .await
+        .await.map_err(Into::into)
 }
 
 pub(crate) async fn recover_handoffs(

@@ -153,6 +153,501 @@ pub(super) struct CurrentNativeContext<'a> {
     pub recovered_dispatches: &'a [RecoveredTurnStartDispatch],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeHistoryRetirement {
+    pub source_thread: String,
+    pub source_generation: u64,
+    pub replacement_thread: String,
+    pub source_artifact: ArtifactRef,
+    pub source_movement_seq: u64,
+    pub proof: NativeHistoryProof,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct NativeHistoryProof {
+    pub thread_id: String,
+    pub context_generation: u64,
+    thread_shape: String,
+    static_context: String,
+    rollout_bytes: u64,
+    rollout_blake3: String,
+    calls: Vec<RetiredNativeCall>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredNativeCall {
+    turn_id: String,
+    call: serde_json::Value,
+    pending: CodexPendingContinuity,
+    closed_generation: u64,
+    closure_artifact: ArtifactRef,
+    closure_movement_seq: u64,
+    result_artifact: ArtifactRef,
+    result_movement_seq: u64,
+}
+
+fn pending_correlation(pending: &CodexPendingContinuity) -> Option<&str> {
+    match pending {
+        CodexPendingContinuity::DynamicTool { call_id, .. }
+        | CodexPendingContinuity::InterfaceOperation { call_id, .. } => Some(call_id),
+        CodexPendingContinuity::Operator { .. } => None,
+    }
+}
+
+impl NativeHistoryProof {
+    pub(super) fn validate(
+        &self,
+        source: &CodexContinuityState,
+    ) -> Result<(), InterfaceDriverError> {
+        if self.thread_id != source.thread_id
+            || self.context_generation != source.context_generation
+            || self.thread_shape != source.thread_shape_fingerprint
+            || self.static_context != source.static_context_fingerprint
+            || codex_continuity_waits_for_result(source)
+            || source.tool_operator_request.is_some()
+            || self.rollout_bytes == 0
+            || !is_sha256_hex(&self.rollout_blake3)
+            || self.calls.is_empty()
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "native history retirement has no exact settled source".into(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut turns = BTreeSet::new();
+        for call in &self.calls {
+            validate_pending_continuity_coordinates(Some(&call.pending), "native history source")?;
+            let item: octopus_protocol::models::ResponseItem =
+                serde_json::from_value(call.call.clone()).map_err(|error| {
+                    InterfaceDriverError::FailedClosed(format!(
+                        "retired native call is malformed: {error}"
+                    ))
+                })?;
+            let call_id = match item {
+                octopus_protocol::models::ResponseItem::CustomToolCall { call_id, .. } => call_id,
+                octopus_protocol::models::ResponseItem::FunctionCall { call_id, .. }
+                    if pending_correlation(&call.pending) == Some(call_id.as_str()) => call_id,
+                _ => return Err(InterfaceDriverError::FailedClosed("unfinished native function call requires its exact pending correlation and admitted result".into())),
+            };
+            if call_id.is_empty()
+                || call_id.trim() != call_id
+                || !ids.insert(call_id)
+                || call.turn_id.is_empty()
+                || call.turn_id.trim() != call.turn_id
+                || !turns.insert(&call.turn_id)
+                || call.result_movement_seq >= call.closure_movement_seq
+                || call.closed_generation > self.context_generation
+                || pending_turn_id(&call.pending) != call.turn_id
+                || !interrupted_pending_has_external_result(&call.pending)
+            {
+                return Err(InterfaceDriverError::FailedClosed(
+                    "native history retirement has ambiguous call or result evidence".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl NativeHistoryRetirement {
+    pub(super) fn connects(
+        &self,
+        source: &CodexContinuityState,
+        target: &CodexContinuityState,
+    ) -> bool {
+        source.provider_interface == target.provider_interface
+            && source.run == target.run
+            && source.thread_id == self.source_thread
+            && source.context_generation <= self.source_generation
+            && source.thread_shape_fingerprint == self.proof.thread_shape
+            && source.static_context_fingerprint == self.proof.static_context
+            && source.tool_operator_request.is_none()
+            && self.validate(target).is_ok()
+            && source
+                .pending
+                .as_ref()
+                .or(source.interrupted_pending.as_ref())
+                .is_none_or(|pending| {
+                    self.proof.calls.iter().any(|call| {
+                        &call.pending == pending
+                            && source.context_generation < call.closed_generation
+                    })
+                })
+    }
+
+    pub(super) fn validate(
+        &self,
+        current: &CodexContinuityState,
+    ) -> Result<(), InterfaceDriverError> {
+        if self.source_thread != self.proof.thread_id
+            || self.source_generation != self.proof.context_generation
+            || self.source_thread == self.replacement_thread
+            || self.replacement_thread != current.thread_id
+            || self.source_generation >= current.context_generation
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "native history retirement is detached from its replacement continuity".into(),
+            ));
+        }
+        let mut source = current.clone();
+        source.thread_id = self.source_thread.clone();
+        source.context_generation = self.source_generation;
+        source.thread_shape_fingerprint = self.proof.thread_shape.clone();
+        source.static_context_fingerprint = self.proof.static_context.clone();
+        source.pending = None;
+        source.interrupted_pending = None;
+        source.tool_operator_request = None;
+        self.proof.validate(&source)
+    }
+}
+
+fn native_history_orphans(
+    path: &Path,
+    thread: &str,
+) -> Result<(u64, String, Vec<(String, serde_json::Value)>), InterfaceDriverError> {
+    let refused = |message: String| InterfaceDriverError::FailedClosed(message);
+    let file = std::fs::File::open(path)
+        .map_err(|error| refused(format!("native history cannot be read: {error}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| refused(format!("native history metadata cannot be read: {error}")))?;
+    if !metadata.is_file() {
+        return Err(refused("native history is not a regular file".into()));
+    }
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut hash = blake3::Hasher::new();
+    let mut size = 0u64;
+    let mut owner = None;
+    let mut identity = false;
+    let mut rolled_back = false;
+    let mut known = BTreeMap::<String, (String, serde_json::Value)>::new();
+    let mut open = BTreeMap::<String, (String, serde_json::Value)>::new();
+    loop {
+        line.clear();
+        let count = (&mut reader)
+            .take((RECOVERY_ROLLOUT_MAX_LINE_BYTES + 1) as u64)
+            .read_line(&mut line)
+            .map_err(|error| refused(format!("native history cannot be read: {error}")))?;
+        if count == 0 {
+            break;
+        }
+        if count > RECOVERY_ROLLOUT_MAX_LINE_BYTES || !line.ends_with('\n') {
+            return Err(refused(
+                "native history has an oversized or incomplete record".into(),
+            ));
+        }
+        size += count as u64;
+        hash.update(line.as_bytes());
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|error| refused(format!("native history record is malformed: {error}")))?;
+        let payload = value
+            .get("payload")
+            .ok_or_else(|| refused("native history record has no payload".into()))?;
+        let mut replacement = None;
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("session_meta") => {
+                if identity || payload.get("id").and_then(serde_json::Value::as_str) != Some(thread)
+                {
+                    return Err(refused(
+                        "native history belongs to a different or repeated thread".into(),
+                    ));
+                }
+                identity = true;
+            }
+            Some("turn_context") => {
+                owner = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            }
+            Some("event_msg")
+                if matches!(
+                    payload.get("type").and_then(serde_json::Value::as_str),
+                    Some("task_started" | "turn_started")
+                ) =>
+            {
+                owner = payload
+                    .get("turn_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+            }
+            Some("event_msg")
+                if payload.get("type").and_then(serde_json::Value::as_str)
+                    == Some("thread_rolled_back") =>
+            {
+                rolled_back = true
+            }
+            Some("compacted") => match payload.get("replacement_history") {
+                Some(serde_json::Value::Array(items)) => {
+                    open.clear();
+                    replacement = Some(items.clone());
+                }
+                None | Some(serde_json::Value::Null) if open.is_empty() => {}
+                _ => return Err(refused(
+                    "native history compaction does not prove retention of its unfinished calls"
+                        .into(),
+                )),
+            },
+            Some("response_item") => replacement = Some(vec![payload.clone()]),
+            _ => {}
+        }
+        let from_compaction =
+            value.get("type").and_then(serde_json::Value::as_str) == Some("compacted");
+        for item in replacement.into_iter().flatten() {
+            let kind = item
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !matches!(
+                kind,
+                "custom_tool_call"
+                    | "custom_tool_call_output"
+                    | "function_call"
+                    | "function_call_output"
+            ) {
+                continue;
+            }
+            serde_json::from_value::<octopus_protocol::models::ResponseItem>(item.clone())
+                .map_err(|error| {
+                    refused(format!("native history call/output is malformed: {error}"))
+                })?;
+            let id = item
+                .get("call_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty() && id.trim() == *id)
+                .ok_or_else(|| refused("native history call has no canonical identity".into()))?
+                .to_owned();
+            if kind.ends_with("_output") {
+                if let Some((_, call)) = open.remove(&id) {
+                    if format!("{}_output", call["type"].as_str().unwrap_or_default()) != kind {
+                        return Err(refused(
+                            "native history output changed its call type".into(),
+                        ));
+                    }
+                }
+                continue;
+            }
+            let turn = if from_compaction {
+                known
+                    .get(&id)
+                    .filter(|(_, original)| original == &item)
+                    .map(|(turn, _)| turn.clone())
+            } else {
+                owner.clone()
+            };
+            let turn = turn.ok_or_else(|| {
+                refused(format!(
+                    "native call '{id}' has no exact retained turn ownership"
+                ))
+            })?;
+            if open
+                .insert(id.clone(), (turn.clone(), item.clone()))
+                .is_some()
+                || (!from_compaction && known.insert(id, (turn, item)).is_some())
+            {
+                return Err(refused("native history repeats a call identity".into()));
+            }
+        }
+    }
+    if !identity {
+        return Err(refused(
+            "native history has no exact thread identity".into(),
+        ));
+    }
+    if rolled_back && !open.is_empty() {
+        return Err(refused(
+            "native history rollback prevents exact orphan retention proof".into(),
+        ));
+    }
+    let after = reader
+        .get_ref()
+        .metadata()
+        .map_err(|error| refused(format!("native history metadata cannot be read: {error}")))?;
+    let modified = |metadata: &std::fs::Metadata| metadata.modified()
+        .map_err(|error| refused(format!("native history modification time cannot be read: {error}")));
+    if size != metadata.len()
+        || after.len() != metadata.len()
+        || modified(&after)? != modified(&metadata)?
+    {
+        return Err(refused(
+            "native history changed while proving its settled calls".into(),
+        ));
+    }
+    Ok((
+        size,
+        blake3::Hasher::finalize(&hash).to_hex().to_string(),
+        open.into_values().collect(),
+    ))
+}
+
+pub(super) fn prove_native_history_retirement(
+    path: &Path,
+    source: &CodexContinuityState,
+    session: &[SessionContextArtifact],
+    labels: &BTreeSet<String>,
+) -> Result<Option<NativeHistoryProof>, InterfaceDriverError> {
+    if codex_continuity_waits_for_result(source) || source.tool_operator_request.is_some() {
+        return Ok(None);
+    }
+    let (rollout_bytes, rollout_blake3, orphans) = native_history_orphans(path, &source.thread_id)?;
+    if orphans.is_empty() {
+        return Ok(None);
+    }
+    let refused = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+    let mut calls = Vec::new();
+    for (turn_id, call) in orphans {
+        let mut proof = None;
+        for entry in session.iter().filter(|entry| {
+            entry.label == TURN_INTERRUPTED_RESULT_LABEL
+                && entry.payload["thread_id"] == source.thread_id
+                && entry.payload["turn_id"] == turn_id
+        }) {
+            if !labels.contains(&entry.label) {
+                return Err(refused(
+                    "native history closure is not a declared context output",
+                ));
+            }
+            let original = parse_codex_continuity(
+                entry
+                    .payload
+                    .get("native_terminal_source_continuity")
+                    .ok_or_else(|| {
+                        refused("native history closure has no exact original pending continuity")
+                    })?,
+                &source.provider_interface,
+                &source.run,
+            )?;
+            let result_artifact: ArtifactRef =
+                serde_json::from_value(entry.payload.get("source_artifact").cloned().ok_or_else(
+                    || refused("native history closure has no exact result artifact"),
+                )?)
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+            let results = session
+                .iter()
+                .filter(|result| result.source_artifact == result_artifact)
+                .collect::<Vec<_>>();
+            let [result] = results.as_slice() else {
+                return Err(refused(
+                    "native history retirement requires one admitted exact inner result",
+                ));
+            };
+            let pending = original
+                .pending
+                .as_ref()
+                .or(original.interrupted_pending.as_ref())
+                .ok_or_else(|| refused("native history closure lost its original external wait"))?;
+            if call["type"] == "function_call"
+                && call["call_id"].as_str() != pending_correlation(pending)
+            {
+                return Err(refused(
+                    "unfinished native function call requires its exact pending correlation and admitted result",
+                ));
+            }
+            let ok = match pending {
+                CodexPendingContinuity::DynamicTool { .. } => {
+                    let result = decode_tool_result_artifact(&result.payload)?
+                        .ok_or_else(|| refused("native history result is not a tool result"))?;
+                    validate_recovered_tool_result(&result, pending)?;
+                    result.ok
+                }
+                CodexPendingContinuity::InterfaceOperation {
+                    call_id,
+                    operation,
+                    output_label,
+                    ..
+                } => {
+                    validate_recovered_interface_operation_result(
+                        &result.label,
+                        &result.payload,
+                        call_id,
+                        operation,
+                        output_label,
+                    )?;
+                    result.payload["ok"].as_bool().ok_or_else(|| {
+                        refused("native history operation result lost its outcome")
+                    })?
+                }
+                _ => {
+                    return Err(refused(
+                        "native history retirement cannot settle an operator request",
+                    ));
+                }
+            };
+            if entry.payload["ok"] != ok {
+                return Err(refused(
+                    "native history closure changed the admitted result outcome",
+                ));
+            }
+            let bytes = serde_json::to_vec(&entry.payload)
+                .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+            let closed = interrupted_result_closure_payload(
+                &entry.label,
+                &bytes,
+                &original,
+                &result_artifact,
+                labels,
+            )
+            .map_err(InterfaceDriverError::FailedClosed)?
+            .ok_or_else(|| refused("native history has no admitted result closure"))?;
+            let terminal = closed
+                .native_terminal
+                .as_ref()
+                .ok_or_else(|| refused("native history closure has no native terminal proof"))?;
+            if closed.thread_id != source.thread_id
+                || closed.context_generation > source.context_generation
+                || terminal
+                    .exact_turn(&source.thread_id, Some(&turn_id))?
+                    .status
+                    != TurnStatus::Interrupted
+            {
+                return Err(refused(
+                    "native history retirement is not a settled interrupted turn",
+                ));
+            }
+            let closure_movement_seq = entry
+                .source_movement_seq
+                .ok_or_else(|| refused("native history closure has no admitted movement"))?;
+            let result_movement_seq = result
+                .source_movement_seq
+                .ok_or_else(|| refused("native history result has no admitted movement"))?;
+            if result_movement_seq >= closure_movement_seq || proof.is_some() {
+                return Err(refused(
+                    "native history has ambiguous or unordered result closure evidence",
+                ));
+            }
+            proof = Some(RetiredNativeCall {
+                turn_id: turn_id.clone(),
+                call: call.clone(),
+                pending: pending.clone(),
+                closed_generation: closed.context_generation,
+                closure_artifact: entry.source_artifact.clone(),
+                closure_movement_seq,
+                result_artifact,
+                result_movement_seq,
+            });
+        }
+        calls.push(proof.ok_or_else(|| refused(if call["type"] == "function_call" {
+            "unfinished native function call has no exact admitted interrupted-result closure; explicit continuity repair is required"
+        } else {
+            "orphaned native wrapper has no admitted interrupted-result closure; explicit continuity repair is required"
+        }))?);
+    }
+    let proof = NativeHistoryProof {
+        thread_id: source.thread_id.clone(),
+        context_generation: source.context_generation,
+        thread_shape: source.thread_shape_fingerprint.clone(),
+        static_context: source.static_context_fingerprint.clone(),
+        rollout_bytes,
+        rollout_blake3,
+        calls,
+    };
+    proof.validate(source)?;
+    Ok(Some(proof))
+}
 fn completed_effect(
     input: &ProviderInput,
     pending: &CodexPendingContinuity,
@@ -246,6 +741,62 @@ fn completed_effect(
 }
 
 impl CodexAppServerInterfaceDriver {
+    pub(super) async fn settled_native_history_proof(
+        &self,
+        scope: &TransportStateScope,
+        thread: &str,
+        source: Option<&CodexContinuityState>,
+        session: &[SessionContextArtifact],
+        sink: &TurnSink<'_>,
+    ) -> Result<Option<NativeHistoryProof>, InterfaceDriverError> {
+        let Some(source) = source.filter(|source| source.thread_id == thread) else {
+            return Ok(None);
+        };
+        if codex_continuity_waits_for_result(source)
+            || source.tool_operator_request.is_some()
+            || self.has_pending_request(scope).await
+        {
+            return Ok(None);
+        }
+        let interrupted = source
+            .native_terminal
+            .as_ref()
+            .map(|terminal| terminal.exact_turn(&source.thread_id, None))
+            .transpose()?
+            .is_some_and(|turn| turn.status == TurnStatus::Interrupted);
+        let retained_closure = session.iter().any(|entry| {
+            entry.label == TURN_INTERRUPTED_RESULT_LABEL
+                && entry.payload["thread_id"] == source.thread_id
+        });
+        if !interrupted && !retained_closure {
+            return Ok(None);
+        }
+        let path = self
+            .transport_state
+            .lock()
+            .await
+            .get(scope)
+            .and_then(|state| state.rollout_path.clone());
+        let Some(path) = path else {
+            return Err(InterfaceDriverError::FailedClosed("settled native terminal history has no inspectable exact rollout; explicit continuity repair is required".into()));
+        };
+        let proof =
+            prove_native_history_retirement(&path, source, session, sink.context_output_labels)?;
+        if proof.is_some()
+            && (!sink
+                .context_output_labels
+                .contains(INTERFACE_CONTEXT_UPDATED_LABEL)
+                || !sink
+                    .client_projection_output_labels
+                    .contains(INTERFACE_CONTEXT_UPDATED_LABEL))
+        {
+            return Err(InterfaceDriverError::FailedClosed(
+                "native history retirement requires its declared context output binding".into(),
+            ));
+        }
+        Ok(proof)
+    }
+
     pub(super) async fn refresh_native_context(
         &self,
         context: TurnContext<'_, '_>,
@@ -565,6 +1116,7 @@ impl CodexAppServerInterfaceDriver {
                     context.scope,
                     ThreadAcquisition {
                         recovered: Some(&previous),
+                        retired_history: None,
                         require_exact_resume: false,
                         context_generation: previous.context_generation.checked_add(1).ok_or_else(
                             || {
@@ -587,6 +1139,7 @@ impl CodexAppServerInterfaceDriver {
             state.thread_shape_fingerprint = fingerprint;
             state.static_context_fingerprint = current.static_fingerprint.into();
             state.context_refresh = Some(refresh.clone());
+            state.native_history_retirement = None;
             context.sink.set_continuity(state);
             context
                 .sink
@@ -658,6 +1211,26 @@ impl CodexAppServerInterfaceDriver {
 }
 
 impl TurnSink<'_> {
+    pub(super) async fn admit_native_history_retirement(&self) -> Result<(), InterfaceDriverError> {
+        let state = self.continuity_snapshot().ok_or_else(|| {
+            InterfaceDriverError::FailedClosed("native history retirement lost continuity".into())
+        })?;
+        let retirement = state.native_history_retirement.ok_or_else(|| {
+            InterfaceDriverError::FailedClosed("native history retirement lost its proof".into())
+        })?;
+        let mut output = CodexTurnOutput::client(
+            INTERFACE_CONTEXT_UPDATED_LABEL,
+            serde_json::json!({
+                "native_history_retired": true, "source_movement_seq": self.source_movement_seq,
+                "source_artifact": retirement.source_artifact, "source_thread": retirement.source_thread,
+                "replacement_thread": retirement.replacement_thread,
+            }),
+        );
+        self.normalize_output_label(&mut output)?;
+        let emission = self.materialize_normalized(output, false)?;
+        self.admit_context_emissions(vec![emission]).await
+    }
+
     pub(super) fn recover_context_retirement(
         &self,
         expected: &ContextRefresh,

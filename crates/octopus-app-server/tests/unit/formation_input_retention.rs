@@ -175,7 +175,17 @@ fn registry_observation_requires_stability_and_propagates_read_failures() {
         assert!(reads.next().is_none());
         assert!(match result {
             Ok(Some((f, candidate))) => expected == "ok" && (f.digest, candidate) == (2, 2),
-            Err(error) => error.contains(expected),
+            Err(error) => {
+                assert_eq!(matches!(error, RegistrySnapshotError::Unstable { .. }), expected == "after 4 attempts");
+                if let RegistrySnapshotError::Unstable { attempts } = &error {
+                    let verdict = crate::InterfaceArtifactArrivalAdmissionError::RegistryUnstable { attempts: *attempts }.verdict();
+                    assert!(matches!(verdict, octopus_ledger::DeliveryVerdict::Refused {
+                        reason: octopus_ledger::RefusedReason::RegistryUnstable, ..
+                    }));
+                    assert_eq!(serde_json::to_value(verdict).unwrap()["refused"]["reason"], "registry_unstable");
+                }
+                error.to_string().contains(expected)
+            },
             Ok(None) => false,
         });
     }

@@ -428,7 +428,7 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
     }
     let edit = match &request.operation {
         RevisionOperation::OwnerInputs { desired_inputs } => {
-            if !owner_input_ready(&evidence, &record, &scope.writer.owner, &verify.source)? {
+            if !owner_input_ready(&evidence, &verify.run_path, &before, &scope.writer, &verify.source)? {
                 return Ok(json!({"status":"deferred","checkpoints":record.active_checkpoints}));
             }
             match prepare_provider_input_revision(
@@ -459,8 +459,9 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
         RevisionOperation::Payloads { selected } => {
             if !provider_input_payloads_ready(
                 &evidence,
-                &record,
-                &scope.writer.owner,
+                &verify.run_path,
+                &before,
+                &scope.writer,
                 &verify.source,
             )? {
                 return Ok(json!({"status":"deferred","checkpoints":record.active_checkpoints}));
@@ -735,15 +736,16 @@ fn input_ready(
     let record = RunRecord::from_bytes(bytes).map_err(|e| e.to_string())?;
     match proposal.operation {
         RevisionOperation::OwnerInputs { .. } => {
-            owner_input_ready(evidence, &record, &proposal.writer.owner, &proposal.source)
+            owner_input_ready(evidence, &proposal.edit.path, bytes, &proposal.writer, &proposal.source)
         }
         RevisionOperation::Rearm => {
             provider_input_rearm_ready(evidence, &record, &proposal.writer.owner)
         }
         RevisionOperation::Payloads { .. } => provider_input_payloads_ready(
             evidence,
-            &record,
-            &proposal.writer.owner,
+            &proposal.edit.path,
+            bytes,
+            &proposal.writer,
             &proposal.source,
         ),
     }
@@ -751,16 +753,18 @@ fn input_ready(
 
 fn owner_input_ready(
     evidence: &CheckedRunEvidence<'_>,
-    record: &RunRecord,
-    provider: &InterfaceId,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
     source: &InterfaceId,
 ) -> Result<bool, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error|error.to_string())?;
     let state = record
         .interface_state
-        .get(provider)
+        .get(&writer.owner)
         .ok_or("provider state absent")?;
     if state.get("pending_handoff").is_none() {
-        provider_input_payloads_ready(evidence, record, provider, source)
+        provider_input_payloads_ready(evidence, path, current, writer, source)
     } else {
         Ok(true)
     }

@@ -313,7 +313,7 @@
 
 .home-response-stage.has-response::after {
   position: absolute;
-  z-index: 2;
+  z-index: 5;
   top: 0;
   right: 0;
   bottom: auto;

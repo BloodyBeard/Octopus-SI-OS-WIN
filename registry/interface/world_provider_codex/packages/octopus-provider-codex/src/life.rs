@@ -47,7 +47,7 @@ use crate::opencodex::{
     OpenCodexDescriptorConfig, descriptor_config as opencodex_descriptor_config,
 };
 use octopus_provider_run_authoring::{
-    FailedSourceHandoffError, ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome,
+    CheckedRunError, FailedSourceHandoffError, ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome,
     ProviderHandoffSession, ProviderInvocationSessionSnapshot, ProviderOutputHandoff,
     ProviderSourceRecovery, RunAuthoringResultIdentity, payload_carries_session_context,
     resolve_session_snapshot_chain,
@@ -495,17 +495,6 @@ async fn codex_life(
     let interrupted_effects = InterruptedEffectArbiter::new(ctx.clone());
     upgrade_deferred_provider_turn_journals(&ctx, &descriptor).await?;
     let mut deferred_turns = load_deferred_provider_turns(&ctx, &descriptor)?;
-    let mut control_task =
-        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(control_reader_life(
-            ctx.clone(),
-            descriptor.clone(),
-            handoff_session.clone(),
-            active_controls.clone(),
-            control_gates.clone(),
-            interrupted_effects.clone(),
-            control_reader_progress,
-            control_fence_rx,
-        )));
     ctx.signal_ready()?;
     restore_consumed_provider_inputs(
         &ctx,
@@ -516,6 +505,16 @@ async fn codex_life(
         reader.next_seq(),
     )
     .await?;
+    restore_completed_provider_sources(&ctx, &descriptor, &handoff_session, &runtime_auth, &mut driver,
+        &active_controls, &interrupted_effects, reader.next_seq()).await?;
+    let mut control_task =
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(control_reader_life(
+            ctx.clone(), descriptor.clone(), handoff_session.clone(), active_controls.clone(),
+            control_gates.clone(), interrupted_effects.clone(), control_reader_progress, control_fence_rx,
+        )));
+    let restored_controls = active_controls.lock().await.iter().map(|(run, broker)|
+        (RunId::new(run), broker.source_movement_seq())).collect::<Vec<_>>();
+    for (run, source) in restored_controls { fence_control_reader(&control_fence_tx, &run, source).await?; }
 
     loop {
         if ctx.cancel.is_cancelled() {
@@ -607,7 +606,7 @@ async fn codex_life(
             if broker.is_starting() {
                 broker.finish();
             }
-            if broker.is_finished() {
+            if broker.is_finished() || broker.is_recovered_pending() {
                 if let Err(error) =
                     fence_control_reader(&control_fence_tx, &run, broker.source_movement_seq())
                         .await
@@ -618,7 +617,7 @@ async fn codex_life(
                     shutdown_driver(&ctx, &mut driver).await?;
                     return Err(error);
                 }
-                remove_control_if_same(&active_controls, &run, &broker).await;
+                if broker.is_finished() { remove_control_if_same(&active_controls, &run, &broker).await; }
             }
             if !deferred_turns.is_empty() {
                 continue;
@@ -1060,7 +1059,7 @@ async fn codex_life(
             if created_broker && broker.is_starting() {
                 broker.finish();
             }
-            if broker.is_finished() {
+            if broker.is_finished() || broker.is_recovered_pending() {
                 if let Err(error) =
                     fence_control_reader(&control_fence_tx, &run, broker.source_movement_seq())
                         .await
@@ -1071,7 +1070,7 @@ async fn codex_life(
                     shutdown_driver(&ctx, &mut driver).await?;
                     return Err(error);
                 }
-                remove_control_if_same(&active_controls, &run, &broker).await;
+                if broker.is_finished() { remove_control_if_same(&active_controls, &run, &broker).await; }
             }
             if !deferred_turns.is_empty() {
                 break;
@@ -3286,6 +3285,28 @@ fn operator_turn_requires_deferral(
         .map(|scan| scan.latest.is_some())
 }
 
+async fn wait_for_provider_handoff(
+    ctx: &InterfaceLiftContext,
+    descriptor: &InterfaceDescriptor,
+    session: &ProviderHandoffSession,
+    run: &RunId,
+    input: &InterfaceInvocationEnvelope,
+    source_movement_seq: u64,
+    pinned: &[u8],
+) -> Result<ProviderOutputHandoff, String> {
+    loop {
+        if ctx.cancel.is_cancelled() { return Err("provider input preparation was cancelled".into()); }
+        match session.from_invocation_when_ready(ctx, descriptor, run, input, source_movement_seq, pinned).await {
+            Ok(handoff) => return Ok(handoff),
+            Err(error @ (CheckedRunError::AwaitingResults { .. } | CheckedRunError::ChangedDuringRead { .. })) => {
+                tracing::warn!(interface = ctx.interface.as_str(), run = run.as_str(), seq = source_movement_seq,
+                    error = %error, "provider source still awaits checked run evidence");
+            }
+            Err(CheckedRunError::Invalid(error)) => return Err(error),
+        }
+    }
+}
+
 async fn operator_turn_requires_deferral_with_context(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
@@ -3294,8 +3315,8 @@ async fn operator_turn_requires_deferral_with_context(
     turn: &QueuedTurn,
 ) -> Result<bool, String> {
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
-    let handoff = session.from_invocation_when_ready(
-        ctx, descriptor, run, &turn.envelope, turn.seq, &pinned,
+    let handoff = wait_for_provider_handoff(
+        ctx, descriptor, session, run, &turn.envelope, turn.seq, &pinned,
     ).await.map_err(|error| error.to_string())?;
     operator_turn_requires_deferral(
         ctx, descriptor, run, turn, &handoff.current_session_context_artifacts().await,
@@ -3547,7 +3568,7 @@ async fn checked_deferred_interrupted_result(
     let current = if let Some(current) = current { current } else {
         let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
         let session = ProviderHandoffSession::new(ctx)?;
-        let handoff = session.from_invocation_when_ready(ctx, descriptor, run, &turn.envelope, turn.seq, &pinned).await?;
+        let handoff = wait_for_provider_handoff(ctx, descriptor, &session, run, &turn.envelope, turn.seq, &pinned).await?;
         checked = handoff.current_session_context_artifacts().await;
         &checked
     };
@@ -3637,7 +3658,7 @@ async fn recover_deferred_failed_result(
         return Ok(None);
     }
     let session = ProviderHandoffSession::new(ctx)?;
-    let handoff = session.from_invocation_when_ready(ctx, descriptor, run, &turn.envelope, turn.seq, &pinned).await?;
+    let handoff = wait_for_provider_handoff(ctx, descriptor, &session, run, &turn.envelope, turn.seq, &pinned).await?;
     let failed_sources = match released_source {
         Some(sequence) if handoff.recovered_failed_context_source(sequence).await? => vec![sequence],
         Some(_) => return Err("released failed result lost its checked recovery proof".into()),
@@ -4771,9 +4792,10 @@ async fn hand_control_result(
             })?;
         }
         let pinned_run_record = ctx.pinned_run_record_bytes(envelope)?;
-        let handoff = handoff_session.from_invocation_when_ready(
+        let handoff = wait_for_provider_handoff(
             ctx,
             descriptor,
+            handoff_session,
             run,
             envelope,
             source_movement_seq,
@@ -4994,15 +5016,17 @@ async fn drive_turn_with_retries(
             return Ok(());
         }
     };
-    let handoff = match handoff_session.from_invocation_when_ready(
+    let handoff = match wait_for_provider_handoff(
         ctx,
         descriptor,
+        handoff_session,
         run,
         &turn.envelope,
         turn.seq,
         &pinned_run_record,
     ).await {
         Ok(handoff) => handoff,
+        Err(error) if ctx.cancel.is_cancelled() => return Err(error),
         Err(error) => {
             if recover_interrupted_result_without_context(
                 ctx, descriptor, handoff_session, interrupted_effects, control, run, &turn,
@@ -5040,6 +5064,7 @@ async fn drive_turn_with_retries(
             }
         }
     }
+    control.prepare_recovered_result().await?;
     let durable_interrupted_continuity = interrupted_effects.durable_continuity(run).await?;
     let resolving_interrupted_result = interrupted_effects
         .begin_result(run, turn.seq, &turn.envelope)
@@ -5058,7 +5083,7 @@ async fn drive_turn_with_retries(
             interrupted_effects
                 .recover_completed_source(run, turn.seq, &recovered_outcomes)
                 .await?;
-            control.finish();
+            retain_completed_source_control(ctx, descriptor, runtime_auth, driver, control, interrupted_effects, run, &turn, &handoff).await?;
             return Ok(());
         }
         ProviderSourceRecovery::Interrupted {
@@ -5770,7 +5795,7 @@ async fn drive_turn_with_retries(
                         interrupted_effects
                             .recover_completed_source(run, turn.seq, &recovered_outcomes)
                             .await?;
-                        control.finish();
+                        retain_completed_source_control(ctx, descriptor, runtime_auth, driver, control, interrupted_effects, run, &turn, &handoff).await?;
                         return Ok(());
                     }
                     ProviderSourceRecovery::Interrupted {
@@ -5906,6 +5931,90 @@ async fn restore_consumed_provider_inputs(
         );
         author_failed_provider_source(ctx, descriptor, handoff_session, &run, &turn, &message)
             .await?;
+    }
+    Ok(())
+}
+
+async fn retain_completed_source_control(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, auth: &CodexRuntimeAuth,
+    driver: &mut Option<Arc<CodexAppServerInterfaceDriver>>, control: &CodexTurnControlBroker,
+    interrupted: &InterruptedEffectArbiter, run: &RunId, turn: &QueuedTurn, handoff: &ProviderOutputHandoff,
+) -> Result<(), String> {
+    if let Some(continuity) = interrupted.durable_continuity(run).await? {
+        return control.publish_recovered_interrupted_pending(&continuity);
+    }
+    let continuity = crate::handler::completed_source_pending_continuity(descriptor, &turn.envelope,
+        &handoff.current_run_record_bytes().await, &handoff.current_session_context_artifacts().await)
+        .map_err(|error| error.to_string())?;
+    if let Some(continuity) = continuity {
+        if driver.is_none() {
+            *driver = Some(connect_declared_interface_driver(ctx, descriptor, auth, Some(&turn.envelope)).await.map_err(|error| error.message)?);
+        }
+        driver.as_ref().expect("connected recovery transport").restore_pending_control(control, continuity).await;
+    } else { control.finish(); }
+    Ok(())
+}
+
+async fn restore_completed_provider_sources(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, session: &ProviderHandoffSession,
+    auth: &CodexRuntimeAuth, driver: &mut Option<Arc<CodexAppServerInterfaceDriver>>,
+    active_controls: &ActiveTurnControls, interrupted: &InterruptedEffectArbiter, committed_before: u64,
+) -> Result<(), String> {
+    for (run, source) in session.completed_source_candidates(ctx)? {
+        if source >= committed_before { continue; }
+        let turn = replay_provider_source(ctx, &run, source)?.ok_or("completed result source lost its original admitted input")?;
+        let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
+        let handoff = wait_for_provider_handoff(ctx, descriptor, session, &run, &turn.envelope, source, &pinned).await?;
+        let (recovery, outcomes) = handoff.recover_completed_source_with_outcomes().await?;
+        if recovery != ProviderSourceRecovery::Completed { continue; }
+        let record = handoff.current_run_record_bytes().await;
+        let context = handoff.current_session_context_artifacts().await;
+        let Some(proof) = crate::handler::stopped_result::prove(descriptor, &turn.envelope, source, &record, &context, &outcomes)
+            .map_err(|error| error.to_string())? else {
+                let broker = CodexTurnControlBroker::new(Some(source));
+                retain_completed_source_control(ctx, descriptor, auth, driver, &broker, interrupted, &run, &turn, &handoff).await?;
+                if !broker.is_finished() { active_controls.lock().await.insert(run.to_string(), broker); }
+                continue;
+            };
+        validate_stopped_result_control(ctx, descriptor, &run, &proof)?;
+        if driver.is_none() {
+            *driver = Some(connect_declared_interface_driver(ctx, descriptor, auth, Some(&turn.envelope)).await.map_err(|error| error.message)?);
+        }
+        let closure = driver.as_ref().expect("connected recovery transport").stopped_result_settlement(
+            &proof, &turn.envelope, &ctx.interface_var_dir().join("emitted"),
+            &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?,
+        ).await.map_err(|error| error.to_string())?;
+        let expected: serde_json::Value = serde_json::from_slice(&closure.artifact.read_payload_bytes().map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+        match handoff.hand_completed_source_settlement(&proof.predecessor, proof.context_generation(), closure).await? {
+            ProviderHandoffOutcome::Admitted { seq, artifact } => {
+                let (manifest, bytes) = read_pinned_provider_artifact(ctx, &artifact, "stopped result settlement")?;
+                let mut actual: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+                actual.as_object_mut().ok_or("stopped result settlement is not an object")?.remove("session_context");
+                if manifest.label != TURN_INTERRUPTED_RESULT_LABEL || actual != expected {
+                    return Err("stopped result admitted a different semantic closure".into());
+                }
+                validate_artifact_admission(ctx, &run, source, &DurableArtifactAdmission { artifact, movement_seq: seq })?;
+            }
+            ProviderHandoffOutcome::TerminalFailure { failure_seq, failure_class, .. } => {
+                return Err(format!("stopped result settlement failed: {failure_class} at {failure_seq}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_stopped_result_control(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId,
+    proof: &crate::handler::stopped_result::StoppedResultSettlement,
+) -> Result<(), String> {
+    validate_artifact_admission(ctx, run, proof.control_source, &DurableArtifactAdmission {
+        artifact: proof.acknowledgement.clone(), movement_seq: proof.acknowledgement_seq,
+    })?;
+    let control = replay_provider_source(ctx, run, proof.control_source)?.ok_or("stopped result lost its admitted Stop input")?;
+    let decoded = decode_admitted_turn_control(ctx, descriptor, &control.envelope).map_err(|error| error.to_string())?
+        .ok_or("stopped result source is not a declared control")?;
+    if control_id(&decoded) != proof.control_id || control_action(&decoded) != proof.action {
+        return Err("stopped result acknowledgement changed its exact admitted control".into());
     }
     Ok(())
 }

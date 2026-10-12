@@ -298,11 +298,12 @@ pub fn provider_input_rearm_ready(
 
 pub fn provider_input_payloads_ready(
     evidence: &CheckedRunEvidence<'_>,
-    record: &RunRecord,
-    provider: &InterfaceId,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
     source: &InterfaceId,
 ) -> Result<bool, String> {
-    payload_readiness(evidence, record, provider, source, u64::MAX)
+    payload_readiness(evidence, path, current, writer, source, u64::MAX)
 }
 
 fn payload_phase(
@@ -341,23 +342,32 @@ fn payload_phase(
     Ok(())
 }
 
-fn payload_index_ready(
+fn payload_index_ready<R: CheckedRunEvidenceReader + ?Sized>(
+    reader: &mut R,
     index: &ProviderLedgerEvidenceIndex,
-    record: &RunRecord,
-    provider: &InterfaceId,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
     source: &InterfaceId,
     before_seq: u64,
 ) -> Result<bool, String> {
-    payload_phase(record, provider, source)?;
-    let declared = topology(record, provider)?;
-    let pending = persisted_pending_handoff(record, provider)?;
+    let record = RunRecord::from_bytes(current).map_err(|error|error.to_string())?;
+    let provider = &writer.owner;
+    payload_phase(&record, provider, source)?;
+    let declared = validate_declared_provider_writer(&record, writer)?;
+    let pending = persisted_pending_handoff(&record, provider)?;
     if let Some(pending) = &pending {
-        if !all_admitted(index, pending, record, provider, before_seq)? {
+        validate_pending_items_are_active(&record, provider, pending)?;
+        if !all_admitted(index, pending, &record, provider, before_seq)? {
             return Ok(false);
         }
+        for item in &pending.items {
+            if reader.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {
+                return Err("payload readiness pending artifact changed its admitted label".into());
+            }
+        }
     }
-    // A source already admitted after the retained handoff must be consumed first.
-    // In a pristine task this also proves that its initial inputs are unspent.
+    let mut newer = BTreeMap::new();
     for (coordinate, rows) in &index.coordinate_outbounds {
         if coordinate.run != record.id.as_str() || coordinate.worker != record.worker.as_str() {
             continue;
@@ -369,51 +379,52 @@ fn payload_index_ready(
             {
                 continue;
             }
-            if declared.checkpoints.iter().any(|template| {
+            let templates = declared.checkpoints.iter().filter(|template| {
                 template.role.is_provider_input()
                     && template.interface() == &row.source
                     && indexed_evidence_matches_checkpoint(row, template)
-            }) {
+            }).collect::<Vec<_>>();
+            if templates.is_empty() { continue; }
+            if pending.is_none() || templates.len() != 1 || templates[0].include_context
+                || !matches!(templates[0].role, RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput) {
                 return Ok(false);
+            }
+            if newer.insert(row.seq, (coordinate.clone(), row.clone())).is_some() {
+                return Err("payload readiness repeats an admitted input coordinate".into());
             }
         }
     }
-    Ok(true)
+    completed_independent_inputs(reader, index, path, current, writer, before_seq, &newer)
 }
 
 pub(super) fn payload_readiness(
     evidence: &CheckedRunEvidence<'_>,
-    record: &RunRecord,
-    provider: &InterfaceId,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
     source: &InterfaceId,
     before_seq: u64,
 ) -> Result<bool, String> {
     let mut index = ProviderLedgerEvidenceIndex::with_spotlight(
-        provider.clone(),
+        writer.owner.clone(),
         evidence.movements_path.to_path_buf(),
         evidence.max_control_frame_bytes,
         evidence.ledger_index_path,
     );
     index.catch_up()?;
-    if !payload_index_ready(&index, record, provider, source, before_seq)? {
-        return Ok(false);
-    }
-    if persisted_pending_handoff(record, provider)?.is_some()
-        && !readiness(evidence, record, provider, before_seq)?
-    {
-        return Ok(false);
-    }
-    Ok(true)
+    let mut reader = FileCheckedRunReader::open(evidence, None)?;
+    payload_index_ready(&mut reader, &index, path, current, writer, source, before_seq.min(index.next_seq))
 }
 
 pub(super) fn reader_payload_readiness<R: CheckedRunEvidenceReader + ?Sized>(
     reader: &mut R,
-    record: &RunRecord,
-    provider: &InterfaceId,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
     source: &InterfaceId,
     before_seq: u64,
 ) -> Result<bool, String> {
-    let mut index = ProviderLedgerEvidenceIndex::new(provider.clone(), PathBuf::new(), 1);
+    let mut index = ProviderLedgerEvidenceIndex::new(writer.owner.clone(), PathBuf::new(), 1);
     for sequence in 0..before_seq {
         let row = reader
             .admitted_movement(sequence)?
@@ -423,7 +434,113 @@ pub(super) fn reader_payload_readiness<R: CheckedRunEvidenceReader + ?Sized>(
         }
         index.note(&row)?;
     }
-    payload_index_ready(&index, record, provider, source, before_seq)
+    payload_index_ready(reader, &index, path, current, writer, source, before_seq)
+}
+
+struct PayloadHistoryReader<'a, R: ?Sized>(&'a mut R);
+
+impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadHistoryReader<'_, R> {
+    fn max_payload_bytes(&self) -> u64 { self.0.max_payload_bytes() }
+    fn movement(&mut self, sequence: u64) -> Result<Option<Movement>, String> { self.0.admitted_movement(sequence) }
+    fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String> { self.0.artifact(reference) }
+    fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String> { self.0.snapshot(hash) }
+    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
+        self.0.concurrent_writer_start(record, before, after_seq)
+    }
+    fn input_payloads_ready(&mut self, path: &Path, current: &[u8], writer: &CheckedRunWriter, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        self.0.input_payloads_ready(path, current, writer, source, before_seq)
+    }
+    fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
+        self.0.input_rearm_ready(record, provider, before_seq)
+    }
+}
+
+fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
+    reader: &mut R, index: &ProviderLedgerEvidenceIndex, path: &Path, current: &[u8],
+    writer: &CheckedRunWriter, before_seq: u64,
+    candidates: &BTreeMap<u64, (RuntimeCoordinateKey, IndexedOutboundArtifact)>,
+) -> Result<bool, String> {
+    if candidates.is_empty() { return Ok(true); }
+    let record = RunRecord::from_bytes(current).map_err(|error|error.to_string())?;
+    let mut anchor = None;
+    for (sequence, (coordinate, input)) in candidates {
+        let Some(label) = index.session_provider_inputs.get(&(artifact_ref_key(&input.artifact), record.id.to_string()))
+            .and_then(|inputs|inputs.get(sequence)) else { return Ok(false); };
+        if reader.artifact(&input.artifact)?.0.label != *label { return Err("payload readiness input changed its exact admitted artifact".into()); }
+        let hash = input.run_record_hash.as_deref().and_then(ContentHash::from_hex).ok_or("payload readiness input has no pinned snapshot")?;
+        let bytes = reader.snapshot(&hash)?;
+        if ContentHash::of_bytes(&bytes) != hash { return Err("payload readiness input snapshot failed integrity".into()); }
+        let pinned = RunRecord::from_bytes(&bytes).map_err(|error|error.to_string())?;
+        let checkpoint_id = CheckpointId::new(&coordinate.checkpoint);
+        let checkpoint = pinned.checkpoint(&checkpoint_id).ok_or("payload readiness input lost its admitted checkpoint")?;
+        let declared = validate_declared_provider_writer(&pinned, writer)?;
+        let matches = declared.checkpoints.iter().filter(|template| {
+            matches!(template.role, RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput)
+                && !template.include_context && template.interface() == &input.source
+                && checkpoint_record_matches_template(checkpoint, template, &pinned.id)
+                && indexed_evidence_matches_checkpoint(input, template)
+        }).count();
+        if matches != 1 || pinned.id != record.id || pinned.ee != record.ee || pinned.worker != record.worker
+            || coordinate.interface != writer.owner.as_str() || !pinned.active_checkpoints.contains(&checkpoint_id)
+            || checkpoint.epoch.0 != coordinate.epoch
+            || !artifact_refs_match_bindings(&input.artifact_binding_refs, &checkpoint.artifact_bindings) {
+            return Err("payload readiness input differs from its exact pinned independent contract".into());
+        }
+        if anchor.is_none() { anchor = Some((*sequence, bytes, pinned)); }
+    }
+    let (source, before, original) = anchor.ok_or("payload readiness lost its input history anchor")?;
+    let writers = declared_writer_closure(&original, vec![writer.clone()])?;
+    let start = reader.concurrent_writer_start(&original, &before, source)?;
+    let mut replay = PayloadHistoryReader(reader);
+    let chain = match checked_run_file_chain_with_reader(&mut replay, path, &before, CheckedRunTarget::Snapshot(current),
+        start, start.checked_add(1).ok_or("payload readiness history interval overflow")?, Some(before_seq), &writers, &[], None, None) {
+        Ok(chain) => chain,
+        Err(CheckedRunError::AwaitingResults { .. }) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut previous = persisted_pending_handoff(&original, &writer.owner)?;
+    let mut completed: BTreeMap<u64, PendingHandoff> = BTreeMap::new();
+    for transition in &chain {
+        validate_checked_owner_transition(transition)?;
+        let authored = RunRecord::from_bytes(&transition.after).map_err(|error|error.to_string())?;
+        let next = persisted_pending_handoff(&authored, &writer.owner)?;
+        if previous == next { continue; }
+        let next = next.ok_or("payload readiness history lost its pending handoff")?;
+        validate_pending_items_are_active(&authored, &writer.owner, &next)?;
+        let publication = previous.as_ref().is_some_and(|prior|context_publication::is_publication_completion(prior, &next));
+        if let Some(prior) = &previous {
+            if prior.context_publication.is_some() && !publication { return Ok(false); }
+            if !all_admitted(index, prior, &record, &writer.owner, transition.call.seq.0)? { return Ok(false); }
+            for item in &prior.items {
+                if replay.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {
+                    return Err("payload readiness completed output changed its admitted label".into());
+                }
+            }
+        }
+        if candidates.contains_key(&next.source_movement_seq) {
+            if transition.writer != *writer { return Err("payload readiness completion changed its provider writer".into()); }
+            if completed.get(&next.source_movement_seq).is_some_and(|prior|prior.terminal && !publication
+                && !source_settlement::follows_completed_source(prior, &next)) {
+                return Err("payload readiness history repeats a completed input".into());
+            }
+            completed.insert(next.source_movement_seq, next.clone());
+        }
+        previous = Some(next);
+    }
+    if previous != persisted_pending_handoff(&record, &writer.owner)? {
+        return Err("payload readiness history differs from the selected current handoff".into());
+    }
+    for source in candidates.keys() {
+        let Some(pending) = completed.get(source) else { return Ok(false); };
+        if !pending.terminal || pending.context_publication.is_some()
+            || !all_admitted(index, pending, &record, &writer.owner, before_seq)? { return Ok(false); }
+        for item in &pending.items {
+            if replay.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {
+                return Err("payload readiness terminal output changed its admitted label".into());
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn ready_pending(
@@ -553,6 +670,7 @@ pub(super) fn reader_readiness<R: CheckedRunEvidenceReader + ?Sized>(
 pub(super) fn validate_rearm_evidence(
     reader: &mut impl CheckedRunEvidenceReader,
     transition: &CheckedRunTransition,
+    path: &Path,
 ) -> Result<(), String> {
     let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
     if !before
@@ -579,8 +697,9 @@ pub(super) fn validate_rearm_evidence(
             .ok_or("payload selection has no stable input")?
             .interface();
         if !reader.input_payloads_ready(
-            &before,
-            &transition.writer.owner,
+            path,
+            &transition.before,
+            &transition.writer,
             source,
             transition.call.seq.0,
         )? {

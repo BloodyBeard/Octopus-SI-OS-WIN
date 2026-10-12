@@ -241,6 +241,35 @@ async fn exercise_interrupted_source_order(
         edge(&cold, &mut proof, prior.content.as_bytes(), &prior.pending_handoff.items[0].checkpoint.id,
             &seed_output, cold.config.worker.clone(), MovementKind::InterfaceArrival);
         let before = std::fs::read(&cold.run_path).unwrap();
+        for invalid in ["effect", "generation"] {
+            let mut probe = cold.clone();
+            probe.hand_in_root = cold.hand_in_root.join(format!("settlement-{invalid}"));
+            probe.session = ProviderHandoffSession::new(&probe.ctx).unwrap();
+            let label = if invalid == "effect" { "tool.call" } else { "interface.artifact.output" };
+            let receipt = InterfaceArtifactFile::write(probe.var_dir.join("settlement-negative"), label, br#"{"text":"settlement"}"#).unwrap();
+            let identity = artifact_identity(&receipt, &probe.var_dir).unwrap();
+            let record = RunRecord::from_bytes(&before).unwrap();
+            let mut context = current_context_artifacts(&record, &probe.config).unwrap();
+            context.retain(|id| id != &prior.pending_handoff.items[0].artifact_id);
+            append_artifact(&mut context, identity.artifact.id.clone());
+            let role = if invalid == "effect" { RunAuthoringCheckpointRole::ProviderToolOutput } else { RunAuthoringCheckpointRole::ProviderArtifactOutput };
+            let mut forged = probe.author_run(&before, &context, &[PreparedHandoff { identity,
+                output_checkpoint:probe.config.checkpoint_for_role(role).unwrap().clone(),verified_inputs:vec![] }],true,None,false,true).unwrap();
+            forged.pending_handoff.settlement_of = Some(pin_artifact(&seed_output, &probe.ctx.blobs_dir));
+            let mut value:serde_json::Value = serde_json::from_str(&forged.content).unwrap();
+            value["interface_state"][probe.ctx.interface.as_str()]["pending_handoff"] = serde_json::to_value(&forged.pending_handoff).unwrap();
+            if invalid == "generation" { value["interface_state"][probe.ctx.interface.as_str()]["context_generation"] = serde_json::json!(999); }
+            forged.content = String::from_utf8(JsonFormat::Compact.encode(&value).unwrap()).unwrap();
+            forged.after_hash = ContentHash::of_bytes(forged.content.as_bytes()).to_hex();
+            forged.patch = json_patch::diff(&serde_json::from_slice(&before).unwrap(), &value);
+            let mut forged_edit = edit(&forged);
+            if detached { forged_edit.correlation_id = format!("provider-writer-run:{run}:2:2"); }
+            checked_call(&probe, &before, &forged_edit, &probe.hand_in_root);
+            let ledger = std::fs::read(&probe.ctx.movements_path).unwrap();
+            assert!(probe.recover_authoring_attempt(&record, &before).is_err(), "{invalid} detached={detached}");
+            assert_eq!(std::fs::read(&probe.run_path).unwrap(), before);
+            assert_eq!(std::fs::read(&probe.ctx.movements_path).unwrap(), ledger);
+        }
         cold.source_movement_seq = proof.len() as u64;
         edge(&cold, &mut proof, &before, &stable(&before), &queued, cold.ctx.interface.clone(), MovementKind::InterfaceOutbound);
         let answer = InterfaceArtifactFile::write(cold.var_dir.join("revision-output"), "interface.artifact.output",
@@ -309,7 +338,7 @@ async fn exercise_interrupted_source_order(
     let writer = declared_provider_run_writer(&RunRecord::from_bytes(&seed).unwrap(), &payload.ctx.interface, &run_authoring_profile(descriptor).unwrap()).unwrap();
     let evidence = CheckedRunEvidence {movements_path:&payload.ctx.movements_path,ledger_index_path:&payload.ctx.ledger_index_path,
         blobs_dir:&payload.ctx.blobs_dir,max_control_frame_bytes:1_048_576,max_manifest_bytes:1_048_576,max_payload_bytes:268_435_456};
-    let ready = |bytes: &[u8]| provider_input_payloads_ready(&evidence, &RunRecord::from_bytes(bytes).unwrap(), &payload.ctx.interface, &source).unwrap();
+    let ready = |bytes: &[u8]| provider_input_payloads_ready(&evidence, &payload.run_path, bytes, &writer, &source).unwrap();
     let mut proof = vec![]; append(&payload, &mut proof, ledger_row(0));
     assert!(ready(&seed));
     let first = prepare_provider_input_payloads(payload.run_path.clone(), &seed, &writer, source.clone(), vec![a.clone(),b.clone()]).unwrap();

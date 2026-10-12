@@ -94,16 +94,28 @@ struct RegistryDescriptorFingerprint {
 
 const REGISTRY_OBSERVATION_ATTEMPTS: usize = 4;
 
+#[derive(Debug, thiserror::Error)]
+pub enum RegistrySnapshotError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("registry descriptors changed while forming the live snapshot; no stable observation after {attempts} attempts")]
+    Unstable { attempts: usize },
+}
+
+impl From<String> for RegistrySnapshotError {
+    fn from(error: String) -> Self { Self::Invalid(error) }
+}
+
 fn observe_stable_registry<T>(
     current: Option<RegistryDescriptorFingerprint>,
     mut fingerprint: impl FnMut() -> std::io::Result<RegistryDescriptorFingerprint>,
     mut load: impl FnMut() -> Result<T, String>,
-) -> Result<Option<(RegistryDescriptorFingerprint, T)>, String> {
+) -> Result<Option<(RegistryDescriptorFingerprint, T)>, RegistrySnapshotError> {
     for _ in 0..REGISTRY_OBSERVATION_ATTEMPTS {
         let before = match fingerprint() {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("registry descriptor fingerprint before load failed: {error}")),
+            Err(error) => return Err(format!("registry descriptor fingerprint before load failed: {error}").into()),
         };
         let candidate = if current == Some(before) {
             Ok(None)
@@ -113,16 +125,15 @@ fn observe_stable_registry<T>(
         let after = match fingerprint() {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("registry descriptor fingerprint after load failed: {error}")),
+            Err(error) => return Err(format!("registry descriptor fingerprint after load failed: {error}").into()),
         };
         if before != after {
             continue;
         }
-        return candidate.map(|snapshot| snapshot.map(|snapshot| (after, snapshot)));
+        return candidate.map(|snapshot| snapshot.map(|snapshot| (after, snapshot)))
+            .map_err(RegistrySnapshotError::Invalid);
     }
-    Err(format!(
-        "registry descriptors changed while forming the live snapshot; no stable observation after {REGISTRY_OBSERVATION_ATTEMPTS} attempts"
-    ))
+    Err(RegistrySnapshotError::Unstable { attempts: REGISTRY_OBSERVATION_ATTEMPTS })
 }
 
 const REGISTRY_DESCRIPTOR_KINDS: [&str; 7] = [
@@ -1470,7 +1481,7 @@ impl EmbeddedRuntime {
         Ok(())
     }
 
-    pub fn reload_registry_snapshot_on_artifact_arrival(&self) -> Result<(), String> {
+    pub fn reload_registry_snapshot_on_artifact_arrival(&self) -> Result<(), RegistrySnapshotError> {
         let mut current = self
             .registry_fingerprint
             .lock()

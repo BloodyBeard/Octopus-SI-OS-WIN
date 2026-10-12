@@ -90,7 +90,15 @@ async function releaseUpdateFixture(root) {
   const context = {
     runtimeInitializationComplete: false, runtimeInitializationPromise: null, nativeBrowserHost: null,
     ensureRuntimeHost: () => ({ probe: async () => ({ phase: live ? "ready" : "unmanaged", ready: live, ownership: live ? "external" : "none", pid: live ? 42 : null, error: null }) }),
-    resolveOctopusHome: () => root, clientSetupPackageRoots: () => roots, path,
+    resolveOctopusHome: () => root, clientSetupPackageRoots: () => roots, path, fs: fsSync,
+    resolveRepoRoot: () => root, resolveSourceRegistry: () => roots.sourceRegistryRoot,
+    resolveLocalPackageRegistry: () => roots.sourceRegistryRoot, resolveLocalPackageLibrary: () => roots.libraryRoot,
+    projectEePolicies: () => assert.fail("Package fixture must not project client policies"),
+    projectionReadRequest: require("../electron/projectionReadContract.cjs").projectionReadRequest,
+    createClientProjectionStore: () => ({ read: async request => {
+      assert.equal(request.method, "projection.operator.os.scope");
+      return { status: "ready", client_runs: [] };
+    }, close() {} }),
     registerLocalPackageMutationGuard, recoverLocalPackageTransactions, adoptLocalPackageUpdates,
     recoverWorkspaceTransactions: async () => calls.push("workspace"),
     startNativeBrowserEngine: async () => {
@@ -98,7 +106,12 @@ async function releaseUpdateFixture(root) {
       calls.push("browser");
     },
     getOperatorChatClientLoader: () => ({ load: () => { calls.push("client"); return "loaded"; } }),
-    projectionStores: new Map(), appendClientLog: async (_level, _event, detail) => assert.fail(detail.message),
+    projectionStores: new Map(), appendClientLog: async (_level, event, detail) => {
+      if (event === "client.package_adoption.unbound") { assert.equal(live, false); assert.equal(detail.reason, "No installed interface Registry or existing workspace."); return; }
+      assert.equal(event, "client.package_adoption.deferred", detail.message);
+      assert.equal(live, true);
+      assert.equal(detail.reason, "runtime is already running");
+    },
   };
   vm.createContext(context);
   for (const pattern of [/async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/,
@@ -134,18 +147,23 @@ async function releaseUpdateFixture(root) {
   assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 999);
   await fs.writeFile(ownerFile(roots, false, "life-bin"), "version five\n");
   live = false; context.runtimeInitializationComplete = false;
-  await assert.rejects(context.initializeRuntimeHost(), /unowned JSON changes/);
-  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
-  assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version four\n");
+  await context.initializeRuntimeHost();
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 999);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version five\n");
   assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
-  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", endpoint: "private" }, contract: 4 });
   await fs.writeFile(ownerFile(roots, true, "local-notes.txt"), "keep me\n");
-  await assert.rejects(adoptLocalPackageUpdates(roots), /changed source-owned files/);
+  await fs.writeFile(ownerFile(roots, false, "life-bin"), "version six\n");
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
+  assert.equal((await record(roots)).locally_modified, true);
   assert.equal(await fs.readFile(ownerFile(roots, true, "local-notes.txt"), "utf8"), "keep me\n");
-  await fs.unlink(ownerFile(roots, true, "local-notes.txt"));
+  const preservedReceipt = await fs.readFile(receiptPath);
+  await json(ownerFile(roots, false, "interface.json"), { id: "world_fixture", config: { model: "new", effort: "high" }, contract: 6 });
+  await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes.*interface.json/);
+  assert.deepEqual(await fs.readFile(receiptPath), preservedReceipt);
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 999);
   await json(manifestPath, { ...manifest, version: "5.0.0", required_packages: ["unselected"] });
   await assert.rejects(adoptLocalPackageUpdates(roots), /reviewed dependency closure/);
-  assert.deepEqual(await fs.readFile(receiptPath), adoptedReceipt);
+  assert.deepEqual(await fs.readFile(receiptPath), preservedReceipt);
 }
 async function sourceBoundaryFixture(root, repoRoot) {
   for (const relative of [".gitignore", "LICENSE", "CONTRIBUTING.md", "README.md", "AGENTS.md",
@@ -234,7 +252,8 @@ async function run() {
     crossWired.members = structuredClone(baseline.members);
     crossWired.members.pop();
     await json(receiptPath, crossWired);
-    assert.equal((await record(roots)).receipt_state, "stale");
+    assert.equal((await record(roots)).available, false);
+    assert.match((await record(roots)).error, /source baseline does not match/);
     crossWired.members = [baseline.members[0], baseline.members[0]];
     await json(receiptPath, crossWired);
     assert.equal((await record(roots)).available, false);

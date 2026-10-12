@@ -409,6 +409,19 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &request.selected_worker_environment_kinds,
         &request.selected_tools,
     )?;
+    let selected_kinds = if request.selected_tools.is_empty() {
+        request.selected_worker_environment_kinds.as_slice()
+    } else {
+        for tool in &request.selected_tools {
+            if !request.selected_worker_environment_kinds.is_empty()
+                && !request.selected_worker_environment_kinds.contains(&tool.worker_environment_kind)
+            {
+                return Err(format!("selected tool '{}' is outside the selected worker environment kinds", tool.tool));
+            }
+        }
+        topology = select_capability_topology(topology, &config, &[], &request.selected_tools)?;
+        &[]
+    };
     topology.worker_relays.clear();
     topology.operation_bindings.clear();
     let selection = RunSelection {
@@ -434,7 +447,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
     if owns_client { communication.client_interface_id = Some(identity.chat_interface_id.clone()); }
     identity.native_communication = Some(communication);
     preserve_selected_file_writer(&config, suffix, &topology, &request.selected_tools,
-        &request.selected_worker_environment_kinds, &mut identity)?;
+        selected_kinds, &mut identity)?;
     let source =
         load_interface_descriptor(&interface_root, &request.authoring.source_interface_id)?;
     if !topology.interface_policies.contains_key(&source.id) {

@@ -1311,7 +1311,7 @@ fn history(
                 validate_checked_owner_transition(&transition)?;
                 generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
                 validate_verified_input_transition(&mut reader, &transition)?;
-                input_revision::validate_rearm_evidence(&mut reader, &transition)?;
+                input_revision::validate_rearm_evidence(&mut reader, &transition, &target_path)?;
                 current.last_applied_target = Some((seq, transition.after));
             }
             current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
@@ -1465,6 +1465,7 @@ impl ProviderOutputHandoff {
             }
             let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
             let original_config = attempt_config(&original, &self.config)?;
+            source_settlement::validate_transition(&original, &record, &original_config)?;
             validate_bound_run_authoring_topology(&record, &original_config, None)?;
             let result_template = original_config
                 .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;

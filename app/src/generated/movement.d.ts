@@ -65,6 +65,7 @@ export type RefusedReason =
   | "stale_epoch"
   | "checkpoint_spent"
   | "settled"
+  | "registry_unstable"
   | "malformed";
 export type MarkClass = "success";
 export type BindingArtifactPolicy =

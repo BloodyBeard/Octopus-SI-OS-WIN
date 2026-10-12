@@ -1801,6 +1801,92 @@ async function planOperatorChatTaskAmendment(options, request) {
   };
 }
 
+async function planOperatorChatPackageAdoption(options, request) {
+  const config = await readConfig();
+  const home = absolutePath(options.octopusHome(), "octopusHome");
+  const registryRoot = resolveRegistryRoot(options);
+  const runId = safeSegment(request?.runId, "runId");
+  const expectedRunHash = safeSha256(request?.expectedRunHash, "expectedRunHash");
+  const runsRoot = await resolveRunRecordsRoot(home);
+  const current = await readJsonDocumentIfPresent(path.join(runsRoot, `${runId}.json`));
+  if (!current || sha256Hex(Buffer.from(current.text)) !== expectedRunHash) {
+    throw new Error(`native package adoption run '${runId}' changed before planning`);
+  }
+  const identity = chatIdentityFromRunRecord(config, runId, current.value);
+  const provider = safeSegment(current.value.interface_state[identity.interfaceId].provider_runtime_interface, "provider runtime interface");
+  const providerPath = path.join(registryRoot, "interface", provider, "interface.json");
+  const descriptor = await readJsonDocumentIfPresent(providerPath);
+  if (!descriptor) throw new Error(`native package adoption provider '${provider}' is absent`);
+  const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), registryRoot, "topology_planner");
+  const plan = await runOperatorRevisionCommand(planner, "--plan-native-adoption", {
+    roots: { registry_root: registryRoot, ee_instances_root: await resolveEeInstancesRoot(home, options),
+      run_records_root: runsRoot, interface_private_state_root: path.join(home, "interfaces") },
+    ledger_root: path.join(home, "ledger"), client_template_interface: config.interface,
+    run_id: runId, expected_run_hash: expectedRunHash, expected_provider_hash: sha256Hex(Buffer.from(descriptor.text)),
+  });
+  if (plan.run_id !== runId || plan.provider_interface_id !== provider
+    || !["unchanged", "deferred", "planned"].includes(plan.status)) {
+    throw new Error("native package adoption planner changed its exact identity or status");
+  }
+  const writes = requiredArray(plan.writes, "native adoption writes");
+  const catalogPath = path.join(registryRoot, "artifact", `artifact-run-affordances-${identity.chatId}`, "artifact.json");
+  if (plan.status === "planned") {
+    if (writes.length !== 2 || writes[0].path !== catalogPath || writes[1].path !== providerPath) {
+      throw new Error("native package adoption may write only its exact catalog and provider declaration");
+    }
+    for (const write of writes) {
+      safeSha256(write.expected_before_hash, "native adoption write preimage");
+      requiredString(write.content, "native adoption content");
+    }
+  } else if (writes.length) throw new Error("deferred or unchanged native adoption contains writes");
+  if (plan.status === "deferred") requiredString(plan.reason, "native adoption deferral reason");
+  for (const preimage of requiredArray(plan.preimages, "native adoption preimages")) {
+    const file = absolutePath(preimage.path, "native adoption preimage path");
+    if (file !== path.join(runsRoot, `${runId}.json`) && !file.startsWith(`${registryRoot}${path.sep}`)) {
+      throw new Error("native adoption preimage is outside its exact run and Registry");
+    }
+    safeSha256(preimage.sha256, "native adoption preimage hash");
+  }
+  return plan;
+}
+
+async function adoptOperatorChatPackageUpdates(options, request) {
+  const assertStopped = requiredFunction(options?.assertStopped, "native adoption stopped-owner guard");
+  const commit = requiredFunction(options?.commitClientAuthoring, "native adoption client transaction");
+  const onResult = requiredFunction(options?.onResult, "native adoption result projection");
+  const seen = new Set();
+  const results = [];
+  for (const row of requiredArray(request?.clientRuns, "native adoption clientRuns")) {
+    const runId = safeSegment(row.run_id, "native adoption run");
+    if (seen.has(runId)) throw new Error(`native adoption repeats run '${runId}'`);
+    seen.add(runId);
+    const result = await withRunAuthoringLock(runId, async () => {
+      await assertStopped();
+      const plan = await planOperatorChatPackageAdoption(options, { runId, expectedRunHash: row.record_digest });
+      if (plan.status === "planned") {
+        for (const preimage of plan.preimages) {
+          const current = await readFileHashIfPresent(preimage.path);
+          if (current?.hash !== preimage.sha256) throw new Error(`native adoption preimage changed at '${preimage.path}'`);
+        }
+        await assertStopped();
+        await commit({ label: `adopt native authoring declarations for ${runId}`,
+          writes: plan.writes.map((write) => ({file:write.path,content:write.content,beforeDigest:write.expected_before_hash,label:write.tag})),
+          removals: [], publishBarrierPath: plan.writes[1].path });
+        for (const write of plan.writes) {
+          const current = await readFileHashIfPresent(write.path);
+          if (current?.hash !== sha256Hex(Buffer.from(write.content))) throw new Error(`native adoption readback differs at '${write.path}'`);
+        }
+      }
+      return { runId, providerInterfaceId: plan.provider_interface_id,
+        status: plan.status === "planned" ? "adopted" : plan.status,
+        sourceMovementSeq: plan.source_movement_seq, reason: plan.reason };
+    });
+    results.push(result);
+    await onResult(result);
+  }
+  return { changed: results.some((row) => row.status === "adopted"), results };
+}
+
 async function verifyProviderAccount(options, request) {
   const input = providerAccountRequest(request, false);
   const submitArtifact = requiredFunction(options?.submitArtifact, "submitArtifact");
@@ -7660,10 +7746,12 @@ function positiveInteger(value, field) {
 }
 
 module.exports = {
+  adoptOperatorChatPackageUpdates,
   assertGenericOperatorChatArtifactAllowed,
   loginProviderAccount,
   planOperatorChatSurface,
   planOperatorChatTaskAmendment,
+  planOperatorChatPackageAdoption,
   readOperatorChatArtifacts,
   refreshProviderModels,
   releaseOperatorTaskWorkerEnvironments,

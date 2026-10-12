@@ -36,12 +36,27 @@ pub struct InterfaceArtifactArrivalAdmissionOutcome {
 pub enum InterfaceArtifactArrivalAdmissionError {
     #[error("interface artifact arrival failed closed: {0}")]
     Arrival(#[from] ArrivalError),
+    #[error("interface artifact arrival awaits a stable registry snapshot after {attempts} observations")]
+    RegistryUnstable { attempts: usize },
 }
 
 impl InterfaceArtifactArrivalAdmissionError {
     pub fn verdict(&self) -> DeliveryVerdict {
         match self {
             InterfaceArtifactArrivalAdmissionError::Arrival(error) => error.verdict(),
+            Self::RegistryUnstable { attempts } => DeliveryVerdict::refused(
+                octopus_ledger::RefusedReason::RegistryUnstable,
+                serde_json::json!({"message":self.to_string(),"attempts":attempts}),
+            ),
+        }
+    }
+
+    fn registry(error: crate::spine_root::RegistrySnapshotError, operation: &str) -> Self {
+        match error {
+            crate::spine_root::RegistrySnapshotError::Unstable { attempts } => Self::RegistryUnstable { attempts },
+            crate::spine_root::RegistrySnapshotError::Invalid(error) => Self::Arrival(
+                ArrivalError::Malformed(format!("{operation} registry reread failed closed: {error}")),
+            ),
         }
     }
 }
@@ -172,9 +187,7 @@ pub async fn admit_interface_artifact_arrival(
                 arriving_interface,
                 arriving_interface,
                 None,
-                InterfaceArtifactArrivalAdmissionError::Arrival(ArrivalError::Malformed(format!(
-                    "artifact arrival registry reread failed closed: {e}"
-                ))),
+                InterfaceArtifactArrivalAdmissionError::registry(e, "artifact arrival"),
             )
         })?;
     let arrival_artifact_file =
@@ -228,9 +241,7 @@ pub async fn admit_system_interface_emission(
                 from_interface,
                 to_interface,
                 None,
-                InterfaceArtifactArrivalAdmissionError::Arrival(ArrivalError::Malformed(format!(
-                    "interface emission registry reread failed closed: {e}"
-                ))),
+                InterfaceArtifactArrivalAdmissionError::registry(e, "interface emission"),
             )
         })?;
     let emission_artifact_file = resolve_interface_arrival_payload(emission_artifact_file)
@@ -283,9 +294,7 @@ pub async fn admit_system_interface_reference_emission(
                 from_interface,
                 to_interface,
                 Some(artifact.clone()),
-                InterfaceArtifactArrivalAdmissionError::Arrival(ArrivalError::Malformed(format!(
-                    "interface emission registry reread failed closed: {e}"
-                ))),
+                InterfaceArtifactArrivalAdmissionError::registry(e, "interface emission"),
             )
         })?;
     let source =

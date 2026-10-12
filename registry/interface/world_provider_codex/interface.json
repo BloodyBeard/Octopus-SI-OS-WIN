@@ -820,7 +820,8 @@
                   },
                   "client_interface_id": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Existing client destination, if one should be reused. Omit to create a new client from the declared native default template; this field is not a new client template or a display title."
                   },
                   "artifacts": {
                     "type": "array",
@@ -882,7 +883,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1
-                    }
+                    },
+                    "description": "Allowed kinds for an explicit nonempty tools list. When tools is empty, select all permitted tools in these kinds."
                   },
                   "return_interface_ids": {
                     "type": "array",
@@ -916,7 +918,8 @@
                           "minLength": 1
                         }
                       }
-                    }
+                    },
+                    "description": "Exact model-visible tool selection when nonempty. Worker environment kinds do not add tools to this list; required private authoring tools remain internal."
                   },
                   "door_host_slots": {
                     "type": "object",
@@ -1117,7 +1120,8 @@
                   },
                   "client_interface_id": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Existing client destination, if one should be reused. Omit to create a new client from the declared native default template; this field is not a new client template or a display title."
                   },
                   "artifacts": {
                     "type": "array",
@@ -1179,7 +1183,8 @@
                     "items": {
                       "type": "string",
                       "minLength": 1
-                    }
+                    },
+                    "description": "Allowed kinds for an explicit nonempty tools list. When tools is empty, select all permitted tools in these kinds."
                   },
                   "return_interface_ids": {
                     "type": "array",
@@ -1213,7 +1218,8 @@
                           "minLength": 1
                         }
                       }
-                    }
+                    },
+                    "description": "Exact model-visible tool selection when nonempty. Worker environment kinds do not add tools to this list; required private authoring tools remain internal."
                   },
                   "door_host_slots": {
                     "type": "object",

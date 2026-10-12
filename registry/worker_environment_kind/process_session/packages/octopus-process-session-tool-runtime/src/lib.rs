@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod door_life;
 mod execution_inputs;
+mod completed_output;
+pub use completed_output::{PreparedToolOutputRecovery, prepare_tool_output_recovery};
 
 #[cfg(test)]
 #[path = "../tests/support/execution_loading.rs"]
@@ -258,6 +260,9 @@ impl ToolDoorOwner {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolProcessBrokerResult {
     Completed,
+    OutputPending {
+        error: String,
+    },
     Refused {
         reason: RefusedReason,
         detail: serde_json::Value,
@@ -1952,11 +1957,38 @@ struct ToolProcessCompletion {
     artifacts: Vec<InterfaceArtifactFile>,
     streamed_output_admitted: bool,
     primary_input: Option<ToolProcessPrimaryInput>,
+    invocation_manifest: PathBuf,
+    generation: PathBuf,
 }
 
 struct ToolProcessPrimaryInput {
     directory: std::fs::File,
     files: Vec<(std::ffi::OsString, ContentHash, std::fs::Metadata)>,
+}
+
+async fn hand_completed_tool_outputs(
+    ctx: &InterfaceLiftContext,
+    input: &ToolProcessEnvelope,
+    completion: ToolProcessCompletion,
+    callback: Option<&ToolDoorOutputCallback>,
+    primary_input: &mut Option<ToolProcessPrimaryInput>,
+) -> ToolProcessBrokerResult {
+    if completion.artifacts.is_empty() {
+        *primary_input = completion.primary_input;
+        return ToolProcessBrokerResult::Completed;
+    }
+    let mut retained = match completed_output::CompletedOutputs::retain(ctx, input, &completion) {
+        Ok(retained) => retained,
+        Err(error) => return ToolProcessBrokerResult::OutputPending { error },
+    };
+    match retained.deliver(ctx, input, callback, false).await {
+        Ok(ToolProcessBrokerResult::Completed) => {
+            *primary_input = completion.primary_input;
+            ToolProcessBrokerResult::Completed
+        }
+        Ok(result) => result,
+        Err(error) => ToolProcessBrokerResult::OutputPending { error },
+    }
 }
 
 #[cfg(unix)]
@@ -2498,6 +2530,7 @@ impl ToolProcessClient {
         let primary_input = ToolProcessPrimaryInput::capture(
             &self.input_root, request_id, &envelope.manifest_path, &self.host_io_limits,
         ).map_err(ToolProcessInvokeError::Unavailable)?;
+        let invocation_manifest = envelope.manifest_path.clone();
         let input = ToolProcessInput::Invoke {
             request_id,
             descriptor,
@@ -2664,6 +2697,8 @@ impl ToolProcessClient {
                         artifacts,
                         streamed_output_admitted,
                         primary_input: all_streamed_outputs_admitted.then_some(primary_input),
+                        invocation_manifest,
+                        generation: self.generation_dir.clone(),
                     });
                 }
                 ToolProcessOutput::Failed {
@@ -3306,6 +3341,17 @@ impl ToolProcessBrokerHost {
             }
         };
         let ctx = effective_ctx.as_ref().unwrap_or(ctx);
+        match completed_output::CompletedOutputs::load(ctx, envelope.source_movement_seq) {
+            Ok(Some(mut retained)) => {
+                return match retained.deliver(ctx, &envelope, self.output_callback.as_ref(), true).await {
+                    Ok(ToolProcessBrokerResult::Completed) => ToolProcessBrokerInvocation::Completed(None),
+                    Ok(result) => ToolProcessBrokerInvocation::Outcome(result),
+                    Err(error) => ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::OutputPending { error }),
+                };
+            }
+            Ok(None) => {}
+            Err(error) => return ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::OutputPending { error }),
+        }
         let initial_process_key = {
             let mut routing = self.routing.lock().await;
             match routing.resolve_process_key(ctx, &tool, &arguments, &envelope, &self.owner) {
@@ -4188,7 +4234,7 @@ impl ToolProcessBrokerState {
         if let Some(source) = envelope.output_source.as_mut() {
             source.formation = Some(formation.clone());
         }
-        let output_source = envelope.output_source.clone();
+        let completed_input = envelope.clone();
         let result = {
             let Some(process) = self.processes.get_mut(&process_key) else {
                 return ToolProcessBrokerResult::Unavailable {
@@ -4228,31 +4274,7 @@ impl ToolProcessBrokerState {
                 }
             }
             Ok(completion) => {
-                let mut refusal = None;
-                // Streamed artifacts already have their own gate verdict and must not be handed twice.
-                for artifact in completion.artifacts {
-                    match hand_tool_process_output(
-                        ctx,
-                        output_source.as_ref(),
-                        output_callback,
-                        artifact,
-                    )
-                    .await
-                    {
-                        Ok(DeliveryVerdict::Admitted { .. }) => {}
-                        Ok(DeliveryVerdict::Refused { reason, detail }) => {
-                            refusal.get_or_insert((reason, detail));
-                        }
-                        Err(error) => return ToolProcessBrokerResult::Unavailable { error },
-                    }
-                }
-                match refusal {
-                    Some((reason, detail)) => ToolProcessBrokerResult::Refused { reason, detail },
-                    None => {
-                        *primary_input = completion.primary_input;
-                        ToolProcessBrokerResult::Completed
-                    }
-                }
+                hand_completed_tool_outputs(ctx, &completed_input, completion, output_callback, primary_input).await
             }
             Err(ToolProcessInvokeError::Capability(error)) => {
                 ToolProcessBrokerResult::CapabilityFailed { error }
@@ -6315,6 +6337,7 @@ fn remove_tool_process_generation(root: &Path, generation: &Path) -> Result<(), 
     match std::fs::symlink_metadata(generation) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
             let _owner_quiescence = acquire_tool_process_owner_lease(generation)?;
+            if completed_output::retains_generation(generation)? { return Ok(()); }
             std::fs::remove_dir_all(generation).map_err(|error| {
                 format!(
                     "tool process generation '{}' cannot be removed: {error}",
@@ -7372,6 +7395,7 @@ impl ToolDoorEffectJournal {
     }
 
     fn prune_before(&mut self, committed_seq: u64) -> Result<(), String> {
+        completed_output::prune_before(self.path.parent().ok_or("tool-door journal has no owner")?, committed_seq, self.maximum_receipt_bytes)?;
         let before = self.entries.len();
         self.entries.retain(|seq, _| *seq >= committed_seq);
         if self.entries.len() == before {
@@ -7807,6 +7831,7 @@ async fn tool_door_loop(
     let mut rows = BTreeMap::<u64, ToolDoorPendingRow>::new();
     let mut tasks = tokio::task::JoinSet::<ToolDoorCompletion>::new();
     ctx.signal_ready()?;
+    completed_output::recover_consumed_sources(ctx, host.output_callback.as_ref(), reader.next_seq()).await?;
     loop {
         if ctx.cancel.is_cancelled() {
             retire_tool_door_tasks(&mut tasks, &mut journal, &mut rows).await?;
@@ -7854,7 +7879,9 @@ async fn tool_door_loop(
                         ToolDoorArtifactDecodePurpose::HistoricalIdentity,
                     ) {
                         ToolDoorAction::Invoke { call, envelope } => {
-                            if tool_door_has_exact_admitted_result(
+                            if completed_output::CompletedOutputs::load(ctx, seq)?.is_some() {
+                                ToolDoorAction::Recover { call, envelope }
+                            } else if tool_door_has_exact_admitted_result(
                                 ctx,
                                 &own.movement,
                                 &call,
@@ -8185,13 +8212,11 @@ async fn execute_tool_invocation(
     };
     let mut captured =
         ToolProcessEnvelope::capture(&envelope, source_movement_seq, &host_io_limits)?;
-    if host.output_callback.is_some() {
-        captured.output_source = Some(ToolDoorOutputSource {
-            movement: ctx.source_movement(&envelope)?.clone(),
-            envelope: envelope.clone(),
-            formation: None,
-        });
-    }
+    captured.output_source = Some(ToolDoorOutputSource {
+        movement: ctx.source_movement(&envelope)?.clone(),
+        envelope: envelope.clone(),
+        formation: None,
+    });
     match host
         .invoke(
             ctx,
@@ -8212,6 +8237,7 @@ async fn execute_tool_invocation(
         ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Refused { .. }) => {
             Ok(ToolDoorJournalState::Refused)
         }
+        ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::OutputPending { error }) => Err(error),
         ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::CapabilityFailed {
             error,
         }) => {
@@ -8924,6 +8950,9 @@ fn validate_private_read_handle(handle: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tool_process_private_boundary_tests {
+    mod completed_output_tests {
+        include!("../tests/support/completed_output.rs");
+    }
     use super::{
         BoundedJsonLineReader, TOOL_DOOR_EFFECT_JOURNAL_FILE, ToolDoorEffectJournal,
         ToolDoorJournalState, ToolProcessBrokerShards, ToolProcessBrokerState, ToolProcessClient,

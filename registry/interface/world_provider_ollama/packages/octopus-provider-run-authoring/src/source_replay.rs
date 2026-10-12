@@ -108,7 +108,7 @@ impl ProviderOutputHandoff {
                     }
                 }
                 if let Some(prior) = sources.get(&next.source_movement_seq) {
-                    if prior.terminal && !publication {
+                    if prior.terminal && !publication && !source_settlement::follows_completed_source(prior, &next) {
                         return Err("completed input chain repeats a terminal source".into());
                     }
                     if prior.items == next.items && !publication {

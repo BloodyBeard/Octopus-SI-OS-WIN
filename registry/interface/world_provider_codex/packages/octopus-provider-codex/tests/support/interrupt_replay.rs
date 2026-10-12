@@ -1,4 +1,60 @@
 use super::*;
+use serde_json::json;
+
+#[tokio::test]
+#[ignore = "requires an explicitly selected stopped Home with a committed error retaining its exact result"]
+async fn selected_home_completed_error_retains_stopped_result_settlement() {
+    let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider = InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run = RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source: u64 = std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let dir = home.join("registry/interface").join(provider.as_str());
+    let descriptor: InterfaceDescriptor = serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let (arrivals, receiver) = tokio::sync::mpsc::channel(1); drop(receiver);
+    let ctx = InterfaceLiftContext::unprivileged(provider.clone(),dir,Some(descriptor.clone()),home.join("interfaces").join(provider.as_str()),
+        home.join("ledger/movements.jsonl"),home.join("ledger/blobs"),scratch.path().join("unused-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(),home.join("state/runs")),("interface_hand_in_root".into(),home.join("interface-hand-in"))]),arrivals,Default::default())
+        .with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path = home.join("state/runs").join(format!("{run}.json"));
+    let before = std::fs::read(&path).unwrap(); let ledger = std::fs::read(&ctx.movements_path).unwrap();
+    let cursors = ["ledger-cursor.json", "ledger-cursor.turn-control.json"].map(|name| {
+        let path = ctx.interface_var_dir().join(name); let bytes = std::fs::read(&path).unwrap(); (path, bytes)
+    });
+    let session = ProviderHandoffSession::new(&ctx).unwrap();
+    assert!(session.completed_source_candidates(&ctx).unwrap().contains(&(run.clone(), source)));
+    let turn = replay_provider_source(&ctx,&run,source).unwrap().unwrap();
+    let pinned = ctx.pinned_run_record_bytes(&turn.envelope).unwrap();
+    let handoff = session.from_invocation(&ctx,&descriptor,&run,&turn.envelope,source,&pinned).unwrap();
+    let (recovery,outcomes) = handoff.recover_completed_source_with_outcomes().await.unwrap();
+    assert_eq!(recovery,ProviderSourceRecovery::Completed);
+    let context = handoff.current_session_context_artifacts().await;
+    let proof = crate::handler::stopped_result::prove(&descriptor,&turn.envelope,source,&before,&context,&outcomes)
+        .unwrap().expect("actual committed error must prove its exact stopped result");
+    validate_stopped_result_control(&ctx,&descriptor,&run,&proof).unwrap();
+    let mut forged_ack = proof.clone();
+    forged_ack.acknowledgement.content = ContentHash::of_bytes(b"unadmitted Stop acknowledgement");
+    assert!(validate_stopped_result_control(&ctx,&descriptor,&run,&forged_ack).is_err());
+    let mut unadmitted_ack = proof.clone();
+    unadmitted_ack.acknowledgement_seq += 1;
+    assert!(validate_stopped_result_control(&ctx,&descriptor,&run,&unadmitted_ack).is_err());
+    let value = serde_json::to_value(&proof.source).unwrap();
+    assert!(value["pending"].is_object()); assert!(value["native_terminal"].is_null());
+    let result:serde_json::Value = serde_json::from_slice(&turn.envelope.read_artifact_payload().unwrap()).unwrap();
+    assert_eq!(result["ok"],true);
+    assert_eq!(result["correlation_id"],value["pending"]["call_id"]);
+    let mut changed = context.as_ref().clone();
+    let error = changed.iter_mut().find(|entry|entry.source_artifact==proof.predecessor).unwrap();
+    error.payload["codex_continuity"]["pending"]["call_id"] = json!("different-effect");
+    assert!(crate::handler::stopped_result::prove(&descriptor,&turn.envelope,source,&before,&changed,&outcomes).is_err());
+    let mut generation:serde_json::Value = serde_json::from_slice(&before).unwrap();
+    generation["interface_state"][provider.as_str()]["context_generation"] = json!(999_999);
+    assert!(crate::handler::stopped_result::prove(&descriptor,&turn.envelope,source,&serde_json::to_vec(&generation).unwrap(),&context,&outcomes).is_err());
+    assert_eq!(std::fs::read(path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+    for (path,bytes) in cursors { assert_eq!(std::fs::read(path).unwrap(),bytes); }
+    eprintln!("actual completed source {source}, Stop {}, checked generation {}: exact settlement eligible; native terminal read remains a live gate",proof.control_source,value["context_generation"]);
+}
 
 #[test]
 #[ignore = "requires an explicitly selected Home for read-only authoring inspection"]

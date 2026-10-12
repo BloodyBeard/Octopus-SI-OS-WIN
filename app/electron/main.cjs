@@ -2549,25 +2549,56 @@ async function initializeRuntimeHost() {
     runtimeInitializationPromise = (async () => {
       const octopusHome = resolveOctopusHome();
       const packageRoots = clientSetupPackageRoots();
-      const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: packageRoots.stateRoot,
-        guard: async () => {
+      const assertStopped = async () => {
           if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during package release adoption.");
           const state = await host.probe();
           if (state.phase !== "unmanaged" || state.ready || state.ownership !== "none" || state.pid !== null || state.error) {
             throw new Error("Close the running Octopus runtime before updating its installed packages. Your Home and tasks are preserved.");
           }
-        },
-      });
+        };
+      const releaseGuard = registerLocalPackageMutationGuard({ stateRoot: packageRoots.stateRoot, guard: assertStopped });
       try {
         await recoverLocalPackageTransactions(packageRoots);
         await adoptLocalPackageUpdates(packageRoots);
+        const state = await host.probe();
+        if (state.pid === null) {
+          await assertStopped();
+          const registryRoot = path.join(octopusHome, "registry");
+          await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot });
+          const interfaceRoot = fs.lstatSync(path.join(registryRoot, "interface"), { throwIfNoEntry: false });
+          if (interfaceRoot) {
+            if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
+            const store = createClientProjectionStore("live", { resolveRepoRoot, sourceRegistry: resolveSourceRegistry,
+              localPackageRegistry: resolveLocalPackageRegistry, localPackageLibrary: resolveLocalPackageLibrary,
+              octopusHome: () => octopusHome, projectEePolicies });
+            try {
+              const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
+              if (scope.status === "invalid") throw new Error(`Native package adoption scope is invalid: ${scope.errors.join("; ")}`);
+              if (scope.client_runs.length) {
+                const client = await getOperatorChatClientLoader().load();
+                await client.adoptOperatorChatPackageUpdates({ octopusHome: () => octopusHome,
+                  registryRoot: () => registryRoot, installationRoot: resolveInstallationRoot, assertStopped,
+                  commitClientAuthoring: (request) => commitProjectionClientAuthoring(octopusHome, registryRoot, request),
+                  onResult: (result) => appendClientLog(result.status === "deferred" ? "warn" : "info", "client.package_adoption", result),
+                }, { clientRuns: scope.client_runs });
+              }
+            } finally { store.close(); }
+          } else {
+            for (const relative of ["state/runs", "client-state/workspace/receipts"]) {
+              const ownerPath = path.join(octopusHome, relative);
+              const owner = fs.lstatSync(ownerPath, { throwIfNoEntry: false });
+              if (owner && (!owner.isDirectory() || owner.isSymbolicLink() || fs.readdirSync(ownerPath).length)) {
+                throw new Error(`Installed interface Registry is absent for existing workspace state '${ownerPath}'.`);
+              }
+            }
+            await appendClientLog("info", "client.package_adoption.unbound", { reason: "No installed interface Registry or existing workspace." });
+          }
+        } else {
+          await appendClientLog("info", "client.package_adoption.deferred", { reason: "runtime is already running" });
+        }
       } finally {
         releaseGuard();
       }
-      await recoverWorkspaceTransactions({
-        octopusHomeRoot: octopusHome,
-        registryRoot: path.join(octopusHome, "registry"),
-      });
       // Only the idle package host starts here. Room engines require admitted tool requests.
       try { await startNativeBrowserEngine(); } catch (error) {
         await appendClientLog("error", "browser.native_host.unavailable", { message: error.message });

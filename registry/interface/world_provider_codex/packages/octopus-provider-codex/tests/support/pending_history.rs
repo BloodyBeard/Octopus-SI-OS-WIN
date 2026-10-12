@@ -10,6 +10,7 @@ async fn pending_operator_history_pages_fail_closed_and_preserve_approval_replay
         (vec![page(vec![turn("other", "completed")], Some("older")), pending.clone()],
             vec![page(vec![item("pending", "first")], Some("next")), page(vec![item("pending", "last")], None)], None),
         (vec![page(vec![], Some("loop")), page(vec![], Some("loop"))], vec![], Some("repeated a pagination cursor")),
+        (vec![page(vec![turn("same", "completed"), turn("same", "completed")], None)], vec![], Some("repeated turn")),
         (vec![page(vec![], None)], vec![], Some("did not restore pending operator turn")),
         (vec![page(vec![turn("pending", "completed")], None)], vec![], Some("not in progress")),
         (vec![pending.clone()], vec![page(vec![item("wrong", "first")], None)], Some("expected 'pending'")),
