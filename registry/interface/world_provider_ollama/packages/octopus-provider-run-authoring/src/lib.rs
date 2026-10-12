@@ -3564,9 +3564,13 @@ fn persisted_authoring_attempt(
         .checked_add(1)
         .ok_or("provider authoring generation overflowed")?;
     let current_hash = ContentHash::of_bytes(record_bytes).to_hex();
+    let calls = private_authoring_calls(ctx, hand_in_root, config)?;
+    if calls.is_empty() {
+        return Ok(None);
+    }
     let predecessors = revision_attempt_generations(ctx, record, record_bytes, config)?;
     let mut attempts = Vec::new();
-    for (path, call) in private_authoring_calls(ctx, hand_in_root, config)? {
+    for (path, call) in calls {
         let prefix = format!("provider-run-authoring:{}:", record.id);
         if !call.correlation_id.starts_with(&prefix) { continue; }
         let generation = correlation_generation(&record.id, &call.correlation_id)?;
