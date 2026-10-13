@@ -311,13 +311,18 @@ test("actual client terminal/request decoders and content-addressed receipts pro
   const ledger = path.join(temporary, "attention-ledger"), blobs = path.join(ledger, "blobs"); fs.mkdirSync(blobs, { recursive: true });
   const { blake3 } = require("@noble/hashes/blake3");
   const validate = new (require("ajv"))({ strict: false, logger: false }).compile(require("../../schemas/movement.schema.json"));
+  function artifact(label, bytes) {
+    const payloadHash = Buffer.from(blake3(bytes)).toString("hex");
+    fs.writeFileSync(path.join(blobs, payloadHash), bytes);
+    const manifest = Buffer.from(JSON.stringify({ label, payload_path: path.join(blobs, payloadHash), payload_content_hash: payloadHash }));
+    const hash = Buffer.from(blake3(manifest)).toString("hex"); fs.writeFileSync(path.join(blobs, hash), manifest);
+    return { id: `${label}:${hash}`, content: [...Buffer.from(hash, "hex")] };
+  }
   function movement(seq, label, payload, direction = "out", target = "chat-interface") {
-    const bytes = Buffer.from(JSON.stringify(payload)), hash = Buffer.from(blake3(bytes)).toString("hex");
-    fs.writeFileSync(path.join(blobs, hash), bytes);
     const row = { seq, lamport: seq, trace: "attention-trace", recorded_at_unix_ms: Date.now() + seq,
       kind: direction === "out" ? "InterfaceOutbound" : "InterfaceArrival",
       from: { Interface: direction === "out" ? "provider-interface" : "chat-interface" }, to: { Interface: direction === "out" ? target : "worker-test" },
-      artifact: { id: `${label}:${seq}`, content: [...Buffer.from(hash, "hex")] }, invocation_metadata: null };
+      artifact: artifact(label, Buffer.from(JSON.stringify(payload))), invocation_metadata: null };
     assert.ok(validate(row), JSON.stringify(validate.errors));
     return { ...row, source_file: path.join(ledger, "movements.jsonl"), source_line: seq + 1 };
   }
@@ -336,12 +341,13 @@ test("actual client terminal/request decoders and content-addressed receipts pro
   const entry = { runId: "run-test", chatInterfaceId: "chat-interface", writable: true, record: {}, inbound, outbound, activity: [...inbound, ...outbound] };
   const projection = { descriptors: { interface: [] }, operatorChatRunIndexCache: { generation: 1, promise: Promise.resolve([entry]) }, operatorChatMessagesCache: new Map(),
     clientAgentCatalog: { document: { agents: [{ id: "exact-agent", name: "Exact Agent", icon: "glasses", project_ee_id: "project-a", worker_interface: "worker-choice" }, { id: "other-project-agent", name: "Other", icon: "curious", project_ee_id: "project-b", worker_interface: "worker-choice" }] } },
-    operatorChatProtocol: { inputLabel: "operator.message", terminalOutputLabel: "interface.artifact.output", errorOutputLabel: "interface.artifact.error", approvalResponseLabel: "operator.approval.response", elicitationResponseLabel: "operator.elicitation.response", userInputResponseLabel: "operator.user_input.response" } };
+    operatorChatProtocol: { artifactReadProjection: require("../../registry/interface/world_operator_chat/client.json").artifact_read_projection,
+      inputLabel: "operator.message", terminalOutputLabel: "interface.artifact.output", errorOutputLabel: "interface.artifact.error", approvalResponseLabel: "operator.approval.response", elicitationResponseLabel: "operator.elicitation.response", userInputResponseLabel: "operator.user_input.response" } };
   try {
     const rows = await audited.auditActivity(projection, [chat]);
     assert.deepEqual(rows.map((row) => row.kind).sort(), ["approval", "message", "user_input"]);
     assert.ok(rows.every((row) => row.agent_name === "Exact Agent" && row.worker === "instantiated-worker"));
-    const terminal = rows.find((row) => row.kind === "message"); assert.equal(terminal.title, "Message — Actual task"); assert.equal(terminal.seq, 1); assert.equal(terminal.artifact_id, "interface.artifact.output:1");
+    const terminal = rows.find((row) => row.kind === "message"); assert.equal(terminal.title, "Message — Actual task"); assert.equal(terminal.seq, 1); assert.equal(terminal.artifact_id, outbound[0].artifact.id);
     const changedTime = [...rows].map((row) => row.id).sort(); chat.updated_at_ms = Date.now() + 999;
     assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.id).sort(), changedTime);
     const unrelated = movement(12, "turn.exec.output_delta", { text: "unrelated tool output" });
@@ -353,7 +359,7 @@ test("actual client terminal/request decoders and content-addressed receipts pro
       { type: "event", seq: 1, source_movement_seq: 13, recorded_at_unix_ms: time + 1, label: "turn.operator_request.resolved", payload: { threadId: "provider-thread", requestId: "a" } },
       { type: "seal", seq: 2, source_movement_seq: 14, recorded_at_unix_ms: time + 2, terminal_label: "interface.artifact.output", terminal_artifact_payload_blake3: "1".repeat(64) },
     ].map(JSON.stringify).join("\n") + "\n");
-    const streamHash = Buffer.from(blake3(streamBytes)); stream.artifact.content = [...streamHash]; fs.writeFileSync(path.join(blobs, streamHash.toString("hex")), streamBytes); outbound.push(stream);
+    stream.artifact = artifact("turn.stream", streamBytes); const streamHash = Buffer.from(stream.artifact.content); outbound.push(stream);
     assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.kind).sort(), ["message", "user_input"]);
     entry.writable = false; projection.operatorChatMessagesCache.clear();
     const readonly = await audited.auditActivity(projection, [{ ...chat, client_surface_role: "home" }]);
