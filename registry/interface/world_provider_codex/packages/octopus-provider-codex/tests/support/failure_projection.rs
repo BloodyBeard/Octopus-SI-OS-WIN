@@ -2,7 +2,7 @@ use super::*;
 use octopus_interfaces::InterfaceArtifactFile;
 
 #[tokio::test]
-async fn refused_failed_source_projection_retains_its_exact_source() {
+async fn unavailable_failed_source_projection_retains_original_error_without_arrival() {
     let temp = tempfile::tempdir().unwrap();
     let ledger = temp.path().join("movements.jsonl");
     std::fs::write(&ledger, b"").unwrap();
@@ -45,21 +45,8 @@ async fn refused_failed_source_projection_retains_its_exact_source() {
     };
     let session = ProviderHandoffSession::new(&ctx).unwrap();
     let run = RunId::new("run_fixture");
-    let refusal = async {
-        let arrival = receiver.recv().await.unwrap();
-        let body: serde_json::Value =
-            serde_json::from_slice(&arrival.artifact.read_payload_bytes().unwrap()).unwrap();
-        assert_eq!(body["additional_details"]["source_movement_seq"], 7);
-        arrival
-            .verdict_tx
-            .unwrap()
-            .send(DeliveryVerdict::Refused {
-                reason: octopus_ledger::RefusedReason::CheckpointSpent,
-                detail: "spent fixture".into(),
-            })
-            .unwrap();
-    };
-    let (result, ()) = tokio::join!(
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
         record_invalid_provider_context(
             &ctx,
             &descriptor,
@@ -68,11 +55,10 @@ async fn refused_failed_source_projection_retains_its_exact_source() {
             &turn,
             "invalid fixture".into(),
         ),
-        refusal
-    );
-    assert!(
-        result
-            .unwrap_err()
-            .contains("failed provider source 7 has no admitted error projection")
-    );
+    ).await.expect("an unavailable authored route must not attempt an unproven arrival");
+    assert_eq!(result.unwrap_err(), "codex turn stopped because its admitted provider context is invalid (movement seq 7): invalid fixture");
+    assert!(matches!(receiver.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)));
+    assert!(std::fs::read(&ctx.movements_path).unwrap().is_empty());
+    assert!(!ctx.interface_var_dir().join("emitted").exists());
+    assert!(!ctx.interface_var_dir().join("ledger-cursor.json").exists());
 }

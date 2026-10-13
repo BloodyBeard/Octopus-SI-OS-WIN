@@ -236,7 +236,13 @@ fn materialize(
     output_root: &Path,
     labels: &BTreeSet<String>,
 ) -> Result<ProviderEmission, InterfaceDriverError> {
-    let source = &proof.source;
+    materialize_closure(&proof.source, Some(&proof.evidence), input, terminal, events, output_root, labels)
+}
+
+fn materialize_closure(
+    source: &CodexContinuityState, evidence: Option<&serde_json::Value>, input: &InterfaceInvocationEnvelope,
+    terminal: NativeTerminalEvidence, events: Vec<serde_json::Value>, output_root: &Path, labels: &BTreeSet<String>,
+) -> Result<ProviderEmission, InterfaceDriverError> {
     let pending = source.pending.as_ref().ok_or_else(|| {
         InterfaceDriverError::FailedClosed("stopped result lost its pending effect".into())
     })?;
@@ -300,7 +306,7 @@ fn materialize(
     output.value["terminal_evidence_source"] = serde_json::json!("thread/read");
     output.value["native_terminal_input_context"] = serde_json::json!(false);
     output.value["retained_native_outputs"] = serde_json::json!(outputs);
-    output.value["completed_source_settlement"] = proof.evidence.clone();
+    if let Some(evidence) = evidence { output.value["completed_source_settlement"] = evidence.clone(); }
     let bytes = serde_json::to_vec(&output.value)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
     interrupted_result_closure_payload(
@@ -343,4 +349,195 @@ pub(crate) fn materialize_for_test(
         output_root,
         labels,
     )
+}
+
+pub(crate) struct PendingIntentControl {
+    pub(crate) source: CodexContinuityState,
+    pub(crate) intent: octopus_provider_run_authoring::PendingSourceIntent,
+    applied: serde_json::Value,
+}
+
+pub(crate) struct PendingIntentTransport {
+    handle: AppServerRequestHandle,
+    request_ids: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl CodexTurnControlBroker {
+    pub(crate) fn pending_intent_transport(&self) -> Option<PendingIntentTransport> {
+        match self.state.borrow().clone() {
+            CodexTurnControlTarget::RecoveredPending { handle, request_ids, .. } => Some(PendingIntentTransport { handle, request_ids }),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn prove_intent(
+    descriptor: &InterfaceDescriptor, input: &InterfaceInvocationEnvelope,
+    intent: octopus_provider_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
+) -> Result<PendingIntentControl, InterfaceDriverError> {
+    let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+    let runtime = invocation_runtime_metadata(input)?;
+    let labels = codex_context_output_labels(descriptor)?;
+    let original = recover_codex_continuity_from_current_session(session, &input.artifact, &runtime.interface, runtime.run.as_str(), &labels)?
+        .ok_or_else(|| fail("unadmitted native intent has no original pending continuity"))?;
+    let wait = original.pending.as_ref().ok_or_else(|| fail("unadmitted native intent has no original effect"))?;
+    let operation = native_pending_operation(wait)?.ok_or_else(|| fail("unadmitted intent is not an exact native operation"))?;
+    if !matches!(operation.state, crate::run_affordances::NativePhase::Applying { .. } | crate::run_affordances::NativePhase::Writing { .. })
+        || original.interrupted_pending.is_some() || original.tool_operator_request.is_some()
+        || original.context_generation.checked_add(1) != Some(intent.context_generation)
+    { return Err(fail("unadmitted native intent does not follow one applied native write")); }
+    let mut exact = original.clone();
+    exact.interrupted_pending = exact.pending.take();
+    if !exact_interrupted_result_source(input, &exact).map_err(InterfaceDriverError::FailedClosed)? {
+        return Err(fail("unadmitted native intent changed its exact original write result"));
+    }
+    let result: serde_json::Value = serde_json::from_slice(&input.read_artifact_payload()?).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let NativeStep::Effect { pending: successor, effect, .. } = operation.advance(&result).map_err(InterfaceDriverError::FailedClosed)? else {
+        return Err(fail("original applied write does not prove the saved native successor"));
+    };
+    if !matches!(successor.state, crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. }) {
+        return Err(fail("native withdrawal supports only an installed, unseeded run"));
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&intent.payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let next = parse_codex_continuity(payload.get(CODEX_CONTINUITY_FIELD).ok_or_else(|| fail("saved native intent has no exact continuity"))?, &runtime.interface, runtime.run.as_str())?;
+    let mut expected = original.clone();
+    expected.context_generation = intent.context_generation;
+    expected.pending = Some(CodexPendingContinuity::DynamicTool { turn_id: pending_turn_id(wait).into(), call_id: effect.correlation_id.clone(), tool: effect.tool.clone(),
+        native_operation: Some(serde_json::to_value(&successor).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?) });
+    if next != expected || payload["tool"] != effect.tool || payload["correlation_id"] != effect.correlation_id || payload["arguments"] != effect.arguments {
+        return Err(fail("saved intent differs from the exact applied native operation"));
+    }
+    let mut source = original;
+    source.context_generation = intent.context_generation;
+    Ok(PendingIntentControl { source, intent, applied: serde_json::json!({
+        "installed":true,"seed_admitted":false,"work_completed":false,
+        "original_write_result":result,"unadmitted_native_operation":successor,
+    }) })
+}
+
+impl PendingIntentTransport {
+    pub(crate) async fn interrupted_control(&self, proof: &PendingIntentControl, control: &CodexTurnControl) -> Result<CodexTurnControlResult, InterfaceDriverError> {
+        let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+        if !matches!(control, CodexTurnControl::Interrupt { .. }) { return Err(fail("pending intent recovery requires its stopping control")); }
+        let pending = proof.source.pending.as_ref().ok_or_else(|| fail("pending intent lost its native target"))?;
+        let terminal = read_exact_terminal_turn(&self.handle, &self.request_ids, &proof.source.thread_id, pending_turn_id(pending)).await
+            .map_err(InterfaceDriverError::FailedClosed)?.ok_or_else(|| fail("recorded Stop intent still has an unknown native outcome"))?;
+        if terminal.exact_turn(&proof.source.thread_id, Some(pending_turn_id(pending)))?.status != TurnStatus::Interrupted {
+            return Err(fail("recorded Stop intent has no exact native Interrupted outcome"));
+        }
+        let (mut continuity, _) = interrupted_continuity(Some(proof.source.clone())).map_err(InterfaceDriverError::FailedClosed)?;
+        continuity.as_mut().ok_or_else(|| fail("pending intent recovery lost continuity"))?.native_terminal = Some(terminal);
+        Ok(CodexTurnControlResult { control_id: control.control_id().into(), action: control.action().into(), acknowledged: true,
+            thread_id: Some(proof.source.thread_id.clone()), turn_id: Some(pending_turn_id(pending).into()),
+            detail: serde_json::json!({"already_terminal":true,"external_effect_dispatched":false,"terminal_evidence_source":"thread/read"}), continuity })
+    }
+
+    pub(crate) async fn closure(
+        &self, proof: &PendingIntentControl, input: &InterfaceInvocationEnvelope,
+        control_source: u64, control_artifact: &ArtifactRef, control: &CodexTurnControlResult,
+        output_root: &Path, labels: &BTreeSet<String>,
+    ) -> Result<ProviderEmission, InterfaceDriverError> {
+        let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+        let pending = proof.source.pending.as_ref().ok_or_else(|| fail("withdrawal lost its original pending effect"))?;
+        if !control.acknowledged || !matches!(control.action.as_str(), "stop" | "interrupt")
+            || control.thread_id.as_deref() != Some(proof.source.thread_id.as_str())
+            || control.turn_id.as_deref() != Some(pending_turn_id(pending))
+        { return Err(fail("withdrawal control changed its exact native target")); }
+        let terminal = match control.continuity.as_ref().and_then(|continuity| continuity.native_terminal.clone()) {
+            Some(terminal) => terminal,
+            None => read_exact_terminal_turn(&self.handle, &self.request_ids, &proof.source.thread_id, pending_turn_id(pending)).await
+                .map_err(InterfaceDriverError::FailedClosed)?.ok_or_else(|| fail("pending intent withdrawal awaits exact native Interrupted evidence"))?,
+        };
+        let emission = materialize_closure(&proof.source, None, input, terminal, Vec::new(), output_root, labels)?;
+        let mut value: serde_json::Value = serde_json::from_slice(&emission.artifact.read_payload_bytes().map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?)
+            .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        value.as_object_mut().ok_or_else(|| fail("withdrawal closure is not an object"))?.remove("completed_source_settlement");
+        value["withdrawn_source_intent"] = serde_json::json!({
+            "source_movement_seq":proof.intent.source_movement_seq,"source_artifact":input.artifact,
+            "intent_artifact":proof.intent.artifact,"control_source_movement_seq":control_source,"control_artifact":control_artifact,
+            "control_id":control.control_id,"action":control.action,"applied_native_operation":proof.applied,
+            "continuation_dispatched":false,
+        });
+        let bytes = serde_json::to_vec(&value).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        Ok(ProviderEmission { artifact: materialize_codex_emitted_artifact(output_root, TURN_INTERRUPTED_RESULT_LABEL, &bytes)?, route: ProviderEmissionRoute::ClientProjection })
+    }
+}
+
+pub(crate) fn closure_continuity(value: &serde_json::Value, provider: &InterfaceId, run: &str) -> Result<CodexContinuityState, String> {
+    parse_codex_continuity(value.get(CODEX_CONTINUITY_FIELD).ok_or("withdrawal closure lost continuity")?, provider, run).map_err(|error| error.to_string())
+}
+
+impl CodexContinuityState {
+    pub(crate) fn advance_control_context(&mut self, descriptor: &InterfaceDescriptor) -> Result<(), String> {
+        if codex_context_output_labels(descriptor).map_err(|error| error.to_string())?.contains(TURN_CONTROL_ACKNOWLEDGED_LABEL) {
+            self.context_generation = self.context_generation.checked_add(1).ok_or("withdrawal control generation overflow")?;
+        }
+        Ok(())
+    }
+}
+
+
+pub(crate) fn validate_withdrawal_closure(
+    value: &serde_json::Value, input: &InterfaceInvocationEnvelope, source: u64, control_artifact: &ArtifactRef,
+    control_source: u64, control: &CodexTurnControlResult,
+) -> Result<(), String> {
+    let runtime = invocation_runtime_metadata(input).map_err(|error| error.to_string())?;
+    let evidence = &value["withdrawn_source_intent"];
+    if evidence["source_movement_seq"] != source || evidence["source_artifact"] != serde_json::to_value(&input.artifact).map_err(|error| error.to_string())?
+        || evidence["control_source_movement_seq"] != control_source || evidence["control_artifact"] != serde_json::to_value(control_artifact).map_err(|error| error.to_string())?
+        || evidence["control_id"] != control.control_id || evidence["action"] != control.action || evidence["continuation_dispatched"] != false
+    { return Err("withdrawal closure changed its admitted result or Stop input".into()); }
+    let original = parse_codex_continuity(&value["native_terminal_source_continuity"], &runtime.interface, runtime.run.as_str()).map_err(|error| error.to_string())?;
+    let closed = parse_codex_continuity(&value[CODEX_CONTINUITY_FIELD], &runtime.interface, runtime.run.as_str()).map_err(|error| error.to_string())?;
+    let terminal = closed.native_terminal.as_ref().ok_or("withdrawal has no native terminal proof")?;
+    let pending = original.pending.as_ref().ok_or("withdrawal lost its original effect")?;
+    if terminal.exact_turn(&original.thread_id, Some(pending_turn_id(pending))).map_err(|error| error.to_string())?.status != TurnStatus::Interrupted
+        || closed.pending.is_some() || closed.interrupted_pending.is_some()
+    { return Err("withdrawal did not close its exact native Interrupted turn".into()); }
+    let mut exact = original.clone(); exact.interrupted_pending = exact.pending.take();
+    if !exact_interrupted_result_source(input, &exact)? { return Err("withdrawal closed a different original effect".into()); }
+    Ok(())
+}
+
+pub(crate) fn validate_saved_intent_closure(
+    proof: &PendingIntentControl, input: &InterfaceInvocationEnvelope, value: &serde_json::Value,
+    control_artifact: &ArtifactRef, control_source: u64, control: &CodexTurnControl,
+    labels: &BTreeSet<String>,
+) -> Result<(), String> {
+    if !matches!(control, CodexTurnControl::Interrupt { .. }) { return Err("withdrawal source is not an admitted stopping control".into()); }
+    let runtime = invocation_runtime_metadata(input).map_err(|error| error.to_string())?;
+    let source = parse_codex_continuity(&value["native_terminal_source_continuity"], &runtime.interface, runtime.run.as_str()).map_err(|error| error.to_string())?;
+    if source != proof.source { return Err("persisted withdrawal changed its exact original native plan".into()); }
+    let evidence = &value["withdrawn_source_intent"];
+    if evidence["intent_artifact"] != serde_json::to_value(&proof.intent.artifact).map_err(|error| error.to_string())?
+        || evidence["applied_native_operation"] != proof.applied
+    { return Err("persisted withdrawal changed its unadmitted intent or applied write receipt".into()); }
+    let result = CodexTurnControlResult { control_id: control.control_id().into(), action: control.action().into(), acknowledged: true,
+        thread_id: Some(source.thread_id.clone()), turn_id: source.pending.as_ref().map(|pending| pending_turn_id(pending).into()), detail: serde_json::Value::Null, continuity: None };
+    validate_withdrawal_closure(value, input, proof.intent.source_movement_seq, control_artifact, control_source, &result)?;
+    let mut payload = value.clone(); payload.as_object_mut().ok_or("withdrawal closure is not an object")?.remove("session_context");
+    interrupted_result_closure_payload(TURN_INTERRUPTED_RESULT_LABEL, &serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+        &source, &input.artifact, labels)?.ok_or("persisted withdrawal is not the exact original result closure")?;
+    Ok(())
+}
+
+pub(crate) fn intent_control_continuity(
+    descriptor: &InterfaceDescriptor, input: &InterfaceInvocationEnvelope,
+    intent: octopus_provider_run_authoring::PendingSourceIntent, session: &[SessionContextArtifact],
+) -> Result<CodexContinuityState, InterfaceDriverError> {
+    let runtime = invocation_runtime_metadata(input)?;
+    let value: serde_json::Value = serde_json::from_slice(&intent.payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let state = parse_codex_continuity(&value[CODEX_CONTINUITY_FIELD], &runtime.interface, runtime.run.as_str())?;
+    let pending = state.pending.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed("saved pending output has no native wait".into()))?;
+    let CodexPendingContinuity::DynamicTool { tool, call_id, .. } = pending else {
+        return Err(InterfaceDriverError::FailedClosed("saved tool output has a different native wait".into()));
+    };
+    if state.context_generation != intent.context_generation || value["tool"] != *tool || value["correlation_id"] != *call_id {
+        return Err(InterfaceDriverError::FailedClosed("saved tool output changed its checked context or exact wait".into()));
+    }
+    if native_pending_operation(pending)?.is_some_and(|operation| matches!(operation.state,
+        crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. })) {
+        return Ok(prove_intent(descriptor, input, intent, session)?.source);
+    }
+    Ok(state)
 }

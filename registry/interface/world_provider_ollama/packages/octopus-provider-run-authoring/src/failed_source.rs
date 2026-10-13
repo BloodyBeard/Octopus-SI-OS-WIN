@@ -298,6 +298,7 @@ impl ProviderHandoffSession {
             session: self.clone(),
             invocation_session_snapshot: None,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+                validated_withdrawal_output: None,
                 context_artifacts,
                 static_context_artifacts,
                 session_context: ResolvedSessionContext {

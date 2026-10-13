@@ -410,10 +410,15 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
             .unwrap(),
     )
     .unwrap();
+    let mut document = widget_contract["contract"]["example"].clone();
+    document["glyph"] = json!("weather");
+    document["revision"] = json!(2);
+    document["render"]["density"] = json!("comfortable");
+    document["data"] = json!({"summary":"Admitted weather fixture: 10 degrees"});
     let widget = InterfaceArtifactFile::write(
         root.join("task-widget"),
         "client.surface.document",
-        &serde_json::to_vec(&widget_contract["contract"]["example"]).unwrap(),
+        &serde_json::to_vec(&document).unwrap(),
     )
     .unwrap()
     .capture_bounded(1048576, 67108864)
@@ -446,6 +451,18 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
             "Task widget reaches {recipient} while Home is idle"
         );
     }
+    let published = sent.outbound_movement.as_ref().unwrap().artifact.as_ref().unwrap();
+    let rows = log.read_from(Seq(begin as u64)).into_iter().filter(|row| row.artifact.as_ref() == Some(published)).map(|row| {
+        let mut value = serde_json::to_value(row).unwrap(); value["payload"] = document.clone(); value
+    }).collect::<Vec<_>>();
+    let mut renderer = std::process::Command::new("node")
+        .arg(source.join("app/scripts/test-home-widget-projection.cjs")).arg("--publication-fixture")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    use std::io::Write;
+    renderer.stdin.take().unwrap().write_all(&serde_json::to_vec(&json!({"rows":rows,
+        "scope":{"runId":plan.run_id,"interfaceId":plan.chat_interface_id},"summary":document["data"]["summary"]})).unwrap()).unwrap();
+    let rendered = renderer.wait_with_output().unwrap();
+    assert!(rendered.status.success(), "{}\n{}", String::from_utf8_lossy(&rendered.stdout), String::from_utf8_lossy(&rendered.stderr));
     let update_pin = contract["delivery"]["voice_update"]["interface"]
         .as_str()
         .unwrap();

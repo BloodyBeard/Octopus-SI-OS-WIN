@@ -20,6 +20,20 @@ fn mcp_lifecycle_catalogue_and_exact_calls_are_validated() {
     let names = tools["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect::<Vec<_>>();
     assert_eq!(names, ["list_artifacts","read_artifact","search_artifacts","publish_widget","open_client_surface"]);
     let call = |name: &str, arguments: Value| json!({"jsonrpc":"2.0","id":"call","method":"tools/call","params":{"name":name,"arguments":arguments}});
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
+    let publish = tools["result"]["tools"].as_array().unwrap().iter().find(|entry|entry["name"]=="publish_widget").unwrap();
+    for (name, file) in [("client_surface","client_surface_document.schema.json"),("projection_read","projection_read_contract.schema.json")] {
+        let schema:Value=serde_json::from_slice(&std::fs::read(root.join("app/schemas").join(file)).unwrap()).unwrap();
+        assert_eq!(publish["inputSchema"]["$defs"][name],schema);
+    }
+    let guide:Value=serde_json::from_slice(&std::fs::read(root.join("registry/artifact/artifact-home-widget-authoring/artifact.json")).unwrap()).unwrap();
+    let mut document=guide["contract"]["example"].clone();
+    document["glyph"]=json!("cloud");
+    let Reply::Message(refused)=server.receive(call("publish_widget",json!({"interface":"target","document":document}))) else {panic!("invalid glyph reached emission")};
+    assert_eq!(refused["error"]["code"],-32602);
+    assert!(refused["error"]["message"].as_str().unwrap().contains("/document/glyph"));
+    document["glyph"]=json!("weather");document["revision"]=json!(2);document["render"]["density"]=json!("comfortable");
+    assert!(matches!(server.receive(call("publish_widget",json!({"interface":"target","document":document}))),Reply::Call{..}));
     let Reply::Call { id, entry, arguments } = server.receive(call("read_artifact", json!({"id":"visible"}))) else { panic!() };
     assert_eq!(id, "call");
     assert_eq!(entry.name, "read_artifact");

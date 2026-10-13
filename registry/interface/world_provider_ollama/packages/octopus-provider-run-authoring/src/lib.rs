@@ -235,6 +235,7 @@ struct ProviderLedgerEvidenceIndex {
     byte_offset: u64,
     observed_len: u64,
     next_seq: u64,
+    through_seq: Option<u64>,
     poison: Option<String>,
     handoff_metadata_poison: HashMap<(String, String), String>,
     session_metadata_poison: HashMap<(String, String), String>,
@@ -326,6 +327,7 @@ pub struct ProviderOutputHandoff {
 
 #[derive(Clone)]
 struct HandoffState {
+    validated_withdrawal_output: Option<ArtifactRef>,
     context_artifacts: Vec<ArtifactId>,
     static_context_artifacts: Vec<ArtifactId>,
     session_context: ResolvedSessionContext,
@@ -393,6 +395,10 @@ struct PendingHandoff {
     source_without_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement_of: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    dispatch_fenced: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    withdrawal: Option<Box<source_withdrawal::Withdrawal>>,
 }
 
 mod context_publication;
@@ -406,6 +412,8 @@ mod writer_run;
 pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_writer_binding, OwnerWriterEdit, OwnerWriterEvidence, WriterRunBinding};
 mod source_replay;
 mod source_settlement;
+mod source_withdrawal;
+pub use source_withdrawal::{PendingSourceIntent, PendingSourceWithdrawal};
 mod settled_definition;
 pub mod capability_amendment;
 pub use capability_amendment::ProviderCapabilityAmendment;
@@ -650,8 +658,13 @@ fn pinned_run_record(
     expected: &ContentHash,
     surface: &str,
 ) -> Result<(Vec<u8>, RunRecord), String> {
-    let limits = ctx.required_host_io_limits()?;
-    let path = ctx.blobs_dir.join(expected.to_hex());
+    pinned_run_record_from_cache(&ctx.blobs_dir, ctx.required_host_io_limits()?, expected, surface)
+}
+
+fn pinned_run_record_from_cache(
+    blobs_dir: &Path, limits: InterfaceHostIoLimits, expected: &ContentHash, surface: &str,
+) -> Result<(Vec<u8>, RunRecord), String> {
+    let path = blobs_dir.join(expected.to_hex());
     let bytes =
         octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes)
             .map_err(|error| {
@@ -885,6 +898,13 @@ pub struct CheckedRunEvidence<'a> {
 
 pub trait CheckedRunEvidenceReader {
     fn max_payload_bytes(&self) -> u64;
+    fn source_context_snapshot(&mut self, _record: &RunRecord, _config: &RunAuthoringConfig, _source: u64) -> Result<(serde_json::Value, Vec<(ArtifactRef, u64)>), String> {
+        Err("checked reader does not provide exact source context evidence".into())
+    }
+    fn pending_output_payload(&mut self, provider: &InterfaceId, reference: &ArtifactRef, relative: &Path) -> Result<Vec<u8>, String> {
+        let _ = (provider, relative);
+        self.artifact(reference).map(|(_, payload)| payload)
+    }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> { self.movement(seq) }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
@@ -917,6 +937,7 @@ pub struct FileCheckedRunReader<'a> {
     reader: std::io::BufReader<std::fs::File>,
     next_seq: u64,
     snapshot_bytes: u64,
+    provider_context: Option<InterfaceLiftContext>,
 }
 
 impl<'a> FileCheckedRunReader<'a> {
@@ -947,14 +968,30 @@ impl<'a> FileCheckedRunReader<'a> {
         }
     }
 
-        Ok(Self { evidence, decoder, reader, next_seq: sequence, snapshot_bytes: 0 })
+        Ok(Self { evidence, decoder, reader, next_seq: sequence, snapshot_bytes: 0, provider_context: None })
     }
+
+    fn with_provider_context(mut self, ctx: &InterfaceLiftContext) -> Self { self.provider_context = Some(ctx.clone()); self }
 
     pub fn next_sequence(&self) -> u64 { self.next_seq }
 }
 
 impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
     fn max_payload_bytes(&self) -> u64 { self.evidence.max_payload_bytes }
+    fn source_context_snapshot(&mut self, record: &RunRecord, config: &RunAuthoringConfig, source: u64) -> Result<(serde_json::Value, Vec<(ArtifactRef, u64)>), String> {
+        source_withdrawal::source_snapshot_from_evidence(self.evidence, self.provider_context.as_ref(), record, config, source)
+    }
+    fn pending_output_payload(&mut self, provider: &InterfaceId, reference: &ArtifactRef, relative: &Path) -> Result<Vec<u8>, String> {
+        if let Some(ctx) = self.provider_context.as_ref().filter(|ctx| ctx.interface == *provider) {
+            if relative.as_os_str().is_empty() || relative.is_absolute() || relative.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
+                return Err("withdrawal closure has an unsafe private artifact path".into());
+            }
+            let file = InterfaceArtifactFile::new(ctx.interface_var_dir().join(relative)).map_err(|error| error.to_string())?;
+            if artifact_identity(&file, &ctx.interface_var_dir())?.artifact != *reference { return Err("withdrawal closure differs from its exact private artifact".into()); }
+            return file.read_payload_bytes().map_err(|error| error.to_string());
+        }
+        self.artifact(reference).map(|(_, payload)| payload)
+    }
     fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
         concurrent_writer_evidence_start(self.evidence, record, before, after_seq)
     }
@@ -1151,6 +1188,7 @@ fn checked_run_file_chain_with_reader(
                 input_artifacts::validate_input_transition(reader, &transition)?;
                 validate_verified_input_transition(reader,&transition)?;
                 input_revision::validate_rearm_evidence(reader, &transition, path)?;
+                source_withdrawal::validate_evidence(reader, &transition)?;
                 if transitions.len() >= 1024 { return Err("checked authoring transitions exceed their evidence bound".into()); }
                 transitions.push(transition);
                 continue;
@@ -1183,6 +1221,7 @@ fn checked_run_file_chain_with_reader(
             input_artifacts::validate_input_transition(reader, &transition)?;
             validate_verified_input_transition(reader, &transition)?;
             input_revision::validate_rearm_evidence(reader, &transition, path)?;
+                source_withdrawal::validate_evidence(reader, &transition)?;
             transitions.push(transition);
         }
     }
@@ -1557,7 +1596,7 @@ fn checked_selected_run_advance_state(
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let first = concurrent_writer_evidence_start(&evidence, &record, before, after_seq)?;
     let writers = declared_writer_closure(&record, writers)?;
-    let mut reader = FileCheckedRunReader::open(&evidence, Some(first))?;
+    let mut reader = FileCheckedRunReader::open(&evidence, Some(first))?.with_provider_context(ctx);
     let scan_start = reader.next_seq;
     let chain = checked_run_file_chain_with_reader(&mut reader, path, before, CheckedRunTarget::Snapshot(after), first, scan_start,
         None, &writers, &[], Some(config), None)?;
@@ -1694,6 +1733,7 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
     let provider = &transition.writer.owner;
     source_settlement::validate_checked_transition(&before, &after, &transition.writer)?;
+    source_withdrawal::validate_checked_transition(&before, &after, &transition.writer)?;
     if capability_amendment::validate_transition(transition)? { return Ok(()); }
     let read = |record: &RunRecord| -> Result<BoundRunAuthoringTopology, String> {
         let state = record.interface_state.get(provider).ok_or("checked provider lost its state")?;
@@ -1736,10 +1776,12 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
         canonical_role_bindings(&rows,call,result,&record.id)
     };
     let mut expected_roles = roles(&before)?;
-    for checkpoint in next_topology.checkpoints.iter().filter(|cp| !topology.checkpoints.contains(cp) && cp.role != RunAuthoringCheckpointRole::VerifiedInput) {
-        for id in &checkpoint.static_artifact_bindings {
-            let binding: ArtifactBinding = serde_json::from_value(serde_json::json!({"id": id})).map_err(|error| error.to_string())?;
-            if !expected_roles.contains(&binding) { expected_roles.push(binding); }
+    if topology.writer_run.is_none() {
+        for checkpoint in next_topology.checkpoints.iter().filter(|cp| !topology.checkpoints.contains(cp) && cp.role != RunAuthoringCheckpointRole::VerifiedInput) {
+            for id in &checkpoint.static_artifact_bindings {
+                let binding: ArtifactBinding = serde_json::from_value(serde_json::json!({"id": id})).map_err(|error| error.to_string())?;
+                if !expected_roles.contains(&binding) { expected_roles.push(binding); }
+            }
         }
     }
     if expected_roles != roles(&after)? { return Err("coauthor changed the mandatory role binding closure beyond its authored additions".into()); }
@@ -2742,6 +2784,7 @@ fn validate_authoring_attempt_source(
         format!("provider authoring failure source call carries a malformed run: {error}")
     })?;
     source_settlement::validate_transition(record, &candidate, config)?;
+    source_withdrawal::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
     if candidate.id != record.id || candidate.worker != record.worker {
         return Err(
             "provider authoring failure source call carries the wrong run topology".to_string(),
@@ -4002,13 +4045,30 @@ fn recover_source_session_context(
     context_output_labels: &BTreeSet<String>,
     session_snapshot_labels: &BTreeSet<String>,
 ) -> Result<(ResolvedSessionContext, Option<SessionSnapshotHead>), String> {
+    let (context, head, _) = recover_source_session_context_from_cache(
+        &ctx.blobs_dir, ctx.required_host_io_limits()?, session, record, config, source_movement_seq, context_output_labels, session_snapshot_labels,
+    )?;
+    Ok((context, head))
+}
+
+fn recover_source_session_context_from_cache(
+    blobs_dir: &Path,
+    limits: InterfaceHostIoLimits,
+    session: &ProviderHandoffSession,
+    record: &RunRecord,
+    config: &RunAuthoringConfig,
+    source_movement_seq: u64,
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+) -> Result<(ResolvedSessionContext, Option<SessionSnapshotHead>, Vec<ArtifactId>), String> {
     let (coordinate, source) = session.index()?.exact_provider_source_outbound(
         &record.id,
         &record.worker,
         &config.provider_interface,
         source_movement_seq,
     )?;
-    let pinned = indexed_source_run_record(ctx, &source, source_movement_seq)?;
+    let hash = source.run_record_hash.as_deref().and_then(ContentHash::from_hex).ok_or("source context has no pinned run record")?;
+    let (_, pinned) = pinned_run_record_from_cache(blobs_dir, limits, &hash, "provider source context")?;
     if pinned.id != record.id || pinned.worker != record.worker {
         return Err(format!(
             "provider source movement {source_movement_seq} pinned a different run identity"
@@ -4083,27 +4143,17 @@ fn recover_source_session_context(
         &config.provider_interface,
         source.artifact_binding_refs.iter(),
     )?;
-    let mut selected = payload_artifact_bindings(&pinned, &config.provider_interface)?;
-    for reference in input_artifacts::bound_sources(&pinned, &config.provider_interface, &checkpoint.id, &source.artifact_binding_refs)? {
-        if !selected.contains(&reference) { selected.push(reference); }
-    }
-    validate_payload_read_bindings(&selected, checkpoint, &source.artifact_binding_refs, &source.readable_artifacts, &source.role_artifacts)?;
-    let payloads = source.artifact_binding_refs.iter().map(|artifact| {
-        Ok(octopus_interfaces::ArtifactBindingPayload::new(
-            artifact.clone(), read_artifact_ref_payload(ctx, artifact)?,
-        ))
-    }).collect::<Result<Vec<_>, String>>()?;
-    let instruction_sources = bound_instruction_sources(&payloads, &selected)?;
+    let (payloads, classified_static) = source_context_payloads_from_cache(blobs_dir, limits, &pinned,
+        &source_config, checkpoint, matched[0], &source)?;
     for bound in &payloads {
         let artifact = &bound.artifact;
         let payload = bound.as_bytes();
-        if selected.contains(artifact) || instruction_sources.contains(&artifact.id)
-            || matched[0].static_artifact_bindings.contains(&artifact.id) {
+        if classified_static.contains(&artifact.id) {
             append_artifact(&mut static_context_artifacts, artifact.id.clone());
             continue;
         }
-        collect_bound_context(
-            ctx,
+        collect_bound_context_from_cache(
+            blobs_dir, limits,
             &mut static_context_artifacts,
             &mut session_context,
             &mut session_snapshot_head,
@@ -4120,8 +4170,8 @@ fn recover_source_session_context(
     validate_session_context_evidence(
         &mut session_context,
         SessionContextEvidenceScope {
-            blobs_dir: &ctx.blobs_dir,
-            limits: ctx.required_host_io_limits()?,
+            blobs_dir,
+            limits,
             run: &record.id,
             provider: &config.provider_interface,
             context_output_labels,
@@ -4129,7 +4179,7 @@ fn recover_source_session_context(
         },
         session,
     )?;
-    let (manifest, payload) = read_pinned_artifact(ctx, &source.artifact)?;
+    let (manifest, payload) = read_pinned_artifact_from_cache(blobs_dir, limits, &source.artifact)?;
     append_session_payload(
         &mut session_context,
         &manifest.label,
@@ -4145,7 +4195,25 @@ fn recover_source_session_context(
         &config.provider_interface,
     )?;
     reconcile_resolved_session_snapshot_head(&session_context, &mut session_snapshot_head)?;
-    Ok((session_context, session_snapshot_head))
+    Ok((session_context, session_snapshot_head, static_context_artifacts))
+}
+
+fn source_context_payloads_from_cache(
+    blobs_dir: &Path, limits: InterfaceHostIoLimits, pinned: &RunRecord, config: &RunAuthoringConfig,
+    checkpoint: &octopus_runtime::run_record::CheckpointRecord, template: &RunAuthoringCheckpoint, source: &IndexedOutboundArtifact,
+) -> Result<(Vec<octopus_interfaces::ArtifactBindingPayload>, BTreeSet<ArtifactId>), String> {
+    let mut selected = payload_artifact_bindings(pinned, &config.provider_interface)?;
+    for reference in input_artifacts::bound_sources(pinned, &config.provider_interface, &checkpoint.id, &source.artifact_binding_refs)? {
+        if !selected.contains(&reference) { selected.push(reference); }
+    }
+    validate_payload_read_bindings(&selected, checkpoint, &source.artifact_binding_refs, &source.readable_artifacts, &source.role_artifacts)?;
+    let payloads = source.artifact_binding_refs.iter().map(|artifact| {
+        Ok(octopus_interfaces::ArtifactBindingPayload::new(artifact.clone(), read_artifact_ref_payload_from_cache(blobs_dir, limits, artifact)?))
+    }).collect::<Result<Vec<_>, String>>()?;
+    let mut static_ids = bound_instruction_sources(&payloads, &selected)?;
+    static_ids.extend(selected.iter().map(|reference| reference.id.clone()));
+    static_ids.extend(template.static_artifact_bindings.iter().cloned());
+    Ok((payloads, static_ids))
 }
 
 fn ground_session_context_movements(
@@ -4434,6 +4502,7 @@ impl ProviderLedgerEvidenceIndex {
             byte_offset: 0,
             observed_len: 0,
             next_seq: 0,
+            through_seq: None,
             poison: None,
             handoff_metadata_poison: HashMap::new(),
             session_metadata_poison: HashMap::new(),
@@ -4495,7 +4564,7 @@ impl ProviderLedgerEvidenceIndex {
         if length == self.byte_offset {
             return Ok(());
         }
-        if self.catch_up_spotlight_prefix(length)? && length == self.byte_offset {
+        if self.through_seq.is_none() && self.catch_up_spotlight_prefix(length)? && length == self.byte_offset {
             return Ok(());
         }
         self.catch_up_full_tail()
@@ -4605,6 +4674,7 @@ impl ProviderLedgerEvidenceIndex {
             .map_err(|error| format!("provider ledger index seek failed: {error}"))?;
         let mut reader = std::io::BufReader::new(file);
         loop {
+            if self.through_seq.is_some_and(|last| self.next_seq > last) { return Ok(()); }
             match read_bounded_ledger_row(&mut reader, self.max_row_bytes)? {
                 BoundedLedgerRow::Complete(row) => {
                     let movement = self
@@ -5808,6 +5878,7 @@ impl ProviderOutputHandoff {
             session,
             invocation_session_snapshot,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts,
                 static_context_artifacts,
                 session_context,
@@ -6196,7 +6267,7 @@ impl ProviderOutputHandoff {
         let batch_count = batches.len();
         let mut outcomes = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None)
+            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None, None)
                 .await?;
             let failed = delivered.iter().any(|outcome| matches!(outcome, ProviderHandoffOutcome::TerminalFailure { .. }));
             outcomes.extend(delivered);
@@ -6216,8 +6287,10 @@ impl ProviderOutputHandoff {
         independent_source: Option<u64>,
         amendment: Option<&ProviderCapabilityAmendment>,
         settlement_of: Option<(&ArtifactRef, u64)>,
+        withdrawal: Option<&source_withdrawal::Withdrawal>,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         let mut state = self.state.lock().await;
+        let withdrawal_guard = if withdrawal.is_some() { Some(self.dispatch_ownership().await?) } else { None };
         self.reconcile_checked_run_state(&mut state).await?;
         let mut active = self.clone();
         let record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
@@ -6346,6 +6419,10 @@ impl ProviderOutputHandoff {
         if let Some((predecessor, context_generation)) = settlement_of {
             active.attach_source_settlement(&state.run_record_bytes, &mut authored, predecessor, context_generation)?;
         }
+        if let Some(proof) = withdrawal {
+            active.attach_source_withdrawal(&state.run_record_bytes, &mut authored, proof)?;
+            state.validated_withdrawal_output = Some(source_withdrawal::closure_ref(&authored.pending_handoff)?);
+        }
         let pending = authored.pending_handoff.clone();
         match active.install_authored_run(&mut state, &authored).await? {
             AuthoredRunInstallOutcome::Installed => {}
@@ -6353,6 +6430,8 @@ impl ProviderOutputHandoff {
                 return Ok(vec![outcome]);
             }
         }
+        if withdrawal.is_some() { active.validate_installed_withdrawal(&state.run_record_bytes)?; }
+        drop(withdrawal_guard);
         if consume_input {
             state.consumed_input = false;
         }
@@ -6979,6 +7058,7 @@ impl ProviderOutputHandoff {
             ));
         }
         if let AuthoringAttemptRecovery::InFlight(attempt) = attempt {
+            let withdrawal_guard = if attempt.authored.pending_handoff.withdrawal.is_some() { Some(self.dispatch_ownership().await?) } else { None };
             if let Some(prior) =
                 persisted_pending_handoff(&record, &self.config.provider_interface)?
             {
@@ -6988,7 +7068,8 @@ impl ProviderOutputHandoff {
                 if (prior.source_movement_seq < self.source_movement_seq && !prior.terminal)
                     || (prior.source_movement_seq == self.source_movement_seq && prior.terminal
                         && !context_publication::is_publication_completion(&prior, &attempt.authored.pending_handoff)
-                        && !source_settlement::follows_completed_source(&prior, &attempt.authored.pending_handoff))
+                        && !source_settlement::follows_completed_source(&prior, &attempt.authored.pending_handoff)
+                        && !source_withdrawal::follows(&prior, &attempt.authored.pending_handoff))
                 {
                     return Err(format!(
                         "provider authoring attempt for movement {} cannot supersede pending movement {} (terminal={})",
@@ -7002,11 +7083,12 @@ impl ProviderOutputHandoff {
                         &prior,
                     )?;
                 }
+                let withdrawing = source_withdrawal::follows(&prior, &attempt.authored.pending_handoff);
                 let evidence = self.pending_handoff_evidence(&prior)?;
                 if let Some((index, _)) = evidence
                     .iter()
                     .enumerate()
-                    .find(|(_, admitted)| admitted.is_none())
+                    .find(|(_, admitted)| !withdrawing && admitted.is_none())
                 {
                     return Err(format!(
                         "provider authoring attempt for movement {} cannot supersede pending artifact '{}' without admitted ledger evidence",
@@ -7014,7 +7096,7 @@ impl ProviderOutputHandoff {
                         prior.items[index].artifact_id.as_str()
                     ));
                 }
-                if prior.source_movement_seq == self.source_movement_seq {
+                if prior.source_movement_seq == self.source_movement_seq && !withdrawing {
                     self.restore_pending_context(&mut state, &record, &prior)?;
                 }
             }
@@ -7034,6 +7116,8 @@ impl ProviderOutputHandoff {
                     return Ok((ProviderSourceRecovery::Completed, Vec::new()));
                 }
             }
+            if withdrawal_guard.is_some() { self.validate_installed_withdrawal(&state.run_record_bytes)?; }
+            drop(withdrawal_guard);
         }
         let pending = persisted_pending_handoff(&record, &self.config.provider_interface)?;
         let Some(pending) = pending else {
@@ -7088,6 +7172,9 @@ impl ProviderOutputHandoff {
                 }
             }
             return Ok((recovered.0, recovered.1));
+        }
+        if self.pending_handoff_evidence(&pending)?.iter().any(Option::is_none) {
+            source_withdrawal::require_validated_output(&state, &pending)?;
         }
         validate_pending_items_are_active(&record, &self.config.provider_interface, &pending)?;
         if pending.items.is_empty() {
@@ -7808,6 +7895,7 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         authored: &AuthoredRun,
     ) -> Result<AuthoredRunInstallOutcome, String> {
+        source_withdrawal::require_validated_output(state, &authored.pending_handoff)?;
         if self.config.writer_run.is_some() { return self.install_with_writer_run(state, authored).await; }
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(self.config.result_timeout_ms))
@@ -8030,6 +8118,8 @@ impl ProviderOutputHandoff {
         pending: &PendingHandoff,
         installed_record: &[u8],
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
+        let _ownership = self.dispatch_ownership().await?;
+        self.validate_dispatch_frontier(pending, installed_record)?;
         let evidence = self.pending_handoff_evidence(pending)?;
         let mut outcomes = Vec::with_capacity(pending.items.len());
         for (index, item) in pending.items.iter().enumerate() {
@@ -8041,6 +8131,7 @@ impl ProviderOutputHandoff {
                 });
                 continue;
             }
+            self.record_pending_dispatch(pending, item)?;
             let verdict = self.ctx.hand_arrival(artifact, Vec::new()).await?;
             let admitted =
                 self.session
@@ -8476,6 +8567,8 @@ impl ProviderOutputHandoff {
             context_publication: (live_context != target_context).then_some(target_context),
             source_without_context: self.failed_source,
             settlement_of: None,
+            dispatch_fenced: true,
+            withdrawal: None,
         };
         provider_state.insert(
             "pending_handoff".to_string(),
@@ -12447,8 +12540,13 @@ fn read_artifact_ref_payload(
     ctx: &InterfaceLiftContext,
     artifact: &ArtifactRef,
 ) -> Result<Vec<u8>, String> {
-    let limits = ctx.required_host_io_limits()?;
-    let carrier_path = ctx.blobs_dir.join(artifact.content.to_hex());
+    read_artifact_ref_payload_from_cache(&ctx.blobs_dir, ctx.required_host_io_limits()?, artifact)
+}
+
+fn read_artifact_ref_payload_from_cache(
+    blobs_dir: &Path, limits: InterfaceHostIoLimits, artifact: &ArtifactRef,
+) -> Result<Vec<u8>, String> {
+    let carrier_path = blobs_dir.join(artifact.content.to_hex());
     let carrier = octopus_interfaces::read_artifact_carrier_file_bounded(
         &carrier_path,
         limits.max_manifest_bytes.max(limits.max_payload_bytes),
@@ -12488,7 +12586,7 @@ fn read_artifact_ref_payload(
         .ok_or_else(|| {
             "provider bound artifact manifest has no canonical payload hash".to_string()
         })?;
-    let payload_path = ctx.blobs_dir.join(payload_hash.to_hex());
+    let payload_path = blobs_dir.join(payload_hash.to_hex());
     let payload = octopus_interfaces::read_artifact_carrier_file_bounded(
         &payload_path,
         limits.max_payload_bytes,
@@ -12990,8 +13088,23 @@ fn collect_bound_context(
     session_snapshot_labels: &BTreeSet<String>,
     provider: &InterfaceId,
 ) -> Result<(), String> {
+    collect_bound_context_from_cache(&ctx.blobs_dir, ctx.required_host_io_limits()?, static_context_artifacts, session_context, session_snapshot_head, artifact, payload, provenance, session_snapshot_labels, provider)
+}
+
+fn collect_bound_context_from_cache(
+    blobs_dir: &Path,
+    limits: InterfaceHostIoLimits,
+    static_context_artifacts: &mut Vec<ArtifactId>,
+    session_context: &mut ResolvedSessionContext,
+    session_snapshot_head: &mut Option<SessionSnapshotHead>,
+    artifact: &ArtifactRef,
+    payload: &[u8],
+    provenance: BoundArtifactProvenance,
+    session_snapshot_labels: &BTreeSet<String>,
+    provider: &InterfaceId,
+) -> Result<(), String> {
     if artifact.id.as_str() == format!("{INSTRUCTION_TEXT_LABEL}:{}", artifact.content.to_hex()) {
-        let (manifest, pinned_payload) = read_pinned_artifact(ctx, artifact)?;
+        let (manifest, pinned_payload) = read_pinned_artifact_from_cache(blobs_dir, limits, artifact)?;
         if manifest.label != INSTRUCTION_TEXT_LABEL || pinned_payload != payload {
             return Err(format!("bound instruction '{}' differs from its pinned text carrier", artifact.id));
         }
@@ -13065,8 +13178,8 @@ fn collect_bound_context(
             );
         }
         let resolved_artifacts = resolve_session_snapshot_chain(
-            &ctx.blobs_dir,
-            ctx.required_host_io_limits()?,
+            blobs_dir,
+            limits,
             artifact,
             payload,
             provenance.provider_arrival_seq,
@@ -13600,11 +13713,10 @@ fn session_snapshot_head_after_output(
     })
 }
 
-fn materialize_session_snapshot(
-    artifact: &InterfaceArtifactFile,
+fn session_snapshot_for_context(
     session_context: &ResolvedSessionContext,
     session_snapshot_head: Option<&SessionSnapshotHead>,
-) -> Result<InterfaceArtifactFile, String> {
+) -> Result<SessionContextSnapshot, String> {
     validate_resolved_session_context(
         session_context,
         "provider output",
@@ -13652,6 +13764,15 @@ fn materialize_session_snapshot(
         "provider output",
         &session_context.provider_interface,
     )?;
+    Ok(snapshot)
+}
+
+fn materialize_session_snapshot(
+    artifact: &InterfaceArtifactFile,
+    session_context: &ResolvedSessionContext,
+    session_snapshot_head: Option<&SessionSnapshotHead>,
+) -> Result<InterfaceArtifactFile, String> {
+    let snapshot = session_snapshot_for_context(session_context, session_snapshot_head)?;
     let payload = artifact
         .read_payload_bytes()
         .map_err(|error| format!("provider output payload cannot be read: {error}"))?;
@@ -14344,6 +14465,7 @@ mod tests {
             session,
             invocation_session_snapshot: None,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts: Vec::new(),
                 static_context_artifacts: Vec::new(),
                 session_context: ResolvedSessionContext {
@@ -14626,6 +14748,7 @@ mod tests {
             session,
             invocation_session_snapshot: None,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts: Vec::new(),
                 static_context_artifacts: Vec::new(),
                 session_context: ResolvedSessionContext {
@@ -15165,6 +15288,8 @@ mod tests {
             context_publication: None,
             source_without_context: false,
             settlement_of: None,
+            dispatch_fenced: true,
+            withdrawal: None,
             items: vec![PendingHandoffItem {
                 artifact_id: source.id.clone(),
                 artifact_content_hash: source.content.to_hex(),
@@ -18135,6 +18260,7 @@ mod tests {
             session,
             invocation_session_snapshot: None,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts: Vec::new(),
                 static_context_artifacts: Vec::new(),
                 session_context: ResolvedSessionContext {
@@ -18251,6 +18377,8 @@ mod tests {
             context_publication: None,
             source_without_context: false,
             settlement_of: None,
+            dispatch_fenced: true,
+            withdrawal: None,
             items: vec![PendingHandoffItem {
                 artifact_id: identity.artifact.id.clone(),
                 artifact_content_hash: identity.artifact.content.to_hex(),
@@ -18408,6 +18536,7 @@ mod tests {
             session,
             invocation_session_snapshot: None,
             state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts: vec![ArtifactId::new("context.reference:seed")],
                 static_context_artifacts: vec![ArtifactId::new("context.reference:seed")],
                 session_context: ResolvedSessionContext {
@@ -18580,6 +18709,7 @@ mod tests {
         let mut rearmed_handoff = handoff.clone();
         rearmed_handoff.source_movement_seq = 18;
         rearmed_handoff.state = Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
             context_artifacts: vec![ArtifactId::new("context.reference:seed")],
             static_context_artifacts: vec![ArtifactId::new("context.reference:seed")],
             session_context: ResolvedSessionContext {

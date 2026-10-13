@@ -22,6 +22,7 @@ octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-policy = { path = "../../../../../crates/octopus-policy" }
 octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-process-session-tool-runtime = { path = "../../../../worker_environment_kind/process_session/packages/octopus-process-session-tool-runtime" }
 octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
 octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
 octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }

@@ -1142,7 +1142,7 @@ fn history(
         max_manifest_bytes: limits.max_manifest_bytes,
         max_payload_bytes: limits.max_payload_bytes,
     };
-    let mut reader = FileCheckedRunReader::open(&evidence, None)?;
+    let mut reader = FileCheckedRunReader::open(&evidence, None)?.with_provider_context(ctx);
     if let Some((start, end, hash)) = current.cursor {
         if reader
             .reader
@@ -1466,6 +1466,7 @@ impl ProviderOutputHandoff {
             let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
             let original_config = attempt_config(&original, &self.config)?;
             source_settlement::validate_transition(&original, &record, &original_config)?;
+            source_withdrawal::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
             validate_bound_run_authoring_topology(&record, &original_config, None)?;
             let result_template = original_config
                 .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;

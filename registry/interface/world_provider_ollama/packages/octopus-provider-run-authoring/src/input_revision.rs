@@ -441,6 +441,12 @@ struct PayloadHistoryReader<'a, R: ?Sized>(&'a mut R);
 
 impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadHistoryReader<'_, R> {
     fn max_payload_bytes(&self) -> u64 { self.0.max_payload_bytes() }
+    fn source_context_snapshot(&mut self, record: &RunRecord, config: &RunAuthoringConfig, source: u64) -> Result<(serde_json::Value, Vec<(ArtifactRef, u64)>), String> {
+        self.0.source_context_snapshot(record, config, source)
+    }
+    fn pending_output_payload(&mut self, provider: &InterfaceId, reference: &ArtifactRef, relative: &Path) -> Result<Vec<u8>, String> {
+        self.0.pending_output_payload(provider, reference, relative)
+    }
     fn movement(&mut self, sequence: u64) -> Result<Option<Movement>, String> { self.0.admitted_movement(sequence) }
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String> { self.0.artifact(reference) }
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String> { self.0.snapshot(hash) }
@@ -508,7 +514,7 @@ fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         let next = next.ok_or("payload readiness history lost its pending handoff")?;
         validate_pending_items_are_active(&authored, &writer.owner, &next)?;
         let publication = previous.as_ref().is_some_and(|prior|context_publication::is_publication_completion(prior, &next));
-        if let Some(prior) = &previous {
+        if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next)) {
             if prior.context_publication.is_some() && !publication { return Ok(false); }
             if !all_admitted(index, prior, &record, &writer.owner, transition.call.seq.0)? { return Ok(false); }
             for item in &prior.items {
@@ -520,7 +526,7 @@ fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         if candidates.contains_key(&next.source_movement_seq) {
             if transition.writer != *writer { return Err("payload readiness completion changed its provider writer".into()); }
             if completed.get(&next.source_movement_seq).is_some_and(|prior|prior.terminal && !publication
-                && !source_settlement::follows_completed_source(prior, &next)) {
+                && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next)) {
                 return Err("payload readiness history repeats a completed input".into());
             }
             completed.insert(next.source_movement_seq, next.clone());

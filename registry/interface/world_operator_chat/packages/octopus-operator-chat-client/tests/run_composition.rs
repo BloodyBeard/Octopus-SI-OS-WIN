@@ -732,6 +732,117 @@ fn composition_binds_planned_native_catalog_and_task_coordinates_before_validati
     assert_eq!(std::fs::read(&child.run_write.path).unwrap(),original_run);
 }
 
+#[test]
+fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlement() {
+    use octopus_operator_chat_client::{SelectedToolSeed, native_run_authoring::plan_existing_adoption};
+    let temp = tempfile::tempdir().unwrap(); let root = temp.path().canonicalize().unwrap();
+    let mut request = support::client_fixture(&root); enable_native_profile(&root);
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
+    for name in ["interface.json", "life.json"] {
+        write(&root, &format!("registry/interface/system_context/{name}"),
+            serde_json::from_slice(&std::fs::read(source.join("registry/interface/system_context").join(name)).unwrap()).unwrap());
+    }
+    for (file, pointer, item) in [
+        ("registry/interface/system_worker_template/policy.json", "/ceiling/tools", "client.mcp"),
+        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces", "system_context"),
+        ("registry/ee_template/existence/ee_template.json", "/allowed_tools", "client.mcp"),
+        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces", "system_context"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_tools", "client.mcp"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces", "system_context"),
+    ] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!(item)); write(&root,file,value);
+    }
+    let canonical: Value = serde_json::from_slice(&std::fs::read(source.join("registry/tool/client.mcp/tool.json")).unwrap()).unwrap();
+    let config: Value = serde_json::from_slice(&std::fs::read(root.join("registry/interface/world_operator_chat/client.json")).unwrap()).unwrap();
+    let mut previous = canonical.clone();
+    for (pointer, value) in config["tool_contract_updates"][0]["predecessors"][0].as_object().unwrap() {
+        *previous.pointer_mut(pointer).unwrap() = value.clone();
+    }
+    write(&root,"registry/tool/client.mcp/tool.json",previous);
+    request.selected_tools.push(SelectedToolSeed {tool:"client.mcp".into(),interface:"system_context".into(),worker_environment_kind:"system_room".into()});
+    let child = plan_run_composition(&request).unwrap();
+    for edit in composition_candidate_writes(&child) {
+        std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(edit.path,edit.content).unwrap();
+    }
+    std::fs::create_dir_all(root.join("ledger/blobs")).unwrap(); std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
+    write(&root,"registry/tool/client.mcp/tool.json",canonical.clone());
+    let tool = &child.authoring.capability_tools["client.mcp"];
+    let tool_path = root.join("registry/tool").join(tool).join("tool.json");
+    let before = std::fs::read(&tool_path).unwrap(); let run_before = std::fs::read(&child.run_write.path).unwrap();
+    let plan = || plan_existing_adoption(&serde_json::from_value(adoption_request(&root,&request,&child)).unwrap())
+        .map(|plan|serde_json::to_value(plan).unwrap());
+    let adopted = plan().unwrap(); assert_eq!(adopted["status"],"planned");
+    assert_eq!(adopted["writes"].as_array().unwrap().len(),1); assert_eq!(adopted["writes"][0]["path"],json!(tool_path));
+    let next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(next["handler_config"],canonical["handler_config"]);
+    let current = RunRecord::from_bytes(&run_before).unwrap();
+    let call = octopus_interfaces::InterfaceArtifactFile::write(root.join("accepted-call"), "tool.call",
+        &serde_json::to_vec(&json!({"tool":tool,"arguments":{},"correlation_id":"pending-contract-call"})).unwrap()).unwrap();
+    let accepted = call.load_into_blob(&mut octopus_ledger_store::DurableBlobs::open(root.join("ledger/blobs")).unwrap()).unwrap().artifact;
+    let door = child.authoring.capability_doors["system_context"].clone();
+    let metadata = octopus_interfaces::InvocationMetadata::new(octopus_interfaces::GrantProjection {
+        tools:vec![tool.clone()], ..Default::default()
+    }).with_runtime(octopus_interfaces::RuntimeInvocationMetadata {
+        run:current.id.clone(), ee:current.ee.clone(), worker:current.worker.clone(),
+        checkpoint:current.checkpoints[0].id.clone(), interface:door.clone().into(), epoch:0, run_record_hash:None,
+    });
+    let accepted = octopus_ledger::Movement { seq:octopus_ledger::Seq(0), lamport:octopus_ledger::Lamport(1), recorded_at_unix_ms:1,
+        trace:current.trace.clone(), kind:octopus_ledger::MovementKind::InterfaceOutbound,
+        from:octopus_ledger::Endpoint::Interface(child.provider_interface_id.clone().into()),
+        to:octopus_ledger::Endpoint::Interface(door.into()), artifact:Some(accepted), invocation_metadata:Some(metadata.into()) };
+    std::fs::write(root.join("ledger/movements.jsonl"),format!("{}\n",serde_json::to_string(&accepted).unwrap())).unwrap();
+    let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
+    assert!(deferred["reason"].as_str().unwrap().contains("accepted tool work"));assert_eq!(std::fs::read(&tool_path).unwrap(),before);
+    std::fs::write(root.join("ledger/movements.jsonl"),"").unwrap();
+    let mut pending: Value = serde_json::from_slice(&run_before).unwrap(); pending["interface_state"][&child.provider_interface_id]["pending_handoff"]=json!({"terminal":false,"source_movement_seq":0});
+    std::fs::write(&child.run_write.path,serde_json::to_vec(&pending).unwrap()).unwrap();
+    let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
+    assert_eq!(std::fs::read(&tool_path).unwrap(),before);std::fs::write(&child.run_write.path,&run_before).unwrap();
+    let sidecar=root.join("registry/interface").join(&child.authoring.capability_doors["system_context"]).join("octopus_os.json");
+    let ownership=std::fs::read(&sidecar).unwrap(); let mut wrong:Value=serde_json::from_slice(&ownership).unwrap();wrong["owner_interface"]=json!("foreign");
+    std::fs::write(&sidecar,serde_json::to_vec(&wrong).unwrap()).unwrap();assert!(plan().unwrap_err().contains("exact client"));std::fs::write(&sidecar,ownership).unwrap();
+    let provider_path=root.join("registry/interface").join(&child.provider_interface_id).join("interface.json");
+    let provider:Value=serde_json::from_slice(&std::fs::read(&provider_path).unwrap()).unwrap();
+    let catalog_path=root.join("registry/artifact").join(provider["interface_driver_config"]["private_config"]["run_affordances"]["catalog_artifact"]["id"].as_str().unwrap()).join("artifact.json");
+    let source_path=root.join("registry/interface/world_provider_fixture/interface.json");
+    let prior_source=std::fs::read(&source_path).unwrap();let mut updated_source:Value=serde_json::from_slice(&prior_source).unwrap();
+    updated_source["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["text"]=json!("Updated package catalog");
+    std::fs::write(&source_path,serde_json::to_vec(&updated_source).unwrap()).unwrap();
+    assert_eq!(plan().unwrap()["writes"].as_array().unwrap().len(),3);
+    let protected=[&child.run_write.path,&provider_path,&catalog_path,&source_path,&sidecar].map(|path|(path,std::fs::read(path).unwrap()));
+    for pointer in ["/handler_config/mcp/tools/3/input_schema", "/handler_config/mcp/tools/0/description", "/description"] {
+        let mut local:Value=serde_json::from_slice(&before).unwrap(); *local.pointer_mut(pointer).unwrap()=if pointer.ends_with("input_schema") {json!({"type":"object","required":["locally_authored"]})} else {json!("Local tool description")};
+        std::fs::write(&tool_path,serde_json::to_vec(&local).unwrap()).unwrap();let retained=std::fs::read(&tool_path).unwrap();
+        let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
+        assert!(deferred["reason"].as_str().unwrap().contains("locally authored tools"));assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
+        for (path,bytes) in &protected {assert_eq!(&std::fs::read(path).unwrap(),bytes);}
+    }
+    let worker_path=root.join("registry/interface").join(&child.worker_interface_id).join("policy.json");
+    let worker_before=std::fs::read(&worker_path).unwrap();let mut blocked:Value=serde_json::from_slice(&worker_before).unwrap();
+    blocked["ceiling"]["hard_blocked_tools"]=json!([tool]);std::fs::write(&worker_path,serde_json::to_vec(&blocked).unwrap()).unwrap();
+    assert!(plan().unwrap_err().contains("outside the actual formed grant"));std::fs::write(&worker_path,worker_before).unwrap();
+    for (pointer,value) in [("/id",json!("foreign.tool")),("/interface",json!("foreign_door")),("/process",Value::Null),
+        ("/process/bin",json!(""))] {
+        let mut invalid:Value=serde_json::from_slice(&before).unwrap();*invalid.pointer_mut(pointer).unwrap()=value;
+        std::fs::write(&tool_path,serde_json::to_vec(&invalid).unwrap()).unwrap();let retained=std::fs::read(&tool_path).unwrap();
+        let error=plan().unwrap_err();if matches!(pointer,"/id"|"/interface") {assert!(error.contains("another exact identity or door"));}
+        assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
+    }
+    std::fs::write(&source_path,prior_source).unwrap();
+    std::fs::write(&tool_path,&before).unwrap();
+    std::fs::write(&tool_path,adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(plan().unwrap()["status"],"unchanged");assert_eq!(std::fs::read(&child.run_write.path).unwrap(),run_before);
+    let provider:Value=serde_json::from_slice(&std::fs::read(provider_path).unwrap()).unwrap();
+    request.selected_tools=serde_json::from_value(provider["interface_driver_config"]["private_config"]["run_affordances"]["defaults"]["tools"].clone()).unwrap();
+    request.identity_seed="future-child-with-inherited-selection".into();
+    request.communication.receive_interface_id="system_worker_future_child".into();
+    let future=plan_run_composition(&request).unwrap();
+    let future_tool=future.descriptor_writes.iter().find(|write|write.tag==format!("tool:{}",future.authoring.capability_tools["client.mcp"])).unwrap();
+    let future_tool:Value=serde_json::from_str(&future_tool.content).unwrap();
+    assert_eq!(future_tool["handler_config"],canonical["handler_config"]);
+}
+
 #[tokio::test]
 async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results() {
     use futures::{SinkExt, StreamExt};

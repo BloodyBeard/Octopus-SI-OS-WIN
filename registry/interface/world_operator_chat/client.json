@@ -105,5 +105,102 @@
   "home_voice": {
     "provider_interface_id": "world_provider_realtime",
     "contract_file": "contract.json"
-  }
+  },
+  "tool_contract_updates": [
+    {
+      "source_tool": "client.mcp",
+      "source_interface": "system_context",
+      "predecessors": [
+        {
+          "/handler_config/mcp/tools/3/input_schema": {
+            "type": "object",
+            "properties": {
+              "interface": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Exact granted System presentation interface, never a guessed Home/client World address."
+              },
+              "document": {
+                "type": "object",
+                "required": [
+                  "schema",
+                  "schema_version",
+                  "release_channel",
+                  "id",
+                  "revision",
+                  "title",
+                  "glyph",
+                  "target",
+                  "render"
+                ],
+                "properties": {
+                  "schema": {
+                    "const": "octopus.client_surface"
+                  },
+                  "schema_version": {
+                    "const": 1
+                  },
+                  "release_channel": {
+                    "const": "stable"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "glyph": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "object",
+                    "required": [
+                      "kind"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "voice.widget",
+                          "voice.window",
+                          "workspace.surface",
+                          "worker_environment.surface"
+                        ]
+                      }
+                    }
+                  },
+                  "render": {
+                    "type": "object",
+                    "required": [
+                      "kind"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "enum": [
+                          "native",
+                          "sandbox"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "interface",
+              "document"
+            ],
+            "additionalProperties": false
+          },
+          "/handler_config/mcp/tools/3/description": "Create or update an Octopus client widget or document. Use the exact System presentation interface from the bound Home delivery artifact. The result proves artifact admission, not rendering or extension installation. Same document id with a larger revision updates it. Read the bound artifact-home-widget-authoring contract for native/sandbox documents."
+        }
+      ]
+    }
+  ]
 }

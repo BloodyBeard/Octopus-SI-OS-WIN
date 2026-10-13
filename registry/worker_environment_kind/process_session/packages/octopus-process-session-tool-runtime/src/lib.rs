@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod door_life;
 mod execution_inputs;
 mod completed_output;
+mod contract_update;
+pub use contract_update::{ToolContractUpdateRequest, ToolContractUpdateProof, tool_contract_update_quiescent};
 pub use completed_output::{PreparedToolOutputRecovery, prepare_tool_output_recovery};
 
 #[cfg(test)]
@@ -7205,6 +7207,7 @@ struct ToolDoorEffectJournal {
     path: PathBuf,
     entries: BTreeMap<u64, ToolDoorJournalEntry>,
     maximum_receipt_bytes: u64,
+    source_sha256: Option<String>,
 }
 
 fn read_bounded_tool_door_receipt<R: std::io::BufRead>(
@@ -7237,6 +7240,14 @@ fn read_bounded_tool_door_receipt<R: std::io::BufRead>(
 
 impl ToolDoorEffectJournal {
     fn open(path: PathBuf, committed_seq: u64, maximum_receipt_bytes: u64) -> Result<Self, String> {
+        Self::load(path, Some(committed_seq), maximum_receipt_bytes)
+    }
+
+    fn read_only(path: PathBuf, maximum_receipt_bytes: u64) -> Result<Self, String> {
+        Self::load(path, None, maximum_receipt_bytes)
+    }
+
+    fn load(path: PathBuf, committed_seq: Option<u64>, maximum_receipt_bytes: u64) -> Result<Self, String> {
         if maximum_receipt_bytes == 0 {
             return Err("tool-door receipt ceiling must be positive".to_string());
         }
@@ -7244,6 +7255,7 @@ impl ToolDoorEffectJournal {
             .map_err(|_| "tool-door receipt ceiling exceeds host address space".to_string())?;
         let mut entries = BTreeMap::new();
         let mut pruned = false;
+        let mut source_sha256 = None;
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
                 validate_tool_door_journal_metadata(&path, &metadata)?;
@@ -7269,6 +7281,8 @@ impl ToolDoorEffectJournal {
                         )
                     })?,
                 )?;
+                use sha2::Digest;
+                let mut hasher = committed_seq.is_none().then(sha2::Sha256::new);
                 let mut reader = std::io::BufReader::new(file);
                 let mut line = Vec::new();
                 let mut index = 0_u64;
@@ -7282,6 +7296,7 @@ impl ToolDoorEffectJournal {
                     if read == 0 {
                         break;
                     }
+                    if let Some(hasher) = &mut hasher { hasher.update(&line); }
                     index = index
                         .checked_add(1)
                         .ok_or_else(|| "tool-door receipt line count overflowed".to_string())?;
@@ -7308,12 +7323,13 @@ impl ToolDoorEffectJournal {
                             )
                         })?;
                     validate_tool_door_journal_receipt(&receipt)?;
-                    if receipt.seq < committed_seq {
+                    if committed_seq.is_some_and(|committed| receipt.seq < committed) {
                         pruned = true;
                         continue;
                     }
                     apply_tool_door_journal_receipt(&mut entries, &receipt)?;
                 }
+                source_sha256 = hasher.map(|hasher| format!("{:x}", hasher.finalize()));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
@@ -7327,6 +7343,7 @@ impl ToolDoorEffectJournal {
             path,
             entries,
             maximum_receipt_bytes: maximum_receipt_bytes as u64,
+            source_sha256,
         };
         if pruned {
             journal.rewrite()?;
@@ -8439,10 +8456,17 @@ fn tool_door_recovery_artifact(
     ctx: &InterfaceLiftContext,
     artifact: &ArtifactRef,
 ) -> Result<(InterfaceArtifactFile, InterfaceArtifactManifest), String> {
-    let limits = ctx.required_host_io_limits()?;
-    let file = InterfaceArtifactFile::new(ctx.blobs_dir.join(artifact.content.to_hex()))
+    tool_door_recovery_artifact_at(&ctx.ledger_read_handles()?, artifact)
+}
+
+fn tool_door_recovery_artifact_at(
+    handles: &InterfaceLedgerReadHandles<'_>,
+    artifact: &ArtifactRef,
+) -> Result<(InterfaceArtifactFile, InterfaceArtifactManifest), String> {
+    let limits = handles.limits;
+    let file = InterfaceArtifactFile::new(handles.blobs_dir.join(artifact.content.to_hex()))
         .map_err(|error| format!("tool-door recovery artifact cannot be opened: {error}"))?
-        .with_payload_cache_root(&ctx.blobs_dir);
+        .with_payload_cache_root(&handles.blobs_dir);
     let bounded = file
         .read_manifest_bounded(limits.max_manifest_bytes)
         .map_err(|error| format!("tool-door recovery artifact manifest is invalid: {error}"))?;
@@ -8471,13 +8495,29 @@ pub fn tool_door_has_exact_admitted_result(
     envelope: &InterfaceInvocationEnvelope,
     decoder: ToolDoorArtifactDecoder,
 ) -> Result<bool, String> {
+    tool_door_has_exact_admitted_result_at(
+        &ctx.ledger_read_handles()?, &ctx.interface, source, call, envelope, None,
+        |movement, candidate| decoder(&ctx.with_source_movement(movement.clone()), candidate,
+            ToolDoorArtifactDecodePurpose::HistoricalIdentity),
+    )
+}
+
+fn tool_door_has_exact_admitted_result_at(
+    handles: &InterfaceLedgerReadHandles<'_>,
+    door: &InterfaceId,
+    source: &Movement,
+    call: &ToolCallArtifact,
+    envelope: &InterfaceInvocationEnvelope,
+    ledger_snapshot: Option<&[u8]>,
+    decoder: impl Fn(&Movement, &InterfaceInvocationEnvelope) -> Result<Option<ToolCallArtifact>, String>,
+) -> Result<bool, String> {
     let source_runtime = envelope
         .runtime()
         .map_err(|error| format!("tool-door recovery source coordinates are invalid: {error}"))?;
     if source.kind != MovementKind::InterfaceOutbound
         || !matches!(&source.from, Endpoint::Interface(_))
-        || !matches!(&source.to, Endpoint::Interface(interface) if interface == &ctx.interface)
-        || source_runtime.interface != ctx.interface
+        || !matches!(&source.to, Endpoint::Interface(interface) if interface == &*door)
+        || source_runtime.interface != *door
         || source.artifact.as_ref() != Some(&envelope.artifact)
     {
         return Err(format!(
@@ -8485,38 +8525,42 @@ pub fn tool_door_has_exact_admitted_result(
             source.seq.0
         ));
     }
-    let limits = ctx.required_host_io_limits()?;
-    let metadata = std::fs::symlink_metadata(&ctx.movements_path).map_err(|error| {
-        format!(
-            "tool-door recovery ledger '{}' cannot be inspected: {error}",
-            ctx.movements_path.display()
-        )
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(format!(
-            "tool-door recovery ledger '{}' must be a regular non-symlink file",
-            ctx.movements_path.display()
-        ));
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(&ctx.movements_path).map_err(|error| {
-        format!(
-            "tool-door recovery ledger '{}' cannot be opened: {error}",
-            ctx.movements_path.display()
-        )
-    })?;
-    let ledger_len = file
-        .metadata()
-        .map_err(|error| format!("tool-door recovery ledger metadata cannot be read: {error}"))?
-        .len();
+    let limits = handles.limits;
+    let (mut reader, ledger_len): (Box<dyn BufRead + '_>, u64) = if let Some(bytes) = ledger_snapshot {
+        (Box::new(std::io::Cursor::new(bytes)), bytes.len() as u64)
+    } else {
+        let metadata = std::fs::symlink_metadata(&handles.movements_path).map_err(|error| {
+            format!(
+                "tool-door recovery ledger '{}' cannot be inspected: {error}",
+                handles.movements_path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(format!(
+                "tool-door recovery ledger '{}' must be a regular non-symlink file",
+                handles.movements_path.display()
+            ));
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let file = options.open(&handles.movements_path).map_err(|error| {
+            format!(
+                "tool-door recovery ledger '{}' cannot be opened: {error}",
+                handles.movements_path.display()
+            )
+        })?;
+        let ledger_len = file
+            .metadata()
+            .map_err(|error| format!("tool-door recovery ledger metadata cannot be read: {error}"))?
+            .len();
+        (Box::new(std::io::BufReader::new(file.take(ledger_len))), ledger_len)
+    };
     let expected_result_label = format!("{}.result", call.tool);
-    let mut reader = std::io::BufReader::new(file);
     let mut line = Vec::new();
     let mut offset = 0_u64;
     let mut expected_seq = 0_u64;
@@ -8531,7 +8575,7 @@ pub fn tool_door_has_exact_admitted_result(
         if read == 0 {
             return Err(format!(
                 "tool-door recovery ledger '{}' ended before its declared length",
-                ctx.movements_path.display()
+                handles.movements_path.display()
             ));
         }
         let end = offset
@@ -8540,20 +8584,20 @@ pub fn tool_door_has_exact_admitted_result(
         if end > ledger_len {
             return Err(format!(
                 "tool-door recovery ledger '{}' changed across the inspected boundary",
-                ctx.movements_path.display()
+                handles.movements_path.display()
             ));
         }
         let Some(json_line) = line.strip_suffix(b"\n") else {
             return Err(format!(
                 "tool-door recovery ledger '{}' ends with an incomplete movement",
-                ctx.movements_path.display()
+                handles.movements_path.display()
             ));
         };
         let json_line = json_line.strip_suffix(b"\r").unwrap_or(json_line);
         if json_line.is_empty() {
             return Err(format!(
                 "tool-door recovery ledger '{}' contains an empty movement at seq {expected_seq}",
-                ctx.movements_path.display()
+                handles.movements_path.display()
             ));
         }
         let line_index = usize::try_from(expected_seq)
@@ -8573,7 +8617,7 @@ pub fn tool_door_has_exact_admitted_result(
             .ok_or_else(|| "tool-door recovery movement sequence overflowed".to_string())?;
         if route.seq == source.seq {
             let observed = decode_tool_door_recovery_movement(
-                &ctx.movements_path,
+                &handles.movements_path,
                 json_line,
                 line_index,
                 limits.max_control_frame_bytes,
@@ -8587,10 +8631,10 @@ pub fn tool_door_has_exact_admitted_result(
             source_seen = true;
         } else if route.kind == MovementKind::InterfaceOutbound
             && matches!(&route.from, Endpoint::Interface(_))
-            && matches!(&route.to, Endpoint::Interface(interface) if interface == &ctx.interface)
+            && matches!(&route.to, Endpoint::Interface(interface) if interface == &*door)
         {
             let movement = decode_tool_door_recovery_movement(
-                &ctx.movements_path,
+                &handles.movements_path,
                 json_line,
                 line_index,
                 limits.max_control_frame_bytes,
@@ -8611,7 +8655,7 @@ pub fn tool_door_has_exact_admitted_result(
                     movement.seq.0
                 )
             })?;
-            if runtime.interface != ctx.interface {
+            if runtime.interface != *door {
                 return Err(format!(
                     "tool-door recovery source candidate movement {} names a different door coordinate",
                     movement.seq.0
@@ -8630,7 +8674,7 @@ pub fn tool_door_has_exact_admitted_result(
                         movement.seq.0
                     )
                 })?;
-                let (file, _) = tool_door_recovery_artifact(ctx, artifact)?;
+                let (file, _) = tool_door_recovery_artifact_at(handles, artifact)?;
                 let captured = file
                     .read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
                     .map_err(|error| {
@@ -8644,7 +8688,7 @@ pub fn tool_door_has_exact_admitted_result(
                 .map_err(|error| format!("tool-door recovery source cannot be pinned: {error}"))?;
                 let mut artifact_binding_payloads = Vec::new();
                 for binding in &invocation.artifact_binding_refs {
-                    let path = ctx.blobs_dir.join(binding.content.to_hex());
+                    let path = handles.blobs_dir.join(binding.content.to_hex());
                     let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
                         &path,
                         limits.max_manifest_bytes.max(limits.max_payload_bytes),
@@ -8659,7 +8703,7 @@ pub fn tool_door_has_exact_admitted_result(
                         Ok(manifest) if !manifest.payload_path.as_os_str().is_empty() => {
                             InterfaceArtifactFile::new(&path)
                                 .map_err(|error| error.to_string())?
-                                .with_payload_cache_root(&ctx.blobs_dir)
+                                .with_payload_cache_root(&handles.blobs_dir)
                                 .read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
                                 .map_err(|error| {
                                     format!(
@@ -8685,12 +8729,7 @@ pub fn tool_door_has_exact_admitted_result(
                     artifact_binding_payloads,
                     metadata: Some(invocation.clone()),
                 };
-                let decoder_context = ctx.with_source_movement(movement.clone());
-                if let Some(candidate) = decoder(
-                    &decoder_context,
-                    &candidate_envelope,
-                    ToolDoorArtifactDecodePurpose::HistoricalIdentity,
-                )? {
+                if let Some(candidate) = decoder(&movement, &candidate_envelope)? {
                     if candidate.tool == call.tool
                         && candidate.correlation_id == call.correlation_id
                     {
@@ -8702,11 +8741,11 @@ pub fn tool_door_has_exact_admitted_result(
                 }
             }
         } else if route.kind == MovementKind::InterfaceArrival
-            && matches!(&route.from, Endpoint::Interface(interface) if interface == &ctx.interface)
+            && matches!(&route.from, Endpoint::Interface(interface) if interface == &*door)
             && matches!(&route.to, Endpoint::Interface(worker) if worker == &source_runtime.worker)
         {
             let movement = decode_tool_door_recovery_movement(
-                &ctx.movements_path,
+                &handles.movements_path,
                 json_line,
                 line_index,
                 limits.max_control_frame_bytes,
@@ -8732,7 +8771,7 @@ pub fn tool_door_has_exact_admitted_result(
             }
             if runtime.ee != source_runtime.ee
                 || runtime.worker != source_runtime.worker
-                || runtime.interface != ctx.interface
+                || runtime.interface != *door
             {
                 return Err(format!(
                     "tool-door recovery result candidate movement {} conflicts with the source run/interface coordinates",
@@ -8745,7 +8784,7 @@ pub fn tool_door_has_exact_admitted_result(
                     movement.seq.0
                 )
             })?;
-            let (file, manifest) = tool_door_recovery_artifact(ctx, artifact)?;
+            let (file, manifest) = tool_door_recovery_artifact_at(handles, artifact)?;
             if manifest.label == expected_result_label {
                 let payload = file
                     .read_payload_bytes_bounded(limits.max_payload_bytes)
@@ -8950,6 +8989,9 @@ fn validate_private_read_handle(handle: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tool_process_private_boundary_tests {
+    mod contract_update_tests {
+        include!("../tests/support/contract_update.rs");
+    }
     mod completed_output_tests {
         include!("../tests/support/completed_output.rs");
     }

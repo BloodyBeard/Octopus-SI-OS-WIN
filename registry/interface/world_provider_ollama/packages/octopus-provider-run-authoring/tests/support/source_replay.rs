@@ -76,6 +76,7 @@ impl CompletedInputReplayFixture {
             bound_topology:topology,delivery_mode:HandoffDeliveryMode::Rearm,invocation_session_snapshot:None,
             result_reader:Arc::new(tokio::sync::Mutex::new(result_reader)),
             state:Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
                 context_artifacts:Vec::new(),static_context_artifacts:Vec::new(),session_context:ResolvedSessionContext {
                     provider_interface:"provider".into(),artifacts:Vec::new(),
                 },session_snapshot_head:None,run_record_bytes:initial.clone(),run_record_evidence_seq:Some(0),
@@ -533,6 +534,63 @@ fn selected_home_materializes_exact_settlement_checkpoint_contract() {
 }
 
 #[test]
+#[ignore = "requires explicitly selected read-only outgoing-binding installation evidence"]
+fn selected_home_outgoing_static_binding_recovers_exact_pending_output() {
+    let home=PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
+    let provider=InterfaceId::new(std::env::var("OCTOPUS_REPLAY_PROVIDER").unwrap());
+    let run=RunId::new(std::env::var("OCTOPUS_REPLAY_RUN").unwrap());
+    let source:u64=std::env::var("OCTOPUS_REPLAY_SOURCE").unwrap().parse().unwrap();
+    let call_seq:u64=std::env::var("OCTOPUS_REPLAY_CALL").unwrap().parse().unwrap();
+    let result_seq:u64=std::env::var("OCTOPUS_REPLAY_RESULT").unwrap().parse().unwrap();
+    let dir=home.join("registry/interface").join(provider.as_str());
+    let descriptor:InterfaceDescriptor=serde_json::from_slice(&std::fs::read(dir.join("interface.json")).unwrap()).unwrap();
+    let life:serde_json::Value=serde_json::from_slice(&std::fs::read(dir.join("life.json")).unwrap()).unwrap();
+    let scratch=tempfile::tempdir().unwrap();let (arrivals,receiver)=tokio::sync::mpsc::channel(1);drop(receiver);
+    let ctx=InterfaceLiftContext::unprivileged(provider.clone(),dir,Some(descriptor.clone()),scratch.path().join("provider"),
+        home.join("ledger/movements.jsonl"),home.join("ledger/blobs"),home.join("ledger/ledger-index.sqlite"),
+        BTreeMap::from([("run_records_root".into(),home.join("state/runs")),("interface_hand_in_root".into(),home.join("interface-hand-in"))]),arrivals,Default::default())
+        .with_host_io_limits(serde_json::from_value(life["processes"][0]["io_limits"].clone()).unwrap()).unwrap();
+    let path=home.join("state/runs").join(format!("{run}.json"));let current=std::fs::read(&path).unwrap();
+    let ledger=std::fs::read(&ctx.movements_path).unwrap();let limits=ctx.required_host_io_limits().unwrap();
+    let cursors=["ledger-cursor.json","ledger-cursor.turn-control.json"].map(|name| {
+        let path=home.join("interfaces").join(provider.as_str()).join(name);let bytes=std::fs::read(&path).unwrap();(path,bytes)
+    });
+    let evidence=CheckedRunEvidence {movements_path:&ctx.movements_path,ledger_index_path:&ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,
+        max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
+    let call=generated_artifacts::read_movement(&evidence,call_seq).unwrap();let result=generated_artifacts::read_movement(&evidence,result_seq).unwrap();
+    let mut replay=octopus_world_pyecho_life_runtime::LedgerReplayReader::open(&ctx).unwrap();let mut input=None;
+    while let Some(batch)=replay.read_batch(256).unwrap() {
+        if let Some(row)=batch.into_iter().find(|row|row.movement.seq.0==source) {input=Some(replay.envelope(&row).unwrap());break;}
+    }
+    let input=input.unwrap();let pinned=ctx.pinned_run_record_bytes(&input).unwrap();let original=RunRecord::from_bytes(&pinned).unwrap();
+    let writer=declared_provider_run_writer(&original,&provider,&run_authoring_profile(&descriptor).unwrap()).unwrap();
+    let proof=CheckedRunInstall {call:ConsentEvidenceRef {movement_seq:call_seq,artifact:call.artifact.clone().unwrap()},
+        result:ConsentEvidenceRef {movement_seq:result_seq,artifact:result.artifact.clone().unwrap()}};
+    let checked=checked_declared_run_install(&evidence,&path,&pinned,&proof,vec![writer]).unwrap();
+    assert_eq!(checked.before,pinned);assert_eq!(checked.after,current);
+    let record=RunRecord::from_bytes(&current).unwrap();
+    let prior=writer_run::binding(&original,&provider).unwrap().unwrap();let next=writer_run::binding(&record,&provider).unwrap().unwrap();
+    assert_eq!(prior.role_artifact_bindings,next.role_artifact_bindings);
+    for record in [&original,&record] {
+        for item in persisted_pending_handoff(record,&provider).unwrap().unwrap().items {
+            let target=ctx.interface_var_dir().join(&item.manifest_relative_path);std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(home.join("interfaces").join(provider.as_str()).join(&item.manifest_relative_path),target).unwrap();
+        }
+    }
+    let handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&input,source,&pinned).unwrap();
+    let pending=persisted_pending_handoff(&record,&provider).unwrap().unwrap();assert_eq!(pending.source_movement_seq,source);
+    validate_pending_items_are_active(&record,&provider,&pending).unwrap();
+    assert!(handoff.recover_authoring_failure(&record,&current).unwrap().is_none());
+    assert!(matches!(handoff.recover_authoring_attempt(&record,&current).unwrap(),AuthoringAttemptRecovery::None));
+    assert_eq!(handoff.pending_handoff_evidence(&pending).unwrap(),vec![None]);
+    let (_,artifact)=load_pending_artifact(&handoff.var_dir,&pending.items[0]).unwrap();
+    assert_eq!(artifact.id,pending.items[0].artifact_id);assert_eq!(artifact.content.to_hex(),pending.items[0].artifact_content_hash);
+    assert_eq!(std::fs::read(path).unwrap(),current);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+    for (path,bytes) in cursors {assert_eq!(std::fs::read(path).unwrap(),bytes);}
+    eprintln!("exact checked write {call_seq}/{result_seq}: {} unchanged detached roles; source {source} reconstructs with no authoring retry and one exact unadmitted pending artifact {}",next.role_artifact_bindings.len(),artifact.id);
+}
+
+#[test]
 #[ignore = "requires explicitly selected read-only historical ledger evidence"]
 fn selected_ledger_checked_authoring_history() {
     let home = PathBuf::from(std::env::var("OCTOPUS_REPLAY_HOME").unwrap());
@@ -626,6 +684,7 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
         bound_topology, delivery_mode: HandoffDeliveryMode::Rearm, invocation_session_snapshot: None,
         result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
             context_artifacts: Vec::new(), static_context_artifacts: Vec::new(),
             session_context: ResolvedSessionContext { provider_interface: provider.clone(), artifacts: Vec::new() },
             session_snapshot_head: None, run_record_bytes: current.clone(), run_record_evidence_seq: None,

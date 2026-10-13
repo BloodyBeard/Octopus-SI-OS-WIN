@@ -7,6 +7,8 @@ pub(super) fn is_publication_completion(before: &PendingHandoff, after: &Pending
         && before.items == after.items
         && before.terminal == after.terminal
         && before.settlement_of == after.settlement_of
+        && before.dispatch_fenced == after.dispatch_fenced
+        && before.withdrawal == after.withdrawal
 }
 
 impl ProviderOutputHandoff {
@@ -47,7 +49,9 @@ impl ProviderOutputHandoff {
         let generation = optional_u64(state, "authoring_generation")?.checked_add(1).ok_or("provider authoring generation overflow")?;
         let context_generation = optional_u64(state, "context_generation")?;
         let prefix = checkpoint_prefix(&record.id, &pending.items.last().ok_or("provider publication has no output")?.artifact_id, generation);
-        let bindings = if pending.settlement_of.is_some() {
+        let bindings = if pending.withdrawal.is_some() {
+            source_withdrawal::publication_bindings(&record, &config, pending)?
+        } else if pending.settlement_of.is_some() {
             source_settlement::publication_bindings(&record, &config, pending)?
         } else { target.iter().map(|id| serde_json::json!({"id":id})).collect::<Vec<_>>() };
         let roles = current_mandatory_role_bindings(&record, &config)?;

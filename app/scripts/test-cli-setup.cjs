@@ -140,6 +140,34 @@ async function nativeAdoptionContract(root) {
   await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:[]}); await boot();
   assert.equal(await fs.readFile(providerPath,"utf8"),thirdProvider); assert.equal(await fs.readFile(catalogPath,"utf8"),thirdCatalog);
   assert.deepEqual(await fs.readFile(runPath),runBytes);
+  const toolId = "client.mcp__home_fixture", toolPath = path.join(registry, "tool", toolId, "tool.json");
+  const oldTool = { id: toolId, interface: "system_context_home_fixture", contract: 1 };
+  await json(toolPath, oldTool); const toolBytes = await fs.readFile(toolPath);
+  const nextTool = `${JSON.stringify({ ...oldTool, contract: 2 })}\n`;
+  const ledgerPath = path.join(home,"ledger/movements.jsonl"), journalPath = path.join(home,"interfaces/system_context_home_fixture/tool-door-effect-frontier.jsonl");
+  await fs.mkdir(path.dirname(ledgerPath),{recursive:true}); await fs.writeFile(ledgerPath,"settled fixture evidence\n");
+  const ledgerBytes = await fs.readFile(ledgerPath);
+  const toolPlan = { ...planned, writes: [{ path: toolPath, content: nextTool, expected_before_hash: hash(toolBytes), tag: `tool:${toolId}` }],
+    preimages: [{path:runPath,sha256:hash(runBytes)},{path:toolPath,sha256:hash(toolBytes)},
+      {path:ledgerPath,sha256:hash(ledgerBytes)},{path:journalPath,sha256:null}] };
+  await json(replyPath, { ...toolPlan, status: "deferred", reason: "accepted tool result is pending", writes: [], preimages: planned.preimages.filter(preimage=>preimage.path===runPath) });
+  await boot(); assert.equal(results.at(-1).status, "deferred"); assert.deepEqual(await fs.readFile(toolPath), toolBytes);
+  const unchangedCatalog = await fs.readFile(catalogPath), unchangedProvider = await fs.readFile(providerPath);
+  await json(replyPath, toolPlan);
+  await fs.appendFile(ledgerPath,"new accepted call\n"); await assert.rejects(boot(), /preimage changed.*movements.jsonl/);
+  await fs.writeFile(ledgerPath,ledgerBytes);
+  await json(journalPath,{state:"in_flight"}); await assert.rejects(boot(), /preimage changed.*tool-door-effect-frontier/);
+  await fs.rm(journalPath); await boot(); assert.equal(results.at(-1).status, "adopted");
+  assert.equal(await fs.readFile(toolPath, "utf8"), nextTool);
+  assert.deepEqual(await fs.readFile(providerPath), unchangedProvider); assert.deepEqual(await fs.readFile(catalogPath), unchangedCatalog);
+  assert.deepEqual(await fs.readFile(runPath), runBytes);
+  await json(replyPath, { ...toolPlan, status: "unchanged", writes: [], preimages: [] });
+  await boot(); assert.equal(results.at(-1).status, "unchanged");
+  await json(replyPath, { ...toolPlan, writes: [{ ...toolPlan.writes[0], path: path.join(registry,"tool/foreign/tool.json") }] });
+  await assert.rejects(boot(), /only declared private tools/);
+  await json(replyPath, toolPlan); await assert.rejects(boot(), /preimage changed/);
+  assert.equal(await fs.readFile(toolPath, "utf8"), nextTool);
+
 }
 
 async function fixtureRuntime(root) {

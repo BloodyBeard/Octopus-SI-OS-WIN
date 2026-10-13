@@ -120,6 +120,7 @@ async fn selected_home_accepts_new_definition_without_replaying_completed_work()
         delivery_mode: HandoffDeliveryMode::Rearm,
         invocation_session_snapshot: None,
         state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+            validated_withdrawal_output: None,
             context_artifacts: Vec::new(),
             static_context_artifacts: Vec::new(),
             session_context: ResolvedSessionContext {

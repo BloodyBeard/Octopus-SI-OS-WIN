@@ -89,10 +89,45 @@ test("malformed current revisions, conflicts and failed reads never revive previ
 
 test("a widget delivered to several recipients stays visible to Home's own recipient", () => {
   const doc = widget(); delete doc.data.home_presentation;
-  const fanout = ["presentation", "worker", "provider", scope.interfaceId].map((interfaceId, index) => source(doc, { interfaceId, sequence: 10 + index }));
+  const deliver = (document, sequence, patch = {}) => ["presentation", "worker", "provider", scope.interfaceId].map((interfaceId, index) => source(document, {
+    interfaceId, sequence: sequence + index, artifactId: `widget-${document.revision}`, path: `artifact:widget-${document.revision}@${interfaceId}`, ...patch,
+  }));
+  const fanout = deliver(doc, 10);
   const voice = uniqueExtensionSurfaces(registry(fanout).voiceSurfaces, "voice", [], true);
   assert.equal(selectHomeSurfaceDocuments(voice, scope, now).documents.length, 1);
   assert.equal(uniqueExtensionSurfaces(registry(fanout).voiceSurfaces, "workspace", []).length, 1);
+
+  const history = deliver({ ...doc, glyph: "cloud" }, 10);
+  const refused = registry(history);
+  assert.equal(refused.documents.length, 0);
+  assert.match(refused.errors.join("\n"), /\/glyph:/);
+  assert.ok(refused.verdicts.every((verdict) => !verdict.passed));
+  const revision2 = { ...doc, revision: 2 };
+  const replacement = deliver(revision2, 20);
+  const partial = registry([...history, replacement[3]]);
+  assert.equal(selectHomeSurfaceDocuments(partial.documents, scope, now).documents[0].document.revision, 2);
+  assert.ok(partial.errors.length, "a repair in one recipient scope cannot clear another scope's refusal");
+  const recovered = registry([...history, ...replacement]);
+  assert.equal(recovered.documents.length, 4);
+  assert.deepEqual(recovered.errors, []);
+  assert.deepEqual(recovered.verdicts.slice(0, 4), refused.verdicts);
+  assert.ok(recovered.verdicts.slice(4).every((verdict) => verdict.passed));
+  const home = selectHomeSurfaceDocuments(uniqueExtensionSurfaces(recovered.voiceSurfaces, "voice", [], true), scope, now);
+  assert.equal(home.documents.length, 1);
+  assert.deepEqual(home.documents[0].document, revision2);
+  assert.deepEqual(home.errors, []);
+  for (const [name, latest] of [
+    ["invalid latest revision", deliver({ ...doc, revision: 3, glyph: "cloud" }, 30)],
+    ["conflicting equal revision", deliver({ ...revision2, title: "Conflict" }, 30)],
+    ["bad delivery", deliver({ ...doc, revision: 3 }, 30, { artifactId: undefined })],
+    ["unknown revision", deliver({ ...doc, revision: "3" }, 30)],
+    ["unreadable document", deliver({ ...doc, revision: 3 }, 30, { text: "{" })],
+  ]) {
+    const blocked = registry([...history, ...replacement, ...latest]);
+    assert.equal(blocked.documents.length, 0, name);
+    assert.ok(blocked.errors.length, name);
+    assert.deepEqual(blocked.verdicts.slice(0, 4), refused.verdicts, name);
+  }
 });
 
 test("revision selection keeps interfaces isolated and replay does not extend a lifetime", () => {

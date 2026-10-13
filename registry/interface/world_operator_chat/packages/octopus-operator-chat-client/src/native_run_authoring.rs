@@ -210,7 +210,7 @@ pub enum NativeRunAdoptionStatus { Unchanged, Deferred, Planned }
 #[derive(Serialize)]
 pub struct NativeRunAdoptionPreimage {
     pub path: PathBuf,
-    pub sha256: String,
+    pub sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -222,6 +222,147 @@ pub struct NativeRunAdoptionPlan {
     pub reason: Option<String>,
     pub writes: Vec<PlannedClientWrite>,
     pub preimages: Vec<NativeRunAdoptionPreimage>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolContractUpdate {
+    source_tool: String,
+    source_interface: String,
+    predecessors: Vec<BTreeMap<String, Value>>,
+}
+
+enum ToolContractAdoption {
+    Planned(Vec<PlannedClientWrite>),
+    Deferred {
+        locally_changed: Vec<String>,
+        selected_tools: BTreeMap<String, InterfaceId>,
+    },
+}
+
+struct CatalogAdoption {
+    reference: ArtifactRef,
+    affordances: Value,
+    next: Value,
+    profile: Profile,
+    raw_profile: Value,
+    write: Option<PlannedClientWrite>,
+}
+
+fn plan_catalog_adoption(
+    roots: &run_composition::CompositionRoots, config: &ClientConfig, chat_id: &str,
+    source: &str, private: &serde_json::Map<String, Value>,
+    preimages: &mut Vec<NativeRunAdoptionPreimage>,
+) -> Result<Option<CatalogAdoption>, String> {
+    let Some(affordances) = private.get("run_affordances").cloned() else { return Ok(None); };
+    let prior_raw = private.get("run_affordance_profile").ok_or("native adoption has no prior owner profile")?;
+    let prior = parse_profile(prior_raw)?;
+    let reference: ArtifactRef = serde_json::from_value(affordances.get("catalog_artifact").cloned().ok_or("native adoption catalog pin is absent")?).map_err(|e|e.to_string())?;
+    if reference.id.as_str() != format!("artifact-run-affordances-{chat_id}") { return Err("native adoption catalog is outside its client owner".into()); }
+    let catalog_path = roots.registry_root.join("artifact").join(reference.id.as_str()).join("artifact.json");
+    let (catalog, catalog_bytes) = adoption_document(&catalog_path, preimages)?;
+    let (_, baseline) = render(&prior, reference.id.as_str(), affordances.clone(), Some(&config.interface))?;
+    if catalog != baseline || ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&catalog)) != reference.content {
+        return Err("native adoption catalog differs from its exact prior owner-generated profile and pin".into());
+    }
+    let (source_descriptor, _) = adoption_document(&roots.registry_root.join("interface").join(source).join("interface.json"), preimages)?;
+    let raw_profile = source_descriptor.pointer("/interface_driver_config/private_config/run_affordance_profile")
+        .ok_or("native adoption source has no declared run_affordance_profile")?.clone();
+    let profile = parse_profile(&raw_profile)?;
+    if profile.file_write_tool != prior.file_write_tool || profile.file_read_tool != prior.file_read_tool
+        || profile.artifact_send_tool != prior.artifact_send_tool {
+        return Err("native adoption changes declared effect tools; an explicit capability amendment is required".into());
+    }
+    let mut declared = affordances.clone();
+    let defaults = declared.get_mut("defaults").and_then(Value::as_object_mut).ok_or("native defaults must be an object")?;
+    for (field, baseline) in [("output_selection",json!(prior.output_selection)),("return_to_source",json!(prior.return_to_source))] {
+        if defaults.get(field) == Some(&baseline) { defaults.remove(field); }
+    }
+    let (next, next_catalog) = render(&profile, reference.id.as_str(), declared, Some(&config.interface))?;
+    let changed = next != affordances || &raw_profile != prior_raw || next_catalog != catalog;
+    let write = if changed { Some(PlannedClientWrite {
+        path: catalog_path, content: pretty_json(&next_catalog)?,
+        tag: format!("artifact:{}", reference.id), expected_before_hash: Some(sha256_hex(&catalog_bytes)),
+    }) } else { None };
+    Ok(Some(CatalogAdoption { reference, affordances, next, profile, raw_profile, write }))
+}
+
+fn plan_tool_contract_adoption(
+    registry: &Path, declarations: Option<&Value>, record: &RunRecord, client: &InterfaceId,
+    chat_id: &str, surface_role: &str, preimages: &mut Vec<NativeRunAdoptionPreimage>,
+) -> Result<ToolContractAdoption, String> {
+    let updates: Vec<ToolContractUpdate> = declarations.map(|value| serde_json::from_value(value.clone()))
+        .transpose().map_err(|e|format!("client tool_contract_updates: {e}"))?.unwrap_or_default();
+    if updates.is_empty() { return Ok(ToolContractAdoption::Planned(Vec::new())); }
+    let (_, worker_bytes) = adoption_document(&registry.join("interface").join(record.worker.as_str()).join("policy.json"), preimages)?;
+    let worker: WorkerInterfacePolicy = serde_json::from_slice(&worker_bytes).map_err(|e|e.to_string())?;
+    if worker.id != record.worker { return Err("tool contract adoption worker pin identity differs".into()); }
+    let mut declared = BTreeSet::new();
+    let mut writes = Vec::new();
+    let mut locally_changed = Vec::new();
+    let mut selected_tools = BTreeMap::new();
+    for update in updates {
+        safe_policy_axis_value(&update.source_tool, "tool contract source tool")?;
+        safe_segment(&update.source_interface, "tool contract source interface")?;
+        if update.source_tool.trim() != update.source_tool || matches!(update.source_tool.as_str(), "." | "..") {
+            return Err("tool contract source tool must be an exact directory identity".into());
+        }
+        if !declared.insert(update.source_tool.clone()) || update.predecessors.is_empty() {
+            return Err("tool contract updates require unique source tools and explicit predecessors".into());
+        }
+        let tool = format!("{}__{chat_id}", update.source_tool);
+        let door = InterfaceId::new(format!("{}_{chat_id}", update.source_interface));
+        if !worker.ceiling.tools.iter().any(|id| id.as_str() == tool)
+            || !record.checkpoints.iter().any(|cp| record.active_checkpoints.contains(&cp.id)
+                && (cp.inbound_interface() == Some(&door) || cp.outbound_interfaces().any(|id| id == &door))) { continue; }
+        let door_root = registry.join("interface").join(door.as_str());
+        let (_, door_bytes) = adoption_document(&door_root.join("interface.json"), preimages)?;
+        let door_descriptor: InterfaceDescriptor = parse_strict(&door_bytes).map_err(|e|e.to_string())?;
+        let (sidecar, _) = adoption_document(&door_root.join("octopus_os.json"), preimages)?;
+        let sidecar: OctopusOsInterfaceSidecar = serde_json::from_value(sidecar).map_err(|e|e.to_string())?;
+        if door_descriptor.id != door || sidecar.schema_version != 1 || sidecar.workspace != "octopus_os"
+            || sidecar.interface != door.as_str() || sidecar.owner_interface != client.as_str()
+            || sidecar.component != "worker_environment_door" || sidecar.surface_role != surface_role {
+            return Err(format!("tool contract adoption door '{door}' is not owned by this exact client"));
+        }
+        let (_, source_bytes) = adoption_document(&registry.join("tool").join(&update.source_tool).join("tool.json"), preimages)?;
+        let mut next: ToolDescriptor = parse_strict(&source_bytes).map_err(|e|e.to_string())?;
+        if next.id.as_str() != update.source_tool || next.interface.as_str() != update.source_interface {
+            return Err("tool contract adoption source tool has another exact owner".into());
+        }
+        next.id = ToolDescriptorId::new(&tool); next.interface = door.clone();
+        let next = serde_json::to_value(next).map_err(|e|e.to_string())?;
+        let path = registry.join("tool").join(&tool).join("tool.json");
+        let (_, before) = adoption_document(&path, preimages)?;
+        let current: ToolDescriptor = parse_strict(&before).map_err(|e|e.to_string())?;
+        if current.id.as_str() != tool || current.interface != door {
+            return Err(format!("tool contract adoption '{tool}' has another exact identity or door"));
+        }
+        selected_tools.insert(tool.clone(), door);
+        let current = serde_json::to_value(current).map_err(|e|e.to_string())?;
+        let mut eligible = current == next;
+        for fields in update.predecessors {
+            if fields.is_empty() { return Err("tool contract predecessor must declare changed fields".into()); }
+            let mut prior = next.clone();
+            for (pointer, value) in &fields {
+                if !(pointer == "/description" || pointer == "/args_schema" || pointer.starts_with("/args_schema/")
+                    || pointer.starts_with("/handler_config/"))
+                    || fields.keys().any(|other| other != pointer && pointer.starts_with(&format!("{other}/"))) {
+                    return Err(format!("tool contract predecessor field '{pointer}' is outside a disjoint tool contract"));
+                }
+                *prior.pointer_mut(pointer).ok_or_else(||format!("tool contract predecessor field '{pointer}' is absent"))? = value.clone();
+            }
+            let _: ToolDescriptor = serde_json::from_value(prior.clone()).map_err(|e|e.to_string())?;
+            eligible |= current == prior;
+        }
+        if !eligible {
+            locally_changed.push(tool);
+        } else if current != next {
+            writes.push(PlannedClientWrite { path, content: pretty_json(&next)?, tag: format!("tool:{tool}"), expected_before_hash: Some(sha256_hex(&before)) });
+        }
+    }
+    if locally_changed.is_empty() { Ok(ToolContractAdoption::Planned(writes)) }
+    else { Ok(ToolContractAdoption::Deferred { locally_changed, selected_tools }) }
 }
 
 pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<NativeRunAdoptionPlan, String> {
@@ -237,7 +378,7 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
     let interface_root = roots.registry_root.join("interface");
     let config = load_named_client_config(&interface_root, &request.client_template_interface)?;
     let mut preimages = Vec::new();
-    adoption_document(&interface_root.join(&config.interface).join("client.json"), &mut preimages)?;
+    let (client_config, _) = adoption_document(&interface_root.join(&config.interface).join("client.json"), &mut preimages)?;
     let run_path = roots.run_records_root.join(format!("{}.json", request.run_id));
     let (current, bytes) = adoption_document(&run_path, &mut preimages)?;
     if sha256_hex(&bytes) != request.expected_run_hash { return Err("native adoption run preimage changed".into()); }
@@ -278,35 +419,26 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         status: NativeRunAdoptionStatus::Unchanged, run_id: request.run_id.clone(), provider_interface_id: provider.into(),
         source_movement_seq, reason: None, writes: Vec::new(), preimages: Vec::new(),
     };
-    let Some(affordances) = private.get("run_affordances").cloned() else {
-        result.preimages = preimages;
-        return Ok(result);
+    let catalog = plan_catalog_adoption(roots, &config, chat_id, source, private, &mut preimages)?;
+    let mut writes = match plan_tool_contract_adoption(&roots.registry_root, client_config.get("tool_contract_updates"),
+        &record, client, chat_id, adoption_field(&state, "client_surface_role")?, &mut preimages)? {
+        ToolContractAdoption::Planned(writes) => writes,
+        ToolContractAdoption::Deferred { locally_changed, selected_tools } => {
+            let chain = resolve_live_ee_policy_chain(&roots.ee_instances_root, &record.ee).map_err(|e|e.to_string())?;
+            let formed = form_capability_topology(&roots.registry_root, &CapabilityFormationRequest::from_live_chain(record.worker.clone(), chain))
+                .map_err(|e|e.to_string())?;
+            for (tool, door) in selected_tools {
+                if !formed.tool_bindings.get(&door).is_some_and(|binding| binding.tools.iter().any(|entry| entry.tool.as_str() == tool)) {
+                    return Err(format!("tool contract adoption '{tool}' is outside the actual formed grant"));
+                }
+            }
+            result.status = NativeRunAdoptionStatus::Deferred;
+            result.reason = Some(format!("automatic tool contract adoption deferred for locally authored tools [{}]; current descriptors are preserved", locally_changed.join(", ")));
+            result.preimages = preimages;
+            return Ok(result);
+        }
     };
-    let prior_raw = private.get("run_affordance_profile").ok_or("native adoption has no prior owner profile")?;
-    let prior = parse_profile(prior_raw)?;
-    let reference: ArtifactRef = serde_json::from_value(affordances.get("catalog_artifact").cloned().ok_or("native adoption catalog pin is absent")?).map_err(|e|e.to_string())?;
-    if reference.id.as_str() != format!("artifact-run-affordances-{chat_id}") { return Err("native adoption catalog is outside its client owner".into()); }
-    let catalog_path = roots.registry_root.join("artifact").join(reference.id.as_str()).join("artifact.json");
-    let (catalog, catalog_bytes) = adoption_document(&catalog_path, &mut preimages)?;
-    let (_, baseline) = render(&prior, reference.id.as_str(), affordances.clone(), Some(&config.interface))?;
-    if catalog != baseline || ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&catalog)) != reference.content {
-        return Err("native adoption catalog differs from its exact prior owner-generated profile and pin".into());
-    }
-    let (source_descriptor, _) = adoption_document(&interface_root.join(source).join("interface.json"), &mut preimages)?;
-    let latest_raw = source_descriptor.pointer("/interface_driver_config/private_config/run_affordance_profile")
-        .ok_or("native adoption source has no declared run_affordance_profile")?;
-    let latest = parse_profile(latest_raw)?;
-    if latest.file_write_tool != prior.file_write_tool || latest.file_read_tool != prior.file_read_tool
-        || latest.artifact_send_tool != prior.artifact_send_tool {
-        return Err("native adoption changes declared effect tools; an explicit capability amendment is required".into());
-    }
-    let mut declared = affordances.clone();
-    let defaults = declared.get_mut("defaults").and_then(Value::as_object_mut).ok_or("native defaults must be an object")?;
-    for (field, baseline) in [("output_selection",json!(prior.output_selection)),("return_to_source",json!(prior.return_to_source))] {
-        if defaults.get(field) == Some(&baseline) { defaults.remove(field); }
-    }
-    let (next, next_catalog) = render(&latest, reference.id.as_str(), declared, Some(&config.interface))?;
-    if next == affordances && latest_raw == prior_raw && next_catalog == catalog {
+    if writes.is_empty() && catalog.as_ref().is_none_or(|catalog| catalog.write.is_none()) {
         result.preimages = preimages;
         return Ok(result);
     }
@@ -336,33 +468,65 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         result.preimages = preimages;
         return Ok(result);
     }
-    if latest.read_root_slots.iter().any(|slot| !process.authority.read_root_slots.contains(slot)) {
-        return Err("native adoption requires undeclared provider read roots; an explicit capability amendment is required".into());
+    if !writes.is_empty() {
+        use octopus_process_session_tool_runtime::{InterfaceHostIoLimits, ToolContractUpdateRequest, tool_contract_update_quiescent};
+        let affected_tools = writes.iter().map(|write| {
+            let descriptor: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
+            Ok((descriptor.id.to_string(), descriptor.interface))
+        }).collect::<Result<BTreeMap<_, _>, String>>()?;
+        let limits = InterfaceHostIoLimits {
+            max_control_frame_bytes: process.io_limits.max_control_frame_bytes,
+            max_stderr_bytes: process.io_limits.max_stderr_bytes,
+            max_manifest_bytes: process.io_limits.max_manifest_bytes,
+            max_payload_bytes: process.io_limits.max_payload_bytes,
+        };
+        let proof = tool_contract_update_quiescent(ToolContractUpdateRequest {
+            movements_path: &movements, ledger_index_path: &index, blobs_dir: &blobs,
+            interface_private_state_root: &roots.interface_private_state_root,
+            affected_tools: &affected_tools, limits: &limits,
+        })?;
+        if !proof.quiescent {
+            result.status = NativeRunAdoptionStatus::Deferred;
+            result.reason = Some("accepted tool work can still dispatch or recover under the previous contract".into());
+            result.preimages = preimages;
+            return Ok(result);
+        }
+        preimages.extend(proof.preimages.into_iter().map(|(path, sha256)| NativeRunAdoptionPreimage { path, sha256 }));
     }
     let chain = resolve_live_ee_policy_chain(&roots.ee_instances_root, &record.ee).map_err(|e|e.to_string())?;
     let formed = form_capability_topology(&roots.registry_root, &CapabilityFormationRequest::from_live_chain(record.worker.clone(), chain))
         .map_err(|e|e.to_string())?;
-    let bound: BoundRunAuthoringTopology = serde_json::from_value(current["interface_state"][provider]["run_authoring_binding"].clone()).map_err(|e|e.to_string())?;
-    for name in ["file_write_tool", "file_read_tool", "artifact_send_tool"] {
-        if name == "file_read_tool" && affordances.get(name).is_none_or(Value::is_null) { continue; }
-        let tool = adoption_field(&affordances, name)?;
-        let granted = formed.tool_bindings.iter().any(|(door, binding)| binding.tools.iter().any(|entry| entry.tool.as_str() == tool)
-            && bound.checkpoints.iter().any(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput
-                && cp.outbound_interface_bindings.iter().any(|out| out.interface == *door)
-                && cp.required_verified_artifacts.iter().any(|required| required.params.get("tools").and_then(Value::as_array)
-                    .is_some_and(|tools| tools.iter().any(|value| value.as_str() == Some(tool))))));
-        if !granted { return Err(format!("native adoption effect tool '{tool}' is not in the actual formed and authored grant")); }
+    for write in &writes {
+        let next: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
+        if !formed.tool_bindings.get(&next.interface).is_some_and(|binding| binding.tools.iter().any(|entry| entry.tool.as_str() == next.id.as_str())) {
+            return Err(format!("tool contract adoption '{}' is outside the actual formed grant", next.id));
+        }
     }
-    if !provider_context_bindings(&record, &provider_id)?.iter().any(|binding| binding.id == reference.id && binding.access.read) {
-        return Err("native adoption catalog has no existing readable provider binding".into());
+    if let Some(catalog) = catalog.filter(|catalog| catalog.write.is_some()) {
+        if catalog.profile.read_root_slots.iter().any(|slot| !process.authority.read_root_slots.contains(slot)) {
+            return Err("native adoption requires undeclared provider read roots; an explicit capability amendment is required".into());
+        }
+        let bound: BoundRunAuthoringTopology = serde_json::from_value(current["interface_state"][provider]["run_authoring_binding"].clone()).map_err(|e|e.to_string())?;
+        for name in ["file_write_tool", "file_read_tool", "artifact_send_tool"] {
+            if name == "file_read_tool" && catalog.affordances.get(name).is_none_or(Value::is_null) { continue; }
+            let tool = adoption_field(&catalog.affordances, name)?;
+            let granted = formed.tool_bindings.iter().any(|(door, binding)| binding.tools.iter().any(|entry| entry.tool.as_str() == tool)
+                && bound.checkpoints.iter().any(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput
+                    && cp.outbound_interface_bindings.iter().any(|out| out.interface == *door)
+                    && cp.required_verified_artifacts.iter().any(|required| required.params.get("tools").and_then(Value::as_array)
+                        .is_some_and(|tools| tools.iter().any(|value| value.as_str() == Some(tool))))));
+            if !granted { return Err(format!("native adoption effect tool '{tool}' is not in the actual formed and authored grant")); }
+        }
+        if !provider_context_bindings(&record, &provider_id)?.iter().any(|binding| binding.id == catalog.reference.id && binding.access.read) {
+            return Err("native adoption catalog has no existing readable provider binding".into());
+        }
+        private.insert("run_affordances".into(), catalog.next);
+        private.insert("run_affordance_profile".into(), catalog.raw_profile);
+        writes.push(catalog.write.unwrap());
+        writes.push(PlannedClientWrite { path: provider_path, content: pretty_json(&descriptor)?, tag: format!("interface:{provider}"), expected_before_hash: Some(request.expected_provider_hash.clone()) });
     }
-    private.insert("run_affordances".into(), next);
-    private.insert("run_affordance_profile".into(), latest_raw.clone());
     result.status = NativeRunAdoptionStatus::Planned;
-    result.writes = vec![
-        PlannedClientWrite { path: catalog_path, content: pretty_json(&next_catalog)?, tag: format!("artifact:{}", reference.id), expected_before_hash: Some(sha256_hex(&catalog_bytes)) },
-        PlannedClientWrite { path: provider_path, content: pretty_json(&descriptor)?, tag: format!("interface:{provider}"), expected_before_hash: Some(request.expected_provider_hash.clone()) },
-    ];
+    result.writes = writes;
     result.preimages = preimages;
     Ok(result)
 }
@@ -377,7 +541,7 @@ fn adoption_document(path: &Path, preimages: &mut Vec<NativeRunAdoptionPreimage>
     if !metadata.is_file() || metadata.file_type().is_symlink() { return Err(format!("native adoption '{}' must be a regular file", path.display())); }
     let bytes = std::fs::read(path).map_err(|e|e.to_string())?;
     let value = serde_json::from_slice(&bytes).map_err(|e|format!("native adoption '{}': {e}", path.display()))?;
-    preimages.push(NativeRunAdoptionPreimage { path: path.to_path_buf(), sha256: sha256_hex(&bytes) });
+    preimages.push(NativeRunAdoptionPreimage { path: path.to_path_buf(), sha256: Some(sha256_hex(&bytes)) });
     Ok((value, bytes))
 }
 

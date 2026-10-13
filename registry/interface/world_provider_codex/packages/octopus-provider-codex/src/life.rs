@@ -1608,6 +1608,7 @@ async fn handle_control_source(
     } = source;
     let gate = control_source_gate(control_gates, run).await;
     let _control_guard = gate.lock().await;
+    let pending_transport = broker.pending_intent_transport();
     let control_id = control_id(&control).to_string();
     let action = control_action(&control).to_string();
     let journal = load_control_journal(ctx, source_movement_seq, run, &control_id, &action)?;
@@ -1625,7 +1626,7 @@ async fn handle_control_source(
     }
     let (
         CodexTurnControlApplied {
-            result,
+            mut result,
             disposition: _,
             output,
             handoff_barrier,
@@ -1650,7 +1651,9 @@ async fn handle_control_source(
             true,
         ),
         Some(TurnControlJournalPhase::Intent) => {
-            let result = CodexTurnControlResult {
+            let recovered = Box::pin(recover_pending_intent_control(ctx, descriptor, handoff_session, run, broker,
+                pending_transport.as_ref(), &control)).await?;
+            let result = recovered.unwrap_or_else(|| CodexTurnControlResult {
                 control_id: control_id.clone(),
                 action: action.clone(),
                 acknowledged: false,
@@ -1660,7 +1663,7 @@ async fn handle_control_source(
                     "error": "provider process restarted after recording a turn-control intent; the external effect outcome is ambiguous and was not replayed"
                 }),
                 continuity: None,
-            };
+            });
             persist_control_journal(
                 ctx,
                 source_movement_seq,
@@ -1788,6 +1791,12 @@ async fn handle_control_source(
             (applied, false)
         }
     };
+    if result.acknowledged && terminal_control_is_satisfied(&result.action)
+        && (pending_transport.is_some() || result.detail.get("pending_source_withdrawal").is_some())
+    {
+        Box::pin(withdraw_pending_source_control(ctx, descriptor, handoff_session, run, broker,
+            pending_transport, envelope, source_movement_seq, &mut result)).await?;
+    }
     let handoff = hand_control_result(
         ctx,
         descriptor,
@@ -5040,6 +5049,7 @@ async fn drive_turn_with_retries(
             return Ok(());
         }
     };
+    validate_saved_source_withdrawal(ctx, descriptor, run, &turn, &handoff).await?;
     let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
     // Classify exact, completed duplicate results before interruption arbitration:
     // an older result must neither resolve nor cancel its successor's pending effect.
@@ -5841,13 +5851,7 @@ async fn record_invalid_provider_context(
     if author_failed_provider_source(ctx, descriptor, handoff_session, run, turn, &message).await? {
         return Ok(());
     }
-    match ctx.hand_arrival(materialize_failed_source_error(ctx, turn.seq, &message)?, Vec::new()).await? {
-        DeliveryVerdict::Admitted { .. } => Ok(()),
-        DeliveryVerdict::Refused { reason, detail } => Err(format!(
-            "failed provider source {} has no admitted error projection: {}: {detail}",
-            turn.seq, reason.as_str(),
-        )),
-    }
+    Err(message)
 }
 
 fn materialize_failed_source_error(
@@ -5935,6 +5939,96 @@ async fn restore_consumed_provider_inputs(
     Ok(())
 }
 
+async fn recover_pending_intent_control(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, session: &ProviderHandoffSession,
+    run: &RunId, broker: &CodexTurnControlBroker, transport: Option<&crate::handler::stopped_result::PendingIntentTransport>, control: &CodexTurnControl,
+) -> Result<Option<CodexTurnControlResult>, String> {
+    let (Some(source), Some(transport)) = (broker.source_movement_seq(), transport) else { return Ok(None); };
+    if !matches!(control, CodexTurnControl::Interrupt { .. }) { return Ok(None); }
+    let original = replay_provider_source(ctx, run, source)?.ok_or("recorded Stop lost its admitted original source")?;
+    let pinned = ctx.pinned_run_record_bytes(&original.envelope)?;
+    let handoff = wait_for_provider_handoff(ctx, descriptor, session, run, &original.envelope, source, &pinned).await?;
+    let Some(intent) = handoff.pending_source_intent().await? else { return Ok(None); };
+    let proof = crate::handler::stopped_result::prove_intent(descriptor, &original.envelope, intent, &handoff.current_session_context_artifacts().await).map_err(|error| error.to_string())?;
+    transport.interrupted_control(&proof, control).await.map(Some).map_err(|error| error.to_string())
+}
+
+async fn withdraw_pending_source_control(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, handoff_session: &ProviderHandoffSession,
+    run: &RunId, broker: &Arc<CodexTurnControlBroker>, pending_transport: Option<crate::handler::stopped_result::PendingIntentTransport>,
+    envelope: &InterfaceInvocationEnvelope, source_movement_seq: u64, result: &mut CodexTurnControlResult,
+) -> Result<(), String> {
+    let control_id = result.control_id.clone();
+    let action = result.action.clone();
+    let saved_source = result.detail.get("pending_source_withdrawal").map(|saved|
+        saved["source_movement_seq"].as_u64().ok_or("saved withdrawal has no exact original source")).transpose()?;
+    if saved_source.is_some() {
+        let ack = materialize_turn_control_result(&ctx.interface_var_dir().join("emitted"), source_movement_seq, result.clone()).map_err(|error| error.to_string())?;
+        if await_artifact_admission_scan(ctx, run, source_movement_seq, &materialized_artifact_ref(&ack)?).await?.movement_seq.is_some() { return Ok(()); }
+    }
+    if let Some(source) = saved_source.or(broker.source_movement_seq()) {
+        if broker.source_movement_seq().is_some_and(|active| active != source) { return Err("saved withdrawal changed its active original source".into()); }
+        let original = replay_provider_source(ctx, run, source)?.ok_or("cold Stop lost its exact original result source")?;
+        let pinned = ctx.pinned_run_record_bytes(&original.envelope)?;
+        let original_handoff = wait_for_provider_handoff(ctx, descriptor, handoff_session, run, &original.envelope, source, &pinned).await?;
+        let intent = original_handoff.pending_source_intent().await?;
+        let saved = result.detail.get("pending_source_withdrawal").cloned();
+        if intent.is_some() || saved.is_some() {
+            let (closure, intent) = if let Some(saved) = saved {
+                let file = octopus_interfaces::InterfaceArtifactFile::new(std::path::PathBuf::from(saved["manifest_path"].as_str().ok_or("saved withdrawal lost its private artifact")?)).map_err(|error| error.to_string())?;
+                let path = file.manifest_path().canonicalize().map_err(|error| error.to_string())?;
+                if !path.starts_with(ctx.interface_var_dir().canonicalize().map_err(|error| error.to_string())?)
+                    || serde_json::to_value(materialized_artifact_ref(&file)?).map_err(|error| error.to_string())? != saved["artifact"]
+                    || saved["source_movement_seq"] != source
+                { return Err("saved withdrawal changed its exact private closure".into()); }
+                (ProviderEmission { artifact: file, route: ProviderEmissionRoute::ClientProjection }, intent)
+            } else {
+                let intent = intent.ok_or("withdrawal lost its installed intent")?;
+                let proof = crate::handler::stopped_result::prove_intent(descriptor, &original.envelope, intent, &original_handoff.current_session_context_artifacts().await)
+                    .map_err(|error| error.to_string())?;
+                let closure = pending_transport.ok_or("cold Stop has no exact retained native transport")?.closure(&proof, &original.envelope,
+                    source_movement_seq, &envelope.artifact, &result, &ctx.interface_var_dir().join("emitted"),
+                    &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?).await.map_err(|error| error.to_string())?;
+                result.detail["pending_source_withdrawal"] = serde_json::json!({
+                    "source_movement_seq":source,"artifact":materialized_artifact_ref(&closure.artifact)?,
+                    "manifest_path":closure.artifact.manifest_path(),
+                });
+                persist_control_journal(ctx, source_movement_seq, run, &control_id, &action, TurnControlJournalPhase::Result { result: result.clone() })?;
+                (closure, Some(proof.intent))
+            };
+            let value: serde_json::Value = serde_json::from_slice(&closure.artifact.read_payload_bytes().map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            crate::handler::stopped_result::validate_withdrawal_closure(&value, &original.envelope, source, &envelope.artifact, source_movement_seq, &result)?;
+            if let Some(intent) = intent {
+                let proof = crate::handler::stopped_result::prove_intent(descriptor, &original.envelope, intent.clone(), &original_handoff.current_session_context_artifacts().await)
+                    .map_err(|error| error.to_string())?;
+                let control = decode_admitted_turn_control(ctx, descriptor, envelope).map_err(|error| error.to_string())?.ok_or("withdrawal lost its admitted control")?;
+                crate::handler::stopped_result::validate_saved_intent_closure(&proof, &original.envelope, &value, &envelope.artifact, source_movement_seq, &control,
+                    &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?)?;
+                validate_saved_source_withdrawal(ctx, descriptor, run, &original, &original_handoff).await?;
+                match original_handoff.hand_source_withdrawal(&intent, source_movement_seq, &envelope.artifact, closure).await? {
+                    ProviderHandoffOutcome::Admitted { .. } => {},
+                    ProviderHandoffOutcome::TerminalFailure { failure_class, .. } => return Err(format!("pending intent withdrawal failed: {failure_class}")),
+                }
+            } else {
+                validate_saved_source_withdrawal(ctx, descriptor, run, &original, &original_handoff).await?;
+                if original_handoff.pending_source_withdrawal().await?.is_some() {
+                    let (recovery, outcomes) = original_handoff.recover_source_with_outcomes().await?;
+                    if recovery != ProviderSourceRecovery::Completed || outcomes.len() != 1 {
+                        return Err("saved withdrawal has no exact checked completed closure".into());
+                    }
+                }
+                original_handoff.validate_source_withdrawal(source_movement_seq, &envelope.artifact).await?;
+            }
+            let mut continuity = crate::handler::stopped_result::closure_continuity(&value, &ctx.interface, run.as_str())?;
+            continuity.advance_control_context(descriptor)?;
+            result.continuity = Some(continuity);
+            persist_control_journal(ctx, source_movement_seq, run, &control_id, &action, TurnControlJournalPhase::Result { result: result.clone() })?;
+            broker.finish();
+        }
+    }
+    Ok(())
+}
+
 async fn retain_completed_source_control(
     ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, auth: &CodexRuntimeAuth,
     driver: &mut Option<Arc<CodexAppServerInterfaceDriver>>, control: &CodexTurnControlBroker,
@@ -5961,10 +6055,28 @@ async fn restore_completed_provider_sources(
     active_controls: &ActiveTurnControls, interrupted: &InterruptedEffectArbiter, committed_before: u64,
 ) -> Result<(), String> {
     for (run, source) in session.completed_source_candidates(ctx)? {
-        if source >= committed_before { continue; }
         let turn = replay_provider_source(ctx, &run, source)?.ok_or("completed result source lost its original admitted input")?;
         let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
         let handoff = wait_for_provider_handoff(ctx, descriptor, session, &run, &turn.envelope, source, &pinned).await?;
+        if let Some(intent) = handoff.pending_source_intent().await? {
+            let continuity = crate::handler::stopped_result::intent_control_continuity(descriptor, &turn.envelope, intent, &handoff.current_session_context_artifacts().await)
+                .map_err(|error| error.to_string())?;
+            if driver.is_none() {
+                *driver = Some(connect_declared_interface_driver(ctx, descriptor, auth, Some(&turn.envelope)).await.map_err(|error| error.message)?);
+            }
+            let broker = CodexTurnControlBroker::new(Some(source));
+            driver.as_ref().expect("connected pending recovery transport").restore_pending_control(&broker, continuity).await;
+            active_controls.lock().await.insert(run.to_string(), broker);
+            continue;
+        }
+        validate_saved_source_withdrawal(ctx, descriptor, &run, &turn, &handoff).await?;
+        if handoff.pending_source_withdrawal().await?.is_some() {
+            let broker = CodexTurnControlBroker::new(Some(source));
+            broker.finish();
+            active_controls.lock().await.insert(run.to_string(), broker);
+            continue;
+        }
+        if source >= committed_before { continue; }
         let (recovery, outcomes) = handoff.recover_completed_source_with_outcomes().await?;
         if recovery != ProviderSourceRecovery::Completed { continue; }
         let record = handoff.current_run_record_bytes().await;
@@ -6001,6 +6113,24 @@ async fn restore_completed_provider_sources(
         }
     }
     Ok(())
+}
+
+async fn validate_saved_source_withdrawal(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId,
+    original: &QueuedTurn, handoff: &ProviderOutputHandoff,
+) -> Result<(), String> {
+    let Some(saved) = handoff.pending_source_withdrawal().await? else { return Ok(()); };
+    let control = replay_provider_source(ctx, run, saved.control_source)?.ok_or("saved withdrawal lost its admitted control input")?;
+    if control.envelope.artifact != saved.control { return Err("saved withdrawal control ArtifactRef changed".into()); }
+    let decoded = decode_admitted_turn_control(ctx, descriptor, &control.envelope).map_err(|error| error.to_string())?
+        .ok_or("saved withdrawal input is not a declared control")?;
+    let context = handoff.current_session_context_artifacts().await;
+    let prior = context.iter().filter(|entry| entry.source_movement_seq.is_some_and(|seq| seq < original.seq)).cloned().collect::<Vec<_>>();
+    let proof = crate::handler::stopped_result::prove_intent(descriptor, &original.envelope, saved.intent, &prior).map_err(|error| error.to_string())?;
+    let value: serde_json::Value = serde_json::from_slice(&saved.closure.read_payload_bytes().map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    crate::handler::stopped_result::validate_saved_intent_closure(&proof, &original.envelope, &value, &saved.control, saved.control_source, &decoded,
+        &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?)?;
+    handoff.validate_source_withdrawal_output(&materialized_artifact_ref(&saved.closure)?).await
 }
 
 fn validate_stopped_result_control(
@@ -7008,12 +7138,22 @@ mod tests {
                             serde_json::from_str(&message.into_text().unwrap()).unwrap();
                         if let octopus_appserver_proto::JSONRPCMessage::Request(request) = message {
                             method_tx.send(request.method.clone()).unwrap();
-                            send_test_result(
-                                &mut socket,
-                                request.id,
-                                json!({"turnId": "turn-a"}),
-                            )
-                            .await;
+                            let result = match request.method.as_str() {
+                                "thread/read" => {
+                                    assert_eq!(serde_json::from_value::<octopus_appserver_proto::ThreadReadParams>(request.params.clone().unwrap()).unwrap().include_turns,false);
+                                    json!({"thread":octopus_appserver_proto::Thread {
+                                        id:"thread-a".into(),session_id:"thread-a".into(),forked_from_id:None,parent_thread_id:None,
+                                        preview:String::new(),ephemeral:false,model_provider:"fixture".into(),created_at:1,updated_at:1,recency_at:Some(1),
+                                        status:octopus_appserver_proto::ThreadStatus::Idle,path:None,cwd:octopus_util_abspath::AbsolutePathBuf::from_absolute_path("/tmp").unwrap(),
+                                        cli_version:"test".into(),source:octopus_appserver_proto::SessionSource::Exec,thread_source:None,
+                                        agent_nickname:None,agent_role:None,git_info:None,name:None,turns:vec![],
+                                    }})
+                                }
+                                "thread/turns/list" => json!({"data":[{"id":"turn-a","items":[],"itemsView":"notLoaded","status":"interrupted","error":null}],"nextCursor":null}),
+                                "thread/items/list" => json!({"data":[],"nextCursor":null}),
+                                _ => json!({"turnId":"turn-a"}),
+                            };
+                            send_test_result(&mut socket,request.id,result).await;
                         }
                     }
                 }

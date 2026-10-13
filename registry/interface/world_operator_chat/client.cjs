@@ -1830,22 +1830,42 @@ async function planOperatorChatPackageAdoption(options, request) {
   }
   const writes = requiredArray(plan.writes, "native adoption writes");
   const catalogPath = path.join(registryRoot, "artifact", `artifact-run-affordances-${identity.chatId}`, "artifact.json");
+  const toolPaths = new Map(requiredArray(Object.hasOwn(config, "tool_contract_updates") ? config.tool_contract_updates : [], "client.tool_contract_updates").map((update) => {
+    const tool = `${safeContractToken(update.source_tool, "tool contract source tool")}__${identity.chatId}`;
+    const door = `${safeSegment(update.source_interface, "tool contract source interface")}_${identity.chatId}`;
+    return [path.join(registryRoot, "tool", tool, "tool.json"), { tool, door }];
+  }));
   if (plan.status === "planned") {
-    if (writes.length !== 2 || writes[0].path !== catalogPath || writes[1].path !== providerPath) {
-      throw new Error("native package adoption may write only its exact catalog and provider declaration");
+    const nativeWrites = writes.filter((write) => !toolPaths.has(write.path));
+    if (!writes.length || new Set(writes.map((write) => write.path)).size !== writes.length
+      || (nativeWrites.length && (nativeWrites.length !== 2 || writes.at(-2)?.path !== catalogPath || writes.at(-1)?.path !== providerPath))) {
+      throw new Error("native package adoption may write only declared private tools followed by its exact catalog and provider declaration");
     }
     for (const write of writes) {
       safeSha256(write.expected_before_hash, "native adoption write preimage");
       requiredString(write.content, "native adoption content");
+      const expected = toolPaths.get(write.path);
+      if (expected) {
+        const descriptor = JSON.parse(write.content);
+        if (descriptor.id !== expected.tool || descriptor.interface !== expected.door) {
+          throw new Error("tool contract adoption changed its exact private tool or door identity");
+        }
+      }
     }
   } else if (writes.length) throw new Error("deferred or unchanged native adoption contains writes");
   if (plan.status === "deferred") requiredString(plan.reason, "native adoption deferral reason");
+  const toolEvidencePaths = new Set(writes.flatMap((write) => {
+    const tool = toolPaths.get(write.path);
+    return tool ? [path.join(home, "ledger/movements.jsonl"),
+      path.join(home, "interfaces", tool.door, "tool-door-effect-frontier.jsonl"),
+      path.join(home, "interfaces", tool.door, "ledger-cursor.tool-door.json")] : [];
+  }));
   for (const preimage of requiredArray(plan.preimages, "native adoption preimages")) {
     const file = absolutePath(preimage.path, "native adoption preimage path");
-    if (file !== path.join(runsRoot, `${runId}.json`) && !file.startsWith(`${registryRoot}${path.sep}`)) {
-      throw new Error("native adoption preimage is outside its exact run and Registry");
+    if (file !== path.join(runsRoot, `${runId}.json`) && !file.startsWith(`${registryRoot}${path.sep}`) && !toolEvidencePaths.has(file)) {
+      throw new Error("native adoption preimage is outside its exact run, Registry and tool completion evidence");
     }
-    safeSha256(preimage.sha256, "native adoption preimage hash");
+    if (preimage.sha256 !== null) safeSha256(preimage.sha256, "native adoption preimage hash");
   }
   return plan;
 }
@@ -1866,12 +1886,12 @@ async function adoptOperatorChatPackageUpdates(options, request) {
       if (plan.status === "planned") {
         for (const preimage of plan.preimages) {
           const current = await readFileHashIfPresent(preimage.path);
-          if (current?.hash !== preimage.sha256) throw new Error(`native adoption preimage changed at '${preimage.path}'`);
+          if ((current?.hash ?? null) !== preimage.sha256) throw new Error(`native adoption preimage changed at '${preimage.path}'`);
         }
         await assertStopped();
-        await commit({ label: `adopt native authoring declarations for ${runId}`,
+        await commit({ label: `adopt client package declarations for ${runId}`,
           writes: plan.writes.map((write) => ({file:write.path,content:write.content,beforeDigest:write.expected_before_hash,label:write.tag})),
-          removals: [], publishBarrierPath: plan.writes[1].path });
+          removals: [], publishBarrierPath: plan.writes.at(-1).path });
         for (const write of plan.writes) {
           const current = await readFileHashIfPresent(write.path);
           if (current?.hash !== sha256Hex(Buffer.from(write.content))) throw new Error(`native adoption readback differs at '${write.path}'`);

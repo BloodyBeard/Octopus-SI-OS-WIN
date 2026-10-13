@@ -12,6 +12,7 @@ export function materializeRegistry(
   const candidates = snapshot.documents.map((source, index) => ({ source, index, result: admitClientSurfaceSource(source) }));
   const verdicts = candidates.map(({ result }) => result.verdict);
   const groups = new Map<string, typeof candidates>();
+  const activeRefusals = new Set<number>();
   const blockedScopes = new Set<string>();
   const unreadableThrough = new Map<string, number>();
   let unscopedDeliveryError = snapshot.errors.length > 0;
@@ -19,14 +20,13 @@ export function materializeRegistry(
     const { source, result } = candidate;
     const scope = sourceScope(source);
     if (result.verdict.details.issues.some((issue) => issue.code === "document.delivery.invalid")) {
+      activeRefusals.add(candidate.index);
       if (source.runId && source.interfaceId) blockedScopes.add(scope);
       else unscopedDeliveryError = true;
     }
-    if (!result.admitted) {
-      errors.push(`${source.path}: ${result.verdict.details.issues[0]?.message || "surface document was refused"}`);
-    }
     const id = result.verdict.details.document_id;
     if (!id) {
+      activeRefusals.add(candidate.index);
       if (source.artifactId && Number.isSafeInteger(source.sequence) && source.sequence! >= 0) {
         unreadableThrough.set(scope, Math.max(unreadableThrough.get(scope) ?? -1, source.sequence!));
       } else blockedScopes.add(scope);
@@ -49,9 +49,12 @@ export function materializeRegistry(
     const latestSequence = current.reduce((latest, { source }) => Math.max(latest, source.sequence ?? -1), -1);
     const unreadable = unreadableThrough.get(sourceScope(group[0].source));
     if (unreadable !== undefined && latestSequence <= unreadable) continue;
-    const unknownRevision = group.some(({ source, result }) => result.verdict.details.revision === null
+    const unknownRevision = group.filter(({ source, result }) => result.verdict.details.revision === null
       && (source.sequence === undefined || source.sequence >= latestSequence));
-    if (unknownRevision || !current.length || current.some(({ result }) => !result.admitted)) {
+    if (unknownRevision.length || !current.length || current.some(({ result }) => !result.admitted)) {
+      for (const candidate of [...unknownRevision, ...current]) {
+        if (!candidate.result.admitted) activeRefusals.add(candidate.index);
+      }
       errors.push(`client surface ${key} has an invalid current revision; display is unavailable`);
       continue;
     }
@@ -68,6 +71,12 @@ export function materializeRegistry(
     }
     const earliest = [...current].sort((left, right) => (left.source.sequence ?? 0) - (right.source.sequence ?? 0))[0];
     selected.push(earliest.result.admitted!);
+  }
+
+  for (const { source, index, result } of candidates) {
+    if (!activeRefusals.has(index)) continue;
+    const issue = result.verdict.details.issues[0];
+    errors.push(`${source.path}: ${issue?.path || "/"}: ${issue?.message || "surface document was refused"}`);
   }
 
   const documents = (readError ? [] : selected)

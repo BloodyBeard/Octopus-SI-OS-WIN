@@ -21,6 +21,7 @@ owner-contract-tests = []
 blake3.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 tokio = { workspace = true, features = ["rt", "sync", "io-std", "io-util", "time", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 notify.workspace = true

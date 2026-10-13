@@ -467,13 +467,17 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
     let authoring: Value = serde_json::from_slice(&std::fs::read(
         repository_root.join("registry/artifact/artifact-home-widget-authoring/artifact.json"),
     ).unwrap()).unwrap();
-    let document = authoring["contract"]["example"].clone();
+    let mut document = authoring["contract"]["example"].clone();
+    document["id"]=json!("home.weather-fixture");document["glyph"]=json!("weather");document["revision"]=json!(2);
+    document["data"]=json!({"summary":"Publication fixture: 10 °C"});document["render"]["density"]=json!("comfortable");
+    let mut invalid=document.clone();invalid["glyph"]=json!("cloud");invalid["revision"]=json!(1);
     let publish = json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":target,"document":document}}});
     let requests = [
         json!({"method":"tools/list"}),
         json!({"method":"tools/call","params":{"name":"read_artifact","arguments":{"id":"context:visible"}}}),
         json!({"method":"tools/call","params":{"name":"read_artifact","arguments":{"id":"context:hidden"}}}),
         json!({"method":"tools/call","params":{"name":"read_artifact","arguments":{"id":ambient}}}),
+        json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":target,"document":invalid}}}),
         publish.clone(), publish,
         json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":"system_foreign","document":document}}}),
     ];
@@ -501,7 +505,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             "manifest_path":input.manifest_path(),"artifact_bindings":bindings,"metadata":metadata,
             "source_movement_seq":41+request_id,"worker_environment":formation,"worker_environment_kind":&*kind,
         }})).await;
-        if matches!(request_id, 5 | 6) {
+        if matches!(request_id, 6 | 7) {
             let emission = read_message(&mut stdout).await;
             assert_eq!(emission["kind"], "system_emission", "{emission}");
             assert_eq!(emission["request_id"], request_id);
@@ -513,7 +517,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             assert_eq!(emitted.manifest.label, "client.surface.document");
             assert_eq!(serde_json::from_slice::<Value>(&emitted.payload_bytes).unwrap(), document);
             write_message(&mut stdin, &json!({"kind":"delivery_verdict","request_id":request_id,
-                "event_id":emission["event_id"],"verdict":if request_id == 5 {json!({"admitted":{"seq":991}})} else {refused.clone()},
+                "event_id":emission["event_id"],"verdict":if request_id == 6 {json!({"admitted":{"seq":991}})} else {refused.clone()},
             })).await;
         }
         let lifecycle = read_message(&mut stdout).await;
@@ -536,25 +540,30 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
         let rpc = &result["body"];
         assert_eq!(rpc["jsonrpc"], "2.0");
         assert_eq!(rpc["id"], 1);
-        assert!(rpc.get("error").is_none(), "{rpc}");
-        if request_id == 1 {
+        if request_id == 5 {
+            assert_eq!(rpc["error"]["code"],-32602);
+            assert!(rpc["error"]["message"].as_str().unwrap().contains("/document/glyph"));
+            assert!(rpc.get("result").is_none());
+        } else if request_id == 1 {
+            assert!(rpc.get("error").is_none(), "{rpc}");
             let names = rpc["result"]["tools"].as_array().unwrap().iter().map(|entry| entry["name"].clone()).collect::<Vec<_>>();
             let declared = descriptor.handler_config["mcp"]["tools"].as_array().unwrap().iter().map(|entry| entry["name"].clone()).collect::<Vec<_>>();
             assert_eq!(names, declared);
         } else {
-            assert_eq!(rpc["result"]["isError"], matches!(request_id, 3 | 4 | 6 | 7));
+            assert!(rpc.get("error").is_none(), "{rpc}");
+            assert_eq!(rpc["result"]["isError"], matches!(request_id, 3 | 4 | 7 | 8));
             let body = &rpc["result"]["structuredContent"];
             match request_id {
                 2 => { assert_eq!(body["id"], "context:visible"); assert_eq!(body["text"], "bound context"); }
-                3 | 4 | 7 => assert!(body["error"].as_str().is_some(), "{body}"),
-                5 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
-                6 => assert_eq!(body, &refused),
+                3 | 4 | 8 => assert!(body["error"].as_str().is_some(), "{body}"),
+                6 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
+                7 => assert_eq!(body, &refused),
                 _ => unreachable!(),
             }
         }
     }
     assert_eq!(std::fs::read_to_string(&ambient).unwrap(), "ambient data must stay unread");
-    write_message(&mut stdin, &json!({"kind":"release_worker_environment","request_id":8,
+    write_message(&mut stdin, &json!({"kind":"release_worker_environment","request_id":9,
         "formation":formation,"worker_environment_kind":&*kind,"mode":"live_owner",
     })).await;
     let released = read_message(&mut stdout).await;
