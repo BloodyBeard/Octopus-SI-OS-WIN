@@ -16,6 +16,7 @@ visit(tree);
 const protocol = { inputLabel: 'input', terminalOutputLabel: 'output', errorOutputLabel: 'error', hiddenActivityLabels: [] };
 
 test('Stop aliases match actual tasks titles without reading terminal history', async () => {
+  await require('./build-cli.cjs').buildCli();
   const { createClient } = require('../cli/client.cjs');
   const entries = ['home', 'task', 'named'].map((name, index) => ({
     runId: `run_${name}`, chatInterfaceId: `chat_${name}`, surfaceRole: name === 'home' ? 'home' : 'task',
