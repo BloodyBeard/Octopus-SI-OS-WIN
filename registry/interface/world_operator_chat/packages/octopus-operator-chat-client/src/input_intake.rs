@@ -392,6 +392,21 @@ fn reconcile_input_context(record: &mut Value, config: &InputIntakeConfig) -> Re
         &parsed, &config.writer.owner,
         octopus_provider_run_authoring::provider_context_bindings(&parsed, &config.provider_interface)?,
     )?;
+    let topology: crate::BoundRunAuthoringTopology = serde_json::from_value(
+        parsed.interface_state[&config.provider_interface]["run_authoring_binding"].clone(),
+    ).map_err(|e| e.to_string())?;
+    let declared_static = topology.checkpoints.iter()
+        .filter(|template| template.role == crate::BoundCheckpointRole::Stable && template.include_context)
+        .flat_map(|template| template.static_artifact_bindings.iter())
+        .collect::<std::collections::BTreeSet<_>>();
+    for id in &declared_static {
+        let bindings = context.iter().filter(|binding| &binding.id == *id).collect::<Vec<_>>();
+        if !matches!(bindings.as_slice(), [binding] if binding.access.read) {
+            return Err("intake static context requires one exact readable provider binding".into());
+        }
+    }
+    let static_ids = context.iter().filter(|binding| declared_static.contains(&binding.id))
+        .map(|binding| binding.id.clone()).collect::<Vec<_>>();
     if owned.iter().any(|id| {
         !parsed
             .checkpoints
@@ -442,6 +457,21 @@ fn reconcile_input_context(record: &mut Value, config: &InputIntakeConfig) -> Re
             })
     {
         return Err("intake input is not exclusively owned by its declared interface".into());
+    }
+    let templates = record["interface_state"][config.provider_interface.as_str()]["run_authoring_binding"]["checkpoints"]
+        .as_array_mut().ok_or("intake provider templates are absent")?;
+    let matches = templates.iter_mut().filter(|template| {
+        template["role"] == "owner_input"
+            && template["owner_authoring"] == json!(config.writer)
+            && template["interface_binding"] == json!(input_binding)
+            && template["outbound_interface_bindings"] == json!(output_binding)
+            && template["include_context"] == true
+    }).collect::<Vec<_>>();
+    let [template]: [&mut Value; 1] = matches.try_into().map_err(|_| "intake requires one exact declared provider input")?;
+    if static_ids.is_empty() {
+        template.as_object_mut().ok_or("intake template must be an object")?.remove("static_artifact_bindings");
+    } else {
+        template["static_artifact_bindings"] = json!(static_ids);
     }
     record["checkpoints"][*index]["artifact_bindings"] = json!(context);
     Ok(())

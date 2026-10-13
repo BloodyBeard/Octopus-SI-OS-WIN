@@ -1,9 +1,11 @@
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
+const nativeFiles = require("../electron/nativeFiles.cjs");
 const { spawnSync, execFileSync } = require("node:child_process");
 const { adoptLocalPackageUpdates, registerLocalPackageMutationGuard, installLocalPackages, repairLocalPackages, removeLocalPackages, readLocalPackageCatalog, recoverLocalPackageTransactions } = require("../electron/localPackages.cjs");
 const { assertDeclaredGeneratedOutput, isGeneratedSourcePath, readGeneratedSourcePaths } = require("./generated-source-boundary.cjs");
@@ -50,16 +52,378 @@ async function install(roots) {
 async function repair(roots, operationId, onProgress) {
   return repairLocalPackages({ ...roots, operationId, packageIds: ["fixture"], expectedRepairs: expected(await record(roots)), onProgress });
 }
+function contentPin(body, mode) { return { sha256: crypto.createHash("sha256").update(body).digest("hex"), size: body.length, mode }; }
+async function conflictFixture(root) {
+  const roots = await fixture(root); await install(roots);
+  const receiptPath = path.join(roots.stateRoot, "receipts", "fixture.json"), prior = await fs.readFile(receiptPath);
+  const before = JSON.parse(prior).members.find(member => member.owner === "world_fixture").source_files;
+  const local = { id: "world_fixture", config: { model: "mine", effort: "high", endpoint: "private" }, contract: 42 };
+  const incoming = { id: "world_fixture", config: { model: "default", effort: "medium" }, contract: 1, release: 2 };
+  const chosen = { ...local, release: 2 }, encode = value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
+  const versions = [["interface.json", encode(local), encode(incoming), encode(chosen), 0o644, 0o640],
+    ["life-bin", Buffer.from([0, 255, 1]), Buffer.from([1, 128, 2]), Buffer.from([0, 255, 1, 128, 2]), 0o750, 0o700]];
+  const rows = [];
+  for (const [relative, active, source, selected, activeMode, mode] of versions) {
+    await fs.writeFile(ownerFile(roots, true, relative), active); await fs.chmod(ownerFile(roots, true, relative), activeMode);
+    await fs.writeFile(ownerFile(roots, false, relative), source);
+    const saved = before.find(file => file.path === relative), { sha256, size } = saved;
+    rows.push({ packageId: "fixture", registry_kind: "interface", owner: "world_fixture", path: relative,
+      previousSource: { sha256, size, mode: saved.mode }, active: contentPin(active, activeMode),
+      incoming: contentPin(source, saved.mode), contentBase64: selected.toString("base64"), mode });
+  }
+  const manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json"), manifest = JSON.parse(await fs.readFile(manifestPath));
+  manifest.members.push({ registry_kind: "tool", owner: "fixture.added" }); await json(manifestPath, manifest);
+  await json(path.join(roots.sourceRegistryRoot, "tool", "fixture.added", "tool.json"), { id: "fixture.added" });
+  const adopt = (conflictResolutions = rows, options = {}) => adoptLocalPackageUpdates({ ...roots, conflictResolutions, assertMutable: async () => {}, ...options });
+  const assertBytes = async resolved => {
+    for (const [index, [relative, active, , selected, activeMode]] of versions.entries()) {
+      assert.deepEqual(await fs.readFile(ownerFile(roots, true, relative)), resolved ? selected : active);
+      assert.equal((await fs.stat(ownerFile(roots, true, relative))).mode & 0o777, resolved ? rows[index].mode : activeMode);
+    }
+  };
+  const unchanged = async () => { await assertBytes(false); assert.deepEqual(await fs.readFile(receiptPath), prior);
+    assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+    assert.equal(fsSync.existsSync(path.join(roots.activeRegistryRoot, "tool", "fixture.added")), false); };
+  return { roots, rows, adopt, prior, receiptPath, assertBytes, unchanged, chosen };
+}
+async function conflictResolutionFixtures(root) {
+  const test = await conflictFixture(path.join(root, "strict")), { roots, rows, adopt, receiptPath } = test;
+  await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes/);
+  await assert.rejects(adopt(rows, { assertMutable: undefined }), /explicit mutation guard/);
+  await assert.rejects(adopt(rows, { assertMutable: async () => { throw new Error("fixture still running"); } }), /still running/);
+  const stale = structuredClone(rows); stale[0].incoming.mode ^= 1;
+  await assert.rejects(adopt(stale), /incoming pin does not match/); await test.unchanged();
+  for (const [mutate, error] of [
+    [value => { value[0].contentBase64 = Buffer.from('{"broken":1e999}').toString("base64"); }, /malformed JSON/],
+    [value => { value[0].contentBase64 = Buffer.from(JSON.stringify({ ...test.chosen, config: { model: "reset", effort: "medium" } })).toString("base64"); }, /configuration ownership/],
+    [value => value.push({ ...value[0], registry_kind: "tool", owner: "fixture.added", path: "tool.json" }), /Unused or out-of-scope/],
+  ]) { const invalid = structuredClone(rows); mutate(invalid); await assert.rejects(adopt(invalid), error); await test.unchanged(); }
+  const supplied = structuredClone(rows); let guards = 0;
+  const result = await adopt(supplied, { assertMutable: async () => { await Promise.resolve(); guards += 1;
+    supplied[0].active.sha256 = "a".repeat(64); supplied[0].contentBase64 = ""; supplied[1].mode = 0o777; supplied.reverse(); } });
+  assert.equal(result.changed, true); assert.ok(guards >= 3); await test.assertBytes(true);
+  const saved = await fs.readFile(receiptPath), receipt = JSON.parse(saved), member = receipt.members.find(row => row.owner === "world_fixture");
+  const current = await record(roots); assert.equal(current.installed, true); assert.equal(current.receipt_state, "valid");
+  for (const row of rows) {
+    const pin = file => ({ sha256: file.sha256, size: file.size, mode: file.mode });
+    const chosen = contentPin(Buffer.from(row.contentBase64, "base64"), row.mode);
+    assert.deepEqual(pin(member.source_files.find(file => file.path === row.path)), row.incoming);
+    assert.deepEqual(pin(member.materialized_files.find(file => file.path === row.path)), chosen);
+    const local = current.local_changes.find(file => file.path === row.path);
+    assert.equal(local.installed_digest, chosen.sha256); assert.equal(local.source_digest, row.incoming.sha256);
+    assert.equal(local.installed_mode, row.mode);
+  }
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+  await assert.rejects(adopt(), /Unused or out-of-scope/); assert.deepEqual(await fs.readFile(receiptPath), saved);
+  for (const variant of ["same", "different"]) {
+    const other = await conflictFixture(path.join(root, variant)); other.rows.reverse();
+    if (variant === "different") other.rows[0].contentBase64 = Buffer.from("another explicit binary choice").toString("base64");
+    await other.adopt(); const id = JSON.parse(await fs.readFile(other.receiptPath)).operation_id;
+    if (variant === "same") assert.equal(id, receipt.operation_id); else assert.notEqual(id, receipt.operation_id);
+  }
+  const race = await conflictFixture(path.join(root, "precommit-race")); let injected = false;
+  const racedFile = ownerFile(race.roots, true, "life-bin");
+  await assert.rejects(race.adopt(race.rows, { onProgress(progress) { if (!injected && progress.phase === "copying") {
+    injected = true; fsSync.chmodSync(racedFile, 0o600);
+  } } }), /changed during repair/);
+  assert.equal(injected, true); assert.deepEqual(await fs.readFile(race.receiptPath), race.prior);
+  assert.equal((await fs.stat(racedFile)).mode & 0o777, 0o600);
+  assert.equal((await fs.readdir(path.join(race.roots.stateRoot, "transactions"))).length, 1);
+  await assert.rejects(recoverLocalPackageTransactions(race.roots), /foreign owner state/);
+  assert.equal((await fs.stat(racedFile)).mode & 0o777, 0o600);
+  assert.deepEqual(await fs.readFile(race.receiptPath), race.prior);
+  await fs.chmod(racedFile, race.rows[1].active.mode); await recoverLocalPackageTransactions(race.roots);
+  await race.unchanged();
+  assert.deepEqual(await fs.readdir(path.join(race.roots.stateRoot, "transactions")), []);
+  for (const phase of ["backing_up", "finalizing"]) {
+    const directory = path.join(root, `crash-${phase}`), interrupted = await conflictFixture(directory);
+    await json(path.join(directory, "resolution.json"), interrupted.rows); child(`resolve-${phase}`, directory);
+    const transactions = path.join(interrupted.roots.stateRoot, "transactions"), names = await fs.readdir(transactions);
+    assert.equal(names.length, 1);
+    const journal = JSON.parse(await fs.readFile(path.join(transactions, names[0], "journal.json")));
+    assert.equal(journal.operation_id, receipt.operation_id); assert.equal(journal.operation, "repair");
+    await recoverLocalPackageTransactions(interrupted.roots); await interrupted.assertBytes(phase === "finalizing");
+    if (phase === "backing_up") { await interrupted.unchanged(); await interrupted.adopt(); }
+    else assert.deepEqual(JSON.parse(await fs.readFile(interrupted.receiptPath)), journal.receipts[0]);
+    await interrupted.assertBytes(true); assert.equal((await adoptLocalPackageUpdates(interrupted.roots)).changed, false);
+    assert.deepEqual(await fs.readdir(transactions), []);
+  }
+  process.stdout.write("explicit package conflict resolution pins, identity, races and crash recovery passed\n");
+}
+async function dataDirectoryFixture(root) {
+  const roots = await fixture(root), manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath)); manifest.members[0].data_directories = ["entries"];
+  await json(manifestPath, manifest);
+  await json(ownerFile(roots, false, "entries/seed.json"), { text: "seed" });
+  await fs.writeFile(ownerFile(roots, false, "entries/seed.bin"), "source data\n", { mode: 0o600 });
+  await install(roots);
+  const receiptPath = path.join(roots.stateRoot, "receipts", "fixture.json"), initialReceipt = await fs.readFile(receiptPath);
+  const initial = await record(roots);
+  const valid = async relative => {
+    const current = await record(roots);
+    assert.equal(current.installed, true, current.error); assert.equal(current.receipt_state, "valid");
+    assert.equal(current.locally_modified, true); assert.ok(current.local_changes.some(file => file.path === relative));
+    assert.notEqual(current.installed_digest, initial.installed_digest); return current;
+  };
+  await json(ownerFile(roots, true, "entries/new.json"), { text: "authored" }); await valid("entries/new.json");
+  await json(ownerFile(roots, true, "entries/seed.json"), { text: "changed" }); await valid("entries/seed.json");
+  await fs.unlink(ownerFile(roots, true, "entries/seed.json")); await valid("entries/seed.json");
+  await fs.writeFile(ownerFile(roots, true, "entries/seed.bin"), "authored data\n");
+  await fs.chmod(ownerFile(roots, true, "entries/seed.bin"), 0o640); await valid("entries/seed.bin");
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", effort: "high" }, contract: 1 });
+  assert.equal((await valid("entries/seed.bin")).customized, true);
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, false); assert.deepEqual(await fs.readFile(receiptPath), initialReceipt);
+  for (const [relative, body] of [["life-bin", "authored data\n"], ["entry/new.json", '{"text":"authored"}']]) {
+    const file = ownerFile(roots, true, relative), prior = await fs.readFile(file).catch(error => { if (error.code !== "ENOENT") throw error; return null; });
+    await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, body);
+    assert.equal((await record(roots)).receipt_state, "stale");
+    if (prior) await fs.writeFile(file, prior); else await fs.unlink(file);
+  }
+  await fs.chmod(ownerFile(roots, true, "life-bin"), 0o700); assert.equal((await record(roots)).receipt_state, "stale");
+  await fs.chmod(ownerFile(roots, true, "life-bin"), 0o755);
+  await fs.writeFile(ownerFile(roots, true, "life-bin"), "damaged executable\n");
+  await assert.rejects(repair(roots, "data_repair_001"), /repair cannot discard authored files/);
+  await fs.writeFile(ownerFile(roots, true, "life-bin"), "version one\n");
+  await assert.rejects(removeLocalPackages({ ...roots, operationId: "data_remove_001", packageIds: ["fixture"],
+    expectedInstalledDigests: { fixture: (await record(roots)).installed_digest } }), /removal cannot delete authored files/);
+  const legacy = JSON.parse(initialReceipt); legacy.schema_version = 1;
+  for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; }
+  await json(receiptPath, legacy); assert.equal((await record(roots)).receipt_state, "stale");
+  const reconstructible = JSON.parse(initialReceipt); for (const member of reconstructible.members) delete member.materialized_files;
+  await json(receiptPath, reconstructible); await valid("entries/seed.bin"); await fs.writeFile(receiptPath, initialReceipt);
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", effort: "high" }, contract: 42 });
+  assert.equal((await record(roots)).receipt_state, "stale");
+  await fs.writeFile(ownerFile(roots, false, "life-bin"), "release two\n");
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 42);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "entries/seed.bin"), "utf8"), "authored data\n");
+  assert.equal((await fs.stat(ownerFile(roots, true, "entries/seed.bin"))).mode & 0o777, 0o640);
+  const updatedReceipt = await fs.readFile(receiptPath), updated = JSON.parse(updatedReceipt), owner = updated.members.find(member => member.owner === "world_fixture");
+  assert.equal(owner.source_files.some(file => file.path === "entries/new.json"), false);
+  assert.equal(owner.materialized_files.some(file => file.path === "entries/new.json"), true);
+  const unknown = structuredClone(updated); for (const member of unknown.members) delete member.materialized_files;
+  await json(ownerFile(roots, true, "entries/new.json"), { text: "later publication" }); await valid("entries/new.json");
+  await json(receiptPath, unknown); assert.equal((await record(roots)).receipt_state, "stale"); await fs.writeFile(receiptPath, updatedReceipt);
+  await fs.unlink(ownerFile(roots, true, "entries/new.json"));
+  assert.equal((await valid("entries/seed.bin")).local_changes.some(file => file.path === "entries/new.json"), false);
+  await fs.writeFile(ownerFile(roots, true, "entries/seed.bin"), "later authored data\n"); await valid("entries/seed.bin");
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, false); assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
+  await fs.writeFile(ownerFile(roots, false, "entries/seed.bin"), "incoming conflicting data\n");
+  assert.equal((await record(roots)).receipt_state, "stale");
+  await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping source-owned changes.*entries\/seed.bin/);
+  assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "entries/seed.bin"), "utf8"), "later authored data\n");
+  await fs.writeFile(ownerFile(roots, false, "entries/seed.bin"), "source data\n");
+  for (const change of [value => { value.members[0].materialized_files[0].mode ^= 1; },
+    value => { value.members[0].source_files[0].sha256 = "a".repeat(64); },
+    value => { value.members[0].json_files[0].sha256 = "a".repeat(64); }]) {
+    const corrupt = structuredClone(updated); change(corrupt); await json(receiptPath, corrupt);
+    assert.equal((await record(roots)).available, false);
+    await assert.rejects(adoptLocalPackageUpdates(roots), /baseline|materialization/);
+    assert.deepEqual(JSON.parse(await fs.readFile(receiptPath)), corrupt);
+  }
+  await fs.writeFile(receiptPath, updatedReceipt); await valid("entries/seed.bin");
+  await json(ownerFile(roots, true, "entries/target/authored.json"), { retained: true });
+  assert.match((await record(roots)).error, /excluded data entry without materialization proof/);
+  await assert.rejects(adoptLocalPackageUpdates(roots), /excluded data entry/);
+  assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
+  await fs.rm(ownerFile(roots, true, "entries/target"), { recursive: true });
+  assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+}
+async function additionFixture(root) {
+  const roots = await fixture(root), manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json");
+  const manifest = JSON.parse(await fs.readFile(manifestPath)); manifest.members[0].data_directories = ["entries"];
+  await json(manifestPath, manifest); await json(ownerFile(roots, false, "entries/seed.json"), { text: "seed" });
+  await install(roots);
+  await json(ownerFile(roots, true, "interface.json"), { id: "world_fixture", config: { model: "mine", effort: "high" }, contract: 42 });
+  await json(ownerFile(roots, true, "entries/seed.json"), { text: "authored" });
+  await fs.writeFile(ownerFile(roots, true, "entries/local.bin"), "local data\n", { mode: 0o750 });
+  manifest.members.push({ registry_kind: "tool", owner: "fixture.zzadded" },
+    { registry_kind: "artifact", owner: "fixture-added", data_directories: ["entries"] });
+  await json(path.join(roots.sourceRegistryRoot, "tool", "fixture.zzadded", "tool.json"), { id: "fixture.zzadded" });
+  await json(path.join(roots.sourceRegistryRoot, "artifact", "fixture-added", "artifact.json"), { id: "fixture-added" });
+  await json(path.join(roots.sourceRegistryRoot, "artifact", "fixture-added", "entries/seed.json"), { text: "new owner seed" });
+  await fs.writeFile(ownerFile(roots, false, "life-bin"), "version two\n"); await json(manifestPath, manifest);
+  return { roots, manifestPath, manifest, receiptPath: path.join(roots.stateRoot, "receipts", "fixture.json"),
+    added: path.join(roots.activeRegistryRoot, "tool", "fixture.zzadded") };
+}
+async function assertAdditionState(fixture, adopted) {
+  const { roots, receiptPath, added } = fixture, receipt = JSON.parse(await fs.readFile(receiptPath));
+  assert.equal(receipt.members.length, adopted ? 4 : 2);
+  assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), adopted ? "version two\n" : "version one\n");
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 42);
+  assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "entries/seed.json"))).text, "authored");
+  assert.equal(await fs.readFile(ownerFile(roots, true, "entries/local.bin"), "utf8"), "local data\n");
+  assert.equal((await fs.stat(ownerFile(roots, true, "entries/local.bin"))).mode & 0o777, 0o750);
+  if (adopted) {
+    assert.equal((await record(roots)).installed, true);
+    assert.ok((await record(roots)).local_changes.some(file => file.path === "entries/local.bin"));
+    assert.equal(JSON.parse(await fs.readFile(path.join(added, "tool.json"))).id, "fixture.zzadded");
+    for (const member of receipt.members) assert.ok(member.source_files && member.materialized_files);
+    const old = receipt.members.find(member => member.owner === "world_fixture");
+    assert.equal(old.source_files.some(file => file.path === "entries/local.bin"), false);
+    assert.equal(old.materialized_files.some(file => file.path === "entries/local.bin"), true);
+  } else await assert.rejects(fs.stat(added), { code: "ENOENT" });
+}
+async function ownerAdditionFixtures(root) {
+  const success = await additionFixture(path.join(root, "success")), { roots } = success;
+  const partial = await record(roots); assert.equal(partial.partially_materialized, true); assert.match(partial.installed_digest, /^[a-f0-9]{64}$/);
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, true); await assertAdditionState(success, true);
+  const saved = await fs.readFile(success.receiptPath), foreignReceipt = JSON.parse(saved);
+  assert.equal((await adoptLocalPackageUpdates(roots)).changed, false); assert.deepEqual(await fs.readFile(success.receiptPath), saved);
+  for (const refusal of ["empty", "foreign", "cross-manifest", "cross-receipt", "missing-old", "removed-old", "legacy-dirty"]) {
+    const test = await additionFixture(path.join(root, refusal)), { roots, manifest, manifestPath, receiptPath, added } = test;
+    const before = await fs.readFile(receiptPath); let pattern;
+    if (refusal === "empty" || refusal === "foreign") {
+      await fs.mkdir(added, { recursive: true }); if (refusal === "foreign") await json(path.join(added, "tool.json"), { retained: true });
+      pattern = /existing unowned target/;
+    } else if (refusal.startsWith("cross-")) {
+      const other = { ...manifest, id: "z_foreign", product_id: "world_unused",
+        members: [{ registry_kind: "interface", owner: refusal === "cross-manifest" ? "world_fixture" : "world_unused", primary: true }] };
+      await json(path.join(roots.libraryRoot, "packages", "z_foreign.json"), other);
+      if (refusal === "cross-receipt") await json(path.join(roots.stateRoot, "receipts", "z_foreign.json"), { ...foreignReceipt, package_id: "z_foreign", product_id: "world_unused" });
+      pattern = refusal === "cross-manifest" ? /belongs to both/ : /artifact\/fixture-added.*already receipted/;
+    } else if (refusal === "missing-old") {
+      await fs.rm(path.join(roots.activeRegistryRoot, "tool", "fixture.tool"), { recursive: true }); pattern = /prior owners must remain declared and present/;
+    } else if (refusal === "removed-old") {
+      manifest.members = manifest.members.filter(member => member.owner !== "fixture.tool"); await json(manifestPath, manifest); pattern = /prior owners must remain declared and present/;
+    } else {
+      const legacy = JSON.parse(before); legacy.schema_version = 1;
+      for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; }
+      await json(receiptPath, legacy); pattern = /without a per-file source baseline/;
+    }
+    const reviewed = await fs.readFile(receiptPath);
+    await assert.rejects(adoptLocalPackageUpdates(roots), pattern); assert.deepEqual(await fs.readFile(receiptPath), reviewed);
+    assert.equal(await fs.readFile(ownerFile(roots, true, "entries/local.bin"), "utf8"), "local data\n");
+    if (refusal === "foreign") assert.equal(JSON.parse(await fs.readFile(path.join(added, "tool.json"))).retained, true);
+    assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+  }
+  const pin = await additionFixture(path.join(root, "old-data-race")), beforePin = await record(pin.roots);
+  await assert.rejects(adoptLocalPackageUpdates({ ...pin.roots, onProgress(progress) {
+    if (progress.phase === "verifying") fsSync.writeFileSync(ownerFile(pin.roots, true, "entries/local.bin"), "racing data\n");
+  } }), /active owners changed before repair/);
+  assert.notEqual((await record(pin.roots)).installed_digest, beforePin.installed_digest); await assert.rejects(fs.stat(pin.added), { code: "ENOENT" });
+  const race = await additionFixture(path.join(root, "new-target-race")), raceReceipt = await fs.readFile(race.receiptPath);
+  let injected = false;
+  await assert.rejects(adoptLocalPackageUpdates({ ...race.roots, onProgress(progress) {
+    if (progress.phase === "backing_up" && !injected) {
+      injected = true; fsSync.mkdirSync(race.added); fsSync.writeFileSync(path.join(race.added, "foreign.txt"), "keep foreign\n");
+    }
+  } }), /target appeared during update.*new-owner rollback found foreign owner state/);
+  assert.equal(await fs.readFile(path.join(race.added, "foreign.txt"), "utf8"), "keep foreign\n");
+  assert.deepEqual(await fs.readFile(race.receiptPath), raceReceipt); await fs.rm(race.added, { recursive: true });
+  await recoverLocalPackageTransactions(race.roots); await assertAdditionState(race, false);
+  const late = await additionFixture(path.join(root, "late-excluded-backup")), retained = '{"authored":"late excluded data"}\n';
+  let authored, lateJournal;
+  await assert.rejects(adoptLocalPackageUpdates({ ...late.roots, onProgress(progress) {
+    if (progress.phase === "finalizing") {
+      const transactions = path.join(late.roots.stateRoot, "transactions");
+      lateJournal = path.join(transactions, fsSync.readdirSync(transactions)[0], "journal.json");
+      const move = JSON.parse(fsSync.readFileSync(lateJournal)).moves.find(move => move.owner === "world_fixture");
+      authored = path.join(late.roots.activeRegistryRoot, move.backup, "entries", "target", "authored.json");
+      fsSync.mkdirSync(path.dirname(authored), { recursive: true }); fsSync.writeFileSync(authored, retained);
+    }
+  } }), /excluded active entries without receipt ownership proof/);
+  const receiptAfterRefusal = await fs.readFile(late.receiptPath);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal(await fs.readFile(authored, "utf8"), retained);
+    assert.equal(JSON.parse(await fs.readFile(lateJournal)).phase, "receipts_written");
+    await assert.rejects(recoverLocalPackageTransactions(late.roots), /excluded active entries without receipt ownership proof/);
+    assert.equal(await fs.readFile(authored, "utf8"), retained); assert.deepEqual(await fs.readFile(late.receiptPath), receiptAfterRefusal);
+  }
+  await fs.rm(path.dirname(authored), { recursive: true }); await recoverLocalPackageTransactions(late.roots);
+  await assertAdditionState(late, true); assert.deepEqual(await fs.readdir(path.join(late.roots.stateRoot, "transactions")), []);
+  for (const mode of ["update-backing_up", "update-new-rename", "update-finalizing", "update-receipting"]) {
+    const directory = path.join(root, mode), test = await additionFixture(directory), prior = await fs.readFile(test.receiptPath);
+    child(mode, directory);
+    const transactions = path.join(test.roots.stateRoot, "transactions"), journalPath = path.join(transactions, (await fs.readdir(transactions))[0], "journal.json");
+    const journal = JSON.parse(await fs.readFile(journalPath));
+    assert.equal(journal.moves.filter(move => move.previous_digest === null).length, 2);
+    if (mode === "update-new-rename") {
+      for (const corrupt of [value => { value.moves.find(move => move.previous_digest !== null).previous_digest = null; },
+        value => { value.moves.find(move => move.previous_digest === null).previous_digest = "a".repeat(64); },
+        value => { delete value.receipts[0].members.find(member => member.owner === "fixture.zzadded").materialized_files; }]) {
+        const invalid = structuredClone(journal); corrupt(invalid); await json(journalPath, invalid);
+        await assert.rejects(recoverLocalPackageTransactions(test.roots), /no proven absent|existing unowned/);
+      }
+      await json(journalPath, journal);
+    }
+    if (mode === "update-finalizing") {
+      child("repair-cleanup", directory);
+      assert.equal(JSON.parse(await fs.readFile(journalPath)).phase, "receipts_written");
+    }
+    await recoverLocalPackageTransactions(test.roots);
+    const committed = mode === "update-finalizing" || mode === "update-receipting";
+    await assertAdditionState(test, committed);
+    if (!committed) assert.deepEqual(await fs.readFile(test.receiptPath), prior);
+    assert.deepEqual(await fs.readdir(transactions), []);
+    await adoptLocalPackageUpdates(test.roots); await assertAdditionState(test, true);
+    assert.equal((await adoptLocalPackageUpdates(test.roots)).changed, false);
+  }
+}
+async function absentOwnerRenameRaceFixture(root) {
+  const test = await additionFixture(root), rename = nativeFiles.renameDirectoryExclusive, receipt = await fs.readFile(test.receiptPath);
+  let injected = false, foreignInode;
+  nativeFiles.renameDirectoryExclusive = (sourceDescriptor, from, destinationDescriptor, to) => {
+    if (!injected && from.endsWith(".stage") && to === path.basename(test.added)) {
+      injected = true; fsSync.mkdirSync(test.added); foreignInode = fsSync.statSync(test.added).ino;
+    }
+    return rename(sourceDescriptor, from, destinationDescriptor, to);
+  };
+  try {
+    await assert.rejects(adoptLocalPackageUpdates(test.roots), error => {
+      assert.match(error.message, /File exists/); assert.equal(error.cause.errno, os.constants.errno.EEXIST);
+      assert.equal(error.cause.code, "ERR_PACKAGE_RENAME"); return true;
+    });
+    assert.equal(injected, true); assert.deepEqual(await fs.readdir(test.added), []);
+    assert.equal((await fs.stat(test.added)).ino, foreignInode); assert.deepEqual(await fs.readFile(test.receiptPath), receipt);
+  } finally { nativeFiles.renameDirectoryExclusive = rename; }
+  await fs.rm(test.added, { recursive: true }); await recoverLocalPackageTransactions(test.roots); await assertAdditionState(test, false);
+  await adoptLocalPackageUpdates(test.roots); await assertAdditionState(test, true);
+}
+async function nativeRenameFixture(root) {
+  await fs.mkdir(root, { recursive: true }); await fs.mkdir(path.join(root, "source"));
+  await fs.writeFile(path.join(root, "source", "retained.bin"), "source bytes\n", { mode: 0o640 });
+  const parent = await fs.open(root, fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW);
+  const rename = (from, to) => nativeFiles.renameDirectoryExclusive(parent.fd, from, parent.fd, to);
+  const errno = number => error => error.code === "ERR_PACKAGE_RENAME" && error.errno === number;
+  try {
+    for (const name of ["", ".", "..", "../escape", "nested/target", "embedded\0nul", "x".repeat(256)]) {
+      assert.throws(() => rename("source", name), errno(os.constants.errno.EINVAL));
+    }
+    await fs.mkdir(path.join(root, "target"));
+    const targetInode = (await fs.stat(path.join(root, "target"))).ino;
+    assert.throws(() => rename("source", "target"), errno(os.constants.errno.EEXIST));
+    assert.equal((await fs.stat(path.join(root, "target"))).ino, targetInode); assert.deepEqual(await fs.readdir(path.join(root, "target")), []);
+    await fs.writeFile(path.join(root, "file"), "unowned bytes\n");
+    assert.throws(() => rename("source", "file"), errno(os.constants.errno.EEXIST));
+    assert.throws(() => rename("file", "absent"), errno(os.constants.errno.EINVAL));
+    await fs.symlink("source", path.join(root, "alias")); assert.throws(() => rename("alias", "absent"), errno(os.constants.errno.EINVAL));
+    assert.throws(() => rename("missing", "absent"), errno(os.constants.errno.ENOENT));
+    const file = await fs.open(path.join(root, "file"), "r");
+    try { assert.throws(() => nativeFiles.renameDirectoryExclusive(file.fd, "source", parent.fd, "absent"), errno(os.constants.errno.EINVAL)); }
+    finally { await file.close(); }
+    rename("source", "moved");
+    assert.equal(await fs.readFile(path.join(root, "moved", "retained.bin"), "utf8"), "source bytes\n");
+    assert.equal((await fs.stat(path.join(root, "moved", "retained.bin"))).mode & 0o777, 0o640);
+    assert.equal(await fs.readFile(path.join(root, "file"), "utf8"), "unowned bytes\n");
+  } finally { await parent.close(); }
+}
 async function crash(mode, root) {
-  const roots = rootsFor(root), rename = fs.rename;
-  fs.rename = async (from, to) => {
-    await rename(from, to);
+  const roots = rootsFor(root), rename = nativeFiles.renameDirectoryExclusive, remove = fs.rm;
+  nativeFiles.renameDirectoryExclusive = (sourceDescriptor, from, destinationDescriptor, to) => {
+    rename(sourceDescriptor, from, destinationDescriptor, to);
     if (mode === "install-rename" && from.endsWith(".stage") && !path.basename(to).startsWith(".")
+      || mode === "update-new-rename" && from.endsWith(".stage") && path.basename(to) === "fixture.zzadded"
       || mode === "remove-rename" && to.endsWith(".backup")
       || mode === "remove-restore" && from.endsWith(".backup")) process.kill(process.pid, "SIGKILL");
   };
+  fs.rm = async (file, options) => {
+    await remove(file, options);
+    if (mode === "repair-cleanup" && file.endsWith(".backup")) process.kill(process.pid, "SIGKILL");
+  };
   if (mode === "install-rename") await install(roots);
-  else if (mode === "remove-restore") await recoverLocalPackageTransactions(roots);
+  else if (mode === "remove-restore" || mode === "repair-cleanup") await recoverLocalPackageTransactions(roots);
   else if (mode === "remove-rename") await removeLocalPackages({ ...roots, operationId: "fixture_remove_001", packageIds: ["fixture"], expectedInstalledDigests: { fixture: (await record(roots)).installed_digest } });
   else if (mode === "repair-copy") await repair(roots, "fixture_partial_001", (progress) => {
     if (progress.phase === "copying") process.kill(process.pid, "SIGKILL");
@@ -67,6 +431,9 @@ async function crash(mode, root) {
   else if (mode.startsWith("update-")) await adoptLocalPackageUpdates({ ...roots, onProgress(progress) {
     if (progress.phase === mode.slice(7)) process.kill(process.pid, "SIGKILL");
   } });
+  else if (mode.startsWith("resolve-")) await adoptLocalPackageUpdates({ ...roots,
+    conflictResolutions: JSON.parse(await fs.readFile(path.join(root, "resolution.json"))), assertMutable: async () => {},
+    onProgress(progress) { if (progress.phase === mode.slice(8)) process.kill(process.pid, "SIGKILL"); } });
   else throw new Error(`unknown crash point ${mode}`);
   throw new Error(`crash point ${mode} was not reached`);
 }
@@ -224,6 +591,10 @@ async function packageExportFixture(root, repoRoot) {
 async function run() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-ownership-"));
   try {
+    await conflictResolutionFixtures(path.join(root, "conflict-resolutions"));
+    await dataDirectoryFixture(path.join(root, "data-directories"));
+    await nativeRenameFixture(path.join(root, "native-rename"));
+    await ownerAdditionFixtures(path.join(root, "owner-additions"));
     await releaseUpdateFixture(path.join(root, "release-update"));
     for (const mode of ["update-backing_up", "update-finalizing"]) {
       const directory = path.join(root, mode), roots = await fixture(directory);
@@ -248,7 +619,8 @@ async function run() {
     const baseline = JSON.parse(originalReceipt), crossWired = structuredClone(baseline);
     crossWired.members.find((member) => member.owner === "world_fixture").digest = "a".repeat(64);
     await json(receiptPath, crossWired);
-    assert.equal((await record(roots)).receipt_state, "stale");
+    assert.equal((await record(roots)).available, false);
+    assert.match((await record(roots)).error, /materialized baseline does not match/);
     crossWired.members = structuredClone(baseline.members);
     crossWired.members.pop();
     await json(receiptPath, crossWired);
@@ -314,6 +686,23 @@ async function run() {
       await json(manifestPath, invalid);
       await assert.rejects(readLocalPackageCatalog(metadata), /invalid explicit manifests/);
     }
+    for (const directories of [[], [""], ["."], [".."], ["/entries"], ["C:/entries"], ["C:entries"],
+      ["entries/"], ["./entries"], ["entries/../other"], ["entries\\other"], ["entries//other"],
+      ["entries/\0other"], ["entries/target"], ["entries/.git"], ["entries", "entries"], ["entries", "entries/nested"]]) {
+      const invalid = structuredClone(manifest); invalid.members[0].data_directories = directories;
+      await json(manifestPath, invalid);
+      await assert.rejects(readLocalPackageCatalog(metadata), /invalid explicit manifests/);
+    }
+    const dataManifest = structuredClone(manifest); dataManifest.members[0].data_directories = ["entries", "entry"];
+    await json(manifestPath, dataManifest);
+    assert.equal((await record(metadata)).available, true);
+    dataManifest.members[0].data_directories = ["interface.json"];
+    await json(manifestPath, dataManifest);
+    assert.match((await record(metadata)).error, /data directory is a file/);
+    dataManifest.members[0].data_directories = ["entries"];
+    dataManifest.members[0].configuration[0].path = "entries/settings.json";
+    await json(manifestPath, dataManifest);
+    await assert.rejects(readLocalPackageCatalog(metadata), /overlaps configuration ownership/);
     await json(manifestPath, manifest);
     const before = await record(metadata);
     await fs.writeFile(ownerFile(metadata, false, "life-bin"), "version two\n");
@@ -341,11 +730,20 @@ async function run() {
     assert.throws(() => validatePublicPayload("life.json", Buffer.from('{"bin":"target/debug/unreviewed"}'), { privateRoots: [], rejectDevelopmentExecutables: true }), /development executable path/);
     await sourceBoundaryFixture(path.join(root, "source-boundary"), repoRoot);
     await packageExportFixture(path.join(root, "package-export"), repoRoot);
+    await absentOwnerRenameRaceFixture(path.join(root, "absent-owner-rename-race"));
     process.stdout.write("package configuration ownership and rename-window recovery passed\n");
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 if (require.main === module) {
-  (process.argv[2] === "--crash" ? crash(process.argv[3], process.argv[4]) : run()).catch((error) => {
+  const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures,
+    "--absent-owner-race": absentOwnerRenameRaceFixture, "--conflict-resolutions": conflictResolutionFixtures }[process.argv[2]];
+  const action = process.argv[2] === "--crash" ? crash(process.argv[3], process.argv[4])
+    : focused ? (async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-contract-"));
+      try { await focused(root); }
+      finally { await fs.rm(root, { recursive: true, force: true }); }
+    })() : run();
+  action.catch((error) => {
     process.stderr.write(`${error.stack || error}\n`); process.exitCode = 1;
   });
 }

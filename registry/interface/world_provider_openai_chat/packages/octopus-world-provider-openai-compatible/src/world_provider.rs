@@ -254,7 +254,9 @@ impl WorldProviderInterfaceDriver {
         handoff: &ProviderOutputHandoff,
         output_root: &Path,
     ) -> Result<Vec<ProviderEmission>, ProviderDriverError> {
-        match self.prepare_artifact_and_materialize_local_outputs(input, output_root)? {
+        let callable_tools = handoff.callable_tool_names(&input)
+            .map_err(|error| ProviderDriverError::failed_closed("provider_tool_topology_invalid", error))?;
+        match self.prepare_artifact_and_materialize_local_outputs(input, output_root, &callable_tools)? {
             PreparedProviderTurn::Local(outputs) => Ok(outputs),
             PreparedProviderTurn::Network(prepared) => {
                 self.execute_prepared_network_turn(
@@ -274,6 +276,7 @@ impl WorldProviderInterfaceDriver {
         &self,
         input: InterfaceInvocationEnvelope,
         output_root: &Path,
+        callable_tools: &BTreeSet<String>,
     ) -> Result<PreparedProviderTurn, ProviderDriverError> {
         let request_bytes = input.read_artifact_payload().map_err(|error| {
             ProviderDriverError::protocol(
@@ -321,6 +324,9 @@ impl WorldProviderInterfaceDriver {
             })?;
         let hidden_tools = model_hidden_tool_names(&self.private_config)
             .map_err(|error| ProviderDriverError::protocol("hidden_tool_config_invalid", error))?;
+        let hidden_tools = octopus_model_context_render::model_tool_exclusions(
+            input.metadata().map_err(|error| ProviderDriverError::failed_closed("invocation_metadata_invalid", error.to_string()))?,
+            callable_tools, &hidden_tools);
         let (tools, model_visible_tool_names, hidden_tools) =
             resolve_model_tool_projection(&input, hidden_tools, model_config.request.model_tools)?;
         let messages = match assemble_messages(
@@ -773,7 +779,16 @@ fn assemble_messages(
     let mut artifacts = Vec::with_capacity(input.artifact_binding_payloads.len() + 1);
     let mut session_sources = BTreeSet::new();
     for bound in &input.artifact_binding_payloads {
-        let mut value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+        let bytes = bound.read_bytes().map_err(|error| {
+            ProviderDriverError::protocol(
+                "bound_artifact_unreadable",
+                format!(
+                    "bound artifact '{}' cannot be read: {error}",
+                    bound.artifact.id.as_str()
+                ),
+            )
+        })?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             ProviderDriverError::protocol(
                 "bound_artifact_json_invalid",
                 format!(
@@ -3313,7 +3328,7 @@ mod tests {
         bind_json(&mut partial, "tool.call:call-2", call_two);
         assert!(matches!(
             driver
-                .prepare_artifact_and_materialize_local_outputs(partial, &root.join("local"))
+                .prepare_artifact_and_materialize_local_outputs(partial, &root.join("local"), &BTreeSet::from(["artifact.read".into()]))
                 .unwrap(),
             PreparedProviderTurn::Local(_)
         ));

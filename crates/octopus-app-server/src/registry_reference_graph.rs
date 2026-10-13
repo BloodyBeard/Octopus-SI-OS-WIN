@@ -476,6 +476,32 @@ pub fn registry_tool_output_sources(
     Ok(BTreeSet::from([owner]))
 }
 
+pub fn registry_worker_policy_issues(
+    registry_root: &Path,
+    workers: &[InterfaceId],
+) -> Result<Vec<RegistryValidationIssue>, String> {
+    let packages = RegistryPackages::load(registry_root)?;
+    let mut issues = Vec::new();
+    for worker in workers.iter().collect::<BTreeSet<_>>() {
+        let node = RegistryNode::interface(worker.as_str());
+        let reason = if packages.worker_policies.contains_key(worker) {
+            packages.graph.validate_active_references(
+                &node.to_string(), [("worker".to_string(), node.clone())],
+            ).err()
+        } else {
+            Some(packages.graph.unavailable.get(&node).cloned().unwrap_or_else(|| {
+                format!("worker interface '{}' has no loaded policy pin in the live registry snapshot", worker)
+            }))
+        };
+        if let Some(reason) = reason {
+            issues.push(RegistryValidationIssue {
+                subject: node.to_string(), checkpoint: None, reason,
+            });
+        }
+    }
+    Ok(issues)
+}
+
 /// Inputs to a prospective file view. No caller-owned file is changed by validation.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

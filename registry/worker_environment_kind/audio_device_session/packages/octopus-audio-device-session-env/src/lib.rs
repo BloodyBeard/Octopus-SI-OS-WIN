@@ -353,17 +353,20 @@ impl AudioDeviceProcess {
                 let bound =
                     bound_artifact(&invocation.envelope, arguments.audio_artifact_id.trim())
                         .map_err(ToolProcessError::Capability)?;
-                if bound.bytes.is_empty() || bound.bytes.len() > config.max_audio_bytes {
+                let audio = bound
+                    .read_bounded(config.max_audio_bytes as u64)
+                    .map_err(|error| ToolProcessError::Capability(error.to_string()))?;
+                if audio.is_empty() || audio.len() > config.max_audio_bytes {
                     return Err(ToolProcessError::Capability(format!(
                         "bound audio artifact '{}' byte count {} is outside 1..={}",
                         arguments.audio_artifact_id,
-                        bound.bytes.len(),
+                        audio.len(),
                         config.max_audio_bytes
                     )));
                 }
                 self.execute_playback(
                     arguments,
-                    bound.bytes.clone(),
+                    audio.into_owned(),
                     config.clone(),
                     &invocation.descriptor,
                     call.correlation_id,

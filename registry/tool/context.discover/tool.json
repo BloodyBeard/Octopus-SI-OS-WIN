@@ -1,0 +1,68 @@
+{
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [
+        "registry_artifact_root"
+      ],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "system_room"
+  ],
+  "is_world_effect": false,
+  "id": "context.discover",
+  "handler_config": {
+    "operation": "collection_discover"
+  },
+  "description": "Discover reusable knowledge, instructions and capability selections within an explicitly bound collection. No arguments lists readable collection sources. Select a source to page compact descriptions; literal query filters those descriptions without choosing relevance. Results do not activate tools or follow external artifact references.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact readable context.collection artifact id already bound to this invocation."
+      },
+      "query": {
+        "type": "string"
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200
+      },
+      "cursor": {
+        "type": "object",
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "after": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot",
+          "after"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}

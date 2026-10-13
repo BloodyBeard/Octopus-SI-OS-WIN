@@ -614,6 +614,7 @@ async function planExistingProviderSelection(options, input) {
     clientSurfaceRole: input.clientSurfaceRole,
     cycle: randomToken(24),
     existingRunRecord: input.currentRunDocument.value,
+    retainCurrentCapabilities: true,
     conversation: {
       ledger_offset: input.conversationState.ledgerOffset,
       artifact_bindings: input.conversationState.artifactBindings,
@@ -633,9 +634,7 @@ async function planExistingProviderSelection(options, input) {
   ) {
     throw new Error("operator chat provider selection changed its exact task identity");
   }
-  if (canonicalJson(topologyPlan.authoring_profile) !== canonicalJson(expectedProfile)) {
-    throw new Error("next-cycle payload selection differs from its explicit authoring profile");
-  }
+  assertPublicationExpansion(topologyPlan, expectedProfile, []);
   const removals = requiredArray(topologyPlan.removals, "plan.removals");
   if (removals.length > 0) {
     throw new Error("operator chat provider selection unexpectedly removes private capabilities");
@@ -718,6 +717,7 @@ async function applyOperatorInputRevision(options, input) {
   const runPath = path.join(await resolveRunRecordsRoot(octopusHome), `${input.runId}.json`);
   const scope = { registry_root: registryRoot, run_path: runPath,
     ledger_root: path.join(octopusHome, "ledger"), artifact_root: input.artifactRoot,
+    interface_hand_in_root: path.join(octopusHome, "interface-hand-in"),
     provider: input.providerInterfaceId, source: input.chatInterfaceId };
   const operations = [];
   if (input.desiredInputs !== null) operations.push(["definition", { kind: "owner_inputs", desired_inputs: input.desiredInputs }]);
@@ -1455,6 +1455,7 @@ async function planOperatorChatSurface(options, request) {
     "modelOutputs",
     "contextArtifactBindings",
     "payloadArtifactBindings",
+    "publications",
     "selectedWorkerEnvironmentKinds",
     "selectedTools",
     "clientSurfaceRole",
@@ -1517,6 +1518,7 @@ async function planOperatorChatSurface(options, request) {
     request.contextArtifactBindings,
   );
   const payloadArtifactBindings = operatorPayloadArtifactBindings(request.payloadArtifactBindings);
+  const publications = operatorPublications(request.publications);
   const selectedWorkerEnvironmentKinds = operatorSelectedWorkerEnvironmentKinds(
     request.selectedWorkerEnvironmentKinds,
   );
@@ -1544,6 +1546,7 @@ async function planOperatorChatSurface(options, request) {
     modelOutputs,
     contextArtifactBindings,
     payloadArtifactBindings,
+    publications,
     selectedWorkerEnvironmentKinds,
     selectedTools,
     clientSurfaceRole,
@@ -1585,9 +1588,7 @@ async function planOperatorChatSurface(options, request) {
     topologyPlan.authoring_profile,
     "plan.authoring_profile",
   );
-  if (canonicalJson(authoringProfile) !== canonicalJson(expectedAuthoringProfile)) {
-    throw new Error("topology plan authoring profile drifted from the requested topology");
-  }
+  assertPublicationExpansion(topologyPlan, expectedAuthoringProfile, publications);
   const requiredInterfaceIds = plannedExactIds(
     topologyPlan.required_interface_ids,
     "plan.required_interface_ids",
@@ -1645,7 +1646,7 @@ async function planOperatorChatSurface(options, request) {
     clientSurfaceRole: operatorSurfaceRole(topologyPlan.client_surface_role),
     reasoningEffort: stringValue(topologyPlan.reasoning_effort),
     serviceTier: optionalServiceTier(topologyPlan.service_tier),
-    authoringProfile: expectedAuthoringProfile,
+    authoringProfile,
     requiredInterfaceIds,
     requiredToolIds,
     writes,
@@ -1690,6 +1691,7 @@ async function planOperatorChatTaskAmendment(options, request) {
   const externalRelays = operatorExternalRelays(request?.externalRelays);
   const modelOutputs = operatorModelOutputs(request?.modelOutputs);
   const contextArtifactBindings = operatorContextArtifactBindings(request?.contextArtifactBindings);
+  const publications = operatorPublications(request?.publications);
   const selectedWorkerEnvironmentKinds = operatorSelectedWorkerEnvironmentKinds(
     request?.selectedWorkerEnvironmentKinds,
   );
@@ -1745,6 +1747,7 @@ async function planOperatorChatTaskAmendment(options, request) {
     externalRelays,
     modelOutputs,
     contextArtifactBindings,
+    publications,
     selectedWorkerEnvironmentKinds,
     selectedTools,
     clientSurfaceRole,
@@ -2876,6 +2879,7 @@ async function readConfig() {
     throw new Error("world_operator_chat/client.json has an unsupported schema_version");
   }
   requiredString(value.interface, "client.interface");
+  value.artifact_read_projection = validateArtifactReadProjection(value.artifact_read_projection);
   requiredObject(value.executables, "client.executables");
   requiredString(value.executables.topology_planner, "client.executables.topology_planner");
   requiredString(value.executables.artifact_materializer, "client.executables.artifact_materializer");
@@ -2905,6 +2909,26 @@ async function readConfig() {
   }
   requiredArray(value.run.context_artifact_bindings, "client.run.context_artifact_bindings");
   return value;
+}
+
+function validateArtifactReadProjection(value) {
+  const fields = ["schema_version", "json_object_labels", "excluded_root_fields", "max_source_bytes", "max_projected_bytes"];
+  if (!isObject(value) || value.schema_version !== 1 || Object.keys(value).length !== fields.length
+    || fields.some(field => !Object.hasOwn(value, field))) throw new Error("client.artifact_read_projection requires its exact version 1 contract");
+  for (const field of ["max_source_bytes", "max_projected_bytes"]) positiveInteger(value[field], `client.artifact_read_projection.${field}`);
+  const names = requiredArray(value.excluded_root_fields, "client.artifact_read_projection.excluded_root_fields");
+  if (names.length > 65536 || new Set(names).size !== names.length) throw new Error("client.artifact_read_projection requires unique root field names");
+  for (const name of names) {
+    requiredString(name, "client.artifact_read_projection excluded root field");
+    if (name.trim() !== name || Buffer.byteLength(name) > 65536) throw new Error("client.artifact_read_projection root field name exceeds its bound");
+  }
+  const labels = requiredArray(value.json_object_labels, "client.artifact_read_projection.json_object_labels");
+  if (labels.length > 65536 || new Set(labels).size !== labels.length || labels.includes(LIVE_STREAM_ARTIFACT_LABEL)) throw new Error("client.artifact_read_projection requires unique JSON object labels excluding its byte stream");
+  for (const label of labels) {
+    requiredTrimmedString(label, "client.artifact_read_projection JSON object label");
+    if (Buffer.byteLength(label) > 65536) throw new Error("client.artifact_read_projection JSON object label exceeds its bound");
+  }
+  return Object.freeze({ ...value, json_object_labels: Object.freeze([...labels]), excluded_root_fields: Object.freeze([...names]) });
 }
 
 function resolveInstallationRoot(options) {
@@ -2964,11 +2988,13 @@ async function planOperatorChatTopology({
   modelOutputs,
   contextArtifactBindings,
   payloadArtifactBindings,
+  publications,
   selectedWorkerEnvironmentKinds,
   selectedTools,
   clientSurfaceRole,
   cycle,
   existingRunRecord,
+  retainCurrentCapabilities = false,
   conversation,
 }) {
   if (!(await fileExists(topologyPlanner))) {
@@ -2998,6 +3024,7 @@ async function planOperatorChatTopology({
     model_outputs: modelOutputs,
     context_artifact_bindings: contextArtifactBindings,
     payload_artifact_bindings: operatorPayloadArtifactBindings(payloadArtifactBindings),
+    publications: operatorPublications(publications),
     selected_worker_environment_kinds: selectedWorkerEnvironmentKinds,
     selected_tools: selectedTools.map((selection) => ({
       tool: selection.tool,
@@ -3005,6 +3032,7 @@ async function planOperatorChatTopology({
       worker_environment_kind: selection.worker_environment_kind,
     })),
     existing_run_record: existingRunRecord ?? null,
+    retain_current_capabilities: retainCurrentCapabilities,
     conversation,
   });
   const stdout = await new Promise((resolve, reject) => {
@@ -3419,6 +3447,81 @@ function operatorModelOutputs(value) {
       },
     };
   });
+}
+
+function operatorPublications(value) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("publications must be an array");
+  const seen = new Set();
+  return value.map((pin, index) => {
+    const field = `publications[${index}]`;
+    if (!isObject(pin) || Object.keys(pin).length !== 3
+      || !Object.hasOwn(pin, "source") || !Object.hasOwn(pin, "entry_id") || !Object.hasOwn(pin, "revision")) {
+      throw new Error(`${field} requires exactly source, entry_id and revision`);
+    }
+    const [source] = operatorPayloadArtifactBindings([pin.source]);
+    source.id = plannedArtifactOwner(source.id);
+    const entry_id = plannedArtifactOwner(pin.entry_id);
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(source.id + entry_id)) {
+      throw new Error(`${field} contains control characters in its identity`);
+    }
+    if (typeof pin.revision !== "string" || !/^[0-9a-f]{64}$/.test(pin.revision)) {
+      throw new Error(`${field}.revision must be an exact content hash`);
+    }
+    const key = JSON.stringify([source.id, entry_id]);
+    if (seen.has(key)) throw new Error(`${field} repeats a selected publication`);
+    seen.add(key);
+    return { source, entry_id, revision: pin.revision };
+  });
+}
+
+function assertPublicationExpansion(plan, requested, publications) {
+  const profile = requiredObject(plan.authoring_profile, "plan.authoring_profile");
+  const expansion = plan.publication_expansion;
+  if (expansion === undefined || expansion === null) {
+    if (publications.length || canonicalJson(profile) !== canonicalJson(requested)) {
+      throw new Error("topology plan authoring profile drifted from the requested topology");
+    }
+    return;
+  }
+  const receipt = requiredObject(expansion, "plan.publication_expansion");
+  const fields = ["requested", "publications", "defaults", "selected", "expanded"];
+  if (Object.keys(receipt).some(field => !fields.includes(field) && field !== "reused_defaults")
+    || fields.some(field => !Object.hasOwn(receipt, field))
+    || canonicalJson(receipt.requested) !== canonicalJson(requested)
+    || canonicalJson(operatorPublications(receipt.publications)) !== canonicalJson(publications)
+    || canonicalJson(receipt.expanded) !== canonicalJson(profile)) {
+    throw new Error("publication expansion does not preserve its exact authoring request and result");
+  }
+  const selected = requiredArray(receipt.selected, "publication expansion selected");
+  const defaults = requiredArray(receipt.defaults, "publication expansion defaults");
+  const reused = operatorPublications(receipt.reused_defaults);
+  const expected = new Map(publications.map(pin => [canonicalJson(pin), pin]));
+  const owners = new Set();
+  for (const declaration of defaults) {
+    const owner = safeSegment(declaration?.interface, "publication default interface");
+    if (!isObject(declaration) || Object.keys(declaration).length !== 3
+      || typeof declaration.descriptor_hash !== "string" || !/^[0-9a-f]{64}$/.test(declaration.descriptor_hash)
+      || owners.has(owner)) throw new Error("publication default declaration is malformed or repeated");
+    owners.add(owner);
+    for (const pin of operatorPublications(declaration.publications)) expected.set(canonicalJson(pin), pin);
+  }
+  if (selected.length + reused.length === 0) throw new Error("publication expansion has no selected evidence");
+  for (const pin of reused) {
+    if (publications.some(explicit => canonicalJson(explicit) === canonicalJson(pin))
+      || !expected.delete(canonicalJson(pin))
+      || !Array.isArray(requested.publication_evidence)
+      || !requested.publication_evidence.some(evidence => canonicalJson(evidence.pin) === canonicalJson(pin))) {
+      throw new Error("publication expansion reuses a default without its accepted request evidence");
+    }
+  }
+  for (const evidence of selected) {
+    const [pin] = operatorPublications([evidence?.pin]);
+    if (!expected.delete(canonicalJson(pin)) || !isObject(evidence.entry) || evidence.entry.id !== pin.entry_id) {
+      throw new Error("publication expansion evidence differs from its requested and declared selections");
+    }
+  }
+  if (expected.size) throw new Error("publication expansion omits selected evidence");
 }
 
 function operatorPayloadArtifactBindings(value) {
@@ -6161,6 +6264,9 @@ async function readOperatorChatArtifacts(options, request) {
           artifactId,
           manifestHash: contentHash,
           label,
+          ...(config.artifact_read_projection.json_object_labels.includes(label) ? {
+            projection: config.artifact_read_projection,
+          } : {}),
         });
         if (label === LIVE_STREAM_ARTIFACT_LABEL) {
           const parsed = parseOperatorTurnStream(

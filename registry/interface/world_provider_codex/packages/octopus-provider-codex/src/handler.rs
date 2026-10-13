@@ -34,7 +34,7 @@ use octopus_interfaces::{
 use octopus_ledger::{ArtifactRef, InvocationMetadata, RequiredVerifiedArtifact};
 use octopus_login::AuthManager;
 use octopus_model_context_render::{
-    model_hidden_tool_names, model_visible_affordances, render_model_context_block,
+    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances, render_model_context_block,
     resolve_instruction_context,
 };
 use octopus_protocol::config_types::{ReasoningSummary, WebSearchMode};
@@ -1496,7 +1496,9 @@ fn lifecycle_context_payloads(
             .iter()
             .find(|bound| bound.artifact == artifact.source_artifact)
         {
-            if existing.as_bytes() != bytes {
+            let existing_bytes = existing.read_bytes()
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+            if existing_bytes.as_ref() != bytes.as_slice() {
                 return Err(InterfaceDriverError::FailedClosed(format!(
                     "lifecycle artifact '{}' has conflicting bound and session bytes",
                     artifact.source_artifact.id.as_str()
@@ -2095,6 +2097,7 @@ struct RecoveredTurnStartDispatch {
 }
 
 pub(crate) struct CodexProviderInvocation<'a> {
+    pub callable_tool_names: BTreeSet<String>,
     pub input: InterfaceInvocationEnvelope,
     pub emit: Arc<ProviderOutputStream>,
     pub resolved_session_snapshot: Option<ProviderInvocationSessionSnapshot>,
@@ -5613,8 +5616,10 @@ impl CodexAppServerInterfaceDriver {
         let mut current_seen = false;
         let mut grounded_snapshot_used = false;
         for bound in artifact_binding_payloads {
+            let bytes = bound.read_bytes()
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
             let value: serde_json::Value =
-                serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+                serde_json::from_slice(bytes.as_ref()).map_err(|error| {
                     InterfaceDriverError::Protocol(format!(
                         "Codex session carrier '{}' is not JSON: {error}",
                         bound.artifact.id
@@ -5696,6 +5701,7 @@ impl CodexAppServerInterfaceDriver {
         invocation: CodexProviderInvocation<'_>,
     ) -> Result<(), InterfaceDriverError> {
         let CodexProviderInvocation {
+            callable_tool_names,
             input,
             emit,
             resolved_session_snapshot,
@@ -5878,6 +5884,7 @@ impl CodexAppServerInterfaceDriver {
         self.native_mcp_resource_discovery()?;
         let hidden_tools = model_hidden_tool_names(&self.interface_private_config)
             .map_err(InterfaceDriverError::Protocol)?;
+        let hidden_tools = model_tool_exclusions(input.metadata()?, &callable_tool_names, &hidden_tools);
         let native_namespace = self.native_tool_namespace()?;
         let run_affordances = RunAffordances::from_invocation(&input, &serde_json::Value::Object(self.interface_private_config.clone()))
             .map_err(InterfaceDriverError::FailedClosed)?;
@@ -6125,7 +6132,7 @@ impl CodexAppServerInterfaceDriver {
         assembled_context.static_context_bytes.clear();
         for bound in &complete_context_payloads {
             if instructions.source_artifacts.contains(&bound.artifact) {
-                append_static_context_source(&mut assembled_context.static_context_bytes, bound);
+                append_static_context_source(&mut assembled_context.static_context_bytes, bound)?;
             }
         }
         assembled_context.static_context_bytes.extend_from_slice(
@@ -10918,7 +10925,9 @@ fn extract_interface_operation_affordances(
     let mut interface_operations = BTreeMap::new();
     let mut catalog_interfaces = BTreeSet::new();
     for bound in &input.artifact_binding_payloads {
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bound.as_bytes()) else {
+        let bytes = bound.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) else {
             continue;
         };
         let Some(object) = value.as_object() else {
@@ -11629,8 +11638,10 @@ fn selected_file_projection(
     let mut payloads = BTreeMap::<(String, u64), Vec<&ArtifactRef>>::new();
     for bound in &input.artifact_binding_payloads {
         if selected.contains(&bound.artifact) {
+            let bytes = bound.read_bytes()
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
             payloads
-                .entry((sha256_hex(bound.as_bytes()), bound.as_bytes().len() as u64))
+                .entry((sha256_hex(bytes.as_ref()), bytes.len() as u64))
                 .or_default()
                 .push(&bound.artifact);
         }
@@ -11683,8 +11694,10 @@ fn selected_file_projection(
         }
     }
     for bound in &context_payloads {
+        let bytes = bound.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let value: serde_json::Value =
-            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+            serde_json::from_slice(bytes.as_ref()).map_err(|error| {
                 InterfaceDriverError::Protocol(format!(
                     "selected file bound context '{}' is not JSON: {error}",
                     bound.artifact.id
@@ -11794,13 +11807,17 @@ fn selected_file_projection(
     let unnamed = input.artifact_binding_payloads.iter()
         .filter(|bound| selected.contains(&bound.artifact)
             && !files.iter().any(|file| file.artifact_ref == bound.artifact))
-        .map(|bound| serde_json::json!({
-            "artifact_ref": bound.artifact,
-            "label": bound.artifact.id.as_str().rsplit_once(':')
-                .filter(|(_, hash)| *hash == bound.artifact.content.to_hex())
-                .map_or(bound.artifact.id.as_str(), |(label, _)| label),
-            "size_bytes": bound.as_bytes().len(),
-        })).collect::<Vec<_>>();
+        .map(|bound| {
+            let bytes = bound.read_bytes()
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+            Ok(serde_json::json!({
+                "artifact_ref": bound.artifact,
+                "label": bound.artifact.id.as_str().rsplit_once(':')
+                    .filter(|(_, hash)| *hash == bound.artifact.content.to_hex())
+                    .map_or(bound.artifact.id.as_str(), |(label, _)| label),
+                "size_bytes": bytes.len(),
+            }))
+        }).collect::<Result<Vec<_>, InterfaceDriverError>>()?;
     if !unnamed.is_empty() {
         visible["selected_artifacts"] = serde_json::json!(unnamed);
     }
@@ -12076,7 +12093,9 @@ pub(crate) fn decode_inflight_turn_control(
             .map_err(InterfaceDriverError::FailedClosed)?
             .remaining_payloads;
         for bound in &context_payloads {
-            serde_json::from_slice::<serde_json::Value>(bound.as_bytes()).map_err(|error| {
+            let bytes = bound.read_bytes()
+                .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
+            serde_json::from_slice::<serde_json::Value>(bytes.as_ref()).map_err(|error| {
                 InterfaceDriverError::Protocol(format!("operator steering context '{}' is not JSON: {error}", bound.artifact.id))
             })?;
         }
@@ -14721,8 +14740,10 @@ fn recover_codex_continuity_resolved(
     let mut sources = BTreeSet::new();
     let mut current_snapshot_seen = false;
     for bound in artifact_binding_payloads {
+        let bytes = bound.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let value: serde_json::Value =
-            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+            serde_json::from_slice(bytes.as_ref()).map_err(|error| {
                 InterfaceDriverError::Protocol(format!(
                     "Codex continuity carrier '{}' is not JSON: {error}",
                     bound.artifact.id
@@ -15488,12 +15509,15 @@ fn validate_pending_continuity_coordinates(
     Ok(())
 }
 
-fn append_static_context_source(bytes: &mut Vec<u8>, bound: &ArtifactBindingPayload) {
+fn append_static_context_source(bytes: &mut Vec<u8>, bound: &ArtifactBindingPayload) -> Result<(), InterfaceDriverError> {
+    let payload_bytes = bound.read_bytes()
+        .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
     let id = bound.artifact.id.as_str().as_bytes();
     bytes.extend_from_slice(&(id.len() as u64).to_le_bytes());
     bytes.extend_from_slice(id);
-    bytes.extend_from_slice(&(bound.as_bytes().len() as u64).to_le_bytes());
-    bytes.extend_from_slice(bound.as_bytes());
+    bytes.extend_from_slice(&(payload_bytes.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(payload_bytes.as_ref());
+    Ok(())
 }
 
 fn is_foreign_provider_payload(
@@ -15565,8 +15589,10 @@ fn assemble_context_resolved(
     let mut assembled = AssembledContext::default();
     let mut session_sources = BTreeSet::new();
     for bound in artifact_binding_payloads {
+        let bytes = bound.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let mut value: serde_json::Value =
-            serde_json::from_slice(bound.as_bytes()).map_err(|e| {
+            serde_json::from_slice(bytes.as_ref()).map_err(|e| {
                 InterfaceDriverError::Protocol(format!(
                     "artifact-turn bound artifact {} is not JSON: {e}",
                     bound.artifact.id.as_str()
@@ -15668,7 +15694,7 @@ fn assemble_context_resolved(
             }
         } else {
             if value.get("label").and_then(serde_json::Value::as_str) == Some(CONTEXT_REFERENCE_LABEL) {
-                append_static_context_source(&mut assembled.static_context_bytes, bound);
+                append_static_context_source(&mut assembled.static_context_bytes, bound)?;
             }
             append_assembled_context(
                 &mut assembled,
@@ -15692,8 +15718,10 @@ fn test_bound_session_contexts(
     let mut contexts = BTreeMap::new();
     let mut current_seen = false;
     for bound in artifact_binding_payloads {
+        let bytes = bound.read_bytes()
+            .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
         let mut value: serde_json::Value =
-            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+            serde_json::from_slice(bytes.as_ref()).map_err(|error| {
                 InterfaceDriverError::Protocol(format!(
                     "test session carrier '{}' is not JSON: {error}",
                     bound.artifact.id
@@ -17973,7 +18001,7 @@ mod tests {
         assert!(raw_value.get("model_projection").is_none());
 
         let bound_result = bound("coder.result:source", serde_json::to_value(&large).unwrap());
-        let original_payload = bound_result.as_bytes().to_vec();
+        let original_payload = bound_result.read_bytes().unwrap().into_owned();
         let assembled = assemble_context_resolved(
             std::slice::from_ref(&bound_result),
             &BTreeMap::new(),
@@ -17986,7 +18014,7 @@ mod tests {
         let projection: serde_json::Value = serde_json::from_str(projected_text).unwrap();
         assert_eq!(projection["model_projection"], "head_tail");
         assert_eq!(projection["source_artifact"], serde_json::to_value(&bound_result.artifact).unwrap());
-        assert_eq!(bound_result.as_bytes(), original_payload.as_slice());
+        assert_eq!(bound_result.read_bytes().unwrap().as_ref(), original_payload.as_slice());
         assert!(projection["omitted_approx_tokens"].as_u64().unwrap() > 0);
         assert!(
             projection["preview"]
@@ -18923,7 +18951,7 @@ mod tests {
         })], &NativeToolNamespace { name: "formed_interfaces".into(), description: "Formed interface tools.".into() }).unwrap();
         let role = bound("role-instruction", serde_json::json!({"label":"context.reference","text":"role"}));
         let mut static_bytes = Vec::new();
-        append_static_context_source(&mut static_bytes, &role);
+        append_static_context_source(&mut static_bytes, &role).unwrap();
         static_bytes.extend_from_slice(br#"{"coder-dexec":"coder.exec"}"#);
         pending.static_context_fingerprint = sha256_hex(&static_bytes);
         pending.thread_shape_fingerprint = thread_shape_fingerprint(
@@ -19019,6 +19047,7 @@ mod tests {
         let (catalog_output, _catalog_output_rx) = ProviderOutputStream::channel();
         let blocked_catalog = driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                callable_tool_names: catalog_envelope.granted_tool_names().unwrap().into_iter().collect(),
                 input: catalog_envelope,
                 emit: catalog_output,
                 resolved_session_snapshot: None,
@@ -19234,6 +19263,7 @@ while IFS= read -r _; do :; done
         let cold_control = CodexTurnControlBroker::new(Some(1));
         let cold_pending =
             cold_driver.receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                callable_tool_names: envelope.granted_tool_names().unwrap().into_iter().collect(),
                 input: envelope,
                 emit: output,
                 resolved_session_snapshot: Some(resolved_session_snapshot),
@@ -19502,6 +19532,7 @@ while IFS= read -r _; do :; done
         let (queued_output, mut queued_output_rx) = ProviderOutputStream::channel();
         let queued = driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                callable_tool_names: queued_turn_envelope.granted_tool_names().unwrap().into_iter().collect(),
                 input: queued_turn_envelope,
                 emit: queued_output,
                 resolved_session_snapshot: None,
@@ -19531,6 +19562,7 @@ while IFS= read -r _; do :; done
         let (interrupted_output, mut interrupted_output_rx) = ProviderOutputStream::channel();
         driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                callable_tool_names: runtime_metadata.grant.tools.iter().cloned().collect(),
                 input: interrupted_result_envelope("interrupted-output"),
                 emit: interrupted_output,
                 resolved_session_snapshot: None,
@@ -19593,6 +19625,7 @@ while IFS= read -r _; do :; done
         let (recovered_output, mut recovered_output_rx) = ProviderOutputStream::channel();
         driver
             .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                callable_tool_names: runtime_metadata.grant.tools.iter().cloned().collect(),
                 input: interrupted_result_envelope("interrupted-recovery-output"),
                 emit: recovered_output,
                 resolved_session_snapshot: None,
@@ -19951,7 +19984,7 @@ while IFS= read -r _; do :; done
         let received = session_artifact(
             "received-foreign-terminal",
             "interface.artifact.output",
-            serde_json::from_slice(foreign.as_bytes()).unwrap(),
+            serde_json::from_slice(foreign.read_bytes().unwrap().as_ref()).unwrap(),
             8,
         );
         let local = continuity("world_provider_test", "run-test", "local-thread", 5, None);
@@ -20322,6 +20355,15 @@ while IFS= read -r _; do :; done
         assert_eq!(visible, vec!["gui.app_state"]);
         assert_eq!(application_input.granted_tool_names().unwrap(), granted);
         assert!(granted.iter().any(|tool| tool == "gui.app_resume"));
+        application_input.metadata.as_mut().unwrap().grant.tools.push("candidate".into());
+        application_input.metadata.as_mut().unwrap().grant.interface_affordance_specs.push(octopus_interfaces::InterfaceToolAffordance {
+            name:"candidate".into(),description:"not attached".into(),args_schema:serde_json::json!({"type":"object"}),
+        });
+        let before = application_input.metadata.clone();
+        let exclusions = model_tool_exclusions(application_input.metadata().unwrap(), &granted.into_iter().collect(), &hidden);
+        let visible = extract_native_affordances_from_invocation(&application_input, &exclusions).unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(application_input.metadata, before);
 
         let mut missing_metadata = metadata_input(serde_json::json!([]));
         missing_metadata.metadata = None;
@@ -20867,7 +20909,7 @@ while IFS= read -r _; do :; done
                 rows.iter()
                     .any(|row| row["artifact_ref"] == file["artifact_ref"]
                         && row["filename"] == file["filename"]
-                        && row["size_bytes"] == bound.as_bytes().len())
+                        && row["size_bytes"] == bound.read_bytes().unwrap().len())
             );
         }
         assert_eq!(
@@ -20885,7 +20927,7 @@ while IFS= read -r _; do :; done
         assert!(rows.iter().any(|row| row["filename"] == "résumé.zip"));
         assert!(!text.contains("payload_path"));
         assert!(!text.contains(&root.as_path().display().to_string()));
-        assert_ne!(first_ref.content.to_hex(), sha256_hex(first.as_bytes()));
+        assert_ne!(first_ref.content.to_hex(), sha256_hex(first.read_bytes().unwrap().as_ref()));
         let snapshot_body = serde_json::json!({"label":"interface.artifact.output","text":"Files retained",
             "session_context":{"schema_version":3,"provider_interface":"world_provider_test",
                 "artifacts":[{"label":OPERATOR_MESSAGE_LABEL,"payload":original,
@@ -20896,7 +20938,7 @@ while IFS= read -r _; do :; done
         );
         let preserved = SessionContextArtifact {
             label: OPERATOR_MESSAGE_LABEL.into(),
-            payload: serde_json::from_slice(original_bound.as_bytes()).unwrap(),
+            payload: serde_json::from_slice(original_bound.read_bytes().unwrap().as_ref()).unwrap(),
             source_artifact: original_ref,
             source_movement_seq: None,
         };

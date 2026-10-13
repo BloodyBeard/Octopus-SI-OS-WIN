@@ -9,6 +9,7 @@ pub struct InvocationArtifactSurface {
     emission_root: PathBuf,
     artifact_blobs_root: Option<PathBuf>,
     grant: GrantProjection,
+    maximum_bytes: u64,
 }
 
 impl InvocationArtifactSurface {
@@ -17,6 +18,7 @@ impl InvocationArtifactSurface {
         emission_root: &Path,
         grant: GrantProjection,
         artifact_blobs_root: Option<&Path>,
+        maximum_bytes: u64,
     ) -> Result<Self, WorkerEnvError> {
         let emission_root = AbsPath::new(emission_root)
             .map_err(|error| {
@@ -31,6 +33,7 @@ impl InvocationArtifactSurface {
             emission_root,
             artifact_blobs_root: artifact_blobs_root.map(Path::to_path_buf),
             grant,
+            maximum_bytes,
         })
     }
 
@@ -91,19 +94,29 @@ impl InvocationArtifactSurface {
                 first.artifact.id.as_str()
             )));
         }
-        Ok(Some(first.as_bytes().to_vec()))
+        first.read_bounded(self.maximum_bytes)
+            .map(|bytes| Some(bytes.into_owned()))
+            .map_err(|error| WorkerEnvError::ArtifactSurfaceFailed(error.to_string()))
     }
 
     pub fn list_impl(&self) -> Result<Vec<BoundArtifact>, WorkerEnvError> {
-        Ok(self
-            .bound
-            .iter()
-            .filter(|bound| self.grant.may_read_artifact(bound.artifact.id.as_str()))
-            .map(|bound| BoundArtifact {
-                artifact: bound.artifact.clone(),
-                text: String::from_utf8(bound.as_bytes().to_vec()).ok(),
-            })
-            .collect())
+        let mut result = Vec::new();
+        let mut retained = 0u64;
+        for bound in self.bound.iter().filter(|bound| self.grant.may_read_artifact(bound.artifact.id.as_str())) {
+            let bytes = bound.read_bounded(self.maximum_bytes - retained)
+                .map_err(|error| WorkerEnvError::ArtifactSurfaceFailed(error.to_string()))?;
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(_) => {
+                    retained = retained.checked_add(bytes.len() as u64).filter(|size| *size <= self.maximum_bytes)
+                        .ok_or_else(|| WorkerEnvError::ArtifactSurfaceFailed("bound artifact list exceeds its retained text ceiling".into()))?;
+                    Some(String::from_utf8(bytes.into_owned())
+                        .map_err(|error| WorkerEnvError::ArtifactSurfaceFailed(error.to_string()))?)
+                }
+                Err(_) => None,
+            };
+            result.push(BoundArtifact { artifact: bound.artifact.clone(), text });
+        }
+        Ok(result)
     }
 }
 

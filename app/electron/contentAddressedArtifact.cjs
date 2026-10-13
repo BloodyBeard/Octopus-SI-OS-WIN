@@ -2,7 +2,9 @@ const fs = require("node:fs/promises");
 const { constants } = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
+const { TextDecoder } = require("node:util");
 const { blake3 } = require("@noble/hashes/blake3");
+const { BoundedJsonProjection, parseArtifactReadProjection } = require("./boundedJsonProjection.cjs");
 
 const DEFAULT_MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 const DEFAULT_MAX_PAYLOAD_BYTES = 40 * 1024 * 1024;
@@ -67,29 +69,85 @@ async function readContentAddressedArtifactPayload(options) {
 }
 
 async function readStableContentAddressedBytes(filePath, expectedHash, maximumBytes, label) {
+  const parts = [];
+  const count = await readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, bytes => parts.push(Buffer.from(bytes)));
+  return Buffer.concat(parts, count);
+}
+
+async function readStableContentAddressedChunks(filePath, expectedHash, maximumBytes, label, consume) {
   const stat = await fs.lstat(filePath);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${label} is not a regular file`);
   if (stat.size > maximumBytes) throw new Error(`${label} exceeds ${maximumBytes} bytes`);
-  const handle = await fs.open(filePath, "r");
+  const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const before = await handle.stat();
-    const bytes = await handle.readFile();
+    if (!before.isFile() || before.dev !== stat.dev || before.ino !== stat.ino || before.size !== stat.size || before.size > maximumBytes) {
+      throw new Error(`${label} changed before it was read`);
+    }
+    const hash = blake3.create(), buffer = Buffer.alloc(64 * 1024);
+    let count = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      count += bytesRead;
+      if (count > before.size || count > maximumBytes) throw new Error(`${label} grew while it was being read`);
+      const bytes = buffer.subarray(0, bytesRead);
+      hash.update(bytes); consume(bytes);
+    }
     const after = await handle.stat();
     if (
-      bytes.byteLength !== before.size
+      count !== before.size
       || before.size !== after.size
       || before.mtimeMs !== after.mtimeMs
+      || before.ctimeMs !== after.ctimeMs
     ) {
       throw new Error(`${label} changed while it was being read`);
     }
-    const actualHash = Buffer.from(blake3(bytes)).toString("hex");
+    const actualHash = Buffer.from(hash.digest()).toString("hex");
     if (actualHash !== expectedHash) {
       throw new Error(`${label} does not match its content-addressed digest`);
     }
-    return bytes;
+    return count;
   } finally {
     await handle.close();
   }
+}
+
+async function readContentAddressedArtifactProjection(options) {
+  const contract = parseArtifactReadProjection(options?.projection);
+  const sourceMaximum = Math.min(contract.max_source_bytes,
+    specifiedPositiveInteger(options?.maxPayloadBytes, contract.max_source_bytes, "maxPayloadBytes"));
+  const manifestMaximum = Math.min(DEFAULT_MAX_MANIFEST_BYTES,
+    specifiedPositiveInteger(options?.maxManifestBytes, DEFAULT_MAX_MANIFEST_BYTES, "maxManifestBytes"));
+  const blobsRoot = absolutePath(options?.blobsRoot, "blobsRoot");
+  const manifestHash = contentHash(options?.manifestHash, "manifestHash");
+  const expectedArtifactId = requiredString(options?.artifactId, "artifactId");
+  const expectedLabel = requiredString(options?.label, "label");
+  if (!contract.json_object_labels.includes(expectedLabel)) throw new Error("artifact label is not declared for JSON object projection");
+  const manifestBytes = await readStableContentAddressedBytes(path.join(blobsRoot, manifestHash), manifestHash,
+    manifestMaximum, "artifact manifest");
+  const manifest = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifestBytes));
+  if (!isObject(manifest)) throw new Error("artifact manifest must be a JSON object");
+  const label = requiredString(manifest.label, "artifact manifest label");
+  if (label !== expectedLabel || expectedArtifactId !== `${label}:${manifestHash}`) {
+    throw new Error("artifact identity does not match its content-addressed manifest");
+  }
+  const payloadPath = absolutePath(manifest.payload_path, "artifact manifest payload_path");
+  const payloadHash = contentHash(manifest.payload_content_hash, "artifact manifest payload_content_hash");
+  const filePath = path.join(blobsRoot, payloadHash);
+  const parser = new BoundedJsonProjection({ ...contract, max_source_bytes: sourceMaximum });
+  const count = await readStableContentAddressedChunks(filePath, payloadHash, sourceMaximum,
+    "artifact payload projection source byte bound", bytes => parser.write(bytes));
+  const projected = parser.finish();
+  return { label, manifestHash, payloadHash, payloadPath, payload: projected.payload,
+      projection: { ...contract, original_bytes: count, projected_bytes: projected.projectedBytes.length,
+        source_max_bytes: sourceMaximum, excluded_present: projected.excludedRootFields } };
+}
+
+function specifiedPositiveInteger(value, fallback, field) {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${field} requires a finite positive byte bound`);
+  return value;
 }
 
 function contentHash(value, field) {
@@ -253,4 +311,5 @@ module.exports = {
   prepareContentAddressedPayloadBindings,
   payloadArtifactBindings,
   readContentAddressedArtifactPayload,
+  readContentAddressedArtifactProjection,
 };

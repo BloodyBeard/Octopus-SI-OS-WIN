@@ -12,7 +12,7 @@ use octopus_interfaces::{
 };
 use octopus_ledger::ArtifactRef;
 use octopus_model_context_render::{
-    model_hidden_tool_names, model_visible_affordances,
+    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances,
     render_model_context_block_with_hidden_tools,
 };
 use octopus_provider_run_authoring::{
@@ -600,8 +600,14 @@ impl AnthropicMessagesDriver {
                 return Ok(vec![materialize_pending_tool_group(output_root, state)?]);
             }
         }
-        let hidden_tools =
-            model_hidden_tool_names(&self.private_config).map_err(DriverError::Protocol)?;
+        let selected = handoff
+            .callable_tool_names(&input)
+            .map_err(DriverError::Protocol)?;
+        let hidden_tools = model_tool_exclusions(
+            input.metadata()?,
+            &selected,
+            &model_hidden_tool_names(&self.private_config).map_err(DriverError::Protocol)?,
+        );
         let (tools, model_visible_tool_names) =
             translate_tools(&input, &hidden_tools, options.tool_name_prefix.as_deref())?;
         let mut assembled = assemble_turn(
@@ -1755,7 +1761,10 @@ fn context_artifacts(
     let mut artifacts = Vec::with_capacity(input.artifact_binding_payloads.len() + 1);
     let mut seen_sources = BTreeSet::new();
     for bound in &input.artifact_binding_payloads {
-        let mut value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+        let bytes = bound
+            .read_bytes()
+            .map_err(|error| DriverError::Protocol(error.to_string()))?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             DriverError::Protocol(format!(
                 "bound artifact '{}' is not JSON: {error}",
                 bound.artifact.id

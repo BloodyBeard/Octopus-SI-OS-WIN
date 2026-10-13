@@ -10,7 +10,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const sourcePath = path.join(__dirname, "client.cjs");
-const source = `${fs.readFileSync(sourcePath, "utf8")}\nmodule.exports.__outbound_test = { interfaceSocketPath, interfaceSocketIdentity, waitForInterfaceSocket, readLedgerOperatorRows, prepareOperatorPayloadArtifactBindings, assertPayloadInputCycleReady, assertPreparedOperatorPayloadSelection, readOrCreateOperatorMessageIntent, operatorMessageRequestDigest, assertProviderModelCatalogActiveRoute, existingRunSubmission, exactOutboundRuntime, ledgerChangeHubs, operatorChatLiveActivityPayload, operatorChatLiveEventEndsTurn, providerAccountOperationError, providerAccountTurnError, providerOperationRequestCoordinates, readOpenOperatorTurnStreamTail, selectOperatorTurnStreamEvents, selectedProviderDescriptorContent, streamIdentityHash, watchLedgerChange };`;
+const source = `${fs.readFileSync(sourcePath, "utf8")}\nmodule.exports.__outbound_test = { readConfig, interfaceSocketPath, interfaceSocketIdentity, waitForInterfaceSocket, readLedgerOperatorRows, prepareOperatorPayloadArtifactBindings, assertPayloadInputCycleReady, assertPreparedOperatorPayloadSelection, readOrCreateOperatorMessageIntent, operatorMessageRequestDigest, assertProviderModelCatalogActiveRoute, existingRunSubmission, exactOutboundRuntime, ledgerChangeHubs, operatorChatLiveActivityPayload, operatorChatLiveEventEndsTurn, providerAccountOperationError, providerAccountTurnError, providerOperationRequestCoordinates, readOpenOperatorTurnStreamTail, selectOperatorTurnStreamEvents, selectedProviderDescriptorContent, streamIdentityHash, watchLedgerChange };`;
 const loaded = { exports: {} };
 vm.runInNewContext(source, {
   Buffer,
@@ -61,6 +61,26 @@ const ACTIVE_WORKER = "system_worker_coder_max_active";
 const ACTIVE_WORKER_ROLE = "artifact-worker-role-active";
 const SUMMARY_ARTIFACT = "interface.artifact.output:task-summary";
 const CONTINUATION_ARTIFACT = "coder.worktree.snapshot:task-continuation";
+
+test("full client configuration validates the explicit artifact projection contract", async () => {
+  const canonical = await loaded.exports.__outbound_test.readConfig();
+  assert.deepEqual(Array.from(canonical.artifact_read_projection.excluded_root_fields), ["session_context", "codex_continuity"]);
+  assert.equal(canonical.artifact_read_projection.max_source_bytes, 268435456);
+  const nativeRequire = moduleApi.createRequire(sourcePath), nativeFs = nativeRequire("node:fs/promises");
+  for (const contract of [undefined, null, {}, { ...canonical.artifact_read_projection, schema_version: 2 },
+    { ...canonical.artifact_read_projection, max_source_bytes: 0 }, { ...canonical.artifact_read_projection, max_projected_bytes: -1 },
+    { ...canonical.artifact_read_projection, extra: true }, { ...canonical.artifact_read_projection, excluded_root_fields: ["x", "x"] },
+    { ...canonical.artifact_read_projection, excluded_root_fields: [" x "] }, { ...canonical.artifact_read_projection, json_object_labels: undefined },
+    { ...canonical.artifact_read_projection, json_object_labels: ["turn.stream"] }]) {
+    const config = { ...canonical, artifact_read_projection: contract }, unit = { exports: {} };
+    vm.runInNewContext(source, { Buffer, __dirname, __filename: sourcePath, clearTimeout, console, module: unit, process, setTimeout,
+      require: id => id === "node:fs/promises" ? { ...nativeFs, readFile: async file => {
+        assert.equal(file, path.join(__dirname, "client.json")); return JSON.stringify(config);
+      } } : nativeRequire(id),
+    });
+    await assert.rejects(unit.exports.__outbound_test.readConfig(), /artifact_read_projection/);
+  }
+});
 
 test("operator message and turn-control labels cannot bypass their owned admission paths", async () => {
   for (const label of ["operator.message", "operator.turn.control"]) {
@@ -223,7 +243,11 @@ test("live compaction batch stays on the active turn", async (t) => {
   t.after(async () => fs.promises.rm(root, { recursive: true, force: true }));
   const batch = await readOperatorChatArtifacts({
     octopusHome: () => root,
-    readArtifactPayload: async () => ({ payload: { id: "compact-one", type: "contextCompaction" } }),
+    readArtifactPayload: async input => {
+      assert.equal(input.projection.schema_version, 1);
+      assert.equal(input.label, "turn.context.compaction");
+      return { payload: { id: "compact-one", type: "contextCompaction" } };
+    },
   }, {
     interfaceId, runId, afterSeq: -1, cursor: { offset: 0, seq: null }, waitMs: 1, limit: 16,
   });
@@ -233,6 +257,32 @@ test("live compaction batch stays on the active turn", async (t) => {
   assert.equal(batch.artifacts[0].event_data.text, undefined);
   assert.equal(batch.artifacts[0].event_data.continuation, undefined);
   assert.equal(batch.artifacts[0].terminal, false);
+  const readerPath = path.join(__dirname, "../../../app/electron/contentAddressedArtifact.cjs");
+  const { readContentAddressedArtifactPayload: raw, readContentAddressedArtifactProjection: projected } = require(readerPath);
+  const blake3 = moduleApi.createRequire(readerPath)("@noble/hashes/blake3").blake3;
+  const blobsRoot = path.join(ledgerRoot, "blobs"), ledger = path.join(ledgerRoot, "movements.jsonl");
+  const base = JSON.parse((await fs.promises.readFile(ledger, "utf8")).trim());
+  const decoded = new Map();
+  const append = async (seq, label, bytes) => {
+    await fs.promises.mkdir(blobsRoot, { recursive: true });
+    const payloadHash = Buffer.from(blake3(bytes)).toString("hex");
+    const manifest = Buffer.from(JSON.stringify({ label, payload_path: path.join(blobsRoot, payloadHash), payload_content_hash: payloadHash }));
+    const hash = Buffer.from(blake3(manifest)).toString("hex");
+    await fs.promises.writeFile(path.join(blobsRoot, payloadHash), bytes); await fs.promises.writeFile(path.join(blobsRoot, hash), manifest);
+    await fs.promises.appendFile(ledger, `${JSON.stringify({ ...base, seq, lamport: seq + 1, artifact: { id: `${label}:${hash}`, content: hash } })}\n`);
+  };
+  for (const [index, [label, bytes]] of [["plain.note", Buffer.from("plain text")], ["binary.data", Buffer.from([255, 0, 1])],
+    ["json.array", Buffer.from("[1,2]")], ["json.scalar", Buffer.from("3")]].entries()) await append(index + 1, label, bytes);
+  const readOptions = { octopusHome: () => root, readArtifactPayload: async input => {
+    const mode = Object.hasOwn(input, "projection");
+    assert.equal(mode, input.label === "turn.context.compaction");
+    const result = await (mode ? projected : raw)({ ...input, blobsRoot }); decoded.set(input.label, result.payload); return result;
+  } };
+  const rawBatch = await readOperatorChatArtifacts(readOptions, { interfaceId, runId, afterSeq: 0, cursor: { offset: 0, seq: null }, waitMs: 1, limit: 16 });
+  assert.equal(rawBatch.artifacts.length, 4); assert.equal(decoded.get("plain.note").__raw, "plain text");
+  assert.equal(decoded.get("binary.data").__binary, true); assert.deepEqual(decoded.get("json.array"), [1, 2]); assert.equal(decoded.get("json.scalar"), 3);
+  await append(5, "turn.context.compaction", Buffer.from('{"private":['));
+  await assert.rejects(readOperatorChatArtifacts(readOptions, { interfaceId, runId, afterSeq: 4, cursor: { offset: 0, seq: null }, waitMs: 1, limit: 16 }), /malformed/);
 });
 
 test("exact provider failure terminates the live turn with diagnostic evidence", async (t) => {

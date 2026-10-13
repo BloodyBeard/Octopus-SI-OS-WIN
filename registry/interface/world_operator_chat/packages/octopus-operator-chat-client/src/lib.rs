@@ -18,6 +18,7 @@ use octopus_world_terminal_client::{
 use sha2::{Digest, Sha256};
 
 pub mod context_bindings;
+pub mod publication_selection;
 pub mod input_intake;
 mod retained_connections;
 mod home_voice;
@@ -45,7 +46,7 @@ pub const OPERATOR_CHAT_INTERFACE: &str = "world_operator_chat";
 const PROVIDER_HANDOFF_COMPLETE_LABEL: &str = "provider.handoff.complete";
 const PROVIDER_TRANSPORT_DISPATCH_LABEL: &str = "provider.transport.dispatch";
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorChatPlanRequest {
     pub registry_root: PathBuf,
@@ -84,9 +85,13 @@ pub struct OperatorChatPlanRequest {
     #[serde(default)]
     pub payload_artifact_bindings: Vec<octopus_ledger::ArtifactRef>,
     #[serde(default)]
+    pub publications: Vec<octopus_context_collections::CollectionSelection>,
+    #[serde(default)]
     pub selected_worker_environment_kinds: Vec<String>,
     #[serde(default)]
     pub selected_tools: Vec<SelectedToolSeed>,
+    #[serde(default)]
+    pub retain_current_capabilities: bool,
     #[serde(default)]
     pub existing_run_record: Option<serde_json::Value>,
     pub conversation: ConversationSeed,
@@ -134,7 +139,7 @@ pub struct SelectedToolSeed {
     pub worker_environment_kind: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConversationSeed {
     pub ledger_offset: u64,
@@ -191,6 +196,10 @@ pub struct OperatorChatPlan {
     pub capability_tools: BTreeMap<String, String>,
     pub authoring_tool_id: String,
     pub worker_relays: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub publication_evidence: Vec<publication_selection::PublicationSelectionEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_expansion: Option<publication_selection::PublicationExpansionReceipt>,
     #[serde(skip)]
     pub authoring_profile: OctopusOsAuthoringProfile,
     #[serde(rename = "authoring_profile")]
@@ -358,6 +367,8 @@ pub struct OctopusOsAuthoringProfile {
     pub selected_worker_environment_kinds: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_tools: Vec<SelectedToolSeed>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_evidence: Vec<publication_selection::PublicationSelectionEvidence>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -453,6 +464,14 @@ fn plan_operator_chat_topology_files(
     request: &OperatorChatPlanRequest,
     preserve_existing_writers: bool,
 ) -> Result<OperatorChatPlan, String> {
+    plan_operator_chat_topology_files_for_source(request, preserve_existing_writers, None)
+}
+
+fn plan_operator_chat_topology_files_for_source(
+    request: &OperatorChatPlanRequest,
+    preserve_existing_writers: bool,
+    native_metadata: Option<&octopus_ledger::InvocationMetadata>,
+) -> Result<OperatorChatPlan, String> {
     let chat_id = safe_segment(&request.chat_id, "chat_id")?;
     let cycle = safe_segment(&request.cycle, "cycle")?;
     let registry_root = require_absolute("registry_root", &request.registry_root)?;
@@ -466,8 +485,9 @@ fn plan_operator_chat_topology_files(
         &request.model_outputs,
     )?;
     let interface_root = registry_root.join("interface");
-    let config = load_client_config(&interface_root)?;
+    let mut config = load_client_config(&interface_root)?;
     let selection = resolve_run_selection(request, &config)?;
+    if request.retain_current_capabilities { config.run.context_artifact_bindings.clear(); }
 
     let ee_policy_root = match request.ee_policy_root.as_deref() {
         Some(root) => require_absolute("ee_policy_root", root)?,
@@ -485,11 +505,15 @@ fn plan_operator_chat_topology_files(
             return Err("Home requires the declared bootstrap-root EE".into());
         }
     }
-    let current_worker = if preserve_existing_writers {
-        let current = RunRecord::from_bytes(&serde_json::to_vec(request.existing_run_record.as_ref()
-            .ok_or("current-run planning requires its existing record")?).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    let retain_current_capabilities = preserve_existing_writers || request.retain_current_capabilities;
+    if retain_current_capabilities && request.existing_run_record.is_none() {
+        return Err("retained capability planning requires its existing record".into());
+    }
+    let current_worker = if retain_current_capabilities {
+        let existing = request.existing_run_record.as_ref().ok_or("retained capability planning requires its existing record")?;
+        let current = RunRecord::from_bytes(&serde_json::to_vec(existing).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
         Some(run_composition::current_run::form_current_worker(registry_root, ee_policy_root, &current,
-            selection.chat_interface_id.as_deref().ok_or("current-run planning has no client owner")?, &chat_id)?)
+            selection.chat_interface_id.as_deref().ok_or("existing-run planning has no client owner")?, &chat_id)?)
     } else { None };
     let topology = if let Some(current) = &current_worker { current.topology.clone() } else { form_capability_topology(
         registry_root,
@@ -500,12 +524,73 @@ fn plan_operator_chat_topology_files(
     )
     .map_err(|error| error.to_string())? };
     ensure_external_interfaces_admitted_by_ee(&topology, &external_interfaces)?;
-    let topology = select_capability_topology(
-        topology,
+    let initial_topology = select_capability_topology(
+        topology.clone(),
         &config,
         &request.selected_worker_environment_kinds,
         &request.selected_tools,
     )?;
+    let initial_interfaces = initial_topology.tool_bindings.keys().cloned()
+        .chain(external_interfaces.iter().map(|id| InterfaceId::new(id.as_str())))
+        .chain(std::iter::once(InterfaceId::new(&selection.provider_choice_interface)))
+        .collect::<Vec<_>>();
+    let initial_provider = resolve_provider(&interface_root, &selection.provider_choice_interface, request.model.as_deref().unwrap_or(""),
+        request.reasoning_effort.as_deref().unwrap_or(""), request.service_tier.as_deref(), &initial_topology)?;
+    let initial_identity = plan_identity(&config, &chat_id, &initial_provider, &initial_topology, &selection)?;
+    let preserved_client_configuration = if initial_identity.owns_client() {
+        preserve_octopus_os_client_configuration(&interface_root, &initial_identity.chat_interface_id, &initial_identity)?
+    } else { None };
+    let retained_evidence = if request.existing_run_record.is_some() {
+        preserved_client_configuration.as_ref().and_then(|preserved| preserved.declaration.authoring_profile.as_ref())
+            .map(|profile| profile.publication_evidence.clone()).unwrap_or_default()
+    } else { Vec::new() };
+    publication_selection::validate_retained_snapshots(registry_root, &retained_evidence)?;
+    let original_selection = publication_selection::PublicationSelectionSeeds::from_operator(request);
+    let explicit_publications = request.publications.clone();
+    let publication_defaults = if request.retain_current_capabilities { Vec::new() } else {
+        publication_selection::declared_publication_defaults(registry_root, initial_interfaces.iter().cloned())?
+    };
+    let mut publications = explicit_publications.clone();
+    let mut reused_defaults = Vec::new();
+    for pin in publication_defaults.iter().flat_map(|default|&default.publications) {
+        if !explicit_publications.contains(pin) && retained_evidence.iter().any(|evidence| &evidence.pin == pin) {
+            if !reused_defaults.contains(pin) { reused_defaults.push(pin.clone()); }
+        } else { publications.push(pin.clone()); }
+    }
+    let mut expanded_request;
+    let mut publication_writes = Vec::new();
+    let mut staged_publication_artifacts = BTreeMap::new();
+    let mut publication_evidence = Vec::new();
+    let request = if publications.is_empty() { request } else {
+        publication_selection::validate_target_read_formation(registry_root, ee_policy_root, &selection.ee_id,
+            current_worker.as_ref().map(|current| current.policy.id.as_str()).unwrap_or(&selection.worker_choice_interface))?;
+        let mut source_context = if request.retain_current_capabilities {
+            context_bindings::retained_context_bindings(request.existing_run_record.as_ref().ok_or("retained publication selection requires its existing record")?,
+                &initial_identity.model_interface_id, &request.context_artifact_bindings)?
+        } else { context_bindings::declared_context_bindings(registry_root, initial_interfaces, &request.context_artifact_bindings)? };
+        for binding in &config.run.context_artifact_bindings {
+            if !source_context.contains(binding) { source_context.push(binding.clone()); }
+        }
+        let authority = match native_metadata {
+            Some(metadata) => publication_selection::PublicationSourceAuthority::Native { metadata },
+            None => publication_selection::PublicationSourceAuthority::Operator { context_bindings:&source_context, payload_bindings:&request.payload_artifact_bindings },
+        };
+        let resolved = publication_selection::resolve_publication_selection(registry_root,
+            &octopus_context_collections::ScopeContext { ee_id:selection.ee_id.clone(),
+                worker_interface:selection.worker_runtime_interface.clone().unwrap_or_else(|| format!("{}_{}",selection.worker_choice_interface,chat_id)) },
+            &publications, publication_selection::PublicationSelectionSeeds::from_operator(request), authority, request.write_hash_algorithm)?;
+        expanded_request = request.clone();
+        resolved.selection.apply_operator(&mut expanded_request);
+        publication_writes = resolved.artifact_writes;
+        staged_publication_artifacts = resolved.staged_artifacts;
+        publication_evidence = resolved.evidence;
+        &expanded_request
+    };
+    external_interfaces = validate_external_routes(&request.external_inputs, &request.external_relays, &request.model_outputs)?;
+    ensure_external_interfaces_admitted_by_ee(&topology, &external_interfaces)?;
+    let topology = if publications.is_empty() { initial_topology } else {
+        select_capability_topology(topology, &config, &request.selected_worker_environment_kinds, &request.selected_tools)?
+    };
 
     let room_binding = topology
         .tool_bindings
@@ -539,15 +624,19 @@ fn plan_operator_chat_topology_files(
     if let Some(current) = &current_worker { identity.capability_tool_sources = current.tools.clone(); }
     preserve_selected_file_writer(&config, &chat_id, &topology, &request.selected_tools,
         &request.selected_worker_environment_kinds, &mut identity)?;
-    identity.voice = home_voice::select(&interface_root, &config, &identity, &topology)?;
+    identity.voice = home_voice::select(&interface_root, &config, &identity, &topology,
+        request.existing_run_record.as_ref().filter(|_| current_worker.is_some()))?;
     ensure_external_interfaces_admitted_by_ee(&topology, &external_interfaces)?;
-    let selected_context = context_bindings::declared_context_bindings(
+    let selected_context = if request.retain_current_capabilities {
+        context_bindings::retained_context_bindings(request.existing_run_record.as_ref().ok_or("retained context selection requires its existing record")?,
+            &identity.model_interface_id, &request.context_artifact_bindings)?
+    } else { context_bindings::declared_context_bindings(
         registry_root,
         topology.tool_bindings.keys().cloned()
             .chain(external_interfaces.iter().map(|id| InterfaceId::new(id.as_str())))
             .chain(std::iter::once(provider.interface.id.clone())),
         &request.context_artifact_bindings,
-    )?;
+    )? };
     plan_code_mode_owners(
         registry_root,
         &config,
@@ -555,6 +644,8 @@ fn plan_operator_chat_topology_files(
         &mut identity,
         &selected_context,
     )?;
+    let selected_publication_evidence = publication_evidence.clone();
+    publication_evidence = publication_selection::retain_publication_evidence(&retained_evidence, &publication_evidence)?;
     let requested_authoring_profile = OctopusOsAuthoringProfile {
         ee_id: selection.ee_id.clone(),
         worker_choice_interface: selection.worker_choice_interface.clone(),
@@ -566,15 +657,16 @@ fn plan_operator_chat_topology_files(
         payload_artifact_bindings: request.payload_artifact_bindings.clone(),
         selected_worker_environment_kinds: request.selected_worker_environment_kinds.clone(),
         selected_tools: request.selected_tools.clone(),
+        publication_evidence: publication_evidence.clone(),
     };
-    let preserved_client_configuration = if identity.owns_client() {
-        preserve_octopus_os_client_configuration(
-            &interface_root,
-            &identity.chat_interface_id,
-            &identity,
-        )?
-    } else {
-        None
+    let publication_expansion = if publications.is_empty() && publication_defaults.is_empty() { None } else {
+        let mut requested = requested_authoring_profile.clone();
+        original_selection.apply_profile(&mut requested);
+        requested.publication_evidence = retained_evidence.to_vec();
+        let receipt = publication_selection::PublicationExpansionReceipt { requested, publications:explicit_publications,
+            defaults:publication_defaults, reused_defaults, selected:selected_publication_evidence, expanded:requested_authoring_profile.clone() };
+        publication_selection::validate_publication_expansion_receipt(registry_root, &receipt)?;
+        Some(receipt)
     };
     let previous_authoring_profile = if request.existing_run_record.is_some() {
         preserved_client_configuration.as_ref()
@@ -608,7 +700,7 @@ fn plan_operator_chat_topology_files(
         .map(|pin| pin.as_str().to_string())
         .collect();
 
-    let mut writes = Vec::new();
+    let mut writes = publication_writes;
     write_code_mode_owner_artifacts(registry_root, &identity, &mut writes)?;
     let previous_owned = request
         .existing_run_record
@@ -662,12 +754,19 @@ fn plan_operator_chat_topology_files(
         &private_worker_role_artifacts,
         role_dependency_workers.iter(),
     )?;
-    let mut selected_context = context_bindings::with_instruction_source_bindings(
+    let retained_context_ids = if request.retain_current_capabilities {
+        let existing = RunRecord::from_bytes(&serde_json::to_vec(request.existing_run_record.as_ref().ok_or("retained instruction selection requires its existing record")?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        octopus_provider_run_authoring::provider_context_bindings(&existing, &InterfaceId::new(&identity.model_interface_id))?
+            .into_iter().map(|binding| binding.id.to_string()).collect::<BTreeSet<_>>()
+    } else { BTreeSet::new() };
+    let mut selected_context = context_bindings::with_instruction_source_bindings_from_planned(
         registry_root,
         role_artifacts.iter().cloned()
             .chain(config.run.context_artifact_bindings.iter().map(|binding| binding.id.clone()))
-            .chain(selected_context.iter().map(|binding| binding.id.clone())),
+            .chain(selected_context.iter().map(|binding| binding.id.clone()))
+            .filter(|id| !retained_context_ids.contains(id)),
         &selected_context,
+        &staged_publication_artifacts,
     )?;
     plan_provider_interface(
         &interface_root,
@@ -680,7 +779,7 @@ fn plan_operator_chat_topology_files(
         &mut writes,
     )?;
     home_voice::plan_descriptors(registry_root, &config, &topology, &identity, &mut writes)?;
-    if let Some(binding) = home_outputs::plan(request, &identity, &mut writes)? { selected_context.push(binding); }
+    if let Some(binding) = home_outputs::plan(request, &identity, &private_worker_role_artifacts, &mut writes)? { selected_context.push(binding); }
     if let Some(binding) = native_run_authoring::plan(native_run_authoring::PlanContext {
         registry_root,
         ee_instances_root: &request.ee_instances_root,
@@ -705,6 +804,19 @@ fn plan_operator_chat_topology_files(
                     descriptor.interface_policy.values=policy.context.clone();
                     write.content=pretty_json(&serde_json::to_value(descriptor).map_err(|e|e.to_string())?)?;
                 }
+            }
+            if request.retain_current_capabilities && file == Some("interface.json") && write.path.exists() {
+                let accepted: InterfaceDescriptor = parse_strict(&std::fs::read(&write.path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                let mut planned: InterfaceDescriptor = parse_strict(write.content.as_bytes()).map_err(|e| e.to_string())?;
+                if let Some(config) = planned.interface_driver_config.as_mut() {
+                    for field in ["context_artifact_bindings", "publications"] {
+                        match accepted.interface_driver_config.as_ref().and_then(|config| config.private_config.get(field)) {
+                            Some(value) => { config.private_config.insert(field.into(), value.clone()); }
+                            None => { config.private_config.remove(field); }
+                        }
+                    }
+                }
+                write.content = pretty_json(&serde_json::to_value(planned).map_err(|e| e.to_string())?)?;
             }
         }
     }
@@ -752,6 +864,10 @@ fn plan_operator_chat_topology_files(
     let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)?;
     let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
     let run_record_content = context_bindings::configure_tool_context(registry_root, &identity, run_record_content, request.existing_run_record.as_ref())?;
+    let run_record_content = if request.retain_current_capabilities {
+        context_bindings::retain_context_access(run_record_content,
+            request.existing_run_record.as_ref().ok_or("retained context access requires its existing record")?, &identity.model_interface_id)?
+    } else { run_record_content };
     if let Some(intake) = intake {
         for (id, component) in [
             (&intake.interface, "authoring_source"),
@@ -802,6 +918,8 @@ fn plan_operator_chat_topology_files(
         capability_tools: identity.capability_tools.clone(),
         authoring_tool_id: identity.authoring_tool_id.clone(),
         worker_relays,
+        publication_evidence,
+        publication_expansion,
         authoring_profile: requested_authoring_profile,
         authored_authoring_profile,
         required_interface_ids,
@@ -3620,6 +3738,7 @@ fn validate_octopus_os_authoring_profile(
     identity: Option<&PlannedIdentity>,
 ) -> Result<(), String> {
     safe_segment(&profile.ee_id, "authoring_profile.ee_id")?;
+    publication_selection::retain_publication_evidence(&[], &profile.publication_evidence)?;
     safe_segment(
         &profile.worker_choice_interface,
         "authoring_profile.worker_choice_interface",
@@ -3652,7 +3771,8 @@ fn validate_octopus_os_authoring_profile(
     )?;
     let mut artifacts = BTreeSet::new();
     for binding in &profile.context_artifact_bindings {
-        let id = safe_segment(&binding.id, "authoring_profile context artifact binding")?;
+        context_bindings::validate_artifact_id(&binding.id)?;
+        let id = binding.id.clone();
         if !artifacts.insert(id.clone()) {
             return Err(format!(
                 "Octopus OS authoring profile repeats context artifact binding '{id}'"
@@ -6368,6 +6488,7 @@ mod tests {
             payload_artifact_bindings: Vec::new(),
             selected_worker_environment_kinds: Vec::new(),
             selected_tools: Vec::new(),
+            publication_evidence: Vec::new(),
         };
         let checkpoint = serde_json::json!({
             "id": "cp_context_derived_exact",
@@ -6547,7 +6668,9 @@ mod tests {
             .map(str::to_string)
             .collect(),
             selected_tools: Vec::new(),
+            retain_current_capabilities: false,
             existing_run_record: None,
+            publications: Vec::new(),
             conversation: ConversationSeed {
                 ledger_offset: 0,
                 artifact_bindings: Vec::new(),
@@ -7169,7 +7292,7 @@ mod tests {
         assert_eq!(returned[0]["owner_authoring"]["tool"],writer_tool);
         assert_eq!(returned[0]["owner_authoring"]["door"],writer["interface"]);
         assert_eq!(returned[0]["include_context"], true);
-        assert!(returned[0].get("static_artifact_bindings").is_none());
+        assert_eq!(returned[0]["static_artifact_bindings"], serde_json::json!([format!("artifact-run-authoring-coordinates-{}", persistent_request.chat_id)]));
         assert_eq!(run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["payload_artifact_bindings"], serde_json::json!([payload_ref]));
         let rows = run["checkpoints"].as_array().unwrap();
         let writer = &run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["writer_run"];
@@ -7207,7 +7330,7 @@ mod tests {
             context_bindings::bind_selected_context(&mut rebound, None, &persistent.model_interface_id, [&seed], []).unwrap();
             let returned = rebound["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter().find(|cp| cp["role"] == "owner_input" && cp["interface_binding"]["interface"] == *owner).unwrap();
             assert_eq!(returned["include_context"], inherit);
-            assert_eq!(returned.get("static_artifact_bindings").is_none(), inherit);
+            assert!(returned["static_artifact_bindings"].as_array().unwrap().contains(&serde_json::json!(seed.id)));
             for row in rebound["checkpoints"].as_array().unwrap().iter().filter(|row| owned.contains(&row["id"])) {
                 let actual = bindings(&row["artifact_bindings"]);
                 assert_eq!(row["artifact_bindings"].as_array().unwrap().iter().find(|binding| binding["id"] == prelude["id"]).unwrap()["access"], rights);
@@ -7287,6 +7410,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn task_agent_nested_selection_survives_model_change_and_current_amendment() {
+        use crate::run_composition::{CompositionRoots, current_run::*};
+        use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let registry = root.join("registry");
+        copy_planner_descriptors(&repository_registry_root().join("registry"), &registry);
+        let ee = root.join("ee"); std::fs::create_dir(&ee).unwrap(); boot_operator_space_ee_instances(&ee);
+        let agent = "system_worker_template_nested_agent";
+        for file in ["interface.json", "policy.json"] {
+            let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(registry.join("interface/system_worker_operator_task").join(file)).unwrap()).unwrap();
+            value["id"] = serde_json::json!(agent);
+            if file == "policy.json" { for id in value["ceiling"]["interfaces"].as_array_mut().unwrap() {
+                if id == "system_worker_operator_task" { *id = serde_json::json!(agent); }
+            } }
+            let path = registry.join("interface").join(agent).join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap(); std::fs::write(path, pretty_json(&value).unwrap()).unwrap();
+        }
+        let topology = form_capability_topology(&registry, &CapabilityFormationRequest::from_live_chain(InterfaceId::new(agent), resolve_live_ee_policy_chain(&ee, &EeId::new("ee_existence")).unwrap())).unwrap();
+        let selected = topology.tool_bindings.iter().flat_map(|(interface,binding)| binding.tools.iter().map(|tool| SelectedToolSeed {
+            tool:tool.tool.to_string(), interface:interface.to_string(), worker_environment_kind:tool.worker_environment_kind.to_string(),
+        })).collect::<Vec<_>>();
+        let mut request: OperatorChatPlanRequest = serde_json::from_value(serde_json::json!({
+            "registry_root":registry,"ee_instances_root":ee,"run_records_root":root.join("runs"),"interface_private_state_root":root.join("private"),
+            "write_hash_algorithm":"sha256","chat_id":"nested_agent_task","provider_interface_id":"world_provider_codex","model":"gpt-6.1-sol","reasoning_effort":"xhigh",
+            "ee_id":"ee_existence","worker_interface_id":agent,"client_surface_role":"task","cycle":"first",
+            "selected_worker_environment_kinds":["browser_session","code_mode","desktop_session","system_room"],"selected_tools":selected,
+            "context_artifact_bindings":[{"id":"artifact-code-mode-browser-prelude"},{"id":"artifact-code-mode-cua-prelude"}],
+            "conversation":{"ledger_offset":0,"artifact_bindings":[],"pinned_artifact_bindings":[],"pinned_context_items":[],"continued_from":null}
+        })).unwrap();
+        let install = |plan: &OperatorChatPlan| {
+            for write in plan.interface_writes.iter().chain(&plan.run_writes) {
+                std::fs::create_dir_all(write.path.parent().unwrap()).unwrap(); std::fs::write(&write.path,&write.content).unwrap();
+            }
+            std::fs::create_dir_all(root.join("runs")).unwrap();
+            std::fs::write(root.join("runs").join(format!("{}.json",plan.run_id)),&plan.run_record_content).unwrap();
+        };
+        let initial = plan_operator_chat_topology(&request).unwrap(); install(&initial);
+        let roots = CompositionRoots {registry_root:registry.clone(),ee_instances_root:ee.clone(),run_records_root:root.join("runs"),interface_private_state_root:root.join("private")};
+        let provider = InterfaceId::new(&initial.model_interface_id);
+        let mut current = RunRecord::from_bytes(initial.run_record_content.as_bytes()).unwrap();
+        let first = current_selection(&roots,&current,&provider).unwrap().unwrap();
+        assert_eq!(first.selected_tools.len(),selected.len());
+        assert!(selected.iter().all(|tool|first.selected_tools.contains(tool)));
+        request.existing_run_record = Some(serde_json::to_value(&current).unwrap());
+        request.retain_current_capabilities = true; request.cycle = "model_change".into(); request.model = Some("gpt-6-astra".into());
+        let changed = plan_operator_chat_topology(&request).unwrap();
+        assert_eq!(changed.capability_tools,initial.capability_tools); assert_eq!(changed.capability_doors,initial.capability_doors);
+        install(&changed); current = RunRecord::from_bytes(changed.run_record_content.as_bytes()).unwrap();
+        assert_eq!(current_selection(&roots,&current,&provider).unwrap().unwrap().selected_tools,first.selected_tools);
+        let door = InterfaceId::new(&changed.capability_doors["system_room"]);
+        let bridge = ProviderCapabilityBridge {tool:changed.capability_tools["file.read"].clone(),correlation_id:"nested-read".into(),arguments_hash:octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone()};
+        let amendment = plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-retain".into(),selection:Some(first.clone()),authored:None,publications:vec![]},bridge,&[(changed.capability_tools["file.read"].clone(),door)]).unwrap();
+        assert!(amendment.validation.safe_to_apply,"{:?}",amendment.validation.regressions);
+        let after = RunRecord::from_bytes(&serde_json::to_vec(&amendment.amendment.after).unwrap()).unwrap();
+        assert_eq!(current_selection(&roots,&after,&provider).unwrap().unwrap().selected_tools,first.selected_tools);
+        let owner = &changed.capability_doors["system_code_mode"];
+        let owner_state = &current.interface_state[&InterfaceId::new(owner)];
+        assert_eq!(after.interface_state[&InterfaceId::new(owner)],*owner_state);
+        let nested = registry.join("tool").join(&changed.capability_tools["browser.navigate"]).join("tool.json");
+        let before = std::fs::read(&nested).unwrap();
+        let mut descriptor: serde_json::Value = serde_json::from_slice(&before).unwrap(); descriptor["description"] = serde_json::json!("Changed after accepted selection");
+        std::fs::write(&nested,pretty_json(&descriptor).unwrap()).unwrap();
+        assert!(current_selection(&roots,&current,&provider).unwrap_err().contains("granted exact descriptor"));
+        std::fs::write(&nested,before).unwrap();
+        let mut unbound = current.clone();
+        for checkpoint in &mut unbound.checkpoints {
+            checkpoint.artifact_bindings.retain(|artifact| !artifact.id.as_str().starts_with("artifact-code-mode-topology__"));
+        }
+        assert!(current_selection(&roots,&unbound,&provider).unwrap_err().contains("not readable"));
+        let mut wrong_return = current.clone();
+        for checkpoint in &mut wrong_return.checkpoints {
+            if checkpoint.inbound_interface().is_some_and(|id| id.as_str() == changed.capability_doors["system_browser"])
+                && checkpoint.outbound_interfaces().any(|id| id.as_str() == owner) {
+                checkpoint.outbound_interface_bindings = vec![AuthoredInterfaceBinding::all(InterfaceId::new(owner))];
+            }
+        }
+        assert!(current_selection(&roots,&wrong_return,&provider).unwrap_err().contains("exact accepted call and return"));
+    }
+
     fn assert_home_and_task_browser_cu_profile(registry_root: &Path, ee_root: &Path) {
         let repo = registry_root.parent().unwrap();
         let read = |path: &str| -> serde_json::Value {
@@ -7316,7 +7520,7 @@ mod tests {
         }
         assert!(!driver["required_packages"].as_array().unwrap().contains(&serde_json::json!("world_operator_chat")));
         let source_policy = read("registry/interface/system_worker_operator_home/policy.json");
-        assert_eq!(source_policy["role_artifacts"], serde_json::json!(["artifact-worker-role-template", "artifact-grounding-system-architecture", "artifact-worker-role-operator-home", "artifact-home-task-authoring", "artifact-spawn-literacy", "artifact-home-widget-authoring"]));
+        assert_eq!(source_policy["role_artifacts"], serde_json::json!(["artifact-worker-role-template", "artifact-grounding-system-architecture", "artifact-worker-role-operator-home", "artifact-home-task-authoring", "artifact-spawn-literacy", "artifact-home-widget-authoring", "artifact-context-collection-guide"]));
         let overlay = tempfile::tempdir().unwrap();
         copy_planner_descriptors(registry_root, overlay.path());
         let registry_root = overlay.path();
@@ -7466,6 +7670,59 @@ mod tests {
             assert_eq!(serde_json::to_value(&next).unwrap()["authoring_profile"], saved_sidecar["authoring_profile"]);
             assert!(!next.interface_writes.iter().any(|write| write.path == sidecar_path), "ordinary continuation must not rewrite unrelated client configuration");
             if role == "home" {
+                use crate::run_composition::{CompositionRoots, current_run::*};
+                use octopus_provider_run_authoring::capability_amendment::ProviderCapabilityBridge;
+                let roots = CompositionRoots { registry_root:registry_root.to_path_buf(), ee_instances_root:request.ee_instances_root.clone(),
+                    run_records_root:ee_root.join("runs"), interface_private_state_root:ee_root.join("interface-private") };
+                std::fs::create_dir_all(&roots.ee_instances_root).unwrap();
+                boot_operator_space_ee_instances(&roots.ee_instances_root);
+                std::fs::write(roots.run_records_root.join(format!("{}.json",plan.run_id)), &plan.run_record_content).unwrap();
+                let current = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
+                let provider = InterfaceId::new(&plan.model_interface_id);
+                let selection = current_selection(&roots,&current,&provider).unwrap().unwrap();
+                for tool in ["context.discover", "context.read", "context.prepare_publication"] {
+                    assert!(selection.selected_tools.iter().any(|selected| selected.tool == tool));
+                }
+                let voice: home_voice::HomeVoiceContext = serde_json::from_value(run["interface_state"][&plan.chat_interface_id]["voice_context"].clone()).unwrap();
+                let voice_paths = [roots.run_records_root.join(format!("{}.json",voice.run_id)),
+                    registry_root.join("interface").join(&voice.provider_id).join("interface.json"),
+                    registry_root.join("interface").join(&voice.provider_id).join("life.json")];
+                let accepted_voice = voice_paths.iter().map(|path| (path.clone(),std::fs::read(path).unwrap())).collect::<BTreeMap<_,_>>();
+                let source_path = registry_root.join("interface/world_provider_realtime/interface.json");
+                let source_bytes = std::fs::read(&source_path).unwrap();
+                let mut source: serde_json::Value = serde_json::from_slice(&source_bytes).unwrap();
+                source["interface_driver_config"]["private_config"]["session"]["audio"]["output"]["voice"] = serde_json::json!("changed source default");
+                std::fs::write(&source_path,pretty_json(&source).unwrap()).unwrap();
+                let mut retained = make_request(&inherited,role,id);
+                retained.existing_run_record = Some(run.clone()); retained.retain_current_capabilities = true;
+                let retained = plan_operator_chat_topology(&retained).unwrap();
+                assert!(!retained.interface_writes.iter().any(|write| write.tag == format!("policy:{}",plan.worker_interface_id)));
+                assert!(!retained.interface_writes.iter().chain(&retained.run_writes).any(|write| accepted_voice.contains_key(&write.path)));
+                let door = InterfaceId::new(&plan.capability_doors["system_room"]);
+                let bridge = ProviderCapabilityBridge { tool:plan.capability_tools["file.read"].clone(),correlation_id:"home-read".into(),
+                    arguments_hash:octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone() };
+                let amend = |record: &RunRecord| plan_current_run_amendment(&roots,record,&provider,CurrentRunRequest {
+                    amendment_key:"home-context-retained".into(),selection:Some(selection.clone()),authored:None,publications:vec![],
+                },bridge.clone(),&[(plan.capability_tools["file.read"].clone(),door.clone())]);
+                let preview = amend(&current).unwrap();
+                assert!(preview.validation.safe_to_apply,"{:?}",preview.validation.regressions);
+                assert_eq!(preview.amendment.after,amend(&current).unwrap().amendment.after);
+                assert_eq!(preview.amendment.after["interface_state"][&plan.model_interface_id]["run_authoring_binding"],run["interface_state"][&plan.model_interface_id]["run_authoring_binding"]);
+                assert!(!preview.dependency_writes.iter().chain(&preview.activation_writes).any(|write| accepted_voice.contains_key(&write.path)));
+                for (path,bytes) in &accepted_voice { assert_eq!(&std::fs::read(path).unwrap(),bytes); }
+                let policy_path = registry_root.join("interface").join(&plan.worker_interface_id).join("policy.json");
+                let policy_bytes = std::fs::read(&policy_path).unwrap();
+                let mut policy: serde_json::Value = serde_json::from_slice(&policy_bytes).unwrap();
+                assert!(!policy["ceiling"]["interfaces"].as_array().unwrap().contains(&serde_json::json!("world_provider_realtime")));
+                policy["ceiling"]["interfaces"].as_array_mut().unwrap().retain(|id| id != &serde_json::json!(voice.provider_id));
+                if let Some(policies) = policy["ceiling"]["interface_policy"].as_object_mut() { policies.remove(&voice.provider_id); }
+                std::fs::write(&policy_path,pretty_json(&policy).unwrap()).unwrap();
+                assert!(amend(&current).unwrap_err().contains("Home voice provider is absent"));
+                std::fs::write(&policy_path,policy_bytes).unwrap();
+                let mut wrong = current.clone();
+                wrong.interface_state.get_mut(&InterfaceId::new(&plan.chat_interface_id)).unwrap().get_mut("voice_context").unwrap()["provider_id"] = serde_json::json!("world_provider_realtime");
+                assert!(amend(&wrong).unwrap_err().contains("declared source identity"));
+                std::fs::write(&source_path,source_bytes).unwrap();
                 continuation.context_artifact_bindings.push(ArtifactBindingSeed { id: "artifact-secret-handle-flow".into() });
                 let amended = plan_operator_chat_topology(&continuation).unwrap();
                 let edited: serde_json::Value = serde_json::from_str(&amended.interface_writes.iter().find(|write| write.path == sidecar_path).unwrap().content).unwrap();
@@ -7548,9 +7805,9 @@ mod tests {
             cycle:"browser_persistent_cycle".into(), door_host_slots:BTreeMap::new(),
             external_inputs:Vec::new(), external_relays:Vec::new(), model_outputs:Vec::new(),
             context_artifact_bindings:Vec::new(),
-            payload_artifact_bindings:Vec::new(),
+            payload_artifact_bindings:Vec::new(), publications:Vec::new(),
             selected_worker_environment_kinds:vec!["browser_session".into(),"code_mode".into()],
-            selected_tools:Vec::new(), existing_run_record:None,
+            selected_tools:Vec::new(), retain_current_capabilities:false, existing_run_record:None,
             conversation:ConversationSeed { ledger_offset:0, artifact_bindings:Vec::new(), pinned_artifact_bindings:Vec::new(), pinned_context_items:Vec::new(), continued_from:None },
         };
         let exact = |plan: &OperatorChatPlan, tag: String| -> serde_json::Value {
@@ -7748,7 +8005,9 @@ mod tests {
             payload_artifact_bindings: Vec::new(),
             selected_worker_environment_kinds: vec!["filesystem_workspace".to_string()],
             selected_tools: Vec::new(),
+            retain_current_capabilities: false,
             existing_run_record: None,
+            publications: Vec::new(),
             conversation: ConversationSeed {
                 ledger_offset: 0,
                 artifact_bindings: Vec::new(),

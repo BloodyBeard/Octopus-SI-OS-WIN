@@ -10,6 +10,46 @@ const run = { run_id: "run_task", chat_interface_id: "chat_task", provider_inter
   provider_bound_interface_id: "provider_task", client_surface_role: "task", writable: true, turn_open: true, turn_state: "working" };
 const receipt = { runId: run.run_id, chatInterfaceId: run.chat_interface_id, modelInterfaceId: run.provider_bound_interface_id,
   messageId: "message", messageVerdict: { admitted: { seq: 100 } }, afterSeq: 100, cursor: { offset: 10, seq: 100 } };
+
+test("Stop uses scoped exact Home and run identities without decoding any conversation", async () => {
+  const scope = { status: "ready", home_run_id: "run_home", home_interface_id: "chat_home", client_runs: [
+    { run_id: "run_home", interface_id: "chat_home", surface_role: "home", archived: false },
+    { run_id: "run_task", interface_id: "chat_task", surface_role: "task", archived: false },
+    { run_id: "run_old", interface_id: "chat_old", surface_role: "task", archived: true },
+  ] };
+  const aliases = [scope.client_runs[2], scope.client_runs[1], scope.client_runs[0]].map(row => ({
+    run_id: row.run_id, chat_interface_id: row.interface_id, title: row.run_id === "run_task" ? "Work" : row.run_id, writable: true,
+  }));
+  let aliasReads = 0, submitted = 0;
+  const store = { async read({ method, params }) {
+    if (method === "projection.operator.os.scope") return scope;
+    assert.equal(method, "projection.operator.chats.list", "Stop must not request conversation payloads");
+    assert.equal(params.control_targets_only, true); aliasReads++;
+    return { chats: aliases };
+  }, invalidate() {}, close() {} };
+  const client = createClient({ home: os.tmpdir(), packageRoots: {}, status: async () => ({ runtimeReady: true }) }, {
+    store, loader: { load: async () => ({ async submitOperatorTurnControl(_options, input) {
+      submitted++; assert.equal(input.action, "stop"); return { ...input, verdict: { admitted: { seq: 1 } } };
+    } }) }, metadata: {},
+  });
+  try {
+    assert.equal((await client.stop("home")).interfaceId, "chat_home");
+    assert.equal((await client.stop("run_task")).interfaceId, "chat_task");
+    assert.equal(aliasReads, 0);
+    for (const selector of ["last", "Work", "run_ta"]) assert.equal((await client.stop(selector)).runId, "run_task");
+    assert.equal(aliasReads, 3);
+    await assert.rejects(client.stop("run_"), /ambiguous/);
+    await assert.rejects(client.stop("missing"), /No task/);
+    await assert.rejects(client.stop("run_old"), /cannot accept Stop/);
+    const before = submitted;
+    scope.home_interface_id = "other"; await assert.rejects(client.stop("home"), /No Home/);
+    scope.home_interface_id = "chat_home";
+    aliases[1].chat_interface_id = "foreign"; await assert.rejects(client.stop("Work"), /differs/);
+    scope.client_runs.push(scope.client_runs[1]); await assert.rejects(client.stop("run_task"), /invalid control target/);
+    scope.client_runs.pop(); scope.status = "degraded"; await assert.rejects(client.stop("home"), /valid client scope/);
+    assert.equal(submitted, before);
+  } finally { await client.close(); }
+});
 function movement(seq, overrides = {}) {
   return { source: "movement", run_id: run.run_id, interface_id: run.chat_interface_id,
     from_interface_id: run.provider_bound_interface_id, from_interface_role: "provider",

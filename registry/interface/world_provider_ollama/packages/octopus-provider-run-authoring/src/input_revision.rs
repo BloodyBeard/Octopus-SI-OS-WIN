@@ -288,6 +288,253 @@ fn active_returns(record: &RunRecord, changed: &[RunAuthoringCheckpoint]) -> Vec
         .collect()
 }
 
+fn static_revision_candidate(
+    record: &RunRecord, writer: &CheckedRunWriter, next: &BoundRunAuthoringTopology,
+) -> Result<bool, String> {
+    let old = validate_declared_provider_writer(record, writer)?;
+    let changed = replacements(&old, next)?;
+    let [template] = changed.as_slice() else { return Ok(false); };
+    let replacement = next.checkpoints.iter().find(|candidate| same_edge(template, candidate))
+        .ok_or("active input correction lost its exact owner edge")?;
+    let mut protected = replacement.clone();
+    protected.static_artifact_bindings = template.static_artifact_bindings.clone();
+    Ok(protected == *template && template.include_context
+        && template.static_artifact_bindings.iter().all(|id| replacement.static_artifact_bindings.contains(id))
+        && record.status.as_str() == Some("idle") && active_returns(record, &changed).len() == 1
+        && persisted_pending_handoff(record, &writer.owner)?.is_some_and(|pending| {
+            pending.terminal && pending.source_without_context && pending.dispatch_fenced
+                && pending.context_publication.is_none() && pending.settlement_of.is_none()
+                && pending.withdrawal.is_none() && pending.items.len() == 1
+        }))
+}
+
+fn static_revision_checkpoint<'a>(
+    record: &'a RunRecord,
+    writer: &CheckedRunWriter,
+    next: &BoundRunAuthoringTopology,
+) -> Result<&'a octopus_runtime::run_record::CheckpointRecord, String> {
+    if !static_revision_candidate(record, writer, next)? {
+        return Err("active input correction is not a terminal failed-source static revision".into());
+    }
+    let old = validate_declared_provider_writer(record, writer)?;
+    let changed = replacements(&old, next)?;
+    let [template] = changed.as_slice() else {
+        return Err("active input correction requires exactly one owner input definition".into());
+    };
+    let replacement = next.checkpoints.iter().find(|candidate| same_edge(template, candidate))
+        .ok_or("active input correction lost its exact owner edge")?;
+    let active = active_returns(record, &changed);
+    let [id] = active.as_slice() else {
+        return Err("active input correction requires one exact materialized owner input".into());
+    };
+    let checkpoint = record.checkpoint(id).ok_or("active input correction checkpoint absent")?;
+    if !checkpoint_record_matches_template(checkpoint, template, &record.id) {
+        return Err("active input correction differs from its materialized contract".into());
+    }
+    let declared = old.checkpoints.iter()
+        .filter(|row| row.role == RunAuthoringCheckpointRole::Stable && row.include_context)
+        .flat_map(|row| row.static_artifact_bindings.iter()).collect::<BTreeSet<_>>();
+    let context = provider_context_bindings(record, &writer.owner)?;
+    let mut dynamic = payload_artifact_bindings(record, &writer.owner)?.into_iter()
+        .map(|reference| reference.id).collect::<BTreeSet<_>>();
+    for owner in record.interface_state.keys() {
+        dynamic.extend(input_artifacts::selections(record, owner)?.into_iter().map(|input| input.artifact.id));
+    }
+    for id in replacement.static_artifact_bindings.iter().filter(|id| !template.static_artifact_bindings.contains(id)) {
+        let bindings = checkpoint.artifact_bindings.iter().filter(|binding| &binding.id == id).collect::<Vec<_>>();
+        let [binding] = bindings.as_slice() else { return Err("static correction needs one exact existing binding".into()); };
+        if !declared.contains(id) || dynamic.contains(id) || !binding.access.read
+            || context.iter().filter(|bound| *bound == *binding).count() != 1
+        {
+            return Err("static correction is not existing declared readable provider context".into());
+        }
+    }
+    Ok(checkpoint)
+}
+
+#[derive(PartialEq, Eq)]
+pub(super) struct FailedSourceStaticContext {
+    coordinate: RuntimeCoordinateKey,
+    snapshot: ContentHash,
+    checkpoint: octopus_runtime::run_record::CheckpointRecord,
+    source: IndexedOutboundArtifact,
+    added: Vec<ArtifactRef>,
+}
+
+impl FailedSourceStaticContext {
+    pub(super) fn refs_for(
+        &self, coordinate: &RuntimeCoordinateKey, source: &IndexedOutboundArtifact,
+        snapshot: &ContentHash, checkpoint: &octopus_runtime::run_record::CheckpointRecord,
+    ) -> Result<&[ArtifactRef], String> {
+        if &self.coordinate != coordinate || &self.source != source
+            || &self.snapshot != snapshot || &self.checkpoint != checkpoint
+        {
+            return Err("static correction proof differs from the exact failed source context".into());
+        }
+        Ok(&self.added)
+    }
+
+    fn extend(&mut self, next: Self) -> Result<(), String> {
+        self.refs_for(&next.coordinate, &next.source, &next.snapshot, &next.checkpoint)?;
+        for reference in next.added {
+            if !self.added.contains(&reference) { self.added.push(reference); }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn checked_failed_source_static_context(
+    evidence: &CheckedRunEvidence<'_>, path: &Path, chain: &[CheckedRunTransition],
+    provider: &InterfaceId, source: &IndexedOutboundArtifact,
+) -> Result<Option<FailedSourceStaticContext>, String> {
+    let mut selected: Option<FailedSourceStaticContext> = None;
+    let mut reader = FileCheckedRunReader::open(evidence, None)?;
+    for transition in chain {
+        if &transition.writer.owner != provider { continue; }
+        let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
+        if persisted_pending_handoff(&before, provider)?.is_none_or(|pending| pending.source_movement_seq != source.seq) {
+            continue;
+        }
+        let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+        let old = topology(&before, provider)?;
+        let next = topology(&after, provider)?;
+        if !is_revision(&old, &next) || active_returns(&before, &replacements(&old, &next)?).is_empty() {
+            continue;
+        }
+        let proof = static_revision_evidence(&mut reader, path, &transition.before,
+            &transition.writer, &next, transition.call.seq.0)?;
+        if &proof.source != source {
+            return Err("static correction belongs to another failed source".into());
+        }
+        match &mut selected {
+            Some(selected) => selected.extend(proof)?,
+            None => selected = Some(proof),
+        }
+    }
+    Ok(selected)
+}
+
+fn validate_static_revision_evidence(
+    reader: &mut impl CheckedRunEvidenceReader,
+    index: &ProviderLedgerEvidenceIndex,
+    path: &Path,
+    current: &[u8],
+    writer: &CheckedRunWriter,
+    next: &BoundRunAuthoringTopology,
+    before_seq: u64,
+) -> Result<FailedSourceStaticContext, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let checkpoint = static_revision_checkpoint(&record, writer, next)?;
+    let pending = persisted_pending_handoff(&record, &writer.owner)?.ok_or("failed source absent")?;
+    let matches = index.coordinate_outbounds.iter().filter(|(coordinate, _)| {
+        coordinate.run == record.id.as_str() && coordinate.worker == record.worker.as_str()
+            && coordinate.interface == writer.owner.as_str()
+    }).flat_map(|(coordinate, rows)| rows.iter().filter(|row| row.seq == pending.source_movement_seq)
+        .map(move |row| (coordinate, row))).collect::<Vec<_>>();
+    let [(coordinate, source)] = matches.as_slice() else { return Err("failed source has no unique admitted provider input".into()); };
+    let source_manifest = reader.artifact(&source.artifact)?.0;
+    if index.session_provider_inputs.get(&(artifact_ref_key(&source.artifact), record.id.to_string()))
+        .and_then(|inputs| inputs.get(&source.seq)) != Some(&source_manifest.label)
+    { return Err("failed source is not a completely admitted input artifact".into()); }
+    let hash = source.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+        .ok_or("failed source has no pinned run snapshot")?;
+    let bytes = reader.snapshot(&hash)?;
+    if ContentHash::of_bytes(&bytes) != hash { return Err("failed source snapshot integrity mismatch".into()); }
+    let original = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+    if persisted_pending_handoff(&original, &writer.owner)?.as_ref() == Some(&pending) {
+        return Err("failed source was admitted after its claimed terminal completion".into());
+    }
+    let topology = validate_declared_provider_writer(&original, writer)?;
+    let templates = topology.checkpoints.iter().filter(|template| {
+        template.role == RunAuthoringCheckpointRole::OwnerInput && template.include_context
+            && template.interface() == &source.source
+            && checkpoint_record_matches_template(checkpoint, template, &record.id)
+            && indexed_evidence_matches_checkpoint(source, template)
+    }).collect::<Vec<_>>();
+    if original.id != record.id || original.ee != record.ee || original.worker != record.worker
+        || original.checkpoint(&checkpoint.id) != Some(checkpoint)
+        || !original.active_checkpoints.contains(&checkpoint.id)
+        || coordinate.checkpoint != checkpoint.id.as_str() || coordinate.epoch != checkpoint.epoch.0
+        || templates.len() != 1 || !artifact_refs_match_bindings(&source.artifact_binding_refs, &checkpoint.artifact_bindings)
+    {
+        return Err("failed source differs from the exact active input snapshot or binding rights".into());
+    }
+    let added = next.checkpoints.iter().find(|template| same_edge(templates[0], template))
+        .ok_or("failed source correction changed its admitted input edge")?;
+    let declared = topology.checkpoints.iter()
+        .filter(|template| template.role == RunAuthoringCheckpointRole::Stable && template.include_context)
+        .flat_map(|template| template.static_artifact_bindings.iter()).collect::<BTreeSet<_>>();
+    let mut dynamic = payload_artifact_bindings(&original, &writer.owner)?.into_iter().map(|reference| reference.id).collect::<BTreeSet<_>>();
+    for owner in original.interface_state.keys() {
+        dynamic.extend(input_artifacts::selections(&original, owner)?.into_iter().map(|input| input.artifact.id));
+    }
+    for id in added.static_artifact_bindings.iter().filter(|id| !templates[0].static_artifact_bindings.contains(id)) {
+        if !declared.contains(id) || dynamic.contains(id) || id == &source.artifact.id || !source.readable_artifacts.contains(id)
+            || source.artifact_binding_refs.iter().filter(|reference| &reference.id == id).count() != 1
+        { return Err("static correction was not readable in the exact failed input".into()); }
+    }
+    for (other, rows) in &index.coordinate_outbounds {
+        if other.run != coordinate.run || other.worker != coordinate.worker || other.interface != coordinate.interface { continue; }
+        for row in rows.iter().filter(|row| row.seq < before_seq && row.seq != source.seq) {
+            if (other.checkpoint == coordinate.checkpoint && other.epoch == coordinate.epoch)
+                || (row.seq > source.seq && topology.checkpoints.iter().any(|template| {
+                    template.role.is_provider_input() && template.interface() == &row.source
+                        && indexed_evidence_matches_checkpoint(row, template)
+                }))
+            { return Err("static correction would cross another admitted provider input".into()); }
+        }
+    }
+    let writers = declared_writer_closure(&original, vec![writer.clone()])?;
+    let start = reader.concurrent_writer_start(&original, &bytes, source.seq)?;
+    let mut history = PayloadHistoryReader(reader as &mut dyn CheckedRunEvidenceReader);
+    let chain = checked_run_file_chain_with_reader(&mut history, path, &bytes, CheckedRunTarget::Snapshot(current),
+        start, start.checked_add(1).ok_or("failed source history overflow")?, Some(before_seq), &writers, &[], None, None)
+        .map_err(String::from)?;
+    let mut terminal = None;
+    for transition in &chain {
+        validate_checked_owner_transition(transition)?;
+        let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+        if transition.writer == *writer && persisted_pending_handoff(&after, &writer.owner)?.as_ref() == Some(&pending) {
+            terminal.get_or_insert(transition.result.seq.0);
+        }
+    }
+    let terminal = terminal.ok_or("failed source has no exact checked terminal error write")?;
+    validate_pending_items_are_active(&record, &writer.owner, &pending)?;
+    let item = &pending.items[0];
+    let reference = pending_ref(item)?;
+    let (manifest, payload) = history.artifact(&reference)?;
+    let error: serde_json::Value = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+    if manifest.label != item.artifact_label || manifest.label != "turn.error"
+        || error.get("label").and_then(serde_json::Value::as_str) != Some(manifest.label.as_str())
+        || error.get("will_retry").and_then(serde_json::Value::as_bool) != Some(false)
+        || error.pointer("/additional_details/source_movement_seq").and_then(serde_json::Value::as_u64) != Some(source.seq)
+        || error.get("message").and_then(serde_json::Value::as_str).is_none_or(|message| message.trim().is_empty())
+    { return Err("failed source has no exact non-retry terminal error artifact".into()); }
+    let admission = index.indexed_handoff_seq(PendingHandoffLedgerCoordinate {
+        interface: &writer.owner, run: &record.id, worker: &record.worker, artifact: &reference,
+        required_evidence: pending_required_evidence(item)?, checkpoint: &item.checkpoint.id, epoch: item.checkpoint.epoch,
+    }, before_seq)?.ok_or("failed source terminal error was not admitted before correction")?;
+    if admission <= terminal { return Err("failed source terminal error predates its checked installation".into()); }
+    Ok(FailedSourceStaticContext {
+        coordinate: (**coordinate).clone(), snapshot: hash, checkpoint: checkpoint.clone(),
+        source: (**source).clone(),
+        added: added.static_artifact_bindings.iter()
+            .filter(|id| !templates[0].static_artifact_bindings.contains(id))
+            .map(|id| source.artifact_binding_refs.iter().find(|reference| &reference.id == id)
+                .cloned().ok_or_else(|| "static correction lost its proven source ref".to_string()))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
+impl CheckedRunEvidence<'_> {
+    pub fn prepare_provider_input_revision(
+        &self, path: PathBuf, current: &[u8], writer: &CheckedRunWriter,
+        desired_inputs: Vec<serde_json::Value>, before_sequence: u64,
+    ) -> Result<ProviderInputRevision, String> {
+        prepare_input_revision(path, current, writer, desired_inputs, Some((self, before_sequence)))
+    }
+}
+
 pub fn provider_input_rearm_ready(
     evidence: &CheckedRunEvidence<'_>,
     record: &RunRecord,
@@ -448,6 +695,9 @@ impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadH
         self.0.pending_output_payload(provider, reference, relative)
     }
     fn movement(&mut self, sequence: u64) -> Result<Option<Movement>, String> { self.0.admitted_movement(sequence) }
+    fn visit_admitted_prefix(&mut self, before_seq: u64, visitor: &mut dyn FnMut(&Movement) -> Result<(), String>) -> Result<(), String> {
+        self.0.visit_admitted_prefix(before_seq, visitor)
+    }
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String> { self.0.artifact(reference) }
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String> { self.0.snapshot(hash) }
     fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
@@ -687,6 +937,11 @@ pub(super) fn validate_rearm_evidence(
         return Ok(());
     }
     let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+    let old = topology(&before, &transition.writer.owner)?;
+    let next = topology(&after, &transition.writer.owner)?;
+    if is_revision(&old, &next) && !active_returns(&before, &replacements(&old, &next)?).is_empty() {
+        return static_revision_evidence(reader, path, &transition.before, &transition.writer, &next, transition.call.seq.0).map(|_| ());
+    }
     let initial_revision = persisted_pending_handoff(&before, &transition.writer.owner)?.is_none()
         && is_revision(
             &topology(&before, &transition.writer.owner)?,
@@ -977,6 +1232,26 @@ pub fn prepare_provider_input_revision(
     writer: &CheckedRunWriter,
     desired_inputs: Vec<serde_json::Value>,
 ) -> Result<ProviderInputRevision, String> {
+    prepare_input_revision(path, current, writer, desired_inputs, None)
+}
+
+fn static_revision_evidence(
+    reader: &mut impl CheckedRunEvidenceReader, path: &Path, current: &[u8], writer: &CheckedRunWriter,
+    next: &BoundRunAuthoringTopology, before_seq: u64,
+) -> Result<FailedSourceStaticContext, String> {
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    static_revision_checkpoint(&record, writer, next)?;
+    let source = persisted_pending_handoff(&record, &writer.owner)?.ok_or("failed source absent")?.source_movement_seq;
+    if before_seq <= source { return Err("static correction has no later terminal evidence boundary".into()); }
+    let mut index = ProviderLedgerEvidenceIndex::new(writer.owner.clone(), PathBuf::new(), 1);
+    reader.visit_admitted_prefix(before_seq, &mut |row| index.note(row))?;
+    validate_static_revision_evidence(reader, &index, path, current, writer, next, before_seq)
+}
+
+fn prepare_input_revision(
+    path: PathBuf, current: &[u8], writer: &CheckedRunWriter,
+    desired_inputs: Vec<serde_json::Value>, evidence: Option<(&CheckedRunEvidence<'_>, u64)>,
+) -> Result<ProviderInputRevision, String> {
     let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
     let before = validate_declared_provider_writer(&record, writer)?;
     let config = before.config(&profile(writer));
@@ -1022,14 +1297,23 @@ pub fn prepare_provider_input_revision(
         .validate(&writer.owner, &record.id)?;
     let pending = persisted_pending_handoff(&record, &writer.owner)?;
     let blocked = active_returns(&record, &changed);
-    if !blocked.is_empty()
-        || pending
+    if pending
             .as_ref()
             .is_some_and(|pending| pending.context_publication.is_some())
     {
         return Ok(ProviderInputRevision::Deferred {
             checkpoints: blocked,
         });
+    }
+    if !blocked.is_empty() {
+        let Some((evidence, before_seq)) = evidence else {
+            return Ok(ProviderInputRevision::Deferred { checkpoints: blocked });
+        };
+        if !static_revision_candidate(&record, writer, &next)? {
+            return Ok(ProviderInputRevision::Deferred { checkpoints: blocked });
+        }
+        let mut reader = FileCheckedRunReader::open(evidence, None)?;
+        static_revision_evidence(&mut reader, &path, current, writer, &next, before_seq)?;
     }
     if pending.is_none()
         && optional_u64(
@@ -1237,7 +1521,12 @@ pub(super) fn validate(
     if !active_returns(&original, &changed).is_empty()
         || !active_returns(&current, &changed).is_empty()
     {
-        return Err("input revision changes a materialized return".into());
+        let prior = static_revision_checkpoint(&original, writer, &next)?;
+        if current.checkpoint(&prior.id) != Some(prior)
+            || active_returns(&original, &changed) != active_returns(&current, &changed)
+        {
+            return Err("static input correction changed its materialized checkpoint or rights".into());
+        }
     }
     let old_config = old.config(&profile(writer));
     let new_config = next.config(&profile(writer));

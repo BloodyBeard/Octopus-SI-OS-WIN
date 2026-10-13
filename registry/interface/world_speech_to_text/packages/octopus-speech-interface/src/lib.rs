@@ -709,14 +709,20 @@ async fn process_speech_artifact(
                     DEFAULT_MAX_AUDIO_BYTES,
                     "interface max_audio_bytes",
                 )?;
-                if bound.bytes.is_empty() || bound.bytes.len() > max_audio_bytes {
+                let audio = bound
+                    .read_bounded(
+                        u64::try_from(max_audio_bytes)
+                            .map_err(|_| "interface max_audio_bytes exceeds u64".to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                if audio.is_empty() || audio.len() > max_audio_bytes {
                     return Err(format!(
                         "bound audio artifact '{}' byte count {} is outside 1..={max_audio_bytes}",
                         arguments.audio_artifact_id,
-                        bound.bytes.len()
+                        audio.len()
                     ));
                 }
-                (arguments, bound.as_bytes().to_vec())
+                (arguments, audio.into_owned())
             } else {
                 return Ok(());
             };

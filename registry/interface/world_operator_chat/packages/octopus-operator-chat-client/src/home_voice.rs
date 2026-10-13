@@ -25,6 +25,7 @@ pub(super) struct PlannedVoice {
     pub writer: String,
     inputs: Vec<String>,
     outputs: Vec<String>,
+    retained: bool,
 }
 
 impl PlannedVoice {
@@ -43,6 +44,7 @@ pub(super) fn select(
     config: &ClientConfig,
     identity: &PlannedIdentity,
     topology: &FormedCapabilityTopology,
+    existing: Option<&Value>,
 ) -> Result<Option<PlannedVoice>, String> {
     if identity.surface_role != "home" {
         return Ok(None);
@@ -58,14 +60,38 @@ pub(super) fn select(
     if !matches!(parts.as_slice(), [std::path::Component::Normal(_)]) {
         return Err("Home voice contract must name one local file".into());
     }
-    if !topology
-        .interface_policies
-        .contains_key(&InterfaceId::new(&selected.provider_interface_id))
-    {
+    let context = HomeVoiceContext {
+        control_interface_id: format!("{}_voice_{}", config.interface, identity.chat_id),
+        provider_id: format!("{}_{}", selected.provider_interface_id, identity.chat_id),
+        delegation_interface_id: home_outputs::interfaces(identity)[2].clone(),
+        run_id: format!("{}_voice", identity.run_id),
+    };
+    if let Some(existing) = existing {
+        let accepted: HomeVoiceContext = serde_json::from_value(
+            existing["interface_state"][&identity.chat_interface_id]["voice_context"].clone(),
+        ).map_err(|e| format!("retained Home has no exact voice context: {e}"))?;
+        if accepted != context {
+            return Err("retained Home voice differs from its declared source identity".into());
+        }
+        let sidecar: OctopusOsInterfaceSidecar = serde_json::from_slice(
+            &std::fs::read(root.join(&context.provider_id).join("octopus_os.json")).map_err(|e| e.to_string())?,
+        ).map_err(|e| e.to_string())?;
+        if sidecar.schema_version != 1 || sidecar.workspace != "octopus_os"
+            || sidecar.component != "provider" || sidecar.surface_role != "home"
+            || sidecar.interface != context.provider_id || sidecar.owner_interface != identity.chat_interface_id
+        {
+            return Err("retained Home voice provider has a different exact owner".into());
+        }
+    }
+    let provider_id = if existing.is_some() { &context.provider_id } else { &selected.provider_interface_id };
+    if !topology.interface_policies.contains_key(&InterfaceId::new(provider_id)) {
         return Err("Home voice provider is absent from the formed exact interface policy".into());
     }
-    let descriptor = load_interface_descriptor(root, &selected.provider_interface_id)?;
-    if descriptor.role.0.as_str() != "provider" {
+    let descriptor = load_interface_descriptor(root, provider_id)?;
+    let source_descriptor = load_interface_descriptor(root, &selected.provider_interface_id)?;
+    if descriptor.role.0.as_str() != "provider" || source_descriptor.role.0.as_str() != "provider"
+        || descriptor.interface_driver_ref != source_descriptor.interface_driver_ref
+    {
         return Err("Home voice selection must name a provider interface".into());
     }
     let contract: Value = serde_json::from_slice(
@@ -104,12 +130,7 @@ pub(super) fn select(
     }
     outputs.retain(|label| label != "realtime.delegation");
     Ok(Some(PlannedVoice {
-        context: HomeVoiceContext {
-            control_interface_id: format!("{}_voice_{}", config.interface, identity.chat_id),
-            provider_id: format!("{}_{}", selected.provider_interface_id, identity.chat_id),
-            delegation_interface_id: home_outputs::interfaces(identity)[2].clone(),
-            run_id: format!("{}_voice", identity.run_id),
-        },
+        context,
         source: format!(
             "{}_voice_{}",
             config.authoring.source_interface, identity.chat_id
@@ -124,6 +145,7 @@ pub(super) fn select(
         ),
         inputs,
         outputs,
+        retained: existing.is_some(),
     }))
 }
 
@@ -137,6 +159,9 @@ pub(super) fn plan_descriptors(
     let Some(voice) = &identity.voice else {
         return Ok(());
     };
+    if voice.retained {
+        return Ok(());
+    }
     let selected = config
         .home_voice
         .as_ref()

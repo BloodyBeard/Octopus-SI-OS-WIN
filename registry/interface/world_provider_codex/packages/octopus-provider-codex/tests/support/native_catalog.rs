@@ -9,6 +9,7 @@ fn current_run_catalogs_match_the_typed_authoring_request() {
     });
     let requests = [
         CurrentRunRequest {
+            publications:vec![],
             amendment_key:"attach".into(), authored:None,
             selection:Some(CurrentRunSelection {
                 selected_tools:vec![], selected_worker_environment_kinds:vec![],
@@ -17,6 +18,7 @@ fn current_run_catalogs_match_the_typed_authoring_request() {
             }),
         },
         CurrentRunRequest {
+            publications:vec![],
             amendment_key:"attach".into(), selection:None,
             authored:Some(AuthoredCurrentRun {
                 expected_before_hash:octopus_ledger::ContentHash::of_bytes(

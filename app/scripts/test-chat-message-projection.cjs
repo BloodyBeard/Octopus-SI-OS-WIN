@@ -14,6 +14,95 @@ function visit(node) {
 }
 visit(tree);
 const protocol = { inputLabel: 'input', terminalOutputLabel: 'output', errorOutputLabel: 'error', hiddenActivityLabels: [] };
+
+test('Stop aliases match actual tasks titles without reading terminal history', async () => {
+  const { createClient } = require('../cli/client.cjs');
+  const entries = ['home', 'task', 'named'].map((name, index) => ({
+    runId: `run_${name}`, chatInterfaceId: `chat_${name}`, surfaceRole: name === 'home' ? 'home' : 'task',
+    writable: true, activity: [], outbound: [], record: {},
+    inbound: [{ label: 'input', seq: index + 1, time: index + 1, payload: { text: name === 'home' ? 'Review\n notes' : 'Not the authored title' } }],
+  }));
+  entries[0].inbound.unshift({ label: 'input', seq: 0, time: 10, payload: { text: 'Later input' } });
+  const sidecars = new Map([['chat_home', { presentation: { name: 'Home' } }],
+    ['chat_task', { presentation: { name: 'Task title' } }], ['chat_named', { presentation: { name: 'run_named' } }]]);
+  const scope = { status: 'ready', home_run_id: 'run_home', home_interface_id: 'chat_home',
+    client_runs: entries.map(entry => ({ run_id: entry.runId, interface_id: entry.chatInterfaceId, surface_role: entry.surfaceRole, archived: false })) };
+  const projection = { operatorChatProtocol: protocol };
+  let allowPayload = true, allowHistory = true, payloadReads = 0;
+  const context = vm.createContext({
+    stringValue: value => typeof value === 'string' ? value : '',
+    objectOrEmpty: value => value && typeof value === 'object' && !Array.isArray(value) ? value : {},
+    arrayValue: value => Array.isArray(value) ? value : [], numberValue: (value, fallback) => Number.isFinite(value) ? value : fallback,
+    operatorOsScope: () => scope, octopusOsInterfaceSidecars: () => sidecars, operatorChatRunIndex: async () => entries,
+    ledgerArtifactLabel: row => row.label, rowTimeMs: row => row.time, operatorChatTurnText: payload => payload.text,
+    resolveLedgerArtifactPayload: async row => {
+      assert(allowPayload, 'scope and last selectors must not read payloads'); payloadReads++;
+      assert.equal(row, entries[0].inbound[1], 'only the first Home input supplies a derived title'); return row.payload;
+    },
+    operatorOsApplications: () => ({}), eeInstanceRows: () => [], operatorChatRunProvider: () => ({}),
+    projectHomeVoiceContext: () => null, operatorActivityAgent: () => null,
+    operatorChatTurnState: async () => { assert(allowHistory); return { open: false, state: 'idle' }; },
+    operatorChatLastTerminalMessage: async () => { assert(allowHistory, 'control aliases must not read terminal history'); return {}; },
+  });
+  for (const name of ['operatorChatTitle', 'operatorChatControlTargets', 'buildOperatorChatsList']) {
+    assert(declarations.has(name)); vm.runInContext(declarations.get(name), context);
+  }
+  const store = { async read({ method, params }) {
+    if (method === 'projection.operator.os.scope') return scope;
+    assert.equal(method, 'projection.operator.chats.list');
+    return { chats: params?.control_targets_only
+      ? await context.operatorChatControlTargets(projection, params.include_titles)
+      : await context.buildOperatorChatsList(projection) };
+  }, invalidate() {}, close() {} };
+  const client = createClient({ home: require('node:os').tmpdir(), packageRoots: {}, status: async () => ({ runtimeReady: true }) }, {
+    store, metadata: {}, loader: { load: async () => ({ submitOperatorTurnControl: async (_options, input) => ({ ...input, verdict: { admitted: { seq: 1 } } }) }) },
+  });
+  try {
+    const tasks = await client.tasks();
+    assert.deepEqual(Object.fromEntries(tasks.map(task => [task.id, task.title])), {
+      run_home: 'Review notes', run_named: 'run_named', run_task: 'Task title',
+    });
+    assert.equal(payloadReads, 1);
+    allowHistory = false; allowPayload = false;
+    for (const [selector, id] of [['home', 'run_home'], ['run_task', 'run_task'], ['last', 'run_named']]) {
+      assert.equal((await client.stop(selector)).runId, id);
+    }
+    assert.equal(payloadReads, 1);
+    allowPayload = true;
+    const aliases = await context.operatorChatControlTargets(projection, true);
+    for (const task of tasks) {
+      assert.equal(aliases.find(row => row.run_id === task.id).title, task.title);
+      assert.equal((await client.stop(task.title)).runId, task.id);
+    }
+    sidecars.get('chat_task').presentation.name = tasks.find(task => task.isHome).title;
+    await assert.rejects(client.stop('Review notes'), /ambiguous/);
+  } finally { await client.close(); }
+});
+
+test('artifact cache separates raw bytes, projection contracts and exact artifact identities', async () => {
+  const { artifactReadProjectionForLabel } = require('../electron/boundedJsonProjection.cjs');
+  let reads = 0;
+  const contract = { schema_version: 1, json_object_labels: ['reply'], excluded_root_fields: ['private'], max_source_bytes: 100, max_projected_bytes: 100 };
+  const row = { source_file: 'ledger/movements.jsonl', id: 'reply:checked', label: 'reply' };
+  const context = vm.createContext({ resolvedArtifactPayloads: new Map(), resolvedArtifactPayloadBytes: 0,
+    RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_BYTES: 65536, RESOLVED_ARTIFACT_PAYLOAD_CACHE_MAX_ENTRIES: 16,
+    contentHashHex: () => 'a'.repeat(64), ledgerArtifactLabel: row => row.label, ledgerArtifactId: row => row.id, artifactReadProjectionForLabel,
+    loadLedgerArtifactPayload: async (row, _hex, _required, projection) => {
+      reads++;
+      if (projection && row.id !== 'reply:checked') throw new Error('artifact identity mismatch');
+      if (projection?.max_source_bytes < 50) throw new Error('source byte bound');
+      return { payload: projection ? { text: 'Reply' } : { text: 'Reply', private: 'original' }, cacheable: true, retainedBytes: 32 };
+    },
+  });
+  for (const name of ['resolveLedgerArtifactPayload', 'removeResolvedArtifactPayload', 'trimResolvedArtifactPayloads']) vm.runInContext(declarations.get(name), context);
+  assert.equal((await context.resolveLedgerArtifactPayload(row)).private, 'original');
+  assert.equal((await context.resolveLedgerArtifactPayload(row, { projection: contract })).private, undefined);
+  await context.resolveLedgerArtifactPayload(row, { projection: contract }); assert.equal(reads, 2);
+  assert.equal((await context.resolveLedgerArtifactPayload({ ...row, label: 'binary' }, { projection: contract })).private, 'original');
+  await assert.rejects(context.resolveLedgerArtifactPayload({ ...row, id: 'foreign' }, { projection: contract }), /identity/);
+  await assert.rejects(context.resolveLedgerArtifactPayload(row, { projection: { ...contract, max_source_bytes: 1 } }), /source byte bound/);
+  await assert.rejects(context.resolveLedgerArtifactPayload(row, { projection: undefined }), /projection/i);
+});
 function row(seq, kind, text, item = 'a', phase = null, from = 'provider') {
   return { seq, source_line: seq, from, to: 'chat', label: kind === 'message' ? 'output' : kind,
     payload: { kind, text, turn_id: 'turn', item_id: item, phase, lifecycle: ['message', 'commentary'].includes(kind) ? 'completed' : 'streaming' } };

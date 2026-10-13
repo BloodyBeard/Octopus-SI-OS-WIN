@@ -2,6 +2,8 @@ const { parseScheduledDueAt } = require("./scheduledTime.cjs");
 const { modelServiceTiers } = require("./providerModelTiers.cjs");
 const { parseHomeVoiceContext, projectHomeVoiceContext } = require("./homeVoiceProjection.cjs");
 const { payloadArtifactBindings } = require("./contentAddressedArtifact.cjs");
+const { readContentAddressedArtifactProjection } = require("./contentAddressedArtifact.cjs");
+const { artifactReadProjectionForLabel } = require("./boundedJsonProjection.cjs");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
@@ -558,6 +560,7 @@ function createProjectionStore(options) {
       case "projection.descriptors.ee.list":
         return { descriptors: limitRows(eeTemplateDescriptorRows(projection), params) };
       case "projection.operator.chats.list": {
+        if (params.control_targets_only === true) return { chats: await operatorChatControlTargets(projection, params.include_titles === true) };
         const chats = limitRows(await operatorChatsList(projection), params);
         return { chats, ...(params.include_activity === true ? { activity: await operatorActivity(projection, chats) } : {}) };
       }
@@ -1656,7 +1659,7 @@ function createProjectionStore(options) {
       { afterSeq, beforeSeq, fromEnd, limit: requestedLimit },
     );
     const selected = indexed.rows;
-    const resolvedPayloads = await resolveLedgerArtifactPayloadResults(selected);
+    const resolvedPayloads = await resolveLedgerArtifactPayloadResults(selected, { projection: protocol.artifactReadProjection });
     const sidecars = octopusOsInterfaceSidecars(projection);
     const interfaceRoles = new Map(baseInterfaceRows(projection).map((descriptor) => [
       stringValue(descriptor.rule_id ?? descriptor.id),
@@ -3865,10 +3868,12 @@ function createProjectionStore(options) {
   }
 
 
-  async function resolveLedgerArtifactPayload(row) {
+  async function resolveLedgerArtifactPayload(row, readOptions = {}) {
     const hex = contentHashHex(row && row.artifact && row.artifact.content);
     if (!hex || !row.source_file) return null;
-    const cacheKey = `${row.source_file}:${hex}`;
+    const contract = Object.hasOwn(readOptions, "projection")
+      ? artifactReadProjectionForLabel(readOptions.projection, ledgerArtifactLabel(row)) : null;
+    const cacheKey = `${row.source_file}:${hex}:${contract ? JSON.stringify([contract, ledgerArtifactId(row)]) : "raw"}`;
     const cached = resolvedArtifactPayloads.get(cacheKey);
     if (cached) {
       resolvedArtifactPayloads.delete(cacheKey);
@@ -3876,7 +3881,7 @@ function createProjectionStore(options) {
       return cached.promise;
     }
     const entry = { promise: null, weight: 0 };
-    const pending = loadLedgerArtifactPayload(row, hex).then(({ payload, cacheable, retainedBytes }) => {
+    const pending = loadLedgerArtifactPayload(row, hex, false, contract).then(({ payload, cacheable, retainedBytes }) => {
       if (!cacheable) {
         removeResolvedArtifactPayload(cacheKey, entry);
       } else if (resolvedArtifactPayloads.get(cacheKey) === entry) {
@@ -3917,7 +3922,7 @@ function createProjectionStore(options) {
     }
   }
 
-  async function resolveLedgerArtifactPayloads(rows, required = false) {
+  async function resolveLedgerArtifactPayloads(rows, required = false, readOptions = {}) {
     const unique = [...new Set(rows)];
     const payloads = new Map();
     let next = 0;
@@ -3930,15 +3935,17 @@ function createProjectionStore(options) {
         if (required) {
           const hash = contentHashHex(row?.artifact?.content);
           if (!hash || !row.source_file) throw new Error(`Activity has no readable artifact receipt: ${ledgerArtifactId(row)}`);
-          payloads.set(row, (await loadLedgerArtifactPayload(row, hash, true)).payload);
-        } else payloads.set(row, await resolveLedgerArtifactPayload(row));
+          const contract = Object.hasOwn(readOptions, "projection")
+            ? artifactReadProjectionForLabel(readOptions.projection, ledgerArtifactLabel(row)) : null;
+          payloads.set(row, (await loadLedgerArtifactPayload(row, hash, true, contract)).payload);
+        } else payloads.set(row, await resolveLedgerArtifactPayload(row, readOptions));
       }
     });
     await Promise.all(workers);
     return payloads;
   }
 
-  async function resolveLedgerArtifactPayloadResults(rows) {
+  async function resolveLedgerArtifactPayloadResults(rows, readOptions = {}) {
     const unique = [...new Set(rows)];
     const results = new Map();
     let next = 0;
@@ -3949,7 +3956,7 @@ function createProjectionStore(options) {
         if (index >= unique.length) return;
         const row = unique[index];
         try {
-          results.set(row, { payload: await resolveLedgerArtifactPayload(row), error: "" });
+          results.set(row, { payload: await resolveLedgerArtifactPayload(row, readOptions), error: "" });
         } catch (error) {
           results.set(row, {
             payload: null,
@@ -3962,7 +3969,14 @@ function createProjectionStore(options) {
     return results;
   }
 
-  async function loadLedgerArtifactPayload(row, hex, required = false) {
+  async function loadLedgerArtifactPayload(row, hex, required = false, projection = null) {
+    if (projection) {
+      const resolved = await readContentAddressedArtifactProjection({
+        blobsRoot: path.join(path.dirname(row.source_file), "blobs"), manifestHash: hex,
+        artifactId: ledgerArtifactId(row), label: ledgerArtifactLabel(row), projection,
+      });
+      return { payload: resolved.payload, cacheable: true, retainedBytes: resolved.projection.projected_bytes };
+    }
     const blobPath = path.join(path.dirname(row.source_file), "blobs", hex);
     let bytes;
     try {
@@ -6265,13 +6279,13 @@ function createProjectionStore(options) {
     if (row.kind === "InterfaceOutbound"
       && movementBoundaryInterface(row, "to") === provider
       && label === "provider.peer.input") {
-      const payload = await resolveLedgerArtifactPayload(row);
+      const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
       return payload?.message?.action === "followup" ? "waiting" : null;
     }
     if (!isOperatorChatProviderMovement(entry, row)) return null;
     if (label === "turn.started") return "working";
     if (label === "provider.transport.dispatch") {
-      const payload = await resolveLedgerArtifactPayload(row);
+      const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
       return payload?.provider_interface === provider && payload?.method === "turn/start"
         ? "working" : null;
     }
@@ -6328,7 +6342,7 @@ function createProjectionStore(options) {
       if (["turn.control.acknowledged", "turn.control.failed"].includes(label)) {
         if (!providerMovement) continue;
         const outcome = operatorTurnControlOutcome(
-          await resolveLedgerArtifactPayload(row),
+          await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }),
           row,
         );
         if (outcome?.status === "acknowledged" && outcome.action === "resume") {
@@ -6348,7 +6362,7 @@ function createProjectionStore(options) {
       }
       if (!open) continue;
       if (providerMovement && label === "turn.completed") {
-        const payload = await resolveLedgerArtifactPayload(row);
+        const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
         open = false;
         state = stringValue(payload?.status ?? payload?.turn?.status) === "failed" ? "failed" : "idle";
         continue;
@@ -6364,7 +6378,7 @@ function createProjectionStore(options) {
         continue;
       }
       if (providerMovement && label === protocol.errorOutputLabel) {
-        const payload = await resolveLedgerArtifactPayload(row);
+        const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
         if (payload?.will_retry === true) {
           state = "working";
           continue;
@@ -6374,7 +6388,7 @@ function createProjectionStore(options) {
         continue;
       }
       if (isOperatorChatProviderFailureRow(entry, row)) {
-        operatorChatProviderFailureActivity(entry, row, await resolveLedgerArtifactPayload(row));
+        operatorChatProviderFailureActivity(entry, row, await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }));
         open = false;
         state = "failed";
         continue;
@@ -6477,6 +6491,39 @@ function createProjectionStore(options) {
     return promise;
   }
 
+  async function operatorChatTitle(entry, sidecars, protocol, includeInputTitle = true) {
+    const authoredTitle = entry.surfaceRole === "task"
+      ? stringValue(sidecars.get(entry.chatInterfaceId)?.presentation?.name)
+      : "";
+    if (authoredTitle || !includeInputTitle) return authoredTitle || entry.runId;
+    const firstInbound = entry.inbound
+      .filter((row) => !entry.writable || ledgerArtifactLabel(row) === protocol.inputLabel)
+      .sort((a, b) => rowTimeMs(a) - rowTimeMs(b))[0];
+    if (firstInbound) {
+      const text = operatorChatTurnText(await resolveLedgerArtifactPayload(firstInbound, { projection: protocol.artifactReadProjection }), "in");
+      if (text) return text.replace(/\s+/g, " ").trim().slice(0, 48);
+    }
+    return entry.runId;
+  }
+
+  async function operatorChatControlTargets(projection, includeTitles) {
+    const scope = operatorOsScope(projection);
+    if (scope.status !== "ready") throw new Error("Control target lookup requires the current valid client scope");
+    const scoped = new Map(scope.client_runs.map(row => [row.run_id, row]));
+    const sidecars = octopusOsInterfaceSidecars(projection);
+    const protocol = objectOrEmpty(projection.operatorChatProtocol);
+    const rows = await Promise.all((await operatorChatRunIndex(projection)).filter(entry => scoped.has(entry.runId)).map(async entry => {
+      const owner = scoped.get(entry.runId);
+      if (owner.interface_id !== entry.chatInterfaceId) throw new Error("Control target differs from its scoped client interface");
+      const title = await operatorChatTitle(entry, sidecars, protocol, includeTitles);
+      const movements = entry.activity.length ? entry.activity : [...entry.inbound, ...entry.outbound];
+      return { run_id: entry.runId, chat_interface_id: entry.chatInterfaceId, title,
+        updated_at_ms: movements.reduce((last, row) => Math.max(last, rowTimeMs(row)), 0),
+        archived: owner.archived, writable: entry.writable && !owner.archived, client_surface_role: owner.surface_role };
+    }));
+    return rows.sort((left, right) => right.updated_at_ms - left.updated_at_ms);
+  }
+
   async function buildOperatorChatsList(projection) {
     const voiceRunsById = new Map(arrayValue(projection.runRecords).map((run) => [run.run_id, run]));
     const clientSidecars = octopusOsInterfaceSidecars(projection);
@@ -6501,17 +6548,7 @@ function createProjectionStore(options) {
         (latest, row) => Math.max(latest, numberValue(row.seq, 0)),
         0,
       );
-      const firstInbound = entry.inbound
-        .filter((row) => !entry.writable || ledgerArtifactLabel(row) === protocol.inputLabel)
-        .sort((a, b) => rowTimeMs(a) - rowTimeMs(b))[0];
-      const authoredTitle = entry.surfaceRole === "task"
-        ? stringValue(clientSidecars.get(entry.chatInterfaceId)?.presentation?.name)
-        : "";
-      let title = authoredTitle || entry.runId;
-      if (!authoredTitle && firstInbound) {
-        const text = operatorChatTurnText(await resolveLedgerArtifactPayload(firstInbound), "in");
-        if (text) title = text.replace(/\s+/g, " ").trim().slice(0, 48);
-      }
+      const title = await operatorChatTitle(entry, clientSidecars, protocol);
       const provider = operatorChatRunProvider(projection, entry);
       const record = entry.record;
       const eeId = stringValue(record?.ee_id);
@@ -6587,7 +6624,7 @@ function createProjectionStore(options) {
     const artifactId = ledgerArtifactId(row);
     const movementSeq = numberValue(row?.seq, 0);
     if (!row || !artifactId || !movementSeq) return {};
-    const payload = await resolveLedgerArtifactPayload(row);
+    const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
     const text = operatorChatTurnText(payload, "out").replace(/\s+/g, " ").trim().slice(0, 240);
     return {
       artifact_id: artifactId,
@@ -6624,7 +6661,7 @@ function createProjectionStore(options) {
       const direct = outbound.filter((row) => outputLabels.has(ledgerArtifactLabel(row)));
       const inbound = entry.inbound.filter((row) => row.kind === "InterfaceArrival" && movementBoundaryInterface(row, "from") === entry.chatInterfaceId && responseLabels.has(ledgerArtifactLabel(row)));
       if (direct.length + inbound.length > 50_000) throw new Error(`Activity exceeds the 50000-receipt read boundary: ${chat.run_id}`);
-      const payloads = await resolveLedgerArtifactPayloads([...direct, ...inbound], true);
+      const payloads = await resolveLedgerArtifactPayloads([...direct, ...inbound], true, { projection: protocol.artifactReadProjection });
       const deliveries = direct.filter((row) => ledgerArtifactLabel(row) === protocol.terminalOutputLabel).map((row) => ({
           artifact_id: ledgerArtifactId(row), seq: row.seq,
           movement_id: `${path.basename(stringValue(row.source_file) || "ledger", ".jsonl")}:${numberValue(row.source_line, 0)}`,
@@ -6711,7 +6748,7 @@ function createProjectionStore(options) {
           exhausted = true;
           break;
         }
-        const resolved = await resolveLedgerArtifactPayloadResults(candidates.map((candidate) => candidate.row));
+        const resolved = await resolveLedgerArtifactPayloadResults(candidates.map((candidate) => candidate.row), { projection: projection.operatorChatProtocol?.artifactReadProjection });
         let stoppedAtLimit = false;
         for (const candidate of candidates) {
           cursor = numberValue(candidate.row.seq, cursor);
@@ -6986,7 +7023,7 @@ function createProjectionStore(options) {
     const payloads = await resolveLedgerArtifactPayloads([
       ...entry.inbound,
       ...entry.outbound,
-    ]);
+    ], false, { projection: protocol.artifactReadProjection });
     const expandedOutbound = operatorChatExpandedStreamRows(entry.outbound, payloads, entry.runId);
     const recordedInputs = new Map();
     const runtimeProvider = operatorChatRuntimeProviderId(entry);
@@ -7196,7 +7233,7 @@ function createProjectionStore(options) {
       presentedArtifactVersions.add(artifactVersion);
       return true;
     });
-    const payloads = await resolveLedgerArtifactPayloads(sourceRows);
+    const payloads = await resolveLedgerArtifactPayloads(sourceRows, false, { projection: protocol.artifactReadProjection });
     const ordered = operatorChatExpandedStreamRows(sourceRows, payloads, entry.runId).sort(compareMovementOrder);
     const interfaceRoles = new Map(baseInterfaceRows(projection).map((descriptor) => [
       stringValue(descriptor.rule_id ?? descriptor.id),
@@ -8463,6 +8500,7 @@ async function readOperatorChatProtocol(registryRoot) {
       toolCallLabel: stringValue(labels.tool_call),
       hiddenActivityLabels: normalizeLabelList(labels.hidden_activity, []),
       authoringRoomInterfaceId: stringValue(authoring.room_interface),
+      artifactReadProjection: client.artifact_read_projection,
     };
     return Object.values(protocol).slice(0, 5).every(Boolean) ? protocol : null;
   } catch {

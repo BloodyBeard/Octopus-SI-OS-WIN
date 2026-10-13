@@ -97,6 +97,10 @@ pub async fn run(octopus_home: &Path, installation_root: &Path) -> Result<(), St
         })?;
 
     let (interfaces, mut errors) = discover_interfaces(&interface_root)?;
+    match diagnose_run_worker_policies(octopus_home, &registry_root) {
+        Ok(issues) => errors.extend(issues),
+        Err(error) => errors.push(format!("run worker policies: {error}")),
+    }
     let mut life_processes = 0usize;
     let mut unprobed_processes = 0usize;
     let mut probe_jobs = Vec::new();
@@ -411,6 +415,71 @@ fn require_plain_directory(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn diagnose_run_worker_policies(home: &Path, registry_root: &Path) -> Result<Vec<String>, String> {
+    let host_path = home.join("host.json");
+    let host_bytes = match std::fs::read(&host_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", host_path.display())),
+    };
+    let host: serde_json::Value = serde_json::from_slice(&host_bytes)
+        .map_err(|error| format!("{}: {error}", host_path.display()))?;
+    if host["host_manifest_version"].as_u64() != Some(1) {
+        return Err(format!("{}: unsupported host manifest version", host_path.display()));
+    }
+    let runs_root = host["root_refs"]["run_records_root"].as_str().map(Path::new)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| format!("{}: run_records_root must be an absolute path", host_path.display()))?;
+    let entries = match std::fs::read_dir(runs_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", runs_root.display())),
+    };
+    let mut owners = BTreeMap::<InterfaceId, BTreeSet<String>>::new();
+    let mut issues = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("{}: {error}", runs_root.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let read = || -> Result<octopus_runtime::run_record::RunRecord, String> {
+            if !entry.file_type().map_err(|error| error.to_string())?.is_file() {
+                return Err("run record must be a regular file".into());
+            }
+            let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+            let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes)
+                .map_err(|error| error.to_string())?;
+            if path.file_stem().and_then(|stem| stem.to_str()) != Some(record.id.as_str()) {
+                return Err("run identity differs from its filename".into());
+            }
+            Ok(record)
+        };
+        match read() {
+            Ok(record) => {
+                if record.active_checkpoints.iter().any(|id| record.checkpoint(id).is_some_and(|checkpoint|
+                    checkpoint.interface_binding.is_some() || !checkpoint.outbound_interface_bindings.is_empty())) {
+                    owners.entry(record.worker).or_default().insert(record.id.to_string());
+                }
+            }
+            Err(error) => issues.push(format!("run record '{}': {error}", path.display())),
+        }
+    }
+    if !owners.is_empty() {
+        let workers = owners.keys().cloned().collect::<Vec<_>>();
+        for issue in octopus_app_server::registry_worker_policy_issues(registry_root, &workers)? {
+            let worker = issue.subject.strip_prefix("interface/")
+                .ok_or("worker policy diagnostic has no interface subject")?;
+            let runs = owners.get(&InterfaceId::new(worker))
+                .ok_or("worker policy diagnostic names an unselected worker")?
+                .iter().cloned().collect::<Vec<_>>().join(", ");
+            issues.push(format!("worker '{}' bound by runs [{runs}]: {}", worker, issue.reason));
+        }
+    }
+    issues.sort();
+    Ok(issues)
+}
+
 fn discover_interfaces(interface_root: &Path) -> Result<(Vec<InterfaceId>, Vec<String>), String> {
     let mut entries = std::fs::read_dir(interface_root)
         .map_err(|error| {
@@ -657,6 +726,63 @@ fn render_diagnostic(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn doctor_reports_bound_worker_loader_refusals_and_isolates_unused_presets() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let registry = home.join("registry");
+        let runs = root.path().join("authored-runs");
+        let installation = root.path().join("installation");
+        for path in [runs.clone(), installation.clone(), registry.join("tool"),
+            registry.join("worker_environment_kind"), registry.join("ee_template")] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        for (worker, tools) in [("system_worker_valid", serde_json::json!([])),
+            ("system_worker_optional", serde_json::json!(["missing.private.tool"]))] {
+            let folder = registry.join("interface").join(worker);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("interface.json"), serde_json::json!({
+                "id": worker, "interface_type": "system", "role": "worker",
+                "direction": "bidirectional", "source_names": ["worker"]
+            }).to_string()).unwrap();
+            std::fs::write(folder.join("policy.json"), serde_json::json!({
+                "id": worker, "ceiling": {"interfaces": ["uninstalled_optional_interface"],
+                    "tools": tools, "wek": [], "mark_outcomes": [], "hard_blocked_tools": []},
+                "role_artifacts": []
+            }).to_string()).unwrap();
+        }
+        std::fs::write(home.join("host.json"), serde_json::json!({
+            "host_manifest_version": 1, "root_refs": {"run_records_root": runs}
+        }).to_string()).unwrap();
+        let mut record = serde_json::json!({
+            "id": "run_bound", "ee": "ee_test", "worker": "system_worker_optional",
+            "trace": "trace_test", "status": "idle", "active_checkpoints": [],
+            "checkpoints": [{"id": "cp_test", "run": "run_bound", "trace": "trace_test",
+                "epoch": 0, "interface_binding": {"interface": "system_worker_optional",
+                    "config": {"artifact_policy": {"mode": "all"}}}}]
+        });
+        let run_path = runs.join("run_bound.json");
+        std::fs::write(&run_path, record.to_string()).unwrap();
+        run(&home, &installation).await.unwrap();
+
+        record["active_checkpoints"] = serde_json::json!(["cp_test"]);
+        std::fs::write(&run_path, record.to_string()).unwrap();
+        let issues = diagnose_run_worker_policies(&home, &registry).unwrap();
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        for expected in ["system_worker_optional", "run_bound", "ceiling.tools", "missing.private.tool"] {
+            assert!(issues[0].contains(expected), "{issues:?}");
+        }
+        assert!(run(&home, &installation).await.is_err());
+
+        record["worker"] = serde_json::json!("system_worker_valid");
+        record["checkpoints"][0]["interface_binding"]["interface"] = serde_json::json!("system_worker_valid");
+        std::fs::write(&run_path, record.to_string()).unwrap();
+        run(&home, &installation).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&run_path).unwrap(), record.to_string());
+        assert!(!home.join("state").exists());
+        assert!(!home.join("runtime-instance.json").exists());
+    }
 
     #[cfg(unix)]
     #[tokio::test]

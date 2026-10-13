@@ -204,6 +204,196 @@ fn terminal_control_ack(entry: &SessionContextArtifact) -> bool {
         && entry.payload["turn_id"].is_null()
 }
 
+pub(crate) struct InterruptedResultSource<'a> {
+    pub(crate) continuity: &'a CodexContinuityState,
+    pub(crate) control_source: u64,
+    pub(crate) control_id: &'a str,
+    pub(crate) acknowledgement: &'a ArtifactRef,
+    pub(crate) acknowledgement_seq: u64,
+}
+
+pub(crate) fn prove_interrupted(
+    descriptor: &InterfaceDescriptor,
+    input: &InterfaceInvocationEnvelope,
+    source_seq: u64,
+    current: &[u8],
+    session: &[SessionContextArtifact],
+    outcomes: &[octopus_provider_run_authoring::ProviderHandoffOutcome],
+    journal: &InterruptedResultSource<'_>,
+) -> Result<StoppedResultSettlement, InterfaceDriverError> {
+    let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+    let runtime = invocation_runtime_metadata(input)?;
+    let record: serde_json::Value = serde_json::from_slice(current)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let pending = &record["interface_state"][runtime.interface.as_str()]["pending_handoff"];
+    let [octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted { seq, artifact }] = outcomes else {
+        return Err(fail("interrupted settlement requires one admitted completed error"));
+    };
+    let errors = session.iter().filter(|entry| entry.source_artifact == *artifact
+        && entry.source_movement_seq == Some(*seq)).collect::<Vec<_>>();
+    let [error] = errors.as_slice() else { return Err(fail("interrupted settlement has no unique admitted predecessor")); };
+    if runtime.interface != descriptor.id || record["id"] != runtime.run.as_str()
+        || pending["source_movement_seq"] != source_seq || pending["terminal"] != true
+        || error.label != TURN_ERROR_LABEL || error.payload["will_retry"] != false
+        || error.payload["additional_details"]["source_movement_seq"] != source_seq
+    { return Err(fail("interrupted settlement changed its completed error source")); }
+    let source = parse_codex_continuity(&error.payload[CODEX_CONTINUITY_FIELD], &runtime.interface, runtime.run.as_str())?;
+    let mut expected = journal.continuity.clone();
+    expected.context_generation = expected.context_generation.checked_add(1)
+        .ok_or_else(|| fail("interrupted settlement generation overflow"))?;
+    if source != expected || source.context_generation != read_codex_context_generation(&record, &runtime.interface)? {
+        return Err(fail("interrupted settlement error changed its exact interrupted continuity"));
+    }
+    validate_interrupted_source(input, journal.continuity)?;
+    let acks = session.iter().filter(|entry| entry.source_artifact == *journal.acknowledgement
+        && entry.source_movement_seq == Some(journal.acknowledgement_seq)).collect::<Vec<_>>();
+    let [ack] = acks.as_slice() else { return Err(fail("interrupted settlement has no unique admitted Stop ACK")); };
+    let wait = journal.continuity.interrupted_pending.as_ref().expect("validated interrupted source");
+    let terminal = journal.continuity.native_terminal.as_ref().expect("validated native terminal");
+    if ack.label != TURN_CONTROL_ACKNOWLEDGED_LABEL || ack.payload["status"] != "acknowledged"
+        || !matches!(ack.payload["action"].as_str(), Some("stop" | "interrupt"))
+        || ack.payload["control_id"] != journal.control_id
+        || ack.payload["source_movement_seq"] != journal.control_source
+        || ack.payload["thread_id"] != journal.continuity.thread_id
+        || ack.payload["turn_id"] != pending_turn_id(wait)
+        || ack.payload["detail"]["already_terminal"] != true
+        || ack.payload["detail"]["exact_result_pending"] != true
+        || ack.payload["detail"]["terminal_evidence_source"] != "thread/read"
+        || ack.payload["detail"]["native_terminal"] != serde_json::to_value(terminal).map_err(|error| fail(&error.to_string()))?
+        || parse_codex_continuity(&ack.payload[CODEX_CONTINUITY_FIELD], &runtime.interface, runtime.run.as_str())? != *journal.continuity
+    { return Err(fail("interrupted settlement ACK differs from its durable actual Stop")); }
+    let effects = session.iter().filter(|entry| entry.label == TOOL_CALL_LABEL
+        && entry.source_movement_seq.is_some_and(|value| value < source_seq))
+        .filter_map(|entry| entry.payload.get(CODEX_CONTINUITY_FIELD).map(|raw| (entry, raw)))
+        .map(|(entry, raw)| Ok((entry, parse_codex_continuity(raw, &runtime.interface, runtime.run.as_str())?)))
+        .collect::<Result<Vec<_>, InterfaceDriverError>>()?;
+    let effects = effects.iter().filter(|(_, state)| state.pending.as_ref() == Some(wait)).collect::<Vec<_>>();
+    let [(effect, original)] = effects.as_slice() else { return Err(fail("interrupted settlement has no unique exact original tool call")); };
+    let CodexPendingContinuity::DynamicTool { call_id, tool, .. } = wait else { unreachable!() };
+    let mut expected_ack = original.clone();
+    expected_ack.interrupted_pending = expected_ack.pending.take();
+    expected_ack.native_terminal = Some(terminal.clone());
+    expected_ack.context_generation = expected_ack.context_generation.checked_add(1)
+        .ok_or_else(|| fail("interrupted settlement ACK generation overflow"))?;
+    if expected_ack != *journal.continuity || effect.payload["tool"] != *tool
+        || effect.payload["correlation_id"] != *call_id || !effect.payload["arguments"].is_object()
+    { return Err(fail("interrupted settlement Stop changed its original tool call")); }
+    let effect_seq = effect.source_movement_seq.expect("selected effect admission");
+    let labels = codex_context_output_labels(descriptor)?;
+    let advances = session.iter().filter(|entry| labels.contains(&entry.label)
+        && entry.source_movement_seq.is_some_and(|value| value > effect_seq)).collect::<Vec<_>>();
+    if advances.len() != 2 || advances[0].source_artifact != ack.source_artifact
+        || advances[1].source_artifact != error.source_artifact
+        || !(effect_seq < journal.control_source && journal.control_source < journal.acknowledgement_seq
+            && effect_seq < source_seq && source_seq < *seq && journal.acknowledgement_seq < *seq)
+    { return Err(fail("interrupted settlement has unexplained context or admission order")); }
+    Ok(StoppedResultSettlement {
+        source, predecessor: artifact.clone(), acknowledgement: journal.acknowledgement.clone(),
+        acknowledgement_seq: journal.acknowledgement_seq, control_source: journal.control_source,
+        control_id: journal.control_id.into(), action: ack.payload["action"].as_str().expect("checked action").into(),
+        evidence: serde_json::json!({
+            "error_artifact":artifact,"error_movement_seq":seq,
+            "effect_artifact":effect.source_artifact,"effect_movement_seq":effect_seq,
+            "effect_context_generation":original.context_generation,
+            "result_artifact":input.artifact,"result_movement_seq":source_seq,
+            "stop_artifact":journal.acknowledgement,"stop_movement_seq":journal.acknowledgement_seq,
+            "stop_source_movement_seq":journal.control_source,"continuation_dispatched":false,
+        }),
+    })
+}
+
+fn validate_interrupted_source(input: &InterfaceInvocationEnvelope, source: &CodexContinuityState) -> Result<(), InterfaceDriverError> {
+    let fail = |message: &str| InterfaceDriverError::FailedClosed(message.into());
+    let runtime = invocation_runtime_metadata(input)?;
+    validate_durable_interrupted_continuity(source, &runtime.interface, runtime.run.as_str()).map_err(InterfaceDriverError::FailedClosed)?;
+    let Some(CodexPendingContinuity::DynamicTool { turn_id, native_operation: None, .. }) = source.interrupted_pending.as_ref() else {
+        return Err(fail("interrupted settlement requires an ordinary exact dynamic tool result"));
+    };
+    if source.tool_operator_request.is_some()
+        || source.native_terminal.as_ref().ok_or_else(|| fail("interrupted settlement has no native terminal evidence"))?
+            .exact_turn(&source.thread_id, Some(turn_id))?.status != TurnStatus::Interrupted
+        || !exact_interrupted_result_source(input, source).map_err(InterfaceDriverError::FailedClosed)?
+    { return Err(fail("interrupted settlement changed its exact native Interrupted result")); }
+    Ok(())
+}
+
+pub(crate) fn materialize_interrupted(
+    proof: &StoppedResultSettlement, input: &InterfaceInvocationEnvelope, output_root: &Path, labels: &BTreeSet<String>,
+) -> Result<ProviderEmission, InterfaceDriverError> {
+    validate_interrupted_source(input, &proof.source)?;
+    materialize_closure(&proof.source, Some(&proof.evidence), input,
+        proof.source.native_terminal.clone().expect("validated terminal"), Vec::new(), output_root, labels)
+}
+
+pub(crate) fn materialize_pending_interrupted(
+    descriptor: &InterfaceDescriptor, source: &CodexContinuityState, input: &InterfaceInvocationEnvelope,
+    source_seq: u64, output_root: &Path, stream_root: &Path, input_context: bool,
+) -> Result<Option<Vec<ProviderEmission>>, InterfaceDriverError> {
+    if !has_native_interrupted_result(source).map_err(InterfaceDriverError::FailedClosed)? { return Ok(None); }
+    validate_interrupted_source(input, source)?;
+    let config = &descriptor.interface_driver_config.as_ref().ok_or_else(||
+        InterfaceDriverError::FailedClosed("interrupted result has no provider config".into()))?.private_config;
+    let namespace = serde_json::from_value::<NativeToolNamespace>(config.get("native_tool_namespace").cloned()
+        .ok_or_else(|| InterfaceDriverError::FailedClosed("interrupted result has no native tool namespace".into()))?)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?.validate()?;
+    let result: ToolResultArtifact = serde_json::from_slice(&input.read_artifact_payload()?)
+        .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+    let CodexPendingContinuity::DynamicTool { turn_id, call_id, .. } = source.interrupted_pending.as_ref().expect("validated source") else { unreachable!() };
+    let (emit, mut outputs) = ProviderOutputStream::channel();
+    emit.continuity.lock().expect("continuity lock").continuity = Some(source.clone());
+    emit.continuity.lock().expect("continuity lock").pending_input_context = input_context;
+    let labels = codex_context_output_labels(descriptor)?;
+    let projected = private_config_string_set(config, "client_projection_output_labels")?;
+    let rules = LiveStreamRules::from_private_config(config)?;
+    let sink = TurnSink { emit: &emit, output_root, live_stream_root: stream_root, provider_interface: &descriptor.id,
+        run: &source.run, source_movement_seq: source_seq, attempt: 1, context_output_labels: &labels,
+        client_projection_output_labels: &projected, live_stream_rules: &rules,
+        live_stream: std::sync::Mutex::new(None), continuity: emit.continuity.clone() };
+    sink.bind_live_stream(&source.thread_id, turn_id)?;
+    sink.send_interrupted_result(Some(CodexTurnOutput::dynamic_tool_completed_after_interrupt(
+        namespace.name, result.tool, call_id.clone(), source.thread_id.clone(), turn_id.clone(), result.ok, result.body, result.error,
+    )), false, CodexTurnOutput::interrupted_result_closed("tool_result", call_id.clone(), source.thread_id.clone(), turn_id.clone(), result.ok, &input.artifact))?;
+    let ProviderStreamEmission::InterruptedResult { activity, stream, retained_outputs, closure } = outputs.try_recv()
+        .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))? else {
+        return Err(InterfaceDriverError::FailedClosed("interrupted result did not seal its exact result group".into()));
+    };
+    interrupted_result_closure_ref(&closure.artifact, source, &input.artifact, &labels)
+        .map_err(InterfaceDriverError::FailedClosed)?.ok_or_else(|| InterfaceDriverError::FailedClosed("interrupted result closure did not validate".into()))?;
+    let mut emissions = Vec::new();
+    emissions.extend(activity); emissions.extend(stream); emissions.extend(retained_outputs); emissions.push(closure);
+    Ok(Some(emissions))
+}
+
+pub(crate) fn has_native_interrupted_result(source: &CodexContinuityState) -> Result<bool, String> {
+    let Some(CodexPendingContinuity::DynamicTool { turn_id, native_operation: None, .. }) = source.interrupted_pending.as_ref()
+        else { return Ok(false); };
+    source.native_terminal.as_ref().map(|terminal| terminal.exact_turn(&source.thread_id, Some(turn_id))
+        .map(|turn| turn.status == TurnStatus::Interrupted).map_err(|error| error.to_string())).transpose()
+        .map(|status| status == Some(true))
+}
+
+pub(crate) fn validate_saved_settlement(
+    proof: &StoppedResultSettlement, input: &InterfaceInvocationEnvelope,
+    value: &serde_json::Value, labels: &BTreeSet<String>,
+) -> Result<(), String> {
+    validate_interrupted_source(input, &proof.source).map_err(|error| error.to_string())?;
+    let result: serde_json::Value = serde_json::from_slice(&input.read_artifact_payload().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    if value["completed_source_settlement"] != proof.evidence
+        || value["native_terminal_source_continuity"] != serde_json::to_value(&proof.source).map_err(|error| error.to_string())?
+        || value["native_terminal_input_context"] != false || value["result_origin"] != "native_turn_completion"
+        || value["terminal_evidence_source"] != "thread/read" || value["ok"] != result["ok"]
+    { return Err("saved interrupted settlement changed its exact accepted proof".into()); }
+    let closed = interrupted_result_closure_payload(TURN_INTERRUPTED_RESULT_LABEL,
+        &serde_json::to_vec(value).map_err(|error| error.to_string())?, &proof.source, &input.artifact, labels)?
+        .ok_or("saved interrupted settlement has no semantic closure")?;
+    let mut expected = proof.source.clone();
+    expected.interrupted_pending = None;
+    expected.context_generation = expected.context_generation.checked_add(1).ok_or("saved interrupted settlement generation overflow")?;
+    if closed != expected { return Err("saved interrupted settlement changed its settled native state".into()); }
+    Ok(())
+}
+
 impl CodexAppServerInterfaceDriver {
     pub(crate) async fn stopped_result_settlement(
         &self,
@@ -243,7 +433,10 @@ fn materialize_closure(
     source: &CodexContinuityState, evidence: Option<&serde_json::Value>, input: &InterfaceInvocationEnvelope,
     terminal: NativeTerminalEvidence, events: Vec<serde_json::Value>, output_root: &Path, labels: &BTreeSet<String>,
 ) -> Result<ProviderEmission, InterfaceDriverError> {
-    let pending = source.pending.as_ref().ok_or_else(|| {
+    if source.pending.is_some() && source.interrupted_pending.is_some() {
+        return Err(InterfaceDriverError::FailedClosed("stopped result has conflicting pending effects".into()));
+    }
+    let pending = source.pending.as_ref().or(source.interrupted_pending.as_ref()).ok_or_else(|| {
         InterfaceDriverError::FailedClosed("stopped result lost its pending effect".into())
     })?;
     let turn = terminal.exact_turn(&source.thread_id, Some(pending_turn_id(pending)))?;
@@ -273,6 +466,7 @@ fn materialize_closure(
     };
     let mut closed = source.clone();
     closed.pending = None;
+    closed.interrupted_pending = None;
     closed.native_terminal = Some(terminal.clone());
     let mut outputs = Vec::new();
     for mut output in retained {
@@ -281,7 +475,7 @@ fn materialize_closure(
             .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
         outputs.push(output.value);
     }
-    closed.context_generation = source
+    closed.context_generation = closed
         .context_generation
         .checked_add(u64::from(labels.contains(TURN_INTERRUPTED_RESULT_LABEL)))
         .ok_or_else(|| {
@@ -382,7 +576,7 @@ pub(crate) fn prove_intent(
         .ok_or_else(|| fail("unadmitted native intent has no original pending continuity"))?;
     let wait = original.pending.as_ref().ok_or_else(|| fail("unadmitted native intent has no original effect"))?;
     let operation = native_pending_operation(wait)?.ok_or_else(|| fail("unadmitted intent is not an exact native operation"))?;
-    if !matches!(operation.state, crate::run_affordances::NativePhase::Applying { .. } | crate::run_affordances::NativePhase::Writing { .. })
+    if !matches!(operation.state, crate::run_affordances::NativePhase::Applying { .. } | crate::run_affordances::NativePhase::PinnedApplying { .. } | crate::run_affordances::NativePhase::Writing { .. })
         || original.interrupted_pending.is_some() || original.tool_operator_request.is_some()
         || original.context_generation.checked_add(1) != Some(intent.context_generation)
     { return Err(fail("unadmitted native intent does not follow one applied native write")); }
@@ -395,7 +589,7 @@ pub(crate) fn prove_intent(
     let NativeStep::Effect { pending: successor, effect, .. } = operation.advance(&result).map_err(InterfaceDriverError::FailedClosed)? else {
         return Err(fail("original applied write does not prove the saved native successor"));
     };
-    if !matches!(successor.state, crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. }) {
+    if !matches!(successor.state, crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::PinnedAppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. }) {
         return Err(fail("native withdrawal supports only an installed, unseeded run"));
     }
     let payload: serde_json::Value = serde_json::from_slice(&intent.payload).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
@@ -536,7 +730,7 @@ pub(crate) fn intent_control_continuity(
         return Err(InterfaceDriverError::FailedClosed("saved tool output changed its checked context or exact wait".into()));
     }
     if native_pending_operation(pending)?.is_some_and(|operation| matches!(operation.state,
-        crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. })) {
+        crate::run_affordances::NativePhase::AppliedSeeding { .. } | crate::run_affordances::NativePhase::PinnedAppliedSeeding { .. } | crate::run_affordances::NativePhase::Seeding { .. })) {
         return Ok(prove_intent(descriptor, input, intent, session)?.source);
     }
     Ok(state)

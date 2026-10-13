@@ -682,7 +682,10 @@ fn validate_fan_in_bound_payload(
                 binding.artifact.id.as_str()
             )
         })?;
-    if ContentHash::of_bytes(binding.as_bytes()) != payload_hash {
+    let bound_bytes = binding
+        .read_bounded(limits.max_payload_bytes)
+        .map_err(|error| error.to_string())?;
+    if ContentHash::of_bytes(&bound_bytes) != payload_hash {
         return Err(format!(
             "Gemini fan-in payload for '{}' does not match its pinned manifest",
             binding.artifact.id.as_str()
@@ -699,7 +702,7 @@ fn validate_fan_in_bound_payload(
             payload_path.display()
         )
     })?;
-    if payload_bytes != binding.as_bytes() {
+    if payload_bytes.as_slice() != bound_bytes.as_ref() {
         return Err(format!(
             "Gemini fan-in payload for '{}' differs from its pinned blob",
             binding.artifact.id.as_str()

@@ -24,6 +24,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 json-patch.workspace = true
 octopus-file-write-contract = { path = "../octopus-file-write-contract" }
+octopus-context-collections = { path = "../../../../interface/system_context/packages/octopus-context-collections" }
 tokio = { workspace = true }
 
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }

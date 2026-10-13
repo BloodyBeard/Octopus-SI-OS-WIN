@@ -21,6 +21,7 @@ const PREPARED_TRANSACTION_ROOT = /^\.prepare\.([A-Za-z0-9_-]{8,96})\.[a-f0-9]{1
 const CLEANUP_TRANSACTION_ROOT = /^\.cleanup\.([A-Za-z0-9_-]{8,96})\.[a-f0-9]{12}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const MAX_CONFIGURATION_BYTES = 2 * 1024 * 1024;
+const MAX_RESOLUTION_BYTES = 16 * 1024 * 1024;
 const INTERFACE_IMPORT_PREFIX = "interface://";
 const PACKAGE_KINDS = new Set(["application", "driver", "artifact"]);
 const REGISTRY_KINDS = new Set([
@@ -370,7 +371,13 @@ async function repairLocalPackages(options) {
 
 async function adoptLocalPackageUpdates(options) {
   const roots = normalizeRoots(options);
+  const resolutions = normalizePackageConflictResolutions(options?.conflictResolutions);
+  const assertMutable = options?.assertMutable, onProgress = options?.onProgress;
+  if (resolutions.size && typeof assertMutable !== "function") {
+    throw new Error("Package conflict resolutions require an explicit mutation guard");
+  }
   return withPackageStateLock(roots.stateRoot, async () => {
+    if (resolutions.size) await assertPackageMutationAllowed(roots, assertMutable, [...new Set([...resolutions.values()].map(row => row.packageId))]);
     await ensurePackageState(roots);
     await recoverLocalPackageTransactionsUnlocked(roots);
     const receipts = new Map();
@@ -382,13 +389,17 @@ async function adoptLocalPackageUpdates(options) {
       if (!receipt) throw new Error(`Installed package receipt '${id}' disappeared before update`);
       receipts.set(id, receipt);
     }
-    if (receipts.size === 0) return { action: "adopt_package_updates", changed: false, packageIds: [], receiptUpgrades: [] };
+    if (receipts.size === 0) {
+      assertConflictResolutionsUsed(resolutions, new Set());
+      return { action: "adopt_package_updates", changed: false, packageIds: [], receiptUpgrades: [] };
+    }
     const library = await loadLocalPackageLibrary(roots);
     const selected = requireReviewedPackageClosure(library, [...receipts.keys()].sort());
     const updates = [];
     const receiptUpgrades = [];
     const localChanges = [];
     const expectedRepairs = {};
+    const usedResolutions = new Set();
     for (const entry of selected) {
       const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true });
       await verifyPackageDefinition(entry);
@@ -402,14 +413,14 @@ async function adoptLocalPackageUpdates(options) {
           localChanges.push({ packageId: entry.manifest.id, receiptState: state.receiptState,
             materialized: state.materialized, installedDigest: state.installedDigest,
             receiptDigest: hashJson(receipt), files: state.localChanges });
-          reportProgress(options?.onProgress, { phase: "preserving_local_changes", packageId: entry.manifest.id, percent: 0 });
+          reportProgress(onProgress, { phase: "preserving_local_changes", packageId: entry.manifest.id, percent: 0 });
         }
         if (receipt.schema_version !== 1 || entry.manifest.release_status === "system"
           || sourceBaselineIssue(entry.manifest, source, state) !== null) continue;
         receiptUpgrades.push(entry.manifest.id);
       } else {
         if (state.receiptState === "valid") continue;
-        await preparePackageUpdate(entry.manifest, source, state);
+        await preparePackageUpdate(roots, entry.manifest, source, state, resolutions, usedResolutions);
         if (state.localChanges.length) localChanges.push({ packageId: entry.manifest.id, files: state.localChanges });
       }
       updates.push(entry);
@@ -421,15 +432,19 @@ async function adoptLocalPackageUpdates(options) {
       };
     }
     const packageIds = updates.map(entry => entry.manifest.id);
+    assertConflictResolutionsUsed(resolutions, usedResolutions);
     if (!updates.length) return { action: "adopt_package_updates", changed: false, packageIds, localChanges, receiptUpgrades };
-    await assertPackageMutationAllowed(roots, options?.assertMutable, packageIds);
+    await assertPackageMutationAllowed(roots, assertMutable, packageIds);
+    const identity = resolutions.size ? { expectedRepairs,
+      resolutions: [...resolutions.values()].map(({ body, ...proof }) => proof) } : expectedRepairs;
     const outcome = await repairResolvedPackages(roots, updates, {
-      operationId: `release_${hashJson(expectedRepairs)}`,
+      operationId: `release_${hashJson(identity)}`,
       expectedRepairs,
       prepareMaterialization: (manifest, source, state) => receiptUpgrades.includes(manifest.id)
-        ? prepareSourceBaseline(manifest, source, state) : preparePackageUpdate(manifest, source, state),
-      assertMutable: options?.assertMutable,
-      onProgress: options?.onProgress,
+        ? prepareSourceBaseline(manifest, source, state) : preparePackageUpdate(roots, manifest, source, state, resolutions),
+      allowOwnerAdditions: true,
+      assertMutable,
+      onProgress,
     });
     return { ...outcome, action: "adopt_package_updates", localChanges, receiptUpgrades };
   });
@@ -495,15 +510,14 @@ function sourceBaselineIssue(manifest, source, state) {
 
 function assertPackageUpdateOwnership(manifest, source, state) {
   const receipt = state.receipt;
-  if (!state.materialized || state.partiallyMaterialized || receipt.product_kind !== manifest.product_kind
-    || receipt.product_id !== manifest.product_id || receipt.members.length !== source.members.length) {
+  if (!receipt || receipt.product_kind !== manifest.product_kind || receipt.product_id !== manifest.product_id) {
     throw new Error(`Installed package '${manifest.id}' changed its declared owner set; prior installation is preserved`);
   }
-  for (const member of source.members) {
-    const baseline = receipt.members.find(candidate => memberKey(candidate) === memberKey(member));
-    const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
-    if (!baseline || baseline.target !== memberRelative(member) || !active?.present) {
-      throw new Error(`Installed package '${manifest.id}' changed ownership of '${memberKey(member)}'`);
+  for (const baseline of receipt.members) {
+    const member = source.members.find(candidate => memberKey(candidate) === memberKey(baseline));
+    const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(baseline));
+    if (!member || baseline.target !== memberRelative(member) || !active?.present) {
+      throw new Error(`Installed package '${manifest.id}' changed ownership of '${memberKey(baseline)}'; prior owners must remain declared and present`);
     }
     const jsonFiles = new Map((baseline.source_files ?? baseline.json_files ?? []).map(file => [file.path, file]));
     for (const [relative, saved] of jsonFiles) {
@@ -527,6 +541,24 @@ function assertPackageUpdateOwnership(manifest, source, state) {
     if (snapshotDigest(files) !== baseline.digest) {
       throw new Error(`Installed package '${manifest.id}' has changed source-owned files at '${memberKey(member)}' without a per-file source baseline; prior installation is preserved`);
     }
+  }
+  const prior = new Set(receipt.members.map(memberKey));
+  for (const member of source.members) {
+    if (!prior.has(memberKey(member)) && state.activeMembers.find(candidate => memberKey(candidate) === memberKey(member))?.present) {
+      throw new Error(`Installed package '${manifest.id}' cannot claim an existing unowned target '${memberKey(member)}'`);
+    }
+  }
+}
+
+async function assertPackageOwnersUnclaimed(roots, manifest, source) {
+  const owners = new Set(source.members.map(memberKey));
+  for (const file of await fs.readdir(roots.receiptsRoot)) {
+    if (!file.endsWith(".json")) continue;
+    const id = requiredId(file.slice(0, -5), "installed package id");
+    if (id === manifest.id) continue;
+    const receipt = await readReceipt(roots, id);
+    const collision = receipt?.members.find(member => owners.has(memberKey(member)));
+    if (collision) throw new Error(`Installed package '${manifest.id}' cannot claim owner '${memberKey(collision)}' already receipted by '${id}'`);
   }
 }
 
@@ -555,28 +587,117 @@ function compareSnapshotPaths(left, right) {
   return a.length - b.length;
 }
 
-async function preparePackageUpdate(manifest, source, state) {
+function conflictResolutionKey(packageId, member, relative) {
+  return `${packageId}\0${memberKey(member)}\0${relative}`;
+}
+
+function normalizePackageConflictResolutions(value) {
+  if (value === undefined) return new Map();
+  if (!Array.isArray(value) || !value.length || value.length > 128) throw new Error("conflictResolutions must contain 1 to 128 explicit file resolutions");
+  const fields = ["packageId", "registry_kind", "owner", "path", "previousSource", "active", "incoming", "contentBase64", "mode"].sort().join("\0");
+  const rows = new Map();
+  let totalBytes = 0;
+  for (const row of structuredClone(value)) {
+    if (!isRecord(row) || Object.keys(row).sort().join("\0") !== fields) throw new Error("Malformed package conflict resolution fields");
+    requiredId(row.packageId, "conflict resolution packageId");
+    requiredRegistryKind(row.registry_kind);
+    requiredId(row.owner, "conflict resolution owner");
+    if (typeof row.path !== "string" || !row.path || row.path.length > 4096
+      || path.posix.isAbsolute(row.path) || path.win32.parse(row.path).root || path.posix.normalize(row.path) !== row.path
+      || row.path.split("/").some(part => !part || part === "." || part === ".." || /[\\\u0000-\u001f:]/.test(part) || SOURCE_EXCLUDES.has(part))) {
+      throw new Error("Conflict resolution requires an exact relative, non-excluded file path");
+    }
+    for (const name of ["previousSource", "active", "incoming"]) {
+      const pin = row[name];
+      if (!isRecord(pin) || Object.keys(pin).sort().join("\0") !== ["mode", "sha256", "size"].join("\0")
+        || !DIGEST.test(pin.sha256) || !Number.isSafeInteger(pin.size) || pin.size < 0
+        || !Number.isInteger(pin.mode) || pin.mode < 0 || pin.mode > 0o777) throw new Error(`Malformed conflict resolution ${name} pin`);
+    }
+    if (!Number.isInteger(row.mode) || row.mode < 0 || row.mode > 0o777
+      || typeof row.contentBase64 !== "string" || row.contentBase64.length > Math.ceil(MAX_RESOLUTION_BYTES / 3) * 4) {
+      throw new Error("Malformed conflict resolution content or mode");
+    }
+    const body = Buffer.from(row.contentBase64, "base64");
+    totalBytes += body.byteLength;
+    if (body.toString("base64") !== row.contentBase64 || body.byteLength > MAX_RESOLUTION_BYTES || totalBytes > 4 * MAX_RESOLUTION_BYTES) {
+      throw new Error("Conflict resolution content must be canonical base64, at most 16 MiB per file and 64 MiB total");
+    }
+    const key = conflictResolutionKey(row.packageId, row, row.path);
+    if (rows.has(key)) throw new Error(`Duplicate conflict resolution for '${row.packageId}:${memberKey(row)}/${row.path}'`);
+    const { contentBase64, mode, ...proof } = row;
+    rows.set(key, { ...proof, result: { sha256: sha256Bytes(body), size: body.byteLength, mode }, body });
+  }
+  return new Map([...rows].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+}
+
+function assertConflictResolutionsUsed(resolutions, used) {
+  for (const [key, row] of resolutions) {
+    if (!used.has(key)) throw new Error(`Unused or out-of-scope conflict resolution '${row.packageId}:${memberKey(row)}/${row.path}'`);
+  }
+}
+
+async function resolvePackageFileConflict(resolution, before, current, next, member, active) {
+  const label = `${resolution.packageId}:${memberKey(member)}/${resolution.path}`;
+  for (const [name, file] of [["previousSource", before], ["active", current], ["incoming", next]]) {
+    const pin = resolution[name];
+    if (!file || pin.sha256 !== file.sha256 || pin.size !== file.size || pin.mode !== file.mode) {
+      throw new Error(`Conflict resolution '${label}' ${name} pin does not match an existing regular file`);
+    }
+  }
+  const file = { ...snapshotFile(member, resolution.path), body: resolution.body, ...resolution.result,
+    input_sha256: next.sha256, input_size: next.size, input_mode: next.mode };
+  if (path.extname(resolution.path).toLowerCase() === ".json") await readSnapshotJson(file, `Conflict resolution '${label}'`);
+  const declaration = member.configuration?.find(entry => entry.path === resolution.path);
+  if (!declaration) return { file };
+  const projected = (await projectMemberConfiguration({ files: [file] }, [declaration])).projectedFiles.get(resolution.path);
+  const installed = active.projectedFiles.get(resolution.path);
+  if (!installed || stableJson(projected.fields) !== stableJson(installed.fields)) {
+    throw new Error(`Conflict resolution '${label}' changes active configuration ownership`);
+  }
+  return { file: { ...file, configuration_input: { ...current } }, projected };
+}
+
+async function preparePackageUpdate(roots, manifest, source, state, resolutions = new Map(), usedResolutions = new Set()) {
   assertPackageUpdateOwnership(manifest, source, state);
-  if (state.receipt.schema_version === 1) return preparePackageRepair(manifest, source, state);
+  await assertPackageOwnersUnclaimed(roots, manifest, source);
+  if (state.receipt.schema_version === 1) {
+    if ([...resolutions.values()].some(row => row.packageId === manifest.id)) throw new Error(`Conflict resolutions for '${manifest.id}' require a v2 per-file source baseline`);
+    const prior = new Set(state.receipt.members.map(memberKey));
+    const repaired = await preparePackageRepair(manifest, { ...source, members: source.members.filter(member => prior.has(memberKey(member))) }, state);
+    const members = source.members.map(member => {
+      if (!prior.has(memberKey(member))) return member;
+      const replacement = repaired.members.find(candidate => memberKey(candidate) === memberKey(member));
+      if (!replacement) throw new Error(`Installed package '${manifest.id}' lost prior owner '${memberKey(member)}' during update`);
+      return replacement;
+    });
+    return { ...source, members, fileCount: members.reduce((total, member) => total + member.files.length, 0) };
+  }
   const members = [];
   for (const member of source.members) {
     const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
     const receipt = state.receipt.members.find(candidate => memberKey(candidate) === memberKey(member));
+    if (!receipt) { members.push(member); continue; }
     const baseline = new Map(receipt.source_files.map(file => [file.path, file]));
     const incoming = sourceFileMap(member), local = sourceFileMap(active);
     const paths = [...new Set([...baseline.keys(), ...incoming.keys(), ...local.keys()])].sort(compareSnapshotPaths);
     const files = [], projectedFiles = new Map();
     for (const relative of paths) {
       const before = baseline.get(relative), next = incoming.get(relative), current = local.get(relative);
-      let selected;
+      let selected, resolved;
       if (sameOwnedFile(current, before)) selected = next;
       else if (sameOwnedFile(next, before) || sameOwnedFile(current, next)) selected = current;
-      else throw new Error(`Installed package '${manifest.id}' has overlapping source-owned changes at '${memberKey(member)}/${relative}'; prior installation is preserved`);
+      else {
+        const key = conflictResolutionKey(manifest.id, member, relative), resolution = resolutions.get(key);
+        if (!resolution) throw new Error(`Installed package '${manifest.id}' has overlapping source-owned changes at '${memberKey(member)}/${relative}'; prior installation is preserved`);
+        resolved = await resolvePackageFileConflict(resolution, before, current, next, member, active);
+        usedResolutions.add(key);
+        selected = resolved.file;
+      }
       if (!selected) continue;
       const projected = (selected === next ? member : active).projectedFiles.get(relative);
-      const merged = selected === next && projected
+      const merged = resolved ?? (selected === next && projected
         ? mergeConfiguredFile(selected, projected, active.projectedFiles.get(relative), local.get(relative))
-        : { file: selected, projected };
+        : { file: selected, projected });
       files.push(merged.file);
       if (merged.projected) projectedFiles.set(relative, merged.projected);
     }
@@ -1090,8 +1211,50 @@ function parsePackageManifest(value, file) {
     throw new Error(`local package '${manifest.id}' has more than one primary owner`);
   }
   if (!PACKAGE_KINDS.has(manifest.product_kind)) throw new Error(`local package '${manifest.id}' has invalid product kind`);
-  for (const member of manifest.members) validateConfigurationOwnership(member.configuration ?? [], `${manifest.id}:${memberKey(member)}`, member.registry_kind);
+  for (const member of manifest.members) {
+    const label = `${manifest.id}:${memberKey(member)}`;
+    validateConfigurationOwnership(member.configuration ?? [], label, member.registry_kind);
+    validateDataDirectoryOwnership(member, label);
+  }
   return manifest;
+}
+
+function validateDataDirectoryOwnership(member, label) {
+  const directories = [];
+  for (const directory of member.data_directories ?? []) {
+    if (path.posix.isAbsolute(directory) || path.win32.isAbsolute(directory)
+      || path.posix.normalize(directory) !== directory
+      || directory.split("/").some(component => !component || component === "." || component === ".."
+        || /[\\\u0000-\u001f:]/.test(component) || SOURCE_EXCLUDES.has(component))) {
+      throw new Error(`${label} has an invalid data directory '${directory}'`);
+    }
+    if (directories.some(other => directory === other || directory.startsWith(`${other}/`) || other.startsWith(`${directory}/`))) {
+      throw new Error(`${label} has overlapping data directories at '${directory}'`);
+    }
+    if ((member.configuration ?? []).some(entry => entry.path.startsWith(`${directory}/`))) {
+      throw new Error(`${label} data directory '${directory}' overlaps configuration ownership`);
+    }
+    directories.push(directory);
+  }
+}
+
+function isMemberDataPath(member, relative) {
+  return (member.data_directories ?? []).some(directory => relative.startsWith(`${directory}/`));
+}
+
+function validateMemberDataPaths(member, snapshot) {
+  for (const absolute of snapshot.excludedEntries) {
+    const relative = snapshotRelativePath(path.relative(snapshot.root, absolute));
+    if (isMemberDataPath(member, relative)) {
+      throw new Error(`Package owner '${memberKey(member)}' has an excluded data entry without materialization proof at '${relative}'`);
+    }
+  }
+  for (const file of snapshot.files) {
+    const relative = snapshotRelativePath(file.relative_path);
+    if ((member.data_directories ?? []).some(directory => directory === relative || directory.startsWith(`${relative}/`))) {
+      throw new Error(`Package owner '${memberKey(member)}' data directory is a file at '${relative}'`);
+    }
+  }
 }
 
 function validateConfigurationOwnership(configuration, label, registryKind) {
@@ -1336,6 +1499,7 @@ async function snapshotPackageSource(roots, manifest, options = {}) {
     const snapshot = await snapshotDirectory(sourceDirectory, {
       cacheKey: options.fresh ? "" : `${roots.sourceRegistryRoot}\0${memberKey(member)}`,
     });
+    validateMemberDataPaths(member, snapshot);
     members.push({ ...member, source_directory: sourceDirectory, ...await projectMemberConfiguration(snapshot, member.configuration) });
   }
   await assertApplicationInterfaceImportClosure(manifest, members, roots, options);
@@ -1424,7 +1588,7 @@ async function assertApplicationInterfaceImportClosure(manifest, members, roots,
 }
 
 async function readSnapshotJson(file, label) {
-  const body = await fs.readFile(file.path);
+  const body = file.body === undefined ? await fs.readFile(file.path) : file.body;
   const digest = crypto.createHash("sha256").update(body).digest("hex");
   if (body.byteLength !== file.size || digest !== file.sha256) {
     throw new Error(`${label} changed after its package snapshot was formed`);
@@ -1504,16 +1668,17 @@ async function readPackageState(roots, manifest, source) {
     await requirePlainDirectory(path.dirname(target), path.dirname(target));
     present += 1;
     const snapshot = await snapshotDirectory(target);
+    validateMemberDataPaths(member, snapshot);
     activeMembers.push({ ...member, target, present: true, ...await projectMemberConfiguration(snapshot, member.configuration) });
   }
   const materialized = present === manifest.members.length;
   const partiallyMaterialized = present > 0 && !materialized;
-  const installedDigest = materialized ? hashJson({
+  const installedDigest = present > 0 ? hashJson({
     manifest_digest: source.manifestDigest,
     members: activeMembers.map((member) => ({
       registry_kind: member.registry_kind,
       owner: member.owner,
-      digest: member.digest,
+      digest: member.present ? member.digest : null,
     })),
   }) : "";
   const receiptResult = await readReceipt(roots, manifest.id);
@@ -1576,13 +1741,18 @@ function receiptMemberMatchesSource(receipt, source, active) {
   if (receipt.source_files) {
     if (snapshotDigest(receiptSourceFiles(receipt)) !== source.digest) return false;
     if (active.digest === receipt.digest) return true;
-    if (!source.configuration?.length || active.contentDigest !== receipt.content_digest) return false;
     const baselines = new Map((receipt.json_files ?? []).map(file => [file.path, file]));
     const normalized = active.files.map(file => {
       const relative = snapshotRelativePath(file.relative_path), projected = active.projectedFiles.get(relative), saved = baselines.get(relative);
       return projected && saved?.configuration_digest === projected.configuration_digest && saved.owned_sha256 === projected.owned_sha256
         ? { ...file, size: saved.size, sha256: saved.sha256 } : file;
     });
+    const saved = source.data_directories?.length ? receiptMaterializedFiles(receipt) : null;
+    if (saved) {
+      return snapshotDigest(normalized.filter(file => !isMemberDataPath(source, snapshotRelativePath(file.relative_path))))
+        === snapshotDigest(saved.filter(file => !isMemberDataPath(source, file.path)));
+    }
+    if (!source.configuration?.length || active.contentDigest !== receipt.content_digest) return false;
     return snapshotDigest(normalized) === receipt.digest;
   }
   if (!source.configuration?.length) return receipt.digest === source.digest && active.digest === receipt.digest;
@@ -1846,7 +2016,7 @@ async function installResolvedPackages(roots, entries, operation) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
       if (await pathExists(target)) throw new Error(`package owner target appeared during commit: ${move.target}`);
-      await fs.rename(stage, target);
+      await renameDirectoryExclusive(stage, target);
       await syncDirectory(path.dirname(target));
       journal.moves[index].state = "materialized";
       await writeJournal(journalPath, journal);
@@ -1882,7 +2052,7 @@ async function installResolvedPackages(roots, entries, operation) {
     try {
       recovery = await recoverTransaction(roots, transactionRoot, journalPath);
     } catch (recoveryError) {
-      throw new Error(`${errorMessage(error)}; package transaction recovery failed closed: ${errorMessage(recoveryError)}`);
+      throw new Error(`${errorMessage(error)}; package transaction recovery failed closed: ${errorMessage(recoveryError)}`, { cause: error });
     }
     if (recovery !== "committed") throw error;
   }
@@ -1935,7 +2105,7 @@ async function repairResolvedPackages(roots, entries, operation) {
       prepared.push({ entry, source, state, alreadyCurrent: true });
       continue;
     }
-    if (!state.materialized || state.partiallyMaterialized) {
+    if ((!state.materialized || state.partiallyMaterialized) && !operation.allowOwnerAdditions) {
       throw new Error(`local package '${entry.manifest.id}' repair requires every declared active owner`);
     }
     if (expected.installedDigest !== state.installedDigest) {
@@ -1964,7 +2134,7 @@ async function repairResolvedPackages(roots, entries, operation) {
       members: candidate.materialization.members.map((member) => ({ registry_kind: member.registry_kind, owner: member.owner, digest: member.digest })) })
   ));
   for (const candidate of replacements) {
-    for (const member of candidate.state.activeMembers) assertNoExcludedActiveEntries(member);
+    for (const member of candidate.state.activeMembers.filter(member => member.present)) assertNoExcludedActiveEntries(member);
   }
   const receipts = pending.map(({ entry, source, materialization }) => packageReceipt(
     entry.manifest,
@@ -1976,7 +2146,9 @@ async function repairResolvedPackages(roots, entries, operation) {
 
   const moves = replacements.flatMap(({ entry, materialization, state }) => installationMembers(materialization).map((member) => {
     const active = state.activeMembers.find((candidate) => memberKey(candidate) === memberKey(member));
-    if (!active?.present || !DIGEST.test(active.digest)) {
+    const prior = state.receipt?.members.find(candidate => memberKey(candidate) === memberKey(member));
+    const added = operation.allowOwnerAdditions === true && !prior && active?.present === false;
+    if (!added && (!active?.present || !DIGEST.test(active.digest))) {
       throw new Error(`local package '${entry.manifest.id}' repair lost active owner '${memberKey(member)}'`);
     }
     return {
@@ -1987,7 +2159,7 @@ async function repairResolvedPackages(roots, entries, operation) {
       stage: transactionRelative(member, operation.operationId, "stage"),
       backup: transactionRelative(member, operation.operationId, "backup"),
       digest: member.digest,
-      previous_digest: active.digest,
+      previous_digest: added ? null : active.digest,
       state: "planned",
     };
   }));
@@ -2013,7 +2185,8 @@ async function repairResolvedPackages(roots, entries, operation) {
       if (!sourceMember) throw new Error(`repair transaction lost source member '${move.registry_kind}/${move.owner}'`);
       const stage = resolveTransactionPath(roots, move.stage);
       const backup = resolveTransactionPath(roots, move.backup);
-      if (await pathExists(stage) || await pathExists(backup)) {
+      if (await pathExists(stage) || await pathExists(backup)
+        || move.previous_digest === null && await pathExists(resolveTransactionPath(roots, move.target))) {
         throw new Error(`package repair transaction path already exists for '${move.target}'`);
       }
       await fs.mkdir(path.dirname(stage), { recursive: true, mode: 0o755 });
@@ -2047,23 +2220,28 @@ async function repairResolvedPackages(roots, entries, operation) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
       const backup = resolveTransactionPath(roots, move.backup);
-      const current = await snapshotDirectory(target);
-      if (current.digest !== move.previous_digest) {
-        throw new Error(`package owner '${move.target}' changed during repair`);
+      if (await pathExists(backup)) throw new Error(`package repair backup appeared during update: ${move.backup}`);
+      if (move.previous_digest === null) {
+        if (await pathExists(target)) throw new Error(`package owner target appeared during update: ${move.target}`);
+      } else {
+        const current = await snapshotDirectory(target);
+        if (current.digest !== move.previous_digest) {
+          throw new Error(`package owner '${move.target}' changed during repair`);
+        }
+        assertNoExcludedActiveEntries(current);
+        await renameDirectoryExclusive(target, backup);
+        await syncDirectory(path.dirname(target));
+        reportProgress(operation.onProgress, {
+          operationId: operation.operationId,
+          packageId: move.package_id,
+          operation: "repair",
+          phase: "backing_up",
+          percent: Math.round(56 + index / journal.moves.length * 34),
+        });
+        journal.moves[index].state = "backed_up";
+        await writeJournal(journalPath, journal);
       }
-      assertNoExcludedActiveEntries(current);
-      await fs.rename(target, backup);
-      await syncDirectory(path.dirname(target));
-      reportProgress(operation.onProgress, {
-        operationId: operation.operationId,
-        packageId: move.package_id,
-        operation: "repair",
-        phase: "backing_up",
-        percent: Math.round(56 + index / journal.moves.length * 34),
-      });
-      journal.moves[index].state = "backed_up";
-      await writeJournal(journalPath, journal);
-      await fs.rename(stage, target);
+      await renameDirectoryExclusive(stage, target);
       await syncDirectory(path.dirname(target));
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
@@ -2116,7 +2294,7 @@ async function repairResolvedPackages(roots, entries, operation) {
     try {
       recovery = await recoverTransaction(roots, transactionRoot, journalPath);
     } catch (recoveryError) {
-      throw new Error(`${errorMessage(error)}; package repair recovery failed closed: ${errorMessage(recoveryError)}`);
+      throw new Error(`${errorMessage(error)}; package repair recovery failed closed: ${errorMessage(recoveryError)}`, { cause: error });
     }
     if (recovery !== "committed") throw error;
   }
@@ -2138,6 +2316,19 @@ async function repairResolvedPackages(roots, entries, operation) {
 }
 
 async function preparePackageRepair(manifest, source, state) {
+  const changedData = state.localChanges.some(change => {
+    const member = source.members.find(candidate => memberKey(candidate) === memberKey(change));
+    return member && isMemberDataPath(member, change.path);
+  });
+  const unprovedData = state.receipt?.schema_version !== 2 && source.members.some(member => {
+    if (!member.data_directories?.length) return false;
+    const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
+    return snapshotDigest(member.files.filter(file => isMemberDataPath(member, snapshotRelativePath(file.relative_path))))
+      !== snapshotDigest((active?.files ?? []).filter(file => isMemberDataPath(member, snapshotRelativePath(file.relative_path))));
+  });
+  if (changedData || unprovedData) {
+    throw new Error(`local package '${manifest.id}' has local changes in declared data directories; repair cannot discard authored files`);
+  }
   if (state.receipt?.schema_version === 2 && state.localChanges.length && state.receipt.members.some(receiptHasLocalChanges)) {
     throw new Error(`local package '${manifest.id}' contains preserved local changes; repair cannot discard authored files`);
   }
@@ -2269,7 +2460,7 @@ async function removeResolvedPackages(roots, entries, operation) {
       const current = await snapshotDirectory(target);
       if (current.digest !== move.digest) throw new Error(`package owner '${move.target}' changed during removal`);
       assertNoExcludedActiveEntries(current);
-      await fs.rename(target, backup);
+      await renameDirectoryExclusive(target, backup);
       await syncDirectory(path.dirname(target));
       journal.moves[index].state = "backed_up";
       await writeJournal(journalPath, journal);
@@ -2312,7 +2503,7 @@ async function removeResolvedPackages(roots, entries, operation) {
     try {
       recovery = await recoverTransaction(roots, transactionRoot, journalPath);
     } catch (recoveryError) {
-      throw new Error(`${errorMessage(error)}; package transaction recovery failed closed: ${errorMessage(recoveryError)}`);
+      throw new Error(`${errorMessage(error)}; package transaction recovery failed closed: ${errorMessage(recoveryError)}`, { cause: error });
     }
     if (recovery !== "committed") throw error;
   }
@@ -2368,15 +2559,22 @@ async function recoverTransaction(roots, transactionRoot, journalPath) {
       await reconcileRepairOwnersForward(roots, journal);
       await verifyRepairReceiptOwners(roots, journal.receipts);
       await reconcileRepairReceipts(roots, journal);
+      if (journal.phase === "owners_materialized") {
+        journal.phase = "receipts_written";
+        await writeJournal(journalPath, journal);
+      }
       await removeRepairBackups(roots, journal.moves);
       await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
       return "committed";
     }
     const rolling = { ...journal, phase: "rolling_back" };
     await writeJournal(journalPath, rolling);
+    const refusals = [];
     for (const move of [...journal.moves].reverse()) {
-      await rollbackRepairOwner(roots, move);
+      try { await rollbackRepairOwner(roots, move); }
+      catch (error) { refusals.push(errorMessage(error)); }
     }
+    if (refusals.length) throw new Error(refusals.join("; "));
     await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
     return "rolled_back";
   }
@@ -2513,8 +2711,16 @@ function validateRepairJournalContract(journal) {
   }
   const receiptsByPackage = new Map(journal.receipts.map((receipt) => [receipt.package_id, receipt]));
   const previousReceipts = journal.previous_receipts ?? [];
+  const priorByPackage = new Map(previousReceipts.map(receipt => [receipt.package_id, receipt]));
   if (previousReceipts.some((receipt) => !receiptsByPackage.has(receipt.package_id))) {
     throw new Error("repair transaction has previous receipt without replacement");
+  }
+  for (const previous of previousReceipts) {
+    const next = receiptsByPackage.get(previous.package_id);
+    if (next.product_kind !== previous.product_kind || next.product_id !== previous.product_id
+      || previous.members.some(member => !next.members.some(candidate => memberKey(candidate) === memberKey(member) && candidate.target === member.target))) {
+      throw new Error(`repair receipt '${previous.package_id}' removes or renames a prior owner`);
+    }
   }
   for (const receipt of journal.receipts) {
     if (receipt.operation_id !== journal.operation_id) {
@@ -2552,6 +2758,16 @@ function validateRepairJournalContract(journal) {
     if (!receiptMember || receiptMember.target !== move.target || receiptMember.digest !== move.digest) {
       throw new Error(`repair move disagrees with receipt member '${move.package_id}:${key}'`);
     }
+    const previous = priorByPackage.get(move.package_id);
+    const priorMember = previous?.members.find(member => memberKey(member) === key);
+    if (move.previous_digest === null) {
+      if (!previous || priorMember || receipt.schema_version !== 2 || !receiptMember.materialized_files
+        || snapshotDigest(receiptSourceFiles(receiptMember)) !== move.digest || move.state === "backed_up") {
+        throw new Error(`repair move '${move.package_id}:${key}' has no proven absent new-owner preimage`);
+      }
+    } else if (previous && !priorMember) {
+      throw new Error(`repair move '${move.package_id}:${key}' cannot claim an existing unowned owner`);
+    }
     const moved = movedMembersByPackage.get(move.package_id) ?? new Set();
     moved.add(key);
     movedMembersByPackage.set(move.package_id, moved);
@@ -2587,6 +2803,7 @@ function parseReceipt(value, file) {
         || sourcePaths.has(entry.path)) throw new Error(`local package receipt '${value.package_id}' has an invalid source path '${entry.path}'`);
       sourcePaths.add(entry.path);
     }
+    if (member.materialized_files) validateReceiptMaterialization(member, value.package_id);
   }
   if (value.schema_version === 2 && hashJson({ manifest_digest: value.manifest_digest,
     members: value.members.map(member => ({ registry_kind: member.registry_kind, owner: member.owner,
@@ -2596,8 +2813,54 @@ function parseReceipt(value, file) {
   return structuredClone(value);
 }
 
+function validateReceiptMaterialization(member, packageId) {
+  const paths = new Map();
+  for (const file of member.materialized_files) {
+    if (path.posix.isAbsolute(file.path) || path.win32.parse(file.path).root
+      || file.path.split("/").some(part => !part || part === "." || part === ".." || /[\\\u0000-\u001f]/.test(part))
+      || paths.has(file.path)) {
+      throw new Error(`local package receipt '${packageId}' has an invalid materialized path '${file.path}'`);
+    }
+    paths.set(file.path, file);
+  }
+  for (const relative of paths.keys()) {
+    const components = relative.split("/");
+    for (let length = 1; length < components.length; length += 1) {
+      if (paths.has(components.slice(0, length).join("/"))) {
+        throw new Error(`local package receipt '${packageId}' has overlapping materialized paths at '${relative}'`);
+      }
+    }
+  }
+  const files = member.materialized_files.map(file => ({ ...file, relative_path: file.path }));
+  if (snapshotDigest(files) !== member.digest) {
+    throw new Error(`local package receipt '${packageId}' materialized baseline does not match its saved digest`);
+  }
+  const jsonFiles = new Map((member.json_files ?? []).map(file => [file.path, file]));
+  for (const [relative, file] of paths) {
+    if (path.extname(relative) !== ".json") continue;
+    const saved = jsonFiles.get(relative);
+    if (!saved || saved.sha256 !== file.sha256 || saved.size !== file.size) {
+      throw new Error(`local package receipt '${packageId}' JSON baseline disagrees with materialization at '${relative}'`);
+    }
+    jsonFiles.delete(relative);
+  }
+  if (jsonFiles.size) throw new Error(`local package receipt '${packageId}' has JSON baselines outside its materialization`);
+}
+
 function receiptSourceFiles(member) {
   return member.source_files.map(file => ({ ...file, relative_path: file.path }));
+}
+
+function receiptMaterializedFiles(member) {
+  if (member.materialized_files) return member.materialized_files.map(file => ({ ...file, relative_path: file.path }));
+  if (!member.source_files) return null;
+  const jsonFiles = new Map((member.json_files ?? []).map(file => [file.path, file]));
+  const files = receiptSourceFiles(member).map(file => {
+    const saved = jsonFiles.get(file.path);
+    jsonFiles.delete(file.path);
+    return saved ? { ...file, sha256: saved.sha256, size: saved.size } : file;
+  });
+  return !jsonFiles.size && snapshotDigest(files) === member.digest ? files : null;
 }
 
 function packageReceipt(manifest, source, operationId, materialization = source) {
@@ -2618,6 +2881,8 @@ function packageReceipt(manifest, source, operationId, materialization = source)
       owner: member.owner,
       target: memberRelative(member),
       digest: member.digest,
+      materialized_files: member.files.map(file => ({ path: snapshotRelativePath(file.relative_path),
+        sha256: file.sha256, size: file.size, mode: file.mode })),
       source_files: sourceMembers.get(memberKey(member)).files.map(file => {
         const relative = snapshotRelativePath(file.relative_path);
         const projected = sourceMembers.get(memberKey(member)).projectedFiles.get(relative);
@@ -2732,7 +2997,7 @@ async function copySnapshot(snapshot, targetRoot, onFile) {
       const content = await hashFileHandle(source);
       const stat = await source.stat();
       if (!stat.isFile() || stat.size !== (file.input_size ?? file.size) || content.size !== stat.size
-        || (stat.mode & 0o777) !== file.mode || content.sha256 !== (file.input_sha256 ?? file.sha256)
+        || (stat.mode & 0o777) !== (file.input_mode ?? file.mode) || content.sha256 !== (file.input_sha256 ?? file.sha256)
         || before.mtimeMs !== stat.mtimeMs || before.ctimeMs !== stat.ctimeMs) {
         throw new Error(`local package source changed while copying '${file.path}'`);
       }
@@ -2790,7 +3055,7 @@ async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onF
   await copySnapshot(snapshot, preparation, onFile);
   if ((await snapshotDirectory(preparation)).digest !== snapshot.digest) throw new Error(`package preparation changed before staging '${stage}'`);
   if (await pathExists(stage)) throw new Error(`package stage appeared during preparation '${stage}'`);
-  await fs.rename(preparation, stage);
+  await renameDirectoryExclusive(preparation, stage);
   await syncDirectory(transactionRoot);
   await syncDirectory(path.dirname(stage));
 }
@@ -2810,6 +3075,7 @@ async function removeMatchingDirectory(directory, digest, label, optional = fals
   }
   const snapshot = await snapshotDirectory(directory);
   if (snapshot.digest !== digest) throw new Error(`${label} changed before cleanup: ${directory}`);
+  assertNoExcludedActiveEntries(snapshot);
   await fs.rm(directory, { recursive: true, force: false });
   await syncDirectory(path.dirname(directory));
 }
@@ -2862,6 +3128,18 @@ async function rollbackRepairOwner(roots, move) {
   const stage = resolveTransactionPath(roots, move.stage);
   const backup = resolveTransactionPath(roots, move.backup);
   const observed = await repairOwnerDigests({ target, stage, backup });
+  if (move.previous_digest === null) {
+    if (observed.backup !== null) throw repairOwnerStateError(move, observed, "new-owner rollback");
+    if (observed.target === null && [null, move.digest].includes(observed.stage)) {
+      if (observed.stage === move.digest) await removeMatchingDirectory(stage, move.digest, "new-owner stage");
+      return;
+    }
+    if (observed.target === move.digest && observed.stage === null && ["staged", "materialized"].includes(move.state)) {
+      await removeMatchingDirectory(target, move.digest, "materialized new owner");
+      return;
+    }
+    throw repairOwnerStateError(move, observed, "new-owner rollback");
+  }
   if (move.state === "planned" && observed.target === move.previous_digest && observed.backup === null) {
     await removeInstallStage(stage, move.digest, "planned");
     return;
@@ -2921,7 +3199,7 @@ function repairOwnerStateError(move, observed, phase) {
 async function restoreRepairBackup(target, backup, digest) {
   const snapshot = await snapshotDirectory(backup);
   if (snapshot.digest !== digest) throw new Error(`repair backup changed before rollback: ${backup}`);
-  await fs.rename(backup, target);
+  await renameDirectoryExclusive(backup, target);
   await syncDirectory(path.dirname(target));
 }
 
@@ -2938,7 +3216,7 @@ async function createTransactionRoot(roots, operationId, journal) {
   try {
     await writeJournal(path.join(preparationRoot, "journal.json"), journal);
     if (await pathExists(transactionRoot)) throw new Error(`package transaction '${operationId}' already exists`);
-    await fs.rename(preparationRoot, transactionRoot);
+    await renameDirectoryExclusive(preparationRoot, transactionRoot);
     published = true;
     await syncDirectory(roots.transactionsRoot);
     return transactionRoot;
@@ -2959,7 +3237,7 @@ async function removeTransactionRoot(transactionRoot, transactionsRoot) {
     transactionsRoot,
     `.cleanup.${operationId}.${crypto.randomBytes(6).toString("hex")}`,
   );
-  await fs.rename(transactionRoot, cleanupRoot);
+  await renameDirectoryExclusive(transactionRoot, cleanupRoot);
   await syncDirectory(transactionsRoot);
   await removeUnpublishedTransactionRoot(cleanupRoot, transactionsRoot);
 }
@@ -3006,6 +3284,19 @@ async function syncDirectory(directory) {
   } finally {
     await handle.close();
   }
+}
+
+async function renameDirectoryExclusive(source, destination) {
+  const flags = fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW;
+  const sourceParent = await fs.open(path.dirname(source), flags);
+  try {
+    const destinationParent = await fs.open(path.dirname(destination), flags);
+    try {
+      require("./nativeFiles.cjs").renameDirectoryExclusive(
+        sourceParent.fd, path.basename(source), destinationParent.fd, path.basename(destination),
+      );
+    } finally { await destinationParent.close(); }
+  } finally { await sourceParent.close(); }
 }
 
 function validateMovePaths(roots, move, operationId) {

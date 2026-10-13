@@ -6725,6 +6725,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "octopus-context-collections"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "octopus-descriptors",
+ "octopus-ledger",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "octopus-core"
 version = "0.1.0"
 dependencies = [
@@ -7458,12 +7471,14 @@ dependencies = [
  "futures",
  "octopus-app-server",
  "octopus-app-server-interface",
+ "octopus-context-collections",
  "octopus-descriptors",
  "octopus-ee",
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-ledger-store",
+ "octopus-marks",
  "octopus-policy",
  "octopus-process-session-tool-runtime",
  "octopus-provider-run-authoring",
@@ -7471,6 +7486,7 @@ dependencies = [
  "octopus-system-room-env",
  "octopus-tool-handlers",
  "octopus-tool-registry",
+ "octopus-verifiers",
  "octopus-worker-env",
  "octopus-world-pyecho-life-runtime",
  "octopus-world-terminal-client",
@@ -7608,6 +7624,7 @@ dependencies = [
  "futures",
  "json-patch",
  "notify",
+ "octopus-app-server",
  "octopus-app-server-interface",
  "octopus-app-server-transport",
  "octopus-appserver-proto",
@@ -8045,6 +8062,7 @@ dependencies = [
  "fs2",
  "json-patch",
  "libc",
+ "octopus-context-collections",
  "octopus-descriptors",
  "octopus-file-write-contract",
  "octopus-interfaces",
@@ -8578,21 +8596,33 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "futures",
+ "octopus-app-server",
+ "octopus-app-server-interface",
  "octopus-azure-auth",
+ "octopus-context-collections",
  "octopus-descriptors",
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-ledger-store",
  "octopus-model-context-render",
+ "octopus-operator-chat-client",
  "octopus-provider-credential-pool",
  "octopus-provider-run-authoring",
+ "octopus-runtime",
  "octopus-secrets",
+ "octopus-system-room-env",
  "octopus-tool-handlers",
+ "octopus-tool-registry",
+ "octopus-worker-env",
  "octopus-world-pyecho-life-runtime",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-tungstenite 0.28.0",
 ]
 
 [[package]]

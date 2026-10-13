@@ -15,6 +15,7 @@ use octopus_worker_env::WorkerEnvironmentLifecycle;
 mod artifact_bound;
 mod artifact_bound_process;
 mod client_mcp;
+mod collection_tools;
 mod artifact_send;
 mod bound_surface;
 mod file_write;

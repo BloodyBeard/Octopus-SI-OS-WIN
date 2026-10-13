@@ -7,14 +7,17 @@ use octopus_ledger::{
     ArtifactRef, ContentHash, DeliveryVerdict, InterfaceToolAffordance, InvocationMetadata,
 };
 use octopus_operator_chat_client::run_composition::{
-    AuthoredRunComposition, AuthoredRunCompositionPlan, CompositionAuthoring,
+    AuthoredRunComposition, AuthoredRunCompositionPlan, CollectionSelection, CompositionAuthoring,
     CompositionCommunication, CompositionRoots, CompositionSeed, RegistryValidationIssue,
     RegistryValidationRoots, RunCompositionPlan, RunCompositionRequest,
     composition_candidate_writes, plan_authored_run_composition, plan_run_composition,
     validate_registry_candidate, validate_run_authoring_source, validation_roots,
 };
-use octopus_operator_chat_client::{PlannedClientWrite, SelectedToolSeed};
-use octopus_operator_chat_client::run_composition::current_run::{CurrentRunRequest, current_selection, plan_current_run_amendment};
+use octopus_operator_chat_client::{ExternalInputSeed, ExternalRelaySeed, ModelOutputSeed, PlannedClientWrite, SelectedToolSeed};
+use octopus_operator_chat_client::run_composition::current_run::{CurrentRunRequest, current_selection, plan_current_run_amendment_for_native};
+use octopus_operator_chat_client::publication_selection::{
+    PublicationSelectionEvidence, validate_evidence, validate_publication_snapshot_refs,
+};
 use octopus_provider_run_authoring::ProviderOutgoingBinding;
 use octopus_provider_run_authoring::capability_amendment::{ProviderCapabilityAmendment, ProviderCapabilityBridge, validate_installed};
 use octopus_runtime::run_record::RunRecord;
@@ -166,6 +169,14 @@ pub struct RunDefaults {
     pub tools: Vec<SelectedToolSeed>,
     #[serde(default)]
     pub door_host_slots: BTreeMap<String, BTreeMap<String, PathBuf>>,
+    #[serde(default)]
+    pub external_inputs: Vec<ExternalInputSeed>,
+    #[serde(default)]
+    pub external_relays: Vec<ExternalRelaySeed>,
+    #[serde(default)]
+    pub model_outputs: Vec<ModelOutputSeed>,
+    #[serde(default)]
+    pub publications: Vec<CollectionSelection>,
     #[serde(default, deserialize_with = "deserialize_artifact_refs")]
     pub context_artifacts: Vec<ArtifactRef>,
     #[serde(default)]
@@ -209,6 +220,14 @@ pub struct CreateRunRequest {
     pub tools: Option<Vec<SelectedToolSeed>>,
     #[serde(default)]
     pub door_host_slots: Option<BTreeMap<String, BTreeMap<String, PathBuf>>>,
+    #[serde(default)]
+    pub external_inputs: Option<Vec<ExternalInputSeed>>,
+    #[serde(default)]
+    pub external_relays: Option<Vec<ExternalRelaySeed>>,
+    #[serde(default)]
+    pub model_outputs: Option<Vec<ModelOutputSeed>>,
+    #[serde(default)]
+    pub publications: Option<Vec<CollectionSelection>>,
     #[serde(default)]
     pub return_interface_ids: Option<Vec<String>>,
     #[serde(default)]
@@ -269,6 +288,11 @@ pub enum NativePhase {
         stage: CurrentRunStage,
         plan: Box<PendingCurrentRun>,
     },
+    PinnedCurrentRun {
+        stage: CurrentRunStage,
+        plan: Box<PendingCurrentRun>,
+        publication_read_refs: Vec<ArtifactRef>,
+    },
     Applying {
         created: Value,
         files: Vec<FileProof>,
@@ -278,9 +302,26 @@ pub enum NativePhase {
         seed: Option<NativeEffect>,
         outgoing_bindings: Vec<ProviderOutgoingBinding>,
     },
+    PinnedApplying {
+        created: Value,
+        files: Vec<FileProof>,
+        publication_read_refs: Vec<ArtifactRef>,
+        validation_roots: RegistryValidationRoots,
+        allowed_issues: Vec<RegistryValidationIssue>,
+        checked_subjects: Vec<String>,
+        seed: Option<NativeEffect>,
+        outgoing_bindings: Vec<ProviderOutgoingBinding>,
+    },
     AppliedSeeding {
         created: Value,
         files: Vec<FileProof>,
+        write_receipt: Value,
+        validation: Value,
+    },
+    PinnedAppliedSeeding {
+        created: Value,
+        files: Vec<FileProof>,
+        publication_read_refs: Vec<ArtifactRef>,
         write_receipt: Value,
         validation: Value,
     },
@@ -350,6 +391,35 @@ pub enum NativeStep {
 }
 
 impl NativePending {
+    fn publication_read_refs(&self) -> Option<&[ArtifactRef]> {
+        match &self.state {
+            NativePhase::PinnedApplying { publication_read_refs, .. }
+            | NativePhase::PinnedAppliedSeeding { publication_read_refs, .. }
+            | NativePhase::PinnedCurrentRun { publication_read_refs, .. } => Some(publication_read_refs),
+            _ => None,
+        }
+    }
+
+    fn validate_publication_reads(&self, registry_root: &Path) -> Result<(), String> {
+        if let Some(refs) = self.publication_read_refs() {
+            validate_publication_snapshot_refs(registry_root, refs)?;
+        }
+        Ok(())
+    }
+
+    fn successor_state(&self, state: NativePhase) -> Result<NativePhase, String> {
+        match (self.publication_read_refs(), state) {
+            (Some(refs), NativePhase::CurrentRun { stage, plan }) => Ok(NativePhase::PinnedCurrentRun {
+                stage, plan, publication_read_refs:refs.to_vec(),
+            }),
+            (Some(refs), NativePhase::AppliedSeeding { created, files, write_receipt, validation }) => Ok(NativePhase::PinnedAppliedSeeding {
+                created, files, write_receipt, validation, publication_read_refs:refs.to_vec(),
+            }),
+            (None, state) => Ok(state),
+            _ => Err("pinned native operation has an unsupported successor phase".into()),
+        }
+    }
+
     fn advance_current_run(&self, stage: &CurrentRunStage, plan: &PendingCurrentRun, body: &Value, receipt: &Value) -> Result<NativeStep, String> {
         let mut next = plan.clone();
         next.receipts.push(receipt.clone());
@@ -357,22 +427,24 @@ impl NativePending {
             CurrentRunStage::Dependencies => {
                 validate_file_receipt(&self.effect, body, &plan.dependency_files)?;
                 readback_files(&plan.dependency_files)?;
+                self.validate_publication_reads(&plan.validation_roots.registry_root)?;
                 let (effect, stage) = match &plan.activation {
                     Some(effect) => (effect.clone(), CurrentRunStage::Activation),
                     None => (plan.readback.clone(), CurrentRunStage::Readback),
                 };
                 Ok(NativeStep::AmendmentEffect {
                     amendment: plan.amendment.clone(), effect: effect.clone(),
-                    pending: Self { effect, state:NativePhase::CurrentRun { stage, plan:Box::new(next) }, ..self.clone() },
+                    pending: Self { effect, state:self.successor_state(NativePhase::CurrentRun { stage, plan:Box::new(next) })?, ..self.clone() },
                 })
             }
             CurrentRunStage::Activation => {
                 validate_file_receipt(&self.effect, body, &plan.activation_files)?;
                 readback_files(&plan.activation_files)?;
+                self.validate_publication_reads(&plan.validation_roots.registry_root)?;
                 let effect = plan.readback.clone();
                 Ok(NativeStep::Effect {
                     effect: effect.clone(), outgoing_bindings:Vec::new(),
-                    pending: Self { effect, state:NativePhase::CurrentRun { stage:CurrentRunStage::Readback, plan:Box::new(next) }, ..self.clone() },
+                    pending: Self { effect, state:self.successor_state(NativePhase::CurrentRun { stage:CurrentRunStage::Readback, plan:Box::new(next) })?, ..self.clone() },
                 })
             }
             CurrentRunStage::Readback => {
@@ -391,6 +463,7 @@ impl NativePending {
                 readback_files(&plan.activation_files)?;
                 let live = RunRecord::from_bytes(&std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                 validate_installed(&live, &plan.amendment)?;
+                self.validate_publication_reads(&plan.validation_roots.registry_root)?;
                 let validation = validate_registry_candidate(&plan.validation_roots, &[])?;
                 let issues = validation.stages.first().ok_or("current-run validation has no stage")?.issues.iter()
                     .filter(|issue| (issue.subject == "snapshot" || plan.checked_subjects.contains(&issue.subject)) && !plan.allowed_issues.contains(issue))
@@ -420,7 +493,7 @@ impl NativePending {
         }
         let body = receipt.body.ok_or("native result has no body")?;
         match &self.state {
-            NativePhase::CurrentRun { stage, plan } => self.advance_current_run(stage, plan, &body, result),
+            NativePhase::CurrentRun { stage, plan } | NativePhase::PinnedCurrentRun { stage, plan, .. } => self.advance_current_run(stage, plan, &body, result),
             NativePhase::Applying {
                 created,
                 files,
@@ -429,9 +502,19 @@ impl NativePending {
                 checked_subjects,
                 seed,
                 outgoing_bindings,
+            } | NativePhase::PinnedApplying {
+                created,
+                files,
+                validation_roots,
+                allowed_issues,
+                checked_subjects,
+                seed,
+                outgoing_bindings,
+                ..
             } => {
                 validate_file_receipt(&self.effect, &body, files)?;
                 readback_files(files)?;
+                self.validate_publication_reads(&validation_roots.registry_root)?;
                 let mut validation = validate_registry_candidate(validation_roots, &[])?;
                 let unexpected = validation.stages[0]
                     .issues
@@ -473,12 +556,12 @@ impl NativePending {
                     outgoing_bindings: outgoing_bindings.clone(),
                     pending: Self {
                         effect: seed.clone(),
-                        state: NativePhase::AppliedSeeding {
+                        state: self.successor_state(NativePhase::AppliedSeeding {
                             created: created.clone(),
                             files: files.clone(),
                             write_receipt: result.clone(),
                             validation: json!(validation),
-                        },
+                        })?,
                         ..self.clone()
                     },
                 })
@@ -488,16 +571,22 @@ impl NativePending {
                 files,
                 write_receipt,
                 validation,
+            } | NativePhase::PinnedAppliedSeeding {
+                created,
+                files,
+                write_receipt,
+                validation,
+                ..
             } => {
                 let verdict = parse_delivery_verdict(body)?;
                 let admitted = matches!(verdict, DeliveryVerdict::Admitted { .. });
-                Ok(NativeStep::Complete {
-                    result: json!({
+                let mut completed = json!({
                         "ok":admitted,"call_id":self.call_id,"operation":self.operation_name,
                         "created":created,"installed":true,"files":files,"write_receipt":write_receipt,
                         "validation":validation,"seed_receipt":result,"seed_admitted":admitted,"work_completed":false,
-                    }),
-                })
+                    });
+                if let Some(refs) = self.publication_read_refs() { completed["publication_read_refs"] = json!(refs); }
+                Ok(NativeStep::Complete { result:completed })
             }
             NativePhase::Writing {
                 created,
@@ -563,14 +652,14 @@ impl NativePending {
             "ok": false, "receipt": receipt, "work_completed": false,
         });
         match &self.state {
-            NativePhase::CurrentRun { stage, plan } => {
+            NativePhase::CurrentRun { stage, plan } | NativePhase::PinnedCurrentRun { stage, plan, .. } => {
                 result["run_id"] = json!(self.source_run);
                 result["amendment_key"] = json!(plan.amendment.amendment_key);
                 result["stage"] = json!(stage);
                 result["receipts"] = json!(plan.receipts);
                 result["installed"] = Value::Null;
             }
-            NativePhase::Applying { created, files, .. } => {
+            NativePhase::Applying { created, files, .. } | NativePhase::PinnedApplying { created, files, .. } => {
                 result["created"] = created.clone();
                 result["planned_files"] = json!(files);
                 result["installed"] = Value::Null;
@@ -581,6 +670,12 @@ impl NativePending {
                 files,
                 write_receipt,
                 validation,
+            } | NativePhase::PinnedAppliedSeeding {
+                created,
+                files,
+                write_receipt,
+                validation,
+                ..
             } => {
                 result["created"] = created.clone();
                 result["files"] = json!(files);
@@ -613,6 +708,7 @@ impl NativePending {
                 result["recipient_action_confirmed"] = json!(false);
             }
         }
+        if let Some(refs) = self.publication_read_refs() { result["publication_read_refs"] = json!(refs); }
         result
     }
 }
@@ -627,6 +723,9 @@ pub struct RunAffordances {
 impl RunAffordances {
     fn current_run_step(&self, metadata: &InvocationMetadata, current: &RunRecord, call_id: &str, operation_name: &str,
         request: CurrentRunRequest, preview: bool) -> Result<NativeStep, String> {
+        for publication in &request.publications {
+            require_readable_refs(metadata, std::slice::from_ref(&publication.source))?;
+        }
         let roots = self.config.roots.as_ref().ok_or("current-run authoring roots are absent")?;
         let writer = self.config.file_write_tool.as_ref().ok_or("current-run file_write_tool is absent")?;
         let reader = self.config.file_read_tool.as_ref().ok_or("current-run file_read_tool is absent")?;
@@ -644,7 +743,7 @@ impl RunAffordances {
         let identity = call_identity(current.id.as_str(), &request.amendment_key)?;
         let readback = NativeEffect { tool:reader.clone(), arguments:json!({"path":source_path}), correlation_id:format!("{identity}:readback") };
         let read_bridge = current_run_bridge(&readback, retained_tools[1].1.clone())?;
-        let mut plan = plan_current_run_amendment(roots, current, provider, request, read_bridge, &retained_tools)?;
+        let mut plan = plan_current_run_amendment_for_native(roots, current, provider, request, read_bridge, &retained_tools, metadata)?;
         let batch = |writes: &[octopus_operator_chat_client::run_composition::RegistryCandidateWrite], suffix: &str| -> Result<Option<(NativeEffect, Vec<FileProof>)>, String> {
             if writes.is_empty() { return Ok(None); }
             let writes = writes.iter().map(|write| PlannedClientWrite { path:write.path.clone(), content:write.content.clone(),
@@ -663,6 +762,7 @@ impl RunAffordances {
                 "bridge":plan.amendment.bridge, "validation":plan.validation, "awaiting_activation":plan.awaiting_activation, "work_completed":false,
             }) });
         }
+        let publication_read_refs = publication_read_refs(&plan.publication_evidence)?;
         let pending_plan = PendingCurrentRun {
             amendment:plan.amendment.clone(), dependency_files:dependencies.as_ref().map(|(_, files)|files.clone()).unwrap_or_default(),
             activation_files:activation.as_ref().map(|(_, files)|files.clone()).unwrap_or_default(),
@@ -670,12 +770,15 @@ impl RunAffordances {
             validation_roots:validation_roots(roots), checked_subjects:plan.validation.checked_subjects,
             allowed_issues:plan.validation.stages.last().ok_or("amendment validation has no final stage")?.issues.clone(), receipts:Vec::new(),
         };
+        if dependencies.is_none() {
+            validate_publication_snapshot_refs(&pending_plan.validation_roots.registry_root, &publication_read_refs)?;
+        }
         let (effect, stage, attach) = match dependencies {
             Some((effect, _)) => (effect, CurrentRunStage::Dependencies, false),
             None => match activation { Some((effect, _)) => (effect, CurrentRunStage::Activation, true), None => (readback, CurrentRunStage::Readback, true) },
         };
         let pending = NativePending { call_id:call_id.into(), operation_name:operation_name.into(), source_run:current.id.to_string(), effect:effect.clone(),
-            state:NativePhase::CurrentRun { stage, plan:Box::new(pending_plan) } };
+            state:NativePhase::PinnedCurrentRun { stage, plan:Box::new(pending_plan), publication_read_refs } };
         if attach { Ok(NativeStep::AmendmentEffect { effect, pending, amendment:plan.amendment }) }
         else { Ok(NativeStep::Effect { effect, pending, outgoing_bindings:Vec::new() }) }
     }
@@ -707,7 +810,8 @@ impl RunAffordances {
         if bound.next().is_some() {
             return Err("run affordance catalog is bound more than once".into());
         }
-        let catalog: RunCatalog = serde_json::from_slice(payload.as_bytes())
+        let bytes = payload.read_bytes().map_err(|error| error.to_string())?;
+        let catalog: RunCatalog = serde_json::from_slice(bytes.as_ref())
             .map_err(|error| format!("bound run affordance catalog is malformed: {error}"))?;
         if catalog.id != config.catalog_artifact.id.as_str() {
             return Err("run affordance catalog self-identity differs from its bound ref".into());
@@ -1076,6 +1180,10 @@ impl RunAffordances {
         require_readable_refs(metadata, &args.artifacts)?;
         let contexts = merge_refs(&defaults.context_artifacts, &args.context_artifacts)?;
         require_readable_refs(metadata, &contexts)?;
+        let publications = args.publications.unwrap_or_else(|| defaults.publications.clone());
+        for publication in &publications {
+            require_readable_refs(metadata, std::slice::from_ref(&publication.source))?;
+        }
         let seed = PeerMessage {
             action: PeerAction::Followup,
             control_id: identity.into(),
@@ -1132,6 +1240,10 @@ impl RunAffordances {
             door_host_slots: args
                 .door_host_slots
                 .unwrap_or_else(|| defaults.door_host_slots.clone()),
+            external_inputs: args.external_inputs.unwrap_or_else(|| defaults.external_inputs.clone()),
+            external_relays: args.external_relays.unwrap_or_else(|| defaults.external_relays.clone()),
+            model_outputs: args.model_outputs.unwrap_or_else(|| defaults.model_outputs.clone()),
+            publications,
             context_artifact_bindings: Vec::new(),
             payload_artifact_bindings: merge_refs(&contexts, &args.artifacts)?,
             seed: CompositionSeed {
@@ -1173,6 +1285,7 @@ impl RunAffordances {
         let authored = AuthoredRunComposition {
             run_id: plan.run_id.clone(),
             writes: composition_candidate_writes(&plan),
+            publication_read_refs: publication_read_refs(&plan.publication_evidence)?,
             outgoing_bindings: vec![ProviderOutgoingBinding {
                 interface: InterfaceId::new(&plan.receive_interface_id),
                 artifact_label: plan.seed.label.clone(),
@@ -1252,9 +1365,10 @@ impl RunAffordances {
             operation_name: operation_name.into(),
             source_run: parent.id.to_string(),
             effect: effect.clone(),
-            state: NativePhase::Applying {
+            state: NativePhase::PinnedApplying {
                 created,
                 files,
+                publication_read_refs: plan.authored.publication_read_refs,
                 validation_roots: validation_roots(roots),
                 allowed_issues: plan
                     .validation
@@ -1432,6 +1546,19 @@ fn validate_file_receipt(
         }
     }
     Ok(())
+}
+
+fn publication_read_refs(evidence: &[PublicationSelectionEvidence]) -> Result<Vec<ArtifactRef>, String> {
+    let mut refs = BTreeMap::new();
+    for evidence in evidence {
+        validate_evidence(evidence)?;
+        for reference in evidence.snapshot.iter().chain(&evidence.context_sources) {
+            if refs.insert(reference.id.clone(), reference.clone()).is_some_and(|prior| prior != *reference) {
+                return Err("publication read evidence contains conflicting exact references".into());
+            }
+        }
+    }
+    Ok(refs.into_values().collect())
 }
 
 fn readback_files(files: &[FileProof]) -> Result<(), String> {
@@ -1924,7 +2051,10 @@ mod tests {
         input.metadata.as_mut().unwrap().artifact_binding_refs[0] = reference;
         let mut malformed = catalog;
         malformed["operations"][0]["input_schema"]["properties"] = json!(7);
-        input.artifact_binding_payloads[0].bytes = serde_json::to_vec(&malformed).unwrap();
+        input.artifact_binding_payloads[0] = octopus_interfaces::ArtifactBindingPayload::new(
+            input.artifact_binding_payloads[0].artifact.clone(),
+            serde_json::to_vec(&malformed).unwrap(),
+        );
         assert!(RunAffordances::from_invocation(&input, &config).is_err());
     }
 

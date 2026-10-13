@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "framework-authoring",
+  "title": "Extend the current environment and compose runs",
+  "description": "Native descriptor authoring, run creation and revision, worker-environment ownership and verification boundaries.",
+  "applicability": "Use when a task needs a new tool, MCP connection, interface, worker environment, run, or a change to its current capabilities.",
+  "state": "active",
+  "scope": {},
+  "content": {
+    "text": "Inspect the installed descriptors and the actual authoring tools before choosing an implementation. Extend an existing owner through its descriptor when possible. New code belongs to an interface or worker-environment package. Prepare and validate exact file effects; preserve accepted work. Publish reusable instructions and capability selections back into an authorized collection after the capability exists."
+  },
+  "selection": {
+    "context_artifact_bindings": [
+      {
+        "id": "artifact-grounding-system-architecture"
+      },
+      {
+        "id": "artifact-home-task-authoring"
+      },
+      {
+        "id": "artifact-spawn-literacy"
+      }
+    ]
+  },
+  "requires": [
+    {
+      "kind": "artifact",
+      "id": "artifact-grounding-system-architecture"
+    },
+    {
+      "kind": "artifact",
+      "id": "artifact-home-task-authoring"
+    },
+    {
+      "kind": "artifact",
+      "id": "artifact-spawn-literacy"
+    }
+  ]
+}

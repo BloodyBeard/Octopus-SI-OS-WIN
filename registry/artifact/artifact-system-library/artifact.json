@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "label": "context.collection",
+  "id": "artifact-system-library",
+  "description": "Reusable knowledge, procedures and capability selections explicitly published for this installation. Bind a separate collection to isolate a project or another audience.",
+  "directory": "entries",
+  "limits": {
+    "max_entries": 4096,
+    "max_entry_bytes": 262144,
+    "max_page_bytes": 65536,
+    "max_scan_bytes": 16777216
+  }
+}

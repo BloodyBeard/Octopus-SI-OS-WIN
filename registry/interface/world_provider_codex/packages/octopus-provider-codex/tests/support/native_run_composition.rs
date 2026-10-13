@@ -34,6 +34,274 @@ fn shipped_native_catalogs_accept_the_exact_artifact_reference_wire() {
 mod support;
 
 #[test]
+fn native_creation_routes_use_authored_defaults_and_explicit_empty_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let request = support::fixture(temp.path());
+    let (mut affordances, metadata) = exact_affordances(&request);
+    let selections = json!({
+        "external_inputs":[{"checkpoint_id":"input", "interface_id":"system_worker_unselected"}],
+        "external_relays":[{"checkpoint_id":"relay", "interface_id":"system_worker_parent", "outbound_interface_ids":["system_worker_unselected"]}],
+        "model_outputs":[{"checkpoint_id":"output", "interface_id":"system_worker_parent", "required_verified_artifact":{
+            "mark":"tool.call.allowed", "artifact_label":"tool.call", "verifier":"tool_call_allowed", "params":{"tools":["file.write"]}}}],
+    });
+    let mut defaults = json!({"ee_id":request.ee_id, "worker_template_interface_id":request.worker_template_interface_id,
+        "provider_interface_id":request.provider_interface_id, "model":request.model, "reasoning_effort":request.reasoning_effort,
+        "authoring":request.authoring, "worker_environment_kinds":request.selected_worker_environment_kinds,
+        "tools":request.selected_tools, "door_host_slots":request.door_host_slots});
+    let legacy: RunDefaults = serde_json::from_value(defaults.clone()).unwrap();
+    assert!(legacy.external_inputs.is_empty() && legacy.external_relays.is_empty() && legacy.model_outputs.is_empty() && legacy.publications.is_empty());
+    for (field, value) in selections.as_object().unwrap() { defaults[field] = value.clone(); }
+    affordances.config.defaults = Some(serde_json::from_value(defaults).unwrap());
+    let omitted: CreateRunRequest = serde_json::from_value(json!({"text":"Use authored defaults"})).unwrap();
+    let selected = affordances.composition_request(&metadata, &request.admitted_parent_record, "selection", omitted).unwrap();
+    for (field, value) in selections.as_object().unwrap() { assert_eq!(json!(selected)[field], *value); }
+    let explicit: CreateRunRequest = serde_json::from_value(json!({"text":"No extra routes", "external_inputs":[], "external_relays":[], "model_outputs":[]})).unwrap();
+    let empty = affordances.composition_request(&metadata, &request.admitted_parent_record, "empty", explicit).unwrap();
+    assert!(empty.external_inputs.is_empty() && empty.external_relays.is_empty() && empty.model_outputs.is_empty());
+    affordances.config.defaults = Some(legacy);
+    let mut explicit = selections.clone(); explicit["text"] = json!("Use exact routes");
+    let explicit = serde_json::from_value(explicit).unwrap();
+    let selected = affordances.composition_request(&metadata, &request.admitted_parent_record, "explicit", explicit).unwrap();
+    for (field, value) in selections.as_object().unwrap() { assert_eq!(json!(selected)[field], *value); }
+    let descriptor: Value = serde_json::from_slice(&std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interface.json")).unwrap()).unwrap();
+    let operations = descriptor["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["operations"].as_array().unwrap();
+    for name in ["create_run", "preview_run"] {
+        let schema = &operations.iter().find(|entry| entry["name"] == name).unwrap()["input_schema"];
+        let validator = ToolArgumentValidator::compile(schema).unwrap();
+        let mut args = selections.clone(); args["creation_key"] = json!("selection"); args["text"] = json!("Exact selected routes");
+        validator.validate(&args).unwrap();
+        let mut invalid = args.clone(); invalid["external_relays"][0].as_object_mut().unwrap().remove("outbound_interface_ids");
+        assert!(validator.validate(&invalid).is_err());
+        invalid = args.clone(); invalid["model_outputs"][0]["required_verified_artifact"].as_object_mut().unwrap().remove("verifier");
+        assert!(validator.validate(&invalid).is_err());
+        let mut pinned = args.clone(); pinned["publications"] = json!([{
+            "source":ArtifactRef { id:"collection".into(), content:ContentHash::of_bytes(b"collection") },
+            "entry_id":"published-entry", "revision":ContentHash::of_bytes(b"entry").to_hex(),
+        }]);
+        validator.validate(&pinned).unwrap();
+        pinned["publications"][0]["revision"] = json!(vec![0_u8; 32]);
+        assert!(validator.validate(&pinned).is_err());
+        let mixed = json!({"creation_key":"mixed", "publications":[], "authored":{
+            "run_id":"new-run", "writes":[{"path":"/tmp/new-run.json", "content":"{}", "expected_before_hash":null}], "outgoing_bindings":[],
+        }});
+        assert!(validator.validate(&mixed).is_err());
+    }
+    let mut selection = selections;
+    for field in ["selected_tools", "selected_worker_environment_kinds", "context_artifact_bindings", "payload_artifact_bindings"] {
+        selection[field] = json!([]);
+    }
+    selection["door_host_slots"] = json!({});
+    for name in ["preview_current_run", "amend_current_run"] {
+        let schema = &operations.iter().find(|entry| entry["name"] == name).unwrap()["input_schema"];
+        let validator = ToolArgumentValidator::compile(schema).unwrap();
+        validator.validate(&json!({"amendment_key":"selection", "selection":selection, "publications":[{
+            "source":ArtifactRef { id:"collection".into(), content:ContentHash::of_bytes(b"collection") },
+            "entry_id":"published-entry", "revision":ContentHash::of_bytes(b"entry").to_hex(),
+        }]})).unwrap();
+        let authored = json!({"expected_before_hash":"0".repeat(64), "expected_before":{}, "run_record":{}, "writes":[]});
+        validator.validate(&json!({"amendment_key":"authored", "authored":authored})).unwrap();
+        assert!(validator.validate(&json!({"amendment_key":"mixed", "authored":authored, "publications":[]})).is_err());
+    }
+}
+
+#[test]
+fn native_publication_pins_require_each_exact_readable_source_and_keep_empty_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    let request = support::fixture(temp.path());
+    let (mut affordances, metadata) = exact_affordances(&request);
+    let source = ArtifactRef { id:"bound-collection".into(), content:ContentHash::of_bytes(b"collection") };
+    let pins = vec![
+        CollectionSelection { source:source.clone(), entry_id:"entry-a".into(), revision:ContentHash::of_bytes(b"a") },
+        CollectionSelection { source:source.clone(), entry_id:"entry-b".into(), revision:ContentHash::of_bytes(b"b") },
+    ];
+    affordances.config.defaults = Some(serde_json::from_value(json!({"ee_id":request.ee_id,
+        "worker_template_interface_id":request.worker_template_interface_id, "provider_interface_id":request.provider_interface_id,
+        "model":request.model, "reasoning_effort":request.reasoning_effort, "authoring":request.authoring, "publications":pins,
+    })).unwrap());
+    let args = || serde_json::from_value(json!({"text":"Selected publication"})).unwrap();
+    assert!(affordances.composition_request(&metadata, &request.admitted_parent_record, "unbound", args()).unwrap_err().contains("exact readable metadata binding"));
+    let mut granted = json!(metadata);
+    granted["grant"]["artifact_access"][source.id.as_str()] = json!({"read":true});
+    let read_without_binding = serde_json::from_value(granted.clone()).unwrap();
+    assert!(affordances.composition_request(&read_without_binding, &request.admitted_parent_record, "no-ref", args()).unwrap_err().contains("exact readable metadata binding"));
+    granted["artifact_binding_refs"].as_array_mut().unwrap().push(json!(source));
+    let admitted: InvocationMetadata = serde_json::from_value(granted.clone()).unwrap();
+    let selected = affordances.composition_request(&admitted, &request.admitted_parent_record, "admitted", args()).unwrap();
+    assert_eq!(selected.publications, pins);
+    assert!(selected.selected_tools.is_empty());
+    assert!(selected.context_artifact_bindings.is_empty() && selected.payload_artifact_bindings.is_empty());
+    let mut wrong = granted.clone(); wrong["artifact_binding_refs"].as_array_mut().unwrap().last_mut().unwrap()["content"] = json!(ContentHash::of_bytes(b"changed"));
+    let wrong = serde_json::from_value(wrong).unwrap();
+    assert!(affordances.composition_request(&wrong, &request.admitted_parent_record, "stale-source", args()).unwrap_err().contains("exact readable metadata binding"));
+    granted["grant"]["artifact_access"][source.id.as_str()] = json!({"read":false});
+    let denied = serde_json::from_value(granted).unwrap();
+    assert!(affordances.composition_request(&denied, &request.admitted_parent_record, "denied", args()).unwrap_err().contains("exact readable metadata binding"));
+    let empty = serde_json::from_value(json!({"text":"No publications", "publications":[]})).unwrap();
+    assert!(affordances.composition_request(&metadata, &request.admitted_parent_record, "empty", empty).unwrap().publications.is_empty());
+    let mixed = json!({"creation_key":"mixed", "publications":pins, "authored":{
+        "run_id":"new-run", "writes":[{"path":request.roots.run_records_root.join("new-run.json"), "content":"{}", "expected_before_hash":null}], "outgoing_bindings":[],
+    }});
+    assert!(affordances.plan_call(&metadata, &request.admitted_parent_record, &request.admitted_parent_record, "mixed", "create_run", &mixed)
+        .unwrap_err().contains("exact authored files cannot be combined"));
+}
+
+#[test]
+fn native_publication_composition_validates_private_scope_and_stages_inline_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let mut request = support::client_fixture(&root);
+    let baseline = plan_run_composition(&request).unwrap();
+    let descriptor = json!({"id":"bound-publication", "label":"context.collection", "description":"Run guidance",
+        "schema_version":1, "directory":"entries", "limits":{"max_entries":4, "max_entry_bytes":16384,
+            "max_page_bytes":65536, "max_scan_bytes":65536}});
+    let context = json!({"id":"selected-context", "label":"context.reference", "text":"Exact selected context."});
+    support::write(&root, "registry/artifact/selected-context/artifact.json", context.clone());
+    let context_ref = ArtifactRef { id:"selected-context".into(), content:ContentHash::of_canonical_json(&context) };
+    let entry = json!({"schema_version":1, "id":"guidance", "title":"Run guidance", "description":"Exact selected context",
+        "applicability":"Selected target worker", "state":"active", "scope":{"ee_ids":[request.ee_id],
+            "worker_interfaces":[request.admitted_parent_record.worker, request.communication.receive_interface_id]},
+        "content":{"text":"Preserve the selected interface topology.", "evidence":[ArtifactRef {
+            id:"unbound-provenance".into(), content:ContentHash::of_bytes(b"provenance"),
+        }]}, "selection":{"external_inputs":[{"checkpoint_id":"publication_input", "interface_id":"system_worker_unselected"}],
+            "context_artifact_bindings":[{"id":"selected-context"}]}});
+    support::write(&root, "registry/artifact/bound-publication/artifact.json", descriptor.clone());
+    support::write(&root, "registry/artifact/bound-publication/entries/guidance.json", entry.clone());
+    let source = ArtifactRef { id:"bound-publication".into(), content:ContentHash::of_canonical_json(&descriptor) };
+    let pin = CollectionSelection { source:source.clone(), entry_id:"guidance".into(), revision:ContentHash::of_canonical_json(&entry) };
+    let (_, metadata) = exact_affordances(&request);
+    let mut admitted = json!(metadata);
+    admitted["grant"]["artifact_access"][source.id.as_str()] = json!({"read":true});
+    admitted["artifact_binding_refs"].as_array_mut().unwrap().push(json!(source));
+    request.metadata = serde_json::from_value(admitted).unwrap();
+    let publication_metadata = request.metadata.clone();
+    request.publications = vec![pin.clone()];
+    let plan = plan_run_composition(&request).unwrap();
+    assert_eq!(plan.required_tool_ids, baseline.required_tool_ids);
+    assert_eq!(plan.publication_evidence.len(), 1);
+    assert_eq!(plan.publication_evidence[0].pin, pin);
+    assert_eq!(plan.publication_evidence[0].entry, entry);
+    let snapshot = plan.publication_evidence[0].snapshot.as_ref().unwrap();
+    let snapshot_path = request.roots.registry_root.join("artifact").join(snapshot.id.as_str()).join("artifact.json");
+    assert!(!snapshot_path.exists());
+    assert_eq!(plan.descriptor_writes[0].path, snapshot_path);
+    let value: Value = serde_json::from_str(&plan.descriptor_writes[0].content).unwrap();
+    assert_eq!(ContentHash::of_canonical_json(&value), snapshot.content);
+    assert_eq!(value["text"], entry["content"]["text"]);
+    let record = RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
+    let input = record.checkpoints.iter().find(|row| row.id.as_str() == "publication_input").unwrap();
+    assert_eq!(input.inbound_interface().unwrap().as_str(), "system_worker_unselected");
+    assert!(input.artifact_bindings.iter().any(|binding| binding.id == snapshot.id && binding.access.read));
+    assert!(record.checkpoints.iter().all(|row| row.artifact_bindings.iter().all(|binding| binding.id.as_str() != "unbound-provenance")));
+    let sidecar: Value = serde_json::from_str(&plan.descriptor_writes.iter().find(|write|
+        write.path.file_name().is_some_and(|name| name == "octopus_os.json")).unwrap().content).unwrap();
+    assert_eq!(sidecar["authoring_profile"]["publication_evidence"], json!(plan.publication_evidence));
+    assert_eq!(sidecar["authoring_profile"]["external_inputs"], entry["selection"]["external_inputs"]);
+    let writes = composition_candidate_writes(&plan);
+    let exact = plan_authored_run_composition(&request.roots, &request.admitted_parent_record, AuthoredRunComposition {
+        run_id:plan.run_id.clone(), writes, outgoing_bindings:Vec::new(), publication_read_refs:Vec::new(), seed:None,
+    }, false).unwrap();
+    assert!(exact.validation.safe_to_apply, "{:?}", exact.validation.stages);
+    let writer_writes = exact.authored.writes.iter().map(|write| PlannedClientWrite { path:write.path.clone(), content:write.content.clone(),
+        expected_before_hash:write.expected_before_hash.clone(), tag:"selected-publication".into() }).collect::<Vec<_>>();
+    let (_, proofs) = file_write_batch(&writer_writes, &request.roots.run_records_root.join("caller.json")).unwrap();
+    assert!(proofs.iter().any(|proof| proof.path == snapshot_path));
+    request.communication.receive_interface_id = "system_worker_private_other".into();
+    assert!(plan_run_composition(&request).is_err());
+    request.communication.receive_interface_id = plan.worker_interface_id;
+    request.publications[0].revision = ContentHash::of_bytes(b"stale entry");
+    assert!(plan_run_composition(&request).is_err());
+    request.publications[0] = pin;
+    request.metadata.grant.artifact_access.clear();
+    assert!(plan_run_composition(&request).unwrap_err().contains("not readable"));
+    assert!(!snapshot_path.exists());
+    request.metadata = publication_metadata;
+    request.communication.client_template_interface_id = None;
+    request.communication.client_title = None;
+    request.communication.client_interface_id = None;
+    let identity = call_identity(request.admitted_parent_record.id.as_str(), "reuse").unwrap();
+    request.identity_seed = identity.clone();
+    request.communication.receive_interface_id = format!("system_worker_{identity}");
+    let mut entry = entry.clone();
+    entry["scope"]["worker_interfaces"].as_array_mut().unwrap().push(json!(request.communication.receive_interface_id));
+    request.publications[0].revision = ContentHash::of_canonical_json(&entry);
+    support::write(&root, "registry/artifact/bound-publication/entries/guidance.json", entry.clone());
+    let first = plan_run_composition(&request).unwrap();
+    let snapshot = first.publication_evidence[0].snapshot.as_ref().unwrap().clone();
+    let snapshot_path = request.roots.registry_root.join("artifact").join(snapshot.id.as_str()).join("artifact.json");
+    let snapshot_write = first.descriptor_writes.iter().find(|write| write.path == snapshot_path).unwrap();
+    std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot_path, &snapshot_write.content).unwrap();
+    let reused = plan_run_composition(&request).unwrap();
+    assert!(!reused.descriptor_writes.iter().any(|write| write.path == snapshot_path));
+    assert!(!reused.descriptor_writes.iter().any(|write| write.path.file_name().is_some_and(|name| name == "octopus_os.json")));
+    let (mut affordances, _) = exact_affordances(&request);
+    affordances.config.defaults = Some(RunDefaults {
+        client_template_interface_id:None, output_selection:None, ee_id:request.ee_id.clone(),
+        worker_template_interface_id:request.worker_template_interface_id.clone(), provider_interface_id:request.provider_interface_id.clone(),
+        model:request.model.clone(), reasoning_effort:request.reasoning_effort.clone(), service_tier:None,
+        authoring:request.authoring.clone(), worker_environment_kinds:request.selected_worker_environment_kinds.clone(),
+        tools:request.selected_tools.clone(), door_host_slots:request.door_host_slots.clone(), context_artifacts:vec![],
+        external_inputs:request.external_inputs.clone(), external_relays:request.external_relays.clone(), model_outputs:request.model_outputs.clone(),
+        publications:request.publications.clone(), return_interface_ids:request.communication.return_interface_ids.clone(), return_to_source:false,
+    });
+    let args = json!({"creation_key":"reuse", "text":"Exact selected context", "publications":request.publications});
+    let NativeStep::Complete { result: preview } = affordances.plan_call(&request.metadata, &request.admitted_parent_record,
+        &request.admitted_parent_record, "public-preview", "preview_run", &args).unwrap() else { panic!("expected public preview"); };
+    assert_eq!(preview["ok"], true, "{preview}");
+    assert_eq!(preview["authored"]["publication_read_refs"], json!(publication_read_refs(&reused.publication_evidence).unwrap()));
+    assert!(preview.get("publication_read_refs").is_none());
+    let authored_args = json!({"creation_key":"reuse", "authored":preview["authored"]});
+    let descriptor: Value = serde_json::from_slice(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interface.json")).unwrap()).unwrap();
+    for name in ["preview_run", "create_run", "preview_revision", "revise_run"] {
+        let schema = &descriptor["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["operations"]
+            .as_array().unwrap().iter().find(|row| row["name"] == name).unwrap()["input_schema"];
+        ToolArgumentValidator::compile(schema).unwrap().validate(&authored_args).unwrap();
+    }
+    let mut withdrawn = entry.clone(); withdrawn["state"] = json!("withdrawn");
+    support::write(&root, "registry/artifact/bound-publication/entries/guidance.json", withdrawn);
+    let NativeStep::Effect { pending, .. } = affordances.plan_call(&request.metadata, &request.admitted_parent_record,
+        &request.admitted_parent_record, "accepted-reuse", "create_run", &authored_args).unwrap() else { panic!("expected accepted public authored writer"); };
+    let mut missing_reads = json!(pending);
+    missing_reads["state"].as_object_mut().unwrap().remove("publication_read_refs");
+    assert!(serde_json::from_value::<NativePending>(missing_reads).is_err());
+    let restored: NativePending = serde_json::from_value(json!(pending)).unwrap();
+    let NativePhase::PinnedApplying { files, publication_read_refs, .. } = &restored.state else { panic!("expected applying phase"); };
+    assert_eq!(publication_read_refs.len(), 2);
+    assert!(publication_read_refs.contains(&snapshot) && publication_read_refs.contains(&context_ref));
+    assert!(files.iter().all(|proof| proof.path != snapshot_path));
+    for write in restored.effect.arguments["writes"].as_array().unwrap() {
+        let path = Path::new(write["path"].as_str().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, write["content"].as_str().unwrap()).unwrap();
+    }
+    let receipt = json!(ToolResultArtifact::success(&restored.effect.tool, Some(restored.effect.correlation_id.clone()),
+        json!({"result":"ordered_file_writes", "writes":files.iter().map(|proof| json!({"path":proof.path,
+            "before_hash":proof.before_hash, "after_hash":proof.after_hash, "bytes":proof.bytes, "outcome":"applied",
+            "observed_hash":proof.after_hash, "error":null})).collect::<Vec<_>>()})));
+    let NativeStep::Effect { effect:seed, pending:seed_pending, .. } = restored.advance(&receipt).unwrap() else { panic!("unchanged read evidence must permit seed"); };
+    assert_eq!(seed.tool, "artifact.send");
+    let seed_pending: NativePending = serde_json::from_value(json!(seed_pending)).unwrap();
+    let mut missing_seed_reads = json!(seed_pending);
+    missing_seed_reads["state"].as_object_mut().unwrap().remove("publication_read_refs");
+    assert!(serde_json::from_value::<NativePending>(missing_seed_reads).is_err());
+    let NativePhase::PinnedAppliedSeeding { publication_read_refs: retained, .. } = &seed_pending.state else { panic!("expected seeding phase"); };
+    assert_eq!(retained, publication_read_refs);
+    let delivered = json!(ToolResultArtifact::success(&seed.tool, Some(seed.correlation_id.clone()), json!({"admitted":{"seq":17}})));
+    let NativeStep::Complete { result } = seed_pending.advance(&delivered).unwrap() else { panic!("expected seed receipt"); };
+    assert_eq!(result["seed_admitted"], true);
+    for reference in [&snapshot, &context_ref] {
+        let path = root.join("registry/artifact").join(reference.id.as_str()).join("artifact.json");
+        let accepted = std::fs::read(&path).unwrap();
+        let mut changed: Value = serde_json::from_slice(&accepted).unwrap();
+        changed["text"] = json!("Valid same-ID text changed after native acceptance.");
+        std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        let error = restored.advance(&receipt).unwrap_err();
+        assert!(error.contains(reference.id.as_str()), "{error}");
+        std::fs::write(path, accepted).unwrap();
+    }
+}
+
+#[test]
 fn current_run_requires_complete_effects_and_exact_final_readback_with_original_call_identity() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -68,21 +336,50 @@ fn current_run_requires_complete_effects_and_exact_final_readback_with_original_
     std::fs::write(&composition.run_write.path,&content).unwrap();
     let proof = |name: &str| { let path=root.join(name);std::fs::write(&path,b"{}").unwrap();FileProof {path,before_hash:None,after_hash:ContentHash::of_bytes(b"{}").to_hex(),bytes:2} };
     let dependency = proof("dependency.json"); let activation = proof("activation.json");
+    let context_path = request.roots.registry_root.join("artifact/role-system_worker_template/artifact.json");
+    let context_bytes = std::fs::read(&context_path).unwrap();
+    let context: Value = serde_json::from_slice(&context_bytes).unwrap();
+    let context_ref = ArtifactRef { id:"role-system_worker_template".into(), content:ContentHash::of_canonical_json(&context) };
+    let snapshot = json!({"id":"accepted-publication-snapshot", "label":"context.reference", "text":"Accepted inline publication context."});
+    support::write(&root, "registry/artifact/accepted-publication-snapshot/artifact.json", snapshot.clone());
+    let accepted_refs = vec![context_ref, ArtifactRef { id:"accepted-publication-snapshot".into(), content:ContentHash::of_canonical_json(&snapshot) }];
     let effect = |stage: &str| NativeEffect {tool:"file.write".into(),arguments:json!({"ordered":true}),correlation_id:format!("amend:{stage}")};
     let pending = NativePending {call_id:"original-model-call".into(),operation_name:"amend_current_run".into(),source_run:composition.run_id.clone(),effect:effect("dependencies"),
-        state:NativePhase::CurrentRun {stage:CurrentRunStage::Dependencies,plan:Box::new(PendingCurrentRun {amendment,dependency_files:vec![dependency.clone()],activation_files:vec![activation.clone()],
+        state:NativePhase::PinnedCurrentRun {stage:CurrentRunStage::Dependencies,publication_read_refs:accepted_refs.clone(),plan:Box::new(PendingCurrentRun {amendment,dependency_files:vec![dependency.clone()],activation_files:vec![activation.clone()],
             activation:Some(effect("activation")),readback,validation_roots:validation_roots(&request.roots),checked_subjects:vec![format!("run/{}",composition.run_id)],allowed_issues:vec![],receipts:vec![]})}};
     let receipt = |pending: &NativePending, proof: &FileProof| json!(ToolResultArtifact::success(&pending.effect.tool,Some(pending.effect.correlation_id.clone()),
         json!({"result":"ordered_file_writes","writes":[{"path":proof.path,"before_hash":proof.before_hash,"after_hash":proof.after_hash,
             "bytes":proof.bytes,"outcome":"applied","observed_hash":proof.after_hash,"error":null}]})));
+    let mut legacy_wire = json!(pending);
+    legacy_wire["state"]["phase"] = json!("current_run");
+    legacy_wire["state"].as_object_mut().unwrap().remove("publication_read_refs");
+    let legacy: NativePending = serde_json::from_value(legacy_wire.clone()).unwrap();
+    assert_eq!(json!(legacy), legacy_wire);
     let mut incomplete = receipt(&pending,&dependency);
     incomplete["body"]["writes"][0]["outcome"]=json!("not_applied");
     assert!(pending.advance(&incomplete).unwrap_err().contains("uncertain"));
+    let refuse_drift = |pending: &NativePending, receipt: &Value| {
+        let mut missing = json!(pending);
+        missing["state"].as_object_mut().unwrap().remove("publication_read_refs");
+        assert!(serde_json::from_value::<NativePending>(missing).is_err());
+        for reference in &accepted_refs {
+            let path = request.roots.registry_root.join("artifact").join(reference.id.as_str()).join("artifact.json");
+            let accepted = std::fs::read(&path).unwrap();
+            let mut changed: Value = serde_json::from_slice(&accepted).unwrap();
+            changed["text"] = json!("Changed after amendment acceptance.");
+            std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            let error = pending.advance(receipt).unwrap_err();
+            assert!(error.contains(reference.id.as_str()), "{error}");
+            std::fs::write(path, accepted).unwrap();
+        }
+    };
+    refuse_drift(&pending, &receipt(&pending,&dependency));
     let NativeStep::AmendmentEffect {pending:activation_pending,..}=pending.advance(&receipt(&pending,&dependency)).unwrap() else {panic!("dependency receipt must continue at checked amendment");};
     assert_eq!(activation_pending.call_id,"original-model-call");
     let mut failed=receipt(&activation_pending,&activation);failed["ok"]=json!(false);failed.as_object_mut().unwrap().remove("body");failed["error"]=json!({"code":"interrupted","message":"interrupted"});
     let NativeStep::Complete {result}=activation_pending.advance(&failed).unwrap() else {panic!("missing failed-stage result");};
     assert_eq!(result["installed"],Value::Null);assert_eq!(result["work_completed"],false);
+    refuse_drift(&activation_pending, &receipt(&activation_pending,&activation));
     let NativeStep::Effect {pending:final_pending,..}=activation_pending.advance(&receipt(&activation_pending,&activation)).unwrap() else {panic!("activation must await readback");};
     let final_receipt=json!(ToolResultArtifact::success("file.read",Some(final_pending.effect.correlation_id.clone()),
         json!({"path":composition.run_write.path,"content":content,"content_hash":ContentHash::of_bytes(content.as_bytes()).to_hex(),"bytes":content.len()})));
@@ -90,10 +387,16 @@ fn current_run_requires_complete_effects_and_exact_final_readback_with_original_
     assert!(final_pending.advance(&wrong).unwrap_err().contains("correlation"));
     wrong=final_receipt.clone();wrong["body"]["bytes"]=json!(0);
     assert!(final_pending.advance(&wrong).unwrap_err().contains("exact file receipt"));
+    refuse_drift(&final_pending, &final_receipt);
     let restored:NativePending=serde_json::from_value(json!(final_pending)).unwrap();
     let NativeStep::Complete {result}=restored.advance(&final_receipt).unwrap() else {panic!("exact final readback did not complete");};
     assert_eq!(result["call_id"],"original-model-call");assert_eq!(result["installed"],true);assert_eq!(result["ok"],true,"{result}");
     assert_eq!(result["receipts"].as_array().unwrap().len(),3);assert_eq!(result["work_completed"],false);
+    let NativeStep::AmendmentEffect { pending:legacy_activation, .. } = legacy.advance(&receipt(&legacy,&dependency)).unwrap() else { panic!("legacy dependency settlement lost activation"); };
+    assert_eq!(json!(legacy_activation)["state"]["phase"], "current_run");
+    let NativeStep::Effect { pending:legacy_readback, .. } = legacy_activation.advance(&receipt(&legacy_activation,&activation)).unwrap() else { panic!("legacy activation lost readback"); };
+    let NativeStep::Complete { result:legacy_result } = legacy_readback.advance(&final_receipt).unwrap() else { panic!("legacy readback did not settle"); };
+    assert_eq!(legacy_result, result);
 }
 
 #[test]
@@ -129,6 +432,7 @@ fn creation_uses_admitted_coordinates_after_the_authoring_frontier_advances() {
                 service_tier:None,
                 authoring:request.authoring, worker_environment_kinds:request.selected_worker_environment_kinds,
                 tools:request.selected_tools, door_host_slots:request.door_host_slots, context_artifacts:vec![],
+                external_inputs:vec![], external_relays:vec![], model_outputs:vec![], publications:vec![],
                 return_interface_ids:vec![], return_to_source:true,
             }),
         },
@@ -143,7 +447,7 @@ fn creation_uses_admitted_coordinates_after_the_authoring_frontier_advances() {
     assert_eq!(effect.tool, "file.write");
     assert!(effect.arguments["writes"].as_array().unwrap().iter().all(|write|
         write["path"] != json!(request.roots.run_records_root.join("caller.json"))));
-    let NativePhase::Applying {
+    let NativePhase::PinnedApplying {
         outgoing_bindings,
         seed,
         ..
@@ -236,6 +540,7 @@ fn full_authored_run_preserves_wait_return_and_verification_then_checks_real_ord
     let mut authored = AuthoredRunComposition {
         run_id: plan.run_id.clone(),
         writes: composition_candidate_writes(&plan),
+        publication_read_refs: Vec::new(),
         outgoing_bindings: vec![ProviderOutgoingBinding {
             interface: plan.receive_interface_id.clone().into(),
             artifact_label: plan.seed.label.clone(),
@@ -365,6 +670,11 @@ fn full_authored_run_preserves_wait_return_and_verification_then_checks_real_ord
     };
     assert!(outgoing_bindings.is_empty());
     assert_eq!(effect.arguments["ordered"], true);
+    let mut legacy_wire = json!(pending);
+    legacy_wire["state"]["phase"] = json!("applying");
+    legacy_wire["state"].as_object_mut().unwrap().remove("publication_read_refs");
+    let legacy: NativePending = serde_json::from_value(legacy_wire.clone()).unwrap();
+    assert_eq!(json!(legacy), legacy_wire);
     let payload = serde_json::to_vec(&json!({"tool":effect.tool,"arguments":effect.arguments,"correlation_id":effect.correlation_id})).unwrap();
     let kinds = vec!["system_room".to_string()];
     let envelope = InterfaceInvocationEnvelope {
@@ -428,6 +738,17 @@ fn full_authored_run_preserves_wait_return_and_verification_then_checks_real_ord
     };
     assert_eq!(outgoing_bindings.len(), 1);
     assert_eq!(seed.arguments["payload"], plan.seed.payload);
+    let NativeStep::Effect { effect:legacy_seed, pending:legacy_seeding, .. } = legacy.advance(&receipt).unwrap() else { panic!("legacy applied receipt must continue directly to seed"); };
+    assert_eq!(json!(legacy_seed), json!(seed));
+    let legacy_wire = json!(legacy_seeding);
+    assert_eq!(legacy_wire["state"]["phase"], "applied_seeding");
+    assert!(legacy_wire["state"].get("publication_read_refs").is_none());
+    let legacy_seeding: NativePending = serde_json::from_value(legacy_wire.clone()).unwrap();
+    assert_eq!(json!(legacy_seeding), legacy_wire);
+    let NativeStep::Complete { result:legacy_result } = legacy_seeding.advance(&json!(ToolResultArtifact::success(
+        &legacy_seed.tool, Some(legacy_seed.correlation_id), json!({"admitted":{"seq":17}})))).unwrap() else { panic!("legacy transfer receipt did not settle"); };
+    assert_eq!(legacy_result["seed_admitted"], true);
+    assert_eq!(legacy_result["call_id"], legacy.call_id);
     let installed = RunRecord::load(&plan.run_id.clone().into(), &request.roots.run_records_root)
         .unwrap()
         .unwrap();

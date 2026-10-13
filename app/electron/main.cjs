@@ -64,7 +64,7 @@ const {
   normalizedEndpoint,
   validateArtifactEndpoint,
 } = require("./interfaceTransport.cjs");
-const { readContentAddressedArtifactPayload, prepareContentAddressedPayloadBindings, payloadArtifactBindings } = require("./contentAddressedArtifact.cjs");
+const { readContentAddressedArtifactPayload, readContentAddressedArtifactProjection, prepareContentAddressedPayloadBindings, payloadArtifactBindings } = require("./contentAddressedArtifact.cjs");
 const { createClientSurfaceDocumentStore, filterClientSurfaceSnapshot } = require("./surfaceDocuments.cjs");
 const { createClientExtensionStore, readClientExtensionFilesystemSource } = require("./clientExtensions.cjs");
 const { createClientSetupStore } = require("./clientSetup.cjs");
@@ -4246,11 +4246,12 @@ ipcMain.handle("octopus:operator-chat-artifacts-read", async (_event, token, req
   const batch = await readOperatorChatArtifacts(
     {
       octopusHome: () => octopusHome,
-      readArtifactPayload: (input) => readContentAddressedArtifactPayload({
-        ...input,
-        blobsRoot: path.join(octopusHome, "ledger", "blobs"),
-        maxPayloadBytes: input?.label === "turn.stream" ? 256 * 1024 * 1024 : undefined,
-      }),
+      readArtifactPayload: (input) => Object.hasOwn(input, "projection")
+        ? readContentAddressedArtifactProjection({ ...input, blobsRoot: path.join(octopusHome, "ledger", "blobs") })
+        : readContentAddressedArtifactPayload({
+          ...input, blobsRoot: path.join(octopusHome, "ledger", "blobs"),
+          maxPayloadBytes: input?.label === "turn.stream" ? 256 * 1024 * 1024 : undefined,
+        }),
     },
     request,
   );

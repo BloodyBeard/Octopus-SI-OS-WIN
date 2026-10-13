@@ -18,6 +18,126 @@ fn materialized_checkpoints_preserve_static_role_overlap_access() {
     }
 }
 
+#[test]
+fn failed_owner_input_static_revision_requires_checked_terminal_source() {
+    for mode in ["valid", "ordinary_active", "missing_error", "wrong_error_source", "earlier_input", "later_input", "denied_read"] {
+        let mut fixture = CompletedInputReplayFixture::new();
+        let static_id = ArtifactId::new(format!("static:{}", ContentHash::of_bytes(b"declared context").to_hex()));
+        let static_ids = vec![static_id.clone(), ArtifactId::new(format!("static:{}", ContentHash::of_bytes(b"second context").to_hex()))];
+        let owner = CheckedRunWriter { owner:"room".into(), source:"room".into(), door:"owner-writer".into(),
+            tool:"owner.write".into(), call_label:"tool.call".into(), result_label:"owner.write.result".into() };
+        fixture.handoff.config.checkpoints[0].role = RunAuthoringCheckpointRole::OwnerInput;
+        fixture.handoff.config.checkpoints[0].owner_authoring = Some(owner);
+        fixture.handoff.config.checkpoints[1].static_artifact_bindings = static_ids.clone();
+        fixture.handoff.bound_topology.checkpoints = fixture.handoff.config.checkpoints.clone();
+        let mut value: serde_json::Value = serde_json::from_slice(&std::fs::read(&fixture.handoff.run_path).unwrap()).unwrap();
+        value["interface_state"]["provider"][RUN_AUTHORING_BINDING] = serde_json::to_value(&fixture.handoff.bound_topology).unwrap();
+        for row in value["checkpoints"].as_array_mut().unwrap().iter_mut().filter(|row| row["id"] == "input" || row["id"] == "alternate") {
+            row["artifact_bindings"] = serde_json::json!([{"id":static_ids[0]}, {"id":static_ids[1]}]);
+        }
+        let initial = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&fixture.handoff.run_path, &initial).unwrap();
+        fixture.rows.clear();
+        let input_file = fixture.input_file.clone();
+        fixture.edge(&initial, &"input".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+        if mode == "earlier_input" {
+            fixture.edge(&initial, &"input".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+        }
+        fixture.handoff.source_movement_seq = fixture.rows.len() as u64 - 1;
+        for row in &mut fixture.rows {
+            let mut metadata = row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+            if mode != "denied_read" { for id in &static_ids { metadata.grant.artifact_access.insert(id.to_string(), octopus_runtime::ArtifactAccess::read_only()); } }
+            row.invocation_metadata = Some(metadata.into());
+        }
+        fixture.save();
+        fixture.handoff.failed_source = mode != "ordinary_active";
+        let source = fixture.handoff.source_movement_seq;
+        let file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("error"), "turn.error",
+            &serde_json::to_vec(&serde_json::json!({"label":"turn.error", "message":"admitted context invalid", "will_retry":false,
+                "additional_details":{"source_movement_seq":source + u64::from(mode == "wrong_error_source")}})).unwrap()).unwrap();
+        let authored = fixture.handoff.author_run_with_bindings(&initial, &static_ids, &[PreparedHandoff {
+            identity:artifact_identity(&file, &fixture.handoff.var_dir).unwrap(),
+            output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+            verified_inputs:Vec::new(),
+        }], true, None, false, true, &[]).unwrap();
+        fixture.install(&authored);
+        if mode != "missing_error" {
+            fixture.edge(authored.content.as_bytes(), &authored.pending_handoff.items[0].checkpoint.id,
+                &file, "worker".into(), MovementKind::InterfaceArrival);
+        }
+        let before = std::fs::read(&fixture.handoff.run_path).unwrap();
+        let record = RunRecord::from_bytes(&before).unwrap();
+        if mode == "later_input" {
+            let template = fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::Stable).unwrap();
+            let cp = record.checkpoints.iter().find(|cp| record.active_checkpoints.contains(&cp.id)
+                && checkpoint_record_matches_template(cp, template, &record.id)).unwrap().id.clone();
+            fixture.edge(&before, &cp, &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+        }
+        let writer = declared_provider_run_writer(&record, &"provider".into(), &RunAuthoringProfile {
+            file_write_tool:"write".into(), file_write_label:"tool.call".into(), file_write_result_label:"write.result".into(), result_timeout_ms:1000,
+        }).unwrap();
+        let mut desired = fixture.handoff.config.checkpoints[0].clone();
+        desired.static_artifact_bindings = vec![static_id];
+        let desired = vec![serde_json::to_value(desired).unwrap()];
+        assert!(matches!(prepare_provider_input_revision(fixture.handoff.run_path.clone(), &before, &writer, desired.clone()).unwrap(), ProviderInputRevision::Deferred { .. }));
+        let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
+            blobs_dir:&fixture.handoff.ctx.blobs_dir, max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+        let cutoff = fixture.rows.len() as u64;
+        let prepared = evidence.prepare_provider_input_revision(fixture.handoff.run_path.clone(), &before, &writer, desired, cutoff);
+        assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), before);
+        if mode == "ordinary_active" {
+            assert!(matches!(prepared.unwrap(), ProviderInputRevision::Deferred { .. })); continue;
+        }
+        if mode != "valid" { assert!(prepared.is_err(), "{mode}: {prepared:?}"); continue; }
+        let mut prepared = prepared.unwrap();
+        let mut before = before;
+        let mut cutoff = cutoff;
+        let mut chain = Vec::new();
+        for count in 1..=2 {
+        let ProviderInputRevision::Prepared { edit } = prepared else { panic!("eligible correction deferred"); };
+        let after = RunRecord::from_bytes(edit.content.as_bytes()).unwrap();
+        assert_eq!(record.checkpoint(&"input".into()), after.checkpoint(&"input".into()));
+        assert_eq!(persisted_pending_handoff(&record, &writer.owner).unwrap(), persisted_pending_handoff(&after, &writer.owner).unwrap());
+        let revised = AuthoredRun { json_format:edit.json_format, content:edit.content.clone(), patch:edit.patch.clone(), before_hash:edit.before_hash,
+            after_hash:edit.after_hash, correlation_id:edit.correlation_id,
+            authoring_result_checkpoint:active_checkpoint_for_role(&after, &fixture.handoff.config, RunAuthoringCheckpointRole::AuthoringResult).unwrap().id.clone(),
+            authoring_result_interface:authored.authoring_result_interface.clone(), pending_handoff:authored.pending_handoff.clone() };
+        fixture.install(&revised);
+        let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
+            blobs_dir:&fixture.handoff.ctx.blobs_dir, max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+        let install = CheckedRunInstall {
+            call:ConsentEvidenceRef {artifact:fixture.rows[cutoff as usize].artifact.clone().unwrap(), movement_seq:cutoff},
+            result:ConsentEvidenceRef {artifact:fixture.rows[cutoff as usize + 1].artifact.clone().unwrap(), movement_seq:cutoff + 1},
+        };
+        chain.push(checked_declared_run_install(&evidence, &fixture.handoff.run_path, &before, &install, vec![writer.clone()]).unwrap());
+        let (coordinate, source) = fixture.handoff.session.index().unwrap().exact_provider_source_outbound(
+            &record.id, &record.worker, &writer.owner, source).unwrap();
+        let hash = ContentHash::of_bytes(&initial);
+        let checkpoint = record.checkpoint(&"input".into()).unwrap();
+        assert!(input_revision::checked_failed_source_static_context(&evidence, &fixture.handoff.run_path, &[], &writer.owner, &source).unwrap().is_none());
+        let proof = input_revision::checked_failed_source_static_context(&evidence, &fixture.handoff.run_path, &chain, &writer.owner, &source).unwrap().unwrap();
+        let refs = proof.refs_for(&coordinate, &source, &hash, checkpoint).unwrap();
+        assert_eq!(refs.iter().map(|reference| reference.id.clone()).collect::<Vec<_>>(), static_ids[..count]);
+        let mut foreign = source.clone(); foreign.seq += 1;
+        assert!(input_revision::checked_failed_source_static_context(&evidence, &fixture.handoff.run_path, &chain, &writer.owner, &foreign).unwrap().is_none());
+        assert!(proof.refs_for(&coordinate, &foreign, &hash, checkpoint).is_err());
+        foreign = source.clone(); foreign.artifact_binding_refs[0].content = ContentHash::of_bytes(b"other revision");
+        assert!(proof.refs_for(&coordinate, &foreign, &hash, checkpoint).is_err());
+        foreign = source.clone(); foreign.readable_artifacts.clear();
+        assert!(proof.refs_for(&coordinate, &foreign, &hash, checkpoint).is_err());
+        assert!(proof.refs_for(&coordinate, &source, &ContentHash::of_bytes(b"other snapshot"), checkpoint).is_err());
+        let mut other = checkpoint.clone(); other.epoch.0 += 1;
+        assert!(proof.refs_for(&coordinate, &source, &hash, &other).is_err());
+        if count == 2 { break; }
+        before = edit.content.into_bytes();
+        cutoff = fixture.rows.len() as u64;
+        let mut desired = fixture.handoff.config.checkpoints[0].clone(); desired.static_artifact_bindings = static_ids.clone();
+        prepared = evidence.prepare_provider_input_revision(fixture.handoff.run_path.clone(), &before, &writer,
+            vec![serde_json::to_value(desired).unwrap()], cutoff).unwrap();
+        }
+    }
+}
+
 struct CompletedInputReplayFixture {
     _root: tempfile::TempDir,
     handoff: ProviderOutputHandoff,
@@ -69,8 +189,10 @@ impl CompletedInputReplayFixture {
         std::fs::write(&run_path,&initial).unwrap();
         let result_reader = LedgerTailReader::open_named(&ctx,"completed-input-test").unwrap();
         let handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
             session:ProviderHandoffSession::new(&ctx).unwrap(),var_dir:ctx.var_dir.clone(),ctx,
             config,run_path,hand_in_root:root.path().join("hand-in"),source_movement_seq:0,source_carries_context:true,failed_source:false,
+            checked_settlement_output: None,
             context_output_labels:BTreeSet::from(["tool.call".into()]),session_snapshot_labels:BTreeSet::new(),
             granted_tools:BTreeSet::from(["read".into(),"write".into()]),granted_interfaces:BTreeSet::new(),granted_mark_outcomes:BTreeSet::new(),
             bound_topology:topology,delivery_mode:HandoffDeliveryMode::Rearm,invocation_session_snapshot:None,
@@ -675,10 +797,12 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
     reader_ctx.var_dir = scratch.path().to_path_buf();
     let result_reader = LedgerTailReader::open_named(&reader_ctx, "replay-audit").unwrap();
     let handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
         session: ProviderHandoffSession::new(&reader_ctx).unwrap(),
         hand_in_root: home.join("interface-hand-in").join(config.authoring_source_interface.as_str()),
         var_dir: ctx.var_dir.clone(), ctx, config, run_path, source_movement_seq,
         source_carries_context: true, failed_source: false,
+        checked_settlement_output: None,
         context_output_labels, session_snapshot_labels,
         granted_tools: BTreeSet::new(), granted_interfaces: BTreeSet::new(), granted_mark_outcomes: BTreeSet::new(),
         bound_topology, delivery_mode: HandoffDeliveryMode::Rearm, invocation_session_snapshot: None,

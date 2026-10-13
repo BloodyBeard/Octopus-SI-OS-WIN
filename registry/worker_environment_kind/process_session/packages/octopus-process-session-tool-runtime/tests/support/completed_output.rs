@@ -52,7 +52,7 @@ async fn completed_fixture(root: &Path, output_count: usize) -> (InterfaceLiftCo
         schema_version:1, generation:"a".repeat(64), formation_id:Some(formation.worker_environment_id.to_string()),
         process_id:pid, process_group_id:pid as i32,
     }).unwrap();
-    let completion = client.invoke(&ctx, descriptor, input.clone(), false, None).await.unwrap();
+    let completion = client.invoke(&ctx, descriptor, input.clone(), false, false, None).await.unwrap();
     client.child.kill().await.unwrap();
     assert_eq!(std::fs::read(&counter).unwrap(), b"effect");
     (ctx.with_source_movement(source.clone()), input, completion, receiver, source)
@@ -420,10 +420,19 @@ fn selected_home_completed_output_recovery_plan() {
     for (write,outcome) in writes.iter().zip(outcomes) {
         assert_eq!(write["path"],outcome["path"]);
         assert_eq!(write["expected_before_hash"],outcome["before_hash"]);
-        assert_eq!(write["expected_after_hash"],outcome["after_hash"]);
         assert_eq!(outcome["outcome"],"applied");
         assert!(outcome["error"].is_null());
         let bytes=std::fs::read(outcome["path"].as_str().unwrap()).unwrap();
+        if let Some(content) = write.get("content") {
+            assert!(write.get("patch").is_none());
+            let expected = content.as_str().unwrap().as_bytes();
+            assert_eq!(bytes, expected);
+            assert_eq!(ContentHash::of_bytes(expected).to_hex(), outcome["after_hash"].as_str().unwrap());
+            assert_eq!(expected.len() as u64, outcome["bytes"].as_u64().unwrap());
+        } else {
+            assert!(write["patch"].is_array());
+            assert_eq!(write["expected_after_hash"].as_str().unwrap(), outcome["after_hash"].as_str().unwrap());
+        }
         assert_eq!(ContentHash::of_bytes(&bytes).to_hex(),outcome["after_hash"].as_str().unwrap());
         assert_eq!(bytes.len() as u64,outcome["bytes"].as_u64().unwrap());
     }

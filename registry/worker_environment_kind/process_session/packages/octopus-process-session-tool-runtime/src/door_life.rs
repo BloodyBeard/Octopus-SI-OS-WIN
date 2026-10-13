@@ -2316,11 +2316,13 @@ impl LedgerTailReader {
                 manifest_path.display()
             )
         })?;
+        let mut remaining = self.host_io_limits.max_payload_bytes;
         let mut artifact_binding_payloads: ArtifactBindingPayloadSet = Vec::new();
         for binding_ref in &metadata.artifact_binding_refs {
             let binding_blob_path = self.blobs_dir.join(binding_ref.content.to_hex());
-            let bytes = resolve_artifact_binding_payload(&binding_blob_path, self.host_io_limits)?;
-            artifact_binding_payloads.push(ArtifactBindingPayload::new(binding_ref.clone(), bytes));
+            artifact_binding_payloads.push(resolve_artifact_binding_payload(
+                &binding_blob_path, binding_ref, self.host_io_limits, &mut remaining,
+            )?);
         }
         Ok(InterfaceInvocationEnvelope {
             artifact,
@@ -2571,79 +2573,47 @@ pub(super) fn ledger_change_watch(path: &Path) -> Result<LedgerChangeWatch, Stri
 
 pub(crate) fn resolve_artifact_binding_payload(
     blob_path: &Path,
+    reference: &ArtifactRef,
     limits: InterfaceHostIoLimits,
-) -> Result<Vec<u8>, String> {
-    let carrier_maximum = limits.max_manifest_bytes.max(limits.max_payload_bytes);
-    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(blob_path, carrier_maximum)
-        .map_err(|error| {
-            format!(
-                "artifact-binding blob '{}' cannot be captured: {error}",
-                blob_path.display()
-            )
-        })?;
+    remaining: &mut u64,
+) -> Result<ArtifactBindingPayload, String> {
+    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+        blob_path, limits.max_manifest_bytes.max(limits.max_payload_bytes.min(*remaining)),
+    ).map_err(|error| error.to_string())?;
+    if ContentHash::of_bytes(&bytes) != reference.content {
+        return Err("artifact-binding carrier differs from its exact admitted reference".into());
+    }
+    let cache_root = blob_path.parent().ok_or("artifact-binding blob has no cache root")?
+        .canonicalize().map_err(|error| error.to_string())?;
     match serde_json::from_slice::<InterfaceArtifactManifest>(&bytes) {
         Ok(manifest) if !manifest.payload_path.as_os_str().is_empty() => {
-            let manifest_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if manifest_size > limits.max_manifest_bytes {
-                return Err(format!(
-                    "artifact-binding manifest blob '{}' is {manifest_size} bytes, above the declared ceiling {}",
-                    blob_path.display(),
-                    limits.max_manifest_bytes
-                ));
+            if bytes.len() as u64 > limits.max_manifest_bytes {
+                return Err("artifact-binding manifest exceeds its declared ceiling".into());
             }
             if manifest.label.trim().is_empty() || !manifest.payload_path.is_absolute() {
-                return Err(format!(
-                    "artifact-binding manifest blob '{}' has an empty label or non-absolute payload path",
-                    blob_path.display()
-                ));
+                return Err("artifact-binding manifest has an empty label or non-absolute payload path".into());
             }
-            let cache_root = blob_path
-                .parent()
-                .ok_or_else(|| "artifact-binding blob has no cache root".to_string())?;
-            let payload_path = match manifest.payload_content_hash.as_deref() {
+            match manifest.payload_content_hash.as_deref() {
                 Some(hash) => {
-                    if octopus_ledger::ContentHash::from_hex(hash).is_none() {
-                        return Err(format!(
-                            "artifact-binding manifest blob '{}' has an invalid payload content hash",
-                            blob_path.display()
-                        ));
-                    }
-                    cache_root.join(hash)
+                    let hash = ContentHash::from_hex(hash)
+                        .ok_or("artifact-binding manifest has an invalid payload hash")?;
+                    ArtifactBindingPayload::from_pinned_file(
+                        reference.clone(), cache_root.join(hash.to_hex()), hash, limits.max_payload_bytes,
+                    ).map_err(|error| error.to_string())
                 }
-                None => manifest.payload_path.clone(),
-            };
-            let payload_bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
-                &payload_path,
-                limits.max_payload_bytes,
-            )
-            .map_err(|error| {
-                format!(
-                    "artifact-binding payload for manifest blob '{}' cannot be captured: {error}",
-                    blob_path.display()
-                )
-            })?;
-            if let Some(expected) = manifest.payload_content_hash.as_deref() {
-                let actual = octopus_ledger::ContentHash::of_bytes(&payload_bytes).to_hex();
-                if expected != actual {
-                    return Err(format!(
-                        "artifact-binding payload for manifest blob '{}' has content hash {actual}, expected {expected}",
-                        blob_path.display()
-                    ));
+                None => {
+                    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+                        &manifest.payload_path, limits.max_payload_bytes.min(*remaining),
+                    ).map_err(|error| error.to_string())?;
+                    *remaining -= bytes.len() as u64;
+                    Ok(ArtifactBindingPayload::new(reference.clone(), bytes))
                 }
             }
-            Ok(payload_bytes)
         }
-        _ => {
-            let payload_size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            if payload_size > limits.max_payload_bytes {
-                return Err(format!(
-                    "artifact-binding blob '{}' is {payload_size} bytes, above the declared payload ceiling {}",
-                    blob_path.display(),
-                    limits.max_payload_bytes
-                ));
-            }
-            Ok(bytes)
-        }
+        _ => ArtifactBindingPayload::from_pinned_file(
+            reference.clone(), cache_root.join(reference.content.to_hex()),
+            reference.content, limits.max_payload_bytes,
+        ).map_err(|error| error.to_string()),
     }
 }
 

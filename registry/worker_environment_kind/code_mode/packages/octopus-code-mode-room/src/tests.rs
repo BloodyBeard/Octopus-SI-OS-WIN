@@ -107,7 +107,10 @@ fn persistent_prelude_requires_the_exact_admitted_binding_and_payload() {
     input.artifact_binding_payloads[0].artifact.content = ContentHash::of_bytes(b"other-manifest");
     assert!(config.resolve_context(&input).is_err());
     input.artifact_binding_payloads[0].artifact = artifact;
-    input.artifact_binding_payloads[0].bytes = vec![0xff];
+    input.artifact_binding_payloads[0] = octopus_interfaces::ArtifactBindingPayload::new(
+        input.artifact_binding_payloads[0].artifact.clone(),
+        vec![0xff],
+    );
     assert!(config.resolve_context(&input).is_err());
     assert!(
         serde_json::from_value::<super::config::CodeModeConfig>(json!({
@@ -2644,7 +2647,8 @@ async fn actual_generated_artifact_read(admission: &std::sync::Arc<FrontierAdmis
     let artifact = super::continuation::artifact_ref(&raw).unwrap();
     let admission_seq = admission.arrive("system_browser_test",&raw).await.unwrap();
     assert!(!admission.deliveries.lock().unwrap().iter().any(|d|super::continuation::artifact_ref(&d.file).unwrap()==artifact));
-    let unbound = actual_bound_surface::InvocationArtifactSurface::new(&[],&root.join("unbound"),download.metadata.grant.clone(), None).unwrap();
+    let payload_budget = admission.door.lock().await.context.owner_io_limits().unwrap().max_payload_bytes;
+    let unbound = actual_bound_surface::InvocationArtifactSurface::new(&[],&root.join("unbound"),download.metadata.grant.clone(), None, payload_budget).unwrap();
     assert_eq!(unbound.read_impl(artifact.id.as_str()).unwrap(),None);
     let result = octopus_tool_handlers::ToolResultArtifact::success(&call.tool,call.correlation_id,json!({"status":"completed","artifact":artifact,"generated_artifacts":[{"artifact":artifact,"source_artifact":super::continuation::artifact_ref(&download.file).unwrap(),"source_movement_seq":download.seq,"admission_seq":admission_seq,"payload_content_hash":blake3::hash(payload).to_hex().to_string(),"byte_count":payload.len()}]}));
     let result_file = InterfaceArtifactFile::write(root.join("generated-result"),&result.label,&serde_json::to_vec(&result).unwrap()).unwrap();
@@ -2659,10 +2663,10 @@ async fn actual_generated_artifact_read(admission: &std::sync::Arc<FrontierAdmis
     assert_eq!(read_call.tool,"artifact.read"); assert_eq!(read_call.arguments["id"],artifact.id.as_str());
     assert!(read.metadata.artifact_binding_refs.contains(&artifact));
     let bound = vec![octopus_interfaces::ArtifactBindingPayload::new(artifact.clone(),raw.read_payload_bytes().unwrap())];
-    let surface = actual_bound_surface::InvocationArtifactSurface::new(&bound,&root.join("read-surface"),read.metadata.grant.clone(), None).unwrap();
+    let surface = actual_bound_surface::InvocationArtifactSurface::new(&bound,&root.join("read-surface"),read.metadata.grant.clone(), None, payload_budget).unwrap();
     let bytes = surface.read_impl(artifact.id.as_str()).unwrap().unwrap(); assert_eq!(bytes,payload);
     let mut denied = read.metadata.grant.clone(); denied.artifact_access.get_mut(artifact.id.as_str()).unwrap().read=false;
-    assert!(actual_bound_surface::InvocationArtifactSurface::new(&bound,&root.join("denied"),denied, None).unwrap().read_impl(artifact.id.as_str()).is_err());
+    assert!(actual_bound_surface::InvocationArtifactSurface::new(&bound,&root.join("denied"),denied, None, payload_budget).unwrap().read_impl(artifact.id.as_str()).is_err());
     let after = std::fs::read(admission.run_records.join("run_code_mode_test.json")).unwrap();
     let record:Value=serde_json::from_slice(&after).unwrap();
     assert!(record["interface_state"][DOOR]["generated_artifacts"][0]["admission_seq"].as_u64().unwrap()>admission_seq);

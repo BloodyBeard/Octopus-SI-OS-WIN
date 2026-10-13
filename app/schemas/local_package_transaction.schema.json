@@ -64,7 +64,7 @@
           "stage": { "$ref": "#/$defs/relativePath" },
           "backup": { "$ref": "#/$defs/relativePath" },
           "digest": { "$ref": "#/$defs/digest" },
-          "previous_digest": { "$ref": "#/$defs/digest" },
+          "previous_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
           "state": { "enum": ["planned", "staged", "materialized", "backed_up"] }
         },
         "additionalProperties": false
@@ -77,7 +77,7 @@
       "then": {
         "properties": {
           "operation": { "enum": ["install", "remove"] },
-          "moves": { "minItems": 1 }
+          "moves": { "minItems": 1, "items": { "properties": { "previous_digest": { "$ref": "#/$defs/digest" } } } }
         },
         "not": { "required": ["previous_receipts"] }
       }

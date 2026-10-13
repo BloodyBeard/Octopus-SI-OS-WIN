@@ -7,4 +7,10 @@ function cloneFile(sourceDescriptor, directoryDescriptor, name) {
   return binding.cloneFile(sourceDescriptor, directoryDescriptor, name);
 }
 
-module.exports = { cloneFile };
+function renameDirectoryExclusive(sourceDirectoryDescriptor, sourceName, destinationDirectoryDescriptor, destinationName) {
+  if (process.platform !== "darwin") throw new Error("Client package directory moves require macOS with RENAME_EXCL support");
+  if (!binding) binding = require(path.join(__dirname, "..", "native", "build", "octopus-filesystem.node"));
+  return binding.renameDirectoryExclusive(sourceDirectoryDescriptor, sourceName, destinationDirectoryDescriptor, destinationName);
+}
+
+module.exports = { cloneFile, renameDirectoryExclusive };

@@ -731,7 +731,7 @@ async function updateBaselineFixture() {
     const receiptPath = path.join(roots.stateRoot, "receipts", `${id}.json`);
     const legacy = JSON.parse(await fs.readFile(receiptPath));
     legacy.schema_version = 1;
-    for (const member of legacy.members) delete member.source_files;
+    for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; }
     await writeJson(receiptPath, legacy);
     await writeJson(path.join(activeOwner, "interface.json"), { id: "world_test_provider", local_authoring: true });
     await fs.mkdir(path.join(activeOwner, "packages"));
@@ -834,7 +834,7 @@ async function updateBaselineFixture() {
     await applyLocalApplicationPack({ ...clean, operationId: "clean_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: cleanSource.source_digest } });
     const cleanReceiptPath = path.join(clean.stateRoot, "receipts", `${id}.json`), cleanReceipt = JSON.parse(await fs.readFile(cleanReceiptPath));
     cleanReceipt.schema_version = 1;
-    for (const member of cleanReceipt.members) delete member.source_files;
+    for (const member of cleanReceipt.members) { delete member.source_files; delete member.materialized_files; }
     await writeJson(cleanReceiptPath, cleanReceipt);
     await fs.writeFile(path.join(clean.sourceRegistryRoot, "interface", "world_test_provider", "new-driver"), "new release\n");
     assert.equal((await adoptLocalPackageUpdates(clean)).changed, true);
@@ -849,7 +849,7 @@ async function updateBaselineFixture() {
     await fs.writeFile(path.join(clean.sourceRegistryRoot, "interface", "world_test_provider", "new-driver"), "new release\n");
     const legacyReceipt = async () => {
       const value = JSON.parse(await fs.readFile(cleanReceiptPath)); value.schema_version = 1;
-      for (const member of value.members) delete member.source_files;
+      for (const member of value.members) { delete member.source_files; delete member.materialized_files; }
       await writeJson(cleanReceiptPath, value); return value;
     };
     const migration = await legacyReceipt(), unproved = structuredClone(migration);

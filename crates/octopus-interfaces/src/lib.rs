@@ -1025,7 +1025,16 @@ fn read_regular_file_stable_bounded(
             detail: "carrier path is not absolute",
         });
     }
-    let mut file = open_regular_file_no_follow(path, surface)?;
+    let file = open_regular_file_no_follow(path, surface)?;
+    read_open_regular_file_stable_bounded(file, path, maximum_bytes, surface)
+}
+
+fn read_open_regular_file_stable_bounded(
+    mut file: std::fs::File,
+    path: &Path,
+    maximum_bytes: u64,
+    surface: CarrierSurface,
+) -> Result<Vec<u8>, InterfaceArtifactFileError> {
     let before = file
         .metadata()
         .map_err(|source| surface.read_error(path, source))?;
@@ -1149,21 +1158,167 @@ fn artifact_label_slug(label: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactBindingPayload {
     pub artifact: ArtifactRef,
-    pub bytes: Vec<u8>,
+    backing: ArtifactBindingBacking,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArtifactBindingBacking {
+    Inline(Arc<[u8]>),
+    PinnedCarrier {
+        path: PathBuf,
+        payload_hash: ContentHash,
+        byte_len: u64,
+        maximum_bytes: u64,
+    },
 }
 
 impl ArtifactBindingPayload {
     pub fn new(artifact: ArtifactRef, bytes: Vec<u8>) -> Self {
-        Self { artifact, bytes }
+        Self { artifact, backing: ArtifactBindingBacking::Inline(bytes.into()) }
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+    pub fn from_pinned_file(
+        artifact: ArtifactRef,
+        path: PathBuf,
+        payload_hash: ContentHash,
+        maximum_bytes: u64,
+    ) -> Result<Self, InterfaceArtifactFileError> {
+        validate_binding_carrier_path(&path)?;
+        let file = open_binding_carrier_no_follow(&path)?;
+        let metadata = file.metadata()
+            .map_err(|error| CarrierSurface::Payload.read_error(&path, error))?;
+        if !metadata.is_file() {
+            return Err(InterfaceArtifactFileError::UnsafeCarrier {
+                surface: "payload", path: path.display().to_string(),
+                detail: "bound payload is not a regular file",
+            });
+        }
+        if metadata.len() > maximum_bytes {
+            return Err(CarrierSurface::Payload.too_large(&path, metadata.len(), maximum_bytes));
+        }
+        Ok(Self { artifact, backing: ArtifactBindingBacking::PinnedCarrier {
+            path, payload_hash, byte_len: metadata.len(), maximum_bytes,
+        } })
     }
 
-    pub fn into_parts(self) -> (ArtifactRef, Vec<u8>) {
-        (self.artifact, self.bytes)
+    pub fn payload_len(&self) -> u64 {
+        match &self.backing {
+            ArtifactBindingBacking::Inline(bytes) => bytes.len() as u64,
+            ArtifactBindingBacking::PinnedCarrier { byte_len, .. } => *byte_len,
+        }
     }
+
+    pub fn retained_byte_len(&self) -> u64 {
+        match &self.backing {
+            ArtifactBindingBacking::Inline(bytes) => bytes.len() as u64,
+            ArtifactBindingBacking::PinnedCarrier { .. } => 0,
+        }
+    }
+
+    pub fn payload_hash(&self) -> ContentHash {
+        match &self.backing {
+            ArtifactBindingBacking::Inline(bytes) => ContentHash::of_bytes(bytes),
+            ArtifactBindingBacking::PinnedCarrier { payload_hash, .. } => *payload_hash,
+        }
+    }
+
+    pub fn read_bytes(&self) -> Result<std::borrow::Cow<'_, [u8]>, InterfaceArtifactFileError> {
+        let maximum = match &self.backing {
+            ArtifactBindingBacking::Inline(bytes) => bytes.len() as u64,
+            ArtifactBindingBacking::PinnedCarrier { maximum_bytes, .. } => *maximum_bytes,
+        };
+        self.read_bounded(maximum)
+    }
+
+    pub fn read_bounded(
+        &self,
+        maximum_bytes: u64,
+    ) -> Result<std::borrow::Cow<'_, [u8]>, InterfaceArtifactFileError> {
+        match &self.backing {
+            ArtifactBindingBacking::Inline(bytes) => {
+                if bytes.len() as u64 > maximum_bytes {
+                    return Err(InterfaceArtifactFileError::PayloadTooLarge {
+                        path: self.artifact.id.to_string(), size: bytes.len() as u64,
+                        maximum: maximum_bytes,
+                    });
+                }
+                Ok(std::borrow::Cow::Borrowed(bytes))
+            }
+            ArtifactBindingBacking::PinnedCarrier { path, payload_hash, byte_len, maximum_bytes: ceiling } => {
+                validate_binding_carrier_path(path)?;
+                let bytes = read_open_regular_file_stable_bounded(
+                    open_binding_carrier_no_follow(path)?, path,
+                    maximum_bytes.min(*ceiling).min(*byte_len), CarrierSurface::Payload,
+                )?;
+                validate_binding_carrier_path(path)?;
+                if bytes.len() as u64 != *byte_len {
+                    return Err(InterfaceArtifactFileError::UnsafeCarrier {
+                        surface: "payload", path: path.display().to_string(),
+                        detail: "bound payload length changed after capture",
+                    });
+                }
+                let actual = ContentHash::of_bytes(&bytes);
+                if actual != *payload_hash {
+                    return Err(InterfaceArtifactFileError::PayloadHashMismatch {
+                        path: path.display().to_string(), expected: payload_hash.to_hex(),
+                        actual: actual.to_hex(),
+                    });
+                }
+                Ok(std::borrow::Cow::Owned(bytes))
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_binding_carrier_no_follow(path: &Path) -> Result<std::fs::File, InterfaceArtifactFileError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "macos")]
+    let directory_access = libc::O_SEARCH;
+    #[cfg(target_os = "linux")]
+    let directory_access = libc::O_PATH | libc::O_DIRECTORY;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let directory_access = libc::O_RDONLY | libc::O_DIRECTORY;
+    let root_fd = unsafe { libc::open(c"/".as_ptr(), directory_access | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    if root_fd < 0 { return Err(CarrierSurface::Payload.read_error(path, std::io::Error::last_os_error())); }
+    let mut directory = unsafe { std::fs::File::from_raw_fd(root_fd) };
+    let mut parts = path.components().skip(1).peekable();
+    while let Some(part) = parts.next() {
+        let std::path::Component::Normal(name) = part else {
+            return Err(InterfaceArtifactFileError::UnsafeCarrier {
+                surface: "payload", path: path.display().to_string(), detail: "bound carrier path has a non-normal component",
+            });
+        };
+        let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| InterfaceArtifactFileError::UnsafeCarrier {
+            surface: "payload", path: path.display().to_string(), detail: "bound carrier path contains NUL",
+        })?;
+        let flags = libc::O_CLOEXEC | libc::O_NOFOLLOW
+            | if parts.peek().is_some() { directory_access } else { libc::O_RDONLY | libc::O_NONBLOCK };
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(CarrierSurface::Payload.read_error(path, std::io::Error::last_os_error()));
+        }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+#[cfg(not(unix))]
+fn open_binding_carrier_no_follow(path: &Path) -> Result<std::fs::File, InterfaceArtifactFileError> {
+    open_regular_file_no_follow(path, CarrierSurface::Payload)
+}
+
+fn validate_binding_carrier_path(path: &Path) -> Result<(), InterfaceArtifactFileError> {
+    if !path.is_absolute() || path.canonicalize()
+        .map_err(|error| CarrierSurface::Payload.read_error(path, error))? != path
+    {
+        return Err(InterfaceArtifactFileError::UnsafeCarrier {
+            surface: "payload", path: path.display().to_string(),
+            detail: "bound payload path is not its exact canonical path",
+        });
+    }
+    Ok(())
 }
 
 pub type ArtifactBindingPayloadSet = Vec<ArtifactBindingPayload>;
@@ -1300,6 +1455,72 @@ impl InterfaceRegistry {
 mod tests {
     use super::*;
     use octopus_descriptors::parse_strict;
+
+    #[test]
+    fn bound_payload_reads_preserve_bytes_and_refuse_changed_carriers() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let path = root.join("payload");
+        let bytes = b"raw\0\xff bytes";
+        let reference = ArtifactRef { id: octopus_descriptors::ArtifactId::new("bound"), content: ContentHash::of_bytes(b"manifest") };
+        let inline = ArtifactBindingPayload::new(reference.clone(), bytes.to_vec());
+        assert!(matches!(inline.read_bytes().unwrap(), std::borrow::Cow::Borrowed(_)));
+        assert!(inline.read_bounded(2).is_err());
+        std::fs::write(&path, bytes).unwrap();
+        let lazy = ArtifactBindingPayload::from_pinned_file(reference.clone(), path.clone(), ContentHash::of_bytes(bytes), 64).unwrap();
+        assert_eq!(lazy.artifact, reference);
+        assert_eq!(lazy.clone().read_bytes().unwrap().as_ref(), bytes);
+        assert!(lazy.read_bounded(2).is_err());
+        std::fs::write(&path, b"bad\0\xff bytes").unwrap();
+        assert!(matches!(lazy.read_bytes(), Err(InterfaceArtifactFileError::PayloadHashMismatch { .. })));
+        std::fs::write(&path, b"short").unwrap();
+        assert!(lazy.read_bytes().is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(lazy.read_bytes().is_err());
+        #[cfg(unix)] {
+            let target = root.join("target");
+            std::fs::write(&target, bytes).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(lazy.read_bytes().is_err());
+            assert!(ArtifactBindingPayload::from_pinned_file(reference.clone(), path, ContentHash::of_bytes(bytes), 64).is_err());
+            std::os::unix::fs::symlink(&root, root.join("alias")).unwrap();
+            assert!(ArtifactBindingPayload::from_pinned_file(reference, root.join("alias/target"), ContentHash::of_bytes(bytes), 64).is_err());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn sandboxed_bound_payload_requires_no_ancestor_directory_read() {
+        const CHILD: &str = "OCTOPUS_BOUND_PAYLOAD_SANDBOX_ROOT";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            assert_eq!(std::fs::read_dir(root.parent().unwrap()).unwrap_err().raw_os_error(), Some(libc::EPERM));
+            assert!(std::fs::read(root.parent().unwrap().join("outside")).is_err());
+            let bytes = b"exact bound payload";
+            let reference = ArtifactRef { id: octopus_descriptors::ArtifactId::new("bound"), content: ContentHash::of_bytes(b"manifest") };
+            let payload = ArtifactBindingPayload::from_pinned_file(reference, root.join("payload"), ContentHash::of_bytes(bytes), 64).unwrap();
+            assert_eq!(payload.read_bytes().unwrap().as_ref(), bytes);
+            assert!(payload.read_bounded(2).is_err());
+            println!("bound payload sandbox: exact bytes; ancestor denied");
+            return;
+        }
+        let temp = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let root = temp.path().canonicalize().unwrap().join("generation");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("payload"), b"exact bound payload").unwrap();
+        std::fs::write(root.parent().unwrap().join("outside"), b"not granted").unwrap();
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let profile = format!("{}\n{}\n(allow file-read* file-test-existence (literal {}) (subpath {}))",
+            include_str!("../../../registry/worker_environment_kind/process_session/packages/octopus-sandbox-substrate/src/seatbelt_base_policy.sbpl"),
+            include_str!("../../../registry/worker_environment_kind/process_session/packages/octopus-sandbox-substrate/src/restricted_read_only_platform_defaults.sbpl"),
+            serde_json::to_string(&executable).unwrap(), serde_json::to_string(&root).unwrap());
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile]).arg(executable)
+            .args(["--exact", "tests::sandboxed_bound_payload_requires_no_ancestor_directory_read", "--nocapture", "--test-threads=1"])
+            .current_dir(&root).env_clear().env(CHILD, &root).output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("bound payload sandbox: exact bytes; ancestor denied"));
+    }
 
     #[test]
     fn manifest_without_hash_does_not_read_payload() {

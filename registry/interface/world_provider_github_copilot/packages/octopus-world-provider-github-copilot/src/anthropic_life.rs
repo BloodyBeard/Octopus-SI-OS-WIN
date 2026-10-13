@@ -319,12 +319,13 @@ fn attach_pending_tool_frontier(
     let mut static_context = Vec::new();
     for bound in turn.envelope.artifact_binding_payloads.drain(..) {
         let value: serde_json::Value =
-            serde_json::from_slice(bound.as_bytes()).map_err(|error| {
-                format!(
-                    "GitHub Copilot Anthropic bound artifact '{}' is not JSON while recovering its frontier: {error}",
-                    bound.artifact.id.as_str()
-                )
-            })?;
+            serde_json::from_slice(&bound.read_bytes().map_err(|error| error.to_string())?)
+                .map_err(|error| {
+                    format!(
+                        "GitHub Copilot Anthropic bound artifact '{}' is not JSON while recovering its frontier: {error}",
+                        bound.artifact.id.as_str()
+                    )
+                })?;
         let label = value
             .get("label")
             .and_then(serde_json::Value::as_str)

@@ -1680,7 +1680,10 @@ async fn upload_resume_requires_exact_verified_current_file_binding_and_never_re
     assert!(settled["body"]["original_result"]["error"]["message"].as_str().unwrap().contains("currently admitted file bytes"));
     assert!(pending_root.join(format!("{digest}.consumed.json")).is_file());
     drop(room); std::fs::remove_dir_all(&private).unwrap(); std::fs::create_dir(&private).unwrap();
-    call.envelope.artifact_binding_payloads[0].bytes = selected_bytes.to_vec();
+    call.envelope.artifact_binding_payloads[0] = ArtifactBindingPayload::new(
+        call.envelope.artifact_binding_payloads[0].artifact.clone(),
+        selected_bytes.to_vec(),
+    );
     call.request_id = 4; call.source_movement_seq = 4;
     let recovered = BrowserRoom::load(environment).unwrap();
     let replay = response(received(recovered.receive(call,&recorder).await));

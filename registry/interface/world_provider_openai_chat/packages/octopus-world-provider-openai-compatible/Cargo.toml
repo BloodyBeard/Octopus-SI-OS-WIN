@@ -33,3 +33,17 @@ octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
 octopus-secrets = { path = "../../../world_provider_codex/packages/octopus-secrets" }
 octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
+
+[dev-dependencies]
+futures = "0.3"
+tempfile = "3"
+tokio-tungstenite = "0.28.0"
+octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
+octopus-app-server-interface = { path = "../../../world_operator_chat/packages/octopus-app-server-interface" }
+octopus-context-collections = { path = "../../../system_context/packages/octopus-context-collections" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-operator-chat-client = { path = "../../../world_operator_chat/packages/octopus-operator-chat-client" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
+octopus-system-room-env = { path = "../../../../worker_environment_kind/system_room/packages/octopus-system-room-env" }
+octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }

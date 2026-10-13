@@ -6,10 +6,10 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const filename = path.join(__dirname, "client.cjs"), loaded = { exports: {} };
-vm.runInNewContext(`${fs.readFileSync(filename, "utf8")}\nmodule.exports = { plannedClientWrite, plannedArtifactOwner, safeSegment };`, {
+vm.runInNewContext(`${fs.readFileSync(filename, "utf8")}\nmodule.exports = { plannedClientWrite, plannedArtifactOwner, safeSegment, operatorPublications, assertPublicationExpansion };`, {
   Buffer, __dirname, __filename: filename, clearTimeout, console, module: loaded, process, require: createRequire(filename), setTimeout,
 });
-const { plannedClientWrite, plannedArtifactOwner, safeSegment } = loaded.exports;
+const { plannedClientWrite, plannedArtifactOwner, safeSegment, operatorPublications, assertPublicationExpansion } = loaded.exports;
 const registry = path.resolve(__dirname, "../../..");
 const topologyOwner = "artifact-code-mode-topology__system_code_mode__project_preflight_66cb898c4b507fb5de287d0d217df62d";
 const write = (id) => ({ path: path.join(registry, "artifact", id, "artifact.json"), content: JSON.stringify({ id, schema_version: 1 }), tag: `artifact:${id}`, expected_before_hash: null });
@@ -45,4 +45,26 @@ test("planned artifact writes still reject changed tags, nonobjects, and escaped
   assert.throws(() => plannedClientWrite({ ...planned, path: path.join(registry, "artifact", "payload.json") }, 0, registry), /escapes/);
   assert.throws(() => plannedClientWrite({ ...planned, path: path.resolve(registry, "..", "artifact.json") }, 0, registry), /escapes/);
   assert.throws(() => plannedClientWrite({ ...planned, expected_before_hash: "wrong" }, 0, registry), /SHA-256/);
+});
+
+test("publication expansion preserves the caller request, exact selected pins and returned profile", () => {
+  const pin = { source: { id: "artifact.project-café", content: Array(32).fill(7) }, entry_id: "release.procedure", revision: "a".repeat(64) };
+  const requested = { ee_id: "ee_project", worker_choice_interface: "system_worker_task", door_host_slots: {} };
+  const evidence = { pin, entry: { id: pin.entry_id } };
+  const expanded = { ...requested, context_artifact_bindings: [{ id: "artifact-publication-selected" }], publication_evidence: [evidence] };
+  const receipt = { requested, publications: [pin], defaults: [], selected: [evidence], expanded };
+  const plan = { authoring_profile: expanded, publication_expansion: receipt };
+  assert.equal(JSON.stringify(operatorPublications([pin])), JSON.stringify([pin]));
+  assert.doesNotThrow(() => assertPublicationExpansion(plan, requested, [pin]));
+  assert.throws(() => assertPublicationExpansion({ authoring_profile: expanded }, requested, [pin]), /drifted/);
+  assert.throws(() => assertPublicationExpansion(plan, { ...requested, ee_id: "ee_other" }, [pin]), /exact authoring request/);
+  assert.throws(() => assertPublicationExpansion(plan, requested, [{ ...pin, revision: "b".repeat(64) }]), /exact authoring request/);
+  assert.throws(() => assertPublicationExpansion({ ...plan, authoring_profile: { ...expanded, selected_tools: [] } }, requested, [pin]), /exact authoring request/);
+  assert.throws(() => assertPublicationExpansion({ ...plan, publication_expansion: { ...receipt, selected: [] } }, requested, [pin]), /no selected evidence/);
+  const defaults = [{ interface: "system_context", descriptor_hash: "c".repeat(64), publications: [pin] }];
+  const reused = { requested: expanded, publications: [], defaults, reused_defaults: [pin], selected: [], expanded };
+  assert.doesNotThrow(() => assertPublicationExpansion({ authoring_profile: expanded, publication_expansion: reused }, expanded, []));
+  assert.throws(() => assertPublicationExpansion({ authoring_profile: expanded, publication_expansion: { ...reused, defaults: [] } }, expanded, []), /accepted request evidence/);
+  assert.throws(() => operatorPublications([pin, pin]), /repeats/);
+  assert.throws(() => operatorPublications([{ ...pin, entry_id: "../escape" }]), /path component/);
 });

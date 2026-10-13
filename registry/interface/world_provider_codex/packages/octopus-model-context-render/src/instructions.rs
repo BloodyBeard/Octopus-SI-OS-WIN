@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use octopus_interfaces::{ArtifactBindingPayload, InvocationMetadata};
@@ -83,7 +84,8 @@ pub fn resolve_instruction_context(
             text_payloads.push(payload);
             continue;
         }
-        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload.as_bytes()) {
+        let bytes = payload.read_bytes().map_err(|error| error.to_string())?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) {
             if value.get("label").and_then(serde_json::Value::as_str) == Some("context.reference") {
                 let instruction: InstructionArtifact =
                     serde_json::from_value(value).map_err(|error| {
@@ -128,7 +130,7 @@ pub fn resolve_instruction_context(
     for id in order {
         let instruction = &instructions[id];
         validate_instruction_binding(metadata, &admitted, bound[id])?;
-        retain_source(&mut result, &mut consumed, bound[id]);
+        retain_source(&mut result, &mut consumed, bound[id])?;
         let mut sections = Vec::new();
         if let Some(text) = &instruction.text {
             sections.push((id.to_string(), text.clone()));
@@ -151,7 +153,7 @@ pub fn resolve_instruction_context(
             }
             validate_instruction_binding(metadata, &admitted, payload)?;
             let text = validate_instruction_text(payload)?;
-            retain_source(&mut result, &mut consumed, payload);
+            retain_source(&mut result, &mut consumed, payload)?;
             sections.push((source_id.to_string(), text.to_string()));
         }
         result.entries.push(ResolvedInstructionArtifact {
@@ -161,7 +163,7 @@ pub fn resolve_instruction_context(
     for payload in text_payloads {
         validate_instruction_binding(metadata, &admitted, payload)?;
         validate_instruction_text(payload)?;
-        retain_source(&mut result, &mut consumed, payload);
+        retain_source(&mut result, &mut consumed, payload)?;
     }
     result.remaining_payloads = payloads
         .iter()
@@ -171,10 +173,15 @@ pub fn resolve_instruction_context(
     Ok(result)
 }
 
-fn validate_instruction_text(payload: &ArtifactBindingPayload) -> Result<&str, String> {
+fn validate_instruction_text(payload: &ArtifactBindingPayload) -> Result<Cow<'_, str>, String> {
     let id = &payload.artifact.id;
-    let text = std::str::from_utf8(payload.as_bytes())
-        .map_err(|error| format!("instruction source '{id}' is not UTF-8: {error}"))?;
+    let bytes = payload.read_bytes().map_err(|error| error.to_string())?;
+    let text = match bytes {
+        Cow::Borrowed(bytes) => Cow::Borrowed(std::str::from_utf8(bytes)
+            .map_err(|error| format!("instruction source '{id}' is not UTF-8: {error}"))?),
+        Cow::Owned(bytes) => Cow::Owned(String::from_utf8(bytes)
+            .map_err(|error| format!("instruction source '{id}' is not UTF-8: {}", error.utf8_error()))?),
+    };
     if text.trim().is_empty() {
         return Err(format!("instruction source '{id}' is empty"));
     }
@@ -199,14 +206,15 @@ fn retain_source(
     result: &mut ResolvedInstructionContext,
     consumed: &mut BTreeSet<String>,
     payload: &ArtifactBindingPayload,
-) -> bool {
+) -> Result<bool, String> {
     if !consumed.insert(payload.artifact.id.as_str().to_string()) {
-        return false;
+        return Ok(false);
     }
+    let payload_bytes = payload.read_bytes().map_err(|error| error.to_string())?;
     for bytes in [
         payload.artifact.id.as_str().as_bytes(),
         payload.artifact.content.to_hex().as_bytes(),
-        payload.as_bytes(),
+        payload_bytes.as_ref(),
     ] {
         result
             .fingerprint_bytes
@@ -214,5 +222,5 @@ fn retain_source(
         result.fingerprint_bytes.extend_from_slice(bytes);
     }
     result.source_artifacts.push(payload.artifact.clone());
-    true
+    Ok(true)
 }

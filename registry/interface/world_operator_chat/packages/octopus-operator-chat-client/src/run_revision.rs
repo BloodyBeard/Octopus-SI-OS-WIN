@@ -9,7 +9,7 @@ use octopus_provider_run_authoring::{
     CheckedRunWriter, ConsentEvidenceRef, FileCheckedRunReader, OwnerWriterEdit,
     ProviderInputRevision, RunAuthoringProfile, checked_declared_run_advance,
     checked_declared_run_install, payload_artifact_bindings, prepare_provider_input_payloads,
-    prepare_provider_input_rearm, prepare_provider_input_revision, provider_context_bindings,
+    prepare_provider_input_rearm, provider_context_bindings,
     provider_input_payloads_ready, provider_input_rearm_ready,
     validate_unchanged_admitted_checkpoint,
 };
@@ -68,6 +68,7 @@ pub struct RunRevisionRequest {
     pub run_path: PathBuf,
     pub ledger_root: PathBuf,
     pub artifact_root: PathBuf,
+    pub interface_hand_in_root: PathBuf,
     pub provider: InterfaceId,
     pub source: InterfaceId,
     pub key: String,
@@ -82,6 +83,7 @@ pub struct RunRevisionVerification {
     pub run_path: PathBuf,
     pub ledger_root: PathBuf,
     pub artifact_root: PathBuf,
+    pub interface_hand_in_root: PathBuf,
     pub provider: InterfaceId,
     pub source: InterfaceId,
     pub key: String,
@@ -108,6 +110,7 @@ struct Scope {
     profile: RunAuthoringProfile,
     limits: octopus_interface_transport::InterfaceHostIoLimits,
     root: PathBuf,
+    call_root: PathBuf,
     proposal_path: PathBuf,
     movements: PathBuf,
     index: PathBuf,
@@ -121,6 +124,7 @@ impl Scope {
             &request.run_path,
             &request.ledger_root,
             &request.artifact_root,
+            &request.interface_hand_in_root,
         ] {
             normal_path(path)?;
         }
@@ -214,12 +218,14 @@ impl Scope {
         };
         process.io_limits.validate()?;
         let root = request.artifact_root.join("input-revisions");
+        let call_root = request.interface_hand_in_root.join(source).join("input-revisions");
         Ok(Self {
             writer,
             profile,
             limits: process.io_limits,
             proposal_path: root.join(format!("{}.artifact.json", request.key)),
             root,
+            call_root,
             movements: request.ledger_root.join("movements.jsonl"),
             index: request.ledger_root.join("ledger-index.sqlite"),
             blobs: request.ledger_root.join("blobs"),
@@ -238,7 +244,7 @@ impl Scope {
     }
 
     fn load(&self, request: &RunRevisionVerification) -> Result<Proposal, String> {
-        let (_, payload, _) = self.capture(&self.proposal_path, PROPOSAL_LABEL)?;
+        let (_, payload, _) = self.capture(&self.root, &self.proposal_path, PROPOSAL_LABEL)?;
         let proposal: Proposal =
             serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
         if proposal.schema_version != 1
@@ -251,11 +257,12 @@ impl Scope {
         }
         let edit = match &proposal.operation {
             RevisionOperation::OwnerInputs { desired_inputs } => {
-                match prepare_provider_input_revision(
+                match self.evidence().prepare_provider_input_revision(
                     request.run_path.clone(),
                     proposal.before.as_bytes(),
                     &proposal.writer,
                     desired_inputs.clone(),
+                    proposal.after_seq.checked_add(1).ok_or("run revision evidence boundary overflow")?,
                 )? {
                     ProviderInputRevision::Prepared { edit } => edit,
                     _ => {
@@ -309,7 +316,7 @@ impl Scope {
                 "run revision call changed its declared embedded or separate writer".into(),
             );
         }
-        let (_, call, _) = self.capture(&proposal.call_path, &proposal.writer.call_label)?;
+        let (_, call, _) = self.capture_call(&proposal.call_path)?;
         let call: Value = serde_json::from_slice(&call).map_err(|e| e.to_string())?;
         if let Some(ordered) = &proposal.ordered {
             ordered.validate(
@@ -329,18 +336,28 @@ impl Scope {
         Ok(proposal)
     }
 
+    fn capture_call(&self, path: &Path) -> Result<(InterfaceArtifactManifest, Vec<u8>, ArtifactRef), String> {
+        normal_path(path)?;
+        let parent = std::fs::canonicalize(path.parent().ok_or("revision call has no parent")?)
+            .map_err(|e| e.to_string())?;
+        let proposal_root = std::fs::canonicalize(&self.root).map_err(|e| e.to_string())?;
+        let root = if parent == proposal_root { &self.root } else { &self.call_root };
+        self.capture(root, path, &self.writer.call_label)
+    }
+
     fn capture(
         &self,
+        root: &Path,
         path: &Path,
         label: &str,
     ) -> Result<(InterfaceArtifactManifest, Vec<u8>, ArtifactRef), String> {
         normal_path(path)?;
-        let root = std::fs::canonicalize(&self.root).map_err(|e| e.to_string())?;
+        let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
         if std::fs::canonicalize(path.parent().ok_or("revision artifact has no parent")?)
             .map_err(|e| e.to_string())?
             != root
         {
-            return Err("run revision artifact is outside its exact client root".into());
+            return Err("run revision artifact is outside its exact owner root".into());
         }
         let bytes = read_regular(path, self.limits.max_manifest_bytes)?;
         let manifest: InterfaceArtifactManifest =
@@ -360,7 +377,7 @@ impl Scope {
         }
         normal_path(&manifest.payload_path)?;
         if manifest.payload_path.parent() != Some(root.as_path()) {
-            return Err("run revision payload is outside its exact client root".into());
+            return Err("run revision payload is outside its exact owner root".into());
         }
         let payload = read_regular(&manifest.payload_path, self.limits.max_payload_bytes)?;
         InterfaceArtifactFile::from_captured_snapshot(path, bytes.clone(), payload.clone())
@@ -383,6 +400,7 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
         run_path: request.run_path,
         ledger_root: request.ledger_root,
         artifact_root: request.artifact_root,
+        interface_hand_in_root: request.interface_hand_in_root,
         provider: request.provider,
         source: request.source,
         key: request.key,
@@ -431,11 +449,12 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
             if !owner_input_ready(&evidence, &verify.run_path, &before, &scope.writer, &verify.source)? {
                 return Ok(json!({"status":"deferred","checkpoints":record.active_checkpoints}));
             }
-            match prepare_provider_input_revision(
+            match evidence.prepare_provider_input_revision(
                 verify.run_path.clone(),
                 &before,
                 &scope.writer,
                 desired_inputs.clone(),
+                after_seq.checked_add(1).ok_or("run revision evidence boundary overflow")?,
             )? {
                 ProviderInputRevision::Prepared { edit } => edit,
                 ProviderInputRevision::Unchanged => return Ok(json!({"status":"unchanged"})),
@@ -482,19 +501,22 @@ pub fn prepare_run_revision(request: RunRevisionRequest) -> Result<Value, String
         scope.limits.max_payload_bytes,
     )?;
     let call = match &ordered {
-        Some(ordered) => ordered.materialize(&scope.root)?,
-        None => edit.materialize(&scope.root, &scope.profile)?,
+        Some(ordered) => ordered.materialize(&scope.call_root)?,
+        None => edit.materialize(&scope.call_root, &scope.profile)?,
     };
     let manifest = call
         .read_manifest_bounded(scope.limits.max_manifest_bytes)
         .map_err(|e| e.to_string())?;
     let call = InterfaceArtifactFile::store_manifest_bounded(
-        &scope.root,
+        &scope.call_root,
         &serde_json::to_vec(&manifest.manifest).map_err(|e| e.to_string())?,
         scope.limits.max_manifest_bytes,
         scope.limits.max_payload_bytes,
     )
     .map_err(|e| e.to_string())?;
+    octopus_interface_transport::capture_spawned_artifact(
+        call.manifest_path(), std::slice::from_ref(&scope.call_root), scope.limits,
+    )?;
     let proposal = Proposal {
         schema_version: 1,
         key: verify.key.clone(),
@@ -534,7 +556,7 @@ pub fn verify_run_revision(request: RunRevisionVerification) -> Result<Value, St
     let scope = Scope::open(&request)?;
     let proposal = scope.load(&request)?;
     let (manifest, _, artifact) =
-        scope.capture(&proposal.call_path, &proposal.writer.call_label)?;
+        scope.capture_call(&proposal.call_path)?;
     let evidence = scope.evidence();
     let mut reader = FileCheckedRunReader::open(&evidence, Some(proposal.after_seq))?;
     let mut call = None;
@@ -692,11 +714,19 @@ pub fn verify_run_revision(request: RunRevisionVerification) -> Result<Value, St
     if before_read != proposal.before.as_bytes() {
         return Err("run revision preimage changed without its checked installation".into());
     }
+    if let RevisionOperation::OwnerInputs { desired_inputs } = &proposal.operation {
+        let ProviderInputRevision::Prepared { edit } = evidence.prepare_provider_input_revision(
+            request.run_path.clone(), &before_read, &proposal.writer, desired_inputs.clone(), reader.next_sequence(),
+        )? else { return Err("saved owner input correction is no longer prepared".into()); };
+        if serde_json::to_value(&edit).map_err(|error| error.to_string())?
+            != serde_json::to_value(&proposal.edit).map_err(|error| error.to_string())?
+        { return Err("saved owner input correction changed before its writer effect".into()); }
+    }
     if !input_ready(&proposal, &evidence, &before_read)? {
         return Ok(json!({"status":"deferred"}));
     }
     if proposal.ordered.is_some() {
-        let (_, bytes, _) = scope.capture(&proposal.call_path, &scope.writer.call_label)?;
+        let (_, bytes, _) = scope.capture_call(&proposal.call_path)?;
         let call: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         let path = Path::new(
             call.pointer("/arguments/writes/0/path")
@@ -714,6 +744,14 @@ pub fn verify_run_revision(request: RunRevisionVerification) -> Result<Value, St
             return Err("run revision writer advanced before its saved call was admitted".into());
         }
     }
+    if !scope.call_root.exists() || std::fs::canonicalize(proposal.call_path.parent().ok_or("revision call has no parent")?)
+        .map_err(|e| e.to_string())? != std::fs::canonicalize(&scope.call_root).map_err(|e| e.to_string())?
+    {
+        return Err("retained revision call is outside its source-owned output root; explicit reprepare requires proof that the original call had no admitted effect".into());
+    }
+    octopus_interface_transport::capture_spawned_artifact(
+        &proposal.call_path, std::slice::from_ref(&scope.call_root), scope.limits,
+    )?;
     Ok(json!({"status":"ready","source_interface":scope.writer.source,"manifest":manifest}))
 }
 

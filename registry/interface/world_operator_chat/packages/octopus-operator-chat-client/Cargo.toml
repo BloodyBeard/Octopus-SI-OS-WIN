@@ -15,16 +15,19 @@ path = "src/bin/octopus-operator-chat-artifact.rs"
 [dependencies]
 blake3.workspace = true
 octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
+octopus-context-collections = { path = "../../../system_context/packages/octopus-context-collections" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ee = { path = "../../../../../crates/octopus-ee" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-marks = { path = "../../../../../crates/octopus-marks" }
 octopus-policy = { path = "../../../../../crates/octopus-policy" }
 octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
 octopus-process-session-tool-runtime = { path = "../../../../worker_environment_kind/process_session/packages/octopus-process-session-tool-runtime" }
 octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
 octopus-tool-registry = { path = "../../../../../crates/octopus-tool-registry" }
+octopus-verifiers = { path = "../../../../../crates/octopus-verifiers" }
 octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 octopus-world-terminal-client = { path = "../../../world_terminal/packages/octopus-world-terminal-client" }
 serde = { version = "1", features = ["derive"] }

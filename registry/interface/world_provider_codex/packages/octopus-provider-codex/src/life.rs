@@ -2111,6 +2111,12 @@ impl InterruptedEffectArbiter {
         }
     }
 
+    async fn journal(&self, run: &RunId) -> Result<Option<InterruptedEffectJournal>, String> {
+        let mut cache = self.cache.lock().await;
+        self.load_run(&mut cache, run)?;
+        Ok(cache.journals.get(run.as_str()).cloned())
+    }
+
     async fn durable_continuity(
         &self,
         run: &RunId,
@@ -2870,12 +2876,15 @@ fn capture_deferred_provider_turn(
         .envelope
         .artifact_binding_payloads
         .iter()
-        .map(|payload| DeferredArtifactBindingRef {
-            artifact: payload.artifact.clone(),
-            bytes_content: ContentHash::of_bytes(&payload.bytes),
-            byte_count: payload.bytes.len() as u64,
+        .map(|payload| {
+            let bytes = payload.read_bytes().map_err(|error| error.to_string())?;
+            Ok(DeferredArtifactBindingRef {
+                artifact: payload.artifact.clone(),
+                bytes_content: ContentHash::of_bytes(bytes.as_ref()),
+                byte_count: bytes.len() as u64,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
     let journal = DeferredProviderTurnJournal {
         schema_version: 3,
         source_movement_seq: turn.seq,
@@ -2895,10 +2904,16 @@ fn capture_deferred_provider_turn(
         || captured.payload_bytes != restored.payload_bytes
         || canonical.metadata.as_ref() != Some(&metadata)
         || canonical.artifact_binding_payloads.len() != turn.envelope.artifact_binding_payloads.len()
-        || canonical.artifact_binding_payloads.iter().zip(&turn.envelope.artifact_binding_payloads)
-            .any(|(pinned, observed)| pinned.artifact != observed.artifact || pinned.bytes != observed.bytes)
     {
         return Err(format!("deferred provider turn {} differs from its canonical source bytes", turn.seq));
+    }
+    for (pinned, observed) in canonical.artifact_binding_payloads.iter().zip(&turn.envelope.artifact_binding_payloads) {
+        if pinned.artifact != observed.artifact
+            || pinned.read_bytes().map_err(|error| error.to_string())?.as_ref()
+                != observed.read_bytes().map_err(|error| error.to_string())?.as_ref()
+        {
+            return Err(format!("deferred provider turn {} differs from its canonical source bytes", turn.seq));
+        }
     }
     Ok(journal)
 }
@@ -3706,7 +3721,8 @@ fn bound_operator_session_snapshot(
         turn.envelope.metadata().map_err(|error| error.to_string())?, &payloads,
     )?.remaining_payloads;
     for bound in &payloads {
-        let value: serde_json::Value = serde_json::from_slice(bound.as_bytes())
+        let bytes = bound.read_bytes().map_err(|error| error.to_string())?;
+        let value: serde_json::Value = serde_json::from_slice(bytes.as_ref())
             .map_err(|error| format!("deferred bound context '{}' is not JSON: {error}", bound.artifact.id))?;
         let Some(session) = value.get("session_context") else {
             continue;
@@ -3722,7 +3738,7 @@ fn bound_operator_session_snapshot(
             &ctx.blobs_dir,
             ctx.required_host_io_limits()?,
             &bound.artifact,
-            bound.as_bytes(),
+            bytes.as_ref(),
             None,
             &labels,
             &ctx.interface,
@@ -5050,6 +5066,10 @@ async fn drive_turn_with_retries(
         }
     };
     validate_saved_source_withdrawal(ctx, descriptor, run, &turn, &handoff).await?;
+    if try_settle_completed_interrupted_result(ctx, descriptor, run, &turn, &handoff, interrupted_effects).await? {
+        control.finish();
+        return Ok(());
+    }
     let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
     // Classify exact, completed duplicate results before interruption arbitration:
     // an older result must neither resolve nor cancel its successor's pending effect.
@@ -5178,6 +5198,14 @@ async fn drive_turn_with_retries(
             control.finish();
             return Ok(());
         }
+        if let Some(emissions) = crate::handler::stopped_result::materialize_pending_interrupted(
+            descriptor, continuity, &turn.envelope, turn.seq, &ctx.interface_var_dir().join("emitted"), &ctx.interface_var_dir().join("streams"),
+            handoff.input_changes_context().await,
+        ).map_err(|error| error.to_string())? {
+            let reference = materialized_artifact_ref(&emissions.last().ok_or("interrupted result group has no closure")?.artifact)?;
+            admit_interrupted_result(ctx, &handoff, control, Some(interrupted_effects), run, turn.seq, &reference, emissions).await?;
+            return Ok(());
+        }
     }
     let native_terminal_source = if resolving_interrupted_result { None } else {
         let snapshot = handoff.invocation_session_snapshot();
@@ -5202,6 +5230,14 @@ async fn drive_turn_with_retries(
             )
         })?
         .private_config;
+    let callable_tool_names = match handoff.callable_tool_names(&turn.envelope) {
+        Ok(names) => names,
+        Err(error) => {
+            control.finish();
+            return emit_terminal_turn_error(ctx, descriptor, handoff_session, run, &turn, &handoff, 0,
+                &format!("provider model tool topology is invalid before dispatch: {error}")).await;
+        }
+    };
     let hidden_tools = model_hidden_tool_names(private_config)?
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -5212,7 +5248,7 @@ async fn drive_turn_with_retries(
         .map_err(|error| error.to_string())?
     {
         let tool = affordance.name.as_str().to_string();
-        if hidden_tools.contains(&tool) {
+        if !callable_tool_names.contains(&tool) || hidden_tools.contains(&tool) {
             continue;
         }
         if !model_visible_tools.insert(tool.clone()) {
@@ -5696,6 +5732,7 @@ async fn drive_turn_with_retries(
         let receive = async {
             let result = live
                 .receive_artifact_and_stream_outputs(CodexProviderInvocation {
+                    callable_tool_names: callable_tool_names.clone(),
                     input: turn.envelope.clone(),
                     emit: output_stream.clone(),
                     resolved_session_snapshot: handoff.invocation_session_snapshot(),
@@ -6077,6 +6114,7 @@ async fn restore_completed_provider_sources(
             continue;
         }
         if source >= committed_before { continue; }
+        if try_settle_completed_interrupted_result(ctx, descriptor, &run, &turn, &handoff, interrupted).await? { continue; }
         let (recovery, outcomes) = handoff.recover_completed_source_with_outcomes().await?;
         if recovery != ProviderSourceRecovery::Completed { continue; }
         let record = handoff.current_run_record_bytes().await;
@@ -6113,6 +6151,129 @@ async fn restore_completed_provider_sources(
         }
     }
     Ok(())
+}
+
+async fn try_settle_completed_interrupted_result(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId, turn: &QueuedTurn,
+    handoff: &ProviderOutputHandoff, interrupted: &InterruptedEffectArbiter,
+) -> Result<bool, String> {
+    let record: serde_json::Value = serde_json::from_slice(&handoff.current_run_record_bytes().await).map_err(|error| error.to_string())?;
+    let pending = &record["interface_state"][ctx.interface.as_str()]["pending_handoff"];
+    if pending["source_movement_seq"] != turn.seq || pending["terminal"] != true
+        || (pending["settlement_of"].is_null() && pending["items"][0]["artifact_label"] != "turn.error") { return Ok(false); }
+    let Some(journal) = interrupted.journal(run).await? else { return Ok(false); };
+    if !matches!(&journal.phase,
+        InterruptedEffectPhase::Resolving { result_source_movement_seq, .. }
+        | InterruptedEffectPhase::Closing { result_source_movement_seq, .. } if *result_source_movement_seq == turn.seq)
+        || !crate::handler::stopped_result::has_native_interrupted_result(&journal.continuity)? { return Ok(false); }
+    settle_completed_interrupted_result(ctx, descriptor, run, turn, handoff, interrupted, &journal).await?;
+    Ok(true)
+}
+
+async fn settle_completed_interrupted_result(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId, turn: &QueuedTurn,
+    handoff: &ProviderOutputHandoff, interrupted: &InterruptedEffectArbiter, journal: &InterruptedEffectJournal,
+) -> Result<(), String> {
+    let saved = handoff.pending_source_settlement().await?
+        .ok_or("completed interrupted result has no checked settlement predecessor")?;
+    let [ProviderHandoffOutcome::Admitted { seq, artifact }] = saved.predecessor_outcomes.as_slice()
+        else { return Err("completed interrupted result requires one admitted predecessor".into()); };
+    if artifact != &saved.predecessor { return Err("completed interrupted predecessor ref changed".into()); }
+    let context = handoff.current_session_context_artifacts().await.iter()
+        .filter(|entry| entry.source_movement_seq.is_some_and(|value| value <= *seq)).cloned().collect::<Vec<_>>();
+    let proof = prove_completed_interrupted_result(ctx, descriptor, run, turn, journal,
+        &saved.predecessor_record, &context, &saved.predecessor_outcomes)?;
+    if let Some(closure) = saved.closure {
+        let InterruptedEffectPhase::Closing { closure_artifact, .. } = &journal.phase else {
+            return Err("saved interrupted settlement is outside its exact Closing phase".into());
+        };
+        let value: serde_json::Value = serde_json::from_slice(&closure.read_payload_bytes().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let labels = codex_context_output_labels(descriptor).map_err(|error| error.to_string())?;
+        crate::handler::stopped_result::validate_saved_settlement(&proof, &turn.envelope, &value, &labels)?;
+        let original = octopus_interfaces::InterfaceArtifactFile::new(ctx.interface_var_dir().join("emitted")
+            .join(format!("turn_interrupted_result-{}.artifact.json", closure_artifact.content.to_hex())))
+            .map_err(|error| error.to_string())?;
+        let limits = ctx.required_host_io_limits()?;
+        let original_bytes = original.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes).map_err(|error| error.to_string())?;
+        if materialized_artifact_ref(&original)? != *closure_artifact { return Err("interrupted Closing manifest pin changed".into()); }
+        let original: serde_json::Value = serde_json::from_slice(&original_bytes.payload_bytes).map_err(|error| error.to_string())?;
+        let mut candidate = value.clone();
+        candidate.as_object_mut().ok_or("saved interrupted settlement is not an object")?.remove("session_context");
+        if candidate != original { return Err("saved interrupted settlement changed its exact Closing closure".into()); }
+        let (recovery, outcomes) = handoff.recover_completed_source_settlement(&proof.predecessor, &materialized_artifact_ref(&closure)?).await?;
+        if recovery != ProviderSourceRecovery::Completed { return Err("saved interrupted settlement did not complete its checked source".into()); }
+        let admission = interrupted_result_admission(&outcomes)?.ok_or("saved interrupted settlement has no admitted closure")?;
+        let (_, bytes) = read_pinned_provider_artifact(ctx, &admission.artifact, "recovered interrupted settlement")?;
+        let admitted: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        if admitted != value { return Err("saved interrupted settlement admitted a different snapshot".into()); }
+        interrupted.complete_closing(run, turn.seq, closure_artifact, &admission).await
+    } else {
+        hand_completed_interrupted_result(ctx, descriptor, run, turn, handoff, interrupted, &proof).await
+    }
+}
+
+fn prove_completed_interrupted_result(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId, turn: &QueuedTurn,
+    journal: &InterruptedEffectJournal, record: &[u8],
+    context: &[octopus_provider_run_authoring::SessionContextArtifact], outcomes: &[ProviderHandoffOutcome],
+) -> Result<crate::handler::stopped_result::StoppedResultSettlement, String> {
+    match &journal.phase {
+        InterruptedEffectPhase::Resolving { result_source_movement_seq, source_artifact }
+            if *result_source_movement_seq == turn.seq && source_artifact == &turn.envelope.artifact => {}
+        InterruptedEffectPhase::Closing { result_source_movement_seq, .. }
+        | InterruptedEffectPhase::Reconciled { result_source_movement_seq, .. }
+            if *result_source_movement_seq == turn.seq => {}
+        _ => return Err("completed interrupted settlement changed its durable result coordinate".into()),
+    }
+    let proof = crate::handler::stopped_result::prove_interrupted(descriptor, &turn.envelope, turn.seq,
+        record, context, outcomes, &crate::handler::stopped_result::InterruptedResultSource {
+            continuity: &journal.continuity, control_source: journal.control_source_movement_seq,
+            control_id: &journal.control_id, acknowledgement: &journal.acknowledgement.artifact,
+            acknowledgement_seq: journal.acknowledgement.movement_seq,
+        }).map_err(|error| error.to_string())?;
+    validate_stopped_result_control(ctx, descriptor, run, &proof)?;
+    let control = load_control_journal(ctx, proof.control_source, run, &proof.control_id, &proof.action)?
+        .ok_or("completed interrupted settlement lost its durable actual Stop")?;
+    let result = match control.phase {
+        TurnControlJournalPhase::Result { result } | TurnControlJournalPhase::Delivered { result } => result,
+        _ => return Err("completed interrupted settlement has no durable Stop result".into()),
+    };
+    let (_, bytes) = read_pinned_provider_artifact(ctx, &proof.acknowledgement, "interrupted settlement ACK")?;
+    let ack: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    if !result.acknowledged || result.control_id != proof.control_id || result.action != proof.action
+        || result.continuity.as_ref() != Some(&journal.continuity)
+        || ack["thread_id"] != serde_json::json!(result.thread_id)
+        || ack["turn_id"] != serde_json::json!(result.turn_id) || ack["detail"] != result.detail
+    { return Err("completed interrupted settlement ACK conflicts with its durable Stop result".into()); }
+    Ok(proof)
+}
+
+async fn hand_completed_interrupted_result(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId, turn: &QueuedTurn,
+    handoff: &ProviderOutputHandoff, interrupted: &InterruptedEffectArbiter,
+    proof: &crate::handler::stopped_result::StoppedResultSettlement,
+) -> Result<(), String> {
+    let closure = crate::handler::stopped_result::materialize_interrupted(proof, &turn.envelope,
+        &ctx.interface_var_dir().join("emitted"), &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let reference = materialized_artifact_ref(&closure.artifact)?;
+    let expected: serde_json::Value = serde_json::from_slice(&closure.artifact.read_payload_bytes().map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    interrupted.begin_closing(run, turn.seq, reference.clone()).await?;
+    match handoff.hand_completed_source_settlement(&proof.predecessor, proof.context_generation(), closure).await? {
+        ProviderHandoffOutcome::Admitted { seq, artifact } => {
+            let (manifest, bytes) = read_pinned_provider_artifact(ctx, &artifact, "completed interrupted settlement")?;
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            value.as_object_mut().ok_or("completed interrupted settlement is not an object")?.remove("session_context");
+            if manifest.label != TURN_INTERRUPTED_RESULT_LABEL || value != expected {
+                return Err("completed interrupted settlement admitted a different semantic closure".into());
+            }
+            interrupted.complete_closing(run, turn.seq, &reference, &DurableArtifactAdmission { artifact, movement_seq: seq }).await
+        }
+        ProviderHandoffOutcome::TerminalFailure { failure_seq, failure_class, .. } =>
+            Err(format!("completed interrupted settlement failed: {failure_class} at {failure_seq}")),
+    }
 }
 
 async fn validate_saved_source_withdrawal(
@@ -7305,9 +7466,11 @@ mod tests {
             manifest_path: turn.envelope.artifact_file.manifest_path().to_path_buf(),
             manifest_bytes: captured.manifest_bytes, payload_bytes: captured.payload_bytes,
             metadata: turn.envelope.metadata.clone().unwrap(), release: expected.release.clone(),
-            artifact_binding_payloads: turn.envelope.artifact_binding_payloads.iter().map(|bound|
+            artifact_binding_payloads: turn.envelope.artifact_binding_payloads.iter().map(|bound| {
+                let bytes = bound.read_bytes().unwrap().into_owned();
                 DeferredArtifactBindingPayloadV2 { artifact: bound.artifact.clone(),
-                    bytes_content: ContentHash::of_bytes(&bound.bytes), bytes: bound.bytes.clone() }).collect(),
+                    bytes_content: ContentHash::of_bytes(&bytes), bytes }
+            }).collect(),
         };
         let bytes = serde_json::to_vec_pretty(&old).unwrap();
         std::fs::write(&path, &bytes).unwrap();
@@ -7336,7 +7499,7 @@ mod tests {
         assert_eq!(loaded[&turn.seq].turn.envelope.read_artifact_payload_bounded(1_048_576).unwrap(), original);
         for (actual, original) in loaded[&turn.seq].turn.envelope.artifact_binding_payloads.iter()
             .zip(&turn.envelope.artifact_binding_payloads)
-        { assert_eq!(actual.artifact, original.artifact); assert_eq!(actual.bytes, original.bytes); }
+        { assert_eq!(actual.artifact, original.artifact); assert_eq!(actual.read_bytes().unwrap().as_ref(), original.read_bytes().unwrap().as_ref()); }
         upgrade_deferred_provider_turn_journals(ctx, descriptor).await.unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), upgraded);
         std::fs::write(&old.manifest_path, &old.manifest_bytes).unwrap();
@@ -7841,6 +8004,7 @@ mod tests {
             let live_stream_root = ctx.interface_var_dir().join("streams");
             let receive = driver.receive_artifact_and_stream_outputs(
                 crate::handler::CodexProviderInvocation {
+                    callable_tool_names: result_envelope.granted_tool_names().unwrap().into_iter().collect(),
                     input: result_envelope.clone(),
                     emit: output,
                     resolved_session_snapshot: None,
@@ -8014,6 +8178,7 @@ mod tests {
             let (recovery_output, mut recovery_rx) = ProviderOutputStream::channel();
             driver
                 .receive_artifact_and_stream_outputs(crate::handler::CodexProviderInvocation {
+                    callable_tool_names: result_envelope.granted_tool_names().unwrap().into_iter().collect(),
                     input: result_envelope,
                     emit: recovery_output,
                     resolved_session_snapshot: None,
@@ -8500,7 +8665,7 @@ mod tests {
                 .into_iter()
                 .collect::<Vec<_>>();
             for bound in &artifact_binding_payloads {
-                std::fs::write(ctx.blobs_dir.join(bound.artifact.content.to_hex()), bound.as_bytes()).unwrap();
+                std::fs::write(ctx.blobs_dir.join(bound.artifact.content.to_hex()), bound.read_bytes().unwrap().as_ref()).unwrap();
             }
             artifact_binding_payloads.push(octopus_interfaces::ArtifactBindingPayload::new(file_ref.clone(), file_bytes.to_vec()));
             let mut pinned: serde_json::Value = serde_json::from_slice(&pinned_test_run_record()).unwrap();

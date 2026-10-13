@@ -27,6 +27,8 @@ struct ArtifactBoundProcess {
     handler: ArtifactBoundHandler,
     run_records_root: Option<PathBuf>,
     artifact_blobs_root: Option<PathBuf>,
+    registry_artifact_root: Option<PathBuf>,
+    maximum_bytes: u64,
 }
 
 impl ToolProcessHandler for ArtifactBoundProcess {
@@ -55,7 +57,7 @@ impl ToolProcessHandler for ArtifactBoundProcess {
                 self.run_records_root.as_ref(),
             )
             .map_err(capability)?;
-            let surface = invocation_surface(&invocation.envelope, self.artifact_blobs_root.as_deref()).map_err(capability)?;
+            let surface = invocation_surface(&invocation.envelope, self.artifact_blobs_root.as_deref(), self.maximum_bytes).map_err(capability)?;
             let context =
                 handler_context(&invocation.envelope, Arc::clone(&surface)).map_err(capability)?;
             let formation = invocation.worker_environment.as_ref().ok_or_else(|| {
@@ -63,6 +65,9 @@ impl ToolProcessHandler for ArtifactBoundProcess {
             })?;
             let outcome = if call.handler_config.get("operation").and_then(serde_json::Value::as_str) == Some("mcp") {
                 Ok(crate::client_mcp::execute(&invocation.envelope, &context, &call, &io).await?)
+            } else if matches!(call.handler_config.get("operation").and_then(serde_json::Value::as_str),
+                Some("collection_discover" | "collection_read" | "collection_prepare")) {
+                crate::collection_tools::execute(&invocation.envelope, &call, self.registry_artifact_root.as_deref(), self.maximum_bytes)
             } else {
                 self.handler.execute(&context, &call).await
             };
@@ -103,6 +108,8 @@ pub async fn run_artifact_bound_tool_process() -> Result<(), String> {
         handler: ArtifactBoundHandler,
         run_records_root: env.root_slots.get("run_records_root").cloned(),
         artifact_blobs_root: env.root_slots.get("artifact_blobs_root").cloned(),
+        registry_artifact_root: env.root_slots.get("registry_artifact_root").cloned(),
+        maximum_bytes: env.host_io_limits.max_payload_bytes,
     }))
     .await
 }
@@ -313,6 +320,7 @@ fn decode_invocation(
 fn invocation_surface(
     input: &InterfaceInvocationEnvelope,
     artifact_blobs_root: Option<&std::path::Path>,
+    maximum_bytes: u64,
 ) -> Result<Arc<InvocationArtifactSurface>, String> {
     let parent = input
         .artifact_file
@@ -325,6 +333,7 @@ fn invocation_surface(
         &parent.join("emitted"),
         grant,
         artifact_blobs_root,
+        maximum_bytes,
     )
     .map(Arc::new)
     .map_err(|error| error.to_string())

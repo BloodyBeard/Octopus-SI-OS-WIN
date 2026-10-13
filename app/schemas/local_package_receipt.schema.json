@@ -43,6 +43,18 @@
           "target": { "$ref": "#/$defs/relativePath" },
           "digest": { "$ref": "#/$defs/digest" },
           "content_digest": { "$ref": "#/$defs/digest" },
+          "materialized_files": {
+            "type": "array",
+            "items": {
+              "type": "object", "required": ["path", "sha256", "size", "mode"], "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "sha256": { "$ref": "#/$defs/digest" },
+                "size": { "type": "integer", "minimum": 0 },
+                "mode": { "type": "integer", "minimum": 0, "maximum": 511 }
+              }
+            }
+          },
           "source_files": {
             "type": "array",
             "items": {

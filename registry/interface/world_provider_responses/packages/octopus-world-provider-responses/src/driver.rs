@@ -13,7 +13,7 @@ use octopus_interfaces::{
 };
 use octopus_ledger::ArtifactRef;
 use octopus_model_context_render::{
-    model_hidden_tool_names, model_visible_affordances,
+    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances,
     render_model_context_block_with_hidden_tools,
 };
 use octopus_provider_run_authoring::{
@@ -923,7 +923,17 @@ impl OpenAiResponsesDriver {
                 .materialize_model_catalog(&input, output_root, &dispatch)
                 .await;
         }
-        let tools = self.translate_tools(&input)?;
+        let selected = handoff
+            .callable_tool_names(&input)
+            .map_err(ResponsesFailure::contract)?;
+        let hidden = model_tool_exclusions(
+            input
+                .metadata()
+                .map_err(|error| ResponsesFailure::contract(error.to_string()))?,
+            &selected,
+            &model_hidden_tool_names(&self.private_config).map_err(ResponsesFailure::contract)?,
+        );
+        let tools = self.translate_tools(&input, hidden)?;
         let assembled = match self.prepare_input(&input, source_movement_seq, &tools)? {
             InputAssembly::Ready(assembled) => assembled,
             InputAssembly::Awaiting(pending) => {
@@ -1466,9 +1476,8 @@ impl OpenAiResponsesDriver {
     fn translate_tools(
         &self,
         input: &InterfaceInvocationEnvelope,
+        hidden: Vec<String>,
     ) -> Result<ToolCatalog, ResponsesFailure> {
-        let hidden =
-            model_hidden_tool_names(&self.private_config).map_err(ResponsesFailure::contract)?;
         let affordances = input
             .interface_affordance_specs()
             .map_err(|error| ResponsesFailure::contract(error.to_string()))?;
@@ -4164,7 +4173,13 @@ fn context_artifacts(
     let mut artifacts = Vec::new();
     let mut session_sources = BTreeSet::new();
     for bound in &input.artifact_binding_payloads {
-        let mut value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+        let bytes = bound.read_bytes().map_err(|error| {
+            ResponsesFailure::contract(format!(
+                "bound artifact '{}' cannot be read: {error}",
+                bound.artifact.id
+            ))
+        })?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             ResponsesFailure::contract(format!(
                 "bound artifact '{}' is not JSON: {error}",
                 bound.artifact.id
@@ -5815,6 +5830,16 @@ mod tests {
         .expect("Responses driver resolves")
     }
 
+    fn native_driver_fixture() -> OpenAiResponsesDriver {
+        let mut descriptor = descriptor("world_provider_responses");
+        descriptor.interface_driver_ref = INTERFACE_DRIVER_REF.into();
+        OpenAiResponsesDriver::from_descriptor(
+            &descriptor,
+            tempfile::tempdir().expect("temporary secrets home").keep(),
+        )
+        .expect("explicit native Responses fixture")
+    }
+
     fn driver_error(descriptor: &InterfaceDescriptor) -> String {
         match OpenAiResponsesDriver::from_descriptor(
             descriptor,
@@ -6213,7 +6238,7 @@ mod tests {
 
     #[test]
     fn carriers_and_replay_preserve_media_files_and_tool_correlation() {
-        let driver = driver("world_provider_responses");
+        let driver = native_driver_fixture();
         let affordances = vec![
             json!({
                 "name": "artifact.read",
@@ -6228,6 +6253,11 @@ mod tests {
             json!({
                 "name": "file.write",
                 "description": "Interface-owned run authoring tool",
+                "input_schema": {"type": "object"}
+            }),
+            json!({
+                "name": "candidate.read",
+                "description": "Granted but not selected",
                 "input_schema": {"type": "object"}
             }),
         ];
@@ -6261,7 +6291,13 @@ mod tests {
             Vec::new(),
             affordances.clone(),
         );
-        let tools = driver.translate_tools(&input).expect("tools translate");
+        let metadata_before = serde_json::to_value(input.metadata().unwrap()).unwrap();
+        let hidden = model_tool_exclusions(
+            input.metadata().unwrap(),
+            &BTreeSet::from(["artifact.read".into(), "file.write".into()]),
+            &model_hidden_tool_names(&driver.private_config).unwrap(),
+        );
+        let tools = driver.translate_tools(&input, hidden.clone()).expect("tools translate");
         assert_eq!(tools.declarations.len(), 1);
         assert_eq!(
             tools.declarations[0].get("name"),
@@ -6271,6 +6307,8 @@ mod tests {
             .assemble_input(&input, &tools)
             .expect("input assembles");
         assert!(!assembled.instructions.contains("file.write"));
+        assert!(!assembled.instructions.contains("candidate.read"));
+        assert_eq!(serde_json::to_value(input.metadata().unwrap()).unwrap(), metadata_before);
         assert_eq!(
             assembled.items[0].pointer("/content/1/type"),
             Some(&json!("input_image"))
@@ -6330,7 +6368,7 @@ mod tests {
             affordances,
         );
         let result_tools = driver
-            .translate_tools(&result_input)
+            .translate_tools(&result_input, hidden)
             .expect("result tools translate");
         let replay = driver
             .assemble_input(&result_input, &result_tools)
@@ -6457,7 +6495,7 @@ mod tests {
         );
         let output_root = tempfile::tempdir().expect("pending output root");
         let tools = driver
-            .translate_tools(&partial)
+            .translate_tools(&partial, model_hidden_tool_names(&driver.private_config).unwrap())
             .expect("partial tools translate");
         let pending_state = match driver
             .prepare_input(&partial, 1, &tools)
@@ -6498,7 +6536,7 @@ mod tests {
             affordances,
         );
         let tools = driver
-            .translate_tools(&completed)
+            .translate_tools(&completed, model_hidden_tool_names(&driver.private_config).unwrap())
             .expect("completed tools translate");
         let InputAssembly::Ready(assembled) = driver
             .prepare_input(&completed, 1, &tools)
@@ -6544,7 +6582,7 @@ mod tests {
             affordances.clone(),
         );
         let tools = driver
-            .translate_tools(&unknown)
+            .translate_tools(&unknown, model_hidden_tool_names(&driver.private_config).unwrap())
             .expect("unknown tools translate");
         assert!(driver
             .prepare_input(&unknown, 1, &tools)
@@ -6570,7 +6608,7 @@ mod tests {
             affordances.clone(),
         );
         let tools = driver
-            .translate_tools(&duplicate)
+            .translate_tools(&duplicate, model_hidden_tool_names(&driver.private_config).unwrap())
             .expect("duplicate tools translate");
         assert!(driver
             .prepare_input(&duplicate, 1, &tools)
@@ -6600,7 +6638,7 @@ mod tests {
             affordances,
         );
         let tools = driver
-            .translate_tools(&mixed)
+            .translate_tools(&mixed, model_hidden_tool_names(&driver.private_config).unwrap())
             .expect("mixed tools translate");
         assert!(driver
             .prepare_input(&mixed, 1, &tools)
@@ -6732,7 +6770,7 @@ mod tests {
             Vec::new(),
             test_affordances(),
         );
-        let tools = driver.translate_tools(&input).expect("tools translate");
+        let tools = driver.translate_tools(&input, model_hidden_tool_names(&driver.private_config).unwrap()).expect("tools translate");
         assert_eq!(tools.declarations.len(), 1);
         assert!(tools.declarations[0].get("strict").is_none());
         let request = driver

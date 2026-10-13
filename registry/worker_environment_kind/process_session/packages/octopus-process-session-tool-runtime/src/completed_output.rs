@@ -440,13 +440,10 @@ fn original_source(ctx: &InterfaceLiftContext, sequence: u64) -> Result<ToolDoor
     let artifact = movement.artifact.clone().ok_or("completed-output source has no artifact")?;
     let (file, _) = tool_door_recovery_artifact(ctx, &artifact)?;
     let file = file.capture_bounded(limits.max_manifest_bytes, limits.max_payload_bytes).map_err(|e| e.to_string())?;
+    let mut remaining = limits.max_payload_bytes;
     let artifact_binding_payloads = metadata.artifact_binding_refs.iter().map(|reference| {
         let path = ctx.blobs_dir.join(reference.content.to_hex());
-        let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_manifest_bytes.max(limits.max_payload_bytes))
-            .map_err(|e| e.to_string())?;
-        if ContentHash::of_bytes(&bytes) != reference.content { return Err("completed-output source binding carrier changed".into()); }
-        door_life::resolve_artifact_binding_payload(&path, limits)
-            .map(|bytes| ArtifactBindingPayload::new(reference.clone(), bytes))
+        door_life::resolve_artifact_binding_payload(&path, reference, limits, &mut remaining)
     }).collect::<Result<Vec<_>, _>>()?;
     let envelope = InterfaceInvocationEnvelope { artifact, artifact_file: file, artifact_binding_payloads, metadata: Some(metadata) };
     ctx.with_source_movement(movement.clone()).source_movement(&envelope)?;

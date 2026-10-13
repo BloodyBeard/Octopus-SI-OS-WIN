@@ -4,8 +4,13 @@ pub use octopus_app_server::{
     RegistryValidationRoots, validate_registry_candidate,
 };
 use octopus_ee::EeInstance;
+pub use octopus_context_collections::CollectionSelection;
 use octopus_ledger::{ArtifactRef, InvocationMetadata};
 use octopus_provider_run_authoring::ProviderOutgoingBinding;
+use crate::publication_selection::{
+    PublicationSelectionEvidence, PublicationSelectionSeeds, PublicationSourceAuthority,
+    resolve_publication_selection, validate_target_read_formation,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -105,6 +110,14 @@ pub struct RunCompositionRequest {
     pub selected_worker_environment_kinds: Vec<String>,
     pub selected_tools: Vec<SelectedToolSeed>,
     pub door_host_slots: BTreeMap<String, BTreeMap<String, PathBuf>>,
+    #[serde(default)]
+    pub external_inputs: Vec<ExternalInputSeed>,
+    #[serde(default)]
+    pub external_relays: Vec<ExternalRelaySeed>,
+    #[serde(default)]
+    pub model_outputs: Vec<ModelOutputSeed>,
+    #[serde(default)]
+    pub publications: Vec<CollectionSelection>,
     pub context_artifact_bindings: Vec<ArtifactBindingSeed>,
     pub payload_artifact_bindings: Vec<ArtifactRef>,
     pub seed: CompositionSeed,
@@ -166,6 +179,8 @@ pub struct RunCompositionPlan {
     pub required_policy_updates: Vec<RequiredPolicyUpdate>,
     pub required_binding_updates: Vec<RequiredBindingUpdate>,
     pub authoring: CompositionAuthoringResult,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_evidence: Vec<PublicationSelectionEvidence>,
     pub seed: PlannedCompositionSeed,
 }
 
@@ -178,6 +193,8 @@ pub struct AuthoredRunComposition {
     pub run_id: String,
     pub writes: Vec<RegistryCandidateWrite>,
     pub outgoing_bindings: Vec<ProviderOutgoingBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_read_refs: Vec<ArtifactRef>,
     #[serde(default)]
     pub seed: Option<PlannedCompositionSeed>,
 }
@@ -350,6 +367,45 @@ pub fn plan_authored_run_composition(
 /// Execution remains an admitted file-tool effect followed by artifact.send.
 pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompositionPlan, String> {
     validate_request(request)?;
+    if !request.publications.is_empty() {
+        validate_target_read_formation(
+            &request.roots.registry_root,
+            &request.roots.ee_instances_root,
+            &request.ee_id,
+            &request.worker_template_interface_id,
+        )?;
+    }
+    let resolved = resolve_publication_selection(
+        &request.roots.registry_root,
+        &octopus_context_collections::ScopeContext {
+            ee_id: request.ee_id.clone(),
+            worker_interface: request.communication.receive_interface_id.clone(),
+        },
+        &request.publications,
+        PublicationSelectionSeeds {
+            selected_tools: request.selected_tools.clone(),
+            selected_worker_environment_kinds: request.selected_worker_environment_kinds.clone(),
+            door_host_slots: request.door_host_slots.clone(),
+            external_inputs: request.external_inputs.clone(),
+            external_relays: request.external_relays.clone(),
+            model_outputs: request.model_outputs.clone(),
+            context_artifact_bindings: request.context_artifact_bindings.clone(),
+            payload_artifact_bindings: request.payload_artifact_bindings.clone(),
+        },
+        PublicationSourceAuthority::Native { metadata: &request.metadata },
+        WriteHashAlgorithm::Blake3,
+    )?;
+    let mut expanded_request = request.clone();
+    expanded_request.selected_tools = resolved.selection.selected_tools;
+    expanded_request.selected_worker_environment_kinds = resolved.selection.selected_worker_environment_kinds;
+    expanded_request.door_host_slots = resolved.selection.door_host_slots;
+    expanded_request.external_inputs = resolved.selection.external_inputs;
+    expanded_request.external_relays = resolved.selection.external_relays;
+    expanded_request.model_outputs = resolved.selection.model_outputs;
+    expanded_request.context_artifact_bindings = resolved.selection.context_artifact_bindings;
+    expanded_request.payload_artifact_bindings = resolved.selection.payload_artifact_bindings;
+    let request = &expanded_request;
+    validate_request(request)?;
     let roots = &request.roots;
     let interface_root = roots.registry_root.join("interface");
     let parent = &request.admitted_parent_record;
@@ -422,8 +478,19 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         topology = select_capability_topology(topology, &config, &[], &request.selected_tools)?;
         &[]
     };
-    topology.worker_relays.clear();
-    topology.operation_bindings.clear();
+    let mut external = validate_external_routes(
+        &request.external_inputs,
+        &request.external_relays,
+        &request.model_outputs,
+    )?;
+    ensure_external_interfaces_admitted_by_ee(&topology, &external)?;
+    external.extend(request.communication.return_interface_ids.iter().cloned());
+    external.extend(request.communication.client_interface_id.iter().cloned());
+    external.sort();
+    external.dedup();
+    let connected = external.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    topology.worker_relays.retain(|id, _| connected.contains(id.as_str()));
+    topology.operation_bindings.retain(|id, _| connected.contains(id.as_str()));
     let selection = RunSelection {
         ee_id: request.ee_id.clone(),
         worker_choice_interface: request.worker_template_interface_id.clone(),
@@ -453,13 +520,6 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
     if !topology.interface_policies.contains_key(&source.id) {
         return Err("authoring source interface is outside selected worker/EE policy".into());
     }
-    let external = request
-        .communication
-        .return_interface_ids
-        .iter()
-        .cloned()
-        .chain(request.communication.client_interface_id.iter().cloned())
-        .collect::<Vec<_>>();
     for id in &external {
         let descriptor = load_interface_descriptor(&interface_root, id)?;
         if request.communication.return_interface_ids.contains(id)
@@ -488,13 +548,15 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &selected_context,
     )?;
     validate_private_identity(request, &identity)?;
-    let mut writes = Vec::new();
+    let mut writes = resolved.artifact_writes;
     if owns_client {
         let profile = OctopusOsAuthoringProfile {
             ee_id: request.ee_id.clone(), worker_choice_interface: request.worker_template_interface_id.clone(),
-            door_host_slots: request.door_host_slots.clone(), external_inputs: Vec::new(), external_relays: Vec::new(), model_outputs: Vec::new(),
+            door_host_slots: request.door_host_slots.clone(), external_inputs: request.external_inputs.clone(),
+            external_relays: request.external_relays.clone(), model_outputs: request.model_outputs.clone(),
             context_artifact_bindings: request.context_artifact_bindings.clone(), payload_artifact_bindings: request.payload_artifact_bindings.clone(),
             selected_worker_environment_kinds: request.selected_worker_environment_kinds.clone(), selected_tools: request.selected_tools.clone(),
+            publication_evidence: resolved.evidence.clone(),
         };
         plan_chat_interface(&interface_root, &config, &identity, Some(&profile), false, &mut writes)?;
     }
@@ -534,16 +596,17 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &mut writes,
     )?;
     let dependency_workers =
-        worker_role_dependency_interfaces(&interface_root, std::iter::empty(), &external)?;
+        worker_role_dependency_interfaces(&interface_root, topology.worker_relays.keys(), &external)?;
     let roles =
         formed_worker_role_artifacts(&interface_root, &private_roles, dependency_workers.iter())?;
-    let mut selected_context = context_bindings::with_instruction_source_bindings(
+    let mut selected_context = context_bindings::with_instruction_source_bindings_from_planned(
         &roots.registry_root,
         roles
             .iter()
             .cloned()
             .chain(selected_context.iter().map(|binding| binding.id.clone())),
         &selected_context,
+        &resolved.staged_artifacts,
     )?;
     plan_provider_interface(
         &interface_root,
@@ -612,9 +675,9 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
             pinned_context_items: Vec::new(),
             continued_from: None,
         },
-        &[],
-        &[],
-        &[],
+        &request.external_inputs,
+        &request.external_relays,
+        &request.model_outputs,
         &selected_context,
         &request.payload_artifact_bindings,
         &provider.client_operation_request_labels,
@@ -751,6 +814,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         required_tool_ids,
         required_policy_updates,
         required_binding_updates,
+        publication_evidence: resolved.evidence,
         authoring: CompositionAuthoringResult {
             source_interface_id: identity.authoring_source_id,
             room_interface_id: identity.authoring_environment_id,
@@ -913,6 +977,23 @@ fn validate_request(request: &RunCompositionRequest) -> Result<(), String> {
         || request.communication.receive_interface_id == request.worker_template_interface_id
     {
         return Err("receive interface must be a new private worker pin".into());
+    }
+    for (name, value) in request.external_inputs.iter().flat_map(|input| [
+        ("external_inputs.checkpoint_id", &input.checkpoint_id),
+        ("external_inputs.interface_id", &input.interface_id),
+    ]).chain(request.external_relays.iter().flat_map(|relay| [
+        ("external_relays.checkpoint_id", &relay.checkpoint_id),
+        ("external_relays.interface_id", &relay.interface_id),
+    ])).chain(request.external_relays.iter().flat_map(|relay| relay.outbound_interface_ids.iter()
+        .map(|id| ("external_relays.outbound_interface_ids", id))))
+        .chain(request.model_outputs.iter().flat_map(|output| [
+            ("model_outputs.checkpoint_id", &output.checkpoint_id),
+            ("model_outputs.interface_id", &output.interface_id),
+        ]))
+    {
+        if safe_segment(value, name)? != *value {
+            return Err(format!("{name} must be exact"));
+        }
     }
     Ok(())
 }

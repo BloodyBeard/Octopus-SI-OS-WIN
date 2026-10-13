@@ -99,6 +99,8 @@ async fn selected_home_accepts_new_definition_without_replaying_completed_work()
     let mut reader_ctx = ctx.clone();
     reader_ctx.var_dir = scratch.path().to_path_buf();
     let handoff = ProviderOutputHandoff {
+        checked_settlement_output: None,
+            invocation_metadata: InvocationMetadata::new(Default::default()),
         session: ProviderHandoffSession::new(&ctx).unwrap(),
         hand_in_root: hand_in.join(config.authoring_source_interface.as_str()),
         var_dir: ctx.var_dir.clone(),

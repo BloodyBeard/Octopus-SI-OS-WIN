@@ -27,6 +27,8 @@ pub struct AuthoredCurrentRun {
 #[serde(deny_unknown_fields)]
 pub struct CurrentRunRequest {
     pub amendment_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publications: Vec<octopus_context_collections::CollectionSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<CurrentRunSelection>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,6 +43,8 @@ pub struct CurrentRunPlan {
     pub activation_writes: Vec<RegistryCandidateWrite>,
     pub validation: RegistryCandidateValidation,
     pub awaiting_activation: Vec<RegistryValidationIssue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_evidence: Vec<crate::publication_selection::PublicationSelectionEvidence>,
 }
 
 fn exact_field(value: &Value, field: &str) -> Result<String, String> {
@@ -67,6 +71,120 @@ pub(crate) struct CurrentWorkerPlanning {
     selected_tools: Vec<SelectedToolSeed>,
 }
 
+fn current_nested_tools(
+    registry_root: &Path,
+    ee_root: &Path,
+    current: &RunRecord,
+    provider: &str,
+    checkpoints: &[Value],
+    topology: &FormedCapabilityTopology,
+) -> Result<BTreeMap<String, ToolDescriptor>, String> {
+    let mut selected = BTreeMap::new();
+    let mut owners = BTreeSet::new();
+    for template in checkpoints.iter().filter(|cp| cp["role"] == "owner_input") {
+        let Some(writer) = template.get("owner_authoring").filter(|value| !value.is_null()) else { continue; };
+        let writer: BoundAuthoringWriter = parse(writer)?;
+        let Some(binding) = topology.tool_bindings.get(&writer.owner) else { continue; };
+        if !binding.sidecars.iter().any(|sidecar| sidecar.file_name == "code_mode.json") { continue; }
+        if !owners.insert(writer.owner.clone()) || writer.source != writer.owner
+            || template["interface_binding"]["interface"] != writer.owner.as_str()
+            || template["outbound_interface_bindings"] != json!([AuthoredInterfaceBinding::all(InterfaceId::new(provider))]) {
+            return Err("current nested owner differs from its exact provider return and writer".into());
+        }
+        let sidecar_path = registry_root.join("interface").join(writer.owner.as_str()).join("code_mode.json");
+        let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&sidecar_path, 1024 * 1024).map_err(|e| e.to_string())?;
+        let sidecar: CodeModeSidecarReferences = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if sidecar.settings.get("schema_version") != Some(&json!(1)) { return Err("current nested owner has an unsupported contract".into()); }
+        let handoff = sidecar.handoff.as_ref().ok_or("current nested owner has no pinned handoff")?;
+        let source_limit = sidecar.settings.get("max_source_bytes").and_then(Value::as_u64).filter(|n| *n > 0)
+            .ok_or("current nested owner has no declared source bound")?;
+        let prelude: ArtifactRef = parse(sidecar.settings.get("context").filter(|context| context["mode"] == "persistent")
+            .and_then(|context| context.get("prelude_artifact")).ok_or("current nested owner has no persistent prelude")?)?;
+        let owner_state = current.interface_state.get(&writer.owner).ok_or("current nested owner has no accepted state")?;
+        let owned: Vec<octopus_descriptors::CheckpointId> = parse(owner_state.get("owned_checkpoint_ids").ok_or("current nested owner has no checkpoint ownership")?)?;
+        let owned_checkpoints = owned.iter().map(|id| {
+            current.checkpoint(id).filter(|_| current.active_checkpoints.contains(id)).ok_or("current nested owner lost an active checkpoint")
+        }).collect::<Result<Vec<_>, _>>()?;
+        let references = [&handoff.topology_artifact, &prelude];
+        let input = owned_checkpoints.iter().find(|cp| cp.outbound_interfaces().any(|id| id == &writer.owner)
+            && references.iter().all(|reference| cp.artifact_bindings.iter().any(|artifact| artifact.id == reference.id && artifact.access.read)))
+            .ok_or("current nested contract is not readable through its accepted owner bindings")?;
+        let grant = octopus_app_server::spine_root::inspect_registry_run_grant(registry_root, ee_root, current, &input.id)?;
+        for reference in references {
+            if !grant.may_read_artifact(reference.id.as_str())
+                || !checkpoints.iter().any(|cp| cp["role"] == "provider_tool_output"
+                    && cp["outbound_interface_bindings"] == json!([AuthoredInterfaceBinding::all(writer.owner.clone())])
+                    && cp["static_artifact_bindings"].as_array().is_some_and(|ids| ids.contains(&json!(reference.id)))) {
+                return Err("current nested contract is not readable through its accepted owner bindings".into());
+            }
+        }
+        crate::context_bindings::validate_artifact_id(handoff.topology_artifact.id.as_str())?;
+        let artifact_path = registry_root.join("artifact").join(handoff.topology_artifact.id.as_str()).join("artifact.json");
+        let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&artifact_path, source_limit).map_err(|e| e.to_string())?;
+        let artifact: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if octopus_ledger::ContentHash::of_canonical_json(&artifact) != handoff.topology_artifact.content
+            || artifact["id"] != handoff.topology_artifact.id.as_str() || artifact["schema_version"] != 1
+            || artifact["run"] != current.id.as_str() || artifact["worker"] != current.worker.as_str()
+            || artifact["owner_interface"] != writer.owner.as_str() || artifact["prelude_artifact"] != json!(prelude)
+            || artifact["file_write_tool"] != writer.tool
+            || artifact["model_output"]["binding"]["inbound"] != json!(AuthoredInterfaceBinding::all(writer.owner.clone()))
+            || artifact["model_output"]["binding"]["outbound"] != json!([AuthoredInterfaceBinding::all(InterfaceId::new(provider))])
+            || artifact["authoring_result"]["binding"]["inbound"] != json!(AuthoredInterfaceBinding::all(writer.door.clone()))
+            || artifact["authoring_result"]["binding"]["outbound"] != json!([AuthoredInterfaceBinding::all(writer.owner.clone())]) {
+            return Err("current nested topology differs from its accepted pin, run or owner".into());
+        }
+        let routes = artifact["routes"].as_array().ok_or("current nested topology has no routes")?;
+        let mut expected_routes = routes.clone();
+        let declared_routes: Vec<Value> = sidecar.routes.iter().map(serde_json::to_value).collect::<Result<_, _>>().map_err(|e| e.to_string())?;
+        let mut configured = declared_routes.clone();
+        partition_nested_returns(&mut expected_routes, &mut configured)?;
+        if expected_routes != *routes || configured != declared_routes
+            || routes.len() != sidecar.routes.len() {
+            return Err("current nested return contracts differ from their declared process owners".into());
+        }
+        let mut route_tools = BTreeSet::new();
+        for route in routes {
+            let tool = exact_field(route, "tool")?;
+            let declared = sidecar.routes.iter().find(|declared| declared.tool == tool).ok_or("current nested route has no declared tool")?;
+            let call: octopus_interfaces::CheckpointBindingPolicySnapshot = parse(&route["call"]["binding"])?;
+            let result: octopus_interfaces::CheckpointBindingPolicySnapshot = parse(&route["result"]["binding"])?;
+            if !route_tools.insert(tool.clone()) || route["call"]["name"] != declared.checkpoint
+                || route["result"]["name"].as_str() != declared.result_checkpoint.as_deref()
+                || call.inbound.interface != writer.owner || call.outbound.len() != 1
+                || call.outbound[0].interface.as_str() != declared.interface || !call.inbound.admits(&writer.call_label)
+                || !call.outbound[0].admits(&writer.call_label) || result.inbound.interface.as_str() != declared.interface
+                || result.outbound.len() != 1 || result.outbound[0].interface != writer.owner
+                || !owned_checkpoints.iter().any(|cp| cp.interface_binding.as_ref() == Some(&result.inbound)
+                    && cp.outbound_interface_bindings == result.outbound && cp.required_verified_artifacts.is_empty()) {
+                return Err("current nested route is not represented by its exact accepted call and return".into());
+            }
+            let mut descriptors = vec![(tool, parse::<ToolDescriptor>(&route["process_descriptor"])?)];
+            if let Some(approval) = route.get("app_approval").filter(|value| !value.is_null()) {
+                if approval["operator_interface"].as_str() != sidecar.continuation.as_ref().and_then(|continuation| continuation.notification_interface.as_deref()) {
+                    return Err("current nested approval differs from its declared operator recipient".into());
+                }
+                descriptors.push((exact_field(approval, "resume_tool")?, parse(&approval["resume_descriptor"])?));
+            }
+            for (tool, descriptor) in descriptors {
+                let [kind] = descriptor.supported_worker_environment_kinds.as_slice() else { return Err("current nested tool has no exact code-world".into()); };
+                let installed = load_tool_descriptor_from_dir(&registry_root.join("tool"), &tool).map_err(|e| e.to_string())?
+                    .ok_or("current nested tool descriptor is absent")?;
+                if descriptor != installed || descriptor.id.as_str() != tool || descriptor.interface.as_str() != declared.interface
+                    || !grant.tools.contains(&tool) || grant.hard_blocked_tools.contains(&tool)
+                    || !grant.interfaces.contains(&declared.interface)
+                    || !topology.tool_bindings.get(&descriptor.interface).is_some_and(|binding| binding.tools.iter()
+                        .any(|entry| entry.tool.as_str() == tool && &entry.worker_environment_kind == kind)) {
+                    return Err(format!("current nested tool '{tool}' differs from its granted exact descriptor"));
+                }
+                if selected.insert(tool, descriptor.clone()).is_some_and(|prior| prior != descriptor) {
+                    return Err("current nested owners disagree on a selected tool descriptor".into());
+                }
+            }
+        }
+    }
+    Ok(selected)
+}
+
 pub(crate) fn form_current_worker(registry_root: &Path, ee_root: &Path, current: &RunRecord, client: &str, chat_id: &str) -> Result<CurrentWorkerPlanning, String> {
     let chain = resolve_live_ee_policy_chain(ee_root, &current.ee).map_err(|e|e.to_string())?;
     let mut topology = form_capability_topology(registry_root, &CapabilityFormationRequest::from_live_chain(current.worker.clone(), chain)).map_err(|e|e.to_string())?;
@@ -80,10 +198,12 @@ pub(crate) fn form_current_worker(registry_root: &Path, ee_root: &Path, current:
     let checkpoints=value["interface_state"][&provider]["run_authoring_binding"]["checkpoints"].as_array().ok_or("current provider has no authored tool contracts")?;
     let authoring_writers=checkpoints.iter().filter_map(|cp|cp.get("owner_authoring").filter(|value|!value.is_null()))
         .map(parse::<BoundAuthoringWriter>).collect::<Result<Vec<_>,_>>()?;
-    let current_tools=checkpoints.iter().filter(|cp|cp["role"]=="provider_tool_output")
+    let nested_tools=current_nested_tools(registry_root,ee_root,current,&provider,checkpoints,&topology)?;
+    let mut current_tools=checkpoints.iter().filter(|cp|cp["role"]=="provider_tool_output")
         .flat_map(|cp|cp["required_verified_artifacts"].as_array().into_iter().flatten())
         .flat_map(|required|required["params"]["tools"].as_array().into_iter().flatten())
         .filter_map(Value::as_str).collect::<BTreeSet<_>>();
+    current_tools.extend(nested_tools.keys().map(String::as_str));
     let mut projected=BTreeMap::new();
     let mut tools=BTreeMap::<String,ToolDescriptor>::new();
     let mut origins=BTreeMap::<String,(bool,bool)>::new();
@@ -126,6 +246,7 @@ pub(crate) fn form_current_worker(registry_root: &Path, ee_root: &Path, current:
                 if *was_bound || (*was_private && !bound) {continue;}
             }
             let mut descriptor=load_tool_descriptor_from_dir(&registry_root.join("tool"),tool.tool.as_str()).map_err(|e|e.to_string())?.ok_or("formed current tool disappeared")?;
+            if nested_tools.get(tool.tool.as_str()).is_some_and(|pinned|pinned != &descriptor) {return Err("current nested tool changed after its owner projection".into());}
             descriptor.id=ToolDescriptorId::new(&base);descriptor.interface=source_id.clone();
             tools.insert(base.clone(),descriptor);origins.insert(base.clone(),(private,bound));
         }
@@ -166,18 +287,9 @@ pub fn current_selection(roots: &CompositionRoots, current: &RunRecord, provider
     }))
 }
 
-fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, key: &str, selection: CurrentRunSelection) -> Result<AuthoredCurrentRun, String> {
+fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, key: &str, selection: CurrentRunSelection,
+    publications: Vec<octopus_context_collections::CollectionSelection>, native_metadata: Option<&InvocationMetadata>) -> Result<(AuthoredCurrentRun, Vec<crate::publication_selection::PublicationSelectionEvidence>), String> {
     let previous = current_selection(roots, current, provider)?.ok_or("this run has no client selection owner; supply its exact authored future record")?;
-    retain_selection(&previous.selected_tools, &selection.selected_tools, "tools")?;
-    retain_selection(&previous.selected_worker_environment_kinds, &selection.selected_worker_environment_kinds, "worker environment kinds")?;
-    retain_selection(&previous.external_inputs, &selection.external_inputs, "external inputs")?;
-    retain_selection(&previous.external_relays, &selection.external_relays, "external relays")?;
-    retain_selection(&previous.model_outputs, &selection.model_outputs, "model outputs")?;
-    retain_selection(&previous.context_artifact_bindings, &selection.context_artifact_bindings, "context artifacts")?;
-    retain_selection(&previous.payload_artifact_bindings, &selection.payload_artifact_bindings, "payload artifacts")?;
-    for (door, slots) in &previous.door_host_slots {
-        if selection.door_host_slots.get(door) != Some(slots) { return Err(format!("current-run amendment changes retained door roots '{door}'")); }
-    }
     let clients = current.interface_state.iter().filter(|(_, state)| state.get("provider_runtime_interface").and_then(Value::as_str) == Some(provider.as_str())
         && state.contains_key("client_surface_role")).collect::<Vec<_>>();
     let [(client, state)] = clients.as_slice() else { return Err("current run has no unique client planning owner".into()); };
@@ -197,11 +309,22 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
         door_host_slots: selection.door_host_slots, external_inputs: selection.external_inputs, external_relays: selection.external_relays,
         model_outputs: selection.model_outputs, context_artifact_bindings: selection.context_artifact_bindings,
         payload_artifact_bindings: selection.payload_artifact_bindings, selected_worker_environment_kinds: selection.selected_worker_environment_kinds,
-        selected_tools: selection.selected_tools, existing_run_record: Some(json!(current)),
+        selected_tools: selection.selected_tools, publications, retain_current_capabilities:false, existing_run_record: Some(json!(current)),
         conversation: parse(&json!({"ledger_offset":state["ledger_offset"], "artifact_bindings":state["conversation_artifact_bindings"],
             "pinned_artifact_bindings":state["pinned_artifact_bindings"], "pinned_context_items":state["pinned_context_items"], "continued_from":state["continued_from"]}))?,
     };
-    let plan = plan_operator_chat_topology_files(&request, true)?;
+    let plan = plan_operator_chat_topology_files_for_source(&request, true, native_metadata)?;
+    let selected = &plan.authoring_profile;
+    retain_selection(&previous.selected_tools, &selected.selected_tools, "tools")?;
+    retain_selection(&previous.selected_worker_environment_kinds, &selected.selected_worker_environment_kinds, "worker environment kinds")?;
+    retain_selection(&previous.external_inputs, &selected.external_inputs, "external inputs")?;
+    retain_selection(&previous.external_relays, &selected.external_relays, "external relays")?;
+    retain_selection(&previous.model_outputs, &selected.model_outputs, "model outputs")?;
+    retain_selection(&previous.context_artifact_bindings, &selected.context_artifact_bindings, "context artifacts")?;
+    retain_selection(&previous.payload_artifact_bindings, &selected.payload_artifact_bindings, "payload artifacts")?;
+    for (door, slots) in &previous.door_host_slots {
+        if selected.door_host_slots.get(door) != Some(slots) { return Err(format!("current-run amendment changes retained door roots '{door}'")); }
+    }
     if plan.run_id != current.id.as_str() || plan.model_interface_id != provider.as_str() || plan.worker_interface_id != current.worker.as_str() || !plan.removals.is_empty() {
         return Err("current-run capability selection changed identity or removes installed capability owners".into());
     }
@@ -287,16 +410,31 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
         }
     }
     let bytes = std::fs::read(roots.run_records_root.join(format!("{}.json",current.id))).map_err(|e|e.to_string())?;
-    Ok(AuthoredCurrentRun { expected_before_hash:octopus_ledger::ContentHash::of_bytes(&bytes).to_hex(), expected_before:current_value, run_record: candidate, writes })
+    Ok((AuthoredCurrentRun { expected_before_hash:octopus_ledger::ContentHash::of_bytes(&bytes).to_hex(), expected_before:current_value, run_record: candidate, writes }, plan.publication_evidence))
 }
 
 pub fn plan_current_run_amendment(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, request: CurrentRunRequest,
     bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)]) -> Result<CurrentRunPlan, String> {
+    plan_current_run_amendment_with_source(roots, current, provider, request, bridge, retained_tools, None)
+}
+
+pub fn plan_current_run_amendment_for_native(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, request: CurrentRunRequest,
+    bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)], metadata: &InvocationMetadata) -> Result<CurrentRunPlan, String> {
+    let runtime = metadata.runtime.as_ref().ok_or("native current-run selection requires admitted runtime coordinates")?;
+    if runtime.run != current.id || runtime.ee != current.ee || runtime.worker != current.worker {
+        return Err("native current-run selection differs from its admitted run/EE/worker coordinates".into());
+    }
+    plan_current_run_amendment_with_source(roots, current, provider, request, bridge, retained_tools, Some(metadata))
+}
+
+fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, request: CurrentRunRequest,
+    bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)], native_metadata: Option<&InvocationMetadata>) -> Result<CurrentRunPlan, String> {
     safe_segment(&request.amendment_key, "amendment_key")?;
     let exact_authored = request.authored.is_some();
-    let authored = match (request.selection, request.authored) {
-        (Some(selection), None) => plan_selection(roots, current, provider, &request.amendment_key, selection)?,
-        (None, Some(authored)) => authored,
+    let (authored, publication_evidence) = match (request.selection, request.authored) {
+        (Some(selection), None) => plan_selection(roots, current, provider, &request.amendment_key, selection, request.publications, native_metadata)?,
+        (None, Some(authored)) if request.publications.is_empty() => (authored, Vec::new()),
+        (None, Some(_)) => return Err("exact authored current-run records cannot also request publication selection".into()),
         _ => return Err("current-run amendment requires exactly one complete selection or authored record".into()),
     };
     let descriptor = load_interface_descriptor(&roots.registry_root.join("interface"), provider.as_str())?;
@@ -382,7 +520,7 @@ pub fn plan_current_run_amendment(roots: &CompositionRoots, current: &RunRecord,
         .cloned().collect::<Vec<_>>();
     validation.regressions.retain(|issue|!awaiting_activation.contains(issue));
     validation.safe_to_apply=validation.regressions.is_empty();
-    Ok(CurrentRunPlan { amendment, dependency_writes, activation_writes, validation, awaiting_activation })
+    Ok(CurrentRunPlan { amendment, dependency_writes, activation_writes, validation, awaiting_activation, publication_evidence })
 }
 
 fn protect_bridge_descriptor(roots: &CompositionRoots, provider: &InterfaceId, tools: &[(String, InterfaceId)], write: &RegistryCandidateWrite) -> Result<(), String> {

@@ -11,7 +11,7 @@ use octopus_interfaces::{
 };
 use octopus_ledger::ArtifactRef;
 use octopus_model_context_render::{
-    model_hidden_tool_names, model_visible_affordances,
+    model_hidden_tool_names, model_tool_exclusions, model_visible_affordances,
     render_model_context_block_with_hidden_tools,
 };
 use octopus_provider_run_authoring::{
@@ -735,8 +735,21 @@ impl BedrockConverseDriver {
                 "this Bedrock descriptor declares no model_catalog endpoint",
             ));
         }
-        let hidden_tools = model_hidden_tool_names(&self.config.private_config)
+        let selected = handoff
+            .callable_tool_names(&input)
             .map_err(BedrockFailure::contract)?;
+        let mut declared_hidden = model_hidden_tool_names(&self.config.private_config)
+            .map_err(BedrockFailure::contract)?;
+        if !self.config.options.tools_enabled {
+            declared_hidden.extend(selected.iter().cloned());
+        }
+        let hidden_tools = model_tool_exclusions(
+            input
+                .metadata()
+                .map_err(|error| BedrockFailure::contract(error.to_string()))?,
+            &selected,
+            &declared_hidden,
+        );
         let (tools, visible_tool_names) = self.translate_tools(&input, &hidden_tools)?;
         let assembled = match assemble_turn(&input, &current, &self.config, &hidden_tools)? {
             TurnAssembly::Ready(assembled) => assembled,
@@ -1596,7 +1609,13 @@ fn assemble_turn(
     let mut artifacts = Vec::new();
     let mut session_sources = BTreeSet::new();
     for bound in &input.artifact_binding_payloads {
-        let mut value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+        let bytes = bound.read_bytes().map_err(|error| {
+            BedrockFailure::contract(format!(
+                "bound artifact '{}' cannot be read: {error}",
+                bound.artifact.id
+            ))
+        })?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             BedrockFailure::contract(format!(
                 "bound artifact '{}' is not JSON: {error}",
                 bound.artifact.id

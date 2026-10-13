@@ -382,7 +382,8 @@ impl LifecycleBinding {
     ) -> Result<Option<Self>, String> {
         let mut candidates = Vec::new();
         for bound in payloads {
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(bound.as_bytes()) else {
+            let bytes = bound.read_bytes().map_err(|error| error.to_string())?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) else {
                 continue;
             };
             if value.get("label").and_then(serde_json::Value::as_str)
@@ -1144,7 +1145,8 @@ impl LifecycleBinding {
     ) -> Result<Option<LifecycleEventArtifact>, String> {
         let mut events = Vec::new();
         for bound in payloads {
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(bound.as_bytes()) else {
+            let bytes = bound.read_bytes().map_err(|error| error.to_string())?;
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) else {
                 continue;
             };
             if value.get("label").and_then(serde_json::Value::as_str) != Some(LIFECYCLE_EVENT_LABEL)

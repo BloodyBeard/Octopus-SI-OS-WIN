@@ -89,6 +89,12 @@
                 "required": [
                   "amendment_key"
                 ],
+                "not": {
+                  "required": [
+                    "authored",
+                    "publications"
+                  ]
+                },
                 "properties": {
                   "amendment_key": {
                     "type": "string",
@@ -346,6 +352,53 @@
                         }
                       }
                     }
+                  },
+                  "publications": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "entry_id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "source": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        },
+                        "entry_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    },
+                    "description": "Pinned entries from readable bound collections, added to the complete current selection. Each pin selects an exact revision; inline content adds context and grants no tools. Omitted or empty publications adds no entries."
                   },
                   "authored": {
                     "type": "object",
@@ -435,6 +488,12 @@
                 "required": [
                   "amendment_key"
                 ],
+                "not": {
+                  "required": [
+                    "authored",
+                    "publications"
+                  ]
+                },
                 "properties": {
                   "amendment_key": {
                     "type": "string",
@@ -693,6 +752,53 @@
                       }
                     }
                   },
+                  "publications": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "entry_id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "source": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        },
+                        "entry_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    },
+                    "description": "Pinned entries from readable bound collections, added to the complete current selection. Each pin selects an exact revision; inline content adds context and grants no tools. Omitted or empty publications adds no entries."
+                  },
                   "authored": {
                     "type": "object",
                     "additionalProperties": false,
@@ -781,6 +887,12 @@
                 "required": [
                   "creation_key"
                 ],
+                "not": {
+                  "required": [
+                    "authored",
+                    "publications"
+                  ]
+                },
                 "properties": {
                   "creation_key": {
                     "type": "string",
@@ -931,6 +1043,206 @@
                       }
                     }
                   },
+                  "external_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "required_verified_artifacts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "mark",
+                              "artifact_label",
+                              "verifier"
+                            ],
+                            "properties": {
+                              "mark": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "artifact_label": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "verifier": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "params": {}
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "external_relays": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id",
+                        "outbound_interface_ids"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "outbound_interface_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required_verified_artifacts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "mark",
+                              "artifact_label",
+                              "verifier"
+                            ],
+                            "properties": {
+                              "mark": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "artifact_label": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "verifier": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "params": {}
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "model_outputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id",
+                        "required_verified_artifact"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "required_verified_artifact": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "mark",
+                            "artifact_label",
+                            "verifier"
+                          ],
+                          "properties": {
+                            "mark": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "verifier": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "params": {}
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "publications": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "entry_id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "source": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        },
+                        "entry_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    },
+                    "description": "Pinned entries from readable bound collections. Each pin selects an exact revision; entry content adds context and grants no tools. Omit to use authored defaults; an empty list selects no publications."
+                  },
                   "output_selection": {
                     "type": "object",
                     "additionalProperties": false,
@@ -995,6 +1307,33 @@
                                 "null"
                               ],
                               "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "publication_read_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
                             }
                           }
                         }
@@ -1081,6 +1420,12 @@
                 "required": [
                   "creation_key"
                 ],
+                "not": {
+                  "required": [
+                    "authored",
+                    "publications"
+                  ]
+                },
                 "properties": {
                   "creation_key": {
                     "type": "string",
@@ -1231,6 +1576,206 @@
                       }
                     }
                   },
+                  "external_inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "required_verified_artifacts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "mark",
+                              "artifact_label",
+                              "verifier"
+                            ],
+                            "properties": {
+                              "mark": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "artifact_label": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "verifier": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "params": {}
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "external_relays": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id",
+                        "outbound_interface_ids"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "outbound_interface_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "required_verified_artifacts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "mark",
+                              "artifact_label",
+                              "verifier"
+                            ],
+                            "properties": {
+                              "mark": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "artifact_label": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "verifier": {
+                                "type": "string",
+                                "minLength": 1
+                              },
+                              "params": {}
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "model_outputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "checkpoint_id",
+                        "interface_id",
+                        "required_verified_artifact"
+                      ],
+                      "properties": {
+                        "checkpoint_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "interface_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "required_verified_artifact": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "mark",
+                            "artifact_label",
+                            "verifier"
+                          ],
+                          "properties": {
+                            "mark": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "artifact_label": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "verifier": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "params": {}
+                          }
+                        }
+                      }
+                    },
+                    "description": "Exact authored route selection. Omit to use declared creation defaults; an empty list selects no routes of this type."
+                  },
+                  "publications": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "entry_id",
+                        "revision"
+                      ],
+                      "properties": {
+                        "source": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        },
+                        "entry_id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "revision": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      }
+                    },
+                    "description": "Pinned entries from readable bound collections. Each pin selects an exact revision; entry content adds context and grants no tools. Omit to use authored defaults; an empty list selects no publications."
+                  },
                   "output_selection": {
                     "type": "object",
                     "additionalProperties": false,
@@ -1295,6 +1840,33 @@
                                 "null"
                               ],
                               "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "publication_read_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
                             }
                           }
                         }
@@ -1605,6 +2177,33 @@
                           }
                         }
                       },
+                      "publication_read_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
+                            }
+                          }
+                        }
+                      },
                       "outgoing_bindings": {
                         "type": "array",
                         "items": {
@@ -1714,6 +2313,33 @@
                                 "null"
                               ],
                               "pattern": "^[a-f0-9]{64}$"
+                            }
+                          }
+                        }
+                      },
+                      "publication_read_refs": {
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "id",
+                            "content"
+                          ],
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "minLength": 1
+                            },
+                            "content": {
+                              "type": "array",
+                              "minItems": 32,
+                              "maxItems": 32,
+                              "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 255
+                              }
                             }
                           }
                         }

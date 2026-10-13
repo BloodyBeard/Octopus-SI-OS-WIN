@@ -1,0 +1,427 @@
+{
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [
+        "registry_artifact_root"
+      ],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "system_room"
+  ],
+  "is_world_effect": false,
+  "id": "context.prepare_publication",
+  "handler_config": {
+    "operation": "collection_prepare"
+  },
+  "description": "Prepare creation, correction or withdrawal of reusable collection content. This is read-only: returns exact ordered file.write arguments; publication happens only when that ordinary granted write succeeds. Keep useful knowledge/procedures source-grounded, with applicability and evidence; selection refers to existing framework capabilities.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact readable context.collection artifact id already bound to this invocation."
+      },
+      "entry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "title",
+          "description",
+          "applicability",
+          "state",
+          "scope",
+          "selection"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "applicability": {
+            "type": "string",
+            "minLength": 1
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "withdrawn"
+            ]
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ee_ids": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "worker_interfaces": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "content": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "content"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "content": {
+                      "type": "array",
+                      "minItems": 32,
+                      "maxItems": 32,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "selection": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "selected_tools": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "tool",
+                    "interface",
+                    "worker_environment_kind"
+                  ],
+                  "properties": {
+                    "tool": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "interface": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "worker_environment_kind": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "selected_worker_environment_kinds": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "door_host_slots": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "external_inputs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "checkpoint_id",
+                    "interface_id"
+                  ],
+                  "properties": {
+                    "checkpoint_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "interface_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "required_verified_artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "mark",
+                          "artifact_label",
+                          "verifier"
+                        ],
+                        "properties": {
+                          "mark": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "artifact_label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "verifier": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "params": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "external_relays": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "checkpoint_id",
+                    "interface_id",
+                    "outbound_interface_ids"
+                  ],
+                  "properties": {
+                    "checkpoint_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "interface_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "outbound_interface_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required_verified_artifacts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "mark",
+                          "artifact_label",
+                          "verifier"
+                        ],
+                        "properties": {
+                          "mark": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "artifact_label": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "verifier": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "params": {}
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "model_outputs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "checkpoint_id",
+                    "interface_id",
+                    "required_verified_artifact"
+                  ],
+                  "properties": {
+                    "checkpoint_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "interface_id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "required_verified_artifact": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "mark",
+                        "artifact_label",
+                        "verifier"
+                      ],
+                      "properties": {
+                        "mark": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "artifact_label": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "verifier": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "params": {}
+                      }
+                    }
+                  }
+                }
+              },
+              "context_artifact_bindings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "payload_artifact_bindings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "content"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "content": {
+                      "type": "array",
+                      "minItems": 32,
+                      "maxItems": 32,
+                      "items": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 255
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "id"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "interface",
+                    "tool",
+                    "worker_environment_kind",
+                    "ee_template",
+                    "artifact",
+                    "mark",
+                    "verifier"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "expected_revision": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "required": [
+      "source",
+      "entry",
+      "expected_revision"
+    ],
+    "additionalProperties": false
+  }
+}

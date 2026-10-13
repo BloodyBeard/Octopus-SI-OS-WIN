@@ -86,12 +86,14 @@ impl CapturedSource {
         }
         let mut matches = envelope.artifact_binding_payloads.iter().filter(|item| item.artifact.id == reference.id);
         let payload = matches.next().ok_or("History source has no admitted captured payload")?;
-        if matches.next().is_some() || payload.artifact != *reference || payload.bytes.len() > SOURCE_BYTES {
+        if matches.next().is_some() || payload.artifact != *reference || payload.payload_len() > SOURCE_BYTES as u64 {
             return Err("History source changed its bound identity or definition byte bound".into());
         }
-        let definition: SourceDefinition = serde_json::from_slice(&payload.bytes).map_err(|error| error.to_string())?;
+        let bytes = payload.read_bounded(SOURCE_BYTES as u64).map_err(|error| error.to_string())?;
+        let definition: SourceDefinition = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
         definition.validate()?;
-        Ok(Self {reference:reference.clone(), bytes:payload.bytes.clone(), payload_digest:hash(&payload.bytes), definition})
+        let payload_digest = hash(&bytes);
+        Ok(Self {reference:reference.clone(), bytes:bytes.into_owned(), payload_digest, definition})
     }
 
     pub(crate) fn same_source(&self, identity: &NativeSourceIdentity, query: &Query) -> Result<(), String> {

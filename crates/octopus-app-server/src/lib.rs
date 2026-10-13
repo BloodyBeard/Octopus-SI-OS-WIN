@@ -21,7 +21,7 @@ mod registry_reference_graph;
 pub use registry_reference_graph::{
     RegistryCandidateValidation, RegistryCandidateWrite, RegistryValidationIssue,
     RegistryValidationRoots, RegistryValidationStage, registry_tool_output_sources,
-    validate_registry_candidate, validate_registry_candidate_with_inspector,
+    registry_worker_policy_issues, validate_registry_candidate, validate_registry_candidate_with_inspector,
 };
 pub mod spine_root;
 pub use spine_root::{

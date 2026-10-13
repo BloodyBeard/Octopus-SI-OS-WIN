@@ -193,8 +193,15 @@ async fn drive_with_retries(
         return emit_turn_error(ctx, run, &turn, &handoff, 0, &evidence).await;
     }
     let output_root = ctx.interface_var_dir().join("emitted");
+    let callable_tools = match handoff.callable_tool_names(&turn.envelope) {
+        Ok(tools) => tools,
+        Err(error) => {
+            let evidence = ProviderErrorEvidence::new("failed_closed", "provider_tool_topology_invalid", error);
+            return emit_turn_error(ctx, run, &turn, &handoff, 0, &evidence).await;
+        }
+    };
     let prepared = match driver
-        .prepare_artifact_and_materialize_local_outputs(turn.envelope.clone(), &output_root)
+        .prepare_artifact_and_materialize_local_outputs(turn.envelope.clone(), &output_root, &callable_tools)
     {
         Ok(PreparedProviderTurn::Local(outputs)) => {
             handoff.hand_batch(outputs).await?;

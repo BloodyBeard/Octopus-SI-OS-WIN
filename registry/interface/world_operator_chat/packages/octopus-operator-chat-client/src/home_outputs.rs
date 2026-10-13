@@ -63,6 +63,7 @@ pub(super) fn template(
 pub(super) fn plan(
     request: &OperatorChatPlanRequest,
     identity: &PlannedIdentity,
+    private_worker_role_artifacts: &[String],
     writes: &mut Vec<PlannedClientWrite>,
 ) -> Result<Option<ArtifactBindingSeed>, String> {
     if identity.surface_role != "home" {
@@ -83,11 +84,6 @@ pub(super) fn plan(
         .ok_or("Home context requires its explicit absolute run_records_root")?;
     let root = registry.join("interface");
     let source = load_interface_descriptor(&root, &identity.worker_choice_interface)?;
-    let worker = writes
-        .iter()
-        .find(|w| w.tag == format!("policy:{}", identity.worker_interface_id))
-        .ok_or("Home delivery has no concrete worker ceiling")?;
-    let worker: Value = serde_json::from_str(&worker.content).map_err(|e| e.to_string())?;
     for id in interfaces(identity) {
         push_json_write(
             root.join(&id).join("interface.json"),
@@ -98,7 +94,7 @@ pub(super) fn plan(
         push_json_write(
             root.join(&id).join("policy.json"),
             pretty_json(
-                &json!({"id":id,"ceiling":{"interfaces":[],"tools":[],"wek":[],"mark_outcomes":[],"hard_blocked_tools":[]},"role_artifacts":worker["role_artifacts"]}),
+                &json!({"id":id,"ceiling":{"interfaces":[],"tools":[],"wek":[],"mark_outcomes":[],"hard_blocked_tools":[]},"role_artifacts":private_worker_role_artifacts}),
             )?,
             format!("policy:{id}"),
             writes,

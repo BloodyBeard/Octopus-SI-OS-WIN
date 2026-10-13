@@ -1,0 +1,55 @@
+{
+  "interface": "system_context",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "authority": {
+      "read_root_slots": [
+        "registry_artifact_root"
+      ],
+      "write_root_slots": [],
+      "executable_root_slots": [],
+      "read_paths": [],
+      "write_paths": [],
+      "executable_paths": [],
+      "executable_commands": [],
+      "read_env_paths": [],
+      "write_env_paths": [],
+      "executable_env_paths": [],
+      "allow_network": false,
+      "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": [
+    "system_room"
+  ],
+  "is_world_effect": false,
+  "id": "context.read",
+  "handler_config": {
+    "operation": "collection_read"
+  },
+  "description": "Read one exact discovered publication revision from a bound collection. Returns its authored content, evidence and capability selection; external references are not followed and no execution rights are granted. Use the returned publication reference for checked run authoring.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "source": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact readable context.collection artifact id already bound to this invocation."
+      },
+      "entry_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "revision": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "required": [
+      "source",
+      "entry_id",
+      "revision"
+    ],
+    "additionalProperties": false
+  }
+}

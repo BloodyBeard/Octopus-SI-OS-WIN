@@ -252,7 +252,7 @@ struct ProviderLedgerEvidenceIndex {
     coordinate_marks: HashMap<(String, RuntimeCoordinateKey, String, String), UniqueEvidence>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct IndexedOutboundArtifact {
     source: InterfaceId,
     artifact: ArtifactRef,
@@ -305,6 +305,7 @@ struct ValidatedAuthoringFailureSource {
 #[derive(Clone)]
 pub struct ProviderOutputHandoff {
     ctx: InterfaceLiftContext,
+    invocation_metadata: InvocationMetadata,
     config: RunAuthoringConfig,
     run_path: PathBuf,
     hand_in_root: PathBuf,
@@ -312,6 +313,7 @@ pub struct ProviderOutputHandoff {
     source_movement_seq: u64,
     source_carries_context: bool,
     failed_source: bool,
+    checked_settlement_output: Option<(ArtifactRef, ArtifactRef)>,
     context_output_labels: BTreeSet<String>,
     session_snapshot_labels: BTreeSet<String>,
     granted_tools: BTreeSet<String>,
@@ -412,6 +414,7 @@ mod writer_run;
 pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_writer_binding, OwnerWriterEdit, OwnerWriterEvidence, WriterRunBinding};
 mod source_replay;
 mod source_settlement;
+pub use source_settlement::PendingSourceSettlement;
 mod source_withdrawal;
 pub use source_withdrawal::{PendingSourceIntent, PendingSourceWithdrawal};
 mod settled_definition;
@@ -906,6 +909,14 @@ pub trait CheckedRunEvidenceReader {
         self.artifact(reference).map(|(_, payload)| payload)
     }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> { self.movement(seq) }
+    fn visit_admitted_prefix(&mut self, before_seq: u64, visitor: &mut dyn FnMut(&Movement) -> Result<(), String>) -> Result<(), String> {
+        for sequence in 0..before_seq {
+            let row = self.admitted_movement(sequence)?.ok_or("checked evidence prefix is incomplete")?;
+            if row.seq.0 != sequence { return Err("checked evidence prefix has a sequence gap".into()); }
+            visitor(&row)?;
+        }
+        Ok(())
+    }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String>;
@@ -1003,6 +1014,14 @@ impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
     }
     fn admitted_movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         generated_artifacts::read_movement(self.evidence,seq).map(Some)
+    }
+    fn visit_admitted_prefix(&mut self, before_seq: u64, visitor: &mut dyn FnMut(&Movement) -> Result<(), String>) -> Result<(), String> {
+        let mut prefix = FileCheckedRunReader::open(self.evidence, None)?;
+        for sequence in 0..before_seq {
+            let row = prefix.movement(sequence)?.ok_or("checked evidence prefix is incomplete")?;
+            visitor(&row)?;
+        }
+        Ok(())
     }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         if seq != self.next_seq { return Err("checked authoring reader lost its exact cursor".into()); }
@@ -4061,6 +4080,23 @@ fn recover_source_session_context_from_cache(
     context_output_labels: &BTreeSet<String>,
     session_snapshot_labels: &BTreeSet<String>,
 ) -> Result<(ResolvedSessionContext, Option<SessionSnapshotHead>, Vec<ArtifactId>), String> {
+    recover_source_session_context_with_static_correction(
+        blobs_dir, limits, session, record, config, source_movement_seq,
+        context_output_labels, session_snapshot_labels, None,
+    )
+}
+
+fn recover_source_session_context_with_static_correction(
+    blobs_dir: &Path,
+    limits: InterfaceHostIoLimits,
+    session: &ProviderHandoffSession,
+    record: &RunRecord,
+    config: &RunAuthoringConfig,
+    source_movement_seq: u64,
+    context_output_labels: &BTreeSet<String>,
+    session_snapshot_labels: &BTreeSet<String>,
+    correction: Option<&input_revision::FailedSourceStaticContext>,
+) -> Result<(ResolvedSessionContext, Option<SessionSnapshotHead>, Vec<ArtifactId>), String> {
     let (coordinate, source) = session.index()?.exact_provider_source_outbound(
         &record.id,
         &record.worker,
@@ -4143,11 +4179,15 @@ fn recover_source_session_context_from_cache(
         &config.provider_interface,
         source.artifact_binding_refs.iter(),
     )?;
-    let (payloads, classified_static) = source_context_payloads_from_cache(blobs_dir, limits, &pinned,
+    let (payloads, mut classified_static) = source_context_payloads_from_cache(blobs_dir, limits, &pinned,
         &source_config, checkpoint, matched[0], &source)?;
+    if let Some(correction) = correction {
+        classified_static.extend(correction.refs_for(&coordinate, &source, &hash, checkpoint)?
+            .iter().map(|reference| reference.id.clone()));
+    }
     for bound in &payloads {
         let artifact = &bound.artifact;
-        let payload = bound.as_bytes();
+        let payload = bound.read_bytes().map_err(|error| error.to_string())?;
         if classified_static.contains(&artifact.id) {
             append_artifact(&mut static_context_artifacts, artifact.id.clone());
             continue;
@@ -5454,6 +5494,16 @@ impl ProviderOutputHandoff {
         Ok(())
     }
 
+    pub fn callable_tool_names(&self, input: &InterfaceInvocationEnvelope) -> Result<BTreeSet<String>, String> {
+        let metadata = input.metadata().map_err(|error| error.to_string())?;
+        if metadata != &self.invocation_metadata { return Err("callable tool projection requires its exact accepted invocation metadata".into()); }
+        let runtime = input.runtime().map_err(|error| error.to_string())?;
+        if runtime.run != self.config.run || runtime.worker != self.config.worker || runtime.interface != self.config.provider_interface {
+            return Err("callable tool projection differs from its accepted run, worker or provider".into());
+        }
+        self.config.callable_tool_names(metadata)
+    }
+
     fn from_invocation_with_session(
         session: ProviderHandoffSession,
         ctx: &InterfaceLiftContext,
@@ -5788,7 +5838,7 @@ impl ProviderOutputHandoff {
                 &mut session_context,
                 &mut session_snapshot_head,
                 &bound.artifact,
-                bound.as_bytes(),
+                &bound.read_bytes().map_err(|error| error.to_string())?,
                 bound_provenance
                     .get(&artifact_ref_key(&bound.artifact))
                     .cloned()
@@ -5861,12 +5911,14 @@ impl ProviderOutputHandoff {
         let result_reader = LedgerTailReader::open_named(ctx, "run-authoring")?;
         let handoff = Self {
             ctx: ctx.clone(),
+            invocation_metadata: input.metadata().map_err(|error| error.to_string())?.clone(),
             run_path,
             hand_in_root: hand_in_root.join(config.authoring_source_interface.as_str()),
             var_dir: ctx.interface_var_dir(),
             source_movement_seq,
             source_carries_context: consumes_context,
             failed_source: false,
+            checked_settlement_output: None,
             config,
             context_output_labels,
             session_snapshot_labels,
@@ -7014,6 +7066,9 @@ impl ProviderOutputHandoff {
         if let Some((failure_seq, failure)) =
             self.recover_authoring_failure(&record, &state.run_record_bytes)?
         {
+            if self.checked_settlement_output.is_some() {
+                return Err("checked settlement recovery cannot replace its closure with an authoring failure".into());
+            }
             hand_authoring_terminal_failure(
                 &self.ctx,
                 &self.session,
@@ -7333,9 +7388,17 @@ impl ProviderOutputHandoff {
                 }) {
                     return Err("failed context terminal admission has invalid causality".into());
                 }
-                let (context, _) = recover_source_session_context(
-                    &self.ctx, &self.session, &original, &config, sequence,
-                    &self.context_output_labels, &self.session_snapshot_labels,
+                let evidence = CheckedRunEvidence {
+                    movements_path: &self.ctx.movements_path, ledger_index_path: &self.ctx.ledger_index_path,
+                    blobs_dir: &self.ctx.blobs_dir, max_control_frame_bytes: limits.max_control_frame_bytes,
+                    max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+                };
+                let correction = input_revision::checked_failed_source_static_context(
+                    &evidence, &self.run_path, &chain, &config.provider_interface, &source,
+                )?;
+                let (context, _, _) = recover_source_session_context_with_static_correction(
+                    &self.ctx.blobs_dir, limits, &self.session, &original, &config, sequence,
+                    &self.context_output_labels, &self.session_snapshot_labels, correction.as_ref(),
                 )?;
                 recovered.insert(sequence, context);
             }
@@ -7895,6 +7958,7 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         authored: &AuthoredRun,
     ) -> Result<AuthoredRunInstallOutcome, String> {
+        self.require_settlement_output_pin(&authored.pending_handoff)?;
         source_withdrawal::require_validated_output(state, &authored.pending_handoff)?;
         if self.config.writer_run.is_some() { return self.install_with_writer_run(state, authored).await; }
         let deadline = Instant::now()
@@ -8119,6 +8183,7 @@ impl ProviderOutputHandoff {
         installed_record: &[u8],
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         let _ownership = self.dispatch_ownership().await?;
+        self.require_settlement_output_pin(pending)?;
         self.validate_dispatch_frontier(pending, installed_record)?;
         let evidence = self.pending_handoff_evidence(pending)?;
         let mut outcomes = Vec::with_capacity(pending.items.len());
@@ -10566,8 +10631,8 @@ impl RunAuthoringConfig {
                 for value in [writer.owner.as_str(),writer.source.as_str(),writer.door.as_str(),&writer.tool,&writer.call_label,&writer.result_label] { non_empty_string(value,"external owner writer")?; }
             }
             if !checkpoint.static_artifact_bindings.is_empty() {
-                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
-                    return Err(format!("run_authoring {owner} static artifacts require a declared stable input, non-context input or tool output"));
+                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
+                    return Err(format!("run_authoring {owner} static artifacts require a declared input or tool/interface output"));
                 }
                 let mut ids = BTreeSet::new();
                 for id in &checkpoint.static_artifact_bindings {
@@ -10832,6 +10897,29 @@ impl RunAuthoringConfig {
             ));
         }
         Ok(checkpoint)
+    }
+
+    fn callable_tool_names(&self, metadata: &InvocationMetadata) -> Result<BTreeSet<String>, String> {
+        let granted_tools = metadata.granted_tool_names().iter().cloned().collect::<BTreeSet<_>>();
+        let granted_interfaces = metadata.allowed_interfaces().iter().map(InterfaceId::new).collect::<BTreeSet<_>>();
+        let mut selected = BTreeSet::new();
+        for checkpoint in self.checkpoints.iter().filter(|checkpoint| checkpoint.role == RunAuthoringCheckpointRole::ProviderToolOutput) {
+            for tool in checkpoint_tool_ids(checkpoint)? {
+                if !selected.insert(tool.clone()) { return Err(format!("selected provider tool '{tool}' has duplicate output owners")); }
+                if metadata.hard_blocked_tool_names().contains(&tool) {
+                    return Err(format!("selected provider tool '{tool}' is hard-blocked"));
+                }
+                let owner = self.output_checkpoint(&ProviderHandoffRoute::Tool { tool: tool.clone() }, &granted_tools, &granted_interfaces, &self.file_write_label)?;
+                if owner.interface() != &self.provider_interface || !owner.interface_binding.admits(&self.file_write_label)
+                    || std::iter::once(owner.interface()).chain(owner.outbound_interfaces()).any(|interface| !granted_interfaces.contains(interface)) {
+                    return Err(format!("selected provider tool '{tool}' has a denied output route"));
+                }
+                let specs = metadata.interface_affordance_specs().iter().filter(|spec| spec.name.as_str() == tool).collect::<Vec<_>>();
+                let [spec] = specs.as_slice() else { return Err(format!("selected provider tool '{tool}' requires one exact descriptor affordance")); };
+                if !spec.args_schema.is_object() { return Err(format!("selected provider tool '{tool}' has a malformed descriptor affordance")); }
+            }
+        }
+        Ok(selected)
     }
 
     fn output_checkpoint(
@@ -13059,7 +13147,8 @@ fn bound_instruction_sources(
     let mut sources = BTreeSet::new();
     for payload in payloads {
         if selected_files.contains(&payload.artifact) { continue; }
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(payload.as_bytes()) else { continue; };
+        let bytes = payload.read_bytes().map_err(|error| error.to_string())?;
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) else { continue; };
         if value.get("label").and_then(serde_json::Value::as_str) != Some(CONTEXT_REFERENCE_LABEL) { continue; }
         let Some(refs) = value.get("sources") else { continue; };
         let refs: Vec<ArtifactRef> = serde_json::from_value(refs.clone()).map_err(|error| {
@@ -13894,6 +13983,33 @@ mod tests {
         )
     }
 
+    #[test]
+    fn checked_prefix_stream_preserves_cursor_and_requires_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let movements = dir.path().join("movements.jsonl");
+        let index = dir.path().join("absent-index.sqlite");
+        let blobs = dir.path().join("blobs");
+        let bytes = (0..15_000).map(|seq| format!("{}\n", serde_json::to_string(&ledger_row(seq)).unwrap())).collect::<String>();
+        std::fs::write(&movements, &bytes).unwrap();
+        let evidence = CheckedRunEvidence { movements_path:&movements, ledger_index_path:&index, blobs_dir:&blobs,
+            max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        reader.movement(0).unwrap().unwrap();
+        let position = reader.reader.stream_position().unwrap();
+        let started = std::time::Instant::now();
+        let mut count = 0;
+        reader.visit_admitted_prefix(15_000, &mut |row| { assert_eq!(row.seq.0, count); count += 1; Ok(()) }).unwrap();
+        eprintln!("checked prefix: {count} rows without SQLite in {:?}", started.elapsed());
+        assert_eq!((count, reader.next_sequence(), reader.reader.stream_position().unwrap(), reader.snapshot_bytes), (15_000, 1, position, 0));
+        assert_eq!(reader.movement(1).unwrap().unwrap().seq.0, 1);
+        for suffix in ["".to_string(), "{".to_string(), format!("{}\n", serde_json::to_string(&ledger_row(2)).unwrap())] {
+            std::fs::write(&movements, format!("{}\n{suffix}", serde_json::to_string(&ledger_row(0)).unwrap())).unwrap();
+            reader.visit_admitted_prefix(1, &mut |_| Ok(())).unwrap();
+            assert!(reader.visit_admitted_prefix(2, &mut |_| Ok(())).is_err());
+            assert_eq!(reader.next_sequence(), 2);
+        }
+    }
+
     fn transport_dispatch_payload(
         method: &str,
         transport: &str,
@@ -14402,6 +14518,7 @@ mod tests {
         let session = ProviderHandoffSession::new(&ctx).unwrap();
         let result_reader = LedgerTailReader::open_named(&ctx, "run-authoring").unwrap();
         let handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
             ctx,
             config: config_with_tool_routes(&[]),
             run_path: dir.path().join("runs/run_test.json"),
@@ -14410,6 +14527,7 @@ mod tests {
             source_movement_seq: 0,
             source_carries_context: true,
             failed_source: false,
+            checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
@@ -14694,6 +14812,7 @@ mod tests {
         let result_reader = LedgerTailReader::open_named(&ctx, "run-authoring").unwrap();
         let run_path = dir.path().join("runs/run_test.json");
         let mut handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
             ctx,
             config: config_with_tool_routes(&[]),
             run_path: run_path.clone(),
@@ -14702,6 +14821,7 @@ mod tests {
             source_movement_seq: 0,
             source_carries_context: true,
             failed_source: false,
+            checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
@@ -17781,6 +17901,34 @@ mod tests {
             .err()
             .unwrap();
         assert!(outside_grant.contains("outside the formed invocation grant"));
+        let metadata = InvocationMetadata::new(octopus_interfaces::GrantProjection {
+            tools: vec!["coder.exec".into(), "candidate".into()],
+            interfaces: vec!["world_provider_test".into(), "system_coder".into()],
+            interface_affordance_specs: ["coder.exec", "candidate"].into_iter().map(|name| octopus_interfaces::InterfaceToolAffordance {
+                name:name.into(),description:name.into(),args_schema:serde_json::json!({"type":"object"}),
+            }).collect(),
+            ..Default::default()
+        });
+        let before = metadata.clone();
+        assert_eq!(config.callable_tool_names(&metadata).unwrap(), BTreeSet::from(["coder.exec".into()]));
+        assert_eq!(metadata, before);
+        assert!(duplicate.callable_tool_names(&metadata).is_err());
+        for case in ["missing", "duplicate", "malformed", "denied", "blocked", "door"] {
+            let mut metadata = before.clone();
+            match case {
+                "missing" => { metadata.grant.interface_affordance_specs.remove(0); }
+                "duplicate" => metadata.grant.interface_affordance_specs.push(metadata.grant.interface_affordance_specs[0].clone()),
+                "malformed" => metadata.grant.interface_affordance_specs[0].args_schema = serde_json::json!(false),
+                "denied" => metadata.grant.tools.retain(|tool| tool != "coder.exec"),
+                "blocked" => metadata.grant.hard_blocked_tools.push("coder.exec".into()),
+                "door" => metadata.grant.interfaces.retain(|interface| interface != "system_coder"),
+                _ => unreachable!(),
+            }
+            assert!(config.callable_tool_names(&metadata).is_err(), "{case}");
+        }
+        let mut malformed = config.clone();
+        malformed.checkpoints.last_mut().unwrap().required_verified_artifacts[0].params = serde_json::json!({"tools":[]});
+        assert!(malformed.callable_tool_names(&before).is_err());
     }
 
     #[test]
@@ -18242,6 +18390,7 @@ mod tests {
         let result_reader = LedgerTailReader::open_named(&ctx, "run-authoring").unwrap();
         let session = ProviderHandoffSession::new(&ctx).unwrap();
         let handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
             ctx,
             config,
             run_path: run_path.clone(),
@@ -18250,6 +18399,7 @@ mod tests {
             source_movement_seq: 17,
             source_carries_context: true,
             failed_source: false,
+            checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
@@ -18518,6 +18668,7 @@ mod tests {
         let session = ProviderHandoffSession::new(&ctx).unwrap();
         let bound_topology = test_bound_topology(&config);
         let mut handoff = ProviderOutputHandoff {
+            invocation_metadata: InvocationMetadata::new(Default::default()),
             ctx,
             config,
             run_path,
@@ -18526,6 +18677,7 @@ mod tests {
             source_movement_seq: 17,
             source_carries_context: true,
             failed_source: false,
+            checked_settlement_output: None,
             context_output_labels: BTreeSet::from(["interface.artifact.output".to_string()]),
             session_snapshot_labels: BTreeSet::from(["interface.artifact.output".to_string()]),
             granted_tools: BTreeSet::new(),

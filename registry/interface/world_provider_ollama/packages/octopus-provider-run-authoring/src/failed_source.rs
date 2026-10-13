@@ -282,12 +282,14 @@ impl ProviderHandoffSession {
         let result_reader = LedgerTailReader::open_named(ctx, "run-authoring")?;
         Ok(ProviderOutputHandoff {
             ctx: ctx.clone(),
+            invocation_metadata: input.metadata().map_err(|error| error.to_string())?.clone(),
             run_path,
             hand_in_root: hand_in_root.join(config.authoring_source_interface.as_str()),
             var_dir: ctx.interface_var_dir(),
             source_movement_seq,
             source_carries_context: false,
             failed_source: true,
+            checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
             granted_tools,

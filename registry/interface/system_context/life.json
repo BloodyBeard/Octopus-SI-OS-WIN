@@ -43,7 +43,8 @@
         "registry_worker_environment_kind_root",
         "repo_root",
         "run_records_root",
-        "artifact_blobs_root"
+        "artifact_blobs_root",
+        "registry_artifact_root"
       ],
       "read_handles": [
         "ledger",

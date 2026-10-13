@@ -5,6 +5,8 @@ use octopus_operator_chat_client::{
 };
 use serde_json::json;
 
+const MAX_PAYLOAD_BYTES: u64 = 1 << 20;
+
 #[allow(dead_code)]
 #[path = "../../../../../worker_environment_kind/system_room/packages/octopus-system-room-env/src/bound_surface.rs"]
 mod bound_surface;
@@ -23,11 +25,11 @@ fn created_artifact_is_durable_and_readable_only_after_explicit_binding() {
     grant.artifact_verbs.push("create".into());
     let payload = br#"{"mandate":{"goals":[]}}"#;
     let missing = bound_surface::InvocationArtifactSurface::new(
-        &[], root.path(), grant.clone(), None,
+        &[], root.path(), grant.clone(), None, MAX_PAYLOAD_BYTES,
     ).unwrap();
     assert!(missing.append_impl("mandate", payload).is_err());
     let surface = bound_surface::InvocationArtifactSurface::new(
-        &[], root.path(), grant.clone(), Some(&cache),
+        &[], root.path(), grant.clone(), Some(&cache), MAX_PAYLOAD_BYTES,
     ).unwrap();
     let artifact = surface.append_impl("mandate", payload).unwrap();
     let manifest_path = cache.join(artifact.content.to_hex());
@@ -41,7 +43,7 @@ fn created_artifact_is_durable_and_readable_only_after_explicit_binding() {
     grant.artifact_access.insert(artifact.id.to_string(), ArtifactAccess::read_only());
     let bound = bound_surface::InvocationArtifactSurface::new(
         &[ArtifactBindingPayload::new(artifact.clone(), payload.to_vec())],
-        root.path(), grant, None,
+        root.path(), grant, None, MAX_PAYLOAD_BYTES,
     ).unwrap();
     assert_eq!(bound.read_impl(artifact.id.as_str()).unwrap(), Some(payload.to_vec()));
 }
@@ -154,7 +156,7 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
         })
         .collect::<Vec<_>>();
     let surface =
-        bound_surface::InvocationArtifactSurface::new(&payloads, root.path(), grant.clone(), None)
+        bound_surface::InvocationArtifactSurface::new(&payloads, root.path(), grant.clone(), None, MAX_PAYLOAD_BYTES)
             .unwrap();
     assert_eq!(
         surface.read_impl(source.id.as_str()).unwrap(),
@@ -172,7 +174,7 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(
-        bound_surface::InvocationArtifactSurface::new(&missing, root.path(), grant.clone(), None)
+        bound_surface::InvocationArtifactSurface::new(&missing, root.path(), grant.clone(), None, MAX_PAYLOAD_BYTES)
             .unwrap()
             .read_impl(source.id.as_str())
             .unwrap(),
@@ -184,7 +186,7 @@ fn composed_tool_context_retains_selected_instruction_sources_without_history() 
         .unwrap()
         .read = false;
     assert!(
-        bound_surface::InvocationArtifactSurface::new(&payloads, root.path(), grant, None)
+        bound_surface::InvocationArtifactSurface::new(&payloads, root.path(), grant, None, MAX_PAYLOAD_BYTES)
             .unwrap()
             .read_impl(source.id.as_str())
             .is_err()

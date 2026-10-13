@@ -8,7 +8,7 @@ const { projectionReadRequest } = require("../electron/projectionReadContract.cj
 const { createClientProviderMetadata, validateProviderModelSelection } = require("../electron/clientProviderMetadata.cjs");
 const { createOperatorChatClientLoader, assertOperatorChatArtifactBatch } = require("../electron/operatorChatClientContract.cjs");
 const { handInArtifact } = require("../electron/interfaceTransport.cjs");
-const { readContentAddressedArtifactPayload, prepareContentAddressedPayloadBindings } = require("../electron/contentAddressedArtifact.cjs");
+const { readContentAddressedArtifactPayload, readContentAddressedArtifactProjection, prepareContentAddressedPayloadBindings } = require("../electron/contentAddressedArtifact.cjs");
 const { createClientAttachmentStagingStore, stageClientAttachmentPaths } = require("../electron/clientAttachments.cjs");
 const { submitClientInterfaceArtifact } = require("../electron/clientArtifacts.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
@@ -57,6 +57,9 @@ function createClient(environment, dependencies = {}) {
     blobsRoot: path.join(env.home, "ledger", "blobs"),
     maxPayloadBytes: input.label === "turn.stream" ? 256 * 1024 * 1024 : undefined,
   });
+  const readActivityPayload = (input) => Object.hasOwn(input, "projection")
+    ? readContentAddressedArtifactProjection({ ...input, blobsRoot: path.join(env.home, "ledger", "blobs") })
+    : readPayload(input);
   const submitOptions = {
     clientArtifactsRoot: artifactsRoot,
     octopusHome: () => env.home,
@@ -279,7 +282,7 @@ function createClient(environment, dependencies = {}) {
       if (options.signal?.aborted || closed) return;
       if (Date.now() - lastProbe > 5_000) { await requireReady(); lastProbe = Date.now(); }
       const batch = assertOperatorChatArtifactBatch(await chat.readOperatorChatArtifacts({
-        octopusHome: () => env.home, readArtifactPayload: readPayload,
+        octopusHome: () => env.home, readArtifactPayload: readActivityPayload,
       }, { runId: current.id, interfaceId: current.chatInterfaceId, afterSeq, cursor, waitMs: 500, limit: 256 }));
       cursor = batch.cursor;
       if (options.signal?.aborted || closed) return;
@@ -300,7 +303,7 @@ function createClient(environment, dependencies = {}) {
 
   async function stop(runId) {
     await requireReady();
-    const current = await task(runId);
+    const current = await controlTarget(runId);
     if (!current.writable) throw new Error("This task cannot accept Stop.");
     const chat = await loader.load();
     const result = await chat.submitOperatorTurnControl(submitOptions, {
@@ -310,6 +313,37 @@ function createClient(environment, dependencies = {}) {
     assertAdmission(result.verdict);
     store.invalidate();
     return result;
+  }
+
+  async function controlTarget(selector) {
+    if (typeof selector !== "string" || !selector.trim()) throw new Error("Choose a task.");
+    const scope = await read("projection.operator.os.scope");
+    if (scope.status !== "ready" || !Array.isArray(scope.client_runs)) throw new Error("Control target lookup requires the current valid client scope.");
+    const ids = new Set();
+    const targets = scope.client_runs.map(row => {
+      if (!row || typeof row.run_id !== "string" || !row.run_id || typeof row.interface_id !== "string" || !row.interface_id
+        || !["home", "task"].includes(row.surface_role) || typeof row.archived !== "boolean" || ids.has(row.run_id)) {
+        throw new Error("The client scope contains an invalid control target.");
+      }
+      ids.add(row.run_id);
+      return { id: row.run_id, chatInterfaceId: row.interface_id, isHome: row.surface_role === "home", archived: row.archived, writable: !row.archived };
+    });
+    if (selector === "home") return exactChoice(targets.filter(row => row.isHome && row.id === scope.home_run_id
+      && row.chatInterfaceId === scope.home_interface_id), "Home");
+    const exact = targets.find(row => row.id === selector);
+    if (exact) return exact;
+    const aliases = await read("projection.operator.chats.list", { control_targets_only: true, include_titles: selector !== "last" });
+    if (!Array.isArray(aliases.chats)) throw new Error("Control target metadata is invalid.");
+    const targetById = new Map(targets.map(row => [row.id, row]));
+    const candidates = aliases.chats.map(row => {
+      const target = targetById.get(row.run_id);
+      if (!target || target.chatInterfaceId !== row.chat_interface_id || typeof row.writable !== "boolean") {
+        throw new Error("Control target metadata differs from the current client scope.");
+      }
+      return { ...target, title: row.title, writable: target.writable && row.writable };
+    });
+    if (selector === "last") return exactChoice(candidates.filter(row => !row.isHome && !row.archived).slice(0, 1), "recent task");
+    return exactChoice(candidates.filter(row => row.title === selector || row.id.startsWith(selector)), "task");
   }
 
   async function respond(runId, request, answer) {

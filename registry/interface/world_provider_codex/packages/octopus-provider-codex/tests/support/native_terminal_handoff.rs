@@ -49,7 +49,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
                 accepted=listener.accept()=> {
                     let mut ws=tokio_tungstenite::accept_async(accepted.unwrap().0).await.unwrap();
                     let manifest:octopus_interfaces::InterfaceArtifactManifest=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
-                    if phase==8 { break; }
+                    if phase==8 || (phase==20 && writes==1) { break; }
                     let file=std::fs::read_dir(root.join("hand-in").join(authoring_id.as_str())).unwrap().map(|e|e.unwrap().path()).filter(|p|p.to_string_lossy().ends_with(".artifact.json")).find_map(|p| { let f=InterfaceArtifactFile::new(p).unwrap(); (serde_json::to_value(f.read_manifest().unwrap()).unwrap()==serde_json::to_value(&manifest).unwrap()).then_some(f) }).unwrap();
                     let selected:serde_json::Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
                     let writer_path=selected["interface_state"][gate_ctx.interface.as_str()]["run_authoring_binding"]["writer_run"]["run"].as_str()
@@ -398,7 +398,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
                 Box::pin(source_with_snapshot(&ctx,root,run_path,&descriptor,&run,first,input,&authoring_id,&listener,receiver)).await
             } else {(first,input,source)};
             state["context_generation"]=json!(before_context+1);
-            let native_plan = if phase >= 5 {
+            let native_plan = if (5..=13).contains(&phase) {
                 use crate::run_affordances::{NativePending,NativeEffect,NativePhase,FileProof,CreatedRun};
                 let mut files=(0..44).map(|index| {
                     let content=if index==0 {json!({"id":"installed_child","ee":record.ee,"worker":record.worker,"trace":record.trace,"status":"idle","checkpoints":[],"active_checkpoints":[]}).to_string()} else {format!("created file {index}")};
@@ -490,22 +490,48 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
                 && cp.inbound_interface()==Some(&InterfaceId::new(worker_interface_id)) && cp.outbound_interfaces().any(|id|id==&descriptor.id)).unwrap();
             let result=artifact(&root.join("result"),"coder.exec.result",json!({"label":"coder.exec.result","tool":"coder.exec","correlation_id":"call-a","ok":true,"body":{"applied":true}}));
             let row=edge(&ctx,&pinned,cp,&result,MovementKind::InterfaceOutbound,descriptor.id.clone());
-            let envelope=source_envelope(&ctx,root,&row,result);let result_seq=append(&ctx,row);
+            let envelope=source_envelope(&ctx,root,&row,result);let result_row=row.clone();
+            let mut result_seq=if phase>=14 {0}else{append(&ctx,row)};
             let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
                 && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.turn.control")).unwrap();
             let stop=artifact(&root.join("stop"),"operator.turn.control",json!({"action":"stop","control_id":"stop-a"}));
             let row=edge(&ctx,&pinned,cp,&stop,MovementKind::InterfaceOutbound,descriptor.id.clone());
             let stop=source_envelope(&ctx,root,&row,stop);let stop_seq=append(&ctx,row);
+            if phase>=14 {result_seq=append(ctx,result_row);}
             let control=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&stop,stop_seq,&pinned).unwrap();
-            let ack=artifact(&ctx.interface_var_dir().join("ack"),"turn.control.acknowledged",json!({
+            let arbiter=InterruptedEffectArbiter::new(ctx.clone());
+            let actual_stop=if phase>=14 {
+                state["interrupted_pending"]=state["pending"].take();
+                state["context_generation"]=json!(before_context+2);
+                state["native_terminal"]=json!({"thread_id":state["thread_id"],"turn":native});
+                Some(CodexTurnControlResult {control_id:"stop-a".into(),action:"stop".into(),acknowledged:true,
+                    thread_id:Some("thread-a".into()),turn_id:Some("turn-a".into()),continuity:Some(serde_json::from_value(state.clone()).unwrap()),
+                    detail:json!({"already_terminal":true,"exact_result_pending":true,"terminal_evidence_source":"thread/read","native_terminal":state["native_terminal"]})})
+            } else {None};
+            let ack=if let Some(result)=&actual_stop {crate::handler::materialize_turn_control_result(&ctx.interface_var_dir().join("emitted"),stop_seq,result.clone()).unwrap()}
+            else {artifact(&ctx.interface_var_dir().join("ack"),"turn.control.acknowledged",json!({
                 "label":"turn.control.acknowledged","status":"acknowledged","control_id":"stop-a","action":"stop","source_movement_seq":stop_seq,
                 "thread_id":null,"turn_id":null,"detail":{"already_terminal":true,"external_effect_dispatched":false,"linearization":"control_reader_terminal_fence"}
-            }));
+            }))};
             let admit=Box::pin(control.hand_final(ProviderEmission{artifact:ack,route:ProviderEmissionRoute::ClientProjection}));
             let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&stop.artifact,0,1,true,0,true);
-            let (result,_)=tokio::join!(admit,gate);result.unwrap();
+            let (result,acks)=tokio::join!(admit,gate);result.unwrap();
+            if let Some(result)=actual_stop {
+                persist_control_journal(ctx,stop_seq,run,"stop-a","stop",TurnControlJournalPhase::Delivered {result:result.clone()}).unwrap();
+                arbiter.record_acknowledgement(run,stop_seq,"stop-a",DurableArtifactAdmission {artifact:acks[0].1.clone(),movement_seq:acks[0].2},result.continuity.unwrap()).await.unwrap();
+                assert!(arbiter.begin_result(run,result_seq,&envelope).await.unwrap());
+            }
             let failed=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&envelope,result_seq,&pinned).unwrap();
             assert_eq!(Box::pin(failed.recover_source()).await.unwrap(),ProviderSourceRecovery::Process);
+            if phase==19 {
+                let source=arbiter.durable_continuity(run).await.unwrap().unwrap();
+                let emissions=crate::handler::stopped_result::materialize_pending_interrupted(descriptor,&source,&envelope,result_seq,&ctx.interface_var_dir().join("emitted"),&ctx.interface_var_dir().join("streams"),failed.input_changes_context().await).unwrap().unwrap();
+                let count=emissions.len();let reference=materialized_artifact_ref(&emissions.last().unwrap().artifact).unwrap();let broker=CodexTurnControlBroker::new(Some(result_seq));
+                let admit=Box::pin(admit_interrupted_result(ctx,&failed,&broker,Some(&arbiter),run,result_seq,&reference,emissions));
+                let gate=pump(ctx,root,run_path,&authoring_id,listener,receiver,&envelope.artifact,0,count,false,1,false);
+                let (result,delivered)=tokio::join!(admit,gate);assert_eq!(result.unwrap(),count);assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
+                assert!(arbiter.reconciled(run).await.unwrap());assert!(broker.is_finished());return;
+            }
             state["context_generation"]=json!(before_context+3);
             let error=artifact(&ctx.interface_var_dir().join("error"),"turn.error",json!({
                 "label":"turn.error","message":"error text is not recovery authority","will_retry":false,
@@ -517,6 +543,125 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
             let session=ProviderHandoffSession::new(&ctx).unwrap();
             assert!(session.completed_source_candidates(&ctx).unwrap().contains(&(run.clone(),result_seq)));
             let handoff=session.from_invocation(&ctx,&descriptor,&run,&envelope,result_seq,&pinned).unwrap();
+            if phase>=14 {
+                let turn=QueuedTurn {seq:result_seq,envelope:envelope.clone()};
+                let journal=arbiter.journal(run).await.unwrap().unwrap();
+                let saved=handoff.pending_source_settlement().await.unwrap().unwrap();assert!(saved.closure.is_none());
+                let context=handoff.current_session_context_artifacts().await;
+                let proof=prove_completed_interrupted_result(ctx,descriptor,run,&turn,&journal,&saved.predecessor_record,&context,&saved.predecessor_outcomes).unwrap();
+                assert!(crate::handler::stopped_result::prove(descriptor,&envelope,result_seq,&saved.predecessor_record,&context,&saved.predecessor_outcomes).unwrap().is_none());
+                for fault in ["result","ack","generation","correlation","terminal"] {
+                    let mut forged=journal.clone();
+                    if fault=="result" {forged.phase=InterruptedEffectPhase::Resolving {result_source_movement_seq:result_seq+1,source_artifact:envelope.artifact.clone()};}
+                    if fault=="ack" {forged.acknowledgement.movement_seq+=1;}
+                    if fault=="generation" {let mut value=serde_json::to_value(&forged.continuity).unwrap();value["context_generation"]=json!(value["context_generation"].as_u64().unwrap()+1);forged.continuity=serde_json::from_value(value).unwrap();}
+                    if fault=="correlation" {let mut value=serde_json::to_value(&forged.continuity).unwrap();value["interrupted_pending"]["call_id"]=json!("different-call");forged.continuity=serde_json::from_value(value).unwrap();}
+                    if fault=="terminal" {let mut value=serde_json::to_value(&forged.continuity).unwrap();value["native_terminal"]["turn"]["status"]=json!("completed");forged.continuity=serde_json::from_value(value).unwrap();}
+                    assert!(prove_completed_interrupted_result(ctx,descriptor,run,&turn,&forged,&saved.predecessor_record,&context,&saved.predecessor_outcomes).is_err(),"{fault}");
+                }
+                let labels=codex_context_output_labels(descriptor).unwrap();
+                let closure=crate::handler::stopped_result::materialize_interrupted(&proof,&envelope,&ctx.interface_var_dir().join("emitted"),&labels).unwrap();
+                let expected:serde_json::Value=serde_json::from_slice(&closure.artifact.read_payload_bytes().unwrap()).unwrap();
+                for field in ["correlation_id","source_artifact","ok","native_terminal_source_continuity","completed_source_settlement"] {
+                    let mut forged=expected.clone();forged[field]=json!("forged");
+                    assert!(crate::handler::stopped_result::validate_saved_settlement(&proof,&envelope,&forged,&labels).is_err(),"{field}");
+                }
+                let deferred=if phase==14 {
+                    let bytes=std::fs::read(run_path).unwrap();let record=RunRecord::from_bytes(&bytes).unwrap();
+                    let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                        && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+                    let file=artifact(&root.join("queued-before-settlement"),"operator.message",json!({"text":"keep this exact input"}));
+                    let row=edge(ctx,&bytes,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+                    let mut input=source_envelope(ctx,root,&row,file);
+                    let static_ids=record.interface_state[&descriptor.id]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter()
+                        .flat_map(|template|template["static_artifact_bindings"].as_array().into_iter().flatten()).cloned().collect::<Vec<_>>();
+                    input.metadata.as_mut().unwrap().grant.role_artifacts.retain(|id|static_ids.contains(&json!(id)));
+                    let mut row=row;row.invocation_metadata=Some(input.metadata.clone().unwrap().into());let seq=append(ctx,row);
+                    let queued=QueuedTurn {seq,envelope:input};persist_deferred_provider_turn(ctx,run,&queued).unwrap();
+                    Some(DeferredProviderTurn {run:run.clone(),turn:queued,release:None})
+                } else {None};
+                let crash=match phase {14=>0,15=>2,16=>3,20|21=>20,_=>8};
+                let admit=Box::pin(settle_completed_interrupted_result(ctx,descriptor,run,&turn,&handoff,&arbiter,&journal));
+                let gate=pump(ctx,root,run_path,&authoring_id,listener,receiver,&envelope.artifact,0,1,true,crash,true);
+                if crash==3 || crash==8 || crash==20 {
+                    tokio::pin!(admit,gate);
+                    tokio::select! {biased;_=&mut gate=>{},result=&mut admit=>panic!("settlement returned before crash: {result:?}")}
+                } else {let (result,delivered)=tokio::join!(admit,gate);if crash==2 {assert!(result.is_err());assert!(delivered.is_empty());}else{result.unwrap();}}
+                drop(handoff);
+                let cold=InterruptedEffectArbiter::new(ctx.clone());
+                if crash!=0 {
+                    let restored=ProviderHandoffSession::new(ctx).unwrap().from_invocation(ctx,descriptor,run,&envelope,result_seq,&pinned).unwrap();
+                    let journal=cold.journal(run).await.unwrap().unwrap();
+                    let saved=restored.pending_source_settlement().await.unwrap().unwrap();assert!(saved.closure.is_some());
+                    if crash==8 {
+                        let before=std::fs::read(run_path).unwrap();let ledger=std::fs::read(&ctx.movements_path).unwrap();
+                        let journal_bytes=std::fs::read(interrupted_effect_journal_path(ctx,run)).unwrap();
+                        let calls=root.join("hand-in").join(authoring_id.as_str());
+                        let (file,call)=std::fs::read_dir(&calls).unwrap().map(|entry|entry.unwrap().path())
+                            .filter(|path|path.to_string_lossy().ends_with(".artifact.json")).find_map(|path| {
+                                let file=InterfaceArtifactFile::new(path).unwrap();let value:serde_json::Value=serde_json::from_slice(&file.read_payload_bytes().unwrap()).unwrap();
+                                let target=if phase==18 {&value["arguments"]["writes"][1]} else {&value["arguments"]};
+                                (target["expected_before_hash"]==ContentHash::of_bytes(&before).to_hex()).then_some((file,value))
+                            }).unwrap();
+                        let target=if phase==18 {&call["arguments"]["writes"][1]} else {&call["arguments"]};
+                        let mut candidate:serde_json::Value=serde_json::from_slice(&before).unwrap();
+                        json_patch::patch(&mut candidate,&serde_json::from_value::<json_patch::Patch>(target["patch"].clone()).unwrap()).unwrap();
+                        let mut payload:serde_json::Value=serde_json::from_slice(&saved.closure.as_ref().unwrap().read_payload_bytes().unwrap()).unwrap();
+                        payload["correlation_id"]=json!("forged-saved-call");
+                        let forged=artifact(&ctx.interface_var_dir().join("forged-settlement"),TURN_INTERRUPTED_RESULT_LABEL,payload);
+                        let reference=cache_artifact(ctx,&forged);
+                        let old=candidate["interface_state"][descriptor.id.as_str()]["pending_handoff"]["items"][0]["artifact_id"].as_str().unwrap();
+                        let prefix=|id:&str| {use sha2::{Digest,Sha256};let mut hash=Sha256::new();hash.update(run.as_str().as_bytes());hash.update([0]);hash.update(id.as_bytes());hash.update([0]);hash.update(candidate["interface_state"][descriptor.id.as_str()]["authoring_generation"].as_u64().unwrap().to_le_bytes());format!("cp_{}",&format!("{:x}",hash.finalize())[..20])};
+                        let encoded=serde_json::to_string(&candidate).unwrap().replace(&prefix(old),&prefix(reference.id.as_str())).replace(old,reference.id.as_str());candidate=serde_json::from_str(&encoded).unwrap();
+                        let item=&mut candidate["interface_state"][descriptor.id.as_str()]["pending_handoff"]["items"][0];
+                        item["artifact_content_hash"]=json!(reference.content.to_hex());item["manifest_relative_path"]=json!(forged.manifest_path().canonicalize().unwrap().strip_prefix(ctx.interface_var_dir().canonicalize().unwrap()).unwrap());
+                        let edit=octopus_provider_run_authoring::CheckedRunEdit::prepare_with_format(run_path.canonicalize().unwrap(),&before,candidate,call["correlation_id"].as_str().unwrap().into(),serde_json::from_value(target["json_format"].clone()).unwrap()).unwrap();
+                        let mut changed=call.clone();let target=if phase==18 {&mut changed["arguments"]["writes"][1]} else {&mut changed["arguments"]};
+                        target["patch"]=json!(edit.patch);target["expected_after_hash"]=json!(edit.after_hash);
+                        let call_label=file.read_manifest().unwrap().label;
+                        let hidden=file.manifest_path().with_extension("fixture-held");std::fs::rename(file.manifest_path(),&hidden).unwrap();
+                        let attempt=artifact(&calls,&call_label,changed);
+                        let probe=ProviderHandoffSession::new(ctx).unwrap().from_invocation(ctx,descriptor,run,&envelope,result_seq,&pinned).unwrap();
+                        assert!(probe.pending_source_settlement().await.unwrap().unwrap().closure.is_some());
+                        let error=settle_completed_interrupted_result(ctx,descriptor,run,&turn,&probe,&cold,&journal).await.unwrap_err();
+                        assert!(error.contains("closure conflicts with durable arbitration"),"{error}");
+                        let checked=materialized_artifact_ref(saved.closure.as_ref().unwrap()).unwrap();
+                        let error=Box::pin(probe.recover_completed_source_settlement(&saved.predecessor,&checked)).await.unwrap_err();
+                        assert!(error.contains("candidate changed after provider semantic validation"),"{error}");
+                        assert_eq!(std::fs::read(run_path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+                        assert_eq!(std::fs::read(interrupted_effect_journal_path(ctx,run)).unwrap(),journal_bytes);assert!(receiver.try_recv().is_err());
+                        std::fs::remove_file(attempt.manifest_path()).unwrap();std::fs::rename(hidden,file.manifest_path()).unwrap();
+                    }
+                    let resume=Box::pin(settle_completed_interrupted_result(ctx,descriptor,run,&turn,&restored,&cold,&journal));
+                    let gate=pump(ctx,root,run_path,&authoring_id,listener,receiver,&envelope.artifact,usize::from(crash==3 || crash==20),1,true,0,true);
+                    let (result,_)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(resume,gate)}).await.unwrap();result.unwrap();
+                }
+                assert!(cold.reconciled(run).await.unwrap());
+                let restored=ProviderHandoffSession::new(ctx).unwrap().from_invocation(ctx,descriptor,run,&envelope,result_seq,&pinned).unwrap();
+                let before=std::fs::read(run_path).unwrap();let ledger=std::fs::read(&ctx.movements_path).unwrap();
+                let (_,outcomes)=Box::pin(restored.recover_completed_source_with_outcomes()).await.unwrap();assert_eq!(outcomes.len(),1);
+                let context=restored.current_session_context_artifacts().await;
+                let closed=context.iter().find(|entry|entry.label==TURN_INTERRUPTED_RESULT_LABEL).unwrap();assert_eq!(closed.payload,expected);
+                assert!(context.iter().any(|entry|entry.source_artifact==old[0].1));
+                let current=RunRecord::from_bytes(&before).unwrap();
+                let heads=octopus_provider_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap();
+                assert!(heads.iter().any(|binding|binding.id==closed.source_artifact.id));assert!(!heads.iter().any(|binding|binding.id==old[0].1.id));
+                assert_eq!(std::fs::read(run_path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+                if let Some(deferred)=deferred {
+                    let controls=ActiveTurnControls::default();
+                    let DeferredTurnReadiness::Ready(released)=prepare_deferred_provider_turn(ctx,descriptor,run,&deferred,&controls).await.unwrap()
+                        else {panic!("exact queued input remains blocked after settlement")};
+                    assert_eq!(released.seq,deferred.turn.seq);assert_eq!(released.envelope.artifact,deferred.turn.envelope.artifact);
+                    assert_eq!(released.envelope.read_artifact_payload().unwrap(),deferred.turn.envelope.read_artifact_payload().unwrap());
+                    let mut saved=load_deferred_provider_turns(ctx,descriptor).unwrap();
+                    let saved=saved.remove(&deferred.turn.seq).unwrap();assert!(saved.release.is_some());
+                    let DeferredTurnReadiness::Ready(replayed)=prepare_deferred_provider_turn(ctx,descriptor,run,&saved,&controls).await.unwrap()
+                        else {panic!("persisted release did not restore its exact input")};
+                    assert_eq!(replayed.seq,released.seq);assert_eq!(replayed.envelope.artifact,released.envelope.artifact);
+                    assert_eq!(std::fs::read(run_path).unwrap(),before);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+                }
+                return;
+            }
             let (recovery,outcomes)=Box::pin(handoff.recover_completed_source_with_outcomes()).await.unwrap();assert_eq!(recovery,ProviderSourceRecovery::Completed);
             let context=handoff.current_session_context_artifacts().await;
             let proof=crate::handler::stopped_result::prove(&descriptor,&envelope,result_seq,&handoff.current_run_record_bytes().await,&context,&outcomes).unwrap().unwrap();
@@ -591,7 +736,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         let static_ids=row["artifact_bindings"].as_array().unwrap().iter().map(|binding|binding["id"].clone()).collect::<Vec<_>>();
         assert!(!static_ids.is_empty());
         initial["interface_state"][&plan.provider_interface_id]["run_authoring_binding"]["checkpoints"][index]["static_artifact_bindings"]=json!(static_ids);
-        if matches!(settlement_phase,Some(8|13)) {
+        if matches!(settlement_phase,Some(8|13|18|21)) {
             let writer=octopus_provider_run_authoring::separate_writer_run(&mut initial,&InterfaceId::new(&plan.provider_interface_id),&RunId::new("cold_writer")).unwrap();
             std::fs::create_dir_all(root.join("runs")).unwrap();std::fs::write(root.join("runs/cold_writer.json"),octopus_provider_run_authoring::JsonFormat::Compact.encode(&writer).unwrap()).unwrap();
         }
@@ -601,6 +746,10 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         let canonical=super::tests::descriptor();
         for key in ["context_output_labels","client_projection_output_labels","session_snapshot_labels","live_stream"] {
             descriptor.interface_driver_config.as_mut().unwrap().private_config.insert(key.into(), canonical.interface_driver_config.as_ref().unwrap().private_config[key].clone());
+        }
+        if settlement_phase.is_some_and(|phase|phase>=14) {
+            let native:InterfaceDescriptor=serde_json::from_slice(&std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interface.json")).unwrap()).unwrap();
+            for key in ["model_result_projection","native_tool_namespace"] {descriptor.interface_driver_config.as_mut().unwrap().private_config.insert(key.into(),native.interface_driver_config.as_ref().unwrap().private_config[key].clone());}
         }
         let (arrivals,mut receiver)=tokio::sync::mpsc::channel(8);
         let mut ctx=context(root,&descriptor); ctx.interface_dir=root.join("registry/interface").join(&plan.provider_interface_id); ctx.arrivals=arrivals;
@@ -744,6 +893,8 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
     for (with_stop, with_answer, native_interrupted, settlement_phase) in [
         (false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
         (false,false,true,None),(true,false,true,None),(false,false,true,Some(0)),(false,false,true,Some(2)),(false,false,true,Some(3)),(false,false,true,Some(4)),(false,false,true,Some(5)),(false,false,true,Some(6)),(false,false,true,Some(7)),(false,false,true,Some(8)),(false,false,true,Some(9)),(false,false,true,Some(10)),(false,false,true,Some(11)),(false,false,true,Some(12)),(false,false,true,Some(13)),
+        (false,false,true,Some(14)),(false,false,true,Some(15)),(false,false,true,Some(16)),(false,false,true,Some(17)),(false,false,true,Some(18)),(false,false,true,Some(19)),
+        (false,false,true,Some(20)),(false,false,true,Some(21)),
     ] {
         tokio::spawn(case(with_stop,with_answer,native_interrupted,settlement_phase)).await.unwrap();
     }

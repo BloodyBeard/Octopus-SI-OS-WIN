@@ -15,24 +15,57 @@ pub fn write(root: &Path, relative: &str, value: Value) {
 pub fn client_fixture(root: &Path) -> RunCompositionRequest {
     let mut request = fixture(root);
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
-    let declared: Value = serde_json::from_slice(&std::fs::read(source.join("registry/interface/world_provider_codex/interface.json")).unwrap()).unwrap();
+    let declared: Value = serde_json::from_slice(
+        &std::fs::read(source.join("registry/interface/world_provider_codex/interface.json"))
+            .unwrap(),
+    )
+    .unwrap();
     let provider_file = "registry/interface/world_provider_fixture/interface.json";
-    let mut provider: Value = serde_json::from_slice(&std::fs::read(root.join(provider_file)).unwrap()).unwrap();
+    let mut provider: Value =
+        serde_json::from_slice(&std::fs::read(root.join(provider_file)).unwrap()).unwrap();
     for field in ["context_output_labels", "session_snapshot_labels"] {
-        provider["interface_driver_config"]["private_config"][field] = declared["interface_driver_config"]["private_config"][field].clone();
+        provider["interface_driver_config"]["private_config"][field] =
+            declared["interface_driver_config"]["private_config"][field].clone();
     }
     write(root, provider_file, provider);
     for name in ["interface.json", "life.json", "client.json"] {
-        let value = serde_json::from_slice(&std::fs::read(source.join("registry/interface/world_operator_chat").join(name)).unwrap()).unwrap();
-        write(root, &format!("registry/interface/world_operator_chat/{name}"), value);
+        let value = serde_json::from_slice(
+            &std::fs::read(
+                source
+                    .join("registry/interface/world_operator_chat")
+                    .join(name),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        write(
+            root,
+            &format!("registry/interface/world_operator_chat/{name}"),
+            value,
+        );
     }
     for (file, pointer) in [
-        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces"),
-        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
-        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"),
+        (
+            "registry/interface/system_worker_template/policy.json",
+            "/ceiling/interfaces",
+        ),
+        (
+            "registry/ee_template/existence/ee_template.json",
+            "/allowed_interfaces",
+        ),
+        (
+            "ee/ee_existence.json",
+            "/policy_narrowing/allowed_interfaces",
+        ),
     ] {
-        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
-        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("world_operator_chat"));
+        let mut value: Value =
+            serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value
+            .pointer_mut(pointer)
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(json!("world_operator_chat"));
         write(root, file, value);
     }
     request.communication.client_template_interface_id = Some("world_operator_chat".into());
@@ -137,7 +170,7 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         authoring: CompositionAuthoring { source_interface_id:"system_interface_authoring".into(),room_interface_id:"system_room".into(),tool_id:"file.write".into(),tool_call_label:"tool.call".into(),tool_call_mark:"tool.call.allowed".into(),tool_call_verifier:"tool_call_allowed".into(),result_timeout_ms:30000 },
         communication: CompositionCommunication { client_template_interface_id:None, client_title:None, receive_interface_id:"system_worker_private_first".into(),return_interface_ids:vec!["system_worker_parent".into()],client_interface_id:None,output_selection:None },
         selected_worker_environment_kinds:vec![], selected_tools:vec![SelectedToolSeed { tool:"file.write".into(),interface:"system_room".into(),worker_environment_kind:"system_room".into() }, SelectedToolSeed { tool:"artifact.send".into(),interface:"system_room".into(),worker_environment_kind:"system_room".into() }],
-        door_host_slots:BTreeMap::new(),context_artifact_bindings:vec![],payload_artifact_bindings:vec![],
+        door_host_slots:BTreeMap::new(),external_inputs:vec![],external_relays:vec![],model_outputs:vec![],publications:vec![],context_artifact_bindings:vec![],payload_artifact_bindings:vec![],
         seed:CompositionSeed { label:"native.work".into(),payload:json!({"text":"Do the explicit task"}) },
     }
 }

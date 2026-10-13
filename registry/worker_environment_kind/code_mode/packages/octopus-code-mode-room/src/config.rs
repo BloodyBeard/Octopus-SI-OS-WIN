@@ -154,13 +154,16 @@ impl CodeModeConfig {
                 "persistent code mode prelude requires its exact single bound payload".to_string(),
             );
         };
-        if payload.artifact != *prelude_artifact || payload.bytes.len() > self.max_source_bytes {
+        if payload.artifact != *prelude_artifact || payload.payload_len() > self.max_source_bytes as u64 {
             return Err(
                 "persistent code mode prelude has a different identity or exceeds its byte limit"
                     .to_string(),
             );
         }
-        let prelude: PreludeArtifact = serde_json::from_slice(&payload.bytes)
+        let bytes = payload
+            .read_bounded(self.max_source_bytes as u64)
+            .map_err(|error| error.to_string())?;
+        let prelude: PreludeArtifact = serde_json::from_slice(&bytes)
             .map_err(|error| format!("bound code mode prelude is malformed: {error}"))?;
         if prelude.schema_version != 1 {
             return Err("bound code mode prelude requires schema_version 1".to_string());
@@ -178,7 +181,7 @@ impl CodeModeConfig {
         }
         Ok(ResolvedContext::Persistent {
             artifact: prelude_artifact.clone(),
-            payload: payload.bytes.clone(),
+            payload: bytes.into_owned(),
             engine: PersistentContextConfig {
                 module_source: prelude.module_source,
                 exports: prelude.exports,
@@ -465,15 +468,18 @@ impl CodeModeConfig {
         if refs != [&handoff.topology_artifact]
             || payloads.len() != 1
             || payloads[0].artifact != handoff.topology_artifact
-            || payloads[0].bytes.len() > self.max_source_bytes
+            || payloads[0].payload_len() > self.max_source_bytes as u64
         {
             return Err(
                 "code mode topology requires one exact admitted artifact and bounded payload"
                     .into(),
             );
         }
+        let bytes = payloads[0]
+            .read_bounded(self.max_source_bytes as u64)
+            .map_err(|e| e.to_string())?;
         let topology: CodeModeOwnerTopology =
-            serde_json::from_slice(&payloads[0].bytes).map_err(|e| e.to_string())?;
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         self.validate_owner_topology(&topology, envelope)?;
         Ok(topology)
     }

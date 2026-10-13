@@ -100,7 +100,10 @@
       "artifact.read",
       "artifact.list",
       "artifact.search",
-      "client.mcp"
+      "client.mcp",
+      "context.discover",
+      "context.read",
+      "context.prepare_publication"
     ],
     "wek": [
       "browser_session",
@@ -122,6 +125,7 @@
     "artifact-worker-role-operator-home",
     "artifact-home-task-authoring",
     "artifact-spawn-literacy",
-    "artifact-home-widget-authoring"
+    "artifact-home-widget-authoring",
+    "artifact-context-collection-guide"
   ]
 }

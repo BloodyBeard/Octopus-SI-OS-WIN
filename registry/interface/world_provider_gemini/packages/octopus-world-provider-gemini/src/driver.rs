@@ -11,7 +11,7 @@ use octopus_interfaces::{
 };
 use octopus_ledger::ArtifactRef;
 use octopus_model_context_render::{
-    model_hidden_tool_names, render_model_context_block_with_hidden_tools,
+    model_hidden_tool_names, model_tool_exclusions, render_model_context_block_with_hidden_tools,
 };
 use octopus_provider_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderOutputHandoff,
@@ -893,23 +893,37 @@ impl GeminiNativeDriver {
                 .materialize_model_catalog(output_root, &dispatch, &required_formed_models(&input)?)
                 .await;
         }
-        let (request, model_visible_tool_names) = self.build_request_with_visible_tools(&input)?;
+        let selected = handoff
+            .callable_tool_names(&input)
+            .map_err(GeminiFailure::contract)?;
+        let hidden = model_tool_exclusions(
+            input
+                .metadata()
+                .map_err(|error| GeminiFailure::contract(error.to_string()))?,
+            &selected,
+            &model_hidden_tool_names(&self.config.private_config).map_err(GeminiFailure::contract)?,
+        );
+        let (request, model_visible_tool_names) =
+            self.build_request_with_visible_tools(&input, &hidden)?;
         let response = self.call(request, &dispatch).await?;
         self.materialize_response(response, output_root, &model_visible_tool_names)
     }
 
     #[cfg(test)]
     fn build_request(&self, input: &InterfaceInvocationEnvelope) -> Result<Value, GeminiFailure> {
-        self.build_request_with_visible_tools(input)
+        let hidden = model_hidden_tool_names(&self.config.private_config)
+            .map_err(GeminiFailure::contract)?;
+        self.build_request_with_visible_tools(input, &hidden)
             .map(|(request, _)| request)
     }
 
     fn build_request_with_visible_tools(
         &self,
         input: &InterfaceInvocationEnvelope,
+        hidden_tools: &[String],
     ) -> Result<(Value, BTreeSet<String>), GeminiFailure> {
-        let (contents, system_instruction) = self.assemble_contents(input)?;
-        let (tools, model_visible_tool_names) = self.translate_tools(input)?;
+        let (contents, system_instruction) = self.assemble_contents(input, hidden_tools)?;
+        let (tools, model_visible_tool_names) = self.translate_tools(input, hidden_tools)?;
         let mut request = Map::new();
         request.insert("contents".to_string(), Value::Array(contents));
         request.insert(
@@ -943,6 +957,7 @@ impl GeminiNativeDriver {
     fn assemble_contents(
         &self,
         input: &InterfaceInvocationEnvelope,
+        hidden_tools: &[String],
     ) -> Result<(Vec<Value>, String), GeminiFailure> {
         let artifacts = context_artifacts(
             input,
@@ -1079,10 +1094,8 @@ impl GeminiNativeDriver {
                 "Gemini response group '{group}' has no ordered functionResponse turn"
             )));
         }
-        let hidden_tools = model_hidden_tool_names(&self.config.private_config)
-            .map_err(GeminiFailure::contract)?;
         if let Some(metadata) = input.metadata.as_ref().and_then(|metadata| {
-            render_model_context_block_with_hidden_tools(metadata, &hidden_tools)
+            render_model_context_block_with_hidden_tools(metadata, hidden_tools)
         }) {
             system_sections.push(metadata);
         }
@@ -1102,11 +1115,9 @@ impl GeminiNativeDriver {
     fn translate_tools(
         &self,
         input: &InterfaceInvocationEnvelope,
+        hidden_tools: &[String],
     ) -> Result<(Vec<Value>, BTreeSet<String>), GeminiFailure> {
-        let hidden = model_hidden_tool_names(&self.config.private_config)
-            .map_err(GeminiFailure::contract)?
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let hidden = hidden_tools.iter().cloned().collect::<BTreeSet<_>>();
         let granted = strict_string_set(
             &input
                 .granted_tool_names()
@@ -2524,7 +2535,13 @@ fn context_artifacts(
     let mut artifacts = Vec::new();
     for bound in &input.artifact_binding_payloads {
         validate_artifact_ref(&bound.artifact, "bound artifact")?;
-        let mut value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+        let bytes = bound.read_bytes().map_err(|error| {
+            GeminiFailure::contract(format!(
+                "bound artifact '{}' cannot be read: {error}",
+                bound.artifact.id
+            ))
+        })?;
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|error| {
             GeminiFailure::contract(format!(
                 "bound artifact '{}' is not JSON: {error}",
                 bound.artifact.id
@@ -2828,9 +2845,12 @@ fn append_fan_in_binding(
 ) -> Result<(), GeminiFailure> {
     let id = binding.artifact.id.as_str().to_string();
     let hash = binding.artifact.content.to_hex();
+    let bytes = binding
+        .read_bytes()
+        .map_err(|error| GeminiFailure::contract(error.to_string()))?;
     match by_id.get(&id) {
         Some((known_hash, known_bytes))
-            if known_hash == &hash && known_bytes == binding.as_bytes() =>
+            if known_hash == &hash && known_bytes.as_slice() == bytes.as_ref() =>
         {
             Ok(())
         }
@@ -2838,7 +2858,7 @@ fn append_fan_in_binding(
             "Gemini fan-in artifact id '{id}' changed content from {known_hash} to {hash}"
         ))),
         None => {
-            by_id.insert(id, (hash, binding.as_bytes().to_vec()));
+            by_id.insert(id, (hash, bytes.into_owned()));
             payloads.push(binding);
             Ok(())
         }
@@ -4109,10 +4129,13 @@ mod tests {
             .iter_mut()
             .find(|binding| binding.artifact.id.as_str() == artifact_id)
             .unwrap();
-        let mut value: Value = serde_json::from_slice(binding.as_bytes()).unwrap();
+        let mut value: Value = serde_json::from_slice(&binding.read_bytes().unwrap()).unwrap();
         rewrite(&mut value);
-        binding.bytes = serde_json::to_vec(&value).unwrap();
-        binding.artifact.content = ContentHash::of_bytes(binding.as_bytes());
+        *binding = ArtifactBindingPayload::new(
+            binding.artifact.clone(),
+            serde_json::to_vec(&value).unwrap(),
+        );
+        binding.artifact.content = ContentHash::of_bytes(&binding.read_bytes().unwrap());
     }
 
     fn invocation(
@@ -4173,6 +4196,22 @@ mod tests {
     fn driver() -> GeminiNativeDriver {
         GeminiNativeDriver::from_descriptor(&root_descriptor(), tempfile::tempdir().unwrap().keep())
             .unwrap()
+    }
+
+    fn native_driver_fixture() -> GeminiNativeDriver {
+        let mut descriptor = root_descriptor();
+        descriptor.interface_driver_ref = GEMINI_NATIVE_DRIVER_REF.into();
+        let config = &mut descriptor.interface_driver_config.as_mut().unwrap().private_config;
+        for field in [
+            "instruction_artifacts", "worker_instruction_artifacts", "model_tool_names",
+            "native_tool_namespace", "operator_continuity", "model_catalog_operation",
+            "private_thread_cold_start", "model_result_projection", "client_projection_output_labels",
+            "opencodex",
+        ] {
+            config.remove(field);
+        }
+        GeminiNativeDriver::from_descriptor(&descriptor, tempfile::tempdir().unwrap().keep())
+            .expect("explicit native Gemini fixture")
     }
 
     fn fan_in_leg(
@@ -4258,7 +4297,7 @@ mod tests {
 
     #[test]
     fn request_is_native_and_keeps_exact_tool_json_schema() {
-        let driver = driver();
+        let driver = native_driver_fixture();
         let schema = json!({
             "$schema": "https://json-schema.org/draft/2020-12/schema",
             "type": "object",
@@ -4276,9 +4315,23 @@ mod tests {
                 "name": "artifact.read",
                 "description": "Read one bound artifact",
                 "input_schema": schema.clone()
+            }), json!({
+                "name": "candidate.read",
+                "description": "Granted but not selected",
+                "input_schema": {"type": "object"}
             })],
         );
-        let request = driver.build_request(&input).unwrap();
+        let metadata_before = serde_json::to_value(input.metadata().unwrap()).unwrap();
+        let hidden = model_tool_exclusions(
+            input.metadata().unwrap(),
+            &BTreeSet::from(["artifact.read".into()]),
+            &model_hidden_tool_names(&driver.config.private_config).unwrap(),
+        );
+        let (request, visible) = driver.build_request_with_visible_tools(&input, &hidden).unwrap();
+        assert_eq!(visible, BTreeSet::from(["artifact.read".into()]));
+        assert_eq!(request["tools"][0]["functionDeclarations"].as_array().unwrap().len(), 1);
+        assert!(!request["systemInstruction"]["parts"][0]["text"].as_str().unwrap().contains("candidate.read"));
+        assert_eq!(serde_json::to_value(input.metadata().unwrap()).unwrap(), metadata_before);
         assert_eq!(
             request.pointer("/contents/0/role").and_then(Value::as_str),
             Some("user")

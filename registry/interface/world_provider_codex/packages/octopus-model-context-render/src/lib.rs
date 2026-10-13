@@ -209,6 +209,18 @@ pub fn model_visible_affordances(
     Ok(visible)
 }
 
+pub fn model_tool_exclusions(
+    metadata: &InvocationMetadata,
+    selected: &BTreeSet<String>,
+    declared_hidden: &[String],
+) -> Vec<String> {
+    declared_hidden.iter().cloned().chain(
+        metadata.granted_tool_names().iter().map(String::as_str)
+            .chain(metadata.interface_affordance_specs().iter().map(|spec| spec.name.as_str()))
+            .filter(|tool| !selected.contains(*tool)).map(str::to_string)
+    ).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
 pub fn model_hidden_tool_names(private_config: &Map<String, Value>) -> Result<Vec<String>, String> {
     let Some(value) = private_config.get("model_hidden_tools") else {
         return Ok(Vec::new());
@@ -474,6 +486,16 @@ mod tests {
             .filter_map(|spec| spec.get("name").and_then(Value::as_str))
             .collect();
         assert_eq!(names, vec!["coder.build", "artifact.read"]);
+        let mut metadata = metadata_with(Vec::new(), grant_axes(&["coder.build", "coder.write_file", "candidate"], &[], &[], &[]), Vec::new());
+        metadata.grant.interface_affordance_specs = vec![affordance("coder.build"), affordance("coder.write_file"), affordance("candidate")];
+        let before = metadata.clone();
+        let excluded = model_tool_exclusions(&metadata, &BTreeSet::from(["coder.build".into(), "coder.write_file".into()]), &["coder.write_file".into()]);
+        let visible = model_visible_affordances(metadata.interface_affordance_specs().to_vec(), &excluded).unwrap();
+        assert_eq!(visible.iter().map(|spec| spec["name"].as_str().unwrap()).collect::<Vec<_>>(), vec!["coder.build"]);
+        let block = render_model_context_block_with_hidden_tools(&metadata, &excluded).unwrap();
+        assert!(block.contains("callable tools: coder.build"));
+        assert!(!block.contains("candidate") && !block.contains("coder.write_file"));
+        assert_eq!(metadata, before);
     }
 
     #[test]

@@ -81,10 +81,10 @@ fn current_selection_materializes_defaults_and_preserves_provider_life_while_att
             if blocked {value["ceiling"]["hard_blocked_tools"]=json!(["file.peek"]);}
             else {value["ceiling"]["tools"].as_array_mut().unwrap().retain(|tool|tool!="file.peek");}
         });
-        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"denied".into(),selection:Some(selection.clone()),authored:None},bridge.clone(),&retained).unwrap_err().contains("outside the formed worker/EE grant"));
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"denied".into(),selection:Some(selection.clone()),authored:None},bridge.clone(),&retained).unwrap_err().contains("outside the formed worker/EE grant"));
         std::fs::write(root.join(&worker_policy),&allowed).unwrap();
     }
-    let plan=plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"attach".into(),selection:Some(selection),authored:None},bridge.clone(),&retained).unwrap();
+    let plan=plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"attach".into(),selection:Some(selection),authored:None},bridge.clone(),&retained).unwrap();
     assert!(plan.validation.safe_to_apply,"{:?}",plan.validation.regressions);
     let owner=request.roots.registry_root.join("interface").join(provider.as_str());
     assert!(plan.dependency_writes.iter().chain(&plan.activation_writes).all(|write|!write.path.starts_with(&owner)));
@@ -103,7 +103,7 @@ fn current_selection_materializes_defaults_and_preserves_provider_life_while_att
     for new_file in [false,true] {
         if new_file {writes=vec![RegistryCandidateWrite {path:owner.join("new.json"),content:"{}".into(),expected_before_hash:None}];}
         let authored=AuthoredCurrentRun {expected_before_hash:ContentHash::of_bytes(composition.run_write.content.as_bytes()).to_hex(),expected_before:json!(current),run_record:json!(current),writes:writes.clone()};
-        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {amendment_key:"unsafe".into(),selection:None,authored:Some(authored)},bridge.clone(),&retained).unwrap_err().contains("in-flight provider"));
+        assert!(plan_current_run_amendment(&request.roots,&current,&provider,CurrentRunRequest {publications:vec![],amendment_key:"unsafe".into(),selection:None,authored:Some(authored)},bridge.clone(),&retained).unwrap_err().contains("in-flight provider"));
     }
     assert_eq!(std::fs::read(&composition.run_write.path).unwrap(),composition.run_write.content.as_bytes());
     for write in plan.dependency_writes.iter().chain(&plan.activation_writes) {
@@ -114,7 +114,7 @@ fn current_selection_materializes_defaults_and_preserves_provider_life_while_att
     let next_selection=current_selection(&request.roots,&next,&provider).unwrap().unwrap();
     assert_eq!(next_selection.selected_tools.len(),4);
     assert!(next_selection.selected_tools.iter().any(|tool|tool.tool=="file.peek" && tool.interface=="system_extra_room"));
-    let repeated=plan_current_run_amendment(&request.roots,&next,&provider,CurrentRunRequest {amendment_key:"repeat".into(),selection:Some(next_selection.clone()),authored:None},bridge,&retained).unwrap();
+    let repeated=plan_current_run_amendment(&request.roots,&next,&provider,CurrentRunRequest {publications:vec![],amendment_key:"repeat".into(),selection:Some(next_selection.clone()),authored:None},bridge,&retained).unwrap();
     assert!(repeated.validation.safe_to_apply,"{:?}",repeated.validation.regressions);
     assert!(repeated.dependency_writes.is_empty(),"existing private IDs must be reused");
     let owner=&composition.authoring.capability_doors["system_room"];
@@ -424,6 +424,70 @@ fn selected_outputs_keep_recorded_activity_out_of_peer_delivery() {
 }
 
 #[test]
+fn selected_external_routes_preserve_checkpoints_profiles_and_scoped_dependencies() {
+    use octopus_operator_chat_client::{ExternalInputSeed, ExternalRelaySeed, ModelOutputSeed};
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = support::client_fixture(dir.path());
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/verifier/artifact_exists");
+    let verifier = request.roots.registry_root.join("verifier/artifact_exists");
+    std::fs::create_dir_all(&verifier).unwrap();
+    for file in ["verifier.json", "verify.py"] { std::fs::copy(source.join(file), verifier.join(file)).unwrap(); }
+    let mut omitted = json!(request);
+    for field in ["external_inputs", "external_relays", "model_outputs"] {
+        omitted.as_object_mut().unwrap().remove(field);
+    }
+    let omitted: RunCompositionRequest = serde_json::from_value(omitted).unwrap();
+    assert_eq!(plan_run_composition(&omitted).unwrap().run_write.content, plan_run_composition(&request).unwrap().run_write.content);
+    assert!(!plan_run_composition(&omitted).unwrap().run_write.content.contains("role-system_worker_unselected"));
+    request.external_inputs = vec![ExternalInputSeed {
+        checkpoint_id: "selected_input".into(), interface_id: "system_worker_unselected".into(),
+        required_verified_artifacts: Vec::new(),
+    }];
+    request.external_relays = vec![ExternalRelaySeed {
+        checkpoint_id: "selected_relay".into(), interface_id: "system_worker_parent".into(),
+        outbound_interface_ids: vec!["system_worker_unselected".into()], required_verified_artifacts: Vec::new(),
+    }];
+    request.model_outputs = vec![ModelOutputSeed {
+        checkpoint_id: "selected_output".into(), interface_id: "system_worker_parent".into(),
+        required_verified_artifact: serde_json::from_value(json!({"mark":"tool.call.allowed", "artifact_label":"selected.result",
+            "verifier":"artifact_exists", "params":{"selected":"exact"}})).unwrap(),
+    }];
+    let plan = plan_run_composition(&request).unwrap();
+    let record = RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
+    for (checkpoint, source, targets) in [
+        ("selected_input", "system_worker_unselected", vec![plan.provider_interface_id.as_str()]),
+        ("selected_relay", "system_worker_parent", vec!["system_worker_unselected"]),
+        ("selected_output", plan.provider_interface_id.as_str(), vec!["system_worker_parent"]),
+    ] {
+        let row = record.checkpoints.iter().find(|row| row.id.as_str() == checkpoint).unwrap();
+        assert!(record.active_checkpoints.contains(&row.id));
+        assert_eq!(row.inbound_interface().unwrap().as_str(), source);
+        assert_eq!(row.outbound_interfaces().map(|id| id.as_str()).collect::<Vec<_>>(), targets);
+        assert!(row.artifact_bindings.iter().any(|binding| binding.id.as_str() == "role-system_worker_unselected" && binding.access.read));
+    }
+    let output = record.checkpoints.iter().find(|row| row.id.as_str() == "selected_output").unwrap();
+    assert_eq!(json!(output.required_verified_artifacts), json!([request.model_outputs[0].required_verified_artifact]));
+    let client = record.interface_state.iter().find(|(_, state)| state.get("client_surface_role") == Some(&json!("task"))).unwrap().0;
+    let sidecar: Value = serde_json::from_str(&plan.descriptor_writes.iter().find(|write|
+        write.path.ends_with(format!("{client}/octopus_os.json"))).unwrap().content).unwrap();
+    for (field, selection) in [("external_inputs", json!(request.external_inputs)), ("external_relays", json!(request.external_relays)),
+        ("model_outputs", json!(request.model_outputs))] {
+        assert_eq!(sidecar["authoring_profile"][field], selection);
+    }
+    let exact = plan_authored_run_composition(&request.roots, &request.admitted_parent_record, AuthoredRunComposition {
+        run_id: plan.run_id.clone(), writes: composition_candidate_writes(&plan), outgoing_bindings: Vec::new(), publication_read_refs: Vec::new(), seed: None,
+    }, false).unwrap();
+    assert!(exact.validation.safe_to_apply, "{:?}", exact.validation.stages);
+    request.external_relays[0].checkpoint_id = "selected_input".into();
+    assert!(plan_run_composition(&request).unwrap_err().contains("repeat checkpoint"));
+    request.external_relays[0].checkpoint_id = "selected_relay".into();
+    request.external_inputs[0].interface_id = " system_worker_unselected".into();
+    assert!(plan_run_composition(&request).unwrap_err().contains("external_inputs.interface_id must be exact"));
+    request.external_inputs[0].interface_id = "outside_selection".into();
+    assert!(plan_run_composition(&request).unwrap_err().contains("formed EE interface allowance"));
+}
+
+#[test]
 fn client_and_return_bindings_are_only_the_callers_explicit_selection() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = fixture(dir.path());
@@ -550,6 +614,7 @@ fn owner_input_revision_retry_keeps_the_original_exact_request() {
         let request: RunRevisionRequest = serde_json::from_value(json!({
             "registry_root":request.roots.registry_root, "run_path":plan.run_write.path,
             "ledger_root":root.join("ledger"), "artifact_root":root.join("client"),
+            "interface_hand_in_root":root.join("hand-in"),
             "provider":plan.provider_interface_id, "source":client, "key":"owner-input-retry",
             "operation":{"kind":"owner_inputs", "desired_inputs":[desired]}, "expected_before_content":before
         })).unwrap();
@@ -742,6 +807,10 @@ fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlemen
         write(&root, &format!("registry/interface/system_context/{name}"),
             serde_json::from_slice(&std::fs::read(source.join("registry/interface/system_context").join(name)).unwrap()).unwrap());
     }
+    for id in ["artifact-context-collection-guide", "artifact-system-library"] {
+        let relative = format!("registry/artifact/{id}/artifact.json");
+        write(&root, &relative, serde_json::from_slice(&std::fs::read(source.join(&relative)).unwrap()).unwrap());
+    }
     for (file, pointer, item) in [
         ("registry/interface/system_worker_template/policy.json", "/ceiling/tools", "client.mcp"),
         ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces", "system_context"),
@@ -867,9 +936,13 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         else { Err(String::from_utf8(output.stderr).unwrap()) }
     }
 
-    fn transport_call(root: &Path, ready: &Value) -> InterfaceArtifactFile {
+    fn transport_call(root: &Path, ready: &Value) -> Result<InterfaceArtifactFile, String> {
         let manifest: InterfaceArtifactManifest = serde_json::from_value(ready["manifest"].clone()).unwrap();
-        InterfaceArtifactFile::store_manifest_bounded(root, &serde_json::to_vec(&manifest).unwrap(), 1<<20, 1<<26).unwrap()
+        let source = ready["source_interface"].as_str().unwrap();
+        let var = root.join("interfaces").join(source);
+        let file = InterfaceArtifactFile::store_manifest_bounded(var.join("activation-artifacts"), &serde_json::to_vec(&manifest).unwrap(), 1<<20, 1<<26).unwrap();
+        octopus_interface_transport::capture_spawned_artifact(file.manifest_path(), &[var, root.join("hand-in").join(source)],
+            InterfaceHostIoLimits { max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26, max_stderr_bytes:1024 })
     }
 
     struct Boundary {
@@ -987,7 +1060,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         let attachment = b.file("fixture.payload", &json!({"text":"exact selected payload"}));
         let selected = json!([attachment.load_into_blob(&mut *blobs.lock().unwrap()).unwrap().artifact]);
         let mut scope = json!({"registry_root":request.roots.registry_root,"run_path":plan.run_write.path,"ledger_root":root.join("ledger"),
-            "artifact_root":root.join("client"),"provider":provider,"source":client,"key":"first-payload","selected_payloads":selected});
+            "artifact_root":root.join("client"),"interface_hand_in_root":root.join("hand-in"),"provider":provider,"source":client,"key":"first-payload","selected_payloads":selected});
         let prepare = |scope: &Value, operation: Value, before: &str| {
             let mut command = scope.clone(); command.as_object_mut().unwrap().remove("selected_payloads");
             command["operation"] = operation; command["expected_before_content"] = json!(before);
@@ -1004,7 +1077,23 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         assert!(verify(&wrong_source).unwrap_err().contains("exact client"));
         let mut wrong_selection = scope.clone(); wrong_selection["selected_payloads"] = json!([]);
         assert!(verify(&wrong_selection).unwrap_err().contains("selected payload"));
-        let call = transport_call(&root.join("wire"),&ready);
+        let call = transport_call(&root,&ready).unwrap();
+        let client_root = root.join("client/input-revisions");
+        let misplaced = InterfaceArtifactFile::write(&client_root, "tool.call", &call.read_payload_bytes().unwrap()).unwrap();
+        let mut outside = ready.clone(); outside["manifest"] = json!(misplaced.read_manifest().unwrap());
+        assert!(transport_call(&root,&outside).unwrap_err().contains("outside private output roots"));
+        let proposal_path = client_root.join("first-payload.artifact.json");
+        let original_proposal = std::fs::read(&proposal_path).unwrap();
+        let mut legacy: Value = serde_json::from_slice(&InterfaceArtifactFile::new(&proposal_path).unwrap().read_payload_bytes().unwrap()).unwrap();
+        legacy["key"] = json!("legacy-unadmitted"); legacy["call_path"] = json!(misplaced.manifest_path());
+        let saved = InterfaceArtifactFile::write(&client_root, "operator.run_revision.proposal", &serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_path = client_root.join("legacy-unadmitted.artifact.json"); std::fs::hard_link(saved.manifest_path(), &legacy_path).unwrap();
+        let legacy_before = std::fs::read(&legacy_path).unwrap();
+        let mut legacy_scope = scope.clone(); legacy_scope["key"] = json!("legacy-unadmitted");
+        assert!(verify(&legacy_scope).unwrap_err().contains("explicit reprepare"));
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy_before);
+        assert_eq!(std::fs::read(&proposal_path).unwrap(), original_proposal);
+        assert_eq!(current(),before); assert_eq!(b.writes,0);
         let (_,returned) = b.effect(&call).await; assert_eq!(b.writes,1);
         assert_ne!(current(),before);
         assert_eq!(verify(&scope).unwrap()["status"], "awaiting_result");
@@ -1046,7 +1135,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         scope["key"] = json!("ordinary-rearm");
         assert_eq!(prepare(&scope,json!({"kind":"rearm"}),&settled).unwrap()["status"], "prepared");
         let ready = verify(&scope).unwrap(); assert_eq!(ready["status"], "ready");
-        let (_,result) = b.effect(&transport_call(&root.join("wire"),&ready)).await;
+        let (_,result) = b.effect(&transport_call(&root,&ready).unwrap()).await;
         assert!(matches!(b.admit(&result,&door).await,DeliveryVerdict::Admitted{..}));
         assert_eq!(verify(&scope).unwrap()["status"], "installed");
         assert_eq!(verify(&scope).unwrap()["status"], "installed"); assert_eq!(b.writes,writes+1);
@@ -1055,7 +1144,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         scope["key"] = json!("wrong-correlation");
         assert_eq!(prepare(&scope,json!({"kind":"rearm"}),&current()).unwrap()["status"], "prepared");
         let ready = verify(&scope).unwrap();
-        let (_,result) = b.effect(&transport_call(&root.join("wire"),&ready)).await;
+        let (_,result) = b.effect(&transport_call(&root,&ready).unwrap()).await;
         let mut wrong: Value = serde_json::from_slice(&result.read_payload_bytes().unwrap()).unwrap(); wrong["correlation_id"] = json!("not-the-proposed-write");
         let wrong = b.file(wrong["label"].as_str().unwrap(), &wrong); b.admit(&wrong,&door).await;
         assert_eq!(verify(&scope).unwrap()["status"], "awaiting_result");

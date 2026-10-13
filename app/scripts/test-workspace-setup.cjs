@@ -906,6 +906,7 @@ async function verifyOperatorChatStatusProjection(temporary) {
       fixtureMovement(0, workspace, "operator.message", workspace.homeInterfaceId, "run"),
       fixtureMovement(1, workspace, "turn.started", `${setupRequest("workspace_status_12345678").home.providerInterfaceId}_${workspace.homeRunId.replace("run_operator_chat_", "")}`, "run"),
     ];
+    for (const movement of workingMovements) await materializeFixtureMovement(octopusHomeRoot, movement);
     await fs.appendFile(ledgerPath, workingMovements.map((movement) => `${JSON.stringify(movement)}\n`).join(""));
     if (ledgerIndexAvailable) await indexFixtureMovements(ledgerRoot, workingMovements);
     const working = await readStatuses();
@@ -920,10 +921,9 @@ async function verifyOperatorChatStatusProjection(temporary) {
       turn_state: "working",
       last_movement_seq: 1,
     }]);
-    await fs.appendFile(
-      ledgerPath,
-      `${JSON.stringify(fixtureMovement(2, workspace, "interface.artifact.output", provider, "run"))}\n`,
-    );
+    const firstReply = fixtureMovement(2, workspace, "interface.artifact.output", provider, "run");
+    await materializeFixtureMovement(octopusHomeRoot, firstReply);
+    await fs.appendFile(ledgerPath, `${JSON.stringify(firstReply)}\n`);
     const idle = await readStatuses();
     assert.equal(idle.chats[0].turn_open, false);
     assert.equal(idle.chats[0].turn_state, "idle");
@@ -952,26 +952,38 @@ async function verifyOperatorChatStatusProjection(temporary) {
       ["turn.control.acknowledged", provider, { action: "interrupt", status: "acknowledged", control_id: "stop" }, "idle"],
       ["turn.started", provider, {}, "working"],
       ["turn.completed", provider, { status: "failed" }, "failed"],
+      ["plain.note", provider, Buffer.from("plain text"), "failed"],
+      ["binary.data", provider, Buffer.from([255, 0, 1]), "failed"],
+      ["json.array", provider, [1, 2], "failed"],
+      ["json.scalar", provider, 3, "failed"],
     ];
     await fs.mkdir(path.join(ledgerRoot, "blobs"), { recursive: true });
+    for (const id of ["peer", "other-provider"]) {
+      const directory = path.join(registryRoot, "interface", id);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, "interface.json"), JSON.stringify({ id, interface_type: "world", role: "provider", direction: "bidirectional", source_names: ["fixture"] }));
+    }
     for (const [offset, [label, from, payload, expected]] of cases.entries()) {
       const movement = fixtureMovement(offset + 3, workspace, label, from, "run");
       if (from === "peer" || label === `${provider}.failure`) {
         movement.kind = "InterfaceOutbound";
         movement.to = { Interface: from === "peer" ? provider : workspace.homeInterfaceId };
       }
-      const bytes = Buffer.from(JSON.stringify(payload)), hash = Buffer.from(require("@noble/hashes/blake3").blake3(bytes));
-      movement.artifact.content = [...hash];
       movement.recorded_at_unix_ms -= offset * 2;
-      await fs.writeFile(path.join(ledgerRoot, "blobs", hash.toString("hex")), bytes);
+      await materializeFixtureMovement(octopusHomeRoot, movement, payload);
       await fs.appendFile(ledgerPath, `${JSON.stringify(movement)}\n`);
       const status = (await readStatuses()).chats[0];
       assert.deepEqual([status.turn_state, status.turn_open], [expected, ["waiting", "working"].includes(expected)], label);
       store.invalidate();
       const cold = (await store.read({ contract_version: 1, method: "projection.operator.chats.list" })).chats.find((chat) => chat.run_id === workspace.homeRunId);
       assert.deepEqual([cold.turn_state, cold.turn_open], [status.turn_state, status.turn_open], `replay: ${label}`);
+      if (["plain.note", "binary.data", "json.array", "json.scalar"].includes(label)) {
+        const page = await store.read({ contract_version: 1, method: "projection.operator.run.activity", params: { run_id: workspace.homeRunId, after_seq: movement.seq - 1 } });
+        assert.equal(page.activity.length, 1); assert.equal(page.activity[0].payload_error, "", label);
+      }
     }
     const retired = fixtureMovement(cases.length + 3, workspace, "turn.started", provider, "run");
+    await materializeFixtureMovement(octopusHomeRoot, retired);
     await fs.appendFile(ledgerPath, `${JSON.stringify(retired)}\n`);
     assert.equal((await readStatuses()).chats[0].turn_state, "working");
     const runPath = path.join(octopusHomeRoot, "state", "runs", `${workspace.homeRunId}.json`);
@@ -986,6 +998,7 @@ async function verifyOperatorChatStatusProjection(temporary) {
     store.invalidate();
     assert.equal((await readStatuses()).chats[0].turn_open, false, "a control or catalog rearm cannot reopen the retired turn");
     const current = fixtureMovement(retired.seq + 1, workspace, "operator.message", workspace.homeInterfaceId, "run");
+    await materializeFixtureMovement(octopusHomeRoot, current);
     current.invocation_metadata.runtime.checkpoint = "cp_home_input";
     await fs.appendFile(ledgerPath, `${JSON.stringify(current)}\n`);
     assert.equal((await readStatuses()).chats[0].turn_state, "waiting", "current input remains open before provider authoring");
@@ -1109,10 +1122,13 @@ async function verifyTaskArchive(temporary) {
     const pending = structuredClone(original); pending.interface_state[plan.modelInterfaceId].pending_handoff.terminal = false;
     await writeRun(pending); await assert.rejects(mutate(true), /is working/); await writeRun(original);
     const taskIdentity = { ...workspace, homeRunId: plan.runId, homeInterfaceId: plan.chatInterfaceId };
-    await fs.appendFile(ledger, `${JSON.stringify(fixtureMovement(0, taskIdentity, "operator.message", plan.chatInterfaceId, "run"))}\n`);
+    const taskInput = fixtureMovement(0, taskIdentity, "operator.message", plan.chatInterfaceId, "run");
+    await materializeFixtureMovement(home, taskInput);
+    await fs.appendFile(ledger, `${JSON.stringify(taskInput)}\n`);
     await assert.rejects(mutate(true), /open turn/);
     const reply = fixtureMovement(1, taskIdentity, "interface.artifact.output", plan.modelInterfaceId, "interface");
     reply.kind = "InterfaceOutbound";
+    await materializeFixtureMovement(home, reply);
     await fs.appendFile(ledger, `${JSON.stringify(reply)}\n`);
     store.invalidate(false);
     const messagesBefore = await read("projection.operator.chat.messages", { run_id: plan.runId });
@@ -1397,6 +1413,18 @@ async function fixturePolicyProjection(octopusHomeRoot) {
     });
   }
   return { environments, issues: [] };
+}
+
+async function materializeFixtureMovement(home, movement, payload = {}) {
+  const root = path.join(home, "ledger", "blobs"), blake3 = require("@noble/hashes/blake3").blake3;
+  await fs.mkdir(root, { recursive: true });
+  const payloadBytes = Buffer.isBuffer(payload) ? payload : Buffer.from(JSON.stringify(payload)), payloadHash = Buffer.from(blake3(payloadBytes)).toString("hex");
+  const label = movement.invocation_metadata.checkpoint_admission.artifact_label;
+  const manifest = Buffer.from(JSON.stringify({ label, payload_path: path.join(root, payloadHash), payload_content_hash: payloadHash }));
+  const hash = Buffer.from(blake3(manifest));
+  await fs.writeFile(path.join(root, payloadHash), payloadBytes);
+  await fs.writeFile(path.join(root, hash.toString("hex")), manifest);
+  movement.artifact = { id: `${label}:${hash.toString("hex")}`, content: [...hash] };
 }
 
 function fixtureMovement(seq, workspace, label, fromInterface, toKind) {

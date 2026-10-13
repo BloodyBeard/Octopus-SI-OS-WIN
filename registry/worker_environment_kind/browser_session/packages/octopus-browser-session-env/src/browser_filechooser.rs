@@ -6,6 +6,7 @@ use octopus_interfaces::{ArtifactRef, InterfaceInvocationEnvelope};
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact, ToolResultError};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -155,14 +156,14 @@ pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::Interfa
     }
     Ok(call)
 }
-fn admitted_bytes<'a>(envelope: &'a InterfaceInvocationEnvelope, selected: &FileSelection) -> Result<&'a [u8], String> {
+fn admitted_bytes<'a>(envelope: &'a InterfaceInvocationEnvelope, selected: &FileSelection) -> Result<Cow<'a, [u8]>, String> {
     validate_filename(&selected.filename)?;
     let metadata = envelope.metadata().map_err(|error| error.to_string())?;
     if !metadata.artifact_binding_refs.iter().filter(|item| item.id == selected.artifact_ref.id).eq([&selected.artifact_ref]) || !metadata.grant.artifact_access.get(selected.artifact_ref.id.as_str()).is_some_and(|access| access.read) { return Err("Upload artifact is not currently bound with read authority".into()); }
     let mut matches = envelope.artifact_binding_payloads.iter().filter(|item| item.artifact.id == selected.artifact_ref.id);
     let payload = matches.next().ok_or("Upload artifact has no captured bound payload")?;
-    if matches.next().is_some() || payload.artifact != selected.artifact_ref || payload.bytes.len() > QUOTA { return Err("Upload bound payload differs from its admitted ref or byte bound".into()); }
-    Ok(&payload.bytes)
+    if matches.next().is_some() || payload.artifact != selected.artifact_ref || payload.payload_len() > QUOTA as u64 { return Err("Upload bound payload differs from its admitted ref or byte bound".into()); }
+    payload.read_bounded(QUOTA as u64).map_err(|error| error.to_string())
 }
 pub(crate) fn private_directory(root: &Path, parts: &[&str]) -> Result<PathBuf, String> {
     let mut path = root.to_path_buf();
@@ -237,7 +238,7 @@ impl BrowserRoom {
         let selected: Vec<FileSelection> = serde_json::from_value(object.get("files").cloned().ok_or("File selection is missing")?).map_err(|error| error.to_string())?;
         if selected.is_empty() { return Err("File chooser requires at least one selected artifact".into()); }
         let mut total = 0usize; let mut files = Vec::new();
-        for selection in &selected { let bytes = admitted_bytes(&decoded.envelope,selection)?; total = total.checked_add(bytes.len()).ok_or("Upload byte count overflow")?; if total > QUOTA { return Err("Upload exceeds room staging quota".into()); } files.push(UploadFile { artifact_ref:selection.artifact_ref.clone(), filename:selection.filename.clone(), payload_sha256:hash(bytes), size_bytes:bytes.len() as u64 }); }
+        for selection in &selected { let bytes = admitted_bytes(&decoded.envelope,selection)?; total = total.checked_add(bytes.len()).ok_or("Upload byte count overflow")?; if total > QUOTA { return Err("Upload exceeds room staging quota".into()); } files.push(UploadFile { artifact_ref:selection.artifact_ref.clone(), filename:selection.filename.clone(), payload_sha256:hash(&bytes), size_bytes:bytes.len() as u64 }); }
         let observed = self.browser_command(&mut state,"OctopusBrowser.inspectFileChooser",json!({"reservation_id":reservation,"file_chooser_id":chooser})).await?;
         let context = state.browser_context_id.as_deref().ok_or("Upload has no exact browser context")?;
         let generation = &state.native_identity.as_ref().ok_or("Upload has no native host identity")?.host_generation;
@@ -316,7 +317,7 @@ impl BrowserRoom {
         create_record(&consumed,&consumption)?;
         let mut applied = async {
             if response.decision == Decision::Accept {
-                for file in &request.upload.files { let selection = FileSelection { artifact_ref:file.artifact_ref.clone(),filename:file.filename.clone() }; let bytes = admitted_bytes(&decoded.envelope,&selection)?; if bytes.len() as u64 != file.size_bytes || hash(bytes) != file.payload_sha256 { return Err("Approved upload lost its exact currently admitted file bytes".into()); } }
+                for file in &request.upload.files { let selection = FileSelection { artifact_ref:file.artifact_ref.clone(),filename:file.filename.clone() }; let bytes = admitted_bytes(&decoded.envelope,&selection)?; if bytes.len() as u64 != file.size_bytes || hash(&bytes) != file.payload_sha256 { return Err("Approved upload lost its exact currently admitted file bytes".into()); } }
             }
             let room = self.room(&decoded.formation).await?; let mut state = room.lock().await;
             self.ensure_browser_context(&mut state,false).await?;

@@ -9,7 +9,7 @@ use octopus_github_copilot_auth::{
 };
 use octopus_interfaces::{InterfaceArtifactFile, InterfaceDescriptor, InterfaceInvocationEnvelope};
 use octopus_model_context_render::{
-    model_hidden_tool_names, render_model_context_block_with_hidden_tools,
+    model_hidden_tool_names, model_tool_exclusions, render_model_context_block_with_hidden_tools,
 };
 use octopus_provider_run_authoring::{
     ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderOutputHandoff,
@@ -472,7 +472,19 @@ impl GitHubCopilotAcpDriver {
                 ),
             ));
         }
-        let prompt = self.assemble_prompt(&input)?;
+        let selected = handoff.callable_tool_names(&input).map_err(|error| {
+            GitHubCopilotAcpFailure::protocol("callable_tool_contract_invalid", error)
+        })?;
+        let hidden = model_tool_exclusions(
+            input.metadata().map_err(|error| {
+                GitHubCopilotAcpFailure::protocol("invocation_metadata_invalid", error.to_string())
+            })?,
+            &selected,
+            &model_hidden_tool_names(&self.private_config).map_err(|error| {
+                GitHubCopilotAcpFailure::protocol("hidden_tool_config_invalid", error)
+            })?,
+        );
+        let prompt = self.assemble_prompt(&input, &hidden)?;
         let token = self.auth.raw_github_token()?;
         let credential_handle_fingerprint = self.auth.raw_token_handle_fingerprint();
         let turn = self
@@ -497,11 +509,21 @@ impl GitHubCopilotAcpDriver {
     fn assemble_prompt(
         &self,
         input: &InterfaceInvocationEnvelope,
+        hidden: &[String],
     ) -> Result<Vec<Value>, GitHubCopilotAcpFailure> {
         let mut entries = Vec::new();
         let mut sources = BTreeSet::new();
         for bound in &input.artifact_binding_payloads {
-            let value: Value = serde_json::from_slice(bound.as_bytes()).map_err(|error| {
+            let bytes = bound.read_bytes().map_err(|error| {
+                GitHubCopilotAcpFailure::protocol(
+                    "bound_artifact_unreadable",
+                    format!(
+                        "bound artifact '{}' cannot be read: {error}",
+                        bound.artifact.id
+                    ),
+                )
+            })?;
+            let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
                 GitHubCopilotAcpFailure::protocol(
                     "bound_artifact_json_invalid",
                     format!(
@@ -561,11 +583,8 @@ impl GitHubCopilotAcpDriver {
             ));
         }
         let mut instructions = Vec::new();
-        let hidden = model_hidden_tool_names(&self.private_config).map_err(|error| {
-            GitHubCopilotAcpFailure::protocol("hidden_tool_config_invalid", error)
-        })?;
         if let Some(metadata) = input.metadata.as_ref() {
-            if let Some(rendered) = render_model_context_block_with_hidden_tools(metadata, &hidden)
+            if let Some(rendered) = render_model_context_block_with_hidden_tools(metadata, hidden)
             {
                 instructions.push(rendered);
             }

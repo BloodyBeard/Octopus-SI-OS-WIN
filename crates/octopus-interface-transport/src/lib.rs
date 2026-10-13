@@ -7,7 +7,7 @@ pub use interface_life::{
     InterfaceLiftFn, RESOLVED_INTERFACE_DESCRIPTOR_ENV, ResolvedSpawnLifeConfig,
     ResolvedSpawnLifeExecutable, SpawnLifeArgument, SpawnLifeCommand, SpawnLifeConfig,
     SpawnLifeDoctorCommand, SpawnLifeRepositoryFileArgument, ValidatedSpawnLifeConfig,
-    interfaces_mentioned_in_live_runs, resolve_interface_descriptor, resolve_spawn_life_config,
+    capture_spawned_artifact, interfaces_mentioned_in_live_runs, resolve_interface_descriptor, resolve_spawn_life_config,
     resolve_spawn_life_executable, spawn_life_config_of, spawn_process_life,
     validate_spawn_life_config,
 };

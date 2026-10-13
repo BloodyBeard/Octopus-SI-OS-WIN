@@ -9,7 +9,15 @@
   "interface_driver_ref": "system_room",
   "interface_driver_config": {
     "private_config": {
-      "provider_tool_include_context": true
+      "provider_tool_include_context": true,
+      "context_artifact_bindings": [
+        {
+          "id": "artifact-context-collection-guide"
+        },
+        {
+          "id": "artifact-system-library"
+        }
+      ]
     }
   }
 }

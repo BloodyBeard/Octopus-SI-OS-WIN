@@ -1,5 +1,12 @@
 use super::*;
 
+pub struct PendingSourceSettlement {
+    pub predecessor: ArtifactRef,
+    pub predecessor_record: Vec<u8>,
+    pub predecessor_outcomes: Vec<ProviderHandoffOutcome>,
+    pub closure: Option<InterfaceArtifactFile>,
+}
+
 pub(super) fn follows_completed_source(before: &PendingHandoff, after: &PendingHandoff) -> bool {
     let [item] = before.items.as_slice() else {
         return false;
@@ -274,6 +281,257 @@ impl ProviderHandoffSession {
 }
 
 impl ProviderOutputHandoff {
+    pub async fn recover_completed_source_settlement(
+        &self,
+        predecessor: &ArtifactRef,
+        closure: &ArtifactRef,
+    ) -> Result<(ProviderSourceRecovery, Vec<ProviderHandoffOutcome>), String> {
+        let mut checked = self.clone();
+        checked.checked_settlement_output = Some((predecessor.clone(), closure.clone()));
+        checked.recover_completed_source_with_outcomes().await
+    }
+
+    pub(super) fn require_settlement_output_pin(
+        &self,
+        pending: &PendingHandoff,
+    ) -> Result<(), String> {
+        let Some((predecessor, expected)) = &self.checked_settlement_output else {
+            return Ok(());
+        };
+        let [item] = pending.items.as_slice() else {
+            return Err("checked settlement lost its single output".into());
+        };
+        if pending.settlement_of.as_ref() != Some(predecessor)
+            || pending.source_movement_seq != self.source_movement_seq
+            || item.artifact_id != expected.id
+            || item.artifact_content_hash != expected.content.to_hex()
+        {
+            return Err(
+                "saved settlement candidate changed after provider semantic validation".into(),
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn pending_source_settlement(
+        &self,
+    ) -> Result<Option<PendingSourceSettlement>, String> {
+        let state = self.state.lock().await;
+        let current =
+            RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+        let chain = self.completed_source_chain(&state.run_record_bytes)?;
+        let attempt = self.recover_authoring_attempt(&current, &state.run_record_bytes)?;
+        let installed = persisted_pending_handoff(&current, &self.config.provider_interface)?
+            .filter(|pending| {
+                pending.source_movement_seq == self.source_movement_seq
+                    && pending.settlement_of.is_some()
+            });
+        let (selected, before) = if let Some(pending) = installed {
+            match attempt {
+                AuthoringAttemptRecovery::None => {}
+                AuthoringAttemptRecovery::OtherSource(_) => {
+                    return Err(
+                        "installed settlement has a different pending source attempt".into(),
+                    );
+                }
+                AuthoringAttemptRecovery::InFlight(attempt) => {
+                    if !context_publication::is_publication_completion(
+                        &pending,
+                        &attempt.authored.pending_handoff,
+                    ) {
+                        return Err(
+                            "installed settlement has a conflicting successor attempt".into()
+                        );
+                    }
+                    validate_transition(
+                        &current,
+                        &RunRecord::from_bytes(attempt.authored.content.as_bytes())
+                            .map_err(|error| error.to_string())?,
+                        &self.config,
+                    )?;
+                }
+            }
+            let mut matched = Vec::new();
+            for transition in &chain {
+                let before =
+                    RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
+                let after =
+                    RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+                if let (Some(prior), Some(next)) = (
+                    persisted_pending_handoff(&before, &self.config.provider_interface)?,
+                    persisted_pending_handoff(&after, &self.config.provider_interface)?,
+                ) {
+                    if next.source_movement_seq == self.source_movement_seq
+                        && next.settlement_of == pending.settlement_of
+                        && next.items == pending.items
+                        && follows_completed_source(&prior, &next)
+                    {
+                        matched.push(transition.before.clone());
+                    }
+                }
+            }
+            if matched.len() != 1 {
+                return Err("saved settlement has no unique checked predecessor record".into());
+            }
+            (pending, matched.remove(0))
+        } else {
+            match attempt {
+                AuthoringAttemptRecovery::None => {
+                    let Some(prior) =
+                        persisted_pending_handoff(&current, &self.config.provider_interface)?
+                            .filter(|pending| {
+                                pending.source_movement_seq == self.source_movement_seq
+                                    && pending.terminal
+                            })
+                    else {
+                        return Ok(None);
+                    };
+                    let predecessor_outcomes = self.admitted_replay_handoff(&prior)?;
+                    let [ProviderHandoffOutcome::Admitted { artifact, .. }] =
+                        predecessor_outcomes.as_slice()
+                    else {
+                        return Err(
+                            "completed settlement source has no single admitted predecessor".into(),
+                        );
+                    };
+                    return Ok(Some(PendingSourceSettlement {
+                        predecessor: artifact.clone(),
+                        predecessor_record: state.run_record_bytes.clone(),
+                        predecessor_outcomes,
+                        closure: None,
+                    }));
+                }
+                AuthoringAttemptRecovery::OtherSource(_) => {
+                    return Err("saved settlement attempt belongs to a different source".into());
+                }
+                AuthoringAttemptRecovery::InFlight(attempt) => {
+                    if attempt.authored.pending_handoff.settlement_of.is_none() {
+                        return Err("saved source attempt is not a completed settlement".into());
+                    }
+                    let before = if attempt.authored.before_hash
+                        == ContentHash::of_bytes(&state.run_record_bytes).to_hex()
+                    {
+                        state.run_record_bytes.clone()
+                    } else {
+                        pinned_run_record(
+                            &self.ctx,
+                            &ContentHash::from_hex(&attempt.authored.before_hash)
+                                .ok_or("saved settlement preimage hash is malformed")?,
+                            "saved settlement predecessor",
+                        )?
+                        .0
+                    };
+                    let original =
+                        RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
+                    let candidate = RunRecord::from_bytes(attempt.authored.content.as_bytes())
+                        .map_err(|error| error.to_string())?;
+                    validate_transition(
+                        &original,
+                        &candidate,
+                        &attempt_config(&original, &self.config)?,
+                    )?;
+                    (attempt.authored.pending_handoff, before)
+                }
+            }
+        };
+        let predecessor = selected
+            .settlement_of
+            .clone()
+            .ok_or("saved settlement lost its predecessor")?;
+        let before_record = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
+        let prior = persisted_pending_handoff(&before_record, &self.config.provider_interface)?
+            .ok_or("saved settlement predecessor has no completed output")?;
+        if !follows_completed_source(&prior, &selected) {
+            return Err("saved settlement changed its exact completed predecessor".into());
+        }
+        let predecessor_outcomes = self.admitted_replay_handoff(&prior)?;
+        let (closure, _) = load_pending_artifact(&self.var_dir, &selected.items[0])?;
+        Ok(Some(PendingSourceSettlement {
+            predecessor,
+            predecessor_record: before,
+            predecessor_outcomes,
+            closure: Some(closure),
+        }))
+    }
+
+    fn completed_source_chain(&self, current: &[u8]) -> Result<Vec<CheckedRunTransition>, String> {
+        let (_, source) = self.session.index()?.exact_provider_source_outbound(
+            &self.config.run,
+            &self.config.worker,
+            &self.config.provider_interface,
+            self.source_movement_seq,
+        )?;
+        let hash = source
+            .run_record_hash
+            .as_deref()
+            .and_then(ContentHash::from_hex)
+            .ok_or("completed source has no pinned record")?;
+        let (bytes, original) = pinned_run_record(&self.ctx, &hash, "completed source")?;
+        let config = config_from_persisted_profile(
+            &original,
+            &self.config.provider_interface,
+            &RunAuthoringProfile {
+                file_write_tool: self.config.file_write_tool.clone(),
+                file_write_label: self.config.file_write_label.clone(),
+                file_write_result_label: self.config.file_write_result_label.clone(),
+                result_timeout_ms: self.config.result_timeout_ms,
+            },
+        )?;
+        let provider_writer = CheckedRunWriter {
+            owner: config.provider_interface.clone(),
+            source: config.authoring_source_interface.clone(),
+            door: config
+                .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?
+                .interface()
+                .clone(),
+            tool: config.file_write_tool.clone(),
+            call_label: config.file_write_label.clone(),
+            result_label: config.file_write_result_label.clone(),
+        };
+        let mut writers = config
+            .checkpoints
+            .iter()
+            .filter_map(|checkpoint| checkpoint.owner_authoring.clone())
+            .collect::<Vec<_>>();
+        writers.push(provider_writer.clone());
+        let writers = declared_writer_closure(&original, writers)?;
+        let limits = self.ctx.required_host_io_limits()?;
+        let evidence = CheckedRunEvidence {
+            movements_path: &self.ctx.movements_path,
+            ledger_index_path: &self.ctx.ledger_index_path,
+            blobs_dir: &self.ctx.blobs_dir,
+            max_control_frame_bytes: limits.max_control_frame_bytes,
+            max_manifest_bytes: limits.max_manifest_bytes,
+            max_payload_bytes: limits.max_payload_bytes,
+        };
+        let chain =
+            stable_run_observation(&self.run_path, current, limits.max_payload_bytes, || {
+                let start = concurrent_writer_evidence_start(
+                    &evidence,
+                    &original,
+                    &bytes,
+                    self.source_movement_seq,
+                )?;
+                checked_run_file_chain_state(
+                    &evidence,
+                    &self.run_path,
+                    &bytes,
+                    current,
+                    start,
+                    &writers,
+                )
+            })
+            .map_err(String::from)?;
+        for transition in &chain {
+            if transition.writer == provider_writer {
+                validate_checked_provider_transition(transition)?;
+            } else {
+                validate_checked_owner_transition(transition)?;
+            }
+        }
+        Ok(chain)
+    }
+
     pub async fn recover_completed_source_with_outcomes(
         &self,
     ) -> Result<(ProviderSourceRecovery, Vec<ProviderHandoffOutcome>), String> {
@@ -286,84 +544,7 @@ impl ProviderOutputHandoff {
             if !pending.terminal || pending.source_movement_seq != self.source_movement_seq {
                 return Err("completed source changed its checked terminal coordinate".into());
             }
-            let (_, source) = self.session.index()?.exact_provider_source_outbound(
-                &self.config.run,
-                &self.config.worker,
-                &self.config.provider_interface,
-                self.source_movement_seq,
-            )?;
-            let hash = source
-                .run_record_hash
-                .as_deref()
-                .and_then(ContentHash::from_hex)
-                .ok_or("completed source has no pinned record")?;
-            let (bytes, original) = pinned_run_record(&self.ctx, &hash, "completed source")?;
-            let config = config_from_persisted_profile(
-                &original,
-                &self.config.provider_interface,
-                &RunAuthoringProfile {
-                    file_write_tool: self.config.file_write_tool.clone(),
-                    file_write_label: self.config.file_write_label.clone(),
-                    file_write_result_label: self.config.file_write_result_label.clone(),
-                    result_timeout_ms: self.config.result_timeout_ms,
-                },
-            )?;
-            let provider_writer = CheckedRunWriter {
-                owner: config.provider_interface.clone(),
-                source: config.authoring_source_interface.clone(),
-                door: config
-                    .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?
-                    .interface()
-                    .clone(),
-                tool: config.file_write_tool.clone(),
-                call_label: config.file_write_label.clone(),
-                result_label: config.file_write_result_label.clone(),
-            };
-            let mut writers = config
-                .checkpoints
-                .iter()
-                .filter_map(|checkpoint| checkpoint.owner_authoring.clone())
-                .collect::<Vec<_>>();
-            writers.push(provider_writer.clone());
-            let writers = declared_writer_closure(&original, writers)?;
-            let limits = self.ctx.required_host_io_limits()?;
-            let evidence = CheckedRunEvidence {
-                movements_path: &self.ctx.movements_path,
-                ledger_index_path: &self.ctx.ledger_index_path,
-                blobs_dir: &self.ctx.blobs_dir,
-                max_control_frame_bytes: limits.max_control_frame_bytes,
-                max_manifest_bytes: limits.max_manifest_bytes,
-                max_payload_bytes: limits.max_payload_bytes,
-            };
-            let chain = stable_run_observation(
-                &self.run_path,
-                &state.run_record_bytes,
-                limits.max_payload_bytes,
-                || {
-                    let start = concurrent_writer_evidence_start(
-                        &evidence,
-                        &original,
-                        &bytes,
-                        self.source_movement_seq,
-                    )?;
-                    checked_run_file_chain_state(
-                        &evidence,
-                        &self.run_path,
-                        &bytes,
-                        &state.run_record_bytes,
-                        start,
-                        &writers,
-                    )
-                },
-            )
-            .map_err(String::from)?;
-            for transition in &chain {
-                if transition.writer == provider_writer {
-                    validate_checked_provider_transition(transition)?;
-                } else {
-                    validate_checked_owner_transition(transition)?;
-                }
-            }
+            let chain = self.completed_source_chain(&state.run_record_bytes)?;
             self.restore_checked_context(&mut state, &current, &chain)?;
         }
         self.recover_source_with_outcomes().await
