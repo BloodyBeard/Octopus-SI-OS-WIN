@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   formatProjectionError,
   loadChatExecutionContexts,
@@ -13,11 +13,13 @@ import {
   readProjection,
   readProviderInterfaceRateLimits,
 } from "../../projectionClient";
-import { useProjectionStructureGeneration } from "../../projectionLive";
+import { useProjectionRegistryGeneration, useProjectionStructureGeneration } from "../../projectionLive";
 import { formatRuntimeError } from "../../runtimeClient";
 import { readClientChatProjects, subscribeClientChatProjects } from "../../shell/clientWorkspaces";
 import { toolPresentationsFromProjection } from "./chatActivityProjection";
 import type { ChatToolPresentationIndex } from "./types";
+
+type ProviderRead = { key: string; generation: number; promise: Promise<void> };
 
 export function useChatCapabilityCatalog(
   accessProfile: OctopusClientAccessProfile,
@@ -27,23 +29,62 @@ export function useChatCapabilityCatalog(
 ) {
   const providerReadGenerationRef = useRef(0);
   const providerReadScopeRef = useRef("");
-  const capabilityCatalogProfileRef = useRef<OctopusClientAccessProfile | null>(null);
+  const providerReadRef = useRef<ProviderRead | null>(null);
+  const providerUsageReadRef = useRef<ProviderRead | null>(null);
+  const capabilityCatalogScopeRef = useRef("");
   const [projectPresentationGeneration, setProjectPresentationGeneration] = useState(0);
   const [executionContexts, setExecutionContexts] = useState<ChatExecutionContext[]>([]);
   const [executionContextsLoaded, setExecutionContextsLoaded] = useState(false);
+  const [completedCapabilityReadKey, setCompletedCapabilityReadKey] = useState("");
   const [workerEnvironmentRooms, setWorkerEnvironmentRooms] = useState<ChatWorkerEnvironmentRoom[]>([]);
   const [toolPresentations, setToolPresentations] = useState<ChatToolPresentationIndex>({});
   const [executionContextError, setExecutionContextError] = useState("");
   const [providerInterfaces, setProviderInterfaces] = useState<OctopusProviderInterface[]>([]);
   const [providerInterfacesLoaded, setProviderInterfacesLoaded] = useState(false);
-  const [providerInterfacesRefreshing, setProviderInterfacesRefreshing] = useState(false);
+  const [providerReadPending, setProviderReadPending] = useState(false);
+  const [completedProviderReadKey, setCompletedProviderReadKey] = useState("");
   const [providerInterfaceError, setProviderInterfaceError] = useState("");
+  const [providerUsageError, setProviderUsageError] = useState("");
   const projectionStructureGeneration = useProjectionStructureGeneration();
+  const projectionRegistryGeneration = useProjectionRegistryGeneration();
+  const scope = JSON.stringify([accessProfile, enabled, runtimeReady, runtimeHome]);
+  const providerReadKey = JSON.stringify([scope, projectionRegistryGeneration]);
+  const providerContextRef = useRef({ scope, key: providerReadKey });
+  const providerInterfacesRefreshing = enabled && (providerReadPending || completedProviderReadKey !== providerReadKey);
+  useLayoutEffect(() => { providerContextRef.current = { scope, key: providerReadKey }; }, [providerReadKey, scope]);
 
-  const refreshProviderInterfaces = useCallback(async () => {
-    const generation = providerReadGenerationRef.current + 1;
-    providerReadGenerationRef.current = generation;
-    const scope = JSON.stringify([accessProfile, enabled, runtimeReady, runtimeHome]);
+  const refreshProviderUsage = useCallback((): Promise<void> => {
+    if (!enabled || providerContextRef.current.scope !== scope) return Promise.resolve();
+    const key = providerContextRef.current.key;
+    const generation = providerReadGenerationRef.current;
+    const pending = providerUsageReadRef.current;
+    if (pending?.key === key && pending.generation === generation) return pending.promise;
+    const read: ProviderRead = { key, generation, promise: Promise.resolve() };
+    providerUsageReadRef.current = read;
+    const isCurrent = () => providerContextRef.current.key === key && providerReadGenerationRef.current === generation;
+    setProviderUsageError("");
+    read.promise = (async () => {
+      try {
+        const byProvider = await readProviderInterfaceRateLimits();
+        if (!isCurrent()) return;
+        setProviderInterfaces((current) => current.map((provider) => ({ ...provider, rateLimits: byProvider.get(provider.id) })));
+      } catch (failure) {
+        if (isCurrent()) {
+          setProviderInterfaces((current) => current.map((provider) => ({ ...provider, rateLimits: undefined })));
+          setProviderUsageError(`Provider usage is unavailable. ${formatRuntimeError(failure)}`);
+        }
+      } finally {
+        if (providerUsageReadRef.current === read) providerUsageReadRef.current = null;
+      }
+    })();
+    return read.promise;
+  }, [enabled, scope]);
+
+  const refreshProviderInterfaces = useCallback((invalidate = false): Promise<void> => {
+    if (providerContextRef.current.key !== providerReadKey) return Promise.resolve();
+    const pending = providerReadRef.current;
+    if (!invalidate && pending?.key === providerReadKey && pending.generation === providerReadGenerationRef.current) return pending.promise;
+    const generation = ++providerReadGenerationRef.current;
     if (providerReadScopeRef.current !== scope) {
       providerReadScopeRef.current = scope;
       setProviderInterfaces([]);
@@ -53,51 +94,54 @@ export function useChatCapabilityCatalog(
       setProviderInterfaces([]);
       setProviderInterfacesLoaded(false);
       setProviderInterfaceError("");
-      setProviderInterfacesRefreshing(false);
-      return;
+      setProviderUsageError("");
+      setProviderReadPending(false);
+      return Promise.resolve();
     }
     setProviderInterfaceError("");
-    setProviderInterfacesRefreshing(true);
-    try {
-      const response = await readRuntimeProviderInterfaces();
-      if (providerReadGenerationRef.current !== generation) return;
-      const providers = response.providers;
-      setProviderInterfaces(providers);
-      const declarationError = response.error
-        ?? (providers.length === 0 ? "No world/provider interface is declared in the registry."
-          : providers.every((provider) => !provider.models.length)
-            ? providers.map((provider) => provider.modelCatalogError).filter(Boolean).join("\n") : "");
-      setProviderInterfaceError(declarationError);
-      setProviderInterfacesLoaded(true);
-      if (declarationError) return;
-      void readProviderInterfaceRateLimits()
-        .then((byProvider) => {
-          if (providerReadGenerationRef.current !== generation) return;
-          setProviderInterfaces((current) => current.map((provider) => ({
-            ...provider,
-            rateLimits: byProvider.get(provider.id),
-          })));
-        })
-        .catch(() => undefined);
-    } catch (failure) {
-      if (providerReadGenerationRef.current === generation) {
-        setProviderInterfaces([]);
-        setProviderInterfaceError(formatRuntimeError(failure));
+    setProviderReadPending(true);
+    setProviderUsageError("");
+    const read: ProviderRead = { key: providerReadKey, generation, promise: Promise.resolve() };
+    providerReadRef.current = read;
+    const isCurrent = () => providerContextRef.current.key === providerReadKey && providerReadGenerationRef.current === generation;
+    read.promise = (async () => {
+      try {
+        const response = await readRuntimeProviderInterfaces();
+        if (!isCurrent()) return;
+        const providers = response.providers;
+        setProviderInterfaces(providers);
+        const declarationError = response.error
+          ?? (providers.length === 0 ? "No world/provider interface is declared in the registry."
+            : providers.every((provider) => !provider.models.length)
+              ? providers.map((provider) => provider.modelCatalogError).filter(Boolean).join("\n") || "No models are available from the declared provider interfaces." : "");
+        setProviderInterfaceError(declarationError);
         setProviderInterfacesLoaded(true);
+        if (!declarationError) void refreshProviderUsage();
+      } catch (failure) {
+        if (isCurrent()) {
+          setProviderInterfaces([]);
+          setProviderInterfaceError(formatRuntimeError(failure));
+          setProviderInterfacesLoaded(true);
+        }
+      } finally {
+        if (isCurrent()) {
+          setCompletedProviderReadKey(providerReadKey);
+          setProviderReadPending(false);
+        }
+        if (providerReadRef.current === read) providerReadRef.current = null;
       }
-    } finally {
-      if (providerReadGenerationRef.current === generation) setProviderInterfacesRefreshing(false);
-    }
-  }, [accessProfile, enabled, runtimeReady, runtimeHome]);
+    })();
+    return read.promise;
+  }, [enabled, providerReadKey, refreshProviderUsage, scope]);
 
   useEffect(() => {
-    void refreshProviderInterfaces();
+    void refreshProviderInterfaces(true);
     return () => { providerReadGenerationRef.current += 1; };
-  }, [projectionStructureGeneration, refreshProviderInterfaces]);
+  }, [refreshProviderInterfaces]);
 
   useEffect(() => {
     if (accessProfile !== "live" || !enabled) return;
-    return window.octopusTransport?.onChatgptAccountChanged?.(() => { void refreshProviderInterfaces(); });
+    return window.octopusTransport?.onChatgptAccountChanged?.(() => { void refreshProviderInterfaces(true); });
   }, [accessProfile, enabled, refreshProviderInterfaces]);
 
   useEffect(() => {
@@ -108,7 +152,7 @@ export function useChatCapabilityCatalog(
 
   useEffect(() => {
     if (!enabled || !hasProjectionBridge()) {
-      capabilityCatalogProfileRef.current = null;
+      capabilityCatalogScopeRef.current = "";
       setExecutionContexts([]);
       setExecutionContextsLoaded(false);
       setWorkerEnvironmentRooms([]);
@@ -117,11 +161,12 @@ export function useChatCapabilityCatalog(
       return;
     }
     let cancelled = false;
-    setExecutionContextsLoaded(false);
-    if (capabilityCatalogProfileRef.current !== accessProfile) {
-      capabilityCatalogProfileRef.current = accessProfile;
+    if (capabilityCatalogScopeRef.current !== scope) {
+      capabilityCatalogScopeRef.current = scope;
       setExecutionContexts([]);
+      setExecutionContextsLoaded(false);
       setWorkerEnvironmentRooms([]);
+      setExecutionContextError("");
     }
     const projectPresentations = readClientChatProjects(accessProfile);
     const projectDisplayNames = new Map(projectPresentations.map((project) => [project.id, project.name]));
@@ -133,6 +178,7 @@ export function useChatCapabilityCatalog(
       .then(([contexts, rooms]) => {
         if (cancelled) return;
         setExecutionContexts(contexts);
+        setCompletedCapabilityReadKey(providerReadKey);
         setExecutionContextsLoaded(true);
         setWorkerEnvironmentRooms(rooms);
         setExecutionContextError("");
@@ -146,7 +192,7 @@ export function useChatCapabilityCatalog(
     return () => {
       cancelled = true;
     };
-  }, [accessProfile, enabled, projectPresentationGeneration, projectionStructureGeneration]);
+  }, [accessProfile, enabled, projectPresentationGeneration, projectionStructureGeneration, providerReadKey, scope]);
 
   useEffect(() => {
     if (!enabled || !hasProjectionBridge()) {
@@ -164,18 +210,20 @@ export function useChatCapabilityCatalog(
     return () => {
       cancelled = true;
     };
-  }, [enabled, projectionStructureGeneration]);
+  }, [enabled, projectionRegistryGeneration]);
 
   return {
-    executionContextError,
-    executionContexts,
-    executionContextsLoaded,
-    providerInterfaceError,
-    providerInterfaces,
-    providerInterfacesLoaded,
+    executionContextError: capabilityCatalogScopeRef.current === scope ? executionContextError : "",
+    executionContexts: capabilityCatalogScopeRef.current === scope ? executionContexts : [],
+    executionContextsLoaded: capabilityCatalogScopeRef.current === scope && executionContextsLoaded && completedCapabilityReadKey === providerReadKey,
+    providerInterfaceError: providerReadScopeRef.current === scope ? providerInterfaceError : "",
+    providerInterfaces: providerReadScopeRef.current === scope ? providerInterfaces : [],
+    providerInterfacesLoaded: providerReadScopeRef.current === scope && providerInterfacesLoaded,
     providerInterfacesRefreshing,
+    providerUsageError: providerReadScopeRef.current === scope ? providerUsageError : "",
     refreshProviderInterfaces,
+    refreshProviderUsage,
     toolPresentations,
-    workerEnvironmentRooms,
+    workerEnvironmentRooms: capabilityCatalogScopeRef.current === scope ? workerEnvironmentRooms : [],
   };
 }

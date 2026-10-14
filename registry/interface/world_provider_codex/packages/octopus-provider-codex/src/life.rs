@@ -710,7 +710,17 @@ async fn codex_life(
                 }
                 if let Err(error) = crate::handler::composer_prediction::run(&ctx, driver.as_ref().unwrap(),
                     &runtime_auth.manager, &envelope, own.movement.seq.0).await {
-                    ctx.hand_admitted_failure(own.movement.seq.0, "composer_prediction_failed", serde_json::json!({"error":error})).await?;
+                    if error.retires_driver() {
+                        if error.result_admitted() {
+                            commit_main_reader(&mut reader, &own, &main_reader_progress)?;
+                        }
+                        finish_active_controls(&active_controls).await;
+                        control_task.abort();
+                        let _ = control_task.await;
+                        shutdown_driver(&ctx, &mut driver).await?;
+                        return Err(error.to_string());
+                    }
+                    ctx.hand_admitted_failure(own.movement.seq.0, "composer_prediction_failed", serde_json::json!({"error":error.to_string()})).await?;
                 }
                 commit_main_reader(&mut reader, &own, &main_reader_progress)?;
                 continue;

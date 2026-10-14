@@ -2,7 +2,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const {
   applyLocalApplicationPack,
   adoptLocalPackageUpdates,
@@ -10,6 +11,7 @@ const {
   inspectLocalPackageInstallation,
   readLocalPackageCatalog,
   readLocalPackageInstallation,
+  withLocalPackageInstallation,
   registerLocalPackageMutationGuard,
   repairLocalPackages,
   removeLocalPackages,
@@ -117,6 +119,19 @@ async function crashChild(mode, root) {
   const catalog = await readLocalPackageCatalog(roots);
   const currentPackage = packageRecord(catalog);
   assert.ok(currentPackage);
+  if (mode === "hold-read") {
+    await withLocalPackageInstallation({ ...roots, packageId: "application.test_provider" }, () => {
+      require("node:fs").writeSync(1, "paused\n"); process.kill(process.pid, "SIGSTOP");
+    });
+    throw new Error("package reader did not pause");
+  }
+  if (mode === "hold-live") {
+    await applyLocalApplicationPack({ ...roots, operationId: "held_install_001", packId: "test-pack", selectedRecommended: [],
+      expectedSourceDigests: { "application.test_provider": currentPackage.source_digest }, onProgress(progress) {
+        if (progress.phase === "copying") { require("node:fs").writeSync(1, "paused\n"); process.kill(process.pid, "SIGSTOP"); }
+      } });
+    throw new Error("live package preparation did not pause");
+  }
   if (mode.startsWith("update-")) {
     await adoptLocalPackageUpdates({ ...roots, onProgress(progress) {
       if (progress.phase === mode.slice(7)) process.kill(process.pid, "SIGKILL");
@@ -285,6 +300,52 @@ print(json.dumps(rows))
     assert.deepEqual(await fs.readFile(sibling), bytes);
     process.stdout.write(`APFS package clone fixture: ${JSON.stringify({ before, after })}\n`);
   } finally { nativeFiles.cloneFile = original; await fs.rm(root, { recursive: true, force: true }); }
+}
+
+async function concurrentUpdateFixture() {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-concurrent-update-")));
+  let child;
+  try {
+    const roots = await createFixture(root), id = "application.test_provider";
+    const source = path.join(roots.sourceRegistryRoot, "interface/world_test_provider/assets");
+    const active = path.join(roots.activeRegistryRoot, "interface/world_test_provider/assets");
+    await writeJson(path.join(source, "item.json"), { original: true });
+    child = spawn(process.execPath, [__filename, "--child", "hold-live", root], { stdio: ["ignore", "pipe", "pipe"] });
+    const exited = once(child, "exit");
+    assert.equal(await Promise.race([once(child.stdout, "data").then(([data]) => data.toString()),
+      exited.then(() => { throw new Error("package writer exited before its preparation boundary"); })]), "paused\n");
+    const pending = await transactionEntries(roots);
+    assert.equal(pending.length, 1);
+    await assert.rejects(readLocalPackageCatalog(roots), error => error.code === "package_maintenance_busy");
+    assert.deepEqual(await transactionEntries(roots), pending);
+    child.kill("SIGKILL"); await exited; child = null;
+    const current = packageRecord(await readLocalPackageCatalog(roots));
+    assert.deepEqual(await transactionEntries(roots), []);
+    await applyLocalApplicationPack({ ...roots, operationId: "resumed_install_001", packId: "test-pack", selectedRecommended: [], expectedSourceDigests: { [id]: current.source_digest } });
+    child = spawn(process.execPath, [__filename, "--child", "hold-read", root], { stdio: ["ignore", "pipe", "pipe"] });
+    const readExited = once(child, "exit");
+    assert.equal(await Promise.race([once(child.stdout, "data").then(([data]) => data.toString()),
+      readExited.then(() => { throw new Error("package reader exited before acquiring its snapshot"); })]), "paused\n");
+    const receiptFile = path.join(roots.stateRoot, "receipts", `${id}.json`), receiptBytes = await fs.readFile(receiptFile);
+    assert.equal(packageRecord(await readLocalPackageCatalog(roots)).receipt_state, "valid");
+    assert.equal((await readLocalPackageInstallation({ ...roots, packageId: id })).receipt_state, "valid");
+    await assert.rejects(adoptLocalPackageUpdates(roots), error => error.code === "package_maintenance_busy");
+    assert.deepEqual(await fs.readFile(receiptFile), receiptBytes);
+    assert.deepEqual(await transactionEntries(roots), []);
+    child.kill("SIGKILL"); await readExited; child = null;
+    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+    await fs.rm(source, { recursive: true }); await fs.writeFile(source, "replacement file\n");
+    await fs.mkdir(path.join(active, "local-empty"));
+    await assert.rejects(adoptLocalPackageUpdates(roots), /overlapping file\/directory ownership/);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(active, "item.json"))), { original: true });
+    await fs.rmdir(path.join(active, "local-empty"));
+    assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
+    assert.equal(await fs.readFile(active, "utf8"), "replacement file\n");
+    await fs.rm(source); await writeJson(path.join(source, "next.json"), { next: true });
+    assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(active, "next.json"))), { next: true });
+    assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
+  } finally { if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } await fs.rm(root, { recursive: true, force: true }); }
 }
 
 async function run() {
@@ -890,7 +951,8 @@ if (process.argv[2] === "--child") {
     process.exitCode = 1;
   });
 } else {
-  (process.argv[2] === "--update-baselines" ? updateBaselineFixture() : process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
+  (process.argv[2] === "--concurrent-update" ? concurrentUpdateFixture() : process.argv[2] === "--update-baselines" ? updateBaselineFixture() : process.argv[2] === "--consent-recipe" ? consentRecipeFixture() : process.argv[2] === "--clone-isolation" ? cloneIsolationFixture() : run()).then(async () => {
+    if (!process.argv[2]) await concurrentUpdateFixture();
     if (!process.argv[2]) await updateBaselineFixture();
     if (!process.argv[2]) await cloneIsolationFixture();
     if (!process.argv[2]) await require("./test-package-ownership.cjs").runPackageOwnership();

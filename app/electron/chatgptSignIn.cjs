@@ -12,6 +12,7 @@ function createChatgptSignIn(options) {
   let authBusy = false;
   let authGeneration = 0;
   let accountNotificationGeneration = 0;
+  let modelDiscovery = null;
   const logins = new Map();
 
   function nativeAuthStamp(codexHome) {
@@ -66,7 +67,8 @@ function createChatgptSignIn(options) {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const server = { child, binary, codexHome, authStamp, closed: false, nextId: 1, pending: new Map(), buffer: "", stderr: "", ready: null };
+    const server = { child, binary, codexHome, authStamp, closed: false, nextId: 1, pending: new Map(), buffer: "", stderr: "", ready: null,
+      accountSnapshot: null, accountReadSequence: 0, accountUpdateRead: null };
     appServer = server;
     const fail = (error) => {
       server.closed = true;
@@ -132,8 +134,7 @@ function createChatgptSignIn(options) {
         }
         if (message.method === "account/updated" && server === appServer && !server.closed
           && !authBusy && ![...logins.values()].some((login) => login.state === "pending")) {
-          accountNotificationGeneration += 1;
-          options.onAccountChanged?.();
+          verifyAccountUpdate(server, message.params);
         }
       }
     });
@@ -161,6 +162,7 @@ function createChatgptSignIn(options) {
     idleTimer = null;
     const server = appServer;
     appServer = null;
+    modelDiscovery = null;
     if (server && !server.closed) {
       server.closed = true;
       for (const waiter of server.pending.values()) {
@@ -178,6 +180,9 @@ function createChatgptSignIn(options) {
   }
 
   async function readAccount(server, refreshToken = false) {
+    const generation = authGeneration;
+    const authStamp = nativeAuthStamp(server.codexHome);
+    const sequence = ++server.accountReadSequence;
     const response = await server.request("account/read", { refreshToken });
     requireCurrentScope(server);
     if (!response || !Object.hasOwn(response, "account") || (response.account !== null
@@ -187,12 +192,58 @@ function createChatgptSignIn(options) {
     const native = response.account;
     if (native?.type === "chatgpt" && ((native.email != null && typeof native.email !== "string")
       || (native.planType != null && typeof native.planType !== "string"))) throw new Error("ChatGPT returned invalid account identity.");
-    return {
+    const value = {
       signedIn: native?.type === "chatgpt", authType: native?.type ?? null,
       email: native?.type === "chatgpt" ? native.email ?? null : null,
       planType: native?.type === "chatgpt" ? native.planType ?? null : null,
       credentialHome: server.codexHome, octopusHome: options.octopusHome?.() ?? null,
     };
+    if (sequence > (server.accountSnapshot?.sequence ?? 0)
+      && generation === authGeneration && authStamp === nativeAuthStamp(server.codexHome)) {
+      const previous = server.accountSnapshot;
+      server.accountSnapshot = { value, generation, authStamp, sequence };
+      if (previous && previous.generation === generation
+        && (previous.authStamp !== authStamp || JSON.stringify(previous.value) !== JSON.stringify(value))
+        && !authBusy && ![...logins.values()].some((login) => login.state === "pending")) {
+        accountNotificationGeneration += 1;
+        options.onAccountChanged?.();
+      }
+    }
+    return value;
+  }
+
+  function verifyAccountUpdate(server, notification) {
+    const previous = server.accountSnapshot;
+    const notificationGeneration = accountNotificationGeneration;
+    const previousRead = server.accountUpdateRead;
+    const read = (previousRead ? previousRead.catch(() => {}) : Promise.resolve()).then(async () => {
+      requireCurrentScope(server);
+      const value = await readAccount(server);
+      const authMode = notification?.authMode === "chatgptAuthTokens" ? "chatgpt" : notification?.authMode;
+      if (previous && previous.authStamp !== null && previous.authStamp === nativeAuthStamp(server.codexHome)
+        && previous.generation === authGeneration && JSON.stringify(previous.value) === JSON.stringify(value)
+        && authMode === value.authType && notification?.planType === value.planType) return;
+      if (notificationGeneration === accountNotificationGeneration) {
+        accountNotificationGeneration += 1;
+        options.onAccountChanged?.();
+      }
+    }).catch((error) => {
+      if (server === appServer && !server.closed && notificationGeneration === accountNotificationGeneration) {
+        accountNotificationGeneration += 1;
+        options.onAccountChanged?.();
+      }
+      throw error;
+    }).finally(() => {
+      if (server.accountUpdateRead === read) server.accountUpdateRead = null;
+      scheduleIdleStop();
+    });
+    server.accountUpdateRead = read;
+    void read.catch(() => {});
+  }
+
+  async function waitForAccountUpdates(server) {
+    while (server.accountUpdateRead) await server.accountUpdateRead;
+    requireCurrentScope(server);
   }
 
   async function account() {
@@ -318,6 +369,35 @@ function createChatgptSignIn(options) {
 
   async function models() {
     const server = await ensureAppServer();
+    const generation = authGeneration;
+    const authStamp = nativeAuthStamp(server.codexHome);
+    const before = await readAccount(server).finally(scheduleIdleStop);
+    await waitForAccountUpdates(server);
+    if (generation !== authGeneration || authStamp !== nativeAuthStamp(server.codexHome)) {
+      throw new Error("ChatGPT account changed while loading models. Refresh and try again.");
+    }
+    const notificationGeneration = accountNotificationGeneration;
+    if (!modelDiscovery || modelDiscovery.server !== server || modelDiscovery.generation !== generation
+      || modelDiscovery.authStamp !== authStamp || modelDiscovery.notificationGeneration !== notificationGeneration) {
+      const discovery = { server, generation, authStamp, notificationGeneration };
+      discovery.promise = readModels(server).then(async (result) => {
+        const after = await readAccount(server);
+        await waitForAccountUpdates(server);
+        requireCurrentScope(server);
+        if (generation !== authGeneration || authStamp !== nativeAuthStamp(server.codexHome)
+          || notificationGeneration !== accountNotificationGeneration || JSON.stringify(before) !== JSON.stringify(after)) {
+          throw new Error("ChatGPT account changed while loading models. Refresh and try again.");
+        }
+        return result;
+      }).finally(() => {
+        if (modelDiscovery === discovery) modelDiscovery = null;
+      });
+      modelDiscovery = discovery;
+    }
+    return modelDiscovery.promise;
+  }
+
+  async function readModels(server) {
     const result = [];
     const modelIds = new Set();
     const cursors = new Set();

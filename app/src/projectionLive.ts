@@ -3,6 +3,7 @@ import type { OctopusProjectionChange } from "./electron";
 
 let generation = 0;
 let structureGeneration = 0;
+let registryGeneration = 0;
 const initialProjectionChange: OctopusProjectionChange = { generation: 0, kind: "structure" };
 let projectionChange = initialProjectionChange;
 let attached = false;
@@ -19,9 +20,10 @@ function bump(next: unknown): void {
     : generation + 1;
   projectionChange = {
     generation,
-    kind: row.kind === "ledger" ? "ledger" : "structure",
+    kind: row.kind === "ledger" ? "ledger" : row.kind === "runs" ? "runs" : row.kind === "files" ? "files" : "structure",
   };
-  if (projectionChange.kind === "structure") structureGeneration = generation;
+  if (projectionChange.kind !== "ledger") structureGeneration = generation;
+  if (projectionChange.kind === "structure") registryGeneration = generation;
   for (const listener of [...listeners]) listener();
 }
 
@@ -73,6 +75,10 @@ export function currentProjectionStructureGeneration(): number {
   return structureGeneration;
 }
 
+export function currentProjectionRegistryGeneration(): number {
+  return registryGeneration;
+}
+
 export function currentProjectionChange(): OctopusProjectionChange {
   return projectionChange;
 }
@@ -89,6 +95,14 @@ export function useProjectionStructureGeneration(): number {
   return useSyncExternalStore(
     subscribeProjectionChanges,
     currentProjectionStructureGeneration,
+    () => 0,
+  );
+}
+
+export function useProjectionRegistryGeneration(): number {
+  return useSyncExternalStore(
+    subscribeProjectionChanges,
+    currentProjectionRegistryGeneration,
     () => 0,
   );
 }

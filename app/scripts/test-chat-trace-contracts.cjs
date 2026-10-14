@@ -886,9 +886,9 @@ assert.doesNotMatch(chatCapabilityCatalog, /projection\.interfaces\.list/);
 assert.match(chatWorkspace, /const startingNewTask = !turn\.runId;/);
 assert.match(chatWorkspace, /work_status: startingNewTask \? "submitting" : "working"/);
 assert.doesNotMatch(chatWorkspace, /Interface provenance projection is not ready/);
-assert.match(chatCapabilityCatalog, /capabilityCatalogProfileRef\.current !== accessProfile/);
+assert.match(chatCapabilityCatalog, /capabilityCatalogScopeRef\.current !== scope/);
 assert.doesNotMatch(chatCapabilityCatalog, /let cancelled = false;\s*setExecutionContextsLoaded\(false\);\s*setInterfaceRolesById\(null\);/);
-assert.match(electronProjection, /segments\[0\] === "state" && segments\[1\] === "runs"[\s\S]*?\? "structure" : null/);
+assert.match(electronProjection, /segments\[0\] === "state" && segments\[1\] === "runs"[\s\S]*?\? "runs" : null/);
 assert.match(electronProjection, /async function cachedEePolicyProjection\(\) \{[\s\S]*?while \(true\)[\s\S]*?build\.generation === policyProjectionGeneration/);
 assert.match(electronProjection, /const workerEnvironmentKind = stringValue\(formation\.worker_environment_kind\);[\s\S]*?validDirectCoordinates = workerEnvironmentKind === "process_session"/);
 

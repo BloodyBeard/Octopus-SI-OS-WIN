@@ -538,6 +538,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     "./ChatAttachmentCard": { ChatAttachmentStrip: empty },
     "../icon-glyphs/geometric-primitives": load("src/components/icon-glyphs/geometric-primitives.tsx"),
     "./useLocalDictation": { useLocalDictation: () => ({}) }, "../../toasts": { appToast: {} },
+    "./useComposerSuggestion": load("src/components/chat/useComposerSuggestion.ts"),
     "../../design-system/components": { ...menuComponents, OcDialog: empty },
     "../../design-system/OcDropdown": dropdown,
     "../../clientActions": commands,

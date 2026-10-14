@@ -457,12 +457,12 @@ function getProjectionStore(profile) {
           if (!win.isDestroyed()) {
             win.webContents.send("octopus:projection-changed", {
               generation,
-              kind: kind === "ledger" ? "ledger" : "structure",
+              kind: ["ledger", "runs", "files"].includes(kind) ? kind : "structure",
             });
           }
         }
         if (profile === "live") scheduleNativeDesktopPresentations();
-        if (profile === "live" && kind === "structure") {
+        if (profile === "live" && kind !== "ledger") {
           void cdpViewerManager?.revalidate();
           void nativeBrowserSurface?.revalidate();
           void processViewerManager?.revalidate();
@@ -3825,7 +3825,7 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
         },
         readTaskStatus: async (runId) => {
           if (resolveOctopusHome() !== octopusHome) throw new Error("Runtime Home changed before the task could be archived");
-          store.invalidate(false);
+          store.invalidate(false, "runs");
           const status = await store.read(projectionReadRequest("projection.operator.chats.status", { run_ids: [runId] }));
           return status.chats.find((row) => row.run_id === runId);
         },

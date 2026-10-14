@@ -247,7 +247,7 @@ declare global {
 
 export type OctopusProjectionChange = {
   generation: number;
-  kind: "ledger" | "structure";
+  kind: "ledger" | "runs" | "files" | "structure";
 };
 
 export type OctopusClientAttachmentSelectionRequest = {

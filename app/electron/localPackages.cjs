@@ -36,14 +36,11 @@ const REGISTRY_KINDS = new Set([
 const SOURCE_EXCLUDES = new Set([".DS_Store", ".git", "__pycache__", "node_modules", "target"]);
 const sourceSnapshotCache = new Map();
 const configurationValidators = new Map();
-const transactionTails = new Map();
 const packageMutationGuards = new Map();
 
 async function readLocalPackageCatalog(options) {
   const roots = normalizeRoots(options);
-  return withPackageStateLock(roots.stateRoot, async () => {
-    await ensurePackageState(roots);
-    await recoverLocalPackageTransactionsUnlocked(roots);
+  return withPackageStateRead(roots, async () => {
     const library = await loadLocalPackageLibrary(roots);
     const packages = [];
     for (const entry of library.packages) {
@@ -280,9 +277,7 @@ async function inspectLocalPackageDiagnostics(options) {
 async function withLocalPackageInstallation(options, operation) {
   if (typeof operation !== "function") throw new Error("local package installation reader requires an operation");
   const roots = normalizeRoots(options);
-  return withPackageStateLock(roots.stateRoot, async () => {
-    await ensurePackageState(roots);
-    await recoverLocalPackageTransactionsUnlocked(roots);
+  return withPackageStateRead(roots, async () => {
     const library = await loadLocalPackageLibrary(roots);
     const packageId = requiredId(options?.packageId, "packageId");
     const entry = requireLibraryPackage(library, packageId);
@@ -768,13 +763,31 @@ async function preparePackageUpdate(roots, manifest, source, state, resolutions 
       if (merged.projected) projectedFiles.set(relative, merged.projected);
     }
     const filePaths = new Set(files.map(file => snapshotRelativePath(file.relative_path)));
-    const directories = new Set(["", ...member.directories, ...active.directories]);
+    const baselineDirectories = new Set([""]);
+    for (const relative of baseline.keys()) {
+      const components = relative.split("/");
+      for (let length = 1; length < components.length; length += 1) baselineDirectories.add(components.slice(0, length).join("/"));
+    }
+    const fileAncestor = relative => {
+      const components = relative.split("/");
+      for (let length = components.length; length > 0; length -= 1) {
+        const candidate = components.slice(0, length).join("/");
+        if (filePaths.has(candidate)) return candidate;
+      }
+      return null;
+    };
+    const directories = new Set(["", ...member.directories]);
+    for (const directory of active.directories) {
+      const relative = snapshotRelativePath(directory);
+      if (fileAncestor(relative) && baselineDirectories.has(relative)) continue;
+      directories.add(relative);
+    }
     for (const relative of filePaths) {
       const components = relative.split("/");
       for (let length = 1; length < components.length; length += 1) directories.add(components.slice(0, length).join("/"));
     }
     for (const directory of directories) {
-      if (filePaths.has(directory)) throw new Error(`Installed package '${manifest.id}' has overlapping file/directory ownership at '${memberKey(member)}/${directory}'`);
+      if (fileAncestor(directory)) throw new Error(`Installed package '${manifest.id}' has overlapping file/directory ownership at '${memberKey(member)}/${directory}'`);
     }
     members.push({ ...member, files, directories: [...directories].sort(compareSnapshotPaths), projectedFiles,
       digest: snapshotDigest(files), contentDigest: snapshotDigest(files.map(file => {
@@ -3685,17 +3698,23 @@ function transactionPackageIds(journal) {
   ])].sort();
 }
 
-function withPackageStateLock(stateRoot, operation) {
-  const key = path.resolve(stateRoot);
-  const previous = transactionTails.get(key) ?? Promise.resolve();
-  let release;
-  const current = new Promise((resolve) => { release = resolve; });
-  const tail = previous.then(() => current);
-  transactionTails.set(key, tail);
-  return previous.then(operation).finally(() => {
-    release();
-    if (transactionTails.get(key) === tail) transactionTails.delete(key);
-  });
+async function withPackageStateRead(roots, operation) {
+  return withPackageStateLock(roots.stateRoot, async (acquireExclusive) => {
+    await ensurePackageState(roots);
+    if ((await fs.readdir(roots.transactionsRoot)).length) {
+      await acquireExclusive();
+      await recoverLocalPackageTransactionsUnlocked(roots);
+    }
+    return operation();
+  }, true);
+}
+
+function withPackageStateLock(stateRoot, operation, shared = false) {
+  return require("./clientFileLock.cjs").withClientFileLock({
+    directory: path.resolve(stateRoot), filename: "maintenance-lock.sqlite", shared,
+    busyCode: "package_maintenance_busy",
+    busyMessage: "Package files are in use by another client. Wait for the current read or update to finish and retry.",
+  }, operation);
 }
 
 module.exports = {

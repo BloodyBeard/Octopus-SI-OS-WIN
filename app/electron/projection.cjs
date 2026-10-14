@@ -115,6 +115,8 @@ function createProjectionStore(options) {
 
   let projectionGeneration = 1;
   let projectionStructureGeneration = 1;
+  let configurationProjectionGeneration = 1;
+  let configurationProjectionBuild = null;
   let projectionBuild = null;
   let projectionBuildPending = null;
   let policyProjectionBuild = null;
@@ -142,10 +144,12 @@ function createProjectionStore(options) {
     for (const root of projectionWatchRoots()) {
       if (projectionWatchers.has(root)) continue;
       try {
-        const watcher = require("node:fs").watch(root, { recursive: true }, (_event, filename) => {
+        const watcher = require("node:fs").watch(root, { recursive: true, persistent: false }, (_event, filename) => {
           const change = projectionTruthChange(filename);
           if (change === "policy") invalidateProjection(true);
           else if (change === "structure") invalidateProjection(false);
+          else if (change === "runs") invalidateProjection(false, "runs");
+          else if (change === "files") invalidateProjection(false, "files");
           else if (change === "ledger") signalLedgerProjectionChange();
         });
         watcher.on("error", (error) => {
@@ -291,10 +295,10 @@ function createProjectionStore(options) {
     if (segments.length === 0) return "structure";
     if (segments.length === 1 && segments[0] === "host.json") return "structure";
     if (segments[0] === "registry") {
-      return segments.length === 4 && segments[3].endsWith(".json") ? "policy" : null;
+      return segments.length <= 3 || (segments.length === 4 && segments[3].endsWith(".json")) ? "policy" : "files";
     }
     if (segments[0] === "state" && segments[1] === "runs") {
-      return segments.length === 3 && segments[2].endsWith(".json") ? "structure" : null;
+      return segments.length === 3 && segments[2].endsWith(".json") ? "runs" : null;
     }
     if (segments[0] === "state" && segments[1] === "ee_instances") {
       return segments.length === 3 && segments[2].endsWith(".json") ? "policy" : null;
@@ -305,13 +309,19 @@ function createProjectionStore(options) {
         : null;
     }
     if (segments[0] === "app-server-control") {
-      return segments.length === 2 ? "structure" : null;
+      return segments.length === 2 ? "runs" : null;
     }
-    if (segments[0] === "client" && segments[1] === "package-state") return "structure";
+    if (segments[0] === "client" && segments[1] === "package-state") {
+      if (segments.length === 3 && ["maintenance-lock.sqlite", "maintenance-lock.sqlite-journal", "maintenance-lock.sqlite-wal", "maintenance-lock.sqlite-shm"].includes(segments[2])) return null;
+      return "structure";
+    }
     if (segments[0] === "client" && segments[1] === "agents") {
       return segments.length === 3 && segments[2] === "catalog.json" ? "structure" : null;
     }
-    if (segments[0] === "client-state" && segments[1] === "workspace") return "structure";
+    if (segments[0] === "client-state" && segments[1] === "workspace") {
+      if (segments.length === 3 && /^transaction-lock\.sqlite(?:-journal|-wal|-shm)?$/.test(segments[2])) return null;
+      return "runs";
+    }
     if (segments[0] === "interfaces") {
       if (
         segments.length === 3
@@ -321,7 +331,7 @@ function createProjectionStore(options) {
       return segments[2] === "worker-environments"
         && segments.length === 5
         && ["worker_environment.json", "live_state.json"].includes(segments[4])
-        ? "structure"
+        ? "runs"
         : null;
     }
     return null;
@@ -336,7 +346,8 @@ function createProjectionStore(options) {
   }
 
   function scheduleProjectionBroadcast(kind, coalesce) {
-    if (kind === "structure") projectionBroadcastKind = "structure";
+    const priority = { ledger: 0, runs: 1, files: 2, structure: 3 };
+    if (priority[kind] > priority[projectionBroadcastKind]) projectionBroadcastKind = kind;
     if (!coalesce) {
       if (projectionBroadcastTimer) return;
       projectionBroadcastTimer = setTimeout(fireProjectionBroadcast, 120);
@@ -354,42 +365,49 @@ function createProjectionStore(options) {
     scheduleProjectionBroadcast("ledger", false);
   }
 
-  function invalidateProjection(policyChanged = true) {
+  function invalidateProjection(policyChanged = true, kind = "structure") {
     projectionGeneration += 1;
     projectionStructureGeneration += 1;
+    if (kind !== "runs") configurationProjectionGeneration += 1;
     if (policyChanged) {
       policyProjectionGeneration += 1;
     }
     projectionBuild = null;
-    scheduleProjectionBroadcast("structure", true);
+    scheduleProjectionBroadcast(kind, true);
+  }
+
+  function fileProjectionScope(repoRoot) {
+    return JSON.stringify([repoRoot, octopusHome(), resolveSourceRegistry(), resolveLocalPackageRegistry(), resolveLocalPackageLibrary()]);
   }
 
   async function cachedFileProjection(repoRoot, includeLedger) {
     ensureProjectionWatchers();
-    const structureGeneration = projectionStructureGeneration;
-    let promise;
-    if (projectionBuild && projectionBuild.structureGeneration === structureGeneration && projectionBuild.repoRoot === repoRoot) {
-      promise = projectionBuild.promise;
-    } else if (projectionBuildPending?.repoRoot === repoRoot) {
-      promise = projectionBuildPending.promise;
-    } else {
-      promise = buildFileProjection(repoRoot);
-      const build = { structureGeneration, repoRoot, promise };
-      projectionBuild = build;
-      projectionBuildPending = build;
-      const settled = () => {
-        if (projectionBuildPending !== build) return;
-        projectionBuildPending = null;
-        if (structureGeneration !== projectionStructureGeneration) scheduleProjectionBroadcast("structure", true);
-      };
-      void promise.then(settled, settled);
-      promise.catch(() => {
-        if (projectionBuild && projectionBuild.promise === promise) projectionBuild = null;
-      });
+    const scope = fileProjectionScope(repoRoot);
+    for (;;) {
+      let build;
+      if (projectionBuild && projectionBuild.structureGeneration === projectionStructureGeneration && projectionBuild.scope === scope) {
+        build = projectionBuild;
+      } else if (projectionBuildPending?.scope === scope) {
+        build = projectionBuildPending;
+      } else {
+        const promise = buildFileProjection(repoRoot);
+        build = { structureGeneration: projectionStructureGeneration, scope, promise };
+        projectionBuild = build;
+        projectionBuildPending = build;
+        const settled = () => {
+          if (projectionBuildPending === build) projectionBuildPending = null;
+        };
+        void promise.then(settled, settled);
+        void promise.catch(() => {
+          if (projectionBuild === build) projectionBuild = null;
+        });
+      }
+      const projection = await build.promise;
+      if (scope !== fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during read");
+      if (build.structureGeneration !== projectionStructureGeneration) continue;
+      if (!includeLedger) return projection;
+      return refreshLedgerProjection(projection);
     }
-    const projection = await promise;
-    if (!includeLedger) return projection;
-    return refreshLedgerProjection(projection);
   }
 
   async function refreshLedgerProjection(projection) {
@@ -2223,13 +2241,33 @@ function createProjectionStore(options) {
     };
   }
 
-  async function buildFileProjection(repoRoot) {
+  async function cachedConfigurationProjection(repoRoot) {
+    const scope = fileProjectionScope(repoRoot);
+    for (;;) {
+      if (scope !== fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during configuration read");
+      let build = configurationProjectionBuild;
+      if (!build || build.scope !== scope) {
+        build = { scope, generation: configurationProjectionGeneration, promise: buildConfigurationProjection(repoRoot) };
+        configurationProjectionBuild = build;
+      }
+      try {
+        const projection = await build.promise;
+        if (scope !== fileProjectionScope(repoRoot)) throw new Error("Projection Home changed during configuration read");
+        if (build.generation === configurationProjectionGeneration) return projection;
+      } catch (error) {
+        if (build.generation === configurationProjectionGeneration) {
+          if (configurationProjectionBuild === build) configurationProjectionBuild = null;
+          throw error;
+        }
+      }
+      if (configurationProjectionBuild === build) configurationProjectionBuild = null;
+    }
+  }
+
+  async function buildConfigurationProjection(repoRoot) {
     const warnings = projectionWatchWarnings();
     const homeRoot = octopusHome();
     const durableRoot = resolveDurableRoot();
-    const cachedLedger = ledgerProjectionSnapshot?.durableRoot === durableRoot
-      ? ledgerProjectionSnapshot
-      : null;
     const registryRoot = path.join(homeRoot, "registry");
     const stateRoot = path.join(homeRoot, "state");
     const runRecordsRoot = path.join(stateRoot, "runs");
@@ -2282,18 +2320,6 @@ function createProjectionStore(options) {
       clientAgentCatalogError = String(error?.message ?? error);
       warnings.push(clientAgentCatalogError);
     }
-    let workspaceSetup;
-    try {
-      workspaceSetup = await readWorkspaceSetupState({
-        octopusHomeRoot: homeRoot,
-        registryRoot,
-      });
-      warnings.push(...arrayValue(workspaceSetup.errors));
-    } catch (error) {
-      const message = String(error?.message ?? error);
-      workspaceSetup = { status: "degraded", receipt: null, errors: [message] };
-      warnings.push(message);
-    }
     const applicationPackages = await readApplicationPackageCatalog(
       registryRoot,
       localPackageRegistryRoot,
@@ -2311,8 +2337,6 @@ function createProjectionStore(options) {
         return [...identities].map((identity) => [identity, row]);
       })),
     ]));
-    const runRecordProjection = await readRunRecords(runRecordsRoot, warnings);
-    const runRecords = runRecordProjection.records;
     const eeInstances = await readEeInstanceRecords(path.join(stateRoot, "ee_instances"), warnings);
     let eePolicyProjection = { environments: [], issues: [] };
     let eePolicyProjectionError = "";
@@ -2323,11 +2347,6 @@ function createProjectionStore(options) {
       eePolicyProjectionError = String(error?.message ?? error);
       warnings.push(eePolicyProjectionError);
     }
-    const workerEnvironments = await readWorkerEnvironmentRecords(
-      homeRoot,
-      warnings,
-      descriptorIndexes.worker_environment_kind,
-    );
     const operatorChatProtocol = await readOperatorChatProtocol(registryRoot);
     return {
       repoRoot,
@@ -2339,16 +2358,45 @@ function createProjectionStore(options) {
       stateRoot,
       runRecordsRoot,
       durableRoot,
-      generatedAt: new Date().toISOString(),
-      generation: projectionGeneration,
       descriptors,
       localPackages,
       clientAgentCatalog,
       clientAgentCatalogError,
-      workspaceSetup,
       applicationPackages,
       descriptorIndexes,
       operatorChatProtocol,
+      eeInstances,
+      eePolicyProjection,
+      eePolicyProjectionError,
+      hostRootRefs,
+      hostManifestError,
+      warnings,
+    };
+  }
+
+  async function buildFileProjection(repoRoot) {
+    const configuration = await cachedConfigurationProjection(repoRoot);
+    const warnings = [...configuration.warnings];
+    const runRecordProjection = await readRunRecords(configuration.runRecordsRoot, warnings);
+    let workspaceSetup;
+    try {
+      workspaceSetup = await readWorkspaceSetupState({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
+      warnings.push(...arrayValue(workspaceSetup.errors));
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      workspaceSetup = { status: "degraded", receipt: null, errors: [message] };
+      warnings.push(message);
+    }
+    const workerEnvironments = await readWorkerEnvironmentRecords(configuration.octopusHome, warnings, configuration.descriptorIndexes.worker_environment_kind);
+    const cachedLedger = ledgerProjectionSnapshot?.durableRoot === configuration.durableRoot
+      ? ledgerProjectionSnapshot
+      : null;
+    return {
+      ...configuration,
+      workspaceSetup,
+      workerEnvironments,
+      generatedAt: new Date().toISOString(),
+      generation: projectionGeneration,
       ledgerRows: cachedLedger?.rows ?? [],
       ledgerRowsByRunSources: cachedLedger?.rowsByRunSources ?? [],
       invalidLedgerRows: cachedLedger?.invalidRows ?? [],
@@ -2363,14 +2411,8 @@ function createProjectionStore(options) {
       operatorChatStatusInitialized: false,
       operatorChatStatusRefreshTail: Promise.resolve(),
       operatorChatTurnStateCache: new Map(),
-      runRecords,
+      runRecords: runRecordProjection.records,
       invalidRunRecords: runRecordProjection.invalidRecords,
-      eeInstances,
-      eePolicyProjection,
-      eePolicyProjectionError,
-      workerEnvironments,
-      hostRootRefs,
-      hostManifestError,
       warnings,
     };
   }
@@ -8327,6 +8369,7 @@ function createProjectionStore(options) {
       projectionBroadcastKind = "ledger";
       projectionBuild = null;
       projectionBuildPending = null;
+      configurationProjectionBuild = null;
       ledgerProjectionSnapshot = null;
       ledgerCursors.clear();
       resolvedArtifactPayloads.clear();

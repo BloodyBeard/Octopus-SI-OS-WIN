@@ -123,3 +123,22 @@ test("durable queue claims and submission restoration preserve the selected tier
   assert.equal(restored.serviceTier, "ultrafast");
   assert.equal(item.status, "queued");
 });
+
+test("new Home messages read current JSON settings while queued messages and task choices stay exact", async () => {
+  let run = { runId: "home", clientSurfaceRole: "home", writable: true, providerInterfaceId: "provider", providerModel: "model", reasoningEffort: "xhigh", serviceTier: "ultrafast" };
+  let stored = [], submitted;
+  const api = functions("src/components/chat/useChatWorkspace.ts", ["beginSubmission", "currentHomeProviderSelection"], {
+    loadChatRuns: async () => [run], deliveryScopeCurrent: () => true, activeRunIdRef: { current: "home" }, queueOwner: { id: "owner", active: true },
+    replaceQueuedTurns: async update => { stored = update(stored); }, consumeDraft: () => {}, resetInputHistory: () => {}, executeTurnSequence: async value => { submitted = value; },
+  });
+  const draft = { runId: "home", clientSurfaceRole: "home", messageId: "first", text: "Draft", attachments: [], providerModel: "old-model", reasoningEffort: "xhigh", serviceTier: "priority" };
+  run = { ...run, reasoningEffort: "low" };
+  await api.beginSubmission(draft);
+  assert.deepEqual([stored[0].providerModel, stored[0].reasoningEffort, stored[0].serviceTier], ["model", "low", "ultrafast"]);
+  await api.beginSubmission({ ...draft, queueId: "already-queued" });
+  assert.equal(submitted.reasoningEffort, "xhigh");
+  await api.beginSubmission({ ...draft, clientSurfaceRole: "task", messageId: "task-choice" });
+  assert.equal(submitted.providerModel, "old-model");
+  run = { ...run, archived: true };
+  await assert.rejects(api.beginSubmission({ ...draft, messageId: "archived" }), /configuration is unavailable/);
+});

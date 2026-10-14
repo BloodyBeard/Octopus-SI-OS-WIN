@@ -72,7 +72,7 @@ export function ProviderModelPicker({
   const tiers = activeProvider && activeModel ? providerServiceTiers(activeProvider, activeModel.model) : [];
   const selectedTier = activeProvider ? providerSelectedServiceTier(activeProvider, providerModel, serviceTier) : "default";
   const tierLabel = tiers.find((tier) => tier.id === selectedTier)?.name ?? (selectedTier === "default" ? "Standard" : selectedTier + " · unavailable");
-  const disabled = options.length === 0;
+  const disabled = options.length === 0 && !onRefreshModels;
   const catalogPending = Boolean(activeProvider && !activeProvider.modelCatalogError && providerModels(activeProvider).length === 0);
   const unavailableLabel = loading || catalogPending ? "Loading…" : providerModel ? providerModel + " · unavailable" : "Select model";
   const modelLabel = activeProvider && activeModel ? displayName({ provider: activeProvider, model: activeModel }, options) : unavailableLabel;
@@ -190,12 +190,13 @@ export function ProviderModelPicker({
     if (!open) return;
     advancedPanel.current?.querySelector(".provider-model-list")?.scrollTo({ top: 0 });
     if (keyboardOpen.current) {
-      const selected = view === "advanced" ? menuRef.current?.querySelector<HTMLElement>("[role=menuitemradio][aria-checked=true]") : null;
-      const first = menuRef.current?.querySelector<HTMLElement>(view === "advanced" ? "[role=menuitemradio]" : "[data-model-picker-view-toggle]");
-      (selected ?? first)?.focus({ preventScroll: view !== "advanced" });
+      const panel = view === "advanced" ? advancedPanel.current : simplePanel.current;
+      const selected = view === "advanced" ? panel?.querySelector<HTMLElement>("[role=menuitemradio][aria-checked=true]:not(:disabled)") : null;
+      const first = panel?.querySelector<HTMLElement>(view === "advanced" ? "[role=menuitemradio]:not(:disabled), [role=menuitem]:not(:disabled)" : "[data-model-picker-view-toggle]");
+      (selected ?? first ?? menuRef.current)?.focus({ preventScroll: view !== "advanced" });
     }
     else menuRef.current?.focus({ preventScroll: true });
-  }, [open, view]);
+  }, [loading, open, view]);
   useEffect(() => {
     if (!open && !tooltip) return;
     const touchOutside = () => closeMenu(false);
@@ -255,7 +256,8 @@ export function ProviderModelPicker({
   };
   const menuKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey) return;
-    const items = [...event.currentTarget.querySelectorAll<HTMLElement>(view === "advanced" ? "[role=menuitemradio], [data-speed-row]" : "[role=menuitem], [role=slider]")];
+    const panel = view === "advanced" ? advancedPanel.current : simplePanel.current;
+    const items = [...(panel?.querySelectorAll<HTMLElement>(view === "advanced" ? "[role=menuitemradio]:not(:disabled), [role=menuitem]:not(:disabled)" : "[role=menuitem]:not(:disabled), [role=slider]") ?? [])];
     const current = items.indexOf(document.activeElement as HTMLElement);
     if (event.key === "Tab") {
       event.preventDefault();
@@ -353,7 +355,13 @@ export function ProviderModelPicker({
           : null}
       </div></div><div ref={advancedPanel} className="provider-model-view-panel" data-active={view === "advanced"} aria-hidden={view !== "advanced"} inert={view !== "advanced"} data-provider-picker-panel="advanced">
       <div className="provider-model-list">
-        <div className="provider-model-section-label">Select model</div>
+        <div className="provider-model-section-label">{options.length ? "Select model" : loading ? "Loading models…" : "No models available"}</div>
+        {!options.length && onRefreshModels ? <OcMenuItem role="menuitem" tabIndex={-1}
+          label="Retry loading models" disabled={loading} onClick={onRefreshModels}
+          onKeyDown={(event) => {
+            if (!loading && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onRefreshModels(); }
+          }}
+          onPointerMove={focusHoveredItem} onPointerLeave={leaveItem} /> : null}
         {options.map((option) => <ShellTooltip key={JSON.stringify([option.provider.id, option.model.model])}
           label={option.provider.id + " · " + option.model.model} disabled={view !== "advanced"}>
         <button type="button" role="menuitemradio" className="provider-model-option"

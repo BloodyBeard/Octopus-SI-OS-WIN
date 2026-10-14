@@ -98,10 +98,11 @@ function resolveEnvironment(options = {}) {
 function createEnvironment(options = {}) {
   const resolved = resolveEnvironment(options);
   let account = null;
+  let statusProjection = null;
   let signInHandler = options.openExternal ?? options.ui?.openExternal;
   const environment = {
     ...resolved,
-    async status(request = {}) { return status(environment, request); },
+    async status(request = {}) { return status(environment, request, () => statusProjection ??= projectionStore(environment)); },
     async start(request = {}) { return start(environment, request); },
     async setup(request = {}) { return require("./setup.cjs").setupEnvironment(environment, request); },
     accountClient(request = {}) {
@@ -123,13 +124,15 @@ function createEnvironment(options = {}) {
     close() {
       if (account) account.dispose();
       account = null;
+      statusProjection?.close();
+      statusProjection = null;
     },
   };
   privateEnvironments.set(environment, privateEnvironments.get(resolved));
   return environment;
 }
 
-async function status(environment, options = {}) {
+async function status(environment, options = {}, currentProjection) {
   const host = runtimeHost(environment);
   const observed = await host.probe();
   const result = {
@@ -141,7 +144,7 @@ async function status(environment, options = {}) {
   if (!observed.ready) return result;
   let interfaceId = options.interfaceId;
   if (interfaceId === undefined) {
-    const store = projectionStore(environment);
+    const store = currentProjection ? currentProjection() : projectionStore(environment);
     try {
       const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
       if (scope.status === "invalid") {
@@ -156,7 +159,7 @@ async function status(environment, options = {}) {
     } catch (error) {
       result.reason = `Home scope cannot be read: ${error.message}`;
       return result;
-    } finally { store.close(); }
+    } finally { if (!currentProjection) store.close(); }
   }
   if (typeof interfaceId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(interfaceId)) throw new Error("Home endpoint requires an exact interface id.");
   result.endpoint = privateEnvironments.get(environment)?.configuredEndpoint

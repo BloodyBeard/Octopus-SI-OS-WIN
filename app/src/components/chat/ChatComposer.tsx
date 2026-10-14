@@ -27,6 +27,7 @@ type Props = {
   attachments: ChatAttachment[];
   providerInterfaces: OctopusProviderInterface[];
   providerInterfacesLoaded?: boolean;
+  providerInterfacesRefreshing?: boolean;
   activeProvider?: OctopusProviderInterface;
   providerInterfaceId: string;
   providerModel: string;
@@ -95,6 +96,7 @@ export function ChatComposer({
   attachments,
   providerInterfaces,
   providerInterfacesLoaded = true,
+  providerInterfacesRefreshing = false,
   activeProvider,
   providerInterfaceId,
   providerModel,
@@ -549,7 +551,7 @@ export function ChatComposer({
                             activeProvider={activeProvider}
                             interfaceLocked={executionContextLocked === true}
                             listenToGlobalCommands={listenToGlobalCommands}
-                            loading={!providerInterfacesLoaded}
+                            loading={!providerInterfacesLoaded || providerInterfacesRefreshing}
                             onModelChange={onProviderModelChange}
                             onRefreshModels={onProviderModelsRefresh}
                             onReasoningEffortChange={onReasoningEffortChange}

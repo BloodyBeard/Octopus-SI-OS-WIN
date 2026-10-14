@@ -946,6 +946,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           providerModel={workspace.providerModel}
           providerInterfaces={workspace.providerInterfaces}
           providerInterfacesLoaded={workspace.providerInterfacesLoaded}
+          providerInterfacesRefreshing={workspace.providerInterfacesRefreshing}
           projectedFileSources={projectedFileSources}
           pausedQueueSubmissionCount={workspace.pausedQueueSubmissionCount}
           reasoningEffort={workspace.reasoningEffort}

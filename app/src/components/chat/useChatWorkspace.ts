@@ -175,7 +175,9 @@ export function useChatWorkspace(
     providerInterfaces,
     providerInterfacesLoaded,
     providerInterfacesRefreshing,
+    providerUsageError,
     refreshProviderInterfaces,
+    refreshProviderUsage,
     toolPresentations,
     workerEnvironmentRooms,
   } = useChatCapabilityCatalog(accessProfile, enabled, runtimeReady, runtimeHome);
@@ -232,6 +234,7 @@ export function useChatWorkspace(
   const [loadingRuns, setLoadingRuns] = useState(false);
   const [runsLoaded, setRunsLoaded] = useState(false);
   const [activeRunId, setActiveRunId] = useState("");
+  const projectedActiveRun = useMemo(() => runs.find((run) => run.runId === activeRunId) ?? null, [activeRunId, runs]);
   const [error, setError] = useState("");
   const {
     agentPresetId,
@@ -257,10 +260,10 @@ export function useChatWorkspace(
     onDragOver,
     onFilesPicked,
     providerInterfaceId,
-    providerModel,
+    providerModel: draftProviderModel,
     readDraft,
-    reasoningEffort,
-    serviceTier,
+    reasoningEffort: draftReasoningEffort,
+    serviceTier: draftServiceTier,
     removeAttachment,
     resetInputHistory,
     saveCurrentDraft,
@@ -296,6 +299,9 @@ export function useChatWorkspace(
     },
     storageScope: runtimeHome ? JSON.stringify([runtimeHome, storageScope]) : "",
   });
+  const providerModel = clientSurfaceRole === "home" ? projectedActiveRun?.providerModel ?? "" : draftProviderModel;
+  const reasoningEffort = clientSurfaceRole === "home" ? projectedActiveRun?.reasoningEffort ?? "" : draftReasoningEffort;
+  const serviceTier = clientSurfaceRole === "home" ? projectedActiveRun?.serviceTier ?? "" : draftServiceTier;
   const composerDraftRef = useRef({ runId: activeRunId, text, attachments });
   composerDraftRef.current = { runId: activeRunId, text, attachments };
   const initialDraft = readDraft("");
@@ -643,7 +649,6 @@ export function useChatWorkspace(
     };
   }, [accessProfile, enabled, endpoint]);
 
-  const projectedActiveRun = useMemo(() => runs.find((run) => run.runId === activeRunId) ?? null, [activeRunId, runs]);
   const inFlightTurnControlTarget = inFlightTurnControlTargets[activeRunId] ?? null;
   const activeRun = projectedActiveRun;
   const activeTurnControlTarget = inFlightTurnControlTarget ?? (
@@ -698,7 +703,7 @@ export function useChatWorkspace(
         mergeLiveRunMessages(runId, visible);
         const terminalReceived = reconcileRunReceipt(runId, artifacts);
         if (artifacts.some((artifact) => artifact.event_kind === "rate_limits")) {
-          void refreshProviderInterfaces();
+          void refreshProviderUsage();
         }
         if (terminalReceived) {
           void refreshMessages(runId);
@@ -730,7 +735,7 @@ export function useChatWorkspace(
     mergeLiveRunMessages,
     reconcileRunReceipt,
     refreshMessages,
-    refreshProviderInterfaces,
+    refreshProviderUsage,
     refreshRuns,
   ]);
 
@@ -1180,7 +1185,7 @@ export function useChatWorkspace(
                   ? "Choose an Agent before sending."
                 : providerInterfacesRefreshing
                   ? "Refreshing available models…"
-                : !providerDeclared
+                : providerInterfaceError || !providerDeclared
                   ? !providerInterfacesLoaded
                   ? "Loading model interfaces…"
                     : providerInterfaceError || providerInterfaces.find((provider) => provider.id === resolvedProviderInterfaceId)?.modelCatalogError || `${resolvedProviderInterfaceId || "Provider interface"} does not admit model '${providerModel || "not selected"}' for this task.`
@@ -1196,7 +1201,7 @@ export function useChatWorkspace(
                       : "";
   const editingQueuedTurn = queuedTurns.find((item) => item.runKey === activeRunKey && item.status === "editing" && item.messageId === draftMessageId && item.editOwner === queueOwner.id);
   const canSubmit = !activeRun?.archived && (Boolean(editingQueuedTurn && queueReady && hasSubmissionPayload) || submitBlockReason === "");
-  const canQueue = enabled && runtimeReady && queueReady && activeRun?.writable === true && canQueueOnActiveRun && hasSubmissionPayload && providerDeclared && !providerInterfacesRefreshing && reasoningSelectionValid && serviceTierSelectionValid;
+  const canQueue = enabled && runtimeReady && queueReady && activeRun?.writable === true && canQueueOnActiveRun && hasSubmissionPayload && providerDeclared && !providerInterfacesRefreshing && !providerInterfaceError && reasoningSelectionValid && serviceTierSelectionValid;
 
   function selectRun(runId: string) {
     if (runId === activeRunIdRef.current) return;
@@ -1932,6 +1937,7 @@ export function useChatWorkspace(
       createdAtMs: Date.now(),
       status: "queued",
     };
+    if (clientSurfaceRole === "home") Object.assign(item, await currentHomeProviderSelection(activeRun.runId));
     await replaceQueuedTurns((current) => current.some((candidate) => candidate.messageId === item.messageId) ? current : [...current, item]);
     consumeDraft(activeRunId, body, item.attachments);
     resetInputHistory();
@@ -2219,7 +2225,7 @@ export function useChatWorkspace(
                 });
               }
               if (artifacts.some((artifact) => artifact.event_kind === "rate_limits")) {
-                void refreshProviderInterfaces();
+                void refreshProviderUsage();
               }
               const incoming = artifacts.map((artifact) => {
                 const projected = liveArtifactMessage(
@@ -2480,6 +2486,9 @@ export function useChatWorkspace(
   }
 
   async function beginSubmission(submission: ChatTurnSubmission, releaseComposerAction?: () => void) {
+    if (!submission.queueId && submission.clientSurfaceRole === "home") {
+      submission = { ...submission, ...await currentHomeProviderSelection(submission.runId) };
+    }
     const queueId = submission.queueId ?? `submit_${submission.messageId}`;
     await replaceQueuedTurns((items) => items.some((item) => item.id === queueId) ? items : [...items, {
       ...submission, id: queueId, intent: "turn", status: "queued", owner: queueOwner.id, hadAttachments: submission.attachments.length > 0,
@@ -2491,6 +2500,22 @@ export function useChatWorkspace(
     // The durable intent is stored; its longer-lived submission lock owns delivery now.
     releaseComposerAction?.();
     await executeTurnSequence(submission);
+  }
+
+  async function currentHomeProviderSelection(runId: string) {
+    const run = (await loadChatRuns()).find((candidate) => candidate.runId === runId);
+    if (!deliveryScopeCurrent() || !queueOwner.active || activeRunIdRef.current !== runId) {
+      throw new Error("Home changed while reading its configuration. Your message has not been sent.");
+    }
+    if (!run || run.clientSurfaceRole !== "home" || !run.writable || run.archived) {
+      throw new Error("Home configuration is unavailable. Your message has not been sent.");
+    }
+    return {
+      providerInterfaceId: run.providerInterfaceId,
+      providerModel: run.providerModel,
+      reasoningEffort: run.reasoningEffort,
+      serviceTier: run.serviceTier ?? "",
+    };
   }
 
   async function resolvePausedQueueSubmission(resolution: "cancel" | "clear" | "send") {
@@ -2962,7 +2987,7 @@ export function useChatWorkspace(
     editUserMessageInNewTask,
     endpoint,
     eeId,
-    error,
+    error: error || providerUsageError,
     executionContextError,
     fullAccessUnavailableReason,
     executionContexts,

@@ -88,7 +88,7 @@ function octopusClientServer(): Plugin {
             for (const client of projectionClients.get(profile) ?? []) {
               client.write(`data: ${JSON.stringify({
                 generation,
-                kind: kind === "ledger" ? "ledger" : "structure",
+                kind: ["ledger", "runs", "files"].includes(kind) ? kind : "structure",
               })}\n\n`);
             }
           },

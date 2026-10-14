@@ -19,7 +19,6 @@ const {
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
-const transactionTails = new Map();
 const runRecordValidator = new Ajv({ allErrors: true, strict: false, logger: false }).compile(runRecordSchema);
 
 async function initializeWorkspace(options) {
@@ -4669,16 +4668,11 @@ function reportProgress(listener, operationId, phase, percent, label) {
 }
 
 function withTransactionLock(stateRoot, operation) {
-  const key = path.resolve(stateRoot);
-  const previous = transactionTails.get(key) ?? Promise.resolve();
-  let release;
-  const current = new Promise((resolve) => { release = resolve; });
-  const tail = previous.then(() => current);
-  transactionTails.set(key, tail);
-  return previous.then(operation).finally(() => {
-    release();
-    if (transactionTails.get(key) === tail) transactionTails.delete(key);
-  });
+  return require("./clientFileLock.cjs").withClientFileLock({
+    directory: path.resolve(stateRoot), filename: "transaction-lock.sqlite", waitMs: 30000,
+    busyCode: "workspace_transaction_busy",
+    busyMessage: "Another client is still changing this workspace. Wait for it to finish and retry.",
+  }, operation);
 }
 
 module.exports = {

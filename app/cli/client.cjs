@@ -233,7 +233,7 @@ function createClient(environment, dependencies = {}) {
         attachments: consumed,
       });
       assertAdmission(result.messageVerdict);
-      store.invalidate();
+      store.invalidate(!current, current ? "runs" : "structure");
       return { ...result, cursor: result.outboundCursor, afterSeq: result.messageVerdict.admitted.seq };
     } catch (error) {
       failure = error;
@@ -311,7 +311,7 @@ function createClient(environment, dependencies = {}) {
       action: "stop", controlId: `control_${randomUUID().replaceAll("-", "")}`, timeoutMs: 45_000,
     });
     assertAdmission(result.verdict);
-    store.invalidate();
+    store.invalidate(false, "runs");
     return result;
   }
 
@@ -386,7 +386,7 @@ function createClient(environment, dependencies = {}) {
       ...submitOptions, projectionStore: () => store,
       authorizeSubmission: (input) => chat.assertGenericOperatorChatArtifactAllowed(input),
     }, { interfaceId, runId: current.id, label, payload, timeoutMs: 45_000 });
-    store.invalidate();
+    store.invalidate(false, "runs");
     return result;
   }
 
@@ -402,7 +402,7 @@ function createClient(environment, dependencies = {}) {
       commitClientAuthoring: (plan) => commitProjectionClientAuthoring(env.home, registryRoot, plan, { retirementBarrier }),
       withTaskAuthoringLock: chat.withOperatorRunAuthoringLock,
       readTaskStatus: async (id) => {
-        store.invalidate(false);
+        store.invalidate(false, "runs");
         return (await read("projection.operator.chats.status", { run_ids: [id] })).chats.find((row) => row.run_id === id);
       },
       releaseTaskWorkerEnvironments: (input) => chat.releaseOperatorTaskWorkerEnvironments(submitOptions, input),

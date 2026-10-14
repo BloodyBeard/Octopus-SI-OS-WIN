@@ -57,7 +57,10 @@ function nativeFixture(env = {}) {
       calls.push({ ...request, home: options.env.CODEX_HOME });
       if (request.id === undefined) return;
       let result = {}, error;
-      if (request.method === "account/read") result = { account: child.cachedAccount, requiresOpenaiAuth: true };
+      if (request.method === "account/read") {
+        result = { account: child.cachedAccount, requiresOpenaiAuth: true };
+        if (control.accountError) error = { message: control.accountError };
+      }
       if (request.method === "account/rateLimits/read") {
         control.quotaHook?.(child);
         result = { rateLimits: limit, rateLimitsByLimitId: { core: limit, extra: { ...limit, limitId: "extra", primary: null } } };
@@ -65,14 +68,18 @@ function nativeFixture(env = {}) {
       }
       if (request.method === "account/login/start") result = { type: "chatgpt", loginId: `login-${children.length}`, authUrl: "https://example.test/login" };
       if (request.method === "account/login/cancel") result = { status: "canceled" };
+      if (request.method === "model/list") result = { data: [{ model: "model", displayName: "Model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }], nextCursor: null };
       if (request.method === "account/logout" && !control.refuseLogout) { persisted = child.cachedAccount = null; stamp += 1n; }
-      queueMicrotask(() => child.stdout.emit("data", JSON.stringify({ id: request.id, ...(error ? { error } : { result }) }) + "\n"));
+      const reply = () => child.stdout.emit("data", JSON.stringify({ id: request.id, ...(error ? { error } : { result }) }) + "\n");
+      if (request.method === "account/read" && control.accountReply) control.accountReply(reply);
+      else if (request.method === "model/list" && control.modelReply) control.modelReply(reply);
+      else queueMicrotask(reply);
     } };
     children.push(child);
     return child;
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgptSignIn.cjs"), "utf8"), {
-    module, require: (name) => name === "node:fs" ? fileSystem : name === "node:child_process" ? { spawn } : require(name),
+    module, require: (name) => name === "node:fs" ? fileSystem : name === "node:child_process" ? { spawn } : require(require.resolve(name, { paths: [path.join(__dirname, "../electron")] })),
     process: { env }, URL, setTimeout, clearTimeout,
   });
   const client = module.exports.createChatgptSignIn({ codexBinary: () => "/fixture/codex", codexHome: () => home,
@@ -99,6 +106,77 @@ test("native account discovery owns its client identity and credential Home", as
     assert.equal(inherited.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, "other-client");
     assert.equal(fixture.calls.find((call) => call.method === "initialize").params.clientInfo.name, env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE);
   } finally { fixture.client.dispose(); }
+});
+
+test("simultaneous catalogue reads share discovery and account changes invalidate pending results", async () => {
+  const fixture = nativeFixture(), { client } = fixture;
+  const replies = [];
+  fixture.control.modelReply = reply => replies.push(reply);
+  const count = () => fixture.calls.filter(call => call.method === "model/list").length;
+  try {
+    const first = client.models(), second = client.models();
+    await tick(); assert.equal(count(), 1);
+    replies.shift()();
+    assert.equal((await first)[0].model, "model"); assert.deepEqual(await first, await second);
+    const stale = client.models();
+    await tick(); assert.equal(count(), 2);
+    fixture.externalAccount({ type: "chatgpt", email: "second@example.test", planType: "plus" });
+    replies.shift()();
+    await assert.rejects(stale, /account changed/);
+    const current = client.models(); await tick(); assert.equal(count(), 3);
+    replies.shift()(); assert.equal((await current)[0].model, "model");
+    const oldPlan = client.models(); await tick();
+    fixture.children.at(-1).cachedAccount = { ...fixture.children.at(-1).cachedAccount, planType: "pro" };
+    fixture.children.at(-1).stdout.emit("data", JSON.stringify({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } }) + "\n");
+    const newPlan = client.models(); await tick(); assert.equal(count(), 5);
+    replies.shift()(); await assert.rejects(oldPlan, /account changed/);
+    replies.shift()(); assert.equal((await newPlan)[0].model, "model");
+    const oldIdentity = client.models(); await tick();
+    fixture.children.at(-1).cachedAccount = { ...fixture.children.at(-1).cachedAccount, email: "third@example.test" };
+    await client.account();
+    fixture.children.at(-1).stdout.emit("data", JSON.stringify({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } }) + "\n");
+    const newIdentity = client.models(); await tick(); assert.equal(count(), 7);
+    replies.shift()(); await assert.rejects(oldIdentity, /account changed/);
+    replies.shift()(); assert.equal((await newIdentity)[0].model, "model");
+    const oldScope = client.models(); await tick(); fixture.changeHome("/other"); replies.shift()();
+    await assert.rejects(oldScope, /scope changed/);
+  } finally { client.dispose(); }
+});
+
+test("unchanged native notifications verify identity without invalidating discovery or publishing refresh loops", async () => {
+  const fixture = nativeFixture(), { client } = fixture;
+  const replies = [], accountReplies = [];
+  fixture.control.modelReply = reply => replies.push(reply);
+  fixture.control.accountReply = reply => {
+    if (fixture.calls.filter(call => call.method === "account/read").length === 1) queueMicrotask(reply);
+    else accountReplies.push(reply);
+  };
+  const notify = () => fixture.children.at(-1).stdout.emit("data", JSON.stringify({ method: "account/updated", params: { authMode: "chatgpt", planType: "pro" } }) + "\n");
+  try {
+    let completed = false;
+    const first = client.models().then(value => { completed = true; return value; });
+    const initialJoined = client.models();
+    await tick();
+    assert.equal(fixture.calls.findIndex(call => call.method === "account/read") < fixture.calls.findIndex(call => call.method === "model/list"), true);
+    notify(); await tick();
+    replies.shift()(); await tick();
+    assert.equal(completed, false, "discovery must wait for notification identity verification");
+    fixture.control.accountReply = null;
+    for (const reply of accountReplies.splice(0)) reply();
+    assert.equal((await first)[0].model, "model");
+    assert.deepEqual(await initialJoined, await first);
+    const second = client.models(); await tick();
+    notify(); notify();
+    const joined = client.models(); await tick();
+    assert.equal(fixture.calls.filter(call => call.method === "model/list").length, 2);
+    replies.shift()(); await Promise.all([second, joined]);
+    assert.equal(fixture.changes, 0);
+    const failed = client.models(); await tick();
+    fixture.control.accountError = "Identity unavailable";
+    notify(); await tick(); replies.shift()();
+    await assert.rejects(failed, /Identity unavailable/);
+    assert.ok(fixture.changes > 0);
+  } finally { client.dispose(); }
 });
 
 test("native identity, plan, named limits, logout and login replacement use one credential scope", async () => {

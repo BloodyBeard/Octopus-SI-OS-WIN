@@ -229,6 +229,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           providerModel={chat.providerModel}
           providerInterfaces={chat.providerInterfaces}
           providerInterfacesLoaded={chat.providerInterfacesLoaded}
+          providerInterfacesRefreshing={chat.providerInterfacesRefreshing}
           reasoningEffort={chat.reasoningEffort}
           serviceTier={chat.serviceTier}
           resumeAvailable={chat.resumeAvailable}

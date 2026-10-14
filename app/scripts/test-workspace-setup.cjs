@@ -18,6 +18,7 @@ async function main() {
   await verifyTerminalBootstrapBoundary();
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-workspace-test-"));
   try {
+    await verifyLiveWorkspaceLock(await fs.realpath(temporary));
     await verifyLinkedTaskRemoval(await fs.realpath(temporary));
     await verifyExistingRootAttachment(temporary);
     await verifyRootFirstSetup(temporary);
@@ -1497,17 +1498,48 @@ async function verifyTerminalBootstrapBoundary() {
   );
 }
 
-async function crashChild(octopusHomeRoot, registryRoot) {
+async function verifyLiveWorkspaceLock(temporary) {
+  for (const signal of ["SIGKILL", "SIGCONT"]) {
+    const home = path.join(temporary, `workspace-held-${signal}`), registry = path.join(home, "registry");
+    await createFixture(home, registry);
+    const child = childProcess.spawn(process.execPath, [__filename, "hold-workspace-child", home, registry], { stdio: ["ignore", "pipe", "pipe"] });
+    const { once } = require("node:events"), exited = once(child, "exit");
+    let stderr = ""; child.stderr.on("data", chunk => { stderr += chunk; });
+    try {
+      assert.equal(await Promise.race([once(child.stdout, "data").then(([data]) => data.toString()), exited.then(() => { throw new Error(`Workspace writer exited before its transaction: ${stderr}`); })]), "paused\n");
+      const transactions = path.join(home, "client-state/workspace/transactions");
+      const journal = path.join(transactions, "workspace_crash_12345678/journal.json");
+      const before = await fs.readFile(journal);
+      let settled = false;
+      const read = readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot: registry }).finally(() => { settled = true; });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal(settled, false, "a reader must wait for the live writer instead of recovering it");
+      assert.deepEqual(await fs.readFile(journal), before);
+      child.kill(signal); await exited;
+      const state = await read;
+      assert.equal(state.status, "configured");
+      assert.equal(state.receipt.operation_id, "workspace_crash_12345678");
+      assert.deepEqual(await fs.readdir(transactions), []);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await exited; }
+    }
+  }
+}
+
+async function crashChild(octopusHomeRoot, registryRoot, hold = false) {
+  let paused = false;
   await initializeWorkspace({
     octopusHomeRoot,
     registryRoot,
     request: setupRequest("workspace_crash_12345678"),
     planOperatorSurface: (input) => fixturePlan(octopusHomeRoot, registryRoot, input),
     onProgress: (event) => {
-      if (event.phase === "applying") process.exit(73);
+      if (event.phase !== "applying") return;
+      if (!hold) process.exit(73);
+      if (!paused) { paused = true; require("node:fs").writeSync(1, "paused\n"); process.kill(process.pid, "SIGSTOP"); }
     },
   });
-  process.exit(74);
+  if (!hold) process.exit(74);
 }
 
 async function projectCrashChild(
@@ -2372,6 +2404,12 @@ const execution = process.argv[2] === "task-removal"
   })
   : process.argv[2] === "crash-child"
   ? crashChild(process.argv[3], process.argv[4])
+  : process.argv[2] === "hold-workspace-child"
+  ? crashChild(process.argv[3], process.argv[4], true)
+  : process.argv[2] === "workspace-lock"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-workspace-lock-test-")).then(async temporary => {
+    try { await verifyLiveWorkspaceLock(await fs.realpath(temporary)); } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
   : process.argv[2] === "project-crash-child"
     ? projectCrashChild(...process.argv.slice(3))
     : main();

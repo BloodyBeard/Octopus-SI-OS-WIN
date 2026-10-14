@@ -444,6 +444,7 @@ export function ChatView({
         providerModel={chat.providerModel}
         providerInterfaces={chat.providerInterfaces}
         providerInterfacesLoaded={chat.providerInterfacesLoaded}
+        providerInterfacesRefreshing={chat.providerInterfacesRefreshing}
         projectedFileSources={projectedFileSources}
         pausedQueueSubmissionCount={chat.pausedQueueSubmissionCount}
         reasoningEffort={chat.reasoningEffort}
