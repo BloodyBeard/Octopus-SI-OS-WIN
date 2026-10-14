@@ -1060,6 +1060,10 @@ function projectWrite(destination, beforeDigest, content, tag, publishBarrier) {
   };
 }
 
+function workspaceInitializeRequestDigest(value) {
+  return parseInitializeRequest(value).digest;
+}
+
 function parseInitializeRequest(value) {
   const request = exactObject(value, ["action", "operationId", "root", "home", "task", "projects", "agentPresets"], ["operationId", "root", "home", "task", "projects"], "Workspace setup request");
   if (request.action !== undefined && request.action !== "initialize_workspace") {
@@ -4680,6 +4684,7 @@ function withTransactionLock(stateRoot, operation) {
 module.exports = {
   commitClientAuthoringTransaction,
   initializeWorkspace,
+  workspaceInitializeRequestDigest,
   mutateWorkspaceProject,
   readWorkspaceSetupState,
   recoverWorkspaceTransactions,

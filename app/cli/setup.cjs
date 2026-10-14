@@ -3,7 +3,7 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { setTimeout: delay } = require("node:timers/promises");
 const { createClientSetupStore } = require("../electron/clientSetup.cjs");
-const { initializeWorkspace, readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
+const { initializeWorkspace, readWorkspaceSetupState, workspaceInitializeRequestDigest } = require("../electron/workspaceSetup.cjs");
 const { applyLocalApplicationPack, readLocalPackageCatalog, withLocalPackageInstallation, withInstalledAgentPreset } = require("../electron/localPackages.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
 const { createClientProviderMetadata, validateProviderModelSelection } = require("../electron/clientProviderMetadata.cjs");
@@ -358,7 +358,7 @@ function compileSetupPlan(pack, choices) {
     pack: { id: pack.id, manifest_digest: pack.manifest_digest, selected_recommended: [...choices.recommended].sort() },
     packages: selected.map((row) => ({ id: row.package_id, source_digest: row.source_digest, desired_state: "installed" })).sort(byId),
     extensions: [], provider: { interface_id: recipe.provider_interface_id, required_state: "account_readable" },
-    workspace: { request_digest: hash(stableJson(Object.fromEntries(Object.entries(request).filter(([key]) => key !== "action")))), request,
+    workspace: { request_digest: workspaceInitializeRequestDigest(request), request,
       project_defaults: defaults.sort((a, b) => a.package_id.localeCompare(b.package_id)) },
   };
 }

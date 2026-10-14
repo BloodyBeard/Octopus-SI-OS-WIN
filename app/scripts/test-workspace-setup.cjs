@@ -1937,6 +1937,21 @@ async function verifyExistingRootAttachment(temporary) {
 }
 
 async function verifyRootFirstSetup(temporary) {
+  const { compileSetupPlan } = require("../cli/setup.cjs");
+  const cliRecipe = setupRequest("cli_root_first_12345678");
+  const recipeFor = (row) => ({ worker_interface_id: row.workerInterfaceId, provider_interface_id: row.providerInterfaceId,
+    context_artifact_bindings: row.contextArtifactBindings, selected_worker_environment_kinds: row.selectedWorkerEnvironmentKinds });
+  const cliPlan = compileSetupPlan({ id: "fixture", manifest_digest: "a".repeat(64), components: [],
+    workspace_setup: { home: recipeFor(cliRecipe.home), task: recipeFor(cliRecipe.task), project_defaults: [] } },
+  { operationId: cliRecipe.operationId, workspaceName: "Fresh", workspaceGoal: "Fresh", projects: [],
+    model: "fixture-model", reasoningEffort: "high", recommended: [] });
+  const cliHome = path.join(await fs.realpath(temporary), "cli-root-first"), cliRegistry = path.join(cliHome, "registry");
+  await createFixture(cliHome, cliRegistry);
+  const cliOptions = { octopusHomeRoot: cliHome, registryRoot: cliRegistry, request: cliPlan.workspace.request,
+    planOperatorSurface: (input) => fixturePlan(cliHome, cliRegistry, input) };
+  await initializeWorkspace(cliOptions);
+  assert.equal((await readWorkspaceSetupState(cliOptions)).receipt.request_digest, cliPlan.workspace.request_digest);
+  assert.equal((await initializeWorkspace(cliOptions)).changed, false);
   const filename = path.resolve(__dirname, "../src/onboarding/workspaceSetup.ts"), ts = require("typescript"), compiled = { exports: {} };
   const code = ts.transpileModule(await fs.readFile(filename, "utf8"), { fileName: filename,
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
