@@ -578,7 +578,25 @@ async fn direct_workspace_keeps_project_cwd_while_using_an_additional_granted_ro
         )
         .await
         .unwrap();
-    assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "after\n");
+    assert_eq!(std::fs::read_to_string(&outside_file).unwrap(), "after\n");
+    for (mode, query) in [("content", "after"), ("path", "outside.txt")] {
+        let call = ToolCall {
+            tool_id: "workspace.grep".to_string(),
+            arguments: json!({"path": outside_root, "mode": mode, "query": query}),
+            handler_config: grep_config(10, 1024, 1000, 100),
+        };
+        let result = CoderFsHandler.execute(&context, &call).await.unwrap();
+        let matched = &result.body["matches"][0];
+        assert_eq!(
+            matched.get("path").unwrap_or(matched),
+            outside_file.to_str().unwrap()
+        );
+        let restricted = ToolHandlerContext {
+            sandbox: workspace_sandbox(&workspace_root),
+            ..context.clone()
+        };
+        assert!(CoderFsHandler.execute(&restricted, &call).await.is_err());
+    }
 }
 
 #[test]

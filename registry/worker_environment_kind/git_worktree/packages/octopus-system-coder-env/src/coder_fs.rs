@@ -560,7 +560,6 @@ async fn grep(
                     reason: "max_results must be non-zero".to_string(),
                 })?;
             let root = search_root.as_path().to_path_buf();
-            let worktree = worktree_root.as_path().to_path_buf();
             let search_query = query.clone();
             let results = tokio::task::spawn_blocking(move || {
                 file_search_run(
@@ -572,7 +571,6 @@ async fn grep(
                     },
                     None,
                 )
-                .map(|results| (worktree, results))
             })
             .await
             .map_err(|e| ToolHandlerError::Execution {
@@ -584,21 +582,20 @@ async fn grep(
                 reason: format!("path search failed closed: {e}"),
             })?;
             let matches = results
-                .1
                 .matches
                 .iter()
                 .map(|entry| {
-                    entry
-                        .full_path()
-                        .strip_prefix(&results.0)
-                        .map(|path| path.to_string_lossy().to_string())
-                        .map_err(|_| ToolHandlerError::Execution {
+                    let path = entry.full_path();
+                    if !path.starts_with(search_root.as_path()) {
+                        return Err(ToolHandlerError::Execution {
                             tool_id: tool_id.clone(),
                             reason: format!(
-                                "path search returned '{}' outside the worker-environment root",
-                                entry.full_path().display()
+                                "path search returned '{}' outside the requested search root",
+                                path.display()
                             ),
-                        })
+                        });
+                    }
+                    Ok(display_worktree_path(worktree_root.as_path(), &path))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(ToolHandlerResult::new(serde_json::json!({
@@ -608,8 +605,8 @@ async fn grep(
                 "path": relative_worktree_path(ctx, &tool_id, &search_root)?,
                 "matches": matches,
                 "returned_match_count": matches.len(),
-                "total_match_count": results.1.total_match_count,
-                "truncated": results.1.total_match_count > matches.len(),
+                "total_match_count": results.total_match_count,
+                "truncated": results.total_match_count > matches.len(),
             })))
         }
         _ => Err(ToolHandlerError::InvalidArguments {
@@ -704,15 +701,13 @@ fn grep_content(
             break;
         }
         scanned_files = scanned_files.saturating_add(1);
-        let relative = match entry.path().strip_prefix(worktree_root) {
-            Ok(path) => path.to_string_lossy().to_string(),
-            Err(_) => {
-                return Err(format!(
-                    "content grep encountered '{}' outside the worker-environment root",
-                    entry.path().display()
-                ));
-            }
-        };
+        if !entry.path().starts_with(search_root) {
+            return Err(format!(
+                "content grep encountered '{}' outside the requested search root",
+                entry.path().display()
+            ));
+        }
+        let relative = display_worktree_path(worktree_root, entry.path());
         let file = match std::fs::File::open(entry.path()) {
             Ok(file) => file,
             Err(error) => {
@@ -1003,14 +998,18 @@ pub(crate) fn relative_worktree_path(
     _tool_id: &str,
     path: &AbsPath,
 ) -> Result<String, ToolHandlerError> {
-    let Ok(relative) = path.as_path().strip_prefix(&ctx.room_root) else {
-        return Ok(path.as_str().to_string());
+    Ok(display_worktree_path(&ctx.room_root, path.as_path()))
+}
+
+fn display_worktree_path(worktree_root: &Path, path: &Path) -> String {
+    let Ok(relative) = path.strip_prefix(worktree_root) else {
+        return path.to_string_lossy().to_string();
     };
-    Ok(if relative.as_os_str().is_empty() {
+    if relative.as_os_str().is_empty() {
         ".".to_string()
     } else {
         relative.to_string_lossy().to_string()
-    })
+    }
 }
 
 fn bounded_optional_usize_argument(
