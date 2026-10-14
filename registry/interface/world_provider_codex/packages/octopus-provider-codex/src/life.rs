@@ -505,13 +505,13 @@ async fn codex_life(
         reader.next_seq(),
     )
     .await?;
-    restore_completed_provider_sources(&ctx, &descriptor, &handoff_session, &runtime_auth, &mut driver,
-        &active_controls, &interrupted_effects, reader.next_seq()).await?;
+    Box::pin(restore_completed_provider_sources(&ctx, &descriptor, &handoff_session, &runtime_auth, &mut driver,
+        &active_controls, &interrupted_effects, reader.next_seq())).await?;
     let mut control_task =
-        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(control_reader_life(
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(Box::pin(control_reader_life(
             ctx.clone(), descriptor.clone(), handoff_session.clone(), active_controls.clone(),
             control_gates.clone(), interrupted_effects.clone(), control_reader_progress, control_fence_rx,
-        )));
+        ))));
     let restored_controls = active_controls.lock().await.iter().map(|(run, broker)|
         (RunId::new(run), broker.source_movement_seq())).collect::<Vec<_>>();
     for (run, source) in restored_controls { fence_control_reader(&control_fence_tx, &run, source).await?; }
@@ -1863,7 +1863,20 @@ fn terminally_satisfied_control(control_id: &str, action: &str) -> CodexTurnCont
     }
 }
 
-async fn handle_malformed_control_source(
+fn handle_malformed_control_source<'a>(
+    ctx: &'a InterfaceLiftContext,
+    descriptor: &'a InterfaceDescriptor,
+    handoff_session: &'a ProviderHandoffSession,
+    interrupted_effects: &'a InterruptedEffectArbiter,
+    run: &'a RunId,
+    source: MalformedControlSource<'a>,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + 'a>> {
+    Box::pin(handle_malformed_control_source_inner(
+        ctx, descriptor, handoff_session, interrupted_effects, run, source,
+    ))
+}
+
+async fn handle_malformed_control_source_inner(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
     handoff_session: &ProviderHandoffSession,
@@ -4974,7 +4987,15 @@ async fn hand_stream_batch(
     Ok(())
 }
 
-async fn flush_stream_batch(
+fn flush_stream_batch<'a>(
+    handoff: &'a ProviderOutputHandoff,
+    pending: &'a mut Vec<PendingProviderEmission>,
+    keep_last: bool,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<usize, String>> + 'a>> {
+    Box::pin(flush_stream_batch_inner(handoff, pending, keep_last))
+}
+
+async fn flush_stream_batch_inner(
     handoff: &ProviderOutputHandoff,
     pending: &mut Vec<PendingProviderEmission>,
     keep_last: bool,
@@ -5009,7 +5030,15 @@ async fn next_provider_stream_batch_event(
     }
 }
 
-async fn drive_turn_with_retries(
+fn drive_turn_with_retries<'a>(
+    scope: CodexTurnScope<'a>,
+    driver: &'a mut Option<Arc<CodexAppServerInterfaceDriver>>,
+    turn: QueuedTurn,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + 'a>> {
+    Box::pin(drive_turn_with_retries_inner(scope, driver, turn))
+}
+
+async fn drive_turn_with_retries_inner(
     scope: CodexTurnScope<'_>,
     driver: &mut Option<Arc<CodexAppServerInterfaceDriver>>,
     turn: QueuedTurn,
@@ -5406,7 +5435,7 @@ async fn drive_turn_with_retries(
         let (output_stream, mut emit_rx) = ProviderOutputStream::channel();
         let handoff_barrier = ProviderHandoffBarrier::new();
         let (terminal_tx, terminal_rx) = tokio::sync::oneshot::channel::<bool>();
-        let forwarder = {
+        let forwarder = Box::pin({
             let handoff = handoff.clone();
             let interrupted_effects = interrupted_effects.clone();
             let durable_interrupted_continuity = durable_interrupted_continuity.clone();
@@ -5708,7 +5737,7 @@ async fn drive_turn_with_retries(
                 }
                 Ok::<ForwardedProviderEmissions, String>(forwarded)
             }
-        };
+        });
 
         let output_root = ctx.interface_var_dir().join("emitted");
         let live_stream_root = ctx.interface_var_dir().join("streams");
@@ -5729,7 +5758,7 @@ async fn drive_turn_with_retries(
             Ok(false) | Err(_) => None,
         };
         let input_changes_context = handoff.input_changes_context().await;
-        let receive = async {
+        let receive = Box::pin(async {
             let result = live
                 .receive_artifact_and_stream_outputs(CodexProviderInvocation {
                     callable_tool_names: callable_tool_names.clone(),
@@ -5755,9 +5784,10 @@ async fn drive_turn_with_retries(
             drop(output_stream);
             let _ = terminal_tx.send(result.is_ok());
             result
-        };
+        });
         let (result, forwarded) = {
-            tokio::pin!(receive, forwarder);
+            let mut receive = receive;
+            let mut forwarder = forwarder;
             tokio::select! {
                 result = &mut receive => (result, forwarder.await),
                 forwarded = &mut forwarder => {
@@ -6353,7 +6383,22 @@ async fn backoff_or_give_up(
     }
 }
 
-async fn emit_terminal_turn_error(
+fn emit_terminal_turn_error<'a>(
+    ctx: &'a InterfaceLiftContext,
+    descriptor: &'a InterfaceDescriptor,
+    handoff_session: &'a ProviderHandoffSession,
+    run: &'a RunId,
+    turn: &'a QueuedTurn,
+    handoff: &'a ProviderOutputHandoff,
+    attempts: u32,
+    error: &'a str,
+) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), String>> + 'a>> {
+    Box::pin(emit_terminal_turn_error_inner(
+        ctx, descriptor, handoff_session, run, turn, handoff, attempts, error,
+    ))
+}
+
+async fn emit_terminal_turn_error_inner(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
     handoff_session: &ProviderHandoffSession,

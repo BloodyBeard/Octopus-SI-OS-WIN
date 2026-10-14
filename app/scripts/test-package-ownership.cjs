@@ -150,6 +150,79 @@ async function conflictResolutionFixtures(root) {
   }
   process.stdout.write("explicit package conflict resolution pins, identity, races and crash recovery passed\n");
 }
+async function configurationEvolutionFixture(root) {
+  const make = async (name, { legacy = false, plain = false, absent = false, object = false, baselineArray = false, nested = "" } = {}) => {
+    const roots = await fixture(path.join(root, name)), manifestPath = path.join(roots.libraryRoot, "packages/fixture.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath)), sourcePath = ownerFile(roots, false, "interface.json");
+    const original = JSON.parse(await fs.readFile(sourcePath));
+    if (!absent) original.config.observer = baselineArray ? [] : object ? { enabled: true } : "previous source default";
+    if (plain) {
+      delete manifest.members[0].configuration;
+      const applicationPath = ownerFile(roots, false, "application.json"), application = JSON.parse(await fs.readFile(applicationPath));
+      delete application.setup; await json(applicationPath, application);
+    } else manifest.members[0].configuration[0].fields[0].schema.type = ["string", "null"];
+    await json(sourcePath, original); await json(manifestPath, manifest); await install(roots);
+    const receiptPath = path.join(roots.stateRoot, "receipts/fixture.json"), receipt = JSON.parse(await fs.readFile(receiptPath));
+    const member = receipt.members.find(row => row.owner === "world_fixture"), prior = structuredClone(member.configuration);
+    if (legacy) { for (const row of receipt.members) delete row.configuration; await json(receiptPath, receipt); }
+    const activePath = ownerFile(roots, true, "interface.json"), local = structuredClone(original);
+    if (!plain) { local.config.model = null; delete local.config.effort; local.config.endpoint = "retained"; }
+    await json(activePath, local);
+    const incoming = { ...original, contract: 2, config: { ...original.config, observer: nested === "/policy/enabled" ? { policy: { enabled: true } } : { enabled: true } } };
+    const field = { pointer: `/config/observer${nested}`, schema: nested ? { type: "boolean" }
+      : { type: "object", required: ["enabled"], properties: { enabled: { type: "boolean" } }, additionalProperties: false } };
+    if (plain) manifest.members[0].configuration = [{ path: "interface.json", fields: [field] }];
+    else manifest.members[0].configuration[0].fields.push(field);
+    if (legacy) manifest.members[0].configuration_predecessors = prior;
+    await json(sourcePath, incoming); await json(manifestPath, manifest);
+    return { roots, manifest, manifestPath, receiptPath, activePath, sourcePath, incoming, local };
+  };
+  for (const [name, options] of [["persisted", {}], ["legacy", { legacy: true }], ["absent", { absent: true }], ["first", { plain: true }],
+    ["nested", { absent: true, nested: "/enabled" }], ["nested-chain", { legacy: true, absent: true, nested: "/policy/enabled" }]]) {
+    const test = await make(name, options), beforeMode = (await fs.stat(test.activePath)).mode & 0o777;
+    assert.equal((await adoptLocalPackageUpdates(test.roots)).changed, true);
+    assert.deepEqual(JSON.parse(await fs.readFile(test.activePath)), { ...test.local, contract: 2, config: { ...test.local.config, observer: test.incoming.config.observer } });
+    assert.equal((await fs.stat(test.activePath)).mode & 0o777, beforeMode);
+    const receipt = JSON.parse(await fs.readFile(test.receiptPath)), member = receipt.members.find(row => row.owner === "world_fixture");
+    assert.ok(member.configuration[0].fields.some(field => field.pointer === `/config/observer${options.nested ?? ""}`));
+    const source = await fs.readFile(test.sourcePath), pin = member.source_files.find(file => file.path === "interface.json");
+    assert.deepEqual({ sha256: pin.sha256, size: pin.size, mode: pin.mode }, contentPin(source, (await fs.stat(test.sourcePath)).mode & 0o777));
+    assert.equal((await record(test.roots)).receipt_state, "valid"); assert.equal((await adoptLocalPackageUpdates(test.roots)).changed, false);
+    delete test.manifest.members[0].configuration_predecessors; await json(test.manifestPath, test.manifest);
+    await json(test.sourcePath, { ...test.incoming, contract: 3, config: { ...test.incoming.config,
+      observer: options.nested === "/policy/enabled" ? { policy: { enabled: false } } : { enabled: false } } });
+    await adoptLocalPackageUpdates(test.roots);
+    assert.deepEqual(JSON.parse(await fs.readFile(test.activePath)).config.observer, test.incoming.config.observer);
+  }
+  for (const name of ["missing-proof", "wrong-proof", "removed", "narrowed", "conflict", "invalid-local", "parent-null", "parent-scalar", "parent-array", "nested-value", "deep-array-baseline"]) {
+    const test = await make(`refuse-${name}`, { legacy: name.includes("proof"), object: ["invalid-local", "nested-value"].includes(name),
+      plain: name === "deep-array-baseline", baselineArray: name === "deep-array-baseline", absent: name.startsWith("parent-"),
+      nested: name === "deep-array-baseline" ? "/policy/enabled" : name.startsWith("parent-") || name === "nested-value" ? "/enabled" : "" });
+    const fields = test.manifest.members[0].configuration[0].fields;
+    if (name === "missing-proof") delete test.manifest.members[0].configuration_predecessors;
+    if (name === "wrong-proof") test.manifest.members[0].configuration_predecessors[0].fields.reverse();
+    if (name === "removed") fields.shift();
+    if (name === "narrowed") fields[0].schema = { type: "string" };
+    if (name === "conflict") await json(test.activePath, { ...test.local, contract: 42 });
+    if (name.startsWith("parent-")) await json(test.activePath, { ...test.local,
+      config: { ...test.local.config, observer: name === "parent-null" ? null : name === "parent-array" ? [] : "local parent" } });
+    if (["invalid-local", "nested-value"].includes(name)) {
+      await json(test.sourcePath, { ...test.incoming, contract: 1 });
+      await json(test.activePath, { ...test.local, config: { ...test.local.config, observer: name === "nested-value" ? { enabled: "invalid choice" } : "invalid choice" } });
+    }
+    await json(test.manifestPath, test.manifest);
+    const active = await fs.readFile(test.activePath), receipt = await fs.readFile(test.receiptPath);
+    await assert.rejects(adoptLocalPackageUpdates(test.roots), name === "deep-array-baseline"
+      ? /parent is missing at '\/config\/observer\/policy\/enabled'/ : /predecessor|unchanged|overlapping source-owned|package configuration/);
+    assert.deepEqual(await fs.readFile(test.activePath), active); assert.deepEqual(await fs.readFile(test.receiptPath), receipt);
+    assert.deepEqual(await fs.readdir(path.join(test.roots.stateRoot, "transactions")), []);
+  }
+  const interrupted = await make("recovery", { legacy: true });
+  child("update-finalizing", path.join(root, "recovery")); await recoverLocalPackageTransactions(interrupted.roots);
+  assert.equal((await record(interrupted.roots)).receipt_state, "valid");
+  assert.deepEqual(JSON.parse(await fs.readFile(interrupted.activePath)).config.observer, { enabled: true });
+  assert.equal((await adoptLocalPackageUpdates(interrupted.roots)).changed, false);
+}
 async function dataDirectoryFixture(root) {
   const roots = await fixture(root), manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json");
   const manifest = JSON.parse(await fs.readFile(manifestPath)); manifest.members[0].data_directories = ["entries"];
@@ -187,7 +260,7 @@ async function dataDirectoryFixture(root) {
   await assert.rejects(removeLocalPackages({ ...roots, operationId: "data_remove_001", packageIds: ["fixture"],
     expectedInstalledDigests: { fixture: (await record(roots)).installed_digest } }), /removal cannot delete authored files/);
   const legacy = JSON.parse(initialReceipt); legacy.schema_version = 1;
-  for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; }
+  for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
   await json(receiptPath, legacy); assert.equal((await record(roots)).receipt_state, "stale");
   const reconstructible = JSON.parse(initialReceipt); for (const member of reconstructible.members) delete member.materialized_files;
   await json(receiptPath, reconstructible); await valid("entries/seed.bin"); await fs.writeFile(receiptPath, initialReceipt);
@@ -289,7 +362,7 @@ async function ownerAdditionFixtures(root) {
       manifest.members = manifest.members.filter(member => member.owner !== "fixture.tool"); await json(manifestPath, manifest); pattern = /prior owners must remain declared and present/;
     } else {
       const legacy = JSON.parse(before); legacy.schema_version = 1;
-      for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; }
+      for (const member of legacy.members) { delete member.source_files; delete member.materialized_files; delete member.configuration; }
       await json(receiptPath, legacy); pattern = /without a per-file source baseline/;
     }
     const reviewed = await fs.readFile(receiptPath);
@@ -591,6 +664,7 @@ async function packageExportFixture(root, repoRoot) {
 async function run() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-ownership-"));
   try {
+    await configurationEvolutionFixture(path.join(root, "configuration-evolution"));
     await conflictResolutionFixtures(path.join(root, "conflict-resolutions"));
     await dataDirectoryFixture(path.join(root, "data-directories"));
     await nativeRenameFixture(path.join(root, "native-rename"));
@@ -736,6 +810,7 @@ async function run() {
 }
 if (require.main === module) {
   const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures,
+    "--configuration-evolution": configurationEvolutionFixture,
     "--absent-owner-race": absentOwnerRenameRaceFixture, "--conflict-resolutions": conflictResolutionFixtures }[process.argv[2]];
   const action = process.argv[2] === "--crash" ? crash(process.argv[3], process.argv[4])
     : focused ? (async () => {

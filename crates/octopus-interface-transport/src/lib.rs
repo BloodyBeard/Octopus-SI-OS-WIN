@@ -1,4 +1,7 @@
 mod interface_life;
+mod life_ownership;
+
+pub use life_ownership::InterfaceLifeOwnership;
 
 pub use octopus_verifiers::process_authority;
 

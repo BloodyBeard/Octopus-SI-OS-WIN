@@ -10252,6 +10252,7 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
         request,
         hooks.releaseTaskWorkerEnvironments,
         hooks.commitClientAuthoring,
+        hooks,
       );
     }
     if (action === "configure_application") {
@@ -12486,6 +12487,67 @@ async function installedDescriptorIds(root, fileName, identityFields) {
   return ids.sort();
 }
 
+function taskLifecycleHelpers(hooks, record) {
+  const required = Object.values(objectOrEmpty(record.interface_state)).some((state) =>
+    state?.maintenance_observer !== undefined || state?.collection_catalogue_adoption !== undefined);
+  const helpers = hooks.taskLifecycle;
+  if (!helpers && !required) return null;
+  if (!helpers || ["readMaintenanceTaskTopology", "readTaskCatalogueEvidence", "catalogueProvenanceProjection",
+    "assertMaintenanceNoPendingEffects"].some((name) => typeof helpers[name] !== "function")) {
+    const error = new Error("task lifecycle ownership reader is unavailable for the accepted maintenance/catalogue contract");
+    error.code = "maintenance_lifecycle_unavailable";
+    throw error;
+  }
+  return helpers;
+}
+
+async function octopusOsTaskLifecycleGroup(registryRoot, octopusHomeRoot, source, sourceInterfaces, lifecycle, sourceClientInterface) {
+  const sourceWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, source, sourceInterfaces);
+  const companions = lifecycle ? await lifecycle.readMaintenanceTaskTopology({
+    registryRoot, runRecordsRoot: path.join(octopusHomeRoot, "state", "runs"), sourceRecord: source, sourceClientInterface,
+    readWriterRuns: (record, interfaces) => octopusOsOwnedWriterRuns(octopusHomeRoot, record, interfaces),
+  }) : null;
+  const records = new Map([...sourceWriters.records].map(([id, entry]) => [id, { ...entry, role: "writer", targetRun: source.id }]));
+  for (const [id, entry] of companions?.records ?? []) {
+    if (id === source.id || records.has(id)) throw new Error(`task '${source.id}' has conflicting companion/writer ownership`);
+    records.set(id, entry);
+  }
+  const exactInterfaces = new Set([...sourceInterfaces, ...companions?.interfaces ?? []]);
+  if (companions && [...companions.interfaces].some((id) => sourceInterfaces.has(id))) {
+    throw new Error(`task '${source.id}' has overlapping source and companion descriptor owners`);
+  }
+  const ownedWriters = { records, ids: new Set(records.keys()), writes: [...records.values()]
+    .map((entry) => ({ file: entry.file, beforeDigest: entry.digest, next: null })).sort((a, b) => a.file.localeCompare(b.file)) };
+  return { sourceInterfaces, exactInterfaces, ownedWriters, companions };
+}
+
+function taskLifecycleRetirementRequest(sourcePath, source, group) {
+  const rows = [{ ...source, file: sourcePath, role: "source", provider: group.companions.declaration.source_provider_interface },
+    ...group.ownedWriters.records.values()];
+  return {
+    schema_version: 1, source_run: source.document.id,
+    interface_ids: [...group.exactInterfaces].sort(),
+    records: rows.map((entry) => ({ run: entry.document.id, file: entry.file, expected_digest: entry.digest,
+      worker: entry.document.worker, ee: entry.document.ee, role: entry.role,
+      provider_interface: typeof entry.provider === "string" ? entry.provider : entry.owner,
+      target_run: entry.targetRun ?? entry.document.id })).sort((a, b) => a.run.localeCompare(b.run)),
+  };
+}
+
+async function octopusOsTaskGroupArtifactTopology(registryRoot, source, group) {
+  const targets = [{ document: source, interfaces: group.sourceInterfaces }, ...group.companions?.targets.values() ?? []];
+  const ids = new Set(), writes = [];
+  for (const target of targets) {
+    const owned = await octopusOsOwnedArtifactTopology(registryRoot, target.document, target.interfaces);
+    for (const id of owned.ids) {
+      if (ids.has(id)) throw new Error(`task '${source.id}' has an artifact owned by two companion targets`);
+      ids.add(id);
+    }
+    writes.push(...owned.writes);
+  }
+  return { ids, writes };
+}
+
 async function deleteOctopusOsTask(
   registryRoot,
   octopusHomeRoot,
@@ -12493,6 +12555,7 @@ async function deleteOctopusOsTask(
   request,
   releaseTaskWorkerEnvironments,
   commitClientAuthoring,
+  hooks = {},
 ) {
   if (typeof commitClientAuthoring !== "function") {
     throw new Error("client authoring transaction is unavailable");
@@ -12531,9 +12594,20 @@ async function deleteOctopusOsTask(
   }
   const ownerInterface = requiredSafeRegistryId(runProjection.interface_id, "task client interface");
   if (readClientTaskArchive(current.document, ownerInterface)) throw new Error(`task '${runId}' is archived; restore it before deleting`);
-  const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
-  assertRunPrivateStateIsOwned(current.document, exactInterfaces, runId);
-  const ownedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, current.document, exactInterfaces);
+  const sourceInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
+  assertRunPrivateStateIsOwned(current.document, sourceInterfaces, runId);
+  const lifecycle = taskLifecycleHelpers(hooks, current.document);
+  const group = await octopusOsTaskLifecycleGroup(
+    registryRoot, octopusHomeRoot, current.document, sourceInterfaces, lifecycle, ownerInterface,
+  );
+  const { exactInterfaces, ownedWriters, companions } = group;
+  let retirementSelection = companions ? taskLifecycleRetirementRequest(runPath, current, group) : null;
+  if (companions) {
+    lifecycle.assertMaintenanceNoPendingEffects({ targets: new Map([
+      [runId, { document: current.document, provider: companions.declaration.source_provider_interface }],
+      ...companions.targets,
+    ]) });
+  }
   await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
 
   const registryHomeRoot = await fs.realpath(octopusHomeRoot);
@@ -12547,8 +12621,13 @@ async function deleteOctopusOsTask(
     exactInterfaces,
     "task interface",
   );
-  const ownedTools = await octopusOsOwnedToolTopology(registryHome, exactInterfaces);
-  const ownedArtifacts = await octopusOsOwnedArtifactTopology(registryHome, current.document, exactInterfaces);
+  const ownedTools = await octopusOsOwnedToolTopology(registryHome, exactInterfaces, companions);
+  const ownedArtifacts = await octopusOsTaskGroupArtifactTopology(registryHome, current.document, group);
+  const catalogueEvidence = lifecycle ? await lifecycle.readTaskCatalogueEvidence({
+    registryRoot: registryHome,
+    records: [current.document, ...[...companions?.targets.values() ?? []].map((entry) => entry.document)],
+    canonicalContentHash: (value) => Buffer.from(blake3(Buffer.from(stableJson(value)))).toString("hex"),
+  }) : new Map();
   await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, ownedArtifacts.ids, ownedWriters.ids);
   const policyWrites = await taskTopologyPolicyWrites(registryHome, exactInterfaces, ownedTools.ids);
   const plannedDocuments = new Map([...policyWrites, ...ownedArtifacts.writes].map((write) => [write.file, write.next]));
@@ -12560,6 +12639,7 @@ async function deleteOctopusOsTask(
     ]),
     plannedDocuments,
     new Set([runId, ...ownedWriters.ids, ...exactInterfaces, ...ownedTools.ids, ...ownedArtifacts.ids]),
+    lifecycle,
   );
 
   let releasedWorkerEnvironmentIds = [];
@@ -12586,13 +12666,16 @@ async function deleteOctopusOsTask(
     ) {
       throw new Error(`task run '${runId}' changed outside its exact release cycle`);
     }
-    assertRunPrivateStateIsOwned(releasedRun.document, exactInterfaces, runId);
+    assertRunPrivateStateIsOwned(releasedRun.document, sourceInterfaces, runId);
     await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, ownedArtifacts.ids, ownedWriters.ids);
-    const releasedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, releasedRun.document, exactInterfaces);
-    if (stableJson(releasedWriters.writes) !== stableJson(ownedWriters.writes)) {
+    const releasedGroup = await octopusOsTaskLifecycleGroup(
+      registryRoot, octopusHomeRoot, releasedRun.document, sourceInterfaces, lifecycle, ownerInterface,
+    );
+    if (stableJson([...releasedGroup.exactInterfaces].sort()) !== stableJson([...exactInterfaces].sort())
+      || stableJson(releasedGroup.ownedWriters.writes) !== stableJson(ownedWriters.writes)) {
       throw new Error(`task '${runId}' writer ownership changed during release`);
     }
-    const releasedArtifacts = await octopusOsOwnedArtifactTopology(registryHome, releasedRun.document, exactInterfaces);
+    const releasedArtifacts = await octopusOsTaskGroupArtifactTopology(registryHome, releasedRun.document, releasedGroup);
     if (stableJson(releasedArtifacts.writes) !== stableJson(ownedArtifacts.writes)) {
       throw new Error(`task '${runId}' artifact ownership changed during release`);
     }
@@ -12604,14 +12687,19 @@ async function deleteOctopusOsTask(
       ]),
       plannedDocuments,
       new Set([runId, ...ownedWriters.ids, ...exactInterfaces, ...ownedTools.ids, ...ownedArtifacts.ids]),
+      lifecycle,
     );
+    if (companions) retirementSelection = taskLifecycleRetirementRequest(runPath, releasedRun, releasedGroup);
   }
 
   const runtimeStateDirectories = await snapshotOwnedInterfaceStateDirectories(
     registryHomeRoot,
     exactInterfaces,
   );
-  await assertTaskWorkerEnvironmentsReleased(registryHomeRoot, exactInterfaces, runId, ownedWriters.records);
+  await assertTaskWorkerEnvironmentsReleased(registryHomeRoot, exactInterfaces, runId, ownedWriters.records, current.document);
+  for (const [file, snapshot] of catalogueEvidence) {
+    await requireUnchangedJsonDigest(file, snapshot.digest, "accepted catalogue evidence");
+  }
   for (const removal of [...interfaceDirectories, ...ownedTools.directories]) await requireUnchangedRemoval(removal);
   for (const write of ownedWriters.writes) await snapshotRemovalFile(write.file, write.beforeDigest, "task writer Run");
   await snapshotRemovalFile(runPath, expectedDigest, `task run ${runId}`);
@@ -12624,6 +12712,7 @@ async function deleteOctopusOsTask(
       ...runtimeStateDirectories,
     ],
     publishBarrierPath: runPath,
+    ...(retirementSelection ? { retirement: retirementSelection } : {}),
   });
   return {
     action: "delete_task",
@@ -12731,12 +12820,39 @@ async function moveOctopusOsTask(
   }
   const ownerInterface = requiredSafeRegistryId(runProjection.interface_id, "task client interface");
   if (readClientTaskArchive(current.document, ownerInterface)) throw new Error(`task '${runId}' is archived; restore it before moving`);
+  if (current.document.interface_state !== undefined && (!isPlainRecord(current.document.interface_state)
+    || Object.values(current.document.interface_state).some((state) => !isPlainRecord(state)))) {
+    throw new Error(`task '${runId}' has malformed interface state`);
+  }
   const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
   assertRunPrivateStateIsOwned(current.document, exactInterfaces, runId);
   const ownedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, current.document, exactInterfaces);
-  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
   scopeEnvironmentChain(currentEeId, scope.byId, scope.rootEeId);
   scopeEnvironmentChain(targetEeId, scope.byId, scope.rootEeId);
+  const clientSidecarPath = path.join(
+    await fs.realpath(path.join(registryRoot, "interface")),
+    ownerInterface,
+    "octopus_os.json",
+  );
+  const clientSidecar = await readRegularJsonDocument(clientSidecarPath, `task client sidecar ${ownerInterface}`);
+  const parsedSidecar = parseOctopusOsSidecar(clientSidecar.document, ownerInterface, clientSidecarPath);
+  if (
+    stringValue(parsedSidecar.owner_interface) !== ownerInterface
+    || stringValue(parsedSidecar.component) !== "client"
+    || stringValue(parsedSidecar.surface_role) !== "task"
+    || !isPlainRecord(clientSidecar.document.authoring_profile)
+    || parsedSidecar.authoring_profile.ee_id !== currentEeId
+  ) {
+    throw new Error(`task client '${ownerInterface}' has no movable authoring profile`);
+  }
+  if (ownedWriters.ids.size || Object.values(objectOrEmpty(current.document.interface_state)).some((state) =>
+    ["run_authoring_binding", "writer_run", "input_intake", "file_writer_target", "maintenance_observer"]
+      .some((field) => Object.hasOwn(state, field)))) {
+    const error = new Error(`task '${runId}' current execution contract does not admit changing EE`);
+    error.code = "task_execution_ee_change_unsupported";
+    throw error;
+  }
+  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
   const targetEnvironment = scope.byId.get(targetEeId);
   const targetPolicy = objectOrEmpty(targetEnvironment?.formed_envelope);
   assertPolicyAxisAdmits(
@@ -12774,35 +12890,12 @@ async function moveOctopusOsTask(
     new Set(workerPolicy.document.ceiling.wek.map((value) => requiredSafeRegistryId(value, "task worker environment kind"))),
     `target EE '${targetEeId}' worker-environment policy`,
   );
-  const clientSidecarPath = path.join(
-    await fs.realpath(path.join(registryRoot, "interface")),
-    ownerInterface,
-    "octopus_os.json",
-  );
-  const clientSidecar = await readRegularJsonDocument(clientSidecarPath, `task client sidecar ${ownerInterface}`);
-  const parsedSidecar = parseOctopusOsSidecar(clientSidecar.document, ownerInterface, clientSidecarPath);
-  if (
-    stringValue(parsedSidecar.owner_interface) !== ownerInterface
-    || stringValue(parsedSidecar.component) !== "client"
-    || stringValue(parsedSidecar.surface_role) !== "task"
-    || !isPlainRecord(clientSidecar.document.authoring_profile)
-  ) {
-    throw new Error(`task client '${ownerInterface}' has no movable authoring profile`);
-  }
   const nextSidecar = structuredClone(clientSidecar.document);
   nextSidecar.authoring_profile.ee_id = targetEeId;
   parseOctopusOsSidecar(nextSidecar, ownerInterface, clientSidecarPath);
   const writes = [{ file: clientSidecarPath, beforeDigest: clientSidecar.digest, next: nextSidecar }];
   const nextRun = structuredClone(current.document);
   nextRun.ee = targetEeId;
-  for (const entry of ownedWriters.records.values()) {
-    const state = nextRun.interface_state[entry.owner];
-    const binding = entry.provider ? state.run_authoring_binding.writer_run : state.writer_run;
-    binding.initial_record.ee = targetEeId;
-    const nextWriter = structuredClone(entry.document);
-    nextWriter.ee = targetEeId;
-    writes.push({ file: entry.file, beforeDigest: entry.digest, next: nextWriter });
-  }
   writes.push({ file: runPath, beforeDigest: expectedDigest, next: nextRun });
   await commitClientAuthoring({
     label: "move Octopus OS task",
@@ -13026,8 +13119,12 @@ async function assertTaskWorkerPinRemainsTaskLocal(
 }
 
 async function octopusOsOwnedWriterRuns(octopusHomeRoot, run, exactInterfaces) {
-  const ids = new Set(), writes = [], records = new Map();
   const runRoot = await fs.realpath(path.join(octopusHomeRoot, "state", "runs"));
+  return octopusOsOwnedWriterRunsAtRoot(runRoot, run, exactInterfaces);
+}
+
+async function octopusOsOwnedWriterRunsAtRoot(runRoot, run, exactInterfaces) {
+  const ids = new Set(), writes = [], records = new Map();
   for (const [owner, state] of Object.entries(objectOrEmpty(run.interface_state))) {
     const provider = state?.run_authoring_binding;
     const binding = provider?.writer_run ?? state?.writer_run;
@@ -13164,7 +13261,7 @@ async function snapshotOwnedRegistryDirectories(root, ids, label) {
   return directories;
 }
 
-async function octopusOsOwnedToolTopology(registryRoot, exactInterfaces) {
+async function octopusOsOwnedToolTopology(registryRoot, exactInterfaces, companions = null) {
   const toolRoot = await fs.realpath(path.join(registryRoot, "tool"));
   const entries = await fs.readdir(toolRoot, { withFileTypes: true });
   const ids = new Set();
@@ -13177,6 +13274,9 @@ async function octopusOsOwnedToolTopology(registryRoot, exactInterfaces) {
       throw new Error(`tool descriptor '${entry.name}' has drifted identity`);
     }
     if (!exactInterfaces.has(stringValue(descriptor.document?.interface))) continue;
+    if (companions?.interfaces.has(descriptor.document.interface) && !companions.tools.has(entry.name)) {
+      throw new Error(`tool '${entry.name}' reaches companion topology without declared ownership`);
+    }
     ids.add(entry.name);
     directories.push(await snapshotRemovalDirectory(directory, `task tool ${entry.name}`, true));
   }
@@ -13292,12 +13392,22 @@ async function assertNoExternalTaskTopologyReferences(
   excludedDirectories,
   plannedDocuments,
   topologyIds,
+  lifecycle = null,
 ) {
   const files = await registryControlJsonFiles(registryRoot, excludedDirectories);
   for (const file of files) {
     if (plannedDocuments.has(file) && plannedDocuments.get(file) === null) continue;
     const planned = plannedDocuments.get(file);
-    const document = planned ?? (await readRegularJsonDocument(file, `registry control document ${file}`)).document;
+    let document = planned ?? (await readRegularJsonDocument(file, `registry control document ${file}`)).document;
+    if (lifecycle && path.basename(file) === "artifact.json"
+      && path.dirname(path.dirname(file)) === path.join(registryRoot, "artifact")
+      && document.collection_catalogue !== undefined) {
+      const canonicalContentHash = (value) => Buffer.from(blake3(Buffer.from(stableJson(value)))).toString("hex");
+      document = lifecycle.catalogueProvenanceProjection(document, {
+        scope: document.collection_catalogue?.scope,
+        snapshot: { id: document.id, content: canonicalContentHash(document) },
+      }, canonicalContentHash);
+    }
     const references = exactStringReferencePaths(document, topologyIds);
     if (references.length) {
       throw new Error(`task topology is still referenced by '${file}' at ${references.slice(0, 4).join(", ")}`);
@@ -13361,7 +13471,7 @@ async function snapshotOwnedInterfaceStateDirectories(octopusHomeRoot, exactInte
   ];
 }
 
-async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterfaces, runId, ownedWriters = new Map()) {
+async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterfaces, runId, ownedWriters = new Map(), sourceRecord = null) {
   for (const interfaceId of [...exactInterfaces].sort()) {
     const root = path.join(
       octopusHomeRoot,
@@ -13383,13 +13493,18 @@ async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterf
       const formation = objectOrEmpty(record.document?.formation);
       const writer = ownedWriters.get(formation.run);
       const writerTarget = writer?.document?.interface_state?.[writer.owner]?.file_writer_target;
-      const ownedWriter = writer && writerTarget?.run === runId && writerTarget.door === interfaceId
+      const ownedWriter = writer && writerTarget?.run === (writer.targetRun ?? runId) && writerTarget.door === interfaceId
         && formation.worker === writer.document.worker && formation.ee === writer.document.ee;
+      const ownedCompanion = writer && ["observer", "projection"].includes(writer.role)
+        && writer.interfaces.has(interfaceId)
+        && formation.worker === writer.document.worker && formation.ee === writer.document.ee;
+      const ownedSource = stringValue(formation.run) === runId
+        && (!sourceRecord || formation.worker === sourceRecord.worker && formation.ee === sourceRecord.ee);
       if (
         record.document?.schema_version !== 5
         || stringValue(formation.worker_environment_id) !== entry.name
         || stringValue(formation.door_interface) !== interfaceId
-        || (stringValue(formation.run) !== runId && !ownedWriter)
+        || (!ownedSource && !ownedWriter && !ownedCompanion)
         || typeof formation.requires_release !== "boolean"
         || !["active", "failed", "released"].includes(stringValue(record.document?.lifecycle))
       ) {

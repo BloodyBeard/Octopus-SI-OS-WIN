@@ -16,11 +16,13 @@ path = "src/bin/octopus-operator-chat-artifact.rs"
 blake3.workspace = true
 octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
 octopus-context-collections = { path = "../../../system_context/packages/octopus-context-collections" }
+octopus-context-projection = { path = "../../../system_context/packages/octopus-context-projection" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ee = { path = "../../../../../crates/octopus-ee" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 octopus-marks = { path = "../../../../../crates/octopus-marks" }
 octopus-policy = { path = "../../../../../crates/octopus-policy" }
 octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
@@ -34,13 +36,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+object = { version = "0.37.3", default-features = false, features = ["read", "std"] }
 futures = "0.3"
+octopus-provider-codex = { path = "../../../world_provider_codex/packages/octopus-provider-codex" }
 tokio-tungstenite = "0.28.0"
 octopus-system-room-env = { path = "../../../../worker_environment_kind/system_room/packages/octopus-system-room-env" }
 octopus-tool-handlers = { path = "../../../../../crates/octopus-tool-handlers" }
 octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }
 octopus-app-server-interface = { path = "../octopus-app-server-interface" }
 tokio = { version = "1", features = ["macros", "rt"] }
-octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 tempfile = "3"

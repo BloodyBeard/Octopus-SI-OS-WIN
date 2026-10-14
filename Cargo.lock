@@ -6738,6 +6738,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "octopus-context-projection"
+version = "0.1.0"
+dependencies = [
+ "octopus-descriptors",
+ "octopus-interface-transport",
+ "octopus-interfaces",
+ "octopus-ledger",
+ "octopus-provider-run-authoring",
+ "octopus-world-pyecho-life-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "octopus-core"
 version = "0.1.0"
 dependencies = [
@@ -7469,9 +7484,12 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "futures",
+ "libc",
+ "object",
  "octopus-app-server",
  "octopus-app-server-interface",
  "octopus-context-collections",
+ "octopus-context-projection",
  "octopus-descriptors",
  "octopus-ee",
  "octopus-interface-transport",
@@ -7481,6 +7499,7 @@ dependencies = [
  "octopus-marks",
  "octopus-policy",
  "octopus-process-session-tool-runtime",
+ "octopus-provider-codex",
  "octopus-provider-run-authoring",
  "octopus-runtime",
  "octopus-system-room-env",

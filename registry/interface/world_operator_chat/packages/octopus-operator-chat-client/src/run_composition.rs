@@ -173,6 +173,8 @@ pub struct RunCompositionPlan {
     #[serde(default)]
     pub service_tier: Option<String>,
     pub descriptor_writes: Vec<PlannedClientWrite>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_writes: Vec<PlannedClientWrite>,
     pub run_write: PlannedClientWrite,
     pub required_interface_ids: Vec<String>,
     pub required_tool_ids: Vec<String>,
@@ -223,6 +225,7 @@ pub fn composition_candidate_writes(plan: &RunCompositionPlan) -> Vec<RegistryCa
                 .iter()
                 .map(|update| &update.write),
         )
+        .chain(&plan.run_writes)
         .chain(std::iter::once(&plan.run_write))
         .map(|write| RegistryCandidateWrite {
             path: write.path.clone(),
@@ -457,6 +460,10 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         config.run.interface_prefix = client.run.interface_prefix;
         config.run.run_prefix = client.run.run_prefix;
         config.run.listen_env = client.run.listen_env;
+        config.run.context_artifact_bindings = client.run.context_artifact_bindings;
+        if let Some(observer) = client.run._rest.get("maintenance_observer") {
+            config.run._rest.insert("maintenance_observer".into(), observer.clone());
+        }
     }
     let owns_client = request.communication.client_template_interface_id.is_some();
     topology = select_capability_topology(
@@ -530,7 +537,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
             ));
         }
     }
-    let selected_context = context_bindings::declared_context_bindings(
+    let mut selected_context = context_bindings::declared_context_bindings(
         &roots.registry_root,
         topology
             .tool_bindings
@@ -540,6 +547,15 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
             .chain(std::iter::once(provider.interface.id.clone())),
         &request.context_artifact_bindings,
     )?;
+    for binding in context_bindings::declared_context_bindings(
+        &roots.registry_root,
+        std::iter::empty(),
+        &config.run.context_artifact_bindings,
+    )? {
+        if !selected_context.iter().any(|existing| existing.id == binding.id) {
+            selected_context.push(binding);
+        }
+    }
     plan_code_mode_owners(
         &roots.registry_root,
         &config,
@@ -604,10 +620,16 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         roles
             .iter()
             .cloned()
+            .chain(config.run.context_artifact_bindings.iter().map(|binding| binding.id.clone()))
             .chain(selected_context.iter().map(|binding| binding.id.clone())),
         &selected_context,
         &resolved.staged_artifacts,
     )?;
+    let catalogue = collection_context::plan(collection_context::PlanContext {
+        registry_root: &roots.registry_root, ee_instances_root: &roots.ee_instances_root,
+        ee_id: &request.ee_id, identity: &identity, bindings: selected_context.clone(),
+        native_metadata: Some(&request.metadata), existing: None,
+    }, &mut selected_context, &mut writes)?;
     plan_provider_interface(
         &interface_root,
         &config,
@@ -615,6 +637,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &provider,
         &topology,
         &private_roles,
+        &catalogue.inline_ids(),
         Some(&roots.interface_private_state_root),
         &mut writes,
     )?;
@@ -683,6 +706,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &provider.client_operation_request_labels,
         None,
     )?;
+    let run_content = catalogue.wire(&identity.model_interface_id, run_content)?;
     let (run_content, intake) = input_intake::wire(&roots.registry_root, &identity, &mut writes, run_content)?;
     let run_content = context_bindings::configure_tool_context(&roots.registry_root, &identity, run_content, None)?;
     let receive_interface_id = if let Some(intake) = intake {
@@ -694,6 +718,32 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         required_tool_ids.dedup();
         intake.interface
     } else { identity.worker_interface_id.clone() };
+    let (run_content, mut run_writes) = maintenance_attachment::wire(
+        maintenance_attachment::AttachmentRequest {
+            registry_root: &roots.registry_root,
+            ee_instances_root: &roots.ee_instances_root,
+            run_records_root: Some(&roots.run_records_root),
+            interface_private_state_root: Some(&roots.interface_private_state_root),
+            config: &config,
+            identity: &identity,
+            source_input_labels: vec![request.seed.label.clone(), config.artifact_labels.message.clone()],
+            existing: None,
+            write_hash_algorithm: WriteHashAlgorithm::Blake3,
+        },
+        run_content,
+        &mut writes,
+        &mut required_interface_ids,
+        &mut required_tool_ids,
+    )?;
+    let run_content = if owns_client {
+        let (content, mut writers) = writer_runs::wire_new_record(
+            &roots.run_records_root, &identity.run_id, run_content,
+        )?;
+        run_writes.append(&mut writers);
+        content
+    } else {
+        run_content
+    };
     validate_new_descriptor_targets(&writes)?;
     normalize_write_hash_algorithm(&mut writes, WriteHashAlgorithm::Blake3)?;
     let run_write = checked_new_write(
@@ -785,6 +835,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         };
     let required_write_paths = writes
         .iter()
+        .chain(&run_writes)
         .map(|write| write.path.clone())
         .chain(
             required_policy_updates
@@ -809,6 +860,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         reasoning_effort: provider.reasoning_effort,
         service_tier: provider.service_tier,
         descriptor_writes: writes,
+        run_writes,
         run_write,
         required_interface_ids,
         required_tool_ids,

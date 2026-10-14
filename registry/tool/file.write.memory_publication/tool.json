@@ -1,0 +1,30 @@
+{
+  "id": "file.write.memory_publication",
+  "interface": "system_context_memory_publication",
+  "process": {
+    "bin": "target/debug/octopus-file-write-tool",
+    "interrupted_effect_recovery": "reinvoke_exact_artifact",
+    "authority": {
+      "read_root_slots": [],"write_root_slots": [],"executable_root_slots": [],
+      "read_paths": [],"write_paths": [],"executable_paths": [],"executable_commands": [],
+      "read_env_paths": [],"write_env_paths": [],"executable_env_paths": [],
+      "write_argument_paths": [{"pointer":"/writes/*/path","within_root_slots":["registry_artifact_root"],"include_parent":true}],
+      "allow_network":false,"allow_local_ipc":false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "description": "Apply only the exact ordered checked file_write plan returned by context.prepare_publication. This door's registry_artifact_root is only the selected collection entries directory. Preparation is not publication; all applied receipts are the proof.",
+  "args_schema": {
+    "type":"object","properties":{
+      "ordered":{"const":true},
+      "writes":{"type":"array","minItems":1,"items":{
+        "type":"object","properties":{
+          "path":{"type":"string","minLength":1},"content":{"type":"string"},
+          "expected_before_content":{"type":["string","null"]},
+          "expected_before_hash":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"}
+        },"required":["path","content","expected_before_content","expected_before_hash"],"additionalProperties":false
+      }}
+    },"required":["ordered","writes"],"additionalProperties":false
+  },
+  "is_world_effect": true
+}

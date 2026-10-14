@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import json
+import re
+import sys
+
+
+def exact(value):
+    return isinstance(value, str) and bool(value) and value.strip() == value
+
+
+def reference(value):
+    return isinstance(value, dict) and set(value) == {"id", "content"} and exact(value["id"]) and isinstance(value["content"], list) and len(value["content"]) == 32 and all(type(byte) is int and 0 <= byte <= 255 for byte in value["content"])
+
+
+def verify(request):
+    params = request["params"]
+    limit = params["max_bytes"]
+    assert isinstance(limit, int) and 0 < limit <= 268435456, "invalid declared byte bound"
+    with open(request["payload_path"], "rb") as handle:
+        data = handle.read(limit + 1)
+    assert len(data) <= limit, "experience exceeds its declared bound"
+    value = json.loads(data)
+    assert isinstance(value, dict), "experience must be an object"
+    if params["stage"] == "terminal":
+        snapshot = value["session_context"]
+        assert request["artifact_label"] == "interface.artifact.output", "terminal label mismatch"
+        assert snapshot["schema_version"] == 3 and snapshot["provider_interface"] == params["source_provider_interface"], "terminal snapshot identity mismatch"
+        assert isinstance(snapshot["artifacts"], list) and isinstance(value["text"], str), "terminal snapshot fields malformed"
+        return
+    assert params["stage"] == "projection", "unknown experience stage"
+    assert request["artifact_label"] == value["label"] == "memory.experience.input" and value["schema_version"] == 1, "projected experience identity mismatch"
+    assert "session_context" not in value and exact(value["text"]), "foreign continuity or absent ordinary input text"
+    source = value["source"]
+    for field, key in [("run", "source_run"), ("ee", "source_ee"), ("worker_interface", "source_worker_interface"), ("provider_interface", "source_provider_interface"), ("client_interface", "source_client_interface")]:
+        assert source[field] == params[key], "projected source identity mismatch: " + field
+    assert reference(source["terminal_artifact"]), "terminal reference malformed"
+    assert isinstance(source["terminal_source_movement_seq"], int) and isinstance(source["projection_source_movement_seq"], int), "original terminal movement proof absent"
+    selected = value["selected_input"]
+    assert reference(selected["source_artifact"]) and isinstance(selected["source_movement_seq"], int) and isinstance(selected["fields"], dict), "selected input evidence malformed"
+    assert selected["provenance"]["source_artifact"] == selected["source_artifact"] and selected["provenance"]["source_movement_seq"] == selected["source_movement_seq"], "selected input proof mismatch"
+    assert isinstance(value["evidence"], list) and isinstance(value["omission"], dict), "evidence omissions absent"
+    assert value["omission"]["selected_fields_trimmed"] is False and value["omission"]["selected_evidence_trimmed"] is False, "selected evidence was trimmed"
+
+
+if __name__ == "__main__":
+    try:
+        verify(json.load(sys.stdin))
+        result = {"passed": True, "details": {"contract": "memory_experience"}}
+    except (AssertionError, KeyError, TypeError, ValueError, OSError) as error:
+        result = {"passed": False, "details": {"contract": "memory_experience", "error": str(error)}}
+    print(json.dumps(result))

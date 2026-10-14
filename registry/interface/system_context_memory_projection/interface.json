@@ -1,0 +1,9 @@
+{
+  "id": "system_context_memory_projection",
+  "interface_type": "system",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": ["context_projection"],
+  "interface_driver_ref": "bound_context_projection",
+  "interface_driver_config": {"private_config": {}}
+}

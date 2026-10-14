@@ -30,7 +30,7 @@ async function initializeWorkspace(options) {
   }
   return withTransactionLock(roots.stateRoot, async () => {
     await ensureStateRoots(roots);
-    await recoverWorkspaceTransactionsUnlocked(roots);
+    await recoverWorkspaceTransactionsUnlocked(roots, options?.retirementBarrier);
     if (await readProjectReceipt(roots, request.operationId)) {
       throw new Error(`workspace setup operation '${request.operationId}' is already a Project operation`);
     }
@@ -214,7 +214,7 @@ async function mutateWorkspaceProject(options) {
   const scope = parseProjectMutationScope(options?.scope);
   return withTransactionLock(roots.stateRoot, async () => {
     await ensureStateRoots(roots);
-    await recoverWorkspaceTransactionsUnlocked(roots);
+    await recoverWorkspaceTransactionsUnlocked(roots, options?.retirementBarrier);
     if (await readReceipt(roots, request.operationId)) {
       throw new Error(`workspace project operation '${request.operationId}' is already a setup operation`);
     }
@@ -286,7 +286,7 @@ async function readWorkspaceSetupState(options) {
     await ensureStateRoots(roots);
     const recoveryErrors = [];
     try {
-      await recoverWorkspaceTransactionsUnlocked(roots);
+      await recoverWorkspaceTransactionsUnlocked(roots, options?.retirementBarrier);
     } catch (error) {
       recoveryErrors.push(errorMessage(error));
     }
@@ -357,7 +357,7 @@ async function recoverWorkspaceTransactions(options) {
   if (!fsSync.existsSync(roots.transactionsRoot)) return { recovered: 0 };
   return withTransactionLock(roots.stateRoot, async () => {
     await ensureStateRoots(roots);
-    return recoverWorkspaceTransactionsUnlocked(roots);
+    return recoverWorkspaceTransactionsUnlocked(roots, options?.retirementBarrier);
   });
 }
 
@@ -366,7 +366,7 @@ async function commitClientAuthoringTransaction(options) {
   const plan = parseClientAuthoringPlan(options?.plan);
   return withTransactionLock(roots.stateRoot, async () => {
     await ensureStateRoots(roots);
-    await recoverWorkspaceTransactionsUnlocked(roots);
+    await recoverWorkspaceTransactionsUnlocked(roots, options?.retirementBarrier);
     const existingReceipt = await readClientAuthoringReceipt(roots, plan.operationId);
     if (existingReceipt) {
       if (existingReceipt.label !== plan.label) {
@@ -378,14 +378,15 @@ async function commitClientAuthoringTransaction(options) {
     const transactionRoot = await stageClientAuthoringTransaction(roots, plan);
     let recovered = false;
     try {
-      await commitClientAuthoringJournal(roots, transactionRoot);
+      await commitClientAuthoringJournal(roots, transactionRoot, options?.retirementBarrier);
     } catch (error) {
       try {
-        await recoverClientAuthoringTransaction(roots, transactionRoot);
-        recovered = true;
+        const outcome = await recoverClientAuthoringTransaction(roots, transactionRoot, options?.retirementBarrier);
+        if (outcome !== "rolled_back") recovered = true;
       } catch (recoveryError) {
         throw new Error(`${errorMessage(error)}; client authoring recovery failed closed: ${errorMessage(recoveryError)}`);
       }
+      if (!recovered || plan.retirement) throw error;
     }
     return { operationId: plan.operationId, recovered, cleanupWarnings: [] };
   });
@@ -394,7 +395,7 @@ async function commitClientAuthoringTransaction(options) {
 function parseClientAuthoringPlan(value) {
   const plan = exactObject(
     value,
-    ["operationId", "label", "writes", "removals"],
+    ["operationId", "label", "writes", "removals", "retirement"],
     ["operationId", "label", "writes", "removals"],
     "Client authoring plan",
   );
@@ -470,7 +471,95 @@ function parseClientAuthoringPlan(value) {
     label: requiredHumanText(plan.label, "Client authoring plan label", 240),
     writes,
     removals,
+    ...(Object.hasOwn(plan, "retirement") ? { retirement: parseRetirementSelection(plan.retirement) } : {}),
   };
+}
+
+function parseRetirementSelection(value) {
+  const selection = exactObject(value, ["schema_version", "source_run", "interface_ids", "records"],
+    ["schema_version", "source_run", "interface_ids", "records"], "Task retirement selection");
+  if (selection.schema_version !== 1 || !Array.isArray(selection.interface_ids) || !selection.interface_ids.length
+    || !Array.isArray(selection.records) || !selection.records.length) {
+    throw new Error("Task retirement selection has an invalid schema or empty ownership");
+  }
+  const interfaceIds = selection.interface_ids.map((id) => requiredId(id, "Task retirement interface"));
+  if (stableJson(interfaceIds) !== stableJson([...new Set(interfaceIds)].sort())) {
+    throw new Error("Task retirement interfaces must be unique and sorted");
+  }
+  const records = selection.records.map((value) => {
+    const row = exactObject(value, ["run", "file", "expected_digest", "worker", "ee", "role", "provider_interface", "target_run"],
+      ["run", "file", "expected_digest", "worker", "ee", "role", "provider_interface", "target_run"], "Task retirement record");
+    return { run: requiredId(row.run, "Task retirement Run"), file: requiredAbsolutePath(row.file, "Task retirement file"),
+      expected_digest: requiredDigest(row.expected_digest, "Task retirement original digest"),
+      worker: requiredId(row.worker, "Task retirement worker"), ee: requiredId(row.ee, "Task retirement EE"),
+      role: requiredHumanText(row.role, "Task retirement role", 80),
+      provider_interface: requiredId(row.provider_interface, "Task retirement provider"),
+      target_run: requiredId(row.target_run, "Task retirement target") };
+  });
+  const runIds = new Set(records.map((row) => row.run)), files = new Set(records.map((row) => row.file));
+  const sourceRun = requiredId(selection.source_run, "Task retirement source");
+  if (runIds.size !== records.length || files.size !== records.length || !runIds.has(sourceRun)
+    || stableJson(records) !== stableJson([...records].sort((a, b) => a.run.localeCompare(b.run)))
+    || records.some((row) => !runIds.has(row.target_run) || !interfaceIds.includes(row.worker)
+      || !interfaceIds.includes(row.provider_interface))) {
+    throw new Error("Task retirement records differ from their exact ownership");
+  }
+  return { schema_version: 1, source_run: sourceRun, interface_ids: interfaceIds, records };
+}
+
+function parseRetirementJournal(value, journal) {
+  const retirement = exactObject(value, ["schema_version", "selection", "selection_digest", "proof"],
+    ["schema_version", "selection", "selection_digest", "proof"], "Task retirement journal");
+  const selection = parseRetirementSelection(retirement.selection);
+  const selectionDigest = sha256(Buffer.from(stableJson(selection)));
+  if (retirement.schema_version !== 1 || retirement.selection_digest !== selectionDigest) {
+    throw new Error("Task retirement journal changed its selection pin");
+  }
+  for (const row of selection.records) {
+    const write = journal.writes.find((entry) => entry.destination === row.file);
+    if (!write || write.before_digest !== row.expected_digest || write.expected_before_digest !== row.expected_digest
+      || write.after_digest !== null || !write.before_file) {
+      throw new Error("Task retirement selection lacks an exact staged Run removal");
+    }
+    if (write.publish_barrier !== (row.run === selection.source_run)) {
+      throw new Error("Task retirement publication barrier differs from its source Run");
+    }
+  }
+  const ctx = { operation_id: journal.operation_id, selection_digest: selectionDigest, selection,
+    originals: selection.records.map(({ file, expected_digest }) => ({ file, expected_digest })).sort((a, b) => a.file.localeCompare(b.file)) };
+  ctx.retired = ctx.originals.map(({ file }) => ({ file, expected_digest: null }));
+  const proof = retirement.proof === null ? null : parseHeldRetirementProof(retirement.proof, ctx);
+  if (!proof && ["published", "committed", "cleaned"].includes(journal.phase)
+    || proof && ["rolling_back", "rolled_back"].includes(journal.phase)) {
+    throw new Error("Task retirement journal phase has no matching held proof");
+  }
+  if (!proof && journal.removals.some((removal) => removal.state !== "staged")) {
+    throw new Error("Task retirement cleanup started without a durable held proof");
+  }
+  if (proof && journal.writes.some((write) => !["applied", "unchanged"].includes(write.state))
+    || journal.phase === "cleaned" && journal.removals.some((removal) => removal.state !== "moved")
+    || journal.phase === "rolled_back" && journal.writes.some((write) => !["rolled_back", "unchanged"].includes(write.state))) {
+    throw new Error("Task retirement journal phase differs from its durable target writes");
+  }
+  return { schema_version: 1, selection, selection_digest: selectionDigest, proof };
+}
+
+function parseHeldRetirementProof(value, ctx) {
+  const proof = exactObject(value, ["schema_version", "phase", "operation_id", "selection_digest", "interface_ids", "originals", "retired", "ledger_boundary"],
+    ["schema_version", "phase", "operation_id", "selection_digest", "interface_ids", "originals", "retired", "ledger_boundary"], "Task retirement held proof");
+  const originals = ctx.originals.map(({ file, expected_digest }) => ({ file, expected_digest }));
+  if (proof.schema_version !== 1 || proof.phase !== "held" || proof.operation_id !== ctx.operation_id
+    || proof.selection_digest !== ctx.selection_digest || stableJson(proof.interface_ids) !== stableJson(ctx.selection.interface_ids)
+    || stableJson(proof.originals) !== stableJson(originals) || stableJson(proof.retired) !== stableJson(ctx.retired)) {
+    throw new Error("Task retirement held proof differs from the exact operation and preimages");
+  }
+  const boundary = exactObject(proof.ledger_boundary, ["complete_offset", "sequence", "sha256"],
+    ["complete_offset", "sequence", "sha256"], "Task retirement ledger boundary");
+  return { schema_version: 1, phase: "held", operation_id: ctx.operation_id, selection_digest: ctx.selection_digest,
+    interface_ids: [...ctx.selection.interface_ids], originals, retired: ctx.retired.map((entry) => ({ ...entry })),
+    ledger_boundary: { complete_offset: requiredFileIdentityNumber(boundary.complete_offset, "Task retirement ledger offset"),
+      sequence: requiredFileIdentityNumber(boundary.sequence, "Task retirement ledger sequence"),
+      sha256: requiredDigest(boundary.sha256, "Task retirement ledger prefix hash") } };
 }
 
 async function normalizeRoots(options) {
@@ -1676,10 +1765,12 @@ function plannedOwner(root, destination, label) {
 
 function validatePlannedHomeRuns(roots, plan, writes, home) {
   const records = new Map();
+  const contents = new Map();
   for (const write of writes.filter((write) => pathInside(roots.runsRoot, write.destination))) {
     const record = JSON.parse(write.content);
     if (records.has(record.id)) throw new Error("Home topology repeats a Run identity");
     records.set(record.id, record);
+    contents.set(record.id, write.content);
   }
   const declared = new Map([[home.id, home]]);
   const execution = [home];
@@ -1703,6 +1794,22 @@ function validatePlannedHomeRuns(roots, plan, writes, home) {
     }
     declared.set(voice.id, voice);
     execution.push(voice);
+  }
+  if (Object.values(home.interface_state ?? {}).some((state) => state?.maintenance_observer !== undefined)) {
+    const { plannedMaintenanceRuns } = require(path.join(roots.interfaceRoot, "world_operator_chat", "maintenance-client.cjs"));
+    const maintenancePlan = {
+      run_id: plan.runId, chat_interface_id: plan.chatInterfaceId,
+      model_interface_id: plan.modelInterfaceId, worker_interface_id: plan.workerInterfaceId,
+      interface_writes: writes.map((write) => ({ path: write.destination, content: write.content,
+        tag: write.tag, expected_before_hash: write.expectedBeforeDigest })),
+    };
+    for (const { record, content } of plannedMaintenanceRuns(maintenancePlan, home, roots.registryRoot, true)) {
+      if (declared.has(record.id) || contents.get(record.id) !== content) {
+        throw new Error("Home maintenance Run differs from its exact declared initial bytes");
+      }
+      declared.set(record.id, record);
+      execution.push(record);
+    }
   }
   for (const run of execution) {
     for (const [owner, state] of Object.entries(run.interface_state ?? {})) {
@@ -1771,6 +1878,29 @@ async function validatePlannedHomeOwnership(roots, plan, writes, runs) {
       }
     }
   }
+  const authorities = new Map();
+  for (const run of runs) {
+    const policy = documents.get(path.join(roots.interfaceRoot, run.worker, "policy.json"));
+    if (policy?.id !== run.worker || !Array.isArray(policy.ceiling?.interfaces) || !Array.isArray(policy.ceiling?.tools)) {
+      throw new Error(`Home topology plan must declare exact worker interface and tool ceilings for '${run.id}'`);
+    }
+    const interfaces = new Set([run.worker]);
+    const activeInterfaces = new Set();
+    const allowedInterfaces = new Set(policy.ceiling.interfaces);
+    const allowedTools = new Set(policy.ceiling.tools);
+    for (const checkpoint of run.checkpoints) {
+      for (const binding of [checkpoint.interface_binding, ...(checkpoint.outbound_interface_bindings ?? [])].filter(Boolean)) {
+        if (!allowedInterfaces.has(binding.interface)) {
+          throw new Error(`Home Run '${run.id}' binds '${binding.interface}' outside its exact worker ceiling`);
+        }
+        interfaces.add(binding.interface);
+        if (run.active_checkpoints.includes(checkpoint.id)) {
+          activeInterfaces.add(binding.interface);
+        }
+      }
+    }
+    authorities.set(run.id, { worker: run.worker, interfaces, activeInterfaces, allowedInterfaces, allowedTools });
+  }
   const connected = new Set([plan.chatInterfaceId]);
   const pending = [...connected];
   while (pending.length) {
@@ -1780,16 +1910,14 @@ async function validatePlannedHomeOwnership(roots, plan, writes, runs) {
       pending.push(next);
     }
   }
-  const policy = documents.get(path.join(roots.interfaceRoot, plan.workerInterfaceId, "policy.json"));
-  if (!Array.isArray(policy?.ceiling?.interfaces) || !Array.isArray(policy?.ceiling?.tools)) {
-    throw new Error("Home topology plan must declare exact worker interface and tool ceilings");
+  for (const scope of authorities.values()) {
+    if ([...scope.activeInterfaces].some((id) => connected.has(id))) connected.add(scope.worker);
   }
-  const allowedInterfaces = new Set(policy.ceiling.interfaces);
-  const allowedTools = new Set(policy.ceiling.tools);
   for (const owner of interfaceOwners) {
     const descriptor = documents.get(path.join(roots.interfaceRoot, owner, "interface.json"));
     if (descriptor?.id !== owner) throw new Error(`Home topology plan omitted exact interface descriptor '${owner}'`);
-    if (!connected.has(owner) || !allowedInterfaces.has(owner)) {
+    if (!connected.has(owner) || ![...authorities.values()].some((scope) => scope.interfaces.has(owner)
+      && (scope.allowedInterfaces.has(owner) || scope.worker === owner))) {
       throw new Error(`Home planned interface '${owner}' is outside its active Home bindings or worker ceiling`);
     }
   }
@@ -1797,14 +1925,16 @@ async function validatePlannedHomeOwnership(roots, plan, writes, runs) {
     const descriptor = documents.get(path.join(roots.toolRoot, owner, "tool.json"));
     if (descriptor?.id !== owner) throw new Error(`Home topology plan omitted exact tool descriptor '${owner}'`);
     const door = requiredId(descriptor.interface, `Home tool '${owner}' interface`);
-    if (!connected.has(door) || !allowedInterfaces.has(door) || !allowedTools.has(owner)) {
+    if (!connected.has(door) || ![...authorities.values()].some((scope) => scope.interfaces.has(door)
+      && scope.allowedInterfaces.has(door) && scope.allowedTools.has(owner))) {
       throw new Error(`Home planned tool '${owner}' is outside its active Home bindings or worker ceiling`);
     }
   }
   for (const run of runs) {
     for (const [owner, state] of Object.entries(run.interface_state ?? {})) {
       if (state.prelude_sources === undefined) continue;
-      if (!connected.has(owner) || !allowedInterfaces.has(owner) || !Array.isArray(state.prelude_sources)) {
+      const scope = authorities.get(run.id);
+      if (!connected.has(owner) || !scope.interfaces.has(owner) || !scope.allowedInterfaces.has(owner) || !Array.isArray(state.prelude_sources)) {
         throw new Error("Home prelude snapshots require an exact connected owner");
       }
       for (const source of state.prelude_sources) {
@@ -1860,7 +1990,8 @@ function validatePlannedRunRecord(record, plan, materialized) {
       .join("; ") || "unknown schema error";
     throw new Error(`Home run record failed the canonical schema: ${details}`);
   }
-  if (record.ee !== materialized.rootEeId || record.worker !== plan.workerInterfaceId) {
+  if (record.ee !== materialized.rootEeId || !plan.requiredInterfaceIds.includes(record.worker)
+    || record.id === plan.runId && record.worker !== plan.workerInterfaceId) {
     throw new Error("Home run record changed its run, EE, or exact worker identity");
   }
   const checkpointIds = new Set();
@@ -2157,6 +2288,7 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
 }
 
 async function stageClientAuthoringTransaction(roots, plan) {
+  if (plan.retirement) assertRetirementPaths(roots, plan.retirement, plan.writes, plan.removals);
   const transactionRoot = path.join(roots.transactionsRoot, plan.operationId);
   if (!pathInside(roots.transactionsRoot, transactionRoot)) {
     throw new Error("Client authoring transaction path escapes its state root");
@@ -2242,7 +2374,7 @@ async function stageClientAuthoringTransaction(roots, plan) {
     await syncDirectory(path.join(stagingRoot, "before"));
     await syncDirectory(path.join(stagingRoot, "removed"));
     await syncDirectory(stagingRoot);
-    await writeJournal(stagingRoot, {
+    await writeJournal(stagingRoot, parseClientAuthoringJournal({
       schema: "octopus.client_authoring_transaction",
       schema_version: 1,
       operation_id: plan.operationId,
@@ -2250,7 +2382,9 @@ async function stageClientAuthoringTransaction(roots, plan) {
       phase: "staged",
       writes: journalWrites,
       removals: journalRemovals,
-    });
+      ...(plan.retirement ? { retirement: { schema_version: 1, selection: plan.retirement,
+        selection_digest: sha256(Buffer.from(stableJson(plan.retirement))), proof: null } } : {}),
+    }));
     await fs.rename(stagingRoot, transactionRoot);
     await syncDirectory(roots.transactionsRoot);
     return transactionRoot;
@@ -2313,14 +2447,136 @@ async function commitTransaction(roots, transactionRoot, onProgress) {
   await finalizeCommittedTransaction(roots, transactionRoot, journal);
 }
 
-async function commitClientAuthoringJournal(roots, transactionRoot) {
+function assertRetirementPaths(roots, selection, writes, removals) {
+  const selected = new Set(selection.records.map((row) => row.file));
+  for (const row of selection.records) {
+    if (row.file !== path.join(roots.runsRoot, `${row.run}.json`)) {
+      throw new Error("Task retirement record is outside its exact Run coordinate");
+    }
+    const write = writes.find((entry) => (entry.destination ?? entry.file) === row.file);
+    if (!write || (Object.hasOwn(write, "content") ? write.content : write.after_digest) !== null
+      || (write.expectedBeforeDigest ?? write.before_digest) !== row.expected_digest
+      || (write.publishBarrier ?? write.publish_barrier) !== (row.run === selection.source_run)) {
+      throw new Error("Task retirement plan lacks an exact selected Run removal");
+    }
+  }
+  if (writes.some((write) => pathInside(roots.runsRoot, write.destination) && !selected.has(write.destination))) {
+    throw new Error("Task retirement plan changes a Run outside its selected ownership");
+  }
+  for (const removal of removals) {
+    for (const root of [roots.interfaceRoot, roots.privateInterfacesRoot, roots.interfaceHandInRoot]) {
+      if (pathInside(root, removal.destination) && (path.dirname(removal.destination) !== root
+        || !selection.interface_ids.includes(path.basename(removal.destination)))) {
+        throw new Error("Task retirement plan removes an interface outside its held ownership");
+      }
+    }
+  }
+}
+
+function requireRetirementBarrier(barrier) {
+  if (!barrier || typeof barrier.verifyBefore !== "function" || typeof barrier.withHeldProof !== "function") {
+    const error = new Error("Task retirement requires a live preflight and held ownership barrier");
+    error.code = "task_retirement_unavailable";
+    throw error;
+  }
+  return barrier;
+}
+
+async function retirementContext(roots, transactionRoot, journal) {
+  const retirement = journal.retirement;
+  assertRetirementPaths(roots, retirement.selection, journal.writes, journal.removals);
+  const originals = [];
+  for (const row of retirement.selection.records) {
+    const write = journal.writes.find((entry) => entry.destination === row.file);
+    const bytes = await readFileNoFollow(transactionFile(transactionRoot, write.before_file, "retirement original"));
+    const content = bytes.toString("utf8");
+    if (sha256(bytes) !== row.expected_digest || !Buffer.from(content).equals(bytes)) {
+      throw new Error("Task retirement original bytes changed or are not exact UTF-8");
+    }
+    const record = JSON.parse(content);
+    if (record.id !== row.run || record.worker !== row.worker || record.ee !== row.ee
+      || !Object.hasOwn(record.interface_state ?? {}, row.provider_interface)) {
+      throw new Error("Task retirement original Run differs from its identity pin");
+    }
+    originals.push({ file: row.file, expected_digest: row.expected_digest, content });
+  }
+  originals.sort((a, b) => a.file.localeCompare(b.file));
+  return { operation_id: journal.operation_id,
+    roots: { registry_root: roots.registryRoot, run_records_root: roots.runsRoot,
+      ledger_root: path.join(roots.octopusHomeRoot, "ledger"), interface_private_state_root: roots.privateInterfacesRoot },
+    selection: retirement.selection, selection_digest: retirement.selection_digest, originals,
+    retired: originals.map(({ file }) => ({ file, expected_digest: null })), prior_proof: retirement.proof };
+}
+
+async function verifyRetirementTargets(ctx, retired) {
+  for (const original of ctx.originals) {
+    const bytes = await readFileIfPresent(original.file);
+    if ((bytes ? sha256(bytes) : null) !== (retired ? null : original.expected_digest)) {
+      throw new Error("Task retirement target changed outside its exact frontier");
+    }
+  }
+}
+
+async function verifyHeldRetirementProof(held) {
+  if (!held.guard || typeof held.guard.verify !== "function") {
+    throw new Error("Task retirement barrier returned no held proof verifier");
+  }
+  await verifyRetirementTargets(held.ctx, true);
+  const proof = parseHeldRetirementProof(await held.guard.verify(), held.ctx);
+  await verifyRetirementTargets(held.ctx, true);
+  const prior = held.ctx.prior_proof?.ledger_boundary;
+  if (prior && (proof.ledger_boundary.complete_offset < prior.complete_offset
+    || proof.ledger_boundary.sequence < prior.sequence
+    || proof.ledger_boundary.complete_offset === prior.complete_offset && proof.ledger_boundary.sha256 !== prior.sha256)) {
+    throw new Error("Task retirement held proof regressed its checked ledger prefix");
+  }
+  return proof;
+}
+
+async function persistHeldRetirementProof(transactionRoot, journal, held) {
+  const proof = await verifyHeldRetirementProof(held);
+  journal.retirement.proof = proof;
+  await writeJournal(transactionRoot, journal);
+  held.ctx.prior_proof = proof;
+}
+
+async function withHeldRetirement(roots, transactionRoot, journal, barrier, operation) {
+  requireRetirementBarrier(barrier);
+  const ctx = await retirementContext(roots, transactionRoot, journal);
+  let entered = false, completed = false, outcome;
+  await barrier.withHeldProof(ctx, async (guard) => {
+    if (entered) throw new Error("Task retirement barrier invoked cleanup more than once");
+    entered = true;
+    const held = { ctx, guard };
+    await persistHeldRetirementProof(transactionRoot, journal, held);
+    outcome = await operation(held);
+    completed = true;
+    return outcome;
+  });
+  if (!completed) throw new Error("Task retirement barrier did not complete held cleanup");
+  return outcome;
+}
+
+async function commitClientAuthoringJournal(roots, transactionRoot, retirementBarrier) {
   let journal = await readJournal(roots, transactionRoot);
   if (journal.schema !== "octopus.client_authoring_transaction") {
     throw new Error("Client authoring commit received another transaction schema");
   }
+  if (journal.retirement?.proof) {
+    await verifyJournalWrites(journal.writes);
+    return withHeldRetirement(roots, transactionRoot, journal, retirementBarrier, (held) =>
+      finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier, held));
+  }
   if (journal.phase === "committed") {
-    await finalizeClientAuthoringTransaction(roots, transactionRoot, journal);
+    await finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier);
     return;
+  }
+  if (journal.retirement) {
+    const barrier = requireRetirementBarrier(retirementBarrier);
+    const ctx = await retirementContext(roots, transactionRoot, journal);
+    await verifyRetirementTargets(ctx, false);
+    await barrier.verifyBefore(ctx);
+    await verifyRetirementTargets(ctx, false);
   }
   if (journal.phase !== "published") {
     journal.phase = "committing";
@@ -2341,9 +2597,21 @@ async function commitClientAuthoringJournal(roots, transactionRoot) {
     await writeJournal(transactionRoot, journal);
   }
   await verifyJournalWrites(journal.writes);
+  if (journal.retirement) {
+    return withHeldRetirement(roots, transactionRoot, journal, retirementBarrier, (held) =>
+      finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier, held));
+  }
+  await finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier);
+}
+
+async function finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier, held) {
+  if (journal.phase === "committed") {
+    return finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held);
+  }
   journal.phase = "published";
   await writeJournal(transactionRoot, journal);
   for (const index of journal.removals.keys()) {
+    if (held) await verifyHeldRetirementProof(held);
     await applyClientAuthoringRemoval(roots, transactionRoot, journal.removals[index], journal);
     journal.removals[index].state = "moved";
     await writeJournal(transactionRoot, journal);
@@ -2352,7 +2620,7 @@ async function commitClientAuthoringJournal(roots, transactionRoot) {
   journal.phase = "committed";
   await writeJournal(transactionRoot, journal);
   await writeClientAuthoringReceipt(roots, clientAuthoringReceipt(journal));
-  await finalizeClientAuthoringTransaction(roots, transactionRoot, journal);
+  await finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held);
 }
 
 async function applyClientAuthoringRemoval(roots, transactionRoot, removal, journal) {
@@ -2415,7 +2683,8 @@ async function isRetiredInterfaceStateRemoval(roots, journal, removal) {
   return true;
 }
 
-async function finalizeClientAuthoringTransaction(roots, transactionRoot, journal) {
+async function finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held) {
+  if (held) await verifyHeldRetirementProof(held);
   await verifyJournalWrites(journal.writes);
   await verifyClientAuthoringRemovals(roots, transactionRoot, journal);
   const receipt = await readClientAuthoringReceipt(roots, journal.operation_id);
@@ -2429,10 +2698,10 @@ async function finalizeClientAuthoringTransaction(roots, transactionRoot, journa
   }
   await fs.rename(transactionRoot, cleanupRoot);
   await syncDirectory(roots.transactionsRoot);
-  await cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot);
+  await cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, held);
 }
 
-async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
+async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, held) {
   if (!pathInside(roots.transactionsRoot, cleanupRoot)) {
     throw new Error("Client authoring cleanup escapes its transaction root");
   }
@@ -2456,7 +2725,7 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
     return;
   }
   const journal = parseClientAuthoringJournal(document.value);
-  if (journal.operation_id !== match[1] || journal.phase !== "committed") {
+  if (journal.operation_id !== match[1] || !["committed", "cleaned"].includes(journal.phase)) {
     throw new Error("Client authoring cleanup does not prove a committed transaction");
   }
   const receipt = await readClientAuthoringReceipt(roots, journal.operation_id);
@@ -2464,6 +2733,10 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
     throw new Error("Client authoring cleanup has no matching durable receipt");
   }
   await verifyJournalWrites(journal.writes);
+  if (journal.retirement && journal.phase !== "cleaned" && !held) {
+    return withHeldRetirement(roots, cleanupRoot, journal, retirementBarrier, (reacquired) =>
+      cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, reacquired));
+  }
   const declaredStagedFiles = new Set(journal.writes.flatMap((write) => (
     [write.after_file, write.before_file].filter(Boolean)
   )));
@@ -2476,6 +2749,29 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
       if (!declaredStagedFiles.has(relative)) {
         throw new Error(`Client authoring cleanup contains unknown staged file '${relative}'`);
       }
+    }
+  }
+  const cleanupTombstones = async () => {
+    for (const removal of journal.removals) {
+      if (await pathExists(removal.destination)) {
+        throw new Error(`Client authoring cleanup '${removal.tag}' found its source restored`);
+      }
+      const tombstone = transactionFile(cleanupRoot, removal.tombstone, "cleanup tombstone");
+      const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
+      if (!durable.exists) continue;
+      if (journal.phase === "cleaned") throw new Error("Cleaned task retirement journal still contains a private tombstone");
+      if (held) await verifyHeldRetirementProof(held);
+      await removeCommittedClientAuthoringTombstone(tombstone, durable, removal,
+        await isRetiredInterfaceStateRemoval(roots, journal, removal));
+    }
+  };
+  if (journal.retirement) {
+    if (journal.phase !== "cleaned") await persistHeldRetirementProof(cleanupRoot, journal, held);
+    await cleanupTombstones();
+    if (journal.phase !== "cleaned") {
+      await persistHeldRetirementProof(cleanupRoot, journal, held);
+      journal.phase = "cleaned";
+      await writeJournal(cleanupRoot, journal);
     }
   }
   for (const write of journal.writes) {
@@ -2494,16 +2790,7 @@ async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot) {
       await syncDirectory(path.dirname(staged));
     }
   }
-  for (const removal of journal.removals) {
-    if (await pathExists(removal.destination)) {
-      throw new Error(`Client authoring cleanup '${removal.tag}' found its source restored`);
-    }
-    const tombstone = transactionFile(cleanupRoot, removal.tombstone, "cleanup tombstone");
-    const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-    if (!durable.exists) continue;
-    await removeCommittedClientAuthoringTombstone(tombstone, durable, removal,
-      await isRetiredInterfaceStateRemoval(roots, journal, removal));
-  }
+  if (!journal.retirement) await cleanupTombstones();
   for (const directory of ["after", "before", "removed"]) {
     const candidate = path.join(cleanupRoot, directory);
     const entries = await directoryEntriesIfPresent(candidate);
@@ -2628,6 +2915,29 @@ async function applyJournalWrite(roots, transactionRoot, write) {
 
 async function rollbackTransaction(roots, transactionRoot) {
   let journal = await readJournal(roots, transactionRoot);
+  if (journal.retirement && journal.phase === "rolled_back") {
+    return finalizeRolledBackRetirement(roots, transactionRoot, journal);
+  }
+  if (journal.retirement) {
+    if (journal.retirement.proof) throw new Error("Task retirement with a durable held proof cannot roll back");
+    for (const removal of journal.removals) {
+      if (await pathExists(transactionFile(transactionRoot, removal.tombstone, "rollback tombstone"))) {
+        throw new Error("Task retirement rollback found cleanup before its held proof");
+      }
+    }
+    for (const write of journal.writes) {
+      const bytes = await readFileIfPresent(write.destination);
+      const digest = bytes ? sha256(bytes) : null;
+      if (digest !== write.before_digest && digest !== write.after_digest
+        || write.state === "rolled_back" && digest !== write.before_digest) {
+        throw new Error(`Task retirement rollback found changed bytes at '${write.destination}'`);
+      }
+      if (digest !== write.before_digest && write.before_digest !== null) {
+        const before = await readFileNoFollow(transactionFile(transactionRoot, write.before_file, "rollback original"));
+        if (sha256(before) !== write.before_digest) throw new Error(`Task retirement rollback snapshot for '${write.tag}' is corrupt`);
+      }
+    }
+  }
   journal.phase = "rolling_back";
   await writeJournal(transactionRoot, journal);
   for (const index of [...journal.writes.keys()].reverse()) {
@@ -2657,19 +2967,97 @@ async function rollbackTransaction(roots, transactionRoot) {
       const beforePath = transactionFile(transactionRoot, write.before_file, "before file");
       const before = await readFileNoFollow(beforePath);
       if (sha256(before) !== write.before_digest) throw new Error(`Workspace rollback snapshot for '${write.tag}' is corrupt`);
-      const temporary = path.join(path.dirname(write.destination), `.${path.basename(write.destination)}.rollback-${crypto.randomBytes(8).toString("hex")}.tmp`);
-      await writeSyncedFile(temporary, before, 0o600, "wx");
-      await fs.rename(temporary, write.destination);
+      if (journal.retirement && write.after_digest === null) {
+        try {
+          await writeSyncedFile(write.destination, before, 0o600, "wx");
+        } catch (error) {
+          if (error?.code !== "EEXIST") throw error;
+          const raced = await readFileIfPresent(write.destination);
+          if (!raced || sha256(raced) !== write.before_digest) throw new Error("Task retirement restoration raced with changed Run bytes");
+        }
+      } else {
+        const temporary = path.join(path.dirname(write.destination), `.${path.basename(write.destination)}.rollback-${crypto.randomBytes(8).toString("hex")}.tmp`);
+        try {
+          await writeSyncedFile(temporary, before, 0o600, "wx");
+          if (journal.retirement) {
+            const observed = await readFileIfPresent(write.destination);
+            if ((observed ? sha256(observed) : null) !== write.after_digest) {
+              throw new Error(`Task retirement rollback found changed bytes at '${write.destination}'`);
+            }
+          }
+          await fs.rename(temporary, write.destination);
+        } finally {
+          await fs.unlink(temporary).catch((error) => { if (error?.code !== "ENOENT") throw error; });
+        }
+      }
     }
     await syncDirectory(path.dirname(write.destination));
     journal.writes[index].state = "rolled_back";
     await writeJournal(transactionRoot, journal);
   }
+  if (journal.retirement) {
+    for (const write of journal.writes) {
+      const bytes = await readFileIfPresent(write.destination);
+      if ((bytes ? sha256(bytes) : null) !== write.before_digest) {
+        throw new Error(`Task retirement restored bytes for '${write.tag}' changed before rollback completed`);
+      }
+    }
+    return finalizeRolledBackRetirement(roots, transactionRoot, journal);
+  }
   await fs.rm(transactionRoot, { recursive: true, force: true });
   await syncDirectory(roots.transactionsRoot);
 }
 
-async function recoverWorkspaceTransactionsUnlocked(roots) {
+async function finalizeRolledBackRetirement(roots, transactionRoot, journal) {
+  journal.phase = "rolled_back";
+  await writeJournal(transactionRoot, journal);
+  const cleanupRoot = path.join(roots.transactionsRoot, `.rollback-${journal.operation_id}`);
+  if (await pathExists(cleanupRoot)) throw new Error("Task retirement rollback cleanup path already exists");
+  await fs.rename(transactionRoot, cleanupRoot);
+  await syncDirectory(roots.transactionsRoot);
+  await cleanupRolledBackRetirement(roots, cleanupRoot);
+}
+
+async function cleanupRolledBackRetirement(roots, cleanupRoot) {
+  const match = /^\.rollback-([A-Za-z0-9_-]{8,96})$/.exec(path.basename(cleanupRoot));
+  if (!match || !pathInside(roots.transactionsRoot, cleanupRoot)) throw new Error("Task retirement rollback cleanup path is invalid");
+  const journalPath = path.join(cleanupRoot, "journal.json");
+  let document;
+  try { document = await readJson(journalPath, "Task retirement rollback cleanup"); }
+  catch (error) {
+    if (error?.code !== "ENOENT" || (await fs.readdir(cleanupRoot)).length) throw error;
+    await fs.rmdir(cleanupRoot);
+    await syncDirectory(roots.transactionsRoot);
+    return;
+  }
+  const journal = parseClientAuthoringJournal(document.value);
+  if (!journal.retirement || journal.operation_id !== match[1] || journal.phase !== "rolled_back"
+    || journal.writes.some((write) => !["rolled_back", "unchanged"].includes(write.state))) {
+    throw new Error("Task retirement rollback cleanup lacks a completed restoration journal");
+  }
+  const declared = new Map(journal.writes.flatMap((write) => [[write.before_file, write.before_digest], [write.after_file, write.after_digest]])
+    .filter(([file]) => file));
+  for (const directory of ["before", "after", "removed"]) {
+    const candidate = path.join(cleanupRoot, directory), entries = await directoryEntriesIfPresent(candidate);
+    if (entries === null) continue;
+    for (const entry of entries) {
+      const relative = path.join(directory, entry);
+      if (!declared.has(relative)) throw new Error("Task retirement rollback cleanup found an undeclared staged entry");
+      const file = transactionFile(cleanupRoot, relative, "rollback cleanup file");
+      if (sha256(await readFileNoFollow(file)) !== declared.get(relative)) throw new Error("Task retirement rollback staged bytes changed");
+      await fs.unlink(file);
+      await syncDirectory(candidate);
+    }
+    await fs.rmdir(candidate);
+    await syncDirectory(cleanupRoot);
+  }
+  await fs.unlink(journalPath);
+  await syncDirectory(cleanupRoot);
+  await fs.rmdir(cleanupRoot);
+  await syncDirectory(roots.transactionsRoot);
+}
+
+async function recoverWorkspaceTransactionsUnlocked(roots, retirementBarrier) {
   const entries = await fs.readdir(roots.transactionsRoot, { withFileTypes: true });
   let recovered = 0;
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
@@ -2682,22 +3070,27 @@ async function recoverWorkspaceTransactionsUnlocked(roots) {
       await cleanupCommittedClientAuthoringTransaction(
         roots,
         path.join(roots.transactionsRoot, entry.name),
+        retirementBarrier,
       );
+      continue;
+    }
+    if (entry.isDirectory() && /^\.rollback-[A-Za-z0-9_-]{8,96}$/.test(entry.name)) {
+      await cleanupRolledBackRetirement(roots, path.join(roots.transactionsRoot, entry.name));
       continue;
     }
     if (!entry.isDirectory() || !SAFE_OPERATION_ID.test(entry.name)) {
       throw new Error(`Workspace transaction root contains an invalid entry '${entry.name}'`);
     }
-    await recoverTransaction(roots, path.join(roots.transactionsRoot, entry.name));
+    await recoverTransaction(roots, path.join(roots.transactionsRoot, entry.name), retirementBarrier);
     recovered += 1;
   }
   return { recovered };
 }
 
-async function recoverTransaction(roots, transactionRoot) {
+async function recoverTransaction(roots, transactionRoot, retirementBarrier) {
   const journal = await readJournal(roots, transactionRoot);
   if (journal.schema === "octopus.client_authoring_transaction") {
-    await recoverClientAuthoringTransaction(roots, transactionRoot);
+    await recoverClientAuthoringTransaction(roots, transactionRoot, retirementBarrier);
     return;
   }
   if (journal.phase === "rolling_back") {
@@ -2711,12 +3104,32 @@ async function recoverTransaction(roots, transactionRoot) {
   await commitTransaction(roots, transactionRoot);
 }
 
-async function recoverClientAuthoringTransaction(roots, transactionRoot) {
+async function recoverClientAuthoringTransaction(roots, transactionRoot, retirementBarrier) {
+  if (!await pathExists(transactionRoot)) {
+    const operationId = requiredOperationId(path.basename(transactionRoot));
+    const cleanupRoot = path.join(roots.transactionsRoot, `.cleanup-${operationId}`);
+    if (await pathExists(cleanupRoot)) {
+      await cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier);
+    } else if (await pathExists(path.join(roots.transactionsRoot, `.rollback-${operationId}`))) {
+      await cleanupRolledBackRetirement(roots, path.join(roots.transactionsRoot, `.rollback-${operationId}`));
+      return "rolled_back";
+    } else {
+      const receipt = await readClientAuthoringReceipt(roots, operationId);
+      if (!receipt) throw new Error("Client authoring recovery lost both transaction and receipt");
+      await verifyClientAuthoringReceipt(roots, receipt);
+    }
+    return "committed";
+  }
   const journal = await readJournal(roots, transactionRoot);
   if (journal.schema !== "octopus.client_authoring_transaction") {
     throw new Error("Client authoring recovery received another transaction schema");
   }
-  await commitClientAuthoringJournal(roots, transactionRoot);
+  if (journal.retirement && !journal.retirement.proof) {
+    await rollbackTransaction(roots, transactionRoot);
+    return "rolled_back";
+  }
+  await commitClientAuthoringJournal(roots, transactionRoot, retirementBarrier);
+  return "committed";
 }
 
 async function finalizeCommittedTransaction(roots, transactionRoot, journal) {
@@ -2805,14 +3218,15 @@ function parseJournal(value) {
 function parseClientAuthoringJournal(value) {
   const journal = exactObject(
     value,
-    ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals"],
+    ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals", "retirement"],
     ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals"],
     "Client authoring transaction journal",
   );
   if (journal.schema !== "octopus.client_authoring_transaction" || journal.schema_version !== 1) {
     throw new Error("Client authoring transaction journal has an unsupported schema");
   }
-  if (!["staged", "committing", "published", "committed"].includes(journal.phase)) {
+  if (!["staged", "committing", "published", "committed"].includes(journal.phase)
+    && !(Object.hasOwn(journal, "retirement") && ["rolling_back", "rolled_back", "cleaned"].includes(journal.phase))) {
     throw new Error("Client authoring transaction journal has an invalid phase");
   }
   if (!Array.isArray(journal.writes) || !journal.writes.length || !Array.isArray(journal.removals)) {
@@ -2835,6 +3249,7 @@ function parseClientAuthoringJournal(value) {
     phase: journal.phase,
     writes,
     removals,
+    ...(Object.hasOwn(journal, "retirement") ? { retirement: parseRetirementJournal(journal.retirement, { ...journal, writes, removals }) } : {}),
   };
 }
 

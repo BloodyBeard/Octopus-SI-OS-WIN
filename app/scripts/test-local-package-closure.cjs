@@ -26,11 +26,20 @@ async function writeJson(file, value) {
 async function assertPackMembers() {
   const operator = JSON.parse(await fs.readFile(path.join(libraryRoot, "packages", "world_operator_chat.json"), "utf8"));
   assert.deepEqual(operator.members.map(member => `${member.registry_kind}/${member.owner}`).sort(), [
+    "artifact/artifact-role-memory-observer",
+    "interface/system_context_memory_projection",
+    "interface/system_context_memory_publication",
     "interface/system_interface_authoring",
+    "interface/system_worker_memory_observer",
     "interface/system_worker_operator_home",
     "interface/system_worker_operator_task",
     "interface/world_operator_chat",
+    "mark/memory.capture.completed",
+    "mark/memory.experience.admitted",
     "mark/tool.call.allowed",
+    "tool/file.write.memory_publication",
+    "verifier/memory_capture_outcome",
+    "verifier/memory_experience",
     "verifier/tool_call_allowed",
   ]);
   const pack = JSON.parse(await fs.readFile(path.join(libraryRoot, "packs", "codex.json"), "utf8"));

@@ -10,6 +10,16 @@ pub struct ToolContractUpdateRequest<'a> {
     pub limits: &'a InterfaceHostIoLimits,
 }
 
+pub struct ToolRetirementRequest<'a> {
+    pub movements_path: &'a Path,
+    pub ledger_index_path: &'a Path,
+    pub blobs_dir: &'a Path,
+    pub interface_private_state_root: &'a Path,
+    pub runs: &'a BTreeSet<octopus_descriptors::RunId>,
+    pub tool_doors: &'a BTreeSet<InterfaceId>,
+    pub limits: &'a InterfaceHostIoLimits,
+}
+
 #[derive(Debug)]
 pub struct ToolContractUpdateProof {
     pub quiescent: bool,
@@ -52,12 +62,28 @@ fn digest(bytes: Option<&[u8]>) -> Option<String> {
 }
 
 pub fn tool_contract_update_quiescent(request: ToolContractUpdateRequest<'_>) -> Result<ToolContractUpdateProof, String> {
+    inspect_quiescence(request, None)
+}
+
+pub fn tool_retirement_quiescent(request: ToolRetirementRequest<'_>) -> Result<ToolContractUpdateProof, String> {
+    if request.runs.is_empty() { return Err("tool retirement requires exact selected runs".into()); }
+    inspect_quiescence(ToolContractUpdateRequest {
+        movements_path: request.movements_path,
+        ledger_index_path: request.ledger_index_path,
+        blobs_dir: request.blobs_dir,
+        interface_private_state_root: request.interface_private_state_root,
+        affected_tools: &BTreeMap::new(),
+        limits: request.limits,
+    }, Some((request.runs, request.tool_doors)))
+}
+
+fn inspect_quiescence(request: ToolContractUpdateRequest<'_>, retiring: Option<(&BTreeSet<octopus_descriptors::RunId>, &BTreeSet<InterfaceId>)>) -> Result<ToolContractUpdateProof, String> {
     request.limits.validate()?;
     for path in [request.movements_path, request.ledger_index_path, request.blobs_dir, request.interface_private_state_root] {
         if !path.is_absolute() { return Err("tool contract proof requires absolute evidence paths".into()); }
     }
     let mut proof = ToolContractUpdateProof { quiescent: true, preimages: Vec::new() };
-    if request.affected_tools.is_empty() { return Ok(proof); }
+    if retiring.is_none() && request.affected_tools.is_empty() { return Ok(proof); }
     let handles = InterfaceLedgerReadHandles {
         movements_path: request.movements_path, ledger_index_path: request.ledger_index_path,
         blobs_dir: request.blobs_dir, limits: *request.limits,
@@ -65,25 +91,8 @@ pub fn tool_contract_update_quiescent(request: ToolContractUpdateRequest<'_>) ->
     let bytes = snapshot(request.movements_path, None)?;
     proof.preimages.push((request.movements_path.to_path_buf(), digest(bytes.as_deref())));
     let ledger = bytes.as_deref().unwrap_or_default();
-    let mut doors = BTreeMap::new();
-    for door in request.affected_tools.values() {
-        if doors.contains_key(door) { continue; }
-        let mut components = Path::new(door.as_str()).components();
-        if !matches!(components.next(), Some(std::path::Component::Normal(_))) || components.next().is_some() {
-            return Err("tool contract proof door must be one exact path component".into());
-        }
-        let root = request.interface_private_state_root.join(door.as_str());
-        let journal_path = root.join(TOOL_DOOR_EFFECT_JOURNAL_FILE);
-        let journal = ToolDoorEffectJournal::read_only(journal_path.clone(), request.limits.max_control_frame_bytes)?;
-        proof.preimages.push((journal_path, journal.source_sha256.clone()));
-        let cursor_path = root.join("ledger-cursor.tool-door.json");
-        let cursor_bytes = snapshot(&cursor_path, Some(request.limits.max_control_frame_bytes))?;
-        let cursor: Cursor = cursor_bytes.as_deref().map(serde_json::from_slice).transpose()
-            .map_err(|error| format!("tool contract cursor '{}': {error}", cursor_path.display()))?.unwrap_or_default();
-        proof.preimages.push((cursor_path, digest(cursor_bytes.as_deref())));
-        doors.insert(door.clone(), (journal, cursor));
-    }
-    let mut boundaries = BTreeMap::from([(0_u64, 0_u64)]);
+    let mut door_ids = request.affected_tools.values().cloned().collect::<BTreeSet<_>>();
+    let mut boundaries = vec![0_u64];
     let mut sources = Vec::new();
     let mut reader = std::io::Cursor::new(ledger);
     let mut line = Vec::new();
@@ -99,7 +108,7 @@ pub fn tool_contract_update_quiescent(request: ToolContractUpdateRequest<'_>) ->
         if route.seq.0 != sequence { return Err("tool contract ledger sequence is not contiguous".into()); }
         if route.kind == MovementKind::InterfaceOutbound
             && let Endpoint::Interface(door) = &route.to
-            && doors.contains_key(door)
+            && (retiring.is_some() || door_ids.contains(door))
         {
             let movement = decode_tool_door_recovery_movement(request.movements_path, row, index, request.limits.max_control_frame_bytes)?;
             let metadata = movement.invocation_metadata.as_ref().and_then(|value| value.invocation())
@@ -108,43 +117,66 @@ pub fn tool_contract_update_quiescent(request: ToolContractUpdateRequest<'_>) ->
             if runtime.interface != *door || !matches!(movement.from, Endpoint::Interface(_)) || movement.artifact.is_none() {
                 return Err("tool contract source has invalid door coordinates or artifact".into());
             }
-            if metadata.grant().tools.iter().any(|tool| request.affected_tools.get(tool) == Some(door)) {
-                sources.push(movement);
-            }
+            let selected = match retiring {
+                Some((runs, _)) if runs.contains(&runtime.run) => {
+                    door_ids.insert(door.clone());
+                    true
+                }
+                Some(_) => false,
+                None => metadata.grant().tools.iter().any(|tool| request.affected_tools.get(tool) == Some(door)),
+            };
+            if selected { sources.push(movement); }
         }
         sequence = sequence.checked_add(1).ok_or("tool contract sequence overflow")?;
         offset = offset.checked_add(read as u64).ok_or("tool contract offset overflow")?;
-        if doors.values().any(|(_, cursor)| cursor.seq == sequence) { boundaries.insert(sequence, offset); }
+        boundaries.push(offset);
     }
-    for (_, cursor) in doors.values() {
-        if boundaries.get(&cursor.seq) != Some(&cursor.offset) {
+    let mut doors = BTreeMap::new();
+    for door in &door_ids {
+        let mut components = Path::new(door.as_str()).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_))) || components.next().is_some() {
+            return Err("tool contract proof door must be one exact path component".into());
+        }
+        let root = request.interface_private_state_root.join(door.as_str());
+        let journal_path = root.join(TOOL_DOOR_EFFECT_JOURNAL_FILE);
+        let journal = ToolDoorEffectJournal::read_only(journal_path.clone(), request.limits.max_control_frame_bytes)?;
+        proof.preimages.push((journal_path, journal.source_sha256.clone()));
+        let cursor_path = root.join("ledger-cursor.tool-door.json");
+        let cursor_bytes = snapshot(&cursor_path, Some(request.limits.max_control_frame_bytes))?;
+        let cursor: Cursor = cursor_bytes.as_deref().map(serde_json::from_slice).transpose()
+            .map_err(|error| format!("tool contract cursor '{}': {error}", cursor_path.display()))?.unwrap_or_default();
+        proof.preimages.push((cursor_path, digest(cursor_bytes.as_deref())));
+        let known_door = retiring.is_none_or(|(_, declared)| declared.contains(door))
+            || journal.source_sha256.is_some() || cursor_bytes.is_some();
+        doors.insert(door.clone(), (journal, cursor, known_door));
+    }
+    for (_, cursor, _) in doors.values() {
+        if usize::try_from(cursor.seq).ok().and_then(|seq| boundaries.get(seq)) != Some(&cursor.offset) {
             return Err("tool contract cursor is outside its exact ledger boundary".into());
         }
     }
     for source in sources {
         let Endpoint::Interface(door) = &source.to;
-        let (journal, cursor) = &doors[door];
+        let (journal, cursor, known_door) = &doors[door];
+        if !known_door { continue; }
         let state = journal.state(source.seq.0, &tool_door_movement_digest(&source)?)?;
-        if state.is_some_and(ToolDoorJournalState::is_terminal) { continue; }
+        if retiring.is_some() && matches!(state, Some(ToolDoorJournalState::Indeterminate | ToolDoorJournalState::InFlight)) {
+            proof.quiescent = false;
+            break;
+        }
+        if state.is_some_and(ToolDoorJournalState::is_terminal)
+            && (retiring.is_none() || journal.entries.get(&source.seq.0).is_some_and(|entry| entry.schema_version == 3))
+        { continue; }
         if state == Some(ToolDoorJournalState::Prepared)
             || !(cursor.seq > source.seq.0 || state == Some(ToolDoorJournalState::InFlight))
         {
             proof.quiescent = false;
             break;
         }
-        let artifact = source.artifact.as_ref().ok_or("tool contract source has no artifact")?;
-        let (file, _) = tool_door_recovery_artifact_at(&handles, artifact)?;
-        let captured = file.read_bounded(request.limits.max_manifest_bytes, request.limits.max_payload_bytes)
-            .map_err(|error| error.to_string())?;
-        let envelope = InterfaceInvocationEnvelope {
-            artifact: artifact.clone(),
-            artifact_file: InterfaceArtifactFile::from_captured_snapshot(file.manifest_path().to_path_buf(), captured.manifest_bytes, captured.payload_bytes)
-                .map_err(|error| error.to_string())?,
-            artifact_binding_payloads: Vec::new(),
-            metadata: source.invocation_metadata.as_ref().and_then(|value| value.invocation()).cloned(),
-        };
+        let envelope = source_envelope(&handles, &source)?;
         let Some(call) = decode_tool_call(&envelope)? else { proof.quiescent = false; break; };
-        if !tool_door_has_exact_admitted_result_at(&handles, door, &source, &call, &envelope, Some(ledger), |_, envelope| decode_tool_call(envelope))? {
+        let result = tool_door_admitted_result_state_at(&handles, door, &source, &call, &envelope, Some(ledger), |_, envelope| decode_tool_call(envelope))?;
+        if result.is_none() || (retiring.is_some() && result != Some(ToolDoorJournalState::Completed)) {
             proof.quiescent = false;
             break;
         }
@@ -155,4 +187,18 @@ pub fn tool_contract_update_quiescent(request: ToolContractUpdateRequest<'_>) ->
         }
     }
     Ok(proof)
+}
+
+fn source_envelope(handles: &InterfaceLedgerReadHandles<'_>, source: &Movement) -> Result<InterfaceInvocationEnvelope, String> {
+    let artifact = source.artifact.as_ref().ok_or("tool contract source has no artifact")?;
+    let (file, _) = tool_door_recovery_artifact_at(handles, artifact)?;
+    let captured = file.read_bounded(handles.limits.max_manifest_bytes, handles.limits.max_payload_bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(InterfaceInvocationEnvelope {
+        artifact: artifact.clone(),
+        artifact_file: InterfaceArtifactFile::from_captured_snapshot(file.manifest_path().to_path_buf(), captured.manifest_bytes, captured.payload_bytes)
+            .map_err(|error| error.to_string())?,
+        artifact_binding_payloads: Vec::new(),
+        metadata: source.invocation_metadata.as_ref().and_then(|value| value.invocation()).cloned(),
+    })
 }

@@ -2,7 +2,7 @@
   "schema": "octopus.local_application_pack",
   "schema_version": 1,
   "id": "codex",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "name": "Codex Pack",
   "description": "Codex provider, agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
   "components": [

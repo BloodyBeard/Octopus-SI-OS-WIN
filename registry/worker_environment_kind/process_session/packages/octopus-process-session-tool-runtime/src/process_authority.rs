@@ -991,6 +991,10 @@ fn prepare_macos(
     add_macos_lexical_aliases(&mut writable);
     let mut writable_exact = authority.writable_exact.clone();
     add_macos_lexical_aliases(&mut writable_exact);
+    let writable_exact_parents = writable_exact
+        .iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .collect();
     let mut writable_ancestor_sources = writable.clone();
     writable_ancestor_sources.extend(writable_exact.iter().cloned());
     let writable_ancestors = path_ancestors(&writable_ancestor_sources);
@@ -1032,6 +1036,13 @@ fn prepare_macos(
         "file-write*",
         "WRITE_EXACT",
         writable_exact,
+    );
+    append_macos_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-read-data",
+        "WRITE_EXACT_PARENT_READ",
+        writable_exact_parents,
     );
     append_macos_exact_access(
         &mut policy,

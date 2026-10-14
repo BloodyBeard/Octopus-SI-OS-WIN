@@ -105,11 +105,11 @@ const { createNativeBrowserSurfaceAdapter, createBrowserPresentationHost, create
 const {
   initializeWorkspace,
   mutateWorkspaceProject,
-  readWorkspaceSetupState,
+  readWorkspaceSetupState: readWorkspaceSetupStateTransaction,
   recoverWorkspaceTransactions,
 } = require("./workspaceSetup.cjs");
 
-const { commitProjectionClientAuthoring } = require("./clientWorkspaceAuthoring.cjs");
+const { commitProjectionClientAuthoring: commitProjectionClientAuthoringTransaction } = require("./clientWorkspaceAuthoring.cjs");
 
 const OPERATOR_CHAT_INTERFACE = "world_operator_chat";
 
@@ -478,8 +478,37 @@ async function prepareLiveProjectionRead() {
   await recoverWorkspaceTransactions({
     octopusHomeRoot: octopusHome,
     registryRoot: path.join(octopusHome, "registry"),
+    retirementBarrier: {
+      verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+      withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+    },
   });
   await initializeRuntimeHost();
+}
+
+async function taskRetirementBarrier(octopusHome) {
+  if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during task retirement");
+  const client = await loadOperatorChatClient();
+  return (await client.loadOperatorTaskLifecycle({
+    registryRoot: () => path.join(octopusHome, "registry"), installationRoot: resolveInstallationRoot,
+  })).retirementBarrier;
+}
+
+function readWorkspaceSetupState(options) {
+  const octopusHome = options.octopusHomeRoot;
+  return readWorkspaceSetupStateTransaction({ ...options, retirementBarrier: {
+    verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+    withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+  } });
+}
+
+function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
+  return commitProjectionClientAuthoringTransaction(octopusHome, registryRoot, request, {
+    retirementBarrier: {
+      verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+      withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+    },
+  });
 }
 
 function getCdpViewerManager() {
@@ -1192,6 +1221,10 @@ function createClientSetupOwners() {
             await initializeWorkspace({
               octopusHomeRoot: octopusHome,
               registryRoot,
+              retirementBarrier: {
+                verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+                withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+              },
               request: plan.workspace.request,
               planOperatorSurface: planWorkspaceHomeSurface,
               planBrowserNativeHost,
@@ -2564,7 +2597,12 @@ async function initializeRuntimeHost() {
         if (state.pid === null) {
           await assertStopped();
           const registryRoot = path.join(octopusHome, "registry");
-          await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot });
+          await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot,
+            retirementBarrier: {
+              verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+              withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+            },
+          });
           const interfaceRoot = fs.lstatSync(path.join(registryRoot, "interface"), { throwIfNoEntry: false });
           if (interfaceRoot) {
             if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
@@ -3720,6 +3758,10 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
     outcome = await withOperatorWorkspaceTopologyLock(octopusHome, () => initializeWorkspace({
         octopusHomeRoot: octopusHome,
         registryRoot,
+        retirementBarrier: {
+          verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+          withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+        },
         request,
         planOperatorSurface: planWorkspaceHomeSurface,
         planBrowserNativeHost,
@@ -3731,12 +3773,16 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
       }));
     await retryNativeBrowserAfterSetup();
   } else {
+    const taskLifecycle = (await (await loadOperatorChatClient()).loadOperatorTaskLifecycle({
+      registryRoot: () => registryRoot, installationRoot: resolveInstallationRoot,
+    })).taskLifecycle;
     outcome = await mutateOctopusOsWorkspace(
       registryRoot,
       octopusHome,
       scope,
       request,
       {
+        taskLifecycle,
         sourceRegistryRoot: resolveSourceRegistry(),
         localPackageRegistryRoot: resolveLocalPackageRegistry(),
         localPackageLibraryRoot: resolveLocalPackageLibrary(),
@@ -3748,6 +3794,10 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
           return withOperatorWorkspaceTopologyLock(octopusHome, () => mutateWorkspaceProject({
             octopusHomeRoot: octopusHome,
             registryRoot,
+            retirementBarrier: {
+              verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
+              withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
+            },
             scope: projectScope,
             request: projectRequest,
             planOperatorSurface: planWorkspaceHomeSurface,

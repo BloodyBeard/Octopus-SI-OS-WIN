@@ -84,6 +84,14 @@ pub(super) fn wire_record(
     wire_record_at_root(root, run_id, existing, content, false)
 }
 
+pub(super) fn wire_new_record(
+    root: &Path,
+    run_id: &str,
+    content: String,
+) -> Result<(String, Vec<PlannedClientWrite>), String> {
+    wire_record_at_root(require_absolute("run_records_root", root)?, run_id, None, content, false)
+}
+
 fn wire_record_at_root(
     root: &Path,
     run_id: &str,

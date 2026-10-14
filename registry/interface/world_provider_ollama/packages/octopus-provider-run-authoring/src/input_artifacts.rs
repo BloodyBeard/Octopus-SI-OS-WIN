@@ -47,11 +47,8 @@ pub fn validate_input_transition(reader: &mut impl CheckedRunEvidenceReader, tra
     Ok(())
 }
 
-fn validate_source(reader: &mut impl CheckedRunEvidenceReader, transition: &CheckedRunTransition,
-    after: &RunRecord, source: &InputArtifactBinding) -> Result<(), String> {
-    if source.source_movement_seq >= transition.call.seq.0 {
-        return Err("input artifact binding predates its admitted source".into());
-    }
+pub(super) fn checked_source(reader: &mut impl CheckedRunEvidenceReader, after: &RunRecord,
+    owner: &InterfaceId, source: &InputArtifactBinding) -> Result<(Movement, RunRecord), String> {
     let movement = reader.admitted_movement(source.source_movement_seq)?.ok_or("input artifact binding source is absent")?;
     let metadata = movement.invocation_metadata.as_ref().and_then(|value| value.invocation())
         .ok_or("input artifact binding source has no admitted metadata")?;
@@ -64,7 +61,6 @@ fn validate_source(reader: &mut impl CheckedRunEvidenceReader, transition: &Chec
     let checkpoint = pinned.checkpoint(&runtime.checkpoint).ok_or("input artifact binding source checkpoint is absent")?;
     let inbound = checkpoint.interface_binding.as_ref().ok_or("input artifact binding source has no inbound binding")?;
     let binding = CheckpointBindingPolicySnapshot { inbound: inbound.clone(), outbound: checkpoint.outbound_interface_bindings.clone() };
-    let owner = &transition.writer.owner;
     let (manifest, _) = reader.artifact(&source.artifact)?;
     let emitted = movement.kind == MovementKind::InterfaceOutbound && metadata.checkpoint_admission.is_none();
     let edge = match movement.kind {
@@ -109,6 +105,16 @@ fn validate_source(reader: &mut impl CheckedRunEvidenceReader, transition: &Chec
         return Err("input artifact binding differs from its exact admitted source edge".into());
     }
     source.read_bindings(Vec::new())?;
+    Ok((movement, pinned))
+}
+
+fn validate_source(reader: &mut impl CheckedRunEvidenceReader, transition: &CheckedRunTransition,
+    after: &RunRecord, source: &InputArtifactBinding) -> Result<(), String> {
+    if source.source_movement_seq >= transition.call.seq.0 {
+        return Err("input artifact binding predates its admitted source".into());
+    }
+    let owner = &transition.writer.owner;
+    checked_source(reader, after, owner, source)?;
     let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
     let templates = before.interface_state.iter().filter_map(|(provider, state)| state.get(RUN_AUTHORING_BINDING).map(|value| (provider, value)))
         .map(|(provider, value)| serde_json::from_value::<BoundRunAuthoringTopology>(value.clone()).map(|topology| (provider, topology)).map_err(|error| error.to_string()))

@@ -23,6 +23,7 @@ async function main() {
     await verifyRootFirstSetup(temporary);
     await verifyFreshAgentRecipe(temporary);
     await verifyPreludeSnapshotSetup(temporary);
+    await verifyMaintenanceSetup(temporary);
     const fixtureHomeRoot = path.join(temporary, "home");
     const fixtureRegistryRoot = path.join(fixtureHomeRoot, "registry");
     await createFixture(fixtureHomeRoot, fixtureRegistryRoot);
@@ -1215,21 +1216,51 @@ async function verifyTaskArchive(temporary) {
     const movablePolicy = JSON.parse(await fs.readFile(policyPath));
     movablePolicy.ceiling.wek = [];
     await fs.writeFile(policyPath, JSON.stringify(movablePolicy));
-    for (const targetEeId of [workspace.projects[1].eeId, workspace.projects[0].eeId]) {
-      store.invalidate(false);
-      const moveScope = await read("projection.operator.os.scope");
-      const ceiling = JSON.parse(await fs.readFile(policyPath)).ceiling;
-      Object.assign(moveScope.environments.find((row) => row.ee_id === targetEeId).formed_envelope, {
-        allowed_interfaces: [...new Set([...plan.requiredInterfaceIds, original.worker, intakeId, doorId])],
-        allowed_tools: ceiling.tools, allowed_worker_environment_kinds: ceiling.wek,
-      });
-      await mutateOctopusOsWorkspace(registry, home, moveScope,
-        { action: "move_task", runId: plan.runId, expectedDigest: await digest(), targetEeId }, hooks);
-      const moved = JSON.parse(await fs.readFile(runFile)), movedWriter = JSON.parse(await fs.readFile(writerFile));
-      assert.equal(moved.ee, targetEeId); assert.equal(movedWriter.ee, targetEeId);
-      assert.equal(moved.interface_state[intakeId].writer_run.initial_record.ee, targetEeId);
-      assert.deepEqual(movedWriter.checkpoints, writerRun.checkpoints);
+    store.invalidate(false);
+    const moveScope = await read("projection.operator.os.scope");
+    const { maintenanceFixture } = require("../../registry/interface/world_operator_chat/test_maintenance_client.cjs");
+    const { decodeMaintenanceDeclaration } = require("../../registry/interface/world_operator_chat/maintenance-client.cjs");
+    const maintenance = maintenanceFixture(registry, path.dirname(runFile), {
+      run_id: plan.runId, chat_interface_id: plan.chatInterfaceId, model_interface_id: plan.modelInterfaceId, worker_interface_id: plan.workerInterfaceId,
+      run_record_content: await fs.readFile(runFile, "utf8"),
+      interface_writes: await Promise.all(plan.writes.filter((write) => write.filePath !== runFile).map(async (write) => ({
+        path: write.filePath, content: await fs.readFile(write.filePath, "utf8"), tag: write.tag, expected_before_hash: null,
+      }))),
+    });
+    assert.equal(decodeMaintenanceDeclaration(maintenance, JSON.parse(maintenance.run_record_content)).declaration.source_run, plan.runId);
+    const moveFixtureWrites = [...maintenance.interface_writes, ...maintenance.run_writes, { path: runFile, content: maintenance.run_record_content }];
+    const moveBefore = new Map(await Promise.all(moveFixtureWrites.map(async (write) => [write.path, await fs.readFile(write.path).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    })])));
+    try {
+      for (const write of moveFixtureWrites) {
+        await fs.mkdir(path.dirname(write.path), { recursive: true }); await fs.writeFile(write.path, write.content);
+      }
+      moveScope.client_runs.find((row) => row.run_id === plan.runId).record_digest = await digest();
+      const retained = new Map(await Promise.all([...new Set([
+        ...moveFixtureWrites.map((write) => write.path), writerFile,
+        ...[plan.chatInterfaceId, plan.workerInterfaceId, plan.modelInterfaceId, intakeId, doorId]
+          .map((id) => path.join(registry, "interface", id, "octopus_os.json")),
+      ])].map(async (file) => [file, await fs.readFile(file)])));
+      await assert.rejects(mutateOctopusOsWorkspace(registry, home, moveScope,
+        { action: "move_task", runId: plan.runId, expectedDigest: await digest(), targetEeId: workspace.projects[1].eeId }, hooks),
+      (error) => error.code === "task_execution_ee_change_unsupported" && /current execution contract does not admit changing EE/.test(error.message));
+      assert.deepEqual(await mutateOctopusOsWorkspace(registry, home, moveScope,
+        { action: "move_task", runId: plan.runId, targetEeId: original.ee }, hooks),
+      { action: "move_task", runId: plan.runId, targetEeId: original.ee, changed: false });
+      assert.equal(operations, 2);
+      for (const [file, bytes] of retained) assert.deepEqual(await fs.readFile(file), bytes, `move changed ${file}`);
+    } finally {
+      for (const [file, bytes] of moveBefore) {
+        if (bytes !== null) await fs.writeFile(file, bytes);
+        else {
+          await fs.unlink(file);
+          await fs.rmdir(path.dirname(file)).catch((error) => { if (!["ENOTEMPTY", "ENOENT"].includes(error.code)) throw error; });
+        }
+      }
     }
+    console.log("task move: checked execution contract refuses cross-EE writes; source, writers, companions and descriptors retained");
     const { blake3 } = require("@noble/hashes/blake3");
     const canonical = (value) => JSON.stringify(value, function (_key, entry) {
       return entry && !Array.isArray(entry) && typeof entry === "object"
@@ -1292,7 +1323,7 @@ async function verifyTaskArchive(temporary) {
       await fs.writeFile(preludePath, JSON.stringify({ ...preludeBody, module_source: "changed" }));
       return { runId: plan.runId, expectedDigest: await digest(), releasedWorkerEnvironmentIds: [] };
     } }), /drifted identity, ownership or content/); await artifact(preludeBody);
-    assert.equal(operations, 4);
+    assert.equal(operations, 2);
     const deleted = await remove();
     assert.deepEqual(deleted.removedRuns, [plan.runId, writerId].sort());
     await assert.rejects(fs.stat(writerFile), /ENOENT/);
@@ -1978,6 +2009,61 @@ async function verifyRootFirstSetup(temporary) {
   assert.equal((await readWorkspaceSetupState(options)).status, "degraded");
 }
 
+async function verifyMaintenanceSetup(temporary) {
+  const fixture = path.join(temporary, "maintenance-setup");
+  await createFixture(fixture, path.join(fixture, "registry"));
+  const home = await fs.realpath(fixture), registry = path.join(home, "registry"), runsRoot = path.join(home, "state", "runs");
+  const owner = path.join(registry, "interface", "world_operator_chat");
+  await fs.mkdir(owner, { recursive: true });
+  await fs.copyFile(path.resolve(__dirname, "../../registry/interface/world_operator_chat/maintenance-client.cjs"), path.join(owner, "maintenance-client.cjs"));
+  const { maintenanceFixture } = require("../../registry/interface/world_operator_chat/test_maintenance_client.cjs");
+  const request = setupRequest("maintenance_setup_12345678"); request.projects = [];
+  let invalid = "";
+  const options = { octopusHomeRoot: home, registryRoot: registry, request, planOperatorSurface: async (input) => {
+    const plan = await fixturePlan(home, registry, input);
+    if (input.request.clientSurfaceRole !== "home") return plan;
+    const source = plan.writes.find((write) => write.tag === `run:${plan.runId}`);
+    const native = maintenanceFixture(registry, runsRoot, {
+      run_id: plan.runId, chat_interface_id: plan.chatInterfaceId, model_interface_id: plan.modelInterfaceId, worker_interface_id: plan.workerInterfaceId,
+      run_record_content: source.content, interface_writes: plan.writes.filter((write) => write !== source).map((write) => ({
+        path: write.filePath, content: write.content, tag: write.tag, expected_before_hash: write.expectedBeforeHash,
+      })),
+    });
+    plan.requiredInterfaceIds = [...new Set([...plan.requiredInterfaceIds, ...native.interface_writes.filter((write) => path.basename(write.path) === "interface.json").map((write) => JSON.parse(write.content).id)])].sort();
+    plan.requiredToolIds = [...new Set([...plan.requiredToolIds, ...native.interface_writes.filter((write) => path.basename(write.path) === "tool.json").map((write) => JSON.parse(write.content).id)])].sort();
+    plan.writes = [...native.interface_writes, ...native.run_writes, { path: source.filePath, content: native.run_record_content, tag: source.tag, expected_before_hash: null }]
+      .map((write) => ({ filePath: write.path, content: write.content, tag: write.tag, expectedBeforeHash: write.expected_before_hash }));
+    if (invalid === "missing") plan.writes = plan.writes.filter((write) => write.tag !== "run:projection_run");
+    if (invalid === "ceiling" || invalid === "source-ceiling") {
+      const policy = plan.writes.find((write) => write.tag === `policy:${invalid === "ceiling" ? "observer_worker" : plan.workerInterfaceId}`);
+      const value = JSON.parse(policy.content);
+      if (invalid === "ceiling") value.ceiling.tools = [];
+      else value.ceiling.interfaces = value.ceiling.interfaces.filter((id) => id !== "terminal_relay");
+      policy.content = JSON.stringify(value);
+    }
+    if (invalid === "bytes") plan.writes.find((write) => write.tag === "run:observer_run").content += "\n";
+    if (invalid === "extra") plan.writes.push({ filePath: path.join(runsRoot, "undeclared.json"), tag: "run:undeclared", expectedBeforeHash: null,
+      content: JSON.stringify({ ...JSON.parse(source.content), id: "undeclared", checkpoints: [], active_checkpoints: [] }) });
+    return plan;
+  } };
+  for (const [mode, reason] of [["missing", /declared initial bytes/], ["ceiling", /private tool inventory differs from companion ceilings/],
+    ["source-ceiling", /source terminal relay is outside the source worker ceiling/], ["bytes", /declared initial bytes/], ["extra", /undeclared Run/]]) {
+    invalid = mode; await assert.rejects(initializeWorkspace(options), reason);
+    assert.deepEqual(await fs.readdir(runsRoot), []);
+  }
+  invalid = "";
+  const result = await initializeWorkspace(options);
+  assert.equal(result.changed, true);
+  assert.equal((await fs.readdir(runsRoot)).length, 5);
+  const record = JSON.parse(await fs.readFile(path.join(runsRoot, `${result.homeRunId}.json`), "utf8"));
+  const sourcePolicy = JSON.parse(await fs.readFile(path.join(registry, "interface", record.worker, "policy.json")));
+  assert.equal(sourcePolicy.ceiling.tools.includes("file.write.publication"), false);
+  assert.equal(sourcePolicy.ceiling.interfaces.includes("observer_provider"), false);
+  assert.equal(JSON.parse(await fs.readFile(path.join(runsRoot, "observer_run.json"))).worker, "observer_worker");
+  assert.equal(JSON.parse(await fs.readFile(path.join(runsRoot, "projection_run.json"))).worker, "projection_worker");
+  console.log("maintenance setup: exact companions and writers, independent ceilings, partial/foreign/changed plan refusal passed");
+}
+
 async function fixturePlan(octopusHomeRoot, registryRoot, { eeInstancesRoot, request }) {
   const rootRecord = JSON.parse(await fs.readFile(path.join(eeInstancesRoot, `${request.eeId}.json`), "utf8"));
   const clientSurfaceRole = request.clientSurfaceRole ?? "home";
@@ -2265,6 +2351,10 @@ const execution = process.argv[2] === "task-removal"
   ? verifyCapabilityPreferenceSetup()
   : process.argv[2] === "consent-setup"
   ? verifyRetiredConsentSetup()
+  : process.argv[2] === "maintenance-setup"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-maintenance-setup-test-")).then(async (temporary) => {
+    try { await verifyMaintenanceSetup(await fs.realpath(temporary)); } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
   : process.argv[2] === "crash-child"
   ? crashChild(process.argv[3], process.argv[4])
   : process.argv[2] === "project-crash-child"

@@ -10,7 +10,7 @@ mod door_life;
 mod execution_inputs;
 mod completed_output;
 mod contract_update;
-pub use contract_update::{ToolContractUpdateRequest, ToolContractUpdateProof, tool_contract_update_quiescent};
+pub use contract_update::{ToolContractUpdateRequest, ToolContractUpdateProof, ToolRetirementRequest, tool_contract_update_quiescent, tool_retirement_quiescent};
 pub use completed_output::{PreparedToolOutputRecovery, prepare_tool_output_recovery};
 
 #[cfg(test)]
@@ -7143,6 +7143,7 @@ impl From<&ToolCallArtifact> for ToolResultTarget {
 }
 
 const TOOL_DOOR_EFFECT_JOURNAL_FILE: &str = "tool-door-effect-frontier.jsonl";
+const TOOL_EFFECT_INDETERMINATE: &str = "tool_effect_indeterminate";
 static TOOL_DOOR_COMPLETION_JOURNAL_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7172,6 +7173,7 @@ struct ToolDoorJournalReceipt {
 
 #[derive(Clone)]
 struct ToolDoorJournalEntry {
+    schema_version: u32,
     movement_digest: String,
     state: ToolDoorJournalState,
 }
@@ -7227,7 +7229,6 @@ impl ToolDoorEffectJournal {
         let maximum_receipt_bytes = usize::try_from(maximum_receipt_bytes)
             .map_err(|_| "tool-door receipt ceiling exceeds host address space".to_string())?;
         let mut entries = BTreeMap::new();
-        let mut pruned = false;
         let mut source_sha256 = None;
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) => {
@@ -7296,10 +7297,6 @@ impl ToolDoorEffectJournal {
                             )
                         })?;
                     validate_tool_door_journal_receipt(&receipt)?;
-                    if committed_seq.is_some_and(|committed| receipt.seq < committed) {
-                        pruned = true;
-                        continue;
-                    }
                     apply_tool_door_journal_receipt(&mut entries, &receipt)?;
                 }
                 source_sha256 = hasher.map(|hasher| format!("{:x}", hasher.finalize()));
@@ -7318,9 +7315,6 @@ impl ToolDoorEffectJournal {
             maximum_receipt_bytes: maximum_receipt_bytes as u64,
             source_sha256,
         };
-        if pruned {
-            journal.rewrite()?;
-        }
         Ok(journal)
     }
 
@@ -7368,30 +7362,24 @@ impl ToolDoorEffectJournal {
             return Ok(());
         }
         let receipt = ToolDoorJournalReceipt {
-            schema_version: 2,
+            schema_version: 3,
             seq,
             movement_digest: movement_digest.to_string(),
             state,
         };
         validate_tool_door_journal_receipt(&receipt)?;
-        let mut projected = self.entries.clone();
-        apply_tool_door_journal_receipt(&mut projected, &receipt)?;
+        validate_tool_door_journal_transition(self.entries.get(&seq), &receipt)?;
         let mut bytes = serde_json::to_vec(&receipt)
             .map_err(|error| format!("tool-door journal receipt cannot serialize: {error}"))?;
         bytes.push(b'\n');
         self.append(&bytes)?;
-        self.entries = projected;
+        self.entries.insert(seq, ToolDoorJournalEntry { schema_version: receipt.schema_version, movement_digest: movement_digest.to_string(), state });
         Ok(())
     }
 
     fn prune_before(&mut self, committed_seq: u64) -> Result<(), String> {
         completed_output::prune_before(self.path.parent().ok_or("tool-door journal has no owner")?, committed_seq, self.maximum_receipt_bytes)?;
-        let before = self.entries.len();
-        self.entries.retain(|seq, _| *seq >= committed_seq);
-        if self.entries.len() == before {
-            return Ok(());
-        }
-        self.rewrite()
+        Ok(())
     }
 
     fn append(&self, bytes: &[u8]) -> Result<(), String> {
@@ -7449,99 +7437,10 @@ impl ToolDoorEffectJournal {
         sync_tool_door_journal_parent(parent)
     }
 
-    fn rewrite(&self) -> Result<(), String> {
-        let parent = self.path.parent().ok_or_else(|| {
-            "tool-door completion journal path has no parent directory".to_string()
-        })?;
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "tool-door completion journal directory '{}' cannot be created: {error}",
-                parent.display()
-            )
-        })?;
-        let (temp, mut file) = create_tool_door_journal_temp(parent)?;
-        let result = (|| -> Result<(), String> {
-            use std::io::Write;
-            for (seq, entry) in &self.entries {
-                let states = match entry.state {
-                    ToolDoorJournalState::Prepared => vec![ToolDoorJournalState::Prepared],
-                    ToolDoorJournalState::InFlight => vec![
-                        ToolDoorJournalState::Prepared,
-                        ToolDoorJournalState::InFlight,
-                    ],
-                    ToolDoorJournalState::Completed => vec![
-                        ToolDoorJournalState::Prepared,
-                        ToolDoorJournalState::Completed,
-                    ],
-                    ToolDoorJournalState::Refused => vec![
-                        ToolDoorJournalState::Prepared,
-                        ToolDoorJournalState::InFlight,
-                        ToolDoorJournalState::Refused,
-                    ],
-                    ToolDoorJournalState::Indeterminate => vec![
-                        ToolDoorJournalState::Prepared,
-                        ToolDoorJournalState::InFlight,
-                        ToolDoorJournalState::Indeterminate,
-                    ],
-                };
-                for state in states {
-                    let mut receipt = serde_json::to_vec(&ToolDoorJournalReceipt {
-                        schema_version: 2,
-                        seq: *seq,
-                        movement_digest: entry.movement_digest.clone(),
-                        state,
-                    })
-                    .map_err(|error| {
-                        format!("tool-door journal receipt cannot serialize: {error}")
-                    })?;
-                    receipt.push(b'\n');
-                    if receipt.len() as u64 > self.maximum_receipt_bytes {
-                        return Err(format!(
-                            "tool-door completion journal receipt for '{}' exceeds declared ceiling of {} bytes",
-                            self.path.display(),
-                            self.maximum_receipt_bytes
-                        ));
-                    }
-                    file.write_all(&receipt).map_err(|error| {
-                        format!(
-                            "tool-door completion journal temp '{}' cannot be written: {error}",
-                            temp.display()
-                        )
-                    })?;
-                }
-            }
-            file.sync_all().map_err(|error| {
-                format!(
-                    "tool-door completion journal temp '{}' cannot be synced: {error}",
-                    temp.display()
-                )
-            })?;
-            std::fs::rename(&temp, &self.path).map_err(|error| {
-                format!(
-                    "tool-door completion journal '{}' cannot be replaced atomically: {error}",
-                    self.path.display()
-                )
-            })?;
-            sync_tool_door_journal_parent(parent)?;
-            validate_tool_door_journal_metadata(
-                &self.path,
-                &std::fs::symlink_metadata(&self.path).map_err(|error| {
-                    format!(
-                        "tool-door completion journal '{}' cannot be verified: {error}",
-                        self.path.display()
-                    )
-                })?,
-            )
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
-        }
-        result
-    }
 }
 
 fn validate_tool_door_journal_receipt(receipt: &ToolDoorJournalReceipt) -> Result<(), String> {
-    if receipt.schema_version != 2 {
+    if !matches!(receipt.schema_version, 2 | 3) {
         return Err(format!(
             "tool-door journal receipt has unsupported schema_version {}",
             receipt.schema_version
@@ -7565,7 +7464,21 @@ fn apply_tool_door_journal_receipt(
     entries: &mut BTreeMap<u64, ToolDoorJournalEntry>,
     receipt: &ToolDoorJournalReceipt,
 ) -> Result<(), String> {
-    let current = entries.get(&receipt.seq);
+    validate_tool_door_journal_transition(entries.get(&receipt.seq), receipt)?;
+    entries.insert(receipt.seq, ToolDoorJournalEntry {
+        schema_version: receipt.schema_version,
+        movement_digest: receipt.movement_digest.clone(), state: receipt.state,
+    });
+    Ok(())
+}
+
+fn validate_tool_door_journal_transition(
+    current: Option<&ToolDoorJournalEntry>,
+    receipt: &ToolDoorJournalReceipt,
+) -> Result<(), String> {
+    if current.is_some_and(|entry| entry.schema_version > receipt.schema_version) {
+        return Err(format!("tool-door completion journal seq {} regresses its evidence schema", receipt.seq));
+    }
     if let Some(current) = current
         && current.movement_digest != receipt.movement_digest
     {
@@ -7608,13 +7521,6 @@ fn apply_tool_door_journal_receipt(
             receipt.seq, previous, receipt.state
         ));
     }
-    entries.insert(
-        receipt.seq,
-        ToolDoorJournalEntry {
-            movement_digest: receipt.movement_digest.clone(),
-            state: receipt.state,
-        },
-    );
     Ok(())
 }
 
@@ -7658,6 +7564,8 @@ fn validate_tool_door_journal_metadata(
     Ok(())
 }
 
+
+
 fn create_tool_door_journal_temp(parent: &Path) -> Result<(PathBuf, std::fs::File), String> {
     for _ in 0..1024 {
         let sequence = TOOL_DOOR_COMPLETION_JOURNAL_TEMP_SEQUENCE
@@ -7692,7 +7600,7 @@ fn create_tool_door_journal_temp(parent: &Path) -> Result<(PathBuf, std::fs::Fil
 }
 
 enum ToolDoorAction {
-    Complete,
+    Complete(ToolDoorJournalState),
     RecoverIndeterminate,
     Recover {
         call: ToolCallArtifact,
@@ -7873,14 +7781,14 @@ async fn tool_door_loop(
                         ToolDoorAction::Invoke { call, envelope, captured } => {
                             if completed_output::CompletedOutputs::load(ctx, seq)?.is_some() {
                                 ToolDoorAction::Recover { call, envelope, captured }
-                            } else if tool_door_has_exact_admitted_result(
+                            } else if let Some(state) = tool_door_admitted_result_state(
                                 ctx,
                                 &own.movement,
                                 &call,
                                 &envelope,
                                 decoder,
                             )? {
-                                ToolDoorAction::Complete
+                                ToolDoorAction::Complete(state)
                             } else {
                                 ToolDoorAction::Recover { call, envelope, captured }
                             }
@@ -7903,7 +7811,7 @@ async fn tool_door_loop(
                     unreachable!("terminal journal states were handled above")
                 }
             };
-            let should_spawn = !matches!(&action, ToolDoorAction::Complete);
+            let should_spawn = !matches!(&action, ToolDoorAction::Complete(_));
             if matches!(
                 &action,
                 ToolDoorAction::Invoke { .. } | ToolDoorAction::Release { .. }
@@ -7913,7 +7821,8 @@ async fn tool_door_loop(
             let state = if should_spawn {
                 ToolDoorRowState::InFlight
             } else {
-                journal.finish(seq, &movement_digest, ToolDoorJournalState::Completed)?;
+                let ToolDoorAction::Complete(state) = action else { unreachable!() };
+                journal.finish(seq, &movement_digest, state)?;
                 ToolDoorRowState::Completed
             };
             let invocation_ctx = ctx.with_source_movement(own.movement.clone());
@@ -8003,7 +7912,7 @@ fn prepare_tool_door_action(
     let decoder_context = ctx.with_source_movement(own.movement.clone());
     let call = match decoder(&decoder_context, &envelope, purpose) {
         Ok(Some(call)) => call,
-        Ok(None) => return ToolDoorAction::Complete,
+        Ok(None) => return ToolDoorAction::Complete(ToolDoorJournalState::Completed),
         Err(error) => {
             return ToolDoorAction::Failure {
                 class: "invalid_tool_artifact",
@@ -8077,7 +7986,7 @@ async fn execute_tool_door_action(
     primary_input: &mut Option<ToolProcessPrimaryInput>,
 ) -> Result<ToolDoorJournalState, String> {
     match action {
-        ToolDoorAction::Complete => Ok(ToolDoorJournalState::Completed),
+        ToolDoorAction::Complete(state) => Ok(state),
         ToolDoorAction::RecoverIndeterminate => {
             hand_tool_effect_indeterminate(ctx, source_movement_seq, None, None, None).await
         }
@@ -8298,7 +8207,7 @@ async fn hand_tool_effect_indeterminate(
     hand_tool_failure(
         ctx,
         source_movement_seq,
-        "tool_effect_indeterminate",
+        TOOL_EFFECT_INDETERMINATE,
         details,
         target,
         ToolDoorJournalState::Indeterminate,
@@ -8331,6 +8240,7 @@ async fn hand_tool_failure(
     };
     match verdict {
         DeliveryVerdict::Admitted { .. } => Ok(admitted_state),
+        DeliveryVerdict::Refused { .. } if admitted_state == ToolDoorJournalState::Indeterminate => Ok(admitted_state),
         DeliveryVerdict::Refused { .. } => Ok(ToolDoorJournalState::Refused),
     }
 }
@@ -8478,14 +8388,24 @@ pub fn tool_door_has_exact_admitted_result(
     envelope: &InterfaceInvocationEnvelope,
     decoder: ToolDoorArtifactDecoder,
 ) -> Result<bool, String> {
-    tool_door_has_exact_admitted_result_at(
+    tool_door_admitted_result_state(ctx, source, call, envelope, decoder).map(|state| state.is_some())
+}
+
+fn tool_door_admitted_result_state(
+    ctx: &InterfaceLiftContext,
+    source: &Movement,
+    call: &ToolCallArtifact,
+    envelope: &InterfaceInvocationEnvelope,
+    decoder: ToolDoorArtifactDecoder,
+) -> Result<Option<ToolDoorJournalState>, String> {
+    tool_door_admitted_result_state_at(
         &ctx.ledger_read_handles()?, &ctx.interface, source, call, envelope, None,
         |movement, candidate| decoder(&ctx.with_source_movement(movement.clone()), candidate,
             ToolDoorArtifactDecodePurpose::HistoricalIdentity),
     )
 }
 
-fn tool_door_has_exact_admitted_result_at(
+fn tool_door_admitted_result_state_at(
     handles: &InterfaceLedgerReadHandles<'_>,
     door: &InterfaceId,
     source: &Movement,
@@ -8493,7 +8413,7 @@ fn tool_door_has_exact_admitted_result_at(
     envelope: &InterfaceInvocationEnvelope,
     ledger_snapshot: Option<&[u8]>,
     decoder: impl Fn(&Movement, &InterfaceInvocationEnvelope) -> Result<Option<ToolCallArtifact>, String>,
-) -> Result<bool, String> {
+) -> Result<Option<ToolDoorJournalState>, String> {
     let source_runtime = envelope
         .runtime()
         .map_err(|error| format!("tool-door recovery source coordinates are invalid: {error}"))?;
@@ -8548,7 +8468,7 @@ fn tool_door_has_exact_admitted_result_at(
     let mut offset = 0_u64;
     let mut expected_seq = 0_u64;
     let mut source_seen = false;
-    let mut admitted_result_seq = None;
+    let mut admitted_result = None;
     while offset < ledger_len {
         let read = read_bounded_tool_door_ledger_line(
             &mut reader,
@@ -8770,7 +8690,12 @@ fn tool_door_has_exact_admitted_result_at(
                             movement.seq.0, source.seq.0
                         ));
                     }
-                    if let Some(previous) = admitted_result_seq.replace(movement.seq.0) {
+                    let state = if result.error.as_ref().is_some_and(|error| error.code == TOOL_EFFECT_INDETERMINATE) {
+                        ToolDoorJournalState::Indeterminate
+                    } else {
+                        ToolDoorJournalState::Completed
+                    };
+                    if let Some((previous, _)) = admitted_result.replace((movement.seq.0, state)) {
                         return Err(format!(
                             "tool-door recovery found duplicate exact admitted results at movements {previous} and {}",
                             movement.seq.0
@@ -8786,7 +8711,7 @@ fn tool_door_has_exact_admitted_result_at(
             source.seq.0
         ));
     }
-    Ok(admitted_result_seq.is_some())
+    Ok(admitted_result.map(|(_, state)| state))
 }
 
 fn tool_door_movement_digest(movement: &octopus_ledger::Movement) -> Result<String, String> {
@@ -10181,10 +10106,11 @@ mod tool_process_private_boundary_tests {
         reopened
             .finish(10, &digest, ToolDoorJournalState::Indeterminate)
             .unwrap();
+        let before = std::fs::read(&path).unwrap();
         reopened.prune_before(10).unwrap();
-
-        let compacted = ToolDoorEffectJournal::open(path, 10, 64 * 1024).unwrap();
-        assert_eq!(compacted.state(9, &digest).unwrap(), None);
+        let compacted = ToolDoorEffectJournal::open(path.clone(), 10, 64 * 1024).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert_eq!(compacted.state(9, &digest).unwrap(), Some(ToolDoorJournalState::Indeterminate));
         assert_eq!(
             compacted.state(10, &digest).unwrap(),
             Some(ToolDoorJournalState::Indeterminate)
@@ -11098,7 +11024,7 @@ pub mod owner_contract_tests {
                     ToolDoorAction::Invoke { call, envelope, .. } => {
                         return Ok(Some((own.movement.seq.0, call, envelope)));
                     }
-                    ToolDoorAction::Complete => {}
+                    ToolDoorAction::Complete(_) => {}
                     ToolDoorAction::Failure { class, details, .. } => {
                         return Err(format!("{class}: {details}"));
                     }

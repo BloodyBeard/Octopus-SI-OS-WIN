@@ -4,6 +4,7 @@ const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
+const { plannedMaintenanceRuns } = require("./maintenance-client.cjs");
 
 const CONFIG_PATH = path.join(__dirname, "client.json");
 const LIVE_EVENT_DATA_MAX_BYTES = 8 * 1024;
@@ -646,7 +647,7 @@ async function planExistingProviderSelection(options, input) {
   if (providerSelectionChanged && !providerWrite) {
     throw new Error("operator chat provider selection produced no exact provider write");
   }
-  if (plannedAdditionalRunWrites(topologyPlan, await resolveRunRecordsRoot(octopusHome)).length > 0) {
+  if (plannedAdditionalRunWrites(topologyPlan, await resolveRunRecordsRoot(octopusHome), registryRoot).length > 0) {
     throw new Error("operator input revision cannot create undeclared replacement writer Runs");
   }
   const selectedWrites = [];
@@ -801,6 +802,16 @@ async function runOperatorRevisionCommand(planner, flag, request) {
     child.stdin.end(JSON.stringify(request));
   });
   return requiredObject(JSON.parse(output), "operator input revision proof");
+}
+
+async function loadOperatorTaskLifecycle(options) {
+  const config = await readConfig();
+  const registryRoot = resolveRegistryRoot(options);
+  const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), registryRoot, "topology_planner");
+  return {
+    taskLifecycle: require("./maintenance-lifecycle.cjs"),
+    retirementBarrier: require("./task-retirement.cjs").createTaskRetirementBarrier(planner, runOperatorRevisionCommand),
+  };
 }
 
 function assertPayloadInputCycleReady(record, providerInterfaceId, conversation) {
@@ -1611,7 +1622,7 @@ async function planOperatorChatSurface(options, request) {
   const writes = topologyPlan.interface_writes.map((write, index) => (
     plannedClientWrite(write, index, registryRoot)
   ));
-  writes.push(...plannedAdditionalRunWrites(topologyPlan, runsDir));
+  writes.push(...plannedAdditionalRunWrites(topologyPlan, runsDir, registryRoot));
   const runRecordContent = topologyPlan.run_record_content;
   if (typeof runRecordContent !== "string" || !runRecordContent.trim()) {
     throw new Error("plan.run_record_content must be a non-empty string");
@@ -1775,7 +1786,7 @@ async function planOperatorChatTaskAmendment(options, request) {
   const writes = topologyPlan.interface_writes.map((write, index) => (
     plannedClientWrite(write, index, registryRoot)
   ));
-  writes.push(...plannedAdditionalRunWrites(topologyPlan, runsDir));
+  writes.push(...plannedAdditionalRunWrites(topologyPlan, runsDir, registryRoot));
   const plannedProviderWrite = writes.find((write) => write.filePath === providerDescriptorPath);
   const providerDescriptorHash = sha256Hex(Buffer.from(providerDescriptor.text));
   if (plannedProviderWrite && plannedProviderWrite.expectedBeforeHash !== providerDescriptorHash) {
@@ -3082,7 +3093,7 @@ function plannedExactIds(value, field, validate) {
   return values;
 }
 
-function plannedAdditionalRunWrites(plan, runsRoot) {
+function plannedAdditionalRunWrites(plan, runsRoot, registryRoot) {
   const target = requiredObject(JSON.parse(plan.run_record_content), "planned target Run");
   const proposed = requiredArray(plan.run_writes, "plan.run_writes").map((write, index) => {
     requiredObject(write, `plan.run_writes[${index}]`);
@@ -3103,7 +3114,9 @@ function plannedAdditionalRunWrites(plan, runsRoot) {
   if (new Set(proposed.map(({record}) => record.id)).size !== proposed.length) {
     throw new Error("additional Run writes repeat an identity");
   }
+  if (!proposed.length) return [];
   const declared = new Map();
+  const exactContents = new Map();
   const execution = [target];
   const context = target.interface_state?.[plan.chat_interface_id]?.voice_context;
   const voice = proposed.find(({record}) => record.id === context?.run_id)?.record;
@@ -3122,6 +3135,19 @@ function plannedAdditionalRunWrites(plan, runsRoot) {
     declared.set(voice.id, voice);
     execution.push(voice);
   }
+  const proposedIds = new Set(proposed.map(({record}) => record.id));
+  const maintenance = target.interface_state?.[plan.model_interface_id]?.maintenance_observer;
+  const createsMaintenance = [maintenance?.run, maintenance?.projection_run?.run].some((id) => proposedIds.has(id));
+  const companions = plannedMaintenanceRuns(plan, target, registryRoot, createsMaintenance);
+  const companionIds = new Set(companions.map(({record}) => record.id));
+  const requiredCompanions = new Set();
+  for (const { record, content } of companions) {
+    if (declared.has(record.id) || record.id === target.id) throw new Error("maintenance Run repeats another execution owner");
+    declared.set(record.id, record);
+    exactContents.set(record.id, content);
+    execution.push(record);
+    if (createsMaintenance) requiredCompanions.add(record.id);
+  }
   for (const target of execution) {
     const states = requiredObject(target.interface_state, "planned target state");
     for (const [owner, state] of Object.entries(states)) {
@@ -3138,10 +3164,15 @@ function plannedAdditionalRunWrites(plan, runsRoot) {
         throw new Error("writer Run declaration changes its target, worker or EE");
       }
       declared.set(id, record);
+      if (createsMaintenance && companionIds.has(target.id)) requiredCompanions.add(id);
     }
   }
+  if ([...requiredCompanions].some((id) => !proposedIds.has(id))) {
+    throw new Error("maintenance creation must include both companions and their exact declared writers");
+  }
   return proposed.map(({record, write}) => {
-    if (!declared.has(record.id) || canonicalJson(record) !== canonicalJson(declared.get(record.id))) {
+    if (!declared.has(record.id) || canonicalJson(record) !== canonicalJson(declared.get(record.id))
+      || exactContents.has(record.id) && write.content !== exactContents.get(record.id)) {
       throw new Error("planned write differs from its exact declared initial Run");
     }
     declared.delete(record.id);
@@ -7872,6 +7903,7 @@ function positiveInteger(value, field) {
 }
 
 module.exports = {
+  loadOperatorTaskLifecycle,
   adoptOperatorChatPackageUpdates,
   assertGenericOperatorChatArtifactAllowed,
   loginProviderAccount,

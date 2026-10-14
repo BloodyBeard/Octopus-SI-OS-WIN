@@ -130,10 +130,10 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         .filter(|path|path.to_string_lossy().ends_with(".artifact.json")).find_map(|path| {
             let file=InterfaceArtifactFile::new(path).unwrap();
             let value:serde_json::Value=serde_json::from_slice(&file.read_payload_bytes().unwrap()).unwrap();
-            let target=if phase==13 {&value["arguments"]["writes"][1]} else {&value["arguments"]};
+            let target=&value["arguments"]["writes"][1];
             (target["expected_before_hash"]==ContentHash::of_bytes(&selected).to_hex()).then_some((file,value))
         }).unwrap();
-    let target=if phase==13 {&call_value["arguments"]["writes"][1]} else {&call_value["arguments"]};
+    let target=&call_value["arguments"]["writes"][1];
     let mut candidate:serde_json::Value=serde_json::from_slice(&selected).unwrap();
     json_patch::patch(&mut candidate,&serde_json::from_value::<json_patch::Patch>(target["patch"].clone()).unwrap()).unwrap();
     let pending=&candidate["interface_state"][descriptor.id.as_str()]["pending_handoff"];
@@ -166,7 +166,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         item["artifact_content_hash"]=json!(reference.content.to_hex());
         item["manifest_relative_path"]=json!(forged.manifest_path().canonicalize().unwrap().strip_prefix(ctx.interface_var_dir().canonicalize().unwrap()).unwrap());
         let edit=CheckedRunEdit::prepare_with_format(run_path.canonicalize().unwrap(),&selected,changed,call_value["correlation_id"].as_str().unwrap().into(),serde_json::from_value(target["json_format"].clone()).unwrap()).unwrap();
-        let mut value=call_value.clone();let target=if phase==13 {&mut value["arguments"]["writes"][1]} else {&mut value["arguments"]};
+        let mut value=call_value.clone();let target=&mut value["arguments"]["writes"][1];
         target["patch"]=serde_json::to_value(&edit.patch).unwrap();target["expected_after_hash"]=json!(edit.after_hash);
         let attempt=artifact(&calls,&writer.call_label,value);
         let probe=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&envelope,result_seq,&pinned).unwrap();
@@ -175,13 +175,27 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         if phase==12 {
             let mut replay_ctx=ctx.clone();replay_ctx.movements_path=root.join(format!("forged-{fault}.jsonl"));replay_ctx.ledger_index_path=root.join(format!("forged-{fault}.sqlite"));
             std::fs::write(&replay_ctx.movements_path,&ledger).unwrap();
-            let call_cp=installed_record.checkpoints.iter().find(|cp|installed_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(&authoring_id)).unwrap();
-            append(&replay_ctx,edge(&replay_ctx,&selected,call_cp,&attempt,MovementKind::InterfaceOutbound,writer.door.clone()));
-            let after=RunRecord::from_bytes(edit.content.as_bytes()).unwrap();
-            let result_cp=after.checkpoints.iter().find(|cp|after.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(&writer.door)&&cp.outbound_interfaces().any(|id|id==&descriptor.id)).unwrap();
-            let result=artifact(&root.join("forged-result"),&writer.result_label,json!({"label":writer.result_label,"tool":writer.tool,"correlation_id":edit.correlation_id,"ok":true,"body":{"result":"files_written","writes":[{"path":edit.path,"before_hash":edit.before_hash,"after_hash":edit.after_hash,"bytes":edit.content.len()}]}}));
-            append(&replay_ctx,edge(&replay_ctx,edit.content.as_bytes(),result_cp,&result,MovementKind::InterfaceOutbound,descriptor.id.clone()));
-            let limits=ctx.required_host_io_limits().unwrap();let evidence=CheckedRunEvidence {movements_path:&replay_ctx.movements_path,ledger_index_path:&replay_ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
+            let limits=ctx.required_host_io_limits().unwrap();
+            let advance=&call_value["arguments"]["writes"][0];
+            let preimage:octopus_provider_run_authoring::Preimage=serde_json::from_value(advance["expected_before_content"].clone()).unwrap();
+            let writer_before=preimage.decode(advance["expected_before_hash"].as_str().unwrap(),&mut octopus_provider_run_authoring::DecodeBudget::new(limits.max_payload_bytes).unwrap()).unwrap().into_bytes();
+            let before_record=RunRecord::from_bytes(&writer_before).unwrap();
+            assert_eq!(before_record.id.as_str(),installed_record.interface_state[&descriptor.id]["run_authoring_binding"]["writer_run"]["run"].as_str().unwrap());
+            let mut after_value:serde_json::Value=serde_json::from_slice(&writer_before).unwrap();
+            json_patch::patch(&mut after_value,&serde_json::from_value::<json_patch::Patch>(advance["patch"].clone()).unwrap()).unwrap();
+            let format:octopus_provider_run_authoring::JsonFormat=serde_json::from_value(advance["json_format"].clone()).unwrap();
+            let writer_after=format.encode(&after_value).unwrap();
+            assert_eq!(ContentHash::of_bytes(&writer_after).to_hex(),advance["expected_after_hash"].as_str().unwrap());
+            let call_cp=before_record.checkpoints.iter().find(|cp|before_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(authoring_id)&&cp.outbound_interfaces().eq([&writer.door])).unwrap();
+            append(&replay_ctx,edge(&replay_ctx,&writer_before,call_cp,&attempt,MovementKind::InterfaceOutbound,writer.door.clone()));
+            let after_record=RunRecord::from_bytes(&writer_after).unwrap();
+            let result_cp=after_record.checkpoints.iter().find(|cp|after_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(&writer.door)&&cp.outbound_interfaces().eq([&descriptor.id])).unwrap();
+            let result=artifact(&root.join("forged-result"),&writer.result_label,json!({"label":writer.result_label,"tool":writer.tool,"correlation_id":edit.correlation_id,"ok":true,"body":{"result":"ordered_file_writes","writes":[
+                {"path":advance["path"],"before_hash":advance["expected_before_hash"],"after_hash":advance["expected_after_hash"],"bytes":writer_after.len(),"outcome":"applied","observed_hash":advance["expected_after_hash"]},
+                {"path":edit.path,"before_hash":edit.before_hash,"after_hash":edit.after_hash,"bytes":edit.content.len(),"outcome":"applied","observed_hash":edit.after_hash}
+            ]}}));
+            append(&replay_ctx,edge(&replay_ctx,&writer_after,result_cp,&result,MovementKind::InterfaceOutbound,descriptor.id.clone()));
+            let evidence=CheckedRunEvidence {movements_path:&replay_ctx.movements_path,ledger_index_path:&replay_ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
             let error=octopus_provider_run_authoring::checked_run_file_chain(&evidence,&run_path.canonicalize().unwrap(),&selected,edit.content.as_bytes(),stop_seq,&[writer.clone()]).unwrap_err();
             assert!(error.contains(if fault=="delta" {"exact source context parent and delta"} else {"exact predecessor snapshot parent or complete dynamic replacement set"}),"checked {fault}: {error}");
         }
@@ -600,10 +614,10 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
                         let (file,call)=std::fs::read_dir(&calls).unwrap().map(|entry|entry.unwrap().path())
                             .filter(|path|path.to_string_lossy().ends_with(".artifact.json")).find_map(|path| {
                                 let file=InterfaceArtifactFile::new(path).unwrap();let value:serde_json::Value=serde_json::from_slice(&file.read_payload_bytes().unwrap()).unwrap();
-                                let target=if phase==18 {&value["arguments"]["writes"][1]} else {&value["arguments"]};
+                                let target=&value["arguments"]["writes"][1];
                                 (target["expected_before_hash"]==ContentHash::of_bytes(&before).to_hex()).then_some((file,value))
                             }).unwrap();
-                        let target=if phase==18 {&call["arguments"]["writes"][1]} else {&call["arguments"]};
+                        let target=&call["arguments"]["writes"][1];
                         let mut candidate:serde_json::Value=serde_json::from_slice(&before).unwrap();
                         json_patch::patch(&mut candidate,&serde_json::from_value::<json_patch::Patch>(target["patch"].clone()).unwrap()).unwrap();
                         let mut payload:serde_json::Value=serde_json::from_slice(&saved.closure.as_ref().unwrap().read_payload_bytes().unwrap()).unwrap();
@@ -616,7 +630,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
                         let item=&mut candidate["interface_state"][descriptor.id.as_str()]["pending_handoff"]["items"][0];
                         item["artifact_content_hash"]=json!(reference.content.to_hex());item["manifest_relative_path"]=json!(forged.manifest_path().canonicalize().unwrap().strip_prefix(ctx.interface_var_dir().canonicalize().unwrap()).unwrap());
                         let edit=octopus_provider_run_authoring::CheckedRunEdit::prepare_with_format(run_path.canonicalize().unwrap(),&before,candidate,call["correlation_id"].as_str().unwrap().into(),serde_json::from_value(target["json_format"].clone()).unwrap()).unwrap();
-                        let mut changed=call.clone();let target=if phase==18 {&mut changed["arguments"]["writes"][1]} else {&mut changed["arguments"]};
+                        let mut changed=call.clone();let target=&mut changed["arguments"]["writes"][1];
                         target["patch"]=json!(edit.patch);target["expected_after_hash"]=json!(edit.after_hash);
                         let call_label=file.read_manifest().unwrap().label;
                         let hidden=file.manifest_path().with_extension("fixture-held");std::fs::rename(file.manifest_path(),&hidden).unwrap();
@@ -726,7 +740,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         });
         if let Some(file)=&selected_file {request.payload_artifact_bindings.push(materialized_artifact_ref(file).unwrap());}
         let plan=octopus_operator_chat_client::run_composition::plan_run_composition(&request).unwrap();
-        for write in &plan.descriptor_writes { std::fs::create_dir_all(write.path.parent().unwrap()).unwrap(); std::fs::write(&write.path,&write.content).unwrap(); }
+        for write in plan.descriptor_writes.iter().chain(&plan.run_writes) { std::fs::create_dir_all(write.path.parent().unwrap()).unwrap(); std::fs::write(&write.path,&write.content).unwrap(); }
         let mut initial:serde_json::Value=serde_json::from_str(&plan.run_write.content).unwrap();
         let templates=&initial["interface_state"][&plan.provider_interface_id]["run_authoring_binding"]["checkpoints"];
         let index=templates.as_array().unwrap().iter().position(|template|template["role"]=="stable" && template["include_context"]==true).unwrap();
@@ -736,10 +750,7 @@ async fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
         let static_ids=row["artifact_bindings"].as_array().unwrap().iter().map(|binding|binding["id"].clone()).collect::<Vec<_>>();
         assert!(!static_ids.is_empty());
         initial["interface_state"][&plan.provider_interface_id]["run_authoring_binding"]["checkpoints"][index]["static_artifact_bindings"]=json!(static_ids);
-        if matches!(settlement_phase,Some(8|13|18|21)) {
-            let writer=octopus_provider_run_authoring::separate_writer_run(&mut initial,&InterfaceId::new(&plan.provider_interface_id),&RunId::new("cold_writer")).unwrap();
-            std::fs::create_dir_all(root.join("runs")).unwrap();std::fs::write(root.join("runs/cold_writer.json"),octopus_provider_run_authoring::JsonFormat::Compact.encode(&writer).unwrap()).unwrap();
-        }
+        assert!(initial["interface_state"][&plan.provider_interface_id]["run_authoring_binding"]["writer_run"].is_object());
         let initial=serde_json::to_vec(&initial).unwrap(); let record=RunRecord::from_bytes(&initial).unwrap(); let run=record.id.clone();
         std::fs::create_dir_all(plan.run_write.path.parent().unwrap()).unwrap(); std::fs::write(&plan.run_write.path,&initial).unwrap();
         let mut descriptor:InterfaceDescriptor=serde_json::from_slice(&std::fs::read(root.join("registry/interface").join(&plan.provider_interface_id).join("interface.json")).unwrap()).unwrap();

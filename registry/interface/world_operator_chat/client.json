@@ -153,12 +153,22 @@
     "tool_call_mark": "tool.call.allowed",
     "tool_call_verifier": "tool_call_allowed",
     "listen_env": "OCTOPUS_CHAT_LISTEN",
+    "maintenance_observer": {
+      "template_interface_id": "system_worker_memory_observer",
+      "config_file": "maintenance.json"
+    },
     "context_artifact_bindings": [
       {
         "id": "artifact-worker-role-template"
       },
       {
         "id": "artifact-grounding-system-architecture"
+      },
+      {
+        "id": "artifact-system-library"
+      },
+      {
+        "id": "artifact-context-collection-guide"
       }
     ]
   },

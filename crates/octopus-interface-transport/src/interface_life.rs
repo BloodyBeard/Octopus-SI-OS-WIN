@@ -2388,6 +2388,17 @@ pub fn spawn_process_life(
     config: SpawnLifeConfig,
 ) -> InterfaceLifeFuture {
     Box::pin(async move {
+        let private_root = ctx.var_dir.parent().ok_or("interface life has no private root")?;
+        let ownership = loop {
+            if ctx.cancel.is_cancelled() { return Ok(()); }
+            if let Some(guard) = crate::InterfaceLifeOwnership::try_acquire_life(private_root, &ctx.interface)? {
+                break Arc::new(guard);
+            }
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+            }
+        };
         if config.processes.is_empty() {
             return Err(format!(
                 "interface '{}' life declares no processes",
@@ -2456,21 +2467,21 @@ pub fn spawn_process_life(
                     .await
                     .map_err(|_| "life process readiness channel closed".to_string())?
             });
-            processes.spawn(spawn_process_command_life(
-                process_ctx,
-                command,
-                private_environment.clone(),
-            ));
+            let ownership = ownership.clone();
+            let environment = private_environment.clone();
+            processes.spawn(async move {
+                let _ownership = ownership;
+                spawn_process_command_life(process_ctx, command, environment).await
+            });
         }
         if processes.is_empty() {
             ctx.cancel.cancelled().await;
             return Ok(());
         }
-        while !readiness.is_empty() {
+        let life_result = async {
+          while !readiness.is_empty() {
             tokio::select! {
                 _ = ctx.cancel.cancelled() => {
-                    process_cancel.cancel();
-                    while processes.join_next().await.is_some() {}
                     return Ok(());
                 }
                 ready = readiness.join_next() => {
@@ -2478,39 +2489,34 @@ pub fn spawn_process_life(
                         .ok_or_else(|| "life process readiness set ended early".to_string())?
                         .map_err(|error| format!("life process readiness task failed: {error}"))?;
                     if let Err(readiness_error) = ready {
-                        let process_error = processes
-                            .join_next()
-                            .await
-                            .and_then(spawned_life_task_error);
-                        process_cancel.cancel();
-                        while processes.join_next().await.is_some() {}
-                        return Err(process_error.unwrap_or(readiness_error));
+                        return Err(readiness_error);
                     }
                 }
                 result = processes.join_next() => {
                     let result = result
                         .ok_or_else(|| "life process set ended before readiness".to_string())?;
-                    process_cancel.cancel();
-                    while processes.join_next().await.is_some() {}
                     return Err(spawned_life_task_error(result).unwrap_or_else(|| {
                         "life process exited before interface readiness".to_string()
                     }));
                 }
             }
-        }
-        ctx.signal_ready()?;
-        let first = tokio::select! {
-            _ = ctx.cancel.cancelled() => None,
-            result = processes.join_next() => Some(
-                result.ok_or_else(|| "life process set ended without a process".to_string())?
-            ),
-        };
+          }
+          ctx.signal_ready()?;
+          tokio::select! {
+              _ = ctx.cancel.cancelled() => Ok(()),
+              result = processes.join_next() => {
+                  let result = result.ok_or_else(|| "life process set ended without a process".to_string())?;
+                  match spawned_life_task_error(result) {
+                      Some(error) => Err(error),
+                      None => Ok(()),
+                  }
+              },
+          }
+        }.await;
         process_cancel.cancel();
         let mut errors = Vec::new();
-        if let Some(result) = first {
-            if let Some(error) = spawned_life_task_error(result) {
-                errors.push(error);
-            }
+        if let Err(error) = life_result {
+            errors.push(error);
         }
         while let Some(result) = processes.join_next().await {
             if let Some(error) = spawned_life_task_error(result) {
@@ -2754,8 +2760,14 @@ fn spawn_process_command_life(
             return Err("interface life executable escapes its exact owner before spawn".into());
         }
         let mut command = tokio::process::Command::new(&prepared.program);
+        let child_ownership = crate::InterfaceLifeOwnership::try_acquire_life(
+            ctx.var_dir.parent().ok_or("interface life has no private root")?, &ctx.interface,
+        )?.ok_or("interface process lost its lifetime ownership before spawn")?;
         #[cfg(unix)]
-        command.process_group(0);
+        {
+            command.process_group(0);
+            child_ownership.inherit_into(&mut command);
+        }
         command
             .env_clear()
             .envs(prepared.environment)
@@ -2782,20 +2794,13 @@ fn spawn_process_command_life(
         if let Some(ledger_index_path) = ledger_index_path {
             command.env("OCTOPUS_LEDGER_INDEX_SQLITE", ledger_index_path);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("life spawn '{}' failed: {e}", executable.display()))?;
-
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "life stderr unavailable".to_string())?;
-        let interface = ctx.interface.clone();
-        let maximum_bytes = host_io_limits.max_stderr_bytes;
         let started_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| format!("life process start time is before the Unix epoch: {error}"))?
             .as_nanos();
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("life spawn '{}' failed: {e}", executable.display()))?;
         let child_pid = child
             .id()
             .ok_or_else(|| "life process has no host process id after spawn".to_string())?;
@@ -2803,9 +2808,18 @@ fn spawn_process_command_life(
         let stderr_path = var_dir.join(format!(
             "interface-life.stderr.{started_at}.{child_pid}.{capture_sequence}.log"
         ));
+        let mut stderr_task = None;
+        let mut child_exited = false;
+        let life_result = async {
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "life stderr unavailable".to_string())?;
+        let interface = ctx.interface.clone();
+        let maximum_bytes = host_io_limits.max_stderr_bytes;
         let stderr_capture_path = stderr_path.clone();
         let (stderr_failure_tx, mut stderr_failure_rx) = tokio::sync::oneshot::channel();
-        let stderr_task = tokio::spawn(async move {
+        stderr_task = Some(tokio::spawn(async move {
             let result = drain_bounded_stderr_to_private_file(
                 stderr,
                 maximum_bytes,
@@ -2818,7 +2832,7 @@ fn spawn_process_command_life(
                 let _ = stderr_failure_tx.send(error.clone());
             }
             result
-        });
+        }));
         let mut stderr_open = true;
 
         let mut stdin = child
@@ -2830,8 +2844,7 @@ fn spawn_process_command_life(
             .take()
             .ok_or_else(|| "life stdout unavailable".to_string())?;
         let mut lines = BoundedJsonLineReader::new(stdout, host_io_limits.max_control_frame_bytes)?;
-        let mut child_exited = false;
-        let life_result = loop {
+        loop {
             tokio::select! {
                 _ = ctx.cancel.cancelled() => {
                     break Ok(());
@@ -2877,7 +2890,8 @@ fn spawn_process_command_life(
                     }
                 }
             }
-        };
+        }
+        }.await;
         let termination_result = terminate_life_process(&mut child, child_pid, child_exited).await;
         let mut errors = Vec::new();
         if let Err(error) = life_result {
@@ -2886,11 +2900,11 @@ fn spawn_process_command_life(
         if let Err(error) = termination_result {
             errors.push(error);
         }
-        match stderr_task.await {
+        if let Some(stderr_task) = stderr_task { match stderr_task.await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => errors.push(error),
             Err(error) => errors.push(format!("life stderr task failed: {error}")),
-        }
+        } }
         if !errors.is_empty() && stderr_path.is_file() {
             errors.push(format!(
                 "private stderr captured at '{}'",
@@ -3430,7 +3444,11 @@ mod tests {
     async fn life_cleanup_releases_descendant_stderr_after_cancel_or_leader_exit() {
         use tokio::io::AsyncReadExt;
         for leader_exits in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let interface = InterfaceId::new("world_cleanup_test");
+            let ownership = crate::InterfaceLifeOwnership::try_acquire_life(root.path(), &interface).unwrap().unwrap();
             let mut command = tokio::process::Command::new("/bin/sh");
+            ownership.inherit_into(&mut command);
             command
                 .args([
                     "-c",
@@ -3455,9 +3473,11 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(&ready, b"ready");
+            drop(ownership);
             if leader_exits {
                 assert!(child.wait().await.unwrap().success());
             }
+            assert!(crate::InterfaceLifeOwnership::try_acquire(root.path(), &interface).unwrap().is_none());
             terminate_life_process(&mut child, group, leader_exits)
                 .await
                 .unwrap();
@@ -3469,6 +3489,7 @@ mod tests {
             .await
             .expect("descendants must not retain the stopped interface's stderr")
             .unwrap();
+            assert!(crate::InterfaceLifeOwnership::try_acquire(root.path(), &interface).unwrap().is_some());
         }
     }
 
@@ -4185,6 +4206,56 @@ mod tests {
         .await
         .unwrap_err();
         assert!(multi.contains(&missing_name));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn life_ownership_covers_process_readiness_cancellation_and_failed_readiness() {
+        for lose_readiness in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let interface = InterfaceId::new("world_owned_process");
+            let mut context = ctx(root.path(), interface.as_str());
+            std::fs::create_dir_all(&context.interface_dir).unwrap();
+            std::fs::write(context.interface_dir.join("interface.json"), serde_json::json!({
+                "id": interface, "interface_type": "world", "role": "service",
+                "direction": "bidirectional", "source_names": ["test"],
+                "interface_driver_ref": "test_driver"
+            }).to_string()).unwrap();
+            context.root_slots.insert(crate::INTERFACE_LIFE_INSTALL_ROOT_SLOT.into(), root.path().to_path_buf());
+            let private_root = context.var_dir.parent().unwrap().to_path_buf();
+            let cancel = context.cancel.clone();
+            let (context, ready) = context.with_readiness_channel();
+            let mut ready = Some(ready);
+            let guard = crate::InterfaceLifeOwnership::try_acquire(&private_root, &interface).unwrap().unwrap();
+            let config: SpawnLifeConfig = serde_json::from_value(serde_json::json!({
+                "processes": [{
+                    "bin": "/bin/sh", "args": ["-c", "/bin/sleep 60 & printf '{\"kind\":\"ready\"}\\n'; wait"],
+                    "io_limits": test_host_io_limits(),
+                    "read_handles": [],
+                    "authority": {
+                        "sandbox_mode": "disabled", "read_root_slots": [], "write_root_slots": [],
+                        "executable_root_slots": [], "read_paths": [], "write_paths": [],
+                        "executable_paths": ["/bin/sh", "/bin/sleep"], "executable_commands": [],
+                        "read_env_paths": [], "write_env_paths": [], "executable_env_paths": [],
+                        "allow_network": false, "allow_local_ipc": false
+                    }
+                }]
+            })).unwrap();
+            let handle = tokio::spawn(spawn_process_life(context, config));
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            assert!(!handle.is_finished());
+            assert!(matches!(ready.as_mut().unwrap().try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+            if lose_readiness { drop(ready.take()); }
+            drop(guard);
+            if !lose_readiness {
+                tokio::time::timeout(std::time::Duration::from_secs(3), ready.take().unwrap()).await.unwrap().unwrap().unwrap();
+                assert!(crate::InterfaceLifeOwnership::try_acquire(&private_root, &interface).unwrap().is_none());
+                cancel.cancel();
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(3), handle).await.unwrap().unwrap();
+            assert_eq!(result.is_err(), lose_readiness);
+            assert!(crate::InterfaceLifeOwnership::try_acquire(&private_root, &interface).unwrap().is_some());
+        }
     }
 
     #[tokio::test]

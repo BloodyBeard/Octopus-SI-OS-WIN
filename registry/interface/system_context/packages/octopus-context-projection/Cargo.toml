@@ -1,0 +1,20 @@
+[package]
+name = "octopus-context-projection"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "octopus-context-projection-life"
+path = "src/bin/life.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
+octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
+octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
+octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-provider-run-authoring = { path = "../../../world_provider_ollama/packages/octopus-provider-run-authoring" }
+octopus-world-pyecho-life-runtime = { path = "../../../world_pyecho/packages/octopus-world-pyecho-life-runtime" }

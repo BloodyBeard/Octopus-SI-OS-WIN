@@ -520,9 +520,10 @@ function assertPackageUpdateOwnership(manifest, source, state) {
       throw new Error(`Installed package '${manifest.id}' changed ownership of '${memberKey(baseline)}'; prior owners must remain declared and present`);
     }
     const jsonFiles = new Map((baseline.source_files ?? baseline.json_files ?? []).map(file => [file.path, file]));
+    const evolution = configurationEvolution(member, baseline);
     for (const [relative, saved] of jsonFiles) {
       if ((baseline.source_files || saved.configuration_digest !== undefined)
-        && member.projectedFiles.get(relative)?.configuration_digest !== saved.configuration_digest) {
+        && member.projectedFiles.get(relative)?.configuration_digest !== saved.configuration_digest && !evolution.has(relative)) {
         throw new Error(`Installed package '${manifest.id}' changed configuration ownership at '${memberKey(member)}/${relative}'; prior installation is preserved`);
       }
     }
@@ -548,6 +549,59 @@ function assertPackageUpdateOwnership(manifest, source, state) {
       throw new Error(`Installed package '${manifest.id}' cannot claim an existing unowned target '${memberKey(member)}'`);
     }
   }
+}
+
+function assertAdditiveConfiguration(prior, next, label) {
+  const fields = new Map((next?.fields ?? []).map(field => [field.pointer, field]));
+  if (!next || prior.fields.some(field => stableJson(fields.get(field.pointer)) !== stableJson(field))) {
+    throw new Error(`${label} changed configuration ownership; prior pointers and schemas must remain unchanged`);
+  }
+}
+
+function configurationEvolution(member, baseline) {
+  const evolution = new Map();
+  for (const saved of baseline?.source_files ?? baseline?.json_files ?? []) {
+    const next = member.configuration?.find(entry => entry.path === saved.path);
+    if (next && hashJson(next) === saved.configuration_digest || !next && saved.configuration_digest === undefined) continue;
+    const label = `Package owner '${memberKey(member)}/${saved.path}'`;
+    if (!baseline.source_files) throw new Error(`${label} changed configuration ownership without a per-file source baseline`);
+    const prior = saved.configuration_digest === undefined ? { path: saved.path, fields: [] }
+      : [...(baseline.configuration ?? []), ...(member.configuration_predecessors ?? [])]
+        .find(entry => entry.path === saved.path && hashJson(entry) === saved.configuration_digest);
+    if (!prior) throw new Error(`${label} changed configuration ownership without an exact predecessor declaration`);
+    assertAdditiveConfiguration(prior, next, label);
+    evolution.set(saved.path, { prior, next });
+  }
+  return evolution;
+}
+
+async function priorConfigurationFiles(member, evolution) {
+  const files = sourceFileMap(member);
+  if (!evolution.size) return files;
+  const configuration = [...evolution.values()].filter(entry => entry.prior.fields.length).map(entry => entry.prior);
+  const projected = (await projectMemberConfiguration(member, configuration)).projectedFiles;
+  for (const relative of evolution.keys()) {
+    const file = files.get(relative), prior = projected.get(relative);
+    if (file) files.set(relative, { ...file, configuration_digest: prior?.configuration_digest, owned_sha256: prior?.owned_sha256 });
+  }
+  return files;
+}
+
+function additiveConfigurationFields(entry, saved, priorActive, priorIncoming, active, incoming) {
+  const contentMatches = file => file && sameOwnedFile({ ...file, mode: saved.mode }, saved);
+  const activeIsBaseline = contentMatches(priorActive), incomingIsBaseline = contentMatches(priorIncoming);
+  const priorPointers = new Set(entry.prior.fields.map(field => field.pointer));
+  const installed = new Map(active.fields.map(field => [field.pointer, field]));
+  const ambiguous = new Set();
+  const fields = incoming.fields.map(field => {
+    const current = installed.get(field.pointer);
+    if (priorPointers.has(field.pointer)) return current;
+    if (activeIsBaseline) return field;
+    if (incomingIsBaseline || stableJson(current) === stableJson(field)) return current;
+    ambiguous.add(field.pointer);
+    return current;
+  });
+  return { fields, ambiguous };
 }
 
 async function assertPackageOwnersUnclaimed(roots, manifest, source) {
@@ -636,7 +690,7 @@ function assertConflictResolutionsUsed(resolutions, used) {
   }
 }
 
-async function resolvePackageFileConflict(resolution, before, current, next, member, active) {
+async function resolvePackageFileConflict(resolution, before, current, next, member, active, preservedFields) {
   const label = `${resolution.packageId}:${memberKey(member)}/${resolution.path}`;
   for (const [name, file] of [["previousSource", before], ["active", current], ["incoming", next]]) {
     const pin = resolution[name];
@@ -651,7 +705,8 @@ async function resolvePackageFileConflict(resolution, before, current, next, mem
   if (!declaration) return { file };
   const projected = (await projectMemberConfiguration({ files: [file] }, [declaration])).projectedFiles.get(resolution.path);
   const installed = active.projectedFiles.get(resolution.path);
-  if (!installed || stableJson(projected.fields) !== stableJson(installed.fields)) {
+  const required = preservedFields ?? installed?.fields;
+  if (!required || required.some(field => stableJson(projected.fields.find(candidate => candidate.pointer === field.pointer)) !== stableJson(field))) {
     throw new Error(`Conflict resolution '${label}' changes active configuration ownership`);
   }
   return { file: { ...file, configuration_input: { ...current } }, projected };
@@ -679,25 +734,36 @@ async function preparePackageUpdate(roots, manifest, source, state, resolutions 
     if (!receipt) { members.push(member); continue; }
     const baseline = new Map(receipt.source_files.map(file => [file.path, file]));
     const incoming = sourceFileMap(member), local = sourceFileMap(active);
+    const evolution = configurationEvolution(member, receipt);
+    const priorLocal = await priorConfigurationFiles(active, evolution), priorIncoming = await priorConfigurationFiles(member, evolution);
     const paths = [...new Set([...baseline.keys(), ...incoming.keys(), ...local.keys()])].sort(compareSnapshotPaths);
     const files = [], projectedFiles = new Map();
     for (const relative of paths) {
       const before = baseline.get(relative), next = incoming.get(relative), current = local.get(relative);
-      let selected, resolved;
-      if (sameOwnedFile(current, before)) selected = next;
-      else if (sameOwnedFile(next, before) || sameOwnedFile(current, next)) selected = current;
-      else {
+      const transition = evolution.get(relative);
+      const configured = transition && additiveConfigurationFields(transition, before, priorLocal.get(relative), priorIncoming.get(relative),
+        active.projectedFiles.get(relative), member.projectedFiles.get(relative));
+      let selected, resolved, conflict = false;
+      if (sameOwnedFile(priorLocal.get(relative), before)) selected = next;
+      else if (sameOwnedFile(priorIncoming.get(relative), before) || sameOwnedFile(current, next)) selected = current;
+      else conflict = true;
+      if (conflict || configured?.ambiguous.size) {
         const key = conflictResolutionKey(manifest.id, member, relative), resolution = resolutions.get(key);
         if (!resolution) throw new Error(`Installed package '${manifest.id}' has overlapping source-owned changes at '${memberKey(member)}/${relative}'; prior installation is preserved`);
-        resolved = await resolvePackageFileConflict(resolution, before, current, next, member, active);
+        resolved = await resolvePackageFileConflict(resolution, before, current, next, member, active,
+          configured?.fields.filter(field => !configured.ambiguous.has(field.pointer)));
         usedResolutions.add(key);
         selected = resolved.file;
       }
       if (!selected) continue;
       const projected = (selected === next ? member : active).projectedFiles.get(relative);
-      const merged = resolved ?? (selected === next && projected
-        ? mergeConfiguredFile(selected, projected, active.projectedFiles.get(relative), local.get(relative))
+      let merged = resolved ?? (projected && (selected === next || configured)
+        ? mergeConfiguredFile(selected, projected, configured ? { fields: configured.fields } : active.projectedFiles.get(relative), current)
         : { file: selected, projected });
+      if (transition) {
+        const validated = await projectMemberConfiguration({ files: [merged.file] }, [transition.next]);
+        merged = { file: { ...merged.file, configuration_input: { ...current } }, projected: validated.projectedFiles.get(relative) };
+      }
       files.push(merged.file);
       if (merged.projected) projectedFiles.set(relative, merged.projected);
     }
@@ -1214,6 +1280,13 @@ function parsePackageManifest(value, file) {
   for (const member of manifest.members) {
     const label = `${manifest.id}:${memberKey(member)}`;
     validateConfigurationOwnership(member.configuration ?? [], label, member.registry_kind);
+    const predecessors = new Set();
+    for (const prior of member.configuration_predecessors ?? []) {
+      validateConfigurationOwnership([prior], label, member.registry_kind);
+      const digest = hashJson(prior);
+      if (predecessors.has(digest)) throw new Error(`${label} repeats a configuration predecessor`);
+      predecessors.add(digest);
+    }
     validateDataDirectoryOwnership(member, label);
   }
   return manifest;
@@ -1308,21 +1381,23 @@ function configurationValidator(schema) {
   return configurationValidators.get(key);
 }
 
-function configurationSlot(document, pointer) {
+function configurationSlot(document, pointer, allowMissingParents = false) {
   const components = configurationPointer(pointer);
+  const key = components.at(-1);
   let parent = document;
   for (const component of components.slice(0, -1)) {
-    if ((!isRecord(parent) && !Array.isArray(parent)) || !Object.hasOwn(parent, component)) {
+    if (!isRecord(parent) && !Array.isArray(parent)) throw new Error(`package configuration field has no object parent at '${pointer}'`);
+    if (!Object.hasOwn(parent, component)) {
+      if (allowMissingParents && isRecord(parent)) return { parent: null, key, present: false, value: undefined };
       throw new Error(`package configuration parent is missing at '${pointer}'`);
     }
     parent = parent[component];
   }
   if (!isRecord(parent)) throw new Error(`package configuration field has no object parent at '${pointer}'`);
-  const key = components.at(-1);
   return { parent, key, present: Object.hasOwn(parent, key), value: parent[key] };
 }
 
-async function projectMemberConfiguration(snapshot, configuration = []) {
+async function projectMemberConfiguration(snapshot, configuration = [], deferredFields = new Set()) {
   const projectedFiles = new Map();
   for (const entry of configuration) {
     const file = snapshotFile(snapshot, entry.path);
@@ -1333,11 +1408,14 @@ async function projectMemberConfiguration(snapshot, configuration = []) {
     const owned = structuredClone(document);
     const fields = [];
     for (const field of entry.fields) {
-      const slot = configurationSlot(document, field.pointer);
+      const deferred = deferredFields.has(`${entry.path}\0${field.pointer}`);
+      const slot = configurationSlot(document, field.pointer, deferred);
       const validate = configurationValidator(field.schema);
-      if (slot.present && !validate(slot.value)) throw schemaError(`package configuration '${entry.path}${field.pointer}'`, validate.errors);
-      const ownedSlot = configurationSlot(owned, field.pointer);
-      delete ownedSlot.parent[ownedSlot.key];
+      if (slot.present && !deferred && !validate(slot.value)) {
+        throw schemaError(`package configuration '${entry.path}${field.pointer}'`, validate.errors);
+      }
+      const ownedSlot = configurationSlot(owned, field.pointer, deferred);
+      if (ownedSlot.present) delete ownedSlot.parent[ownedSlot.key];
       fields.push({ pointer: field.pointer, present: slot.present, ...(slot.present ? { value: slot.value } : {}) });
     }
     const body = Buffer.from(stableJson(owned));
@@ -1657,6 +1735,7 @@ function jsonPointerToken(value) {
 }
 
 async function readPackageState(roots, manifest, source) {
+  const receiptResult = await readReceipt(roots, manifest.id);
   const activeMembers = [];
   let present = 0;
   for (const member of orderedMembers(manifest.members)) {
@@ -1669,7 +1748,13 @@ async function readPackageState(roots, manifest, source) {
     present += 1;
     const snapshot = await snapshotDirectory(target);
     validateMemberDataPaths(member, snapshot);
-    activeMembers.push({ ...member, target, present: true, ...await projectMemberConfiguration(snapshot, member.configuration) });
+    const baseline = receiptResult?.members.find(candidate => memberKey(candidate) === memberKey(member));
+    const deferred = new Set();
+    for (const [relative, entry] of configurationEvolution(member, baseline)) {
+      const priorPointers = new Set(entry.prior.fields.map(field => field.pointer));
+      for (const field of entry.next.fields) if (!priorPointers.has(field.pointer)) deferred.add(`${relative}\0${field.pointer}`);
+    }
+    activeMembers.push({ ...member, target, present: true, ...await projectMemberConfiguration(snapshot, member.configuration, deferred) });
   }
   const materialized = present === manifest.members.length;
   const partiallyMaterialized = present > 0 && !materialized;
@@ -1681,7 +1766,6 @@ async function readPackageState(roots, manifest, source) {
       digest: member.present ? member.digest : null,
     })),
   }) : "";
-  const receiptResult = await readReceipt(roots, manifest.id);
   let receiptState = receiptResult ? "valid" : "missing";
   if (receiptResult && (
     receiptResult.source_digest !== source.sourceDigest
@@ -2316,6 +2400,10 @@ async function repairResolvedPackages(roots, entries, operation) {
 }
 
 async function preparePackageRepair(manifest, source, state) {
+  if (state.receipt?.members.some(baseline => {
+    const member = source.members.find(candidate => memberKey(candidate) === memberKey(baseline));
+    return member && configurationEvolution(member, baseline).size;
+  })) throw new Error(`local package '${manifest.id}' configuration ownership evolution requires adopt_package_updates`);
   const changedData = state.localChanges.some(change => {
     const member = source.members.find(candidate => memberKey(candidate) === memberKey(change));
     return member && isMemberDataPath(member, change.path);
@@ -2803,6 +2891,18 @@ function parseReceipt(value, file) {
         || sourcePaths.has(entry.path)) throw new Error(`local package receipt '${value.package_id}' has an invalid source path '${entry.path}'`);
       sourcePaths.add(entry.path);
     }
+    if (member.configuration) {
+      validateConfigurationOwnership(member.configuration, `receipt:${value.package_id}:${memberKey(member)}`, member.registry_kind);
+      const declarations = new Map(member.configuration.map(entry => [entry.path, hashJson(entry)]));
+      const configured = new Set();
+      for (const entry of [...(member.source_files ?? []), ...(member.json_files ?? [])]) {
+        if (entry.configuration_digest !== declarations.get(entry.path)) {
+          throw new Error(`local package receipt '${value.package_id}' configuration declaration disagrees with '${entry.path}'`);
+        }
+        if (entry.configuration_digest !== undefined) configured.add(entry.path);
+      }
+      if (configured.size !== declarations.size) throw new Error(`local package receipt '${value.package_id}' has unproved configuration declarations`);
+    }
     if (member.materialized_files) validateReceiptMaterialization(member, value.package_id);
   }
   if (value.schema_version === 2 && hashJson({ manifest_digest: value.manifest_digest,
@@ -2881,6 +2981,7 @@ function packageReceipt(manifest, source, operationId, materialization = source)
       owner: member.owner,
       target: memberRelative(member),
       digest: member.digest,
+      ...(member.configuration?.length ? { configuration: structuredClone(member.configuration) } : {}),
       materialized_files: member.files.map(file => ({ path: snapshotRelativePath(file.relative_path),
         sha256: file.sha256, size: file.size, mode: file.mode })),
       source_files: sourceMembers.get(memberKey(member)).files.map(file => {

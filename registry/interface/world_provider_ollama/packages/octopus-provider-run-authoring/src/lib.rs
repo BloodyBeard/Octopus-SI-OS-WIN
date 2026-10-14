@@ -889,6 +889,7 @@ impl From<CheckedRunError> for String {
 
 pub mod generated_artifacts;
 pub mod input_artifacts;
+pub mod snapshot_projection;
 
 pub struct CheckedRunEvidence<'a> {
     pub movements_path: &'a Path,

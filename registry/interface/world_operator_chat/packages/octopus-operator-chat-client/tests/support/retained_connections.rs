@@ -23,7 +23,7 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
         }
     };
     let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ee,"run_records_root":dir.path().join("runs"),"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ee,"run_records_root":dir.path().join("runs"),"interface_private_state_root":dir.path().join("private"),"write_hash_algorithm":"sha256",
         "chat_id":"retained_peer","provider_interface_id":"world_provider_ollama",
         "ee_id":"ee_operator_space","worker_interface_id":"system_worker_coder_max",
         "client_surface_role":"task","cycle":"first",
@@ -71,7 +71,9 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
     let template = json!({"name":"outgoing_peer","role":"provider_interface_output","interface_binding":incoming,"outbound_interface_bindings":[outgoing],"include_context":false,"static_artifact_bindings":["peer-role","peer-source"],"required_verified_artifacts":[]});
     prior["interface_state"][&first.model_interface_id]["run_authoring_binding"]["checkpoints"].as_array_mut().unwrap().push(template.clone());
     prior["interface_state"][&first.model_interface_id]["frontier_checkpoint_ids"].as_array_mut().unwrap().push(json!("peer_output"));
-    prior["checkpoints"].as_array_mut().unwrap().push(json!({"id":"peer_output","run":first.run_id,"trace":"peer-trace","epoch":0,"interface_binding":incoming,"outbound_interface_bindings":[outgoing],"artifact_bindings":[{"id":"peer-role"},{"id":"peer-source"}],"required_verified_artifacts":[]}));
+    let mut peer_artifacts = prior["interface_state"][&first.model_interface_id]["run_authoring_binding"]["writer_run"]["initial_record"]["checkpoints"][0]["artifact_bindings"].as_array().unwrap().clone();
+    peer_artifacts.extend([json!({"id":"peer-role"}),json!({"id":"peer-source"})]);
+    prior["checkpoints"].as_array_mut().unwrap().push(json!({"id":"peer_output","run":first.run_id,"trace":"peer-trace","epoch":0,"interface_binding":incoming,"outbound_interface_bindings":[outgoing],"artifact_bindings":peer_artifacts,"required_verified_artifacts":[]}));
     prior["active_checkpoints"].as_array_mut().unwrap().push(json!("peer_output"));
     let mut neighbor = prior["interface_state"][&first.model_interface_id]["run_authoring_binding"]["writer_run"]["initial_record"]["checkpoints"][0].clone();
     neighbor["run"] = json!(first.run_id);

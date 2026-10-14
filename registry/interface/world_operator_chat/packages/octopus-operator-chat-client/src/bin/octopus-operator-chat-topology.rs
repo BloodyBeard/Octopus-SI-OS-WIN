@@ -12,12 +12,20 @@ use octopus_operator_chat_client::native_run_authoring::{NativeRunAdoptionReques
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1 && arguments[0] == "--hold-task-retirement" {
+        if let Err(error) = octopus_operator_chat_client::task_retirement::serve_task_retirement() {
+            eprintln!("operator task retirement failed closed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let retirement_preflight = arguments.len() == 1 && arguments[0] == "--verify-task-retirement";
     let writers_only = arguments.len() == 1 && arguments[0] == "--writer-runs";
     let writer_schema = arguments.len() == 1 && arguments[0] == "--writer-schema";
     let prepare_revision = arguments.len() == 1 && arguments[0] == "--prepare-input-revision";
     let verify_revision = arguments.len() == 1 && arguments[0] == "--verify-input-revision";
     let native_adoption = arguments.len() == 1 && arguments[0] == "--plan-native-adoption";
-    if !arguments.is_empty() && !writers_only && !writer_schema && !prepare_revision && !verify_revision && !native_adoption {
+    if !arguments.is_empty() && !writers_only && !writer_schema && !prepare_revision && !verify_revision && !native_adoption && !retirement_preflight {
         eprintln!("operator chat topology received an unknown planning operation");
         std::process::exit(1);
     }
@@ -25,6 +33,15 @@ fn main() {
     if let Err(error) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("operator chat topology stdin read failed: {error}");
         std::process::exit(1);
+    }
+    if retirement_preflight {
+        let result = serde_json::from_str::<octopus_operator_chat_client::task_retirement::TaskRetirementContext>(&input)
+            .map_err(|error| error.to_string()).and_then(|context| context.verify_before());
+        match result {
+            Ok(()) => println!("{{\"ready\":true}}"),
+            Err(error) => { eprintln!("operator task retirement preflight failed closed: {error}"); std::process::exit(1); }
+        }
+        return;
     }
     if native_adoption {
         match serde_json::from_str::<NativeRunAdoptionRequest>(&input).map_err(|error|error.to_string())

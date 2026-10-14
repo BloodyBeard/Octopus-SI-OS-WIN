@@ -395,9 +395,11 @@ function createClient(environment, dependencies = {}) {
     store.invalidate();
     const [scope, { raw }] = await Promise.all([read("projection.operator.os.scope"), contextData()]);
     const chat = await loader.load();
+    const { taskLifecycle, retirementBarrier } = await chat.loadOperatorTaskLifecycle(submitOptions);
     const result = await mutateOctopusOsWorkspace(registryRoot, env.home, scope, request, {
       chatContexts: raw,
-      commitClientAuthoring: (plan) => commitProjectionClientAuthoring(env.home, registryRoot, plan),
+      taskLifecycle,
+      commitClientAuthoring: (plan) => commitProjectionClientAuthoring(env.home, registryRoot, plan, { retirementBarrier }),
       withTaskAuthoringLock: chat.withOperatorRunAuthoringLock,
       readTaskStatus: async (id) => {
         store.invalidate(false);
@@ -405,7 +407,7 @@ function createClient(environment, dependencies = {}) {
       },
       releaseTaskWorkerEnvironments: (input) => chat.releaseOperatorTaskWorkerEnvironments(submitOptions, input),
       mutateWorkspaceProject: (scope, request) => chat.withOperatorWorkspaceTopologyLock(env.home, () => mutateWorkspaceProject({
-        octopusHomeRoot: env.home, registryRoot, scope, request,
+        octopusHomeRoot: env.home, registryRoot, scope, request, retirementBarrier,
         planOperatorSurface: ({ eeInstancesRoot, request }) => chat.planOperatorChatSurface({
           ...submitOptions, eeInstancesRoot: () => eeInstancesRoot,
         }, request),

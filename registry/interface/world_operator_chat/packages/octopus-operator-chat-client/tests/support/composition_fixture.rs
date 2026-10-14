@@ -29,7 +29,7 @@ pub fn client_fixture(root: &Path) -> RunCompositionRequest {
     }
     write(root, provider_file, provider);
     for name in ["interface.json", "life.json", "client.json"] {
-        let value = serde_json::from_slice(
+        let mut value: Value = serde_json::from_slice(
             &std::fs::read(
                 source
                     .join("registry/interface/world_operator_chat")
@@ -38,6 +38,10 @@ pub fn client_fixture(root: &Path) -> RunCompositionRequest {
             .unwrap(),
         )
         .unwrap();
+        if name == "client.json" {
+            value["run"]["context_artifact_bindings"] = json!([]);
+            value["run"].as_object_mut().unwrap().remove("maintenance_observer");
+        }
         write(
             root,
             &format!("registry/interface/world_operator_chat/{name}"),

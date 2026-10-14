@@ -2,7 +2,7 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { commitClientAuthoringTransaction } = require("./workspaceSetup.cjs");
 
-function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
+function commitProjectionClientAuthoring(octopusHome, registryRoot, request, options = {}) {
   const writes = Array.isArray(request?.writes) ? request.writes : [];
   const removals = Array.isArray(request?.removals) ? request.removals : [];
   const publishBarrierPath = path.resolve(request?.publishBarrierPath ?? "");
@@ -12,6 +12,7 @@ function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
   return commitClientAuthoringTransaction({
     octopusHomeRoot: octopusHome,
     registryRoot,
+    retirementBarrier: options.retirementBarrier,
     plan: {
       operationId: randomUUID(),
       label: String(request?.label ?? ""),
@@ -31,6 +32,7 @@ function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
         expectedIno: removal?.ino,
         tag: String(removal?.label ?? removal?.path ?? "client authoring removal"),
       })),
+      ...(Object.hasOwn(request, "retirement") ? { retirement: request.retirement } : {}),
     },
   });
 }

@@ -21,6 +21,21 @@ const starts = new Map();
 const PACKAGE_COMMAND = "npm --prefix app run build:cli (or node app/scripts/package-cli.cjs to package existing release binaries)";
 const execute = promisify(execFile);
 
+function taskRetirementBarrier(environment) {
+  const load = async () => {
+    const registryRoot = environment.packageRoots.activeRegistryRoot;
+    const loader = createOperatorChatClientLoader({ packageRoots: () => environment.packageRoots,
+      clientPath: () => path.join(registryRoot, "interface", "world_operator_chat", "client.cjs") });
+    const client = await loader.load();
+    return (await client.loadOperatorTaskLifecycle({ registryRoot: () => registryRoot,
+      installationRoot: () => environment.installationRoot })).retirementBarrier;
+  };
+  return {
+    verifyBefore: (context) => load().then((barrier) => barrier.verifyBefore(context)),
+    withHeldProof: (context, operation) => load().then((barrier) => barrier.withHeldProof(context, operation)),
+  };
+}
+
 function resolveEnvironment(options = {}) {
   const ambient = { ...(options.env ?? process.env) };
   const userRoot = absolute(options.userHome ?? os.homedir(), "user home");
@@ -216,7 +231,8 @@ async function launchRuntime(environment, options) {
         },
       });
       await assertStopped();
-      await recoverWorkspaceTransactions({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot });
+      await recoverWorkspaceTransactions({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot,
+        retirementBarrier: taskRetirementBarrier(environment) });
       const interfaceRoot = fs.lstatSync(path.join(environment.packageRoots.activeRegistryRoot, "interface"), { throwIfNoEntry: false });
       if (interfaceRoot) {
         if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
@@ -230,7 +246,8 @@ async function launchRuntime(environment, options) {
             const client = await loader.load();
             await client.adoptOperatorChatPackageUpdates({ octopusHome: () => environment.home,
               registryRoot: () => environment.packageRoots.activeRegistryRoot, installationRoot: () => environment.installationRoot,
-              assertStopped, commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, environment.packageRoots.activeRegistryRoot, request),
+              assertStopped, commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, environment.packageRoots.activeRegistryRoot, request,
+                { retirementBarrier: taskRetirementBarrier(environment) }),
               onResult: (result) => options.onProgress({ phase: `client_package_${result.status}`, home: environment.home, ...result }),
             }, { clientRuns: scope.client_runs });
           }
@@ -385,4 +402,4 @@ function positiveTimeout(value) {
 function assertNotAborted(signal) { if (signal?.aborted) { const error = new Error("Terminal operation cancelled; any shared runtime already started remains running."); error.code = "ABORT_ERR"; throw error; } }
 function runtimeError(message, environment) { const error = new Error(`${message} Runtime log: ${environment.logPath}`); error.logPath = environment.logPath; return error; }
 
-module.exports = { resolveEnvironment, createEnvironment, status, start, projectionStore, requireDistribution };
+module.exports = { taskRetirementBarrier, resolveEnvironment, createEnvironment, status, start, projectionStore, requireDistribution };

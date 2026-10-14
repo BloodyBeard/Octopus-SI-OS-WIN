@@ -5,6 +5,8 @@
 mod safe_io;
 mod schema;
 pub use schema::*;
+mod catalogue;
+pub use catalogue::{CatalogueLimits, CollectionCatalogue, CompactCollectionPage, UninspectedBinding};
 
 use octopus_ledger::{ArtifactRef, ContentHash};
 use serde_json::{json, Value};
@@ -367,8 +369,12 @@ impl BoundCollection {
         Ok(())
     }
 
-    fn scan(&self, mut visit: impl FnMut(&ScannedEntry) -> Result<()>) -> Result<ScanSnapshot> {
-        self.scan_inner(&mut visit).map_err(|error| match error {
+    fn scan(&self, visit: impl FnMut(&ScannedEntry) -> Result<()>) -> Result<ScanSnapshot> {
+        self.scan_bounded(self.descriptor.limits.max_scan_bytes, visit)
+    }
+
+    fn scan_bounded(&self, budget: u64, mut visit: impl FnMut(&ScannedEntry) -> Result<()>) -> Result<ScanSnapshot> {
+        self.scan_inner(budget.min(self.descriptor.limits.max_scan_bytes), &mut visit).map_err(|error| match error {
             CollectionError::InvalidSchema(_)
             | CollectionError::Json(_)
             | CollectionError::UnsafePath(_)
@@ -379,6 +385,7 @@ impl BoundCollection {
 
     fn scan_inner(
         &self,
+        scan_budget: u64,
         mut visit: impl FnMut(&ScannedEntry) -> Result<()>,
     ) -> Result<ScanSnapshot> {
         self.check_descriptor()?;
@@ -403,7 +410,7 @@ impl BoundCollection {
         let mut stamps = Vec::new();
         let mut scanned_bytes = 0_u64;
         for (id, name) in files {
-            let remaining = self.descriptor.limits.max_scan_bytes - scanned_bytes;
+            let remaining = scan_budget - scanned_bytes;
             if directory.file_fingerprint(name)?.len() > remaining {
                 return Err(CollectionError::LimitExceeded("scan bytes"));
             }

@@ -18,6 +18,9 @@ use octopus_world_terminal_client::{
 use sha2::{Digest, Sha256};
 
 pub mod context_bindings;
+pub mod collection_context;
+mod maintenance_attachment;
+pub mod maintenance_observer;
 pub mod publication_selection;
 pub mod input_intake;
 mod retained_connections;
@@ -40,6 +43,7 @@ mod retained_connections_tests;
 mod input_intake_tests;
 pub mod run_composition;
 pub mod run_revision;
+pub mod task_retirement;
 pub use run_composition::{RunCompositionPlan, RunCompositionRequest, plan_run_composition};
 
 pub const OPERATOR_CHAT_INTERFACE: &str = "world_operator_chat";
@@ -768,6 +772,14 @@ fn plan_operator_chat_topology_files_for_source(
         &selected_context,
         &staged_publication_artifacts,
     )?;
+    let catalogue = collection_context::plan(collection_context::PlanContext {
+        registry_root, ee_instances_root: ee_policy_root, ee_id: &selection.ee_id, identity: &identity,
+        bindings: config.run.context_artifact_bindings.iter()
+            .chain(request.conversation.artifact_bindings.iter())
+            .chain(request.conversation.pinned_artifact_bindings.iter())
+            .chain(selected_context.iter()).cloned().collect(),
+        native_metadata, existing: request.existing_run_record.as_ref(),
+    }, &mut selected_context, &mut writes)?;
     plan_provider_interface(
         &interface_root,
         &config,
@@ -775,6 +787,7 @@ fn plan_operator_chat_topology_files_for_source(
         &provider,
         &topology,
         &private_worker_role_artifacts,
+        &catalogue.inline_ids(),
         request.interface_private_state_root.as_deref(),
         &mut writes,
     )?;
@@ -860,6 +873,7 @@ fn plan_operator_chat_topology_files_for_source(
             .as_ref()
             .map(|_| &previous_authoring_profile),
     )?;
+    let run_record_content = catalogue.wire(&identity.model_interface_id, run_record_content)?;
     let run_record_content = home_outputs::wire(&identity, &role_artifacts, &selected_context, run_record_content)?;
     let (run_record_content, intake) = input_intake::wire(registry_root, &identity, &mut writes, run_record_content)?;
     let (run_record_content, mut voice_run_writes) = home_voice::wire(request, &config, &identity, &role_artifacts, &selected_context, run_record_content)?;
@@ -868,6 +882,23 @@ fn plan_operator_chat_topology_files_for_source(
         context_bindings::retain_context_access(run_record_content,
             request.existing_run_record.as_ref().ok_or("retained context access requires its existing record")?, &identity.model_interface_id)?
     } else { run_record_content };
+    let (run_record_content, mut maintenance_runs) = maintenance_attachment::wire(
+        maintenance_attachment::AttachmentRequest {
+            registry_root,
+            ee_instances_root: ee_policy_root,
+            run_records_root: request.run_records_root.as_deref(),
+            interface_private_state_root: request.interface_private_state_root.as_deref(),
+            config: &config,
+            identity: &identity,
+            source_input_labels: vec![config.artifact_labels.message.clone()],
+            existing: request.existing_run_record.as_ref(),
+            write_hash_algorithm: request.write_hash_algorithm,
+        },
+        run_record_content,
+        &mut writes,
+        &mut required_interface_ids,
+        &mut required_tool_ids,
+    )?;
     if let Some(intake) = intake {
         for (id, component) in [
             (&intake.interface, "authoring_source"),
@@ -889,6 +920,7 @@ fn plan_operator_chat_topology_files_for_source(
         writer_runs::wire_preserving_existing(request, &identity, run_record_content)?
     } else { writer_runs::wire(request, &identity, run_record_content)? };
     run_writes.append(&mut voice_run_writes);
+    run_writes.append(&mut maintenance_runs);
     let retained_paths = planned_retained_registry_paths(registry_root, &identity, &writes);
     let removals = previous_owned
         .as_ref()
@@ -3214,6 +3246,7 @@ fn plan_provider_interface(
     provider: &ResolvedProvider,
     topology: &FormedCapabilityTopology,
     worker_role_artifacts: &[String],
+    inline_context_ids: &[String],
     interface_private_state_root: Option<&Path>,
     writes: &mut Vec<PlannedClientWrite>,
 ) -> Result<(), String> {
@@ -3236,6 +3269,7 @@ fn plan_provider_interface(
     if driver_config.private_config.contains_key("instruction_artifacts") {
         driver_config.private_config.insert("worker_instruction_artifacts".into(), serde_json::json!(worker_role_artifacts));
     }
+    collection_context::configure_inline_selection(&mut driver_config.private_config, inline_context_ids)?;
     if let Some(names) = driver_config.private_config.get_mut("model_tool_names") {
         let source_names: BTreeMap<String, String> = serde_json::from_value(names.clone())
             .map_err(|error| format!("model_tool_names is malformed: {error}"))?;
@@ -6587,6 +6621,8 @@ mod tests {
         original["interface_state"][provider]["frontier_checkpoint_ids"].as_array_mut().unwrap().extend(ids.clone());
         let output = original["checkpoints"].as_array().unwrap().iter()
             .find(|cp| cp["interface_binding"]["interface"] == *provider
+                && serde_json::from_value::<AuthoredInterfaceBinding>(cp["interface_binding"].clone())
+                    .unwrap().admits("turn.completed")
                 && cp["outbound_interface_bindings"].as_array().unwrap().iter()
                     .any(|binding| binding["interface"] == plan.chat_interface_id)).unwrap().clone();
         original["interface_state"][provider]["pending_handoff"] = json!({
@@ -6636,7 +6672,7 @@ mod tests {
             ee_policy_root: None,
             run_records_root: Some(ee_dir.path().join("runs")),
             write_hash_algorithm: WriteHashAlgorithm::Sha256,
-            interface_private_state_root: None,
+            interface_private_state_root: Some(ee_dir.path().join("private")),
             chat_id: "planprobe0000000000000001".to_string(),
             provider_interface_id: "world_provider_ollama".to_string(),
             model: None,
@@ -7100,7 +7136,7 @@ mod tests {
 
     fn assert_computer_use_planned_identities(registry_root: &Path, ee_root: &Path) {
         let request: OperatorChatPlanRequest = serde_json::from_value(serde_json::json!({
-            "registry_root":registry_root,"ee_instances_root":ee_root,"run_records_root":ee_root.join("runs"),
+            "registry_root":registry_root,"ee_instances_root":ee_root,"run_records_root":ee_root.join("runs"),"interface_private_state_root":ee_root.join("private"),
             "write_hash_algorithm":"sha256","chat_id":"cu_exact_identity",
             "provider_interface_id":"world_provider_codex","ee_id":"ee_operator_space",
             "worker_interface_id":"system_worker_computer_use","client_surface_role":"task",
@@ -7292,7 +7328,13 @@ mod tests {
         assert_eq!(returned[0]["owner_authoring"]["tool"],writer_tool);
         assert_eq!(returned[0]["owner_authoring"]["door"],writer["interface"]);
         assert_eq!(returned[0]["include_context"], true);
-        assert_eq!(returned[0]["static_artifact_bindings"], serde_json::json!([format!("artifact-run-authoring-coordinates-{}", persistent_request.chat_id)]));
+        let mandatory = run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["writer_run"]["initial_record"]["checkpoints"][0]["artifact_bindings"].as_array().unwrap();
+        let mut selected_static = config.run.context_artifact_bindings.iter()
+            .filter(|binding| !mandatory.iter().any(|role| role["id"] == binding.id))
+            .map(|binding| serde_json::json!(binding.id)).collect::<Vec<_>>();
+        selected_static.push(run["interface_state"][&persistent.model_interface_id]["collection_catalogue_adoption"]["snapshot"]["id"].clone());
+        selected_static.push(serde_json::json!(format!("artifact-run-authoring-coordinates-{}", persistent_request.chat_id)));
+        assert_eq!(returned[0]["static_artifact_bindings"], serde_json::json!(selected_static));
         assert_eq!(run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["payload_artifact_bindings"], serde_json::json!([payload_ref]));
         let rows = run["checkpoints"].as_array().unwrap();
         let writer = &run["interface_state"][&persistent.model_interface_id]["run_authoring_binding"]["writer_run"];
@@ -7300,7 +7342,9 @@ mod tests {
             && cp["outbound_interface_bindings"][0]["interface"] == persistent.authoring_environment_interface_id).unwrap();
         let output_template = templates.iter().find(|cp| cp["role"] == "provider_tool_output"
             && cp["outbound_interface_bindings"][0]["interface"] == *owner).unwrap();
-        assert_eq!(output_template["static_artifact_bindings"],serde_json::json!([prelude["id"],topology_ref["id"],payload_ref.id,format!("artifact-run-authoring-coordinates-{}", persistent_request.chat_id)]));
+        let mut output_static = vec![prelude["id"].clone(),topology_ref["id"].clone(),serde_json::json!(payload_ref.id)];
+        output_static.extend(selected_static);
+        assert_eq!(output_template["static_artifact_bindings"],serde_json::json!(output_static));
         let mut exact_bindings = authoring_row["artifact_bindings"].as_array().unwrap().clone();
         exact_bindings.extend(output_template["static_artifact_bindings"].as_array().unwrap().iter().map(|id| serde_json::json!({"id":id})));
         let owner_call = rows.iter().find(|cp| cp["interface_binding"] == output_template["interface_binding"]
@@ -7798,7 +7842,7 @@ mod tests {
         println!("browser planner source overlay retained at {}", registry_root.display());
         let mut request = OperatorChatPlanRequest {
             registry_root:registry_root.into(), ee_instances_root:ee_root.into(), ee_policy_root:None, run_records_root:Some(ee_root.join("runs")),
-            write_hash_algorithm:WriteHashAlgorithm::Sha256, interface_private_state_root:None,
+            write_hash_algorithm:WriteHashAlgorithm::Sha256, interface_private_state_root:Some(ee_root.join("private")),
             chat_id:"browser_persistent_identity".into(), provider_interface_id:"world_provider_codex".into(),
             model:None, reasoning_effort:None, service_tier:None, ee_id:Some("ee_operator_space".into()),
             worker_interface_id:Some("system_worker_coder_max".into()), client_surface_role:"task".into(),

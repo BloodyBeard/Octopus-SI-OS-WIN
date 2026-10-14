@@ -24,7 +24,7 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
     let first_payload = json!({"id":"fixture.selected.first","content":vec![1;32]});
     let second_payload = json!({"id":"fixture.selected.second","content":vec![2;32]});
     let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
-        "registry_root":registry,"ee_instances_root":ee,"run_records_root":temp.path().join("runs"),"write_hash_algorithm":"sha256",
+        "registry_root":registry,"ee_instances_root":ee,"run_records_root":temp.path().join("runs"),"interface_private_state_root":temp.path().join("private"),"write_hash_algorithm":"sha256",
         "chat_id":"intake_client","provider_interface_id":"world_provider_codex",
         "ee_id":"ee_operator_space","worker_interface_id":"system_worker_coder_max",
         "client_surface_role":"task","cycle":"first","conversation":{"ledger_offset":0},
@@ -122,7 +122,9 @@ fn intake_client_continuation_preserves_peer_and_replaces_only_selected_context(
         .as_array_mut()
         .unwrap()
         .push(json!("peer_output"));
-    prior["checkpoints"].as_array_mut().unwrap().push(json!({"id":"peer_output","run":first.run_id,"trace":"peer-trace","epoch":0,"interface_binding":incoming,"outbound_interface_bindings":[outgoing],"artifact_bindings":[{"id":"fixture.peer.context"}],"required_verified_artifacts":[]}));
+    let mut peer_artifacts = prior["interface_state"][&first.model_interface_id]["run_authoring_binding"]["writer_run"]["initial_record"]["checkpoints"][0]["artifact_bindings"].as_array().unwrap().clone();
+    peer_artifacts.push(json!({"id":"fixture.peer.context"}));
+    prior["checkpoints"].as_array_mut().unwrap().push(json!({"id":"peer_output","run":first.run_id,"trace":"peer-trace","epoch":0,"interface_binding":incoming,"outbound_interface_bindings":[outgoing],"artifact_bindings":peer_artifacts,"required_verified_artifacts":[]}));
     prior["active_checkpoints"]
         .as_array_mut()
         .unwrap()
