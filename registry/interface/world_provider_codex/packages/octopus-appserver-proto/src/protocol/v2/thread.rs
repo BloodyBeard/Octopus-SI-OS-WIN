@@ -381,6 +381,10 @@ impl From<ThreadTurnsListResponse> for TurnsPage {
 pub struct ThreadForkParams {
     pub thread_id: String,
 
+    #[experimental("thread/fork.experimentalPredictionMode")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental_prediction_mode: bool,
+
     #[experimental("thread/fork.path")]
     #[serde(
         default,

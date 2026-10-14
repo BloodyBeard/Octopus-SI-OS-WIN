@@ -951,6 +951,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           reasoningEffort={workspace.reasoningEffort}
           serviceTier={workspace.serviceTier}
           resumeAvailable={workspace.resumeAvailable}
+          runId={workspace.activeRunId}
           isSubmitting={workspace.submitting}
           submissionMode={workspace.busy ? "queue" : "send"}
           canSteer={workspace.canSteer}

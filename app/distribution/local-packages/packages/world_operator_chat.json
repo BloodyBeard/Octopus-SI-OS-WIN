@@ -51,7 +51,10 @@
     {"registry_kind":"mark","owner":"memory.capture.completed"},
     {"registry_kind":"mark","owner":"memory.experience.admitted"},
     {"registry_kind":"verifier","owner":"memory_capture_outcome","configuration":[{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"verifier","owner":"memory_experience","configuration":[{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]}
+    {"registry_kind":"verifier","owner":"memory_experience","configuration":[{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
+    {"registry_kind":"ee_template","owner":"client_maintenance"},
+    {"registry_kind":"interface","owner":"system_worker_client_maintenance"},
+    {"registry_kind":"interface","owner":"system_client_maintenance"}
   ],
   "required_packages": [
     "driver.browser_session",

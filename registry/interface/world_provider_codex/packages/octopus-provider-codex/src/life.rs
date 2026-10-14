@@ -700,6 +700,21 @@ async fn codex_life(
                     own.movement.seq.0
                 )
             })?;
+            if manifest.label == crate::handler::composer_prediction::REQUEST_LABEL {
+                if !matches!(runtime_auth.connection_mode, ProviderConnectionMode::Native) {
+                    return Err("composer predictions require a native Codex binding".into());
+                }
+                if driver.is_none() {
+                    driver = Some(connect_declared_interface_driver(&ctx, &descriptor, &runtime_auth, Some(&envelope))
+                        .await.map_err(|error| error.message)?);
+                }
+                if let Err(error) = crate::handler::composer_prediction::run(&ctx, driver.as_ref().unwrap(),
+                    &runtime_auth.manager, &envelope, own.movement.seq.0).await {
+                    ctx.hand_admitted_failure(own.movement.seq.0, "composer_prediction_failed", serde_json::json!({"error":error})).await?;
+                }
+                commit_main_reader(&mut reader, &own, &main_reader_progress)?;
+                continue;
+            }
             let metadata = match own.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) => {

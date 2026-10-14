@@ -4144,6 +4144,42 @@ ipcMain.handle("octopus:provider-models-refresh", async (_event, token, request)
   return getClientProviderMetadata().models(request);
 });
 
+ipcMain.handle("octopus:composer-prediction", async (event, token, request) => {
+  const home = resolveOctopusHome();
+  const current = () => {
+    getClientAccessController().requireSession(token, ["live"]);
+    if (resolveOctopusHome() !== home || event.sender.isDestroyed()) throw new Error("Client suggestion lost its current Home or window");
+  };
+  current();
+  const read = (method, params) => getProjectionStore("live").read(projectionReadRequest(method, params));
+  const readSource = async (runId) => {
+    current();
+    const { chats } = await read("projection.operator.chats.list", {});
+    const chat = chats.find((chat) => chat.run_id === runId);
+    if (!chat?.writable || chat.archived || chat.turn_open || chat.turn_state !== "idle") return null;
+    const { messages } = await read("projection.operator.chat.messages", { run_id: runId });
+    const terminal = messages.findLast((row) => row.artifact_id === chat.last_terminal_message?.artifact_id && row.terminal && !row.error);
+    return terminal ? { chat, terminal } : null;
+  };
+  const source = await readSource(request?.runId);
+  if (!source) return null;
+  const { requestComposerPrediction } = await loadOperatorChatClient();
+  try {
+    const result = await requestComposerPrediction({
+      octopusHome: () => home, readSource, assertCurrent: current,
+      readArtifacts: async (params) => (await read("projection.interface_artifacts.list", params)).artifacts,
+      commit: (plan) => { current(); return commitProjectionClientAuthoring(home, path.join(home, "registry"), plan); },
+      handInArtifact: (input) => { current(); return handInArtifact({ ...input, octopusHome: home }); },
+    }, request);
+    current();
+    const latest = await readSource(request.runId);
+    return latest?.terminal.artifact_id === source.terminal.artifact_id ? result : null;
+  } catch (error) {
+    void appendClientLog("warning", "composer.prediction_failed", { message: String(error?.message ?? error) });
+    throw error;
+  }
+});
+
 ipcMain.handle("octopus:runtime-status", async (_event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
   const endpoint = request && typeof request.endpoint === "string" && request.endpoint.trim()

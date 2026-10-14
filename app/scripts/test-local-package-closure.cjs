@@ -27,9 +27,12 @@ async function assertPackMembers() {
   const operator = JSON.parse(await fs.readFile(path.join(libraryRoot, "packages", "world_operator_chat.json"), "utf8"));
   assert.deepEqual(operator.members.map(member => `${member.registry_kind}/${member.owner}`).sort(), [
     "artifact/artifact-role-memory-observer",
+    "ee_template/client_maintenance",
+    "interface/system_client_maintenance",
     "interface/system_context_memory_projection",
     "interface/system_context_memory_publication",
     "interface/system_interface_authoring",
+    "interface/system_worker_client_maintenance",
     "interface/system_worker_memory_observer",
     "interface/system_worker_operator_home",
     "interface/system_worker_operator_task",

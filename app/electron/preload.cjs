@@ -582,6 +582,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   refreshProviderModels(request) {
     return invokeAccess("octopus:provider-models-refresh", request);
   },
+  requestComposerPrediction(request) {
+    return invokeAccess("octopus:composer-prediction", request);
+  },
   async submitChatTurn(request) {
     return unwrapOperatorChatSubmitResult(await invokeAccess("octopus:submit-chat-turn", request));
   },

@@ -1,0 +1,8 @@
+{
+  "id": "system_client_maintenance",
+  "interface_type": "system",
+  "role": "service",
+  "direction": "bidirectional",
+  "source_names": ["client.maintenance"],
+  "interface_driver_ref": "app_server"
+}

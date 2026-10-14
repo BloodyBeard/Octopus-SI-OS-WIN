@@ -207,6 +207,7 @@ declare global {
       runClientExtensionAction(request: ClientExtensionActionRequest): Promise<ClientExtensionActionOutcome>;
       readCodexUsage(request: OctopusCodexUsageReadRequest): Promise<OctopusCodexUsageSnapshot>;
       refreshProviderModels(request: OctopusProviderModelsRefreshRequest): Promise<OctopusProviderModelsRefreshResponse>;
+      requestComposerPrediction(request: { runId: string }): Promise<{ id: string; text: string | null; runId: string } | null>;
       submitChatTurn(request: OctopusChatTurnRequest): Promise<OctopusChatTurnResponse>;
       readOperatorChatArtifacts(request: OctopusOperatorChatArtifactsRequest): Promise<OctopusOperatorChatArtifactsResponse>;
       submitOperatorTurnControl(request: OctopusOperatorTurnControlRequest): Promise<OctopusOperatorTurnControlResponse>;

@@ -19,6 +19,7 @@ import { OcDropdown } from "../../design-system/OcDropdown";
 import "./queue.css";
 import { RichComposerEditor, type RichComposerEditorHandle } from "./RichComposerEditor";
 import { ChatAttachmentStrip } from "./ChatAttachmentCard";
+import { useComposerSuggestion } from "./useComposerSuggestion";
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -187,6 +188,9 @@ export function ChatComposer({
     },
   });
   const voiceLayoutActive = dictation.isDictating || dictation.isTranscribing;
+  const suggestion = useComposerSuggestion(runId ?? "", accessProfile === "live"
+    && activeProvider?.runtimeHandlerRef === "codex_app_server" && !turnOpen && !isSubmitting
+    && !editingQueuedTurn && !voiceLayoutActive);
   const hasSubmissionPayload = Boolean(text.trim() || attachments.length);
   const stopAvailable = turnOpen && !hasSubmissionPayload && !editingQueuedTurn && Boolean(onInterrupt);
   const resumeActionAvailable = !stopAvailable
@@ -462,6 +466,7 @@ export function ChatComposer({
                     onKeyDown={handleEditorKeyDown}
                     onTextChange={onTextChange}
                     placeholder={placeholder}
+                    suggestion={attachments.length || slashMenuOpen ? null : suggestion}
                     ref={editorRef}
                     spellCheck={clientPreferences.spellcheckEnabled}
                     text={text}

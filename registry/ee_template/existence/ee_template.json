@@ -22,7 +22,8 @@
     "operator_interaction",
     "startup_management",
     "memory_maintenance",
-    "project"
+    "project",
+    "client_maintenance"
   ],
   "bootstrap_root": true,
   "allowed_root_slots": [

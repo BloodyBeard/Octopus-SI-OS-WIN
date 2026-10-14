@@ -16434,6 +16434,30 @@ mod tests {
             .unwrap();
         assert!(error.contains("does not match lifted interface"));
         let session = ProviderHandoffSession::new(&ctx).unwrap();
+        {
+            let mut plain: serde_json::Value = serde_json::from_slice(&run_bytes).unwrap();
+            plain["interface_state"].as_object_mut().unwrap().remove(provider.as_str());
+            let plain_bytes = serde_json::to_vec(&plain).unwrap();
+            std::fs::write(&run_path, &plain_bytes).unwrap();
+            for (name, pinned, expected_error) in [("plain", &plain_bytes, false), ("lost", &run_bytes, true)] {
+                let mut probe_ctx = ctx.clone();
+                probe_ctx.movements_path = ctx.movements_path.with_file_name(format!("candidate-{name}.jsonl"));
+                probe_ctx.ledger_index_path = ctx.ledger_index_path.with_file_name(format!("candidate-{name}.sqlite"));
+                let hash = ContentHash::of_bytes(pinned);
+                std::fs::write(ctx.blobs_dir.join(hash.to_hex()), pinned).unwrap();
+                let mut metadata = input.metadata().unwrap().clone();
+                metadata.runtime.as_mut().unwrap().run_record_hash = Some(hash.to_hex());
+                let row = Movement { seq: Seq(0), lamport: Lamport(0), recorded_at_unix_ms: 0,
+                    trace: TraceId("candidate".into()), kind: MovementKind::InterfaceOutbound,
+                    from: Endpoint::Interface(InterfaceId::new("world_input_profile_test")), to: Endpoint::Interface(provider.clone()),
+                    artifact: Some(input.artifact.clone()), invocation_metadata: Some(metadata.into()) };
+                std::fs::write(&probe_ctx.movements_path, format!("{}\n", serde_json::to_string(&row).unwrap())).unwrap();
+                let candidates = ProviderHandoffSession::new(&probe_ctx).unwrap().completed_source_candidates(&probe_ctx);
+                if expected_error { assert!(candidates.unwrap_err().contains("lost its declared authoring state")); }
+                else { assert!(candidates.unwrap().is_empty()); }
+            }
+            std::fs::write(&run_path, &run_bytes).unwrap();
+        }
         let mut handoff = session
             .from_invocation(&ctx, &descriptor, &run, &input, 23, &run_bytes)
             .unwrap();

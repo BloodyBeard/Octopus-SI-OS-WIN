@@ -9,6 +9,7 @@ import { Plugin, TextSelection, EditorState } from "prosemirror-state";
 import { liftListItem, sinkListItem } from "prosemirror-schema-list";
 import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
 import { createPortal } from "react-dom";
+import { composerSuggestionKey, composerSuggestionPlugin, visibleComposerSuggestion, type ComposerSuggestion } from "./composerSuggestion";
 
 export type RichComposerEditorHandle = {
   dom: () => HTMLElement | null;
@@ -22,6 +23,7 @@ type Props = {
   onKeyDown: (event: globalThis.KeyboardEvent, editor: HTMLElement) => void;
   onTextChange: (value: string) => void;
   placeholder: string;
+  suggestion?: ComposerSuggestion | null;
   spellCheck: boolean;
   text: string;
 };
@@ -43,6 +45,7 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
   onKeyDown,
   onTextChange,
   placeholder,
+  suggestion = null,
   spellCheck,
   text,
 }, forwardedRef) {
@@ -137,6 +140,11 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
     view.dom.setAttribute("aria-label", placeholder);
     view.dispatch(view.state.tr.setMeta("composer-placeholder", placeholder));
   }, [placeholder]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (view) view.dispatch(view.state.tr.setMeta(composerSuggestionKey, { suggestion }));
+  }, [suggestion]);
 
   useEffect(() => {
     if (!activeLink) return;
@@ -299,6 +307,7 @@ function composerPlugins(
   activateLinkRef: RefObject<(anchor: HTMLAnchorElement, view: EditorView) => void>,
 ): Plugin[] {
   return [
+    composerSuggestionPlugin(parsePrompt),
     history(),
     inputRules({
       rules: [
@@ -335,6 +344,7 @@ function composerPlugins(
           return defaultMarkdownSerializer.serialize(schema.topNodeType.create(null, content.content));
         },
         decorations(state) {
+          if (visibleComposerSuggestion(state)) return null;
           const first = state.doc.firstChild;
           if (state.doc.childCount !== 1 || !first?.isTextblock || first.content.size !== 0) return null;
           return DecorationSet.create(state.doc, [Decoration.node(0, first.nodeSize, {

@@ -76,6 +76,9 @@ use context_refresh::{ContextRefresh, CurrentNativeContext, NativeHistoryProof, 
 mod native_history;
 use native_history::{read_native_turn, read_native_turn_items};
 
+#[path = "composer_prediction.rs"]
+pub(crate) mod composer_prediction;
+
 pub const CODEX_APP_SERVER_INTERFACE_DRIVER_REF: &str = "codex_app_server";
 
 pub(crate) const PROVIDER_TRANSPORT_DISPATCH_LABEL: &str = "provider.transport.dispatch";

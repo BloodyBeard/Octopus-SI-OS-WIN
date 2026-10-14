@@ -1,0 +1,11 @@
+{
+  "id": "system_worker_client_maintenance",
+  "ceiling": {
+    "interfaces": ["system_worker_client_maintenance", "system_client_maintenance", "world_provider_codex"],
+    "tools": [],
+    "wek": [],
+    "mark_outcomes": [],
+    "hard_blocked_tools": []
+  },
+  "role_artifacts": []
+}

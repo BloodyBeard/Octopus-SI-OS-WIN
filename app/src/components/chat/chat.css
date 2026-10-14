@@ -1890,6 +1890,14 @@ mark.octopus-thread-find-active {
   user-select: none;
 }
 
+.composer-editor-root .composer-suggestion {
+  color: var(--color-token-input-placeholder-foreground);
+  opacity: .5;
+  user-select: none;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+
 .composer-editor-root .ProseMirror .placeholder::after {
   position: absolute;
   inset: 0 auto auto 0;

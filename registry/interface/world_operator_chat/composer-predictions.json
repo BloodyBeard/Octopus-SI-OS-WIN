@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "ee_template": "client_maintenance",
+  "worker_template": "system_worker_client_maintenance",
+  "client_template": "system_client_maintenance",
+  "provider_driver": "codex_app_server",
+  "provider_template": "world_provider_codex",
+  "request_label": "provider.composer_prediction.request",
+  "result_label": "provider.composer_prediction.result"
+}

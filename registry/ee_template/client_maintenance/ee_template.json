@@ -1,0 +1,11 @@
+{
+  "id": "client_maintenance",
+  "goal_class": "Support the operator's client with useful suggestions derived from explicitly selected conversation context.",
+  "allowed_interfaces": null,
+  "allowed_tools": [],
+  "allowed_worker_environment_kinds": [],
+  "allowed_artifact_verbs": ["read"],
+  "allowed_root_slots": [],
+  "allowed_child_ee_templates": [],
+  "bootstrap_root": false
+}

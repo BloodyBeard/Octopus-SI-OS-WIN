@@ -245,15 +245,18 @@ impl ProviderHandoffSession {
         let runs = {
             let mut index = self.index()?;
             index.catch_up()?;
-            index
-                .coordinate_outbounds
-                .keys()
-                .map(|key| key.run.clone())
-                .collect::<BTreeSet<_>>()
+            let mut runs = BTreeMap::<String, BTreeMap<Option<String>, u64>>::new();
+            for (coordinate, sources) in &index.coordinate_outbounds {
+                let pins = runs.entry(coordinate.run.clone()).or_default();
+                for source in sources {
+                    pins.entry(source.run_record_hash.clone()).or_insert(source.seq);
+                }
+            }
+            runs
         };
         let root = ctx.root_slot("run_records_root")?;
         let mut candidates = Vec::new();
-        for id in runs {
+        for (id, source_pins) in runs {
             if std::path::Path::new(&id).components().count() != 1 {
                 return Err("provider source has an invalid run id".into());
             }
@@ -269,6 +272,21 @@ impl ProviderHandoffSession {
             let record = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
             if record.id.as_str() != id {
                 return Err("completed source run identity changed".into());
+            }
+            if !record.interface_state.get(&ctx.interface).is_some_and(|state| state.contains_key(RUN_AUTHORING_BINDING)) {
+                if record.interface_state.get(&ctx.interface).is_some_and(|state| state.contains_key("pending_handoff")) {
+                    return Err("pending provider handoff has no declared authoring binding".into());
+                }
+                for (pin, source) in source_pins {
+                    let hash = pin.as_deref().and_then(ContentHash::from_hex)
+                        .ok_or_else(|| format!("provider source movement {source} has no pinned run record"))?;
+                    let (_, original) = pinned_run_record(ctx, &hash, "completed source classification")?;
+                    if original.id != record.id || original.interface_state.get(&ctx.interface)
+                        .is_some_and(|state| state.contains_key(RUN_AUTHORING_BINDING) || state.contains_key("pending_handoff")) {
+                        return Err("provider run lost its declared authoring state".into());
+                    }
+                }
+                continue;
             }
             if let Some(pending) = persisted_pending_handoff(&record, &ctx.interface)? {
                 if pending.terminal && !pending.source_without_context {

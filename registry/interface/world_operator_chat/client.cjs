@@ -7915,6 +7915,11 @@ module.exports = {
   releaseOperatorTaskWorkerEnvironments,
   submitOperatorTurn,
   submitOperatorTurnControl,
+  requestComposerPrediction: (options, request) => require("./composer-predictions.cjs").requestComposerPrediction({
+    ...options, withRunLock: withOperatorRunAuthoringLock, withTopologyLock: withOperatorWorkspaceTopologyLock,
+    waitForInterface: waitForInterfaceSocket,
+    handIn: (input) => options.handInArtifact({ ...input, endpoint: interfaceEndpoint(options.octopusHome(), input.interfaceId) }),
+  }, request),
   updateOperatorChatPins,
   validateProviderAccountObservation,
   verifyProviderAccount,
