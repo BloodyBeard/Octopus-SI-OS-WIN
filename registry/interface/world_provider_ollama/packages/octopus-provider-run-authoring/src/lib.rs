@@ -1882,11 +1882,11 @@ pub fn validate_independent_provider_transition(record: &RunRecord, provider: &I
 pub fn checked_declared_run_advance(
     evidence: &CheckedRunEvidence<'_>, path: &Path, before: &[u8], after: &[u8],
     after_seq: u64, seeds: Vec<CheckedRunWriter>,
-) -> Result<Vec<CheckedRunTransition>, String> {
+) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let writers = declared_writer_closure(&record, seeds)?;
     let first = concurrent_writer_evidence_start(evidence, &record, before, after_seq)?;
-    let transitions = checked_run_file_chain(evidence, path, before, after, first, &writers)?;
+    let transitions = checked_run_file_chain_state(evidence, path, before, after, first, &writers)?;
     for transition in &transitions { validate_checked_owner_transition(transition)?; }
     Ok(transitions)
 }

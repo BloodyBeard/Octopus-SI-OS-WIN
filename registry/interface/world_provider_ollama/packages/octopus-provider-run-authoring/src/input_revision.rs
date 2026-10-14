@@ -632,8 +632,7 @@ fn payload_index_ready<R: CheckedRunEvidenceReader + ?Sized>(
                     && indexed_evidence_matches_checkpoint(row, template)
             }).collect::<Vec<_>>();
             if templates.is_empty() { continue; }
-            if pending.is_none() || templates.len() != 1 || templates[0].include_context
-                || !matches!(templates[0].role, RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput) {
+            if pending.is_none() || templates.len() != 1 {
                 return Ok(false);
             }
             if newer.insert(row.seq, (coordinate.clone(), row.clone())).is_some() {
@@ -641,7 +640,7 @@ fn payload_index_ready<R: CheckedRunEvidenceReader + ?Sized>(
             }
         }
     }
-    completed_independent_inputs(reader, index, path, current, writer, before_seq, &newer)
+    completed_inputs(reader, index, path, current, writer, before_seq, &newer)
 }
 
 pub(super) fn payload_readiness(
@@ -711,7 +710,7 @@ impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadH
     }
 }
 
-fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
+fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
     reader: &mut R, index: &ProviderLedgerEvidenceIndex, path: &Path, current: &[u8],
     writer: &CheckedRunWriter, before_seq: u64,
     candidates: &BTreeMap<u64, (RuntimeCoordinateKey, IndexedOutboundArtifact)>,
@@ -731,8 +730,7 @@ fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         let checkpoint = pinned.checkpoint(&checkpoint_id).ok_or("payload readiness input lost its admitted checkpoint")?;
         let declared = validate_declared_provider_writer(&pinned, writer)?;
         let matches = declared.checkpoints.iter().filter(|template| {
-            matches!(template.role, RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput)
-                && !template.include_context && template.interface() == &input.source
+            template.role.is_provider_input() && template.interface() == &input.source
                 && checkpoint_record_matches_template(checkpoint, template, &pinned.id)
                 && indexed_evidence_matches_checkpoint(input, template)
         }).count();
@@ -740,7 +738,7 @@ fn completed_independent_inputs<R: CheckedRunEvidenceReader + ?Sized>(
             || coordinate.interface != writer.owner.as_str() || !pinned.active_checkpoints.contains(&checkpoint_id)
             || checkpoint.epoch.0 != coordinate.epoch
             || !artifact_refs_match_bindings(&input.artifact_binding_refs, &checkpoint.artifact_bindings) {
-            return Err("payload readiness input differs from its exact pinned independent contract".into());
+            return Err("payload readiness input differs from its exact pinned input contract".into());
         }
         if anchor.is_none() { anchor = Some((*sequence, bytes, pinned)); }
     }

@@ -1207,6 +1207,11 @@ struct FrontierAdmission {
     interleave_next_write: AtomicBool,
     provider_wins_next_write: AtomicBool,
     provider_writes_before_owner_call: AtomicBool,
+    probe_unsubmitted_output: AtomicBool,
+    drop_owner_ready_ack: AtomicBool,
+    pending_output_proof: Mutex<Option<(octopus_tool_door_runtime::ToolDoorOutputSource, PathBuf, super::config::CodeModeConfig)>>,
+    output_prepared: tokio::sync::Notify,
+    provider_result_release: tokio::sync::Notify,
     owner_write_prepared: tokio::sync::Notify,
     owner_write_admitted: tokio::sync::Notify,
     peer_write_admitted: tokio::sync::Notify,
@@ -1282,6 +1287,17 @@ impl FrontierAdmission {
             }
             let admitted_seq = self.door.lock().await.record_admission(&artifact,&observation.invocation_metadata,&observation.admitted_mark_outcomes)?;
             final_seq.get_or_insert(admitted_seq);
+            if label == "code_mode.owner_ready" {
+                let ctx = self.door.lock().await.context.clone();
+                if let Some((source, durable, config)) = self.pending_output_proof.lock().unwrap().take() {
+                    let run_path = self.run_records.join("run_code_mode_test.json");
+                    let run = std::fs::read(&run_path).unwrap();
+                    let ledger = std::fs::read(ctx.owner_movements_path()).unwrap();
+                    assert!(matches!(super::continuation::output_authority(&ctx, &durable, &config, &source)?, super::continuation::OutputAuthority::Pending));
+                    assert_eq!(std::fs::read(&run_path).unwrap(), run);
+                    assert_eq!(std::fs::read(ctx.owner_movements_path()).unwrap(), ledger);
+                }
+            }
             for transfer in observation.outbound_artifact_transfers {
                 let seq = self.record(file,transfer.from_interface.clone(),transfer.to_interface.clone(),transfer.invocation_metadata.clone()).await?;
 
@@ -1412,14 +1428,20 @@ impl FrontierAdmission {
             if interleaved { self.owner_write_completed.notify_one(); }
             seq
         } else {
-            if self.reject_next_owner_arrival.swap(false, Ordering::SeqCst) {
+            if output.artifact.read_manifest().map_err(|e| e.to_string())?.label != "code_mode.owner_ready"
+                && self.reject_next_owner_arrival.swap(false, Ordering::SeqCst) {
                 let private = self.door.lock().await.context.interface_var_dir().canonicalize().unwrap();
                 assert!(output.artifact.manifest_path().starts_with(&private), "owner replay must cross the spawned private-output boundary");
                 assert!(output.artifact.read_manifest().unwrap().payload_path.starts_with(&private));
                 return output.acknowledge(DeliveryVerdict::refused(octopus_interfaces::RefusedReason::Policy,
                     "fixture interrupted after checked owner installation".into()));
             }
-            self.arrive(DOOR, &output.artifact).await?
+            let seq = self.arrive(DOOR, &output.artifact).await?;
+            if output.artifact.read_manifest().map_err(|e| e.to_string())?.label == "code_mode.owner_ready"
+                && self.drop_owner_ready_ack.swap(false, Ordering::SeqCst) {
+                return Ok(());
+            }
+            seq
         };
         output.acknowledge(DeliveryVerdict::Admitted { seq })
     }
@@ -1510,7 +1532,46 @@ impl FrontierAdmission {
                 serde_json::from_slice(&file.read_payload_bytes().map_err(|e| e.to_string())?)
                     .map_err(|e| e.to_string())?,
             );
-            hand_owned_output(&ctx, &source, &callback, file).await?;
+            if self.probe_unsubmitted_output.load(Ordering::SeqCst) {
+                let config: super::config::CodeModeConfig = serde_json::from_slice(&std::fs::read(ctx.interface_registry_dir().join("code_mode.json")).unwrap()).unwrap();
+                let durable = octopus_tool_door_runtime::tool_door_durable_state_dir(&ctx, &formation.worker_environment_id)?;
+                assert!(super::continuation::first_output_is_unsubmitted(&ctx, &durable, &config, &source, &file)?);
+                let mut other = source.clone(); other.movement.seq.0 += 1;
+                assert!(!super::continuation::first_output_is_unsubmitted(&ctx, &durable, &config, &other, &file)?);
+                let ledger = std::fs::read(ctx.owner_movements_path()).unwrap();
+                let mut partial = ledger.clone(); partial.extend_from_slice(b"{\"seq\":");
+                std::fs::write(ctx.owner_movements_path(), partial).unwrap();
+                assert!(!super::continuation::first_output_is_unsubmitted(&ctx, &durable, &config, &source, &file)?);
+                assert!(matches!(super::continuation::output_authority(&ctx, &durable, &config, &source)?, super::continuation::OutputAuthority::Pending));
+                std::fs::write(ctx.owner_movements_path(), &ledger).unwrap();
+                *self.pending_output_proof.lock().unwrap() = Some((source.clone(), durable.clone(), config.clone()));
+                self.output_prepared.notify_one();
+                self.peer_write_applied.notified().await;
+                assert!(matches!(super::continuation::reconcile_checked_provider_advance(&ctx, &durable, &config, None),
+                    Err(octopus_provider_run_authoring::CheckedRunError::AwaitingResults { .. })));
+                let delivery = hand_owned_output(&ctx, &source, &callback, file.clone());
+                tokio::pin!(delivery);
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut delivery).await.is_err());
+                self.provider_result_release.notify_one();
+                let error = delivery.await.unwrap_err();
+                assert!(error.contains("verdict channel"), "{error}");
+                let cold = actual_owner_handoff::OwnerHandoff::new();
+                let callback = cold.callback();
+                hand_owned_output(&ctx, &source, &callback, file.clone()).await?;
+                self.probe_unsubmitted_output.store(false, Ordering::SeqCst);
+                assert!(!super::continuation::first_output_is_unsubmitted(&ctx, &durable, &config, &source, &file)?);
+                assert_eq!(self.deliveries.lock().unwrap().iter().filter(|row|
+                    row.from.as_str() == DOOR && row.to.as_str() == DOOR
+                    && row.file.read_manifest().is_ok_and(|manifest| manifest.label == "code_mode.owner_ready")).count(), 1);
+                let run_path = self.run_records.join("run_code_mode_test.json");
+                let run = std::fs::read(&run_path).unwrap();
+                let ledger = std::fs::read(ctx.owner_movements_path()).unwrap();
+                assert!(matches!(super::continuation::output_authority(&ctx, &durable, &config, &source)?, super::continuation::OutputAuthority::Admitted(_)));
+                assert_eq!(std::fs::read(&run_path).unwrap(), run);
+                assert_eq!(std::fs::read(ctx.owner_movements_path()).unwrap(), ledger);
+            } else {
+                hand_owned_output(&ctx, &source, &callback, file).await?;
+            }
         }
         result.ok_or_else(|| "room emitted no terminal result".into())
         })
@@ -1575,8 +1636,8 @@ async fn actual_owner_failure_return(
         cp["id"] == json!(initial.2.runtime().unwrap().checkpoint)));
     assert!(current["active_checkpoints"].as_array().unwrap().contains(&json!(own.metadata.runtime.as_ref().unwrap().checkpoint)));
     admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
-    assert!(handoff.reconcile_failure(&ctx, &mut reader, &movement).await.unwrap_err()
-        .contains("fixture interrupted after checked owner installation"));
+    let error = handoff.reconcile_failure(&ctx, &mut reader, &movement).await.unwrap_err();
+    assert!(error.contains("fixture interrupted after checked owner installation"), "{error}");
     let installed_writes = admission.file_writes.load(Ordering::SeqCst);
     let proposal = std::fs::read_dir(durable).unwrap().map(|entry| entry.unwrap().path())
         .find(|path| path.file_name().unwrap().to_str().unwrap().ends_with(".edit.json")).unwrap();
@@ -1604,7 +1665,7 @@ async fn actual_owner_failure_return(
     assert_eq!(serde_json::from_slice::<octopus_tool_handlers::ToolResultArtifact>(&delivered[0].file.read_payload_bytes().unwrap()).unwrap(), result);
 }
 
-enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, DetachedFailure, InterleavedResult, RefusedFailure, RefusedFailurePretty, NestedFailure, ReadinessFailure }
+enum FrontierCase { Full, Generated, Application, Coauthor, DetachedResult, DetachedFailure, InterleavedResult, UnsubmittedResult, RefusedFailure, RefusedFailurePretty, NestedFailure, ReadinessFailure }
 
 fn exact_install_does_not_claim_later_state(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
@@ -1718,6 +1779,13 @@ fn exact_install_does_not_claim_later_state(
 async fn completed_owner_write_survives_an_overlapping_provider_write() {
     tokio::time::timeout(std::time::Duration::from_secs(20),
         tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::InterleavedResult)))
+        .await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn completed_error_waits_for_the_checked_provider_result_before_dispatch() {
+    tokio::time::timeout(std::time::Duration::from_secs(20),
+        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::UnsubmittedResult)))
         .await.unwrap().unwrap();
 }
 
@@ -1887,7 +1955,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     let provider_directory = root.join("provider-interface");
     std::fs::create_dir_all(&provider_directory).unwrap();
     let mut provider_descriptor:octopus_interfaces::InterfaceDescriptor=serde_json::from_value(json!({"id":"world_provider_test","interface_type":"world","role":"provider","direction":"bidirectional","source_names":["fixture"],"interface_driver_ref":"fixture","interface_driver_config":{"private_config":{"model_hidden_tools":["file.write.provider"],"run_authoring_profile":{"file_write_tool":"file.write.provider","file_write_label":"tool.call","file_write_result_label":"file.write.provider.result","result_timeout_ms":5000},"context_output_labels":["provider.fixture.snapshot"],"session_snapshot_labels":["provider.fixture.snapshot"]}}})).unwrap();
-    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty | FrontierCase::NestedFailure) {
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty | FrontierCase::NestedFailure) {
         provider_descriptor.interface_driver_config.as_mut().unwrap().private_config["context_output_labels"] = json!(["provider.fixture.snapshot", "tool.call"]);
     }
     let control = root.join("control");std::fs::create_dir_all(&control).unwrap();
@@ -1971,7 +2039,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
             let bindings = checkpoint["artifact_bindings"].as_array_mut().unwrap();
             bindings.splice(0..0, roles.iter().map(|role| json!({"id":role.id})));
         }
-        if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+        if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
             let writer = octopus_provider_run_authoring::separate_writer_run(
                 &mut run, &InterfaceId::new("world_provider_test"), &RunId::new("run_detached_provider_writer"),
             ).unwrap();
@@ -2074,6 +2142,11 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         interleave_next_write: AtomicBool::new(false),
         provider_wins_next_write: AtomicBool::new(false),
         provider_writes_before_owner_call: AtomicBool::new(false),
+        probe_unsubmitted_output: AtomicBool::new(false),
+        drop_owner_ready_ack: AtomicBool::new(false),
+        pending_output_proof: Mutex::new(None),
+        output_prepared: tokio::sync::Notify::new(),
+        provider_result_release: tokio::sync::Notify::new(),
         owner_write_prepared: tokio::sync::Notify::new(),
         owner_write_admitted: tokio::sync::Notify::new(),
         peer_write_admitted: tokio::sync::Notify::new(),
@@ -2156,9 +2229,9 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         &root,
         300,
         "code_mode.run",
-        json!({"script":if matches!(case, FrontierCase::InterleavedResult) { "const docs = await prelude.cua.documentation(); return docs;" } else { "let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);" },"yield_time_ms":if matches!(case, FrontierCase::InterleavedResult) { 1000 } else { 20 }}),
+        json!({"script":if matches!(case, FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult) { "const docs = await prelude.cua.documentation(); return docs;" } else { "let sum = prelude.seed; let both = await Promise.all([tools.process_list({}), prelude.browser.tabs.selected()]); if (both[1].id !== 't' || typeof both[1].info !== 'function') throw new Error('browser facade lost its admitted Tab closure'); sum.value += both[0].body.value + both[1].id.length; notify('two exact doors'); text(sum.value);" },"yield_time_ms":if matches!(case, FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult) { 1000 } else { 20 }}),
     );
-    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
         let handoff = admission.provider_handoff().unwrap().unwrap();
         handoff.hand(octopus_provider_run_authoring::ProviderEmission {
             artifact: InterfaceArtifactFile::write(admission.provider.context.var_dir.join("model-call"), "tool.call", &source.artifact_file.read_payload_bytes().unwrap()).unwrap(),
@@ -2175,11 +2248,35 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     let metadata = initial.2.metadata().unwrap();
     let snapshot = std::fs::read(root.join("blobs").join(metadata.runtime.as_ref().unwrap().run_record_hash.as_ref().unwrap())).unwrap();
     octopus_provider_run_authoring::validate_admitted_run_writer(&snapshot, metadata, coauthor).unwrap();
-    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
+    if matches!(case, FrontierCase::DetachedResult | FrontierCase::DetachedFailure | FrontierCase::InterleavedResult | FrontierCase::UnsubmittedResult | FrontierCase::RefusedFailure | FrontierCase::RefusedFailurePretty) {
         admission.provider_handoff().unwrap().unwrap().recover_source().await.unwrap();
         let target_path = admission.run_records.join("run_code_mode_test.json");
         let target = std::fs::read(&target_path).unwrap();
         let target_hash = ContentHash::of_bytes(&target).to_hex();
+        if matches!(case, FrontierCase::UnsubmittedResult) {
+            admission.probe_unsubmitted_output.store(true, Ordering::SeqCst);
+            admission.drop_owner_ready_ack.store(true, Ordering::SeqCst);
+            let peer = admission.clone();
+            let progress = tokio::spawn(async move {
+                peer.output_prepared.notified().await;
+                peer.provider_progress(776).await
+            });
+            let completed = match Box::pin(admission.run(&room, &handoff, &formation, &kind, initial)).await {
+                Ok(completed) => completed,
+                Err(error) => {
+                    if pump.is_finished() { panic!("{error}; owner pump: {:?}", pump.await); }
+                    if provider_socket.is_finished() { panic!("{error}; provider socket: {:?}", provider_socket.await); }
+                    panic!("{error}");
+                }
+            };
+            progress.await.unwrap().unwrap();
+            assert!(completed["body"]["error_text"].as_str().unwrap().contains("Illegal return"), "{completed}");
+            room.release_room(&formation).await.unwrap();
+            admission.door.lock().await.context.owner_cancel().cancel();
+            provider_socket.abort(); provider_pump.abort(); pump.abort();
+            let _ = tokio::join!(provider_socket, provider_pump, pump);
+            return;
+        }
         if !matches!(case, FrontierCase::InterleavedResult) {
             assert!(!root.join("blobs").join(&target_hash).exists());
         }
@@ -2210,7 +2307,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
                 assert_eq!(refused["error"]["code"], "file_write_incomplete");
                 exact_install_does_not_claim_later_state(&ctx, &target_path, &durable, call, result, coauthor);
             }
-            let next = envelope(&root, 301, "code_mode.run", json!({"script":"globalThis.cuaDocs = await prelude.cua.documentation(); text(typeof cuaDocs);", "yield_time_ms":1000}));
+            let next = envelope(&root, 301, "code_mode.run", json!({"script":"globalThis.cuaDocs = await prelude.cua.unknownFixtureMethod(); text(typeof cuaDocs);", "yield_time_ms":1000}));
             Box::pin(admission.model_call(&next.artifact_file)).await.unwrap();
             let input = admission.next().await.unwrap();
             admission.provider_wins_next_write.store(true, Ordering::SeqCst);
@@ -2224,7 +2321,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
             progress.await.unwrap().unwrap();
             admission.provider_wins_next_write.store(false, Ordering::SeqCst);
             assert_eq!(second["body"]["state"], "completed", "{second}");
-            assert!(second["body"]["error_text"].as_str().unwrap().contains("documentation is not a function"), "{second}");
+            assert!(second["body"]["error_text"].as_str().unwrap().contains("unknownFixtureMethod is not a function"), "{second}");
             let next = envelope(&root, 302, "code_mode.run", json!({"script":"text('NEXT_CODE_OK');", "yield_time_ms":1000}));
             Box::pin(admission.model_call(&next.artifact_file)).await.unwrap();
             let input = admission.next().await.unwrap();
@@ -2401,7 +2498,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
             admission.provider_progress(1).await.unwrap();
             let after = std::fs::read(admission.run_records.join("run_code_mode_test.json")).unwrap();
             super::continuation::create_record(&corrupt_history, &json!({"corrupt":true})).unwrap();
-            assert_eq!(super::continuation::reconcile_checked_provider_advance(&journal_ctx, &durable, &parsed_config, None).err().unwrap(), corrupt_error);
+            assert_eq!(super::continuation::reconcile_checked_provider_advance(&journal_ctx, &durable, &parsed_config, None).err().unwrap().to_string(), corrupt_error);
             std::fs::remove_file(&corrupt_history).unwrap();
             let ctx = admission.door.lock().await.context.clone();
             let writer:octopus_provider_run_authoring::CheckedRunWriter = serde_json::from_value(topology["coauthor"].clone()).unwrap();
@@ -3683,6 +3780,11 @@ impl FrontierAdmission {
             Err(error) => octopus_tool_handlers::ToolResultArtifact::failure(&call.tool,call.correlation_id,error),
         };
         let file = InterfaceArtifactFile::write(self.root.join("provider-file-results"),&result.label,&serde_json::to_vec(&result).unwrap()).map_err(|e| e.to_string())?;
+        if self.probe_unsubmitted_output.load(Ordering::SeqCst) {
+            assert!(result.ok, "{result:?}");
+            self.peer_write_applied.notify_one();
+            self.provider_result_release.notified().await;
+        }
         if interleaved && provider_wins {
             assert!(result.ok, "{result:?}");
             self.peer_write_applied.notify_one();

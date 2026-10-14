@@ -94,18 +94,7 @@ impl ProviderOutputHandoff {
                     if prior.context_publication.is_some() && !publication {
                         return Err("completed input handoff was superseded before context publication".into());
                     }
-                    for (item, outcome) in prior.items.iter().zip(self.admitted_replay_handoff(prior)?) {
-                        let ProviderHandoffOutcome::Admitted { artifact, .. } = outcome else {
-                            return Err("completed input handoff has a refused output".into());
-                        };
-                        if self.session.index()?.indexed_handoff_seq(PendingHandoffLedgerCoordinate {
-                            interface: &self.config.provider_interface, run: &self.config.run, worker: &self.config.worker,
-                            artifact: &artifact, required_evidence: pending_required_evidence(item)?,
-                            checkpoint: &item.checkpoint.id, epoch: item.checkpoint.epoch,
-                        }, transition.call.seq.0)?.is_none() {
-                            return Err("completed input handoff was superseded before output admission".into());
-                        }
-                    }
+                    self.admitted_replay_handoff_before(prior, transition.call.seq.0)?;
                 }
                 if let Some(prior) = sources.get(&next.source_movement_seq) {
                     if prior.terminal && !publication && !source_settlement::follows_completed_source(prior, &next) && !source_withdrawal::follows(prior, &next) {
@@ -178,14 +167,15 @@ impl ProviderOutputHandoff {
         current: &[u8],
         pending: &PendingHandoff,
     ) -> Result<(ProviderSourceRecovery, Vec<ProviderHandoffOutcome>, Vec<CheckedRunTransition>), String> {
-        self.validate_independent_handoff_source(pending)?;
+        if pending.source_movement_seq <= self.source_movement_seq {
+            return Err("overtaken source requires a later checked handoff".into());
+        }
         let (_, source) = self.session.index()?.exact_provider_source_outbound(
             &self.config.run, &self.config.worker, &self.config.provider_interface,
             self.source_movement_seq,
         )?;
-        let hash = source.run_record_hash.as_deref().and_then(ContentHash::from_hex)
-            .ok_or("replayed provider source has no pinned run record")?;
-        let (before, original) = pinned_run_record(&self.ctx, &hash, "replayed provider source")?;
+        let (before, original) = self.checked_input_artifact_record(self.source_movement_seq, &source.artifact)?;
+        let mut later_context = self.validate_completed_handoff_source(pending, &original)?;
         let prior = persisted_pending_handoff(&original, &self.config.provider_interface)?;
         let provider_writer = CheckedRunWriter {
             owner: self.config.provider_interface.clone(),
@@ -217,7 +207,7 @@ impl ProviderOutputHandoff {
         }
         let mut previous = prior.clone();
         let mut recovered = None;
-        let mut independent_sources = BTreeMap::new();
+        let mut later_sources = BTreeMap::new();
         let mut earlier_sources = BTreeMap::new();
         for transition in &chain {
             if transition.writer == provider_writer {
@@ -233,18 +223,14 @@ impl ProviderOutputHandoff {
                     if previous.context_publication.is_some() {
                         return Err("provider handoff was superseded before its context was published".into());
                     }
-                    let outcomes = self.admitted_replay_handoff(previous)?;
-                    if outcomes.iter().any(|outcome| matches!(outcome,
-                        ProviderHandoffOutcome::Admitted { seq, .. } if *seq >= transition.call.seq.0)) {
-                        return Err("provider handoff was superseded before its artifacts were admitted".into());
-                    }
+                    self.admitted_replay_handoff_before(previous, transition.call.seq.0)?;
                 }
             }
             if next.source_movement_seq == self.source_movement_seq {
                 recovered = Some(next.clone());
             } else if prior.as_ref().is_none_or(|prior| prior.source_movement_seq != next.source_movement_seq) {
                 if next.source_movement_seq > self.source_movement_seq {
-                    independent_sources.insert(next.source_movement_seq, next.clone());
+                    later_sources.insert(next.source_movement_seq, next.clone());
                 } else {
                     earlier_sources.insert(next.source_movement_seq, next.clone());
                 }
@@ -254,18 +240,21 @@ impl ProviderOutputHandoff {
         if previous.as_ref() != Some(pending) {
             return Err("checked source replay differs from the current pending handoff".into());
         }
-        for independent in independent_sources.values() {
-            self.validate_independent_handoff_source(independent)?;
-            self.admitted_replay_handoff(independent)?;
+        for later in later_sources.values() {
+            later_context |= self.validate_completed_handoff_source(later, &original)?;
+            self.admitted_replay_handoff(later)?;
         }
         for earlier in earlier_sources.values() {
-            self.validate_replay_handoff_source(earlier, false)?;
+            self.validate_completed_handoff_source(earlier, &original)?;
             self.admitted_replay_handoff(earlier)?;
         }
         self.admitted_replay_handoff(pending)?;
         let (recovery, outcomes) = match recovered {
             None => (ProviderSourceRecovery::Process, Vec::new()),
             Some(recovered) => {
+                if later_context && !recovered.terminal {
+                    return Err("unfinished provider source cannot replay across a completed context-bearing input".into());
+                }
                 let outcomes = self.admitted_replay_handoff(&recovered)?;
                 let recovery = if recovered.terminal {
                     ProviderSourceRecovery::Completed
@@ -307,36 +296,38 @@ impl ProviderOutputHandoff {
             }).collect()
     }
 
-    fn validate_independent_handoff_source(&self, pending: &PendingHandoff) -> Result<(), String> {
-        self.validate_replay_handoff_source(pending, true)
+    pub(super) fn admitted_replay_handoff_before(&self, pending: &PendingHandoff, before_seq: u64) -> Result<(), String> {
+        for (item, outcome) in pending.items.iter().zip(self.admitted_replay_handoff(pending)?) {
+            let ProviderHandoffOutcome::Admitted { artifact, .. } = outcome else {
+                return Err("completed input handoff has a refused output".into());
+            };
+            if self.session.index()?.indexed_handoff_seq(PendingHandoffLedgerCoordinate {
+                interface: &self.config.provider_interface, run: &self.config.run, worker: &self.config.worker,
+                artifact: &artifact, required_evidence: pending_required_evidence(item)?,
+                checkpoint: &item.checkpoint.id, epoch: item.checkpoint.epoch,
+            }, before_seq)?.is_none() {
+                return Err("completed input handoff was superseded before output admission".into());
+            }
+        }
+        Ok(())
     }
 
-    fn validate_replay_handoff_source(&self, pending: &PendingHandoff, independent: bool) -> Result<(), String> {
-        let (coordinate, source) = self.session.index()?.exact_provider_source_outbound(
+    fn validate_completed_handoff_source(&self, pending: &PendingHandoff, original: &RunRecord) -> Result<bool, String> {
+        if !pending.terminal {
+            return Err(format!("provider source {} has no completed terminal input handoff", pending.source_movement_seq));
+        }
+        let (_, source) = self.session.index()?.exact_provider_source_outbound(
             &self.config.run, &self.config.worker, &self.config.provider_interface,
             pending.source_movement_seq,
         )?;
-        let pinned = indexed_source_run_record(&self.ctx, &source, pending.source_movement_seq)?;
-        let checkpoint_id = CheckpointId::new(&coordinate.checkpoint);
-        let checkpoint = pinned.checkpoint(&checkpoint_id)
-            .ok_or("replayed handoff source lost its pinned checkpoint")?;
-        let context_free = !independent || self.source_is_context_free(pending.source_movement_seq)?;
-        let templates = self.config.checkpoints.iter().filter(|template| {
-            (!independent || (matches!(template.role,
-                RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput)
-                && !template.include_context))
-                && template.interface() == &source.source
-                && checkpoint_record_matches_template(checkpoint, template, &self.config.run)
-        }).collect::<Vec<_>>();
-        if !pending.terminal || !context_free || pinned.id != self.config.run || pinned.worker != self.config.worker
-            || !pinned.active_checkpoints.contains(&checkpoint_id)
-            || checkpoint.epoch.0 != coordinate.epoch || templates.len() != 1
-            || !indexed_evidence_matches_checkpoint(&source, templates[0])
-            || !artifact_refs_match_bindings(&source.artifact_binding_refs, &checkpoint.artifact_bindings)
-        {
-            let authority = if independent { "independent-input" } else { "earlier-source" };
-            return Err(format!("provider source {} has no exact terminal {authority} handoff", pending.source_movement_seq));
+        let (_, pinned) = self.checked_input_artifact_record(pending.source_movement_seq, &source.artifact)?;
+        if pinned.ee != original.ee {
+            return Err("completed input handoff changed its admitted EE".into());
         }
-        Ok(())
+        let carries_context = !self.source_is_context_free(pending.source_movement_seq)?;
+        if carries_context && pending.context_publication.is_some() {
+            return Err("completed context-bearing input has unfinished context publication".into());
+        }
+        Ok(carries_context)
     }
 }

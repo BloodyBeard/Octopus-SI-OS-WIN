@@ -58,6 +58,126 @@ async fn completed_fixture(root: &Path, output_count: usize) -> (InterfaceLiftCo
     (ctx.with_source_movement(source.clone()), input, completion, receiver, source)
 }
 
+struct CompletedOutputOwner {
+    mode: &'static str,
+    calls: Arc<AtomicU64>,
+    proofs: Arc<AtomicU64>,
+    unsubmitted: bool,
+}
+
+impl ToolDoorOutputHandler for CompletedOutputOwner {
+    fn output(&self, ctx: InterfaceLiftContext, _source: ToolDoorOutputSource, artifact: InterfaceArtifactFile,
+        dispatch: ToolDoorOutputDispatch) -> ToolDoorOutputFuture {
+        let calls = Arc::clone(&self.calls);
+        let mode = self.mode;
+        Box::pin(async move {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            if mode == "prepare" && attempt == 0 { return Err("owner preparation is awaiting results".into()); }
+            let selected = if mode == "original" { artifact } else {
+                InterfaceArtifactFile::write(ctx.interface_var_dir().join("owner-selected"), "owner.result", b"transformed result").map_err(|e| e.to_string())?
+            };
+            let verdict = dispatch(ctx.clone(), selected).await?;
+            let receipt = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0)?.unwrap()).unwrap();
+            assert_eq!(receipt["outputs"][0]["admission"]["state"], "settled");
+            if mode == "after" && attempt == 0 {
+                ctx.cancel.cancel();
+                tokio::task::yield_now().await;
+                return Err("owner after-effects interrupted".into());
+            }
+            Ok(verdict)
+        })
+    }
+
+    fn can_resume_unsubmitted(&self, _ctx: &InterfaceLiftContext, _source: &ToolDoorOutputSource,
+        _artifact: &InterfaceArtifactFile) -> Result<bool, String> {
+        self.proofs.fetch_add(1, Ordering::SeqCst);
+        Ok(self.unsubmitted)
+    }
+}
+
+#[tokio::test]
+async fn completed_output_tracks_actual_dispatch_after_preparation_and_finishes_owner_after_effects() {
+    for mode in ["prepare", "after", "lost"] {
+        let root = tempfile::tempdir().unwrap(); let root = root.path().canonicalize().unwrap();
+        let (ctx, input, completion, mut arrivals, source) = completed_fixture(&root, 1).await;
+        let original = completion.artifacts[0].manifest_path().to_path_buf();
+        let calls = Arc::new(AtomicU64::new(0)); let proofs = Arc::new(AtomicU64::new(0));
+        let callback: ToolDoorOutputCallback = Arc::new(CompletedOutputOwner { mode, calls: Arc::clone(&calls), proofs: Arc::clone(&proofs), unsubmitted: false });
+        let mut retirement = None;
+        let hot = hand_completed_tool_outputs(&ctx, &input, completion, Some(&callback), &mut retirement); tokio::pin!(hot);
+        if mode != "prepare" {
+            let arrival = tokio::select! { arrival = arrivals.recv() => arrival.unwrap(), _ = &mut hot => panic!("missing selected result") };
+            assert_ne!(arrival.artifact.manifest_path(), original);
+            let receipt = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap();
+            assert_eq!(receipt["outputs"][0]["dispatch"]["manifest_path"], serde_json::json!(arrival.artifact.manifest_path()));
+            if mode == "lost" {
+                let refusal = completed_refusal(&ctx, &arrival.artifact, 1, RefusedReason::RegistryUnstable);
+                let verdict = refusal.invocation_metadata.as_ref().unwrap().delivery_verdict().unwrap().clone();
+                write_recovery_ledger(&root, &[source, refusal]);
+                arrival.verdict_tx.unwrap().send(verdict).unwrap(); ctx.cancel.cancel();
+            } else { arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted { seq: 1 }).unwrap(); }
+        }
+        assert!(matches!(hot.await, ToolProcessBrokerResult::OutputPending { error } if error.contains(match mode {
+            "prepare" => "preparation", "after" => "after-effects", _ => "cancelled",
+        })));
+        let receipt = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap();
+        assert_eq!(receipt["schema_version"], 3);
+        assert_eq!(receipt["outputs"][0]["callback_completed"], false);
+        assert_eq!(receipt["outputs"][0]["admission"]["state"], match mode { "prepare" => "unattempted", "after" => "settled", _ => "awaiting_verdict" });
+        let mut cold = ctx.clone(); cold.cancel = tokio_util::sync::CancellationToken::new();
+        let mut host = ToolProcessBrokerHost::new(ToolDoorOwner { worker_environment_kind: WorkerEnvironmentKindId::new("test.room"),
+            door_interface: ctx.interface.clone(), max_in_flight: 1, private_read_max_bytes: 4096, root_slot_transform: None }).unwrap();
+        host.output_callback = Some(Arc::clone(&callback));
+        let resumed = host.invoke(&cold, "test.tool".into(), serde_json::json!({}), input.clone(), true); tokio::pin!(resumed);
+        if mode != "after" {
+            let arrival = tokio::select! { arrival = arrivals.recv() => arrival.unwrap(), _ = &mut resumed => panic!("owner preparation did not resume") };
+            assert_eq!(arrival.artifact.read_payload_bytes().unwrap(), b"transformed result");
+            arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted { seq: 1 }).unwrap();
+        }
+        assert!(matches!(resumed.await, ToolProcessBrokerInvocation::Completed(_)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2); assert_eq!(proofs.load(Ordering::SeqCst), 0);
+        assert!(arrivals.try_recv().is_err()); assert!(host.shards.lock().await.by_key.is_empty());
+        assert_eq!(std::fs::read(root.join("effects")).unwrap(), b"effect");
+    }
+}
+
+#[tokio::test]
+async fn completed_output_legacy_unknown_requires_positive_owner_proof_after_complete_ledger() {
+    for (schema, proven, tail) in [(2, true, false), (2, false, false), (2, true, true), (3, true, false)] {
+        let root = tempfile::tempdir().unwrap(); let root = root.path().canonicalize().unwrap();
+        let (ctx, input, completion, mut arrivals, _) = completed_fixture(&root, 1).await;
+        let mut receipt = completed_output::CompletedOutputs::retain(&ctx, &input, &completion).unwrap();
+        let receipt_dir = ctx.interface_var_dir().join(".tool-process-host-state/completed-outputs");
+        let receipt_path = std::fs::read_dir(receipt_dir).unwrap().next().unwrap().unwrap().path();
+        let mut value = serde_json::to_value(&receipt).unwrap(); value["schema_version"] = serde_json::json!(schema);
+        let output = &mut value["outputs"][0];
+        output["admission"] = serde_json::json!({"state":"awaiting_verdict", "ledger_offset":std::fs::metadata(&ctx.movements_path).unwrap().len()});
+        if schema == 2 { output.as_object_mut().unwrap().remove("callback_completed"); }
+        else {
+            let identity = ["manifest_path", "label", "manifest_hash", "payload_hash"].into_iter()
+                .map(|key| (key.to_owned(), output[key].clone())).collect::<serde_json::Map<_, _>>();
+            output["dispatch"] = serde_json::Value::Object(identity);
+        }
+        std::fs::write(&receipt_path, serde_json::to_vec(&value).unwrap()).unwrap();
+        if tail { std::fs::OpenOptions::new().append(true).open(&ctx.movements_path).unwrap().write_all(b"{\"seq\":1").unwrap(); }
+        receipt = completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap();
+        let proofs = Arc::new(AtomicU64::new(0));
+        let callback: ToolDoorOutputCallback = Arc::new(CompletedOutputOwner { mode:"proof", calls:Arc::new(AtomicU64::new(0)), proofs:Arc::clone(&proofs), unsubmitted:proven });
+        let resumed = receipt.deliver(&ctx, &input, Some(&callback), true); tokio::pin!(resumed);
+        if tail {
+            tokio::select! { result = &mut resumed => panic!("partial ledger completed: {result:?}"), _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {} }
+            assert_eq!(proofs.load(Ordering::SeqCst), 0); ctx.cancel.cancel(); assert!(resumed.await.is_err());
+        } else if schema == 2 && proven {
+            let arrival = tokio::select! { arrival = arrivals.recv() => arrival.unwrap(), _ = &mut resumed => panic!("positive proof did not resume preparation") };
+            assert_eq!(serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap()["schema_version"], 3);
+            arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted { seq: 1 }).unwrap();
+            assert!(matches!(resumed.await.unwrap(), ToolProcessBrokerResult::Completed));
+        } else { assert!(resumed.await.unwrap_err().contains("no exact verdict")); }
+        assert_eq!(proofs.load(Ordering::SeqCst), u64::from(schema == 2 && !tail));
+        assert!(arrivals.try_recv().is_err()); assert_eq!(std::fs::read(root.join("effects")).unwrap(), b"effect");
+    }
+}
+
 #[tokio::test]
 async fn completed_outputs_survive_transient_refusal_and_cold_broker_recovery_without_effect_replay() {
     for (reason, cancelled_before_save) in [(RefusedReason::RegistryUnstable, true), (RefusedReason::RegistryUnstable, false),
@@ -261,21 +381,31 @@ fn completed_refusal(ctx: &InterfaceLiftContext, artifact: &InterfaceArtifactFil
 
 #[tokio::test]
 async fn completed_output_lost_refusal_ack_never_guesses_a_retry() {
-    for (reason, evidence, prior_transient) in [
-        (RefusedReason::Policy, "exact", false), (RefusedReason::Malformed, "exact", false),
-        (RefusedReason::Policy, "boundary", false), (RefusedReason::Malformed, "boundary", false),
-        (RefusedReason::RegistryUnstable, "boundary", false), (RefusedReason::RegistryUnstable, "exact", false),
-        (RefusedReason::Policy, "exact", true), (RefusedReason::RegistryUnstable, "wrong_artifact", false),
-        (RefusedReason::RegistryUnstable, "wrong_scope", false),
+    for (reason, evidence, prior_transient, schema, saved, transformed) in [
+        (RefusedReason::Policy, "exact", false, 3, false, false), (RefusedReason::Malformed, "exact", false, 3, false, false),
+        (RefusedReason::Policy, "boundary", false, 3, false, false), (RefusedReason::Malformed, "boundary", false, 3, false, false),
+        (RefusedReason::RegistryUnstable, "boundary", false, 3, false, false), (RefusedReason::RegistryUnstable, "exact", false, 3, false, false),
+        (RefusedReason::Policy, "exact", true, 3, false, false), (RefusedReason::RegistryUnstable, "wrong_artifact", false, 3, false, false),
+        (RefusedReason::RegistryUnstable, "wrong_scope", false, 3, false, false),
+        (RefusedReason::Policy, "exact", false, 2, true, false), (RefusedReason::Malformed, "exact", false, 2, true, false),
+        (RefusedReason::Policy, "exact", false, 2, false, false), (RefusedReason::Malformed, "exact", false, 2, false, false),
+        (RefusedReason::Policy, "exact", false, 3, true, true), (RefusedReason::Malformed, "exact", false, 3, true, true),
+        (RefusedReason::Policy, "exact", false, 3, false, true), (RefusedReason::Malformed, "exact", false, 3, false, true),
     ] {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let (ctx, input, completion, mut arrivals, source) = completed_fixture(&root, 1).await;
+        let original = completion.artifacts[0].manifest_path().to_path_buf();
+        let calls = Arc::new(AtomicU64::new(0)); let proofs = Arc::new(AtomicU64::new(0));
+        let callback: Option<ToolDoorOutputCallback> = (schema == 2 || transformed).then(|| Arc::new(CompletedOutputOwner {
+            mode: if transformed { "permanent" } else { "original" }, calls: Arc::clone(&calls), proofs: Arc::clone(&proofs), unsubmitted: true,
+        }) as ToolDoorOutputCallback);
         let mut ledger = vec![source];
         let mut retirement = None;
-        let hot = hand_completed_tool_outputs(&ctx, &input, completion, None, &mut retirement);
+        let hot = hand_completed_tool_outputs(&ctx, &input, completion, callback.as_ref(), &mut retirement);
         tokio::pin!(hot);
         let mut output = tokio::select! { output=arrivals.recv()=>output.unwrap(), _=&mut hot=>panic!("missing first hand-in") };
+        assert_eq!(output.artifact.manifest_path() != original, transformed);
         if prior_transient {
             let refusal = completed_refusal(&ctx, &output.artifact, 1, RefusedReason::RegistryUnstable);
             output.verdict_tx.take().unwrap().send(refusal.invocation_metadata.as_ref().unwrap().delivery_verdict().unwrap().clone()).unwrap();
@@ -299,13 +429,20 @@ async fn completed_output_lost_refusal_ack_never_guesses_a_retry() {
         ledger.push(refusal);
         write_recovery_ledger(&root, &ledger);
         output.verdict_tx.take().unwrap().send(verdict).unwrap();
-        ctx.cancel.cancel();
-        assert!(matches!(hot.await, ToolProcessBrokerResult::OutputPending { .. }));
-        let receipt = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap();
-        assert_eq!(receipt["outputs"][0]["admission"]["state"], "awaiting_verdict");
+        if saved { assert!(matches!(hot.await, ToolProcessBrokerResult::Refused { reason: observed, .. } if observed == reason)); }
+        else { ctx.cancel.cancel(); assert!(matches!(hot.await, ToolProcessBrokerResult::OutputPending { .. })); }
+        let mut receipt = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap();
+        assert_eq!(receipt["outputs"][0]["admission"]["state"], if saved { "settled" } else { "awaiting_verdict" });
+        if schema == 2 {
+            receipt["schema_version"] = serde_json::json!(2);
+            let entry = receipt["outputs"][0].as_object_mut().unwrap(); entry.remove("dispatch"); entry.remove("callback_completed");
+            let path = std::fs::read_dir(ctx.interface_var_dir().join(".tool-process-host-state/completed-outputs")).unwrap().next().unwrap().unwrap().path();
+            std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        }
         let mut cold = ctx.clone(); cold.cancel = tokio_util::sync::CancellationToken::new();
-        let host = ToolProcessBrokerHost::new(ToolDoorOwner { worker_environment_kind:WorkerEnvironmentKindId::new("test.room"),
+        let mut host = ToolProcessBrokerHost::new(ToolDoorOwner { worker_environment_kind:WorkerEnvironmentKindId::new("test.room"),
             door_interface:ctx.interface.clone(), max_in_flight:1, private_read_max_bytes:4096, root_slot_transform:None }).unwrap();
+        host.output_callback = callback.clone();
         let resumed = host.invoke(&cold, "test.tool".into(), serde_json::json!({}), input.clone(), true);
         tokio::pin!(resumed);
         if evidence != "exact" {
@@ -320,6 +457,8 @@ async fn completed_output_lost_refusal_ack_never_guesses_a_retry() {
             assert!(matches!(resumed.await, ToolProcessBrokerInvocation::Completed(_)));
         }
         assert!(arrivals.try_recv().is_err());
+        assert_eq!(proofs.load(Ordering::SeqCst), 0);
+        if callback.is_some() { assert_eq!(calls.load(Ordering::SeqCst), if saved { 1 } else { 2 }); }
         assert!(host.shards.lock().await.by_key.is_empty());
         assert_eq!(std::fs::read(root.join("effects")).unwrap(), b"effect");
     }

@@ -18,7 +18,7 @@ use octopus_provider_run_authoring::{CheckedRunEdit, CheckedRunEvidenceReader, R
 use octopus_tool_door_runtime::notify::{RecursiveMode, Watcher};
 use octopus_tool_door_runtime::{
     DeliveryVerdict, InterfaceLiftContext, LedgerTailReader, ToolDoorOutputCallback,
-    ToolDoorOutputSource,
+    ToolDoorOutputDispatch, ToolDoorOutputFuture, ToolDoorOutputHandler, ToolDoorOutputSource,
 };
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact};
 use serde_json::{Value, json};
@@ -51,9 +51,30 @@ enum NativeFailureOutput {
     Return(OwnerOutputAuthority),
 }
 
+enum OutputAuthorityRefresh { NativeInput, Recorded }
+
 enum ApplicationChange {
     Request(PendingApplication),
     Retire(PendingApplication),
+}
+
+struct OwnerOutputHandler(Arc<OwnerHandoff>);
+
+impl ToolDoorOutputHandler for OwnerOutputHandler {
+    fn output(&self, ctx: InterfaceLiftContext, source: ToolDoorOutputSource,
+        artifact: InterfaceArtifactFile, dispatch: ToolDoorOutputDispatch) -> ToolDoorOutputFuture {
+        let owner = Arc::clone(&self.0);
+        Box::pin(async move { OwnerHandoff::output(&owner, &ctx, source, artifact, dispatch).await })
+    }
+
+    fn can_resume_unsubmitted(&self, ctx: &InterfaceLiftContext, source: &ToolDoorOutputSource,
+        artifact: &InterfaceArtifactFile) -> Result<bool, String> {
+        let config = OwnerHandoff::failure_config(ctx)?;
+        if matches!(config.context, CodeModeContext::Isolated) { return Ok(false); }
+        let Some(formation) = source.formation.as_ref() else { return Ok(false); };
+        let root = octopus_tool_door_runtime::tool_door_durable_state_dir(ctx, &formation.worker_environment_id)?;
+        continuation::first_output_is_unsubmitted(ctx, &root, &config, source, artifact)
+    }
 }
 
 impl ApplicationChange {
@@ -64,6 +85,48 @@ impl ApplicationChange {
 }
 
 impl OwnerHandoff {
+    async fn prepare_output_authority(ctx: &InterfaceLiftContext, root: &Path, state: &mut OwnerState) -> Result<(), String> {
+        let mut reader = LedgerTailReader::open_named(ctx, "code-mode-output-authority")?;
+        let cancel = ctx.owner_cancel();
+        loop {
+            if cancel.is_cancelled() { return Err("code mode output authority preparation cancelled".into()); }
+            match continuation::output_authority(ctx, root, &state.config, &state.authority) {
+                Ok(continuation::OutputAuthority::Admitted(source)) => { state.authority = source; return Ok(()); }
+                Ok(continuation::OutputAuthority::Initial(artifact)) => {
+                    continuation::prepare_record(&root.join("output-authority-dispatch.json"), &continuation::artifact_ref(&artifact)?)?;
+                    match ctx.owner_hand_arrival(artifact).await? {
+                        DeliveryVerdict::Admitted { .. } => {},
+                        refused => return Err(format!("code mode output authority was refused: {refused:?}")),
+                    }
+                },
+                Ok(continuation::OutputAuthority::Pending) => reader.wait_for_change(&cancel).await?,
+                Err(octopus_provider_run_authoring::CheckedRunError::AwaitingResults { .. }) => reader.wait_for_change(&cancel).await?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    async fn reconcile_provider_advance(
+        ctx: &InterfaceLiftContext,
+        root: &Path,
+        config: &CodeModeConfig,
+        input: Option<&octopus_interfaces::InterfaceInvocationEnvelope>,
+    ) -> Result<Option<InstalledHandoff>, String> {
+        let mut reader = None;
+        let cancel = ctx.owner_cancel();
+        loop {
+            if cancel.is_cancelled() { return Err("code mode output preparation cancelled".into()); }
+            match continuation::reconcile_checked_provider_advance(ctx, root, config, input) {
+                Ok(installed) => return Ok(installed),
+                Err(octopus_provider_run_authoring::CheckedRunError::AwaitingResults { .. }) => {
+                    if reader.is_none() { reader = Some(LedgerTailReader::open_named(ctx, "code-mode-owner-output")?); }
+                    reader.as_mut().expect("output wait reader was opened").wait_for_change(&cancel).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             states: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -79,11 +142,7 @@ impl OwnerHandoff {
     }
 
     pub fn callback(self: &Arc<Self>) -> ToolDoorOutputCallback {
-        let owner = Arc::clone(self);
-        Arc::new(move |ctx, source, artifact| {
-            let owner = Arc::clone(&owner);
-            Box::pin(async move { owner.output(&ctx, source, artifact).await })
-        })
+        Arc::new(OwnerOutputHandler(Arc::clone(self)))
     }
 
     fn output<'a>(
@@ -91,6 +150,7 @@ impl OwnerHandoff {
         ctx: &'a InterfaceLiftContext,
         mut source: ToolDoorOutputSource,
         artifact: InterfaceArtifactFile,
+        dispatch: ToolDoorOutputDispatch,
     ) -> Pin<Box<dyn Future<Output = Result<DeliveryVerdict, String>> + Send + 'a>> {
         Box::pin(async move {
             let authority = match Self::prepare_native_failure_output(ctx, &mut source, &artifact)? {
@@ -98,7 +158,7 @@ impl OwnerHandoff {
                 Some(NativeFailureOutput::Return(authority)) => Some(authority),
                 None => None,
             };
-            self.output_future(ctx, source, artifact, authority).await
+            self.output_future(ctx, source, artifact, authority, dispatch, OutputAuthorityRefresh::NativeInput).await
         })
     }
 
@@ -150,8 +210,10 @@ impl OwnerHandoff {
         source: ToolDoorOutputSource,
         artifact: InterfaceArtifactFile,
         authority: Option<OwnerOutputAuthority>,
+        dispatch: ToolDoorOutputDispatch,
+        refresh: OutputAuthorityRefresh,
     ) -> Pin<Box<dyn Future<Output = Result<DeliveryVerdict, String>> + Send + 'a>> {
-        Box::pin(self.output_with_authority(ctx, source, artifact, authority))
+        Box::pin(self.output_with_authority(ctx, source, artifact, authority, dispatch, refresh))
     }
 
     async fn output_with_authority(
@@ -160,6 +222,8 @@ impl OwnerHandoff {
         source: ToolDoorOutputSource,
         artifact: InterfaceArtifactFile,
         authority: Option<OwnerOutputAuthority>,
+        dispatch: ToolDoorOutputDispatch,
+        refresh: OutputAuthorityRefresh,
     ) -> Result<DeliveryVerdict, String> {
         let config: CodeModeConfig = serde_json::from_slice(
             &octopus_interfaces::read_artifact_carrier_file_bounded(
@@ -171,7 +235,7 @@ impl OwnerHandoff {
         .map_err(|e| e.to_string())?;
         config.validate(ctx.owner_interface().as_str())?;
         if matches!(config.context, CodeModeContext::Isolated) {
-            return ctx.owner_hand_arrival(artifact).await;
+            return dispatch(ctx.clone(), artifact).await;
         }
         let topology = config.resolve_owner_topology(&source.envelope)?;
         continuation::validate_admitted_coauthor(ctx, &source.envelope, &topology)?;
@@ -185,13 +249,13 @@ impl OwnerHandoff {
         )?;
         let runtime = source.envelope.runtime().map_err(|e| e.to_string())?;
         let mut states = self.states.lock().await;
-        let authority = if authority.is_some() {
+        let authority = if authority.is_some() && matches!(refresh, OutputAuthorityRefresh::NativeInput) {
             match Self::prepare_native_failure_output(ctx, &mut source.clone(), &artifact)? {
                 Some(NativeFailureOutput::Closed(verdict)) => return Ok(verdict),
                 Some(NativeFailureOutput::Return(authority)) => Some(authority),
                 None => return Err("retained failure authority lost its exact native failure".into()),
             }
-        } else { None };
+        } else { authority };
         let state = states.entry(root.clone()).or_insert_with(|| OwnerState {
             config: config.clone(),
             topology: topology.clone(),
@@ -216,10 +280,10 @@ impl OwnerHandoff {
                 return Err("owner output authority changed its exact admitted scope".into());
             }
             continuation::validate_admitted_coauthor(ctx, &authority.envelope, &topology)?;
-            continuation::reconcile_checked_provider_advance(ctx, &root, &config, Some(&authority.envelope))?;
+            Self::reconcile_provider_advance(ctx, &root, &config, Some(&authority.envelope)).await?;
             state.authority = authority;
         }
-        if let Some(installed) = continuation::reconcile_checked_provider_advance(ctx,&root,&config,None)? {
+        if let Some(installed) = Self::reconcile_provider_advance(ctx,&root,&config,None).await? {
             state.expected_hash = installed.after_hash;
         }
         if failure_run_hash.as_ref().is_some_and(|hash| hash != &state.expected_hash) {
@@ -235,6 +299,9 @@ impl OwnerHandoff {
             if installed.after_hash != source_hash {
                 return Err("owner output source is not an admitted installed snapshot".into());
             }
+        }
+        if failure_run_hash.is_none() && state.authority.movement == state.initial_source {
+            Self::prepare_output_authority(ctx, &root, state).await?;
         }
         state.idle = false;
         let captured = artifact
@@ -257,7 +324,7 @@ impl OwnerHandoff {
             let edge = state.topology.receipt.clone();
             self.install(ctx,&root,state,&edge,&artifact_ref.content.to_hex(),&captured.manifest.label,None,None).await?;
             continuation::record_internal_receipt(&root,&artifact_ref,source.movement.seq.0)?;
-            return ctx.owner_hand_arrival(artifact).await;
+            return dispatch(ctx.clone(), artifact).await;
         }
         if captured.manifest.label == "code_mode.application_boundary" {
             let body: Value =
@@ -289,7 +356,7 @@ impl OwnerHandoff {
                     let projection = InterfaceArtifactFile::write(root.join("application-artifacts"), label,
                         &serde_json::to_vec(&application.request.projection()).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
                     self.install(ctx,&root,state,&edge,&artifact_ref.content.to_hex(),label,Some(ApplicationChange::Request(application.clone())),None).await?;
-                    ctx.owner_hand_arrival(projection).await
+                    dispatch(ctx.clone(), projection).await
                 }
                 "retire" => {
                     let decision: ApplicationDecision = continuation::read_record(
@@ -318,7 +385,7 @@ impl OwnerHandoff {
                         &continuation::artifact_ref(&receipt)?,
                         source.movement.seq.0,
                     )?;
-                    ctx.owner_hand_arrival(receipt).await
+                    dispatch(ctx.clone(), receipt).await
                 }
                 _ => Err("unknown application boundary phase".into()),
             };
@@ -409,7 +476,7 @@ impl OwnerHandoff {
         } else {
             self.install(ctx, &root, state, &edge, &artifact_ref.content.to_hex(), &captured.manifest.label, None, failure_run_hash.as_deref()).await?;
         }
-        let verdict = ctx.owner_hand_arrival(delivered_artifact).await?;
+        let verdict = dispatch(ctx.clone(), delivered_artifact).await?;
         if terminal && matches!(verdict, DeliveryVerdict::Admitted { .. }) {
             let readiness = state.topology.readiness.clone();
             self.install(
@@ -442,7 +509,7 @@ impl OwnerHandoff {
     ) -> Result<(), String> {
         loop {
         if ctx.owner_cancel().is_cancelled() { return Err("code mode authoring cancelled".into()); }
-        let reconciled = continuation::reconcile_checked_provider_advance(ctx,root,&state.config,None)?;
+        let reconciled = Self::reconcile_provider_advance(ctx,root,&state.config,None).await?;
         if let Some(installed) = &reconciled {
             state.expected_hash = installed.after_hash.clone();
         }
@@ -948,7 +1015,7 @@ impl OwnerHandoff {
         .await
         .map_err(|_| "code mode checked authoring result timed out".to_string())??;
         let Some(result) = result else {
-            let advanced = continuation::reconcile_checked_provider_advance(ctx, root, &state.config, None)?
+            let advanced = Self::reconcile_provider_advance(ctx, root, &state.config, None).await?
                 .ok_or("rejected authoring has no independent checked advance")?;
             if advanced.after_hash == edit.before_hash || advanced.after_hash == edit.after_hash {
                 return Err("rejected authoring cannot retry without an independent checked effect".into());
@@ -1630,7 +1697,7 @@ impl OwnerHandoff {
         Ok((selected, ContentHash::of_bytes(current).to_hex()))
             },
             || cancellation.is_cancelled(),
-        )
+        ).map_err(String::from)
     }
 
     pub(crate) fn reconcile_failure<'a>(
@@ -1743,11 +1810,12 @@ impl OwnerHandoff {
             return Err("recorded owner failure changed during private output materialization".into());
         }
         if authority.installed_output.is_none() {
-            if let (Some(installed), _) = Self::installed_failure_authority(ctx, reader, &root, &topology, &edge, &authority.source, &reference.content.to_hex())? {
-                authority = installed;
-            }
+            let (installed, current_hash) = Self::installed_failure_authority(ctx, reader, &root, &topology, &edge, &authority.source, &reference.content.to_hex())?;
+            if let Some(installed) = installed { authority = installed; }
+            else { authority.observed_run_hash = current_hash; }
         }
-        match self.output_future(ctx, output_source, artifact, Some(authority)).await? {
+        let dispatch: ToolDoorOutputDispatch = Arc::new(|ctx, artifact| Box::pin(async move { ctx.owner_hand_arrival(artifact).await }));
+        match self.output_future(ctx, output_source, artifact, Some(authority), dispatch, OutputAuthorityRefresh::Recorded).await? {
             DeliveryVerdict::Admitted { .. } => Ok(()),
             refused => Err(format!("recorded owner failure return was refused: {refused:?}")),
         }
@@ -1793,7 +1861,7 @@ impl OwnerHandoff {
                         continue;
                     }
                     if let Some(ready) = continuation::ready_records(root)?.into_iter().next() {
-                        if let Some(installed) = continuation::reconcile_checked_provider_advance(&ctx,root,&state.config,None)? {
+                        if let Some(installed) = Self::reconcile_provider_advance(&ctx,root,&state.config,None).await? {
                             state.expected_hash = installed.after_hash;
                         }
                         if ready.context_generation != continuation::context_generation(root)? {

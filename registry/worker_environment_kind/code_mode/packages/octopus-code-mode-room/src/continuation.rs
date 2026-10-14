@@ -2320,9 +2320,9 @@ pub fn validate_admitted_coauthor(
 
 pub fn checked_recovery_observation<T>(
     mut read: impl FnMut() -> Result<Vec<u8>, String>,
-    mut prove: impl FnMut(&[u8]) -> Result<T, String>,
+    mut prove: impl FnMut(&[u8]) -> Result<T, octopus_provider_run_authoring::CheckedRunError>,
     cancelled: impl Fn() -> bool,
-) -> Result<T, String> {
+) -> Result<T, octopus_provider_run_authoring::CheckedRunError> {
     loop {
         if cancelled() { return Err("shared run recovery cancelled".into()); }
         let current = read()?;
@@ -2333,12 +2333,265 @@ pub fn checked_recovery_observation<T>(
     }
 }
 
+pub fn first_output_is_unsubmitted(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    root: &Path,
+    config: &CodeModeConfig,
+    source: &octopus_tool_door_runtime::ToolDoorOutputSource,
+    output: &octopus_interfaces::InterfaceArtifactFile,
+) -> Result<bool, String> {
+    use std::io::BufRead;
+    let context: ContextRecord = read_record(&root.join("context.json"))?;
+    let Some(topology) = context.identity.owner_topology.as_ref() else { return Ok(false); };
+    let Some(writer) = topology.coauthor.as_ref() else { return Ok(false); };
+    let original = OriginalRun::from_envelope(&source.envelope, source.movement.seq.0)?;
+    if context.identity.config != *config || context.generation != digest(&context.identity)?
+        || context.identity.first_run != original
+        || source.formation.as_ref() != Some(&context.identity.formation)
+        || context.identity.formation.door_interface != *ctx.owner_interface()
+        || config.resolve_owner_topology(&source.envelope)? != *topology
+        || root.join("retired.json").try_exists().map_err(|e| e.to_string())?
+    { return Ok(false); }
+    validate_admitted_coauthor(ctx, &source.envelope, topology)?;
+    let ResolvedContext::Persistent { artifact, payload, .. } = config.resolve_context(&source.envelope)? else { return Ok(false); };
+    if artifact != context.identity.prelude_artifact
+        || DescriptorHash::of_bytes(&payload).to_hex() != context.identity.prelude_payload_hash
+    { return Err("unsubmitted output changed its admitted prelude".into()); }
+    let limits = ctx.owner_io_limits()?;
+    let captured = output.read_bounded(limits.max_manifest_bytes, limits.max_payload_bytes).map_err(|e| e.to_string())?;
+    let result: ToolResultArtifact = serde_json::from_slice(&captured.payload_bytes).map_err(|e| e.to_string())?;
+    if result.tool != original.tool || result.correlation_id.as_deref() != Some(original.correlation_id.as_str())
+        || result.label != captured.manifest.label || result.label != format!("{}.result", original.tool)
+    { return Ok(false); }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let ledger = options.open(ctx.owner_movements_path()).map_err(|e| e.to_string())?;
+    let metadata = ledger.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() { return Err("unsubmitted output ledger is not a regular file".into()); }
+    let length = metadata.len();
+    let mut reader = std::io::BufReader::new(ledger.take(length));
+    let decoder = octopus_ledger_store::DurableMovementDecoder::for_log(ctx.owner_movements_path());
+    let mut sequence = 0;
+    let mut source_seen = false;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let count = Read::by_ref(&mut reader).take(limits.max_control_frame_bytes.saturating_add(1))
+            .read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        if count == 0 { break; }
+        if count as u64 > limits.max_control_frame_bytes { return Err("unsubmitted output ledger row exceeds its bound".into()); }
+        let Some(bytes) = line.strip_suffix(b"\n") else { return Ok(false); };
+        let row = decoder.decode(bytes, sequence).map_err(|e| e.to_string())?;
+        if row.seq.0 != sequence as u64 { return Err("unsubmitted output ledger sequence changed".into()); }
+        sequence += 1;
+        if row.seq == source.movement.seq {
+            if row != source.movement { return Err("unsubmitted output source differs from its admitted movement".into()); }
+            source_seen = true;
+        } else if row.seq > source.movement.seq && row.kind == octopus_ledger::MovementKind::InterfaceOutbound
+            && row.from == Endpoint::Interface(ctx.owner_interface().clone()) {
+            return Ok(false);
+        }
+    }
+    if !source_seen { return Err("unsubmitted output has no exact admitted source".into()); }
+    let run_root = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?;
+    let path = run_root.join(format!("{}.json", topology.run)).canonicalize().map_err(|e| e.to_string())?;
+    if path.parent() != Some(run_root.as_path()) { return Err("unsubmitted output run escapes its granted root".into()); }
+    let before = octopus_interfaces::read_artifact_carrier_file_bounded(
+        &ctx.owner_blobs_dir().join(&original.run_record_hash), limits.max_payload_bytes).map_err(|e| e.to_string())?;
+    if ContentHash::of_bytes(&before).to_hex() != original.run_record_hash { return Err("unsubmitted output snapshot integrity mismatch".into()); }
+    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+        movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+        max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+    };
+    let cancel = ctx.owner_cancel();
+    let unchanged_owner = checked_recovery_observation(
+        || octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string()),
+        |current| Ok(octopus_provider_run_authoring::checked_declared_run_advance(
+            &evidence, &path, &before, current, original.source_movement_seq, vec![writer.clone()])?
+            .iter().all(|transition| transition.writer == *writer)),
+        || cancel.is_cancelled(),
+    )?;
+    let after = reader.get_ref().get_ref().metadata().map_err(|e| e.to_string())?;
+    Ok(unchanged_owner && after.len() == length && after.modified().ok() == metadata.modified().ok())
+}
+
+pub enum OutputAuthority {
+    Admitted(octopus_tool_door_runtime::ToolDoorOutputSource),
+    Initial(octopus_interfaces::InterfaceArtifactFile),
+    Pending,
+}
+
+pub fn output_authority(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    root: &Path,
+    config: &CodeModeConfig,
+    source: &octopus_tool_door_runtime::ToolDoorOutputSource,
+) -> Result<OutputAuthority, octopus_provider_run_authoring::CheckedRunError> {
+    use octopus_provider_run_authoring::CheckedRunEvidenceReader;
+    use octopus_runtime::run_record::RunRecord;
+    let context: ContextRecord = read_record(&root.join("context.json"))?;
+    let topology = context.identity.owner_topology.as_ref().ok_or("output authority has no declared topology")?;
+    if context.identity.config != *config || context.generation != digest(&context.identity)?
+        || source.formation.as_ref() != Some(&context.identity.formation)
+        || topology.owner_interface != ctx.owner_interface().as_str()
+        || config.resolve_owner_topology(&source.envelope)? != *topology
+        || root.join("retired.json").try_exists().map_err(|e| e.to_string())?
+    { return Err("output authority changed its original context".into()); }
+    validate_admitted_coauthor(ctx, &source.envelope, topology)?;
+    let limits = ctx.owner_io_limits()?;
+    let original = &context.identity.first_run;
+    let before = octopus_interfaces::read_artifact_carrier_file_bounded(&ctx.owner_blobs_dir().join(&original.run_record_hash), limits.max_payload_bytes).map_err(|e| e.to_string())?;
+    if ContentHash::of_bytes(&before).to_hex() != original.run_record_hash { return Err("output authority original snapshot differs".into()); }
+    let initial = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
+    let run_root = ctx.owner_root_slot("run_records_root")?.canonicalize().map_err(|e| e.to_string())?;
+    let path = run_root.join(format!("{}.json", topology.run)).canonicalize().map_err(|e| e.to_string())?;
+    if path.parent() != Some(run_root.as_path()) { return Err("output authority run escapes its granted root".into()); }
+    let evidence = octopus_provider_run_authoring::CheckedRunEvidence {
+        movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
+        max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
+    };
+    let cancel = ctx.owner_cancel();
+    let (current, transitions) = checked_recovery_observation(
+        || octopus_interfaces::read_artifact_carrier_file_bounded(&path, limits.max_payload_bytes).map_err(|e| e.to_string()),
+        |current| Ok((current.to_vec(), octopus_provider_run_authoring::checked_declared_run_advance(
+            &evidence, &path, &before, current, original.source_movement_seq, topology.coauthor.iter().cloned().collect())?)),
+        || cancel.is_cancelled(),
+    )?;
+    let record = RunRecord::from_bytes(&current).map_err(|e| e.to_string())?;
+    let reader = octopus_tool_door_runtime::LedgerTailReader::open_named(ctx, "code-mode-output-authority")?;
+    let formed_source = |movement: Movement| -> Result<_, String> {
+        let envelope = reader.envelope_for_movement(&movement)?;
+        if config.resolve_owner_topology(&envelope)? != *topology { return Err("output authority changed its admitted topology".into()); }
+        validate_admitted_coauthor(ctx, &envelope, topology)?;
+        Ok(octopus_tool_door_runtime::ToolDoorOutputSource { movement, envelope, formation: source.formation.clone() })
+    };
+    let owned = record.interface_state.get(ctx.owner_interface()).and_then(|state| state.get("frontier_checkpoint_ids"))
+        .and_then(Value::as_array).ok_or("output authority has no owner frontier")?;
+    for transition in transitions.iter().rev().filter(|transition| transition.writer.owner == *ctx.owner_interface()) {
+        let metadata = transition.result.invocation_metadata.as_ref().and_then(|value| value.invocation()).ok_or("output authority result has no admission")?;
+        let runtime = metadata.runtime().ok_or("output authority result has no coordinate")?;
+        if !owned.contains(&json!(runtime.checkpoint)) { continue; }
+        let checkpoint = record.checkpoint(&runtime.checkpoint).ok_or("output authority return is absent")?;
+        if !record.active_checkpoints.contains(&checkpoint.id)
+            || checkpoint.interface_binding.as_ref() != Some(&topology.authoring_result.binding.inbound)
+            || checkpoint.outbound_interface_bindings != topology.authoring_result.binding.outbound
+            || transition.result.from != Endpoint::Interface(topology.authoring_result.binding.inbound.interface.clone())
+            || transition.result.to != Endpoint::Interface(ctx.owner_interface().clone())
+        { return Err("output authority has another authoring return".into()); }
+        octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&transition.after, &current, &runtime.checkpoint)?;
+        return Ok(OutputAuthority::Admitted(formed_source(transition.result.clone())?));
+    }
+    if transitions.iter().any(|transition| transition.writer.owner == *ctx.owner_interface()) {
+        return Err("output authority lost its admitted authoring return".into());
+    }
+    let original_owned = initial.interface_state.get(ctx.owner_interface()).and_then(|state| state.get("frontier_checkpoint_ids"))
+        .and_then(Value::as_array).ok_or("output authority has no initial owner frontier")?;
+    let ownership = |record: &RunRecord| -> Result<Vec<Value>, String> {
+        record.interface_state.get(ctx.owner_interface()).and_then(|state| state.get("owned_checkpoint_ids"))
+            .and_then(Value::as_array).cloned().ok_or("output authority has no exact owned checkpoint set".into())
+    };
+    let original_ownership = ownership(&initial)?;
+    let current_ownership = ownership(&record)?;
+    let candidates = initial.checkpoints.iter().filter(|checkpoint| original_owned.contains(&json!(checkpoint.id))
+        && initial.active_checkpoints.contains(&checkpoint.id)
+        && checkpoint.interface_binding.as_ref() == Some(&topology.readiness.binding.inbound)
+        && checkpoint.outbound_interface_bindings == topology.readiness.binding.outbound
+        && checkpoint.required_verified_artifacts.is_empty()).collect::<Vec<_>>();
+    let [checkpoint] = candidates.as_slice() else { return Err("output authority requires one original owned readiness edge".into()); };
+    if topology.readiness.binding.inbound.interface != *ctx.owner_interface()
+        || topology.readiness.binding.outbound.iter().map(|binding| &binding.interface).collect::<Vec<_>>() != [ctx.owner_interface()]
+        || !owned.contains(&json!(checkpoint.id)) || !record.active_checkpoints.contains(&checkpoint.id)
+        || !original_ownership.contains(&json!(checkpoint.id)) || !current_ownership.contains(&json!(checkpoint.id))
+        || record.checkpoint(&checkpoint.id) != Some(*checkpoint)
+    { return Err("output authority initial readiness edge changed".into()); }
+    let payload = json!({"schema_version":1,"context_generation":context.generation,
+        "worker_environment_id":context.identity.formation.worker_environment_id,
+        "source_movement_seq":original.source_movement_seq,"source_artifact":original.artifact});
+    prepare_record(&root.join("output-authority.json"), &payload)?;
+    let artifact = octopus_interfaces::InterfaceArtifactFile::write(root.join("output-authority"), "code_mode.owner_ready",
+        &serde_json::to_vec(&payload).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let reference = artifact_ref(&artifact)?;
+    let mut history = octopus_provider_run_authoring::FileCheckedRunReader::open(&evidence, None)?;
+    let mut selected = None;
+    let mut arrival = false;
+    let mut refusal = None;
+    let complete = visit_complete_ledger(ctx, |movement| {
+        if movement.seq.0 <= original.source_movement_seq || movement.artifact.as_ref() != Some(&reference) { return Ok(()); }
+        if movement.from != Endpoint::Interface(ctx.owner_interface().clone()) { return Err("output authority carrier has a foreign source".into()); }
+        if movement.kind == octopus_ledger::MovementKind::DeliveryRefused {
+            let Some(octopus_ledger::MovementMetadata::Delivery(delivery)) = movement.invocation_metadata.as_ref() else { return Err("output authority refusal has no verdict".into()); };
+            refusal = Some(delivery.delivery_verdict.clone());
+            return Ok(());
+        }
+        if movement.kind == octopus_ledger::MovementKind::InterfaceArrival { arrival = true; return Ok(()); }
+        if movement.kind != octopus_ledger::MovementKind::InterfaceOutbound { return Ok(()); }
+        if movement.from != Endpoint::Interface(ctx.owner_interface().clone()) || movement.to != movement.from { return Err("output authority carrier changed its owner edge".into()); }
+        let metadata = movement.invocation_metadata.as_ref().and_then(|value| value.invocation()).ok_or("output authority carrier has no admission")?;
+        let runtime = metadata.runtime().ok_or("output authority carrier has no coordinate")?;
+        if runtime.run != record.id || runtime.ee != record.ee || runtime.worker != record.worker
+            || runtime.interface != *ctx.owner_interface() || runtime.checkpoint != checkpoint.id || runtime.epoch != checkpoint.epoch.0
+            || metadata.verification_failure.is_some() || metadata.checkpoint_binding_policy.as_ref() != Some(&octopus_interfaces::CheckpointBindingPolicySnapshot {
+                inbound: topology.readiness.binding.inbound.clone(), outbound: topology.readiness.binding.outbound.clone(),
+            })
+            || !metadata.checkpoint_admission.as_ref().is_some_and(|admission| admission.complete && admission.artifact_label == "code_mode.owner_ready")
+        { return Err("output authority carrier differs from its exact readiness checkpoint".into()); }
+        let pinned = history.snapshot(&ContentHash::from_hex(runtime.run_record_hash.as_deref().ok_or("output authority carrier has no snapshot")?).ok_or("output authority carrier snapshot is invalid")?)?;
+        octopus_provider_run_authoring::validate_unchanged_admitted_checkpoint(&pinned, &current, &runtime.checkpoint)?;
+        if selected.replace(formed_source(movement.clone())?).is_some() { return Err("output authority has duplicate admissions".into()); }
+        Ok(())
+    })?;
+    if !complete { return Ok(OutputAuthority::Pending); }
+    if let Some(source) = selected { return Ok(OutputAuthority::Admitted(source)); }
+    if let Some(verdict) = refusal { return Err(format!("output authority admission was refused: {verdict:?}").into()); }
+    if arrival { return Ok(OutputAuthority::Pending); }
+    if root.join("output-authority-dispatch.json").try_exists().map_err(|e| e.to_string())? {
+        return Err("output authority dispatch has no exact verdict; retained without retry".into());
+    }
+    Ok(OutputAuthority::Initial(artifact))
+}
+
+fn visit_complete_ledger(
+    ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
+    mut visit: impl FnMut(&Movement) -> Result<(), String>,
+) -> Result<bool, String> {
+    use std::io::BufRead;
+    let mut options = OpenOptions::new(); options.read(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let ledger = options.open(ctx.owner_movements_path()).map_err(|e| e.to_string())?;
+    let before = ledger.metadata().map_err(|e| e.to_string())?;
+    if !before.is_file() { return Err("output authority ledger is not a regular file".into()); }
+    let length = before.len();
+    let mut reader = std::io::BufReader::new(ledger.take(length));
+    let decoder = octopus_ledger_store::DurableMovementDecoder::for_log(ctx.owner_movements_path());
+    let maximum = ctx.owner_io_limits()?.max_control_frame_bytes;
+    let mut line = Vec::new(); let mut sequence = 0; let mut consumed = 0;
+    loop {
+        line.clear();
+        let count = Read::by_ref(&mut reader).take(maximum.saturating_add(1)).read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        if count == 0 { break; }
+        if count as u64 > maximum { return Err("output authority ledger row exceeds its bound".into()); }
+        let Some(bytes) = line.strip_suffix(b"\n") else { return Ok(false); };
+        let row = decoder.decode(bytes, sequence).map_err(|e| e.to_string())?;
+        if row.seq.0 != sequence as u64 { return Err("output authority ledger sequence changed".into()); }
+        visit(&row)?; sequence += 1; consumed += count as u64;
+    }
+    let after = reader.get_ref().get_ref().metadata().map_err(|e| e.to_string())?;
+    Ok(consumed == length && after.len() == length && before.modified().ok() == after.modified().ok())
+}
+
 pub fn reconcile_checked_provider_advance(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     root: &Path,
     config: &CodeModeConfig,
     input: Option<&InterfaceInvocationEnvelope>,
-) -> Result<Option<InstalledHandoff>, String> {
+) -> Result<Option<InstalledHandoff>, octopus_provider_run_authoring::CheckedRunError> {
     if !root.join("context.json").try_exists().map_err(|e| e.to_string())? { return Ok(None); }
     let context: ContextRecord = read_record(&root.join("context.json"))?;
     if context.identity.config != *config || digest(&context.identity)? != context.generation || context.identity.formation.door_interface != *ctx.owner_interface() {

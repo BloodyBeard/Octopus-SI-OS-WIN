@@ -472,6 +472,52 @@ impl ProviderOutputHandoff {
         }))
     }
 
+    pub async fn completed_source_settlement_predecessor(
+        &self, closure: &ArtifactRef,
+    ) -> Result<(Vec<u8>, Vec<ProviderHandoffOutcome>), String> {
+        let state = self.state.lock().await;
+        let chain = self.completed_source_chain(&state.run_record_bytes)?;
+        let mut evidence = None;
+        let mut selected: Option<PendingHandoff> = None;
+        for transition in &chain {
+            let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
+            let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
+            let prior = persisted_pending_handoff(&before, &self.config.provider_interface)?;
+            let next = persisted_pending_handoff(&after, &self.config.provider_interface)?;
+            if let Some(pending) = selected.as_ref() {
+                if prior.as_ref() != Some(pending) {
+                    return Err("completed settlement history changed its selected handoff".into());
+                }
+                if next != prior {
+                    let publication = next.as_ref().is_some_and(|next|
+                        context_publication::is_publication_completion(pending, next));
+                    if pending.context_publication.is_some() && !publication {
+                        return Err("completed settlement was superseded before publication".into());
+                    }
+                    self.admitted_replay_handoff_before(pending, transition.call.seq.0)?;
+                    selected = publication.then(|| next.clone().expect("checked publication"));
+                }
+            }
+            let (Some(prior), Some(next)) = (prior, next) else { continue; };
+            if next.source_movement_seq != self.source_movement_seq
+                || !follows_completed_source(&prior, &next)
+                || next.items.len() != 1 || next.items[0].artifact_id != closure.id
+                || next.items[0].artifact_content_hash != closure.content.to_hex() {
+                continue;
+            }
+            self.admitted_replay_handoff_before(&prior, transition.call.seq.0)?;
+            self.admitted_replay_handoff(&next)?;
+            if evidence.replace((transition.before.clone(), self.admitted_replay_handoff(&prior)?)).is_some() {
+                return Err("completed settlement has multiple checked predecessors".into());
+            }
+            selected = Some(next);
+        }
+        if selected.as_ref().is_some_and(|pending| pending.context_publication.is_some()) {
+            return Err("completed settlement has unfinished publication".into());
+        }
+        evidence.ok_or("completed settlement has no exact checked predecessor".into())
+    }
+
     fn completed_source_chain(&self, current: &[u8]) -> Result<Vec<CheckedRunTransition>, String> {
         let (_, source) = self.session.index()?.exact_provider_source_outbound(
             &self.config.run,

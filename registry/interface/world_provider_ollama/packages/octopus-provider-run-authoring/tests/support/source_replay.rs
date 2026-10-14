@@ -341,7 +341,11 @@ async fn completed_source_settlement_requires_exact_predecessor_and_replays_once
         cp.artifact_bindings[0].access.change = true;
         assert!(source_settlement::validate_transition(&record, &widened, &fixture.handoff.config).is_err());
         fixture.install(&authored);
+        let closure = artifact_identity(&file, &fixture.handoff.var_dir).unwrap().artifact;
+        fixture.handoff.state.lock().await.run_record_bytes = authored.content.as_bytes().to_vec();
+        assert!(fixture.handoff.completed_source_settlement_predecessor(&closure).await.is_err());
         fixture.edge(authored.content.as_bytes(), &authored.pending_handoff.items[0].checkpoint.id, &file, "worker".into(), MovementKind::InterfaceArrival);
+        assert!(fixture.handoff.completed_source_settlement_predecessor(&closure).await.is_err());
         let publication = fixture.handoff.author_context_publication(authored.content.as_bytes(), &authored.pending_handoff).unwrap();
         let installed = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
         let mut changed = RunRecord::from_bytes(publication.content.as_bytes()).unwrap();
@@ -360,17 +364,35 @@ async fn completed_source_settlement_requires_exact_predecessor_and_replays_once
         assert_eq!(fixture.handoff.completed_input_artifact_source(&fixture.input).await.unwrap(), Some(0));
         assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), bytes);
         assert_eq!(std::fs::read(&fixture.handoff.ctx.movements_path).unwrap(), ledger);
+        fixture.handoff.source_movement_seq = 0;
+        let proof = fixture.handoff.completed_source_settlement_predecessor(&closure).await.unwrap();
+        assert_eq!(proof.0, before);
+        assert!(matches!(proof.1.as_slice(), [ProviderHandoffOutcome::Admitted {artifact,..}] if artifact == &predecessor));
+        let next = fixture.rows.len() as u64;
+        fixture.edge(&bytes, &"control".into(), &fixture.input_file.clone(), "provider".into(), MovementKind::InterfaceOutbound);
+        fixture.handoff.source_movement_seq = next;
+        let later = fixture.output(true, true, true); fixture.publish(&later);
+        fixture.handoff.source_movement_seq = 0;
+        let bytes = std::fs::read(&fixture.handoff.run_path).unwrap();
+        let ledger = std::fs::read(&fixture.handoff.ctx.movements_path).unwrap();
+        fixture.handoff.state.lock().await.run_record_bytes = bytes.clone();
+        assert_eq!(fixture.handoff.completed_source_settlement_predecessor(&closure).await.unwrap(), proof);
+        let mut wrong = closure.clone(); wrong.content = ContentHash::of_bytes(b"different closure");
+        assert!(fixture.handoff.completed_source_settlement_predecessor(&wrong).await.is_err());
+        assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), bytes);
+        assert_eq!(std::fs::read(&fixture.handoff.ctx.movements_path).unwrap(), ledger);
     }
 }
 
 #[test]
-fn payload_readiness_proves_completed_newer_independent_inputs() {
+fn payload_readiness_proves_completed_newer_inputs() {
+    for checkpoint in ["control", "alternate"] {
     for mode in ["completed", "unprocessed", "nonterminal", "unadmitted", "unpublished", "late_admission", "late_mark", "wrong_artifact", "extra_input", "changed_current"] {
         let mut fixture = CompletedInputReplayFixture::new();
         fixture.rows.pop(); fixture.save();
         let initial = std::fs::read(&fixture.handoff.run_path).unwrap();
         let control = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("independent"), "arbitrary.independent.input", br#"{"value":1}"#).unwrap();
-        fixture.edge(&initial,&CheckpointId::new("control"),&control,"provider".into(),MovementKind::InterfaceOutbound);
+        fixture.edge(&initial,&CheckpointId::new(checkpoint),&control,"provider".into(),MovementKind::InterfaceOutbound);
         fixture.handoff.source_movement_seq = 1;
         let independent = if mode == "unprocessed" { None } else {
             let output = fixture.output(mode != "nonterminal", !["unadmitted","late_admission"].contains(&mode), mode != "late_mark");
@@ -413,7 +435,7 @@ fn payload_readiness_proves_completed_newer_independent_inputs() {
         let mut reader = FileCheckedRunReader::open(&evidence,None).unwrap();
         let generic = input_revision::reader_payload_readiness(&mut reader,&h.run_path,&current,&writer,&InterfaceId::new("room"),cutoff);
         assert_eq!(file.as_ref().ok(),generic.as_ref().ok(),"{mode}: file={file:?}, generic={generic:?}");
-        assert_eq!(file.as_ref().is_ok_and(|ready|*ready),mode=="completed","{mode}: {file:?}");
+        assert_eq!(file.as_ref().is_ok_and(|ready|*ready),mode=="completed","{checkpoint}/{mode}: {file:?}");
         let selection = InterfaceArtifactFile::write(h.var_dir.join("selection"),"context.reference",br#"{"value":"selected"}"#).unwrap();
         let selected = prepare_provider_input_payloads(h.run_path.clone(),&current,&writer,InterfaceId::new("room"),
             vec![artifact_identity(&selection,&h.var_dir).unwrap().artifact]).unwrap();
@@ -425,6 +447,7 @@ fn payload_readiness_proves_completed_newer_independent_inputs() {
             let mut reader = FileCheckedRunReader::open(&evidence,None).unwrap();
             assert!(!input_revision::reader_payload_readiness(&mut reader,&h.run_path,&current,&writer,&InterfaceId::new("room"),1).unwrap());
         }
+    }
     }
 }
 
@@ -460,13 +483,13 @@ fn selected_home_payload_readiness_proves_consumed_independent_input() {
 #[tokio::test]
 async fn completed_input_artifact_proves_exact_terminal_history_without_replaying() {
     for mode in ["current", "later_normal", "no_context", "current_context", "multiple_prior", "nonterminal", "unadmitted", "unpublished", "late_mark",
-        "repeated_terminal", "wrong_source", "wrong_hash", "wrong_current_source", "wrong_current_hash",
+        "repeated_terminal", "unfinished_target", "wrong_source", "wrong_hash", "wrong_current_source", "wrong_current_hash",
         "wrong_worker", "wrong_run", "wrong_provider", "unadmitted_input", "changed_record"] {
         let mut fixture = CompletedInputReplayFixture::new();
-        let first = fixture.output(mode != "nonterminal", mode != "unadmitted", mode != "late_mark");
+        let first = fixture.output(!["nonterminal", "unfinished_target"].contains(&mode), mode != "unadmitted", mode != "late_mark");
         if mode != "unpublished" { fixture.publish(&first); }
         if mode == "late_mark" { fixture.mark(&first); }
-        if mode == "later_normal" || mode == "repeated_terminal" {
+        if ["later_normal", "repeated_terminal", "unfinished_target"].contains(&mode) {
             let bytes = std::fs::read(&fixture.handoff.run_path).unwrap();
             let record = RunRecord::from_bytes(&bytes).unwrap();
             let cp = record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
@@ -534,6 +557,11 @@ async fn completed_input_artifact_proves_exact_terminal_history_without_replayin
         let ledger = std::fs::read(&fixture.handoff.ctx.movements_path).unwrap();
         let context = serde_json::to_value(fixture.handoff.current_session_context_artifacts().await.as_ref()).unwrap();
         let result = fixture.handoff.completed_input_artifact_source(&fixture.input).await;
+        if mode == "unfinished_target" {
+            let mut target = fixture.handoff.clone(); target.source_movement_seq = 0;
+            let pending = persisted_pending_handoff(&RunRecord::from_bytes(&bytes).unwrap(), &target.config.provider_interface).unwrap().unwrap();
+            assert!(target.recover_overtaken_source(&bytes, &pending).unwrap_err().contains("unfinished provider source"));
+        }
         if ["current", "later_normal", "no_context", "current_context", "multiple_prior"].contains(&mode) {
             assert_eq!(result.unwrap(),Some(0),"{mode}");
             let mut changed = fixture.input.clone(); changed.content = ContentHash::of_bytes(b"different artifact");
@@ -785,7 +813,10 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
     let mut ctx = InterfaceLiftContext::unprivileged(
         provider.clone(), interface_dir, Some(descriptor), home.join("interfaces").join(provider.as_str()),
         home.join("ledger/movements.jsonl"), home.join("ledger/blobs"),
-        home.join("ledger/ledger-index.sqlite"), BTreeMap::new(), arrivals,
+        home.join("ledger/ledger-index.sqlite"), BTreeMap::from([
+            ("run_records_root".into(), home.join("state/runs")),
+            ("interface_hand_in_root".into(), home.join("interface-hand-in")),
+        ]), arrivals,
         tokio_util::sync::CancellationToken::new(),
     ).with_host_io_limits(octopus_interface_transport::InterfaceHostIoLimits {
         max_control_frame_bytes: 1_048_576, max_stderr_bytes: 262_144,
@@ -837,10 +868,10 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
     assert!(handoff.recover_overtaken_source(&current, &unadmitted).is_err());
     let mut unrelated = pending.clone();
     unrelated.source_movement_seq = source_movement_seq;
-    assert!(handoff.recover_overtaken_source(&current, &unrelated).unwrap_err().contains("independent-input"));
+    assert!(handoff.recover_overtaken_source(&current, &unrelated).unwrap_err().contains("overtaken source requires a later checked handoff"));
     let mut incomplete = pending.clone();
     incomplete.terminal = false;
-    assert!(handoff.recover_overtaken_source(&current, &incomplete).unwrap_err().contains("independent-input"));
+    assert!(handoff.recover_overtaken_source(&current, &incomplete).unwrap_err().contains("no completed terminal input handoff"));
     let mut changed: serde_json::Value = serde_json::from_slice(&current).unwrap();
     changed["status"] = serde_json::json!("running");
     assert!(handoff.recover_overtaken_source(&serde_json::to_vec(&changed).unwrap(), &pending).is_err());

@@ -16,6 +16,8 @@ tokio-util.workspace = true
 octopus-code-mode-engine = { path = "../octopus-code-mode-engine" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
+octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
 libc = "0.2.182"
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
@@ -28,9 +30,7 @@ octopus-provider-run-authoring = { path = "../../../../interface/world_provider_
 
 [dev-dependencies]
 octopus-file-write-contract = { path = "../../../system_room/packages/octopus-file-write-contract" }
-octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 octopus-interface-activation-app-server-transport = { path = "../../../../interface/world_operator_chat/packages/octopus-interface-activation-app-server-transport" }
-octopus-runtime = { path = "../../../../../crates/octopus-runtime" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
 futures = { version = "0.3", default-features = false }
 tokio-tungstenite = "0.28.0"

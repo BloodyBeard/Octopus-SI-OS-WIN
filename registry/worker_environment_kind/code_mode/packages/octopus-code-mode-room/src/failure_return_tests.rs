@@ -622,14 +622,14 @@ fn actual_checked_recovery_observation(
     let mut attempts = 0;
     let error = super::super::continuation::checked_recovery_observation(
         || Ok(invalid.clone()), |captured| { attempts += 1; prove(captured) }, || false).unwrap_err();
-    assert_eq!(error, invalid_error);
+    assert_eq!(error.to_string(), invalid_error.to_string());
     assert_eq!(attempts, 1);
     let cancelled = std::cell::Cell::new(false);
     let mut reads = 0;
     let error = super::super::continuation::checked_recovery_observation(
         || { reads += 1; if reads == 2 { cancelled.set(true); } Ok(if reads == 1 { before.to_vec() } else { after.to_vec() }) },
         prove, || cancelled.get()).unwrap_err();
-    assert_eq!(error, "shared run recovery cancelled");
+    assert_eq!(error.to_string(), "shared run recovery cancelled");
     assert_eq!(reads, 2);
     assert_eq!(std::fs::read(path).unwrap(), after);
 }

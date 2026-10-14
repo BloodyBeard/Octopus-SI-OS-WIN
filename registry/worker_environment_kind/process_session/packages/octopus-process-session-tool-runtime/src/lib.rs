@@ -92,15 +92,32 @@ pub struct ToolDoorOutputSource {
 
 pub type ToolDoorOutputFuture =
     Pin<Box<dyn Future<Output = Result<DeliveryVerdict, String>> + Send>>;
-pub type ToolDoorOutputCallback = Arc<
-    dyn Fn(
-            InterfaceLiftContext,
-            ToolDoorOutputSource,
-            InterfaceArtifactFile,
-        ) -> ToolDoorOutputFuture
+pub type ToolDoorOutputDispatch = Arc<
+    dyn Fn(InterfaceLiftContext, InterfaceArtifactFile) -> ToolDoorOutputFuture
         + Send
         + Sync,
 >;
+
+pub trait ToolDoorOutputHandler: Send + Sync {
+    fn output(
+        &self,
+        ctx: InterfaceLiftContext,
+        source: ToolDoorOutputSource,
+        artifact: InterfaceArtifactFile,
+        dispatch: ToolDoorOutputDispatch,
+    ) -> ToolDoorOutputFuture;
+
+    fn can_resume_unsubmitted(
+        &self,
+        _ctx: &InterfaceLiftContext,
+        _source: &ToolDoorOutputSource,
+        _artifact: &InterfaceArtifactFile,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+pub type ToolDoorOutputCallback = Arc<dyn ToolDoorOutputHandler>;
 
 impl InterfaceLiftContext {
     pub fn owner_root_slot(&self, name: &str) -> Result<&Path, String> {
@@ -150,18 +167,32 @@ async fn hand_tool_process_output(
     callback: Option<&ToolDoorOutputCallback>,
     artifact: InterfaceArtifactFile,
 ) -> Result<DeliveryVerdict, String> {
+    let dispatch: ToolDoorOutputDispatch = Arc::new(|ctx, artifact| {
+        Box::pin(async move { ctx.hand_arrival(artifact, Vec::new()).await })
+    });
+    hand_tool_process_output_with_dispatch(ctx, source, callback, artifact, dispatch).await
+}
+
+async fn hand_tool_process_output_with_dispatch(
+    ctx: &InterfaceLiftContext,
+    source: Option<&ToolDoorOutputSource>,
+    callback: Option<&ToolDoorOutputCallback>,
+    artifact: InterfaceArtifactFile,
+    dispatch: ToolDoorOutputDispatch,
+) -> Result<DeliveryVerdict, String> {
     match callback {
         Some(callback) => {
-            callback(
+            callback.output(
                 ctx.clone(),
                 source
                     .cloned()
                     .ok_or("owner output has no immutable admitted source")?,
                 artifact,
+                dispatch,
             )
             .await
         }
-        None => ctx.hand_arrival(artifact, Vec::new()).await,
+        None => dispatch(ctx.clone(), artifact).await,
     }
 }
 
@@ -11255,6 +11286,26 @@ pub mod owner_contract_tests {
         artifact: InterfaceArtifactFile,
     ) -> Result<DeliveryVerdict, String> {
         hand_tool_process_output(ctx, Some(source), Some(callback), artifact).await
+    }
+
+    pub async fn hand_owned_completed_output(
+        ctx: &InterfaceLiftContext,
+        source: &ToolDoorOutputSource,
+        callback: &ToolDoorOutputCallback,
+        artifact: InterfaceArtifactFile,
+        generation: PathBuf,
+        invocation_manifest: PathBuf,
+    ) -> Result<ToolProcessBrokerResult, String> {
+        let mut input = ToolProcessEnvelope::capture(&source.envelope, source.movement.seq.0, &ctx.required_host_io_limits()?)?;
+        input.worker_environment = source.formation.clone();
+        input.output_source = Some(source.clone());
+        let (mut retained, recover) = match completed_output::CompletedOutputs::load(ctx, source.movement.seq.0)? {
+            Some(retained) => (retained, true),
+            None => (completed_output::CompletedOutputs::retain(ctx, &input, &ToolProcessCompletion {
+                artifacts: vec![artifact], streamed_output_admitted: false, primary_input: None, generation, invocation_manifest,
+            })?, false),
+        };
+        retained.deliver(ctx, &input, Some(callback), recover).await
     }
 
     pub async fn hand_owned_invocation_failure(

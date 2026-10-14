@@ -3637,14 +3637,14 @@ async fn checked_deferred_interrupted_result(
     let continuity = checked_interrupted_result_continuity(
         ctx, descriptor, run, &turn.envelope, source, &result_source, &closure,
         current,
-    )?;
+    ).await?;
     if !codex_continuity_successor_is_settled(Some(source), Some(&continuity))? { return Ok(None); }
     Ok(Some((DeferredProviderTurnRelease::InterruptedResult {
         source_session_carrier: carrier, result_source, closure,
     }, continuity)))
 }
 
-fn checked_interrupted_result_continuity(
+async fn checked_interrupted_result_continuity(
     ctx: &InterfaceLiftContext,
     descriptor: &InterfaceDescriptor,
     run: &RunId,
@@ -3669,7 +3669,37 @@ fn checked_interrupted_result_continuity(
         return Err("interrupted release result does not close its exact native pending call".into());
     }
     let (closure_manifest, closure_payload) = read_pinned_provider_artifact(ctx, &closure.artifact, "interrupted closure")?;
-    let closed = interrupted_result_closure_payload(&closure_manifest.label, &closure_payload, interrupted, &result_source.artifact, &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?)?
+    let labels = codex_context_output_labels(descriptor).map_err(|error| error.to_string())?;
+    let value: serde_json::Value = serde_json::from_slice(&closure_payload).map_err(|error| error.to_string())?;
+    let settlement_source = if let Some(evidence) = value.get("completed_source_settlement") {
+        let turn = replay_provider_source(ctx, run, result_source.movement_seq)?
+            .ok_or("completed interrupted release lost its admitted result input")?;
+        if turn.envelope.artifact != result_source.artifact {
+            return Err("completed interrupted release changed its result input".into());
+        }
+        let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
+        let session = ProviderHandoffSession::new(ctx)?;
+        let handoff = wait_for_provider_handoff(ctx, descriptor, &session, run, &turn.envelope, turn.seq, &pinned).await?;
+        let (record, outcomes) = handoff.completed_source_settlement_predecessor(&closure.artifact).await?;
+        let [ProviderHandoffOutcome::Admitted { seq, .. }] = outcomes.as_slice()
+            else { return Err("completed interrupted release has no single admitted predecessor".into()); };
+        let context = current.iter().filter(|entry| entry.source_movement_seq.is_some_and(|value| value <= *seq)).cloned().collect::<Vec<_>>();
+        let acknowledgement: octopus_ledger::ArtifactRef = serde_json::from_value(evidence["stop_artifact"].clone()).map_err(|error| error.to_string())?;
+        let acknowledgement_seq = evidence["stop_movement_seq"].as_u64().ok_or("completed interrupted release has no Stop ACK sequence")?;
+        let control_source = evidence["stop_source_movement_seq"].as_u64().ok_or("completed interrupted release has no Stop input sequence")?;
+        let ack = context.iter().find(|entry| entry.source_artifact == acknowledgement && entry.source_movement_seq == Some(acknowledgement_seq))
+            .ok_or("completed interrupted release has no exact checked Stop ACK")?;
+        let control_id = ack.payload["control_id"].as_str().ok_or("completed interrupted release has no Stop identity")?;
+        let proof = crate::handler::stopped_result::prove_interrupted(descriptor, &turn.envelope, turn.seq,
+            &record, &context, &outcomes, &crate::handler::stopped_result::InterruptedResultSource {
+                continuity: interrupted, control_source, control_id, acknowledgement: &acknowledgement, acknowledgement_seq,
+            }).map_err(|error| error.to_string())?;
+        validate_completed_interrupted_result_control(ctx, descriptor, run, interrupted, &proof)?;
+        crate::handler::stopped_result::validate_saved_settlement(&proof, &turn.envelope, &value, &labels)?;
+        Some(proof.source)
+    } else { None };
+    let closed = interrupted_result_closure_payload(&closure_manifest.label, &closure_payload,
+        settlement_source.as_ref().unwrap_or(interrupted), &result_source.artifact, &labels)?
         .ok_or("interrupted release lost its exact native closure payload")?;
     let mut evidence = current.to_vec();
     let result_payload: serde_json::Value = serde_json::from_slice(&result_payload).map_err(|error| error.to_string())?;
@@ -6287,6 +6317,14 @@ fn prove_completed_interrupted_result(
             control_id: &journal.control_id, acknowledgement: &journal.acknowledgement.artifact,
             acknowledgement_seq: journal.acknowledgement.movement_seq,
         }).map_err(|error| error.to_string())?;
+    validate_completed_interrupted_result_control(ctx, descriptor, run, &journal.continuity, &proof)?;
+    Ok(proof)
+}
+
+fn validate_completed_interrupted_result_control(
+    ctx: &InterfaceLiftContext, descriptor: &InterfaceDescriptor, run: &RunId,
+    continuity: &crate::handler::CodexContinuityState, proof: &crate::handler::stopped_result::StoppedResultSettlement,
+) -> Result<(), String> {
     validate_stopped_result_control(ctx, descriptor, run, &proof)?;
     let control = load_control_journal(ctx, proof.control_source, run, &proof.control_id, &proof.action)?
         .ok_or("completed interrupted settlement lost its durable actual Stop")?;
@@ -6297,11 +6335,11 @@ fn prove_completed_interrupted_result(
     let (_, bytes) = read_pinned_provider_artifact(ctx, &proof.acknowledgement, "interrupted settlement ACK")?;
     let ack: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     if !result.acknowledged || result.control_id != proof.control_id || result.action != proof.action
-        || result.continuity.as_ref() != Some(&journal.continuity)
+        || result.continuity.as_ref() != Some(continuity)
         || ack["thread_id"] != serde_json::json!(result.thread_id)
         || ack["turn_id"] != serde_json::json!(result.turn_id) || ack["detail"] != result.detail
     { return Err("completed interrupted settlement ACK conflicts with its durable Stop result".into()); }
-    Ok(proof)
+    Ok(())
 }
 
 async fn hand_completed_interrupted_result(
@@ -8177,19 +8215,20 @@ mod tests {
             assert_eq!(closure_payload["returned_to_model"], false);
             assert!(closure_payload.get("cancelled_turn_transport").is_none());
             let closed = &closure_payload["codex_continuity"];
-            assert_eq!(closed["context_generation"], 9);
+            assert_eq!(closed["context_generation"], 10);
             assert!(closed["pending"].is_null() && closed["interrupted_pending"].is_null());
             let mut context: Vec<octopus_provider_run_authoring::SessionContextArtifact> = vec![serde_json::from_value(session_entry(
                 TURN_INTERRUPTED_RESULT_LABEL, closure_payload.clone(),
                 materialized_artifact_ref(&closure.artifact).unwrap(), 5,
             )).unwrap()];
             let settled = serde_json::to_value(terminal_failure_continuity(&descriptor, &message_envelope, &context, &run,
-                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":9}}}"#,
+                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
             ).unwrap().unwrap()).unwrap();
             assert_eq!(settled["thread_id"], "thread-a");
-            context[0].payload["codex_continuity"]["context_generation"] = json!(10);
+            assert_eq!(settled["context_generation"], 11);
+            context[0].payload["codex_continuity"]["context_generation"] = json!(11);
             assert!(terminal_failure_continuity(&descriptor, &message_envelope, &context, &run,
-                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":9}}}"#,
+                br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
             ).unwrap_err().to_string().contains("terminal Codex continuity is ahead of its authored context"));
             assert!(output_rx.recv().await.is_none());
             let activity_ref = materialized_artifact_ref(&legacy_activity).unwrap();
@@ -9225,7 +9264,7 @@ mod tests {
             assert_eq!(recover_provider_turn_continuity(&descriptor, &original.envelope,
                 snapshot.as_ref().map(|(_, snapshot)| snapshot), &run, &pinned).unwrap(), Some(interrupted.clone()));
             let private = checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
-                &interrupted, &result_source, &closure, &current).unwrap();
+                &interrupted, &result_source, &closure, &current).await.unwrap();
             assert_eq!(private, closed);
             assert_eq!(original.envelope.artifact_binding_payloads.len(), 1);
             assert_eq!(current.len(), 1);
@@ -9237,7 +9276,7 @@ mod tests {
             source_movement_seq:Some(5),
         });
         assert_eq!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
-            &interrupted, &result_source, &closure, &current).unwrap(), later);
+            &interrupted, &result_source, &closure, &current).await.unwrap(), later);
         assert!(reconcile_delivered_interrupted_continuity(Some(&interrupted), Some(continuity(10, Some("pending"))), Some(closed.clone())).is_err());
         for key in ["provider_interface", "run", "thread_id", "thread_shape_fingerprint", "static_context_fingerprint"] {
             let mut wrong = serde_json::to_value(&later).unwrap();
@@ -9248,11 +9287,11 @@ mod tests {
         let mut wrong = result_source.clone();
         wrong.artifact.content = ContentHash::of_bytes(b"different result");
         assert!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
-            &interrupted, &wrong, &closure, &current).is_err());
+            &interrupted, &wrong, &closure, &current).await.is_err());
         let mut wrong = closure.clone();
         wrong.movement_seq = 4;
         assert!(checked_interrupted_result_continuity(&ctx, &descriptor, &run, &original.envelope,
-            &interrupted, &result_source, &wrong, &current).is_err());
+            &interrupted, &result_source, &wrong, &current).await.is_err());
         }
     }
 

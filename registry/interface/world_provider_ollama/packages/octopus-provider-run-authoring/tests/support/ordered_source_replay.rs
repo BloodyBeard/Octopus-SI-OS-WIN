@@ -106,12 +106,13 @@ async fn exercise_interrupted_source_order(
     let owner_input: RunAuthoringCheckpoint = serde_json::from_value(serde_json::json!({"name":"owner_result","role":"owner_input",
         "interface_binding":names_binding("system_owner_return", &["tool.result"]),
         "outbound_interface_bindings":[names_binding(ctx.interface.as_str(), &["tool.result"])],
-        "include_context":false,"required_verified_artifacts":[],
+        "include_context":true,"required_verified_artifacts":[],
         "owner_authoring":{"owner":"system_owner_return","source":"system_owner_return","door":"system_owner_writer",
             "tool":"file.write.owner","call_label":"tool.call","result_label":"file.write.owner.result"}})).unwrap();
     topology.checkpoints.extend([control.clone(), owner_input.clone()]);
     let mut future_input = owner_input.clone();
     future_input.name = "future_owner_result".into();
+    future_input.include_context = false;
     future_input.interface_binding = names_binding(owner_input.interface().as_str(), &["owner.future.result"]);
     future_input.outbound_interface_bindings = vec![names_binding(ctx.interface.as_str(), &["owner.future.result"])];
     topology.checkpoints.push(future_input);
@@ -146,7 +147,7 @@ async fn exercise_interrupted_source_order(
             &serde_json::to_vec(&serde_json::json!({"text":format!("source {source} terminal {terminal}")})).unwrap()).unwrap();
         let identity = artifact_identity(&file, &h.var_dir).unwrap();
         let mut context = current_context_artifacts(&RunRecord::from_bytes(&current).unwrap(), &h.config).unwrap();
-        if source != 1481 { context.push(identity.artifact.id.clone()); }
+        context.push(identity.artifact.id.clone());
         let authored = h.author_run(&current, &context, &[PreparedHandoff { identity: identity.clone(),
             output_checkpoint:h.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),verified_inputs:vec![] }],
             true, (source == 1456).then_some(&control), false, terminal).unwrap();
@@ -175,8 +176,7 @@ async fn exercise_interrupted_source_order(
         } else { authored };
         if !terminal {
             let mut queued_replay = h.clone(); queued_replay.source_movement_seq = 1477;
-            assert!(queued_replay.recover_overtaken_source(published.content.as_bytes(), &published.pending_handoff)
-                .unwrap_err().contains("independent-input"));
+            assert!(queued_replay.recover_overtaken_source(published.content.as_bytes(), &published.pending_handoff).is_err());
         }
         if source == 1456 {
             for (seq, role) in [(1477, RunAuthoringCheckpointRole::Stable), (1481, RunAuthoringCheckpointRole::OwnerInput)] {
@@ -190,6 +190,8 @@ async fn exercise_interrupted_source_order(
         }
     }
     let current = std::fs::read(&h.run_path).unwrap();
+    let pending = persisted_pending_handoff(&RunRecord::from_bytes(&current).unwrap(), &h.config.provider_interface).unwrap().unwrap();
+    assert!(pending.terminal && pending.context_publication.is_none());
     h.session = ProviderHandoffSession::new(&h.ctx).unwrap();
     for (seq, expected) in [(1452, ProviderSourceRecovery::Completed), (1456, ProviderSourceRecovery::Completed), (1481, ProviderSourceRecovery::Completed), (1477, ProviderSourceRecovery::Process)] {
         h.source_movement_seq = seq;
@@ -203,13 +205,20 @@ async fn exercise_interrupted_source_order(
         if seq == 1477 {
             let context = h.current_session_context_artifacts().await;
             assert!(context.iter().any(|entry| Some(&entry.source_artifact) == closure.as_ref()));
+            assert!(context.iter().any(|entry| entry.source_artifact.id == pending.items[0].artifact_id));
             assert_eq!(context.last().unwrap().source_artifact, queued_ref);
         }
     }
-    let mut context_bearing = h.clone();
-    context_bearing.config.checkpoints.iter_mut().find(|template| template.role == RunAuthoringCheckpointRole::OwnerInput).unwrap().include_context = true;
-    let pending = persisted_pending_handoff(&RunRecord::from_bytes(&current).unwrap(), &h.config.provider_interface).unwrap().unwrap();
-    assert!(context_bearing.recover_overtaken_source(&current, &pending).unwrap_err().contains("independent-input"));
+    let mut invalid = h.clone();
+    invalid.ctx.movements_path = h.var_dir.join("invalid-owner-source.jsonl");
+    invalid.ctx.ledger_index_path = h.var_dir.join("invalid-owner-source.sqlite");
+    let mut invalid_rows = rows.clone();
+    let mut metadata = invalid_rows[1481].invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    metadata.runtime.as_mut().unwrap().epoch += 1;
+    invalid_rows[1481].invocation_metadata = Some(metadata.into());
+    std::fs::write(&invalid.ctx.movements_path, invalid_rows.iter().map(|row| format!("{}\n", serde_json::to_string(row).unwrap())).collect::<String>()).unwrap();
+    invalid.session = ProviderHandoffSession::new(&invalid.ctx).unwrap();
+    assert!(invalid.recover_overtaken_source(&current, &pending).is_err());
     for detached in [false, true] {
         let mut cold = h.clone();
         cold.ctx.movements_path = h.var_dir.join(format!("revision-cold-{detached}.jsonl"));

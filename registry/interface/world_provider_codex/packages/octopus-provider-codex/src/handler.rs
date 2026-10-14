@@ -8661,11 +8661,9 @@ impl TurnSink<'_> {
             closure.value["native_terminal_input_context"] = serde_json::json!(
                 self.continuity.lock().expect("continuity lock").pending_input_context
             );
-            // The sealed stream is handed first. Its batch consumes the source
-            // input before the separately admitted context/snapshot outputs.
-            if self.has_live_stream() {
-                self.advance_continuity(false)?;
-            }
+        }
+        if self.has_live_stream() {
+            self.advance_continuity(false)?;
         }
         if let Some(terminal) = &native_terminal {
             terminal.apply_disposition(&mut closure)?;
@@ -8772,13 +8770,13 @@ pub(crate) async fn native_history_receipt_for_test(
 #[cfg(test)]
 pub(crate) fn native_terminal_group_for_test(
     descriptor: &InterfaceDescriptor, output_root: &Path, stream_root: &Path,
-    original: &CodexContinuityState, native_turn: serde_json::Value,
+    original: &CodexContinuityState, native_turn: Option<serde_json::Value>,
     source: &ArtifactRef, source_seq: u64, with_stop: bool,
     input_changes_context: bool,
 ) -> ProviderStreamEmission {
     let mut retired = original.clone();
     if !with_stop { retired.interrupted_pending = retired.pending.take(); }
-    retired.native_terminal = Some(NativeTerminalEvidence { thread_id: retired.thread_id.clone(), turn: native_turn });
+    retired.native_terminal = native_turn.map(|turn| NativeTerminalEvidence { thread_id: retired.thread_id.clone(), turn });
     let (emit, mut outputs) = ProviderOutputStream::channel();
     emit.continuity.lock().unwrap().continuity = Some(retired);
     emit.continuity.lock().unwrap().pending_input_context = input_changes_context;
