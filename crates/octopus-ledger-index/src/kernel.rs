@@ -37,6 +37,7 @@ pub struct ArrivalDedupIndex {
     admitted_checkpoints: BTreeSet<CheckpointIdentity>,
     admitted_requirements: BTreeSet<(CheckpointIdentity, String)>,
     pending_required_arrivals: HashMap<InterfaceArrivalMarkProofKey, Movement>,
+    pending_requirement_sequences: BTreeMap<(CheckpointIdentity, String), Seq>,
     completion_requirements: BTreeMap<CheckpointIdentity, BTreeSet<String>>,
     malformed_runs: BTreeSet<RunId>,
     malformed_arrival: bool,
@@ -281,6 +282,13 @@ impl ArrivalDedupIndex {
                         RelayArrivalState::Pending(movement.clone()),
                     );
                     if self
+                        .pending_requirement_sequences
+                        .insert((generation, admission.artifact_label.clone()), movement.seq)
+                        .is_some()
+                    {
+                        self.malformed_runs.insert(run.clone());
+                    }
+                    if self
                         .pending_required_arrivals
                         .insert(proof_key, movement.clone())
                         .is_some()
@@ -341,6 +349,8 @@ impl ArrivalDedupIndex {
             return;
         };
         let generation = CheckpointIdentity::new(run, &runtime.checkpoint, runtime.epoch);
+        self.pending_requirement_sequences
+            .remove(&(generation.clone(), admission.artifact_label.clone()));
         self.note_relay_receipt(
             movement,
             runtime,
@@ -497,6 +507,27 @@ impl ArrivalDedupIndex {
             CheckpointIdentity::new(run, checkpoint, epoch),
             artifact_label.to_string(),
         )))
+    }
+
+    pub fn pending_requirement_seq(
+        &self,
+        run: &RunId,
+        checkpoint: &CheckpointId,
+        epoch: u64,
+        artifact_label: &str,
+    ) -> Result<Option<Seq>, LedgerIndexError> {
+        if self.malformed_arrival || self.malformed_runs.contains(run) {
+            return Err(LedgerIndexError::MalformedArrivalMetadata {
+                run: run.as_str().to_string(),
+            });
+        }
+        Ok(self
+            .pending_requirement_sequences
+            .get(&(
+                CheckpointIdentity::new(run, checkpoint, epoch),
+                artifact_label.to_string(),
+            ))
+            .copied())
     }
 
     pub fn admitted_emission_seq(

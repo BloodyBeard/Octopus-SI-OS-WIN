@@ -1265,6 +1265,7 @@ mod tests {
                 &file,
                 &RunId::new("emitter"),
                 &CheckpointId::new("send"),
+                octopus_runtime::GrantEpoch(0),
                 octopus_ledger::Lamport(0),
                 &InterfaceId::new("system_worker_planner"),
             )
@@ -2161,7 +2162,7 @@ mod tests {
                     &mut refusal_writer, &mut refusal_blobs, embedded.arrival_dedup.clone(), TraceId("missing-reference".into()),
                     InterfaceId::new("system_context"));
                 assert!(emitter.emit_artifact_reference_to_interface(&missing_reference, &RunId::new("run_fast_b"),
-                    &CheckpointId::new("cp"), octopus_ledger::Lamport(0), &InterfaceId::new("system_worker_planner")).await.is_err());
+                    &CheckpointId::new("cp"), octopus_runtime::GrantEpoch(0), octopus_ledger::Lamport(0), &InterfaceId::new("system_worker_planner")).await.is_err());
                 let refused = refusal_writer.read_from(Seq(before_refusal as u64));
                 assert_eq!(refused.len(), 2);
                 assert!(refused.iter().all(|row| row.kind == MovementKind::DeliveryRefused));

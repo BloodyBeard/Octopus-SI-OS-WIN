@@ -990,6 +990,39 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         Ok(())
     }
 
+    fn pending_required_arrival(
+        &self,
+        target: &InterfaceArrivalTarget,
+        artifact_label: &str,
+    ) -> Result<Option<Movement>, ArrivalError> {
+        let seq = {
+            let mut index = self
+                .dedup
+                .lock()
+                .map_err(|_| ArrivalError::Malformed("arrival dedup index mutex poisoned".into()))?;
+            index
+                .catch_up(self.log)
+                .map_err(|error| ArrivalError::Malformed(error.to_string()))?;
+            index
+                .pending_requirement_seq(
+                    &target.run,
+                    &target.checkpoint,
+                    target.epoch.0,
+                    artifact_label,
+                )
+                .map_err(|error| ArrivalError::Malformed(error.to_string()))?
+        };
+        seq.map(|seq| {
+            self.log.read_at(seq).ok_or_else(|| {
+                ArrivalError::Malformed(format!(
+                    "pending required arrival {} disappeared from the ledger",
+                    seq.0
+                ))
+            })
+        })
+        .transpose()
+    }
+
     fn finish_target_edge(
         &mut self,
         edge: PendingArrivalEdge,
@@ -1065,7 +1098,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                     .and_then(MovementMetadata::invocation)
                     != Some(&arrival_metadata)
             {
-                return Err(self.record_target_refusal(ArrivalError::Malformed("pending relay admission differs from its freshly verified checkpoint snapshot".into()), arriving_interface, artifact, &target, source));
+                return Err(self.record_target_refusal(ArrivalError::Malformed("pending admission differs from its freshly verified checkpoint snapshot".into()), arriving_interface, artifact, &target, source));
             }
             pending
         } else {
@@ -1191,7 +1224,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         let mut first_refusal = None;
         let mut seen = BTreeSet::new();
         loop {
-            for edge in edges.drain(..) {
+            for mut edge in edges.drain(..) {
                 if let Err(error) = self.prepare_target_edge(
                     &edge.interface,
                     &edge.artifact,
@@ -1201,6 +1234,21 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                 ) {
                     first_refusal.get_or_insert(error);
                     continue;
+                }
+                if edge.pending.is_none() {
+                    match self.pending_required_arrival(&edge.target, &edge.artifact_label) {
+                        Ok(pending) => edge.pending = pending,
+                        Err(error) => {
+                            first_refusal.get_or_insert(self.record_target_refusal(
+                                error,
+                                &edge.interface,
+                                &edge.artifact,
+                                &edge.target,
+                                edge.source.as_ref(),
+                            ));
+                            continue;
+                        }
+                    }
                 }
                 let runtime = self.runtime.clone();
                 inflight.spawn(async move {
@@ -1307,6 +1355,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                 octopus_runtime::SystemInterfaceEmitter {
                     run: &runtime.run,
                     checkpoint: &runtime.checkpoint,
+                    epoch: GrantEpoch(runtime.epoch),
                 },
             )?;
         let mut records = Vec::with_capacity(targets.len());
@@ -1371,6 +1420,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         artifact_file: &InterfaceArtifactFile,
         emitter_run: &RunId,
         emitter_checkpoint: &CheckpointId,
+        emitter_epoch: GrantEpoch,
         source_lamport: Lamport,
         to_interface: &InterfaceId,
     ) -> Result<SystemInterfaceEmissionOutcome, ArrivalError> {
@@ -1391,6 +1441,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             pinned,
             emitter_run,
             emitter_checkpoint,
+            emitter_epoch,
             source_lamport,
             to_interface,
         )
@@ -1402,6 +1453,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         artifact: &ArtifactRef,
         emitter_run: &RunId,
         emitter_checkpoint: &CheckpointId,
+        emitter_epoch: GrantEpoch,
         source_lamport: Lamport,
         to_interface: &InterfaceId,
     ) -> Result<SystemInterfaceEmissionOutcome, ArrivalError> {
@@ -1419,6 +1471,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             pinned,
             emitter_run,
             emitter_checkpoint,
+            emitter_epoch,
             source_lamport,
             to_interface,
         )
@@ -1430,29 +1483,10 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         pinned: PinnedInterfaceArtifactPayload,
         emitter_run: &RunId,
         emitter_checkpoint: &CheckpointId,
+        emitter_epoch: GrantEpoch,
         source_lamport: Lamport,
         to_interface: &InterfaceId,
     ) -> Result<SystemInterfaceEmissionOutcome, ArrivalError> {
-        let authority = match self.runtime.resolve_system_interface_emission_grant(
-            octopus_runtime::SystemInterfaceEmitter {
-                run: emitter_run,
-                checkpoint: emitter_checkpoint,
-            },
-            &self.interface,
-            to_interface,
-            &pinned.artifact_label,
-        ) {
-            Ok(authority) => authority,
-            Err(error) => {
-                return Err(self.record_delivery_refusal(
-                    ArrivalError::Gate(error),
-                    Endpoint::Interface(self.interface.clone()),
-                    Endpoint::Interface(to_interface.clone()),
-                    Some(pinned.artifact.clone()),
-                ));
-            }
-        };
-        let run_record_hash = authority.run_record.hash.to_hex();
         let prior_admitted_seq = (|| -> Result<Option<u64>, ArrivalError> {
             let mut dedup = self.dedup.lock().map_err(|_| {
                 ArrivalError::Malformed("arrival dedup index mutex poisoned".into())
@@ -1463,7 +1497,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             Ok(dedup.admitted_emission_seq(
                 emitter_run,
                 emitter_checkpoint,
-                authority.epoch.0,
+                emitter_epoch.0,
                 to_interface,
                 &pinned.artifact.id,
             ))
@@ -1503,6 +1537,27 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                 delivered,
             });
         }
+        let authority = match self.runtime.resolve_system_interface_emission_grant(
+            octopus_runtime::SystemInterfaceEmitter {
+                run: emitter_run,
+                checkpoint: emitter_checkpoint,
+                epoch: emitter_epoch,
+            },
+            &self.interface,
+            to_interface,
+            &pinned.artifact_label,
+        ) {
+            Ok(authority) => authority,
+            Err(error) => {
+                return Err(self.record_delivery_refusal(
+                    ArrivalError::Gate(error),
+                    Endpoint::Interface(self.interface.clone()),
+                    Endpoint::Interface(to_interface.clone()),
+                    Some(pinned.artifact.clone()),
+                ));
+            }
+        };
+        let run_record_hash = authority.run_record.hash.to_hex();
         if let Err(error) = pin_run_record_snapshot(self.blobs, emitter_run, &authority.run_record)
         {
             return Err(self.record_delivery_refusal(

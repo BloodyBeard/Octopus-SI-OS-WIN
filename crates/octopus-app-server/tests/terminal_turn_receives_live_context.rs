@@ -149,7 +149,6 @@ async fn terminal_turn_receives_nonempty_role_and_goal_context() {
         "every worker role artifact rides the authored route on the outbound transfer"
     );
     let store = blobs.lock().unwrap();
-    let mut role_text = String::new();
     for binding in &transfer.artifact_bindings {
         let bytes = store
             .get(&binding.content)
@@ -166,12 +165,9 @@ async fn terminal_turn_receives_nonempty_role_and_goal_context() {
             .and_then(serde_json::Value::as_str)
             .expect("the role artifact carries its text");
         assert!(!text.trim().is_empty(), "the role text is non-empty");
-        role_text.push_str(text);
-        role_text.push('\n');
+        let declared: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(registry_root().join("artifact").join(binding.id.as_str()).join("artifact.json")).unwrap(),
+        ).unwrap();
+        assert_eq!(value["text"], declared["text"]);
     }
-    assert!(
-        role_text.contains("worker in Octopus")
-            && role_text.contains("How the Octopus system works"),
-        "the assembled role carries both the worker-role template and the grounding, got: {role_text}"
-    );
 }

@@ -68,6 +68,7 @@ fn arrival_trace_id(arriving_interface: &InterfaceId) -> TraceId {
 struct AttestedEmissionSource {
     run: RunId,
     checkpoint: CheckpointId,
+    epoch: octopus_runtime::GrantEpoch,
     trace: TraceId,
     lamport: Lamport,
 }
@@ -78,9 +79,7 @@ fn attest_emission_source(
     source_interface: &InterfaceId,
 ) -> Result<AttestedEmissionSource, InterfaceArtifactArrivalAdmissionError> {
     let movement = log
-        .read_from(Seq(source_movement_seq))
-        .into_iter()
-        .find(|movement| movement.seq == Seq(source_movement_seq))
+        .read_at(Seq(source_movement_seq))
         .ok_or_else(|| {
             InterfaceArtifactArrivalAdmissionError::Arrival(ArrivalError::Malformed(format!(
                 "interface emission source movement seq {source_movement_seq} does not exist"
@@ -147,6 +146,7 @@ fn attest_emission_source(
     Ok(AttestedEmissionSource {
         run: runtime.run.clone(),
         checkpoint: runtime.checkpoint.clone(),
+        epoch: octopus_runtime::GrantEpoch(runtime.epoch),
         trace: movement.trace,
         lamport: movement.lamport,
     })
@@ -269,6 +269,7 @@ pub async fn admit_system_interface_emission(
             &emission_artifact_file,
             &source.run,
             &source.checkpoint,
+            source.epoch,
             source.lamport,
             to_interface,
         )
@@ -320,6 +321,7 @@ pub async fn admit_system_interface_reference_emission(
             artifact,
             &source.run,
             &source.checkpoint,
+            source.epoch,
             source.lamport,
             to_interface,
         )

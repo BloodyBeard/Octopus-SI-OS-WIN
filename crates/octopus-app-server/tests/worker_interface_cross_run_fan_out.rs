@@ -341,7 +341,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
         .await
         .unwrap();
         let recovered_rows = replay.read_from(Seq(0));
-        let admitted_edges: Vec<_> = recovered_rows
+        let mut admitted_edges: Vec<_> = recovered_rows
             .iter()
             .filter_map(|movement| {
                 if movement.kind != MovementKind::InterfaceArrival {
@@ -353,6 +353,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
                     .then_some((runtime.checkpoint.as_str(), metadata.source_movement_seq))
             })
             .collect();
+        admitted_edges.sort_unstable();
         assert_eq!(
             admitted_edges,
             [("cA", Some(source.seq.0)), ("cA2", Some(source.seq.0))],
@@ -402,6 +403,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
                 source.artifact.as_ref().unwrap(),
                 &RunId::new("run_executor_b"),
                 &CheckpointId::new("cB"),
+                octopus_runtime::GrantEpoch(0),
                 source.lamport,
                 &InterfaceId::new(WORKER_INTERFACE),
             )
@@ -452,6 +454,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
         source.artifact.as_ref().unwrap(),
         &RunId::new("run_executor_b"),
         &CheckpointId::new("cB"),
+        octopus_runtime::GrantEpoch(1),
         source.lamport,
         &InterfaceId::new(WORKER_INTERFACE),
     )
@@ -621,6 +624,22 @@ async fn interface_addressed_reference_emission_preserves_artifact_identity() {
             && movement.to == Endpoint::Interface(InterfaceId::new(WORKER_INTERFACE))
             && movement.artifact.as_ref() == Some(&original)
     }));
+
+    let run_path = artifact_root.join("runs/run_reference_emitter.json");
+    let mut rearmed: serde_json::Value = serde_json::from_slice(&std::fs::read(run_path).unwrap()).unwrap();
+    rearmed["checkpoints"][0]["epoch"] = serde_json::json!(1);
+    write_run_record(&artifact_root, &embedded.runtime, &rearmed);
+    let repeated = admit_system_interface_reference_emission(
+        &embedded, &mut log, &mut blob_handle, &original, source_movement.seq.0,
+        &InterfaceId::new("system_context"), &InterfaceId::new(WORKER_INTERFACE),
+    ).await.unwrap();
+    assert_eq!(repeated.prior_admitted_seq, Some(outcome.admitted_seq()));
+    let unaccepted = captured_boundary_artifact(artifact_root.join("unaccepted"), "memory.fact", br#"{"fact":"new"}"#);
+    let refused = octopus_app_server::admit_system_interface_emission(
+        &embedded, &mut log, &mut blob_handle, &unaccepted, source_movement.seq.0,
+        &InterfaceId::new("system_context"), &InterfaceId::new(WORKER_INTERFACE),
+    ).await.unwrap_err();
+    assert!(refused.to_string().contains("emission belongs to epoch 0"));
 }
 
 /// Per-edge verdicts (notes2 2026-07-08, VERIFIERS.md §5b): every edge of the fan-out gets

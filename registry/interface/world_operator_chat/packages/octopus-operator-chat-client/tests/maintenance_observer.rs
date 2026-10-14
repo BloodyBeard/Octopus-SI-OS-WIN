@@ -631,6 +631,7 @@ mod movement_gate {
                 file,
                 &parent.id,
                 &parent.checkpoints[0].id,
+                parent.checkpoints[0].epoch,
                 octopus_ledger::Lamport(0),
                 &intake.into(),
             )

@@ -445,4 +445,27 @@ async fn passing_verifier_gate_records_the_mark_tick() {
     assert_eq!(mark.run(), arrival.run());
     assert!(arrival.seq < mark.seq && mark.seq < outbound.seq);
     assert!(arrival.lamport < mark.lamport && mark.lamport < outbound.lamport);
+
+    let resumed = support::build_test_spine(SpineRootConfig {
+        registry_root: registry_root(),
+        run: embedded.run.clone(),
+        blobs: blobs.clone(),
+        interface_artifact_root: interface_artifact_root.clone(),
+        run_records_root: interface_artifact_root.join("runs"),
+        ee_instances_root: interface_artifact_root.join("ee_instances"),
+    }).await.unwrap();
+    let mut interrupted = LiveMovementLog::new(InMemoryLog::new());
+    interrupted.append(octopus_ledger::MovementDraft {
+        trace: arrival.trace.clone(), kind: arrival.kind.clone(),
+        from: arrival.from.clone(), to: arrival.to.clone(), artifact: arrival.artifact.clone(),
+        invocation_metadata: arrival.invocation_metadata.clone(), causal_floor: None,
+    });
+    resumed.runtime.reconstruct_spent_checkpoints_from_log(&interrupted).unwrap();
+    admit_interface_artifact_arrival(&resumed, &mut interrupted, &mut blob_handle,
+        &submit, &InterfaceId::new("world_terminal")).await.unwrap();
+    let recovered = interrupted.read_from(octopus_ledger::Seq(0));
+    assert_eq!(recovered.iter().filter(|row| row.kind == MovementKind::InterfaceArrival).count(), 1);
+    resumed.runtime.reconstruct_spent_checkpoints_from_movements(&recovered).unwrap();
+    assert!(admit_interface_artifact_arrival(&resumed, &mut interrupted, &mut blob_handle,
+        &submit, &InterfaceId::new("world_terminal")).await.is_err());
 }

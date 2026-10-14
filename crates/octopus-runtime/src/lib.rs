@@ -132,6 +132,7 @@ impl InterfaceArrivalTarget {
 pub struct SystemInterfaceEmitter<'a> {
     pub run: &'a RunId,
     pub checkpoint: &'a CheckpointId,
+    pub epoch: GrantEpoch,
 }
 
 #[derive(Clone, Debug)]
@@ -1892,6 +1893,18 @@ impl Runtime {
             &record,
             "authorizing an interface-addressed system emission",
         )?;
+        if checkpoint.epoch != emitter.epoch {
+            return Err(RuntimeError::DescriptorDrift {
+                reason: RefusedReason::Policy,
+                detail: format!(
+                    "run '{}' checkpoint '{}' emission belongs to epoch {}, but the active checkpoint uses epoch {}",
+                    emitter.run.as_str(),
+                    emitter.checkpoint.as_str(),
+                    emitter.epoch.0,
+                    checkpoint.epoch.0,
+                ),
+            });
+        }
         if !active_checkpoints
             .iter()
             .any(|active| active.id == *emitter.checkpoint)

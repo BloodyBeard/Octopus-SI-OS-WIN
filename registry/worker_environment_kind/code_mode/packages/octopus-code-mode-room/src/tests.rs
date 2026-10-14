@@ -1328,6 +1328,7 @@ impl FrontierAdmission {
                     octopus_runtime::SystemInterfaceEmitter {
                         run: &source_runtime.run,
                         checkpoint: &source_runtime.checkpoint,
+                        epoch: octopus_runtime::GrantEpoch(source_runtime.epoch),
                     },
                     &InterfaceId::new(DOOR),
                     target,

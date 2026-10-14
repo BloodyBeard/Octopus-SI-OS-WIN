@@ -345,7 +345,7 @@ async fn admitted_publication_seed(
     let seed = file(&plan.seed.label,plan.seed.payload.clone());
     octopus_app_server::InterfaceArtifactArrivalFromInterface::new(&runtime.runtime,&mut log,&mut handle,runtime.arrival_dedup.clone(),
         parent.trace.clone(),parent.checkpoints[0].inbound_interface().unwrap().clone())
-        .emit_artifact_to_interface(&seed,&parent.id,&parent.checkpoints[0].id,Lamport(0),&config.writer.owner).await.unwrap();
+        .emit_artifact_to_interface(&seed,&parent.id,&parent.checkpoints[0].id,parent.checkpoints[0].epoch,Lamport(0),&config.writer.owner).await.unwrap();
     let (mut seed_seq, mut seed_input) = envelope(&ctx,&seed,&config.writer.owner);
     for attempt in 0..if legacy {2} else {1} {
     let current = std::fs::read(&plan.run_write.path).unwrap();
@@ -420,7 +420,7 @@ async fn admitted_publication_seed(
         assert_eq!(ctx.pinned_run_record_bytes(&input).unwrap(),pinned);
         let next = file(&plan.seed.label,json!({"text":"Continue in this same run with the selected publication"}));
         octopus_app_server::InterfaceArtifactArrivalFromInterface::new(&runtime.runtime,&mut log,&mut handle,runtime.arrival_dedup.clone(),parent.trace.clone(),parent.checkpoints[0].inbound_interface().unwrap().clone())
-            .emit_artifact_to_interface(&next,&parent.id,&parent.checkpoints[0].id,Lamport(0),&config.writer.owner).await.unwrap();
+            .emit_artifact_to_interface(&next,&parent.id,&parent.checkpoints[0].id,parent.checkpoints[0].epoch,Lamport(0),&config.writer.owner).await.unwrap();
         (seed_seq,seed_input) = envelope(&ctx,&next,&config.writer.owner);
     } else {
         let handoff = handoff.unwrap();
