@@ -1,22 +1,7 @@
-# Collaboration-mode role artifacts (Plan / Default / Execute / Pair Programming)
+# Collaboration-mode artifacts
 
-Conducted home of the codex `collaboration-mode-templates` markdowns (codex-cut-map §9.6:
-`collab-templates → EE template / System worker-interface pin` — scope presets as AUTHORED DATA + bound role
-artifacts, not compiled `include_str!`). Each `artifact-collab-mode-*` descriptor carries one
-mode's developer-instructions text as an ordinary bound context artifact (`context.reference`),
-exactly like the worker role/grounding artifacts beside it: a "mode" is not a runtime primitive —
-it is a role artifact a binding attaches plus whatever tool-surface narrowing the worker
-pin policy already expresses (Plan mode's "no mutating actions" is a policy fact, not a prompt
-switch the kernel knows about). No new ee_template was minted: the mode text is instruction data;
-scope stays with the existing EE-template and worker-pin descriptors that bind it.
+`artifact-collab-mode-*` contains Plan, Default, Execute, and Pair Programming instructions as bound `context.reference` artifacts. Edit the mode text here. Existing EE-template and System worker-interface bindings select the context and permitted tools; mode text does not create a runtime primitive or grant authority. Plan's mutation restriction must also be enforced by policy.
 
-`{{KNOWN_MODE_NAMES}}` in the default-mode text is a render slot substituted by the interface
-that binds the artifact (context assembly lives in the interface — constitution §4).
+The binding interface substitutes `{{KNOWN_MODE_NAMES}}` in Default mode.
 
-RESIDUAL (cross-front, world_terminal): the compiled crate
-`registry/interface/world_provider_codex/packages/octopus-collab-templates` (4-line
-`include_str!` shim over the same markdowns) is still linked by
-`octopus-tui/src/collaboration_modes.rs` + its Cargo.toml. THIS registry home is now the
-authoritative authored source; when the terminal front re-points its mode presets at bound
-artifacts (or its own folder data), `git rm` the crate and its `templates/`. Do not edit the
-crate's markdowns — edit the artifact descriptors here.
+The terminal consumer in `octopus-tui/src/collaboration_modes.rs` and its Cargo.toml still links `registry/interface/world_provider_codex/packages/octopus-collab-templates`. Until it reads bound artifacts or its own folder data, leave that dependency in place. After the consumer changes, remove the crate and its `templates/`. Do not edit the crate's Markdown templates; these descriptors are the authored source.

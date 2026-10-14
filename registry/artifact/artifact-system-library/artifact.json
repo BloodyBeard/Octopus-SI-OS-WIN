@@ -2,7 +2,7 @@
   "schema_version": 1,
   "label": "context.collection",
   "id": "artifact-system-library",
-  "description": "Reusable knowledge, procedures and capability selections explicitly published for this installation. Bind a separate collection to isolate a project or another audience.",
+  "description": "Reusable knowledge, procedures and capability selections published for this installation. Use a separately bound collection for a private project or audience.",
   "directory": "entries",
   "limits": {
     "max_entries": 4096,

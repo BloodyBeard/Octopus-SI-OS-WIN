@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "framework-authoring",
   "title": "Extend the current environment and compose runs",
-  "description": "Native descriptor authoring, run creation and revision, worker-environment ownership and verification boundaries.",
+  "description": "Create or revise runs and extend capabilities through authorized descriptors and owner packages.",
   "applicability": "Use when a task needs a new tool, MCP connection, interface, worker environment, run, or a change to its current capabilities.",
   "state": "active",
   "scope": {},

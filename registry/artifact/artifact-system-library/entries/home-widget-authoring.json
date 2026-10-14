@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "home-widget-authoring",
   "title": "Create and update Home widgets",
-  "description": "The supported document schema, native and sandbox renderers, exact presentation route and delivery checks.",
+  "description": "Author native or sandbox Home documents and deliver them through a permitted presentation route.",
   "applicability": "Use when asked to display a card, widget, custom view or controls in Home. An ordinary Task may need to return the document through its declared route to Home.",
   "state": "active",
   "scope": {},
