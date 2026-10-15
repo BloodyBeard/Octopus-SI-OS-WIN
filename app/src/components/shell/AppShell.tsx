@@ -209,6 +209,7 @@ export function AppShell({
     [sidebarMotion.animatedSize, titlebarLeftWidth],
     ([sidebar, controls]) => `max(${NAVIGATION_RAIL_WIDTH + Number(sidebar)}px, ${Number(controls)}px)`,
   );
+  const settingsHeaderLeft = useTransform(titlebarLeftWidth, (controls) => `${controls}px`);
   const headerRight = useTransform(
     [secondaryPaneWidth, titlebarRightWidth],
     ([secondary, controls]) => `${Number(secondary) + Number(controls)}px`,
@@ -285,7 +286,7 @@ export function AppShell({
   }, [onPrimaryPaneBlockedChange]);
 
   const style = {
-    "--app-shell-header-left": headerLeft,
+    "--app-shell-header-left": interactionDisabled ? settingsHeaderLeft : headerLeft,
     "--app-shell-header-right": headerRight,
     "--app-shell-primary-topbar-inset": primaryTopbarInset,
     "--app-shell-titlebar-right": titlebarRight,

@@ -34,6 +34,9 @@ type Props = {
   onSlotWidthsChange: (widths: { left: number; right: number }) => void;
 };
 
+const TITLEBAR_CLUSTER_GAP = 8;
+const SETTINGS_CONTEXT: TitlebarSurfaceContext = { glyph: "settings", title: "Settings" };
+
 export type TitlebarSurfaceAction = {
   actionId?: string;
   badge?: boolean;
@@ -86,6 +89,8 @@ export function DesktopTitleBar({
   const controlsRef = useRef<HTMLDivElement>(null);
   const paneActionsRef = useRef<HTMLDivElement>(null);
   const paneActionsRight = useTransform(secondaryPaneWidth, (width) => width + 8);
+  const context = settingsOpen ? SETTINGS_CONTEXT : primaryPaneBlocked ? undefined : surfaceContext;
+  const contextTransfer = settingsOpen ? undefined : onSurfaceContextPointerDown;
 
   useMotionValueEvent(secondaryPaneWidth, "change", (width) => {
     const collapsed = width < 1;
@@ -130,7 +135,7 @@ export function DesktopTitleBar({
       const controlsRect = controls.getBoundingClientRect();
       const paneActionsRect = paneActions.getBoundingClientRect();
       onSlotWidthsChange({
-        left: Math.ceil(controlsRect.right),
+        left: Math.ceil(controlsRect.right) + TITLEBAR_CLUSTER_GAP,
         right: Math.ceil(paneActionsRect.width + 8),
       });
     };
@@ -179,27 +184,21 @@ export function DesktopTitleBar({
           shortcut={formatKeyboardShortcuts(shortcuts.toggle_sidebar ?? [])}
         /> : null}
       </div>
-      {!settingsOpen && !primaryPaneBlocked && surfaceContext ? (
+      {context ? (
         <div className="app-titlebar-surface-context-slot">
           <span aria-hidden="true" className="app-titlebar-surface-context-divider" />
           <span
-            className={`app-titlebar-surface-context${onSurfaceContextPointerDown ? " is-transferable no-drag" : ""}`}
-            onPointerDown={onSurfaceContextPointerDown}
+            className={`app-titlebar-surface-context${contextTransfer ? " is-transferable no-drag" : ""}`}
+            onPointerDown={contextTransfer}
           >
-            {surfaceContext.glyph ? <Glyph className="icon-xs shrink-0" name={surfaceContext.glyph} size={16} /> : null}
-            <span title={surfaceContext.title}>{surfaceContext.title}</span>
-            {surfaceContextAccessory}
+            {context.glyph ? <Glyph className="icon-xs shrink-0" name={context.glyph} size={16} /> : null}
+            <span title={context.title}>{context.title}</span>
+            {settingsOpen ? null : surfaceContextAccessory}
           </span>
         </div>
       ) : null}
       <AnimatePresence initial={false}>
-        {settingsOpen ? (
-          <div className="app-titlebar-settings-title">
-            <span aria-hidden="true" className="app-titlebar-surface-context-divider" />
-            <Glyph className="icon-xs shrink-0" name="settings" size={16} />
-            <span>Settings</span>
-          </div>
-        ) : !primaryPaneBlocked && surfaceTitle ? (
+        {!settingsOpen && !primaryPaneBlocked && surfaceTitle ? (
           <motion.div
             animate={{ opacity: 1 }}
             className="app-titlebar-surface-title-slot"

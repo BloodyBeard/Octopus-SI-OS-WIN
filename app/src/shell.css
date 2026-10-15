@@ -373,9 +373,6 @@
 }
 
 .app-titlebar-secondary-controls { position: absolute; z-index: 2; top: 0; right: 8px; display: flex; height: 100%; align-items: center; pointer-events: auto; -webkit-app-region: no-drag; }
-.app-titlebar-settings-title { display: flex; min-width: 0; align-items: center; gap: 8px; margin: 0 44px 0 6px; color: var(--color-token-foreground); font-size: var(--text-sm, 12px); font-weight: 500; line-height: 18px; }
-.app-titlebar-settings-title > .app-titlebar-surface-context-divider { margin: 0 4px 0 2px; }
-.app-titlebar-settings-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .app-titlebar-controls {
   position: relative;
