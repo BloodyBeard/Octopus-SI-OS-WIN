@@ -62,7 +62,7 @@ const ACTIVE_FRAME_INTERVAL_MS = 1000 / 60;
 const RIPPLE_COUNT = 6;
 const RIPPLE_LIFE_SECONDS = 2.4;
 const FORM_COUNT = 4;
-const FORM_LIFE_SECONDS = 1.25;
+const FORM_LIFE_SECONDS = 0.9;
 const RIPPLE_IGNORED_TARGETS = "button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
@@ -245,10 +245,10 @@ float formationAt(vec2 pixel, float shortestSide, float pixelRatio) {
     float inside = 1.0 - smoothstep(-1.5 * pixelRatio, pixelRatio, boxDistance);
     float rim = exp(-abs(boxDistance) / (1.6 * pixelRatio));
     float islands = valueNoise(pixel / (13.0 * pixelRatio) + vec2(float(index) * 7.3, 3.1));
-    float appear = smoothstep(0.0, 0.42, age - islands * 0.26);
-    float settle = smoothstep(0.34, 0.58, age);
-    float dissolve = 1.0 - smoothstep(0.66, ${FORM_LIFE_SECONDS.toFixed(2)}, age + (islands - 0.5) * 0.3);
-    float halo = exp(-max(boxDistance, 0.0) / (22.0 * pixelRatio)) * (1.0 - inside) * sin(PI * clamp(age / 0.8, 0.0, 1.0));
+    float appear = smoothstep(0.0, 0.32, age - islands * 0.18);
+    float settle = smoothstep(0.26, 0.46, age);
+    float dissolve = 1.0 - smoothstep(0.42, ${FORM_LIFE_SECONDS.toFixed(2)}, age + (islands - 0.5) * 0.2);
+    float halo = exp(-max(boxDistance, 0.0) / (22.0 * pixelRatio)) * (1.0 - inside) * sin(PI * clamp(age / 0.7, 0.0, 1.0));
     total += max(max(inside * appear * mix(0.62, 0.78, settle), rim * settle), halo * 0.3) * dissolve;
   }
   return saturate(total);
@@ -739,13 +739,13 @@ void main() {
   vec2 edgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
   float edgeFade = smoothstep(0.012, 0.09, min(edgeDistance.x, edgeDistance.y));
   float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
-  float formedCoverage = max(inkCoverage, formation);
+  float formedCoverage = max(inkCoverage, formation * mix(1.0, 0.5, lightSurface));
   float formationEdge = exp(-abs(formedCoverage - particleSeed) / 0.045) * step(0.02, formation);
   float particleDensity = smoothstep(particleSeed - 0.06, particleSeed + 0.06, formedCoverage);
   float particleEnvelope = mix(0.45, 0.85, formedCoverage) * max(edgeFade, formation);
   float particleSpark = fineDot * particleDensity * particleEnvelope * max(dustPresence, formation);
   float particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread)
-    * (1.0 + formation * mix(2.4, 1.3, lightSurface) + formationEdge * 0.9);
+    * (1.0 + formation * mix(2.4, 0.35, lightSurface) + formationEdge * 0.9);
 
   float glyphPitch = max(1.15 * u_pixel_ratio, 1.6);
   vec2 glyphSpan = vec2(6.0, 9.0) * glyphPitch;
