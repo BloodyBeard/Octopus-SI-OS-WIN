@@ -214,12 +214,14 @@ void rippleAt(vec2 pixel, float shortestSide, out float wake, out float crest) {
     vec4 ripple = u_ripples[index];
     float age = u_time - ripple.z;
     if (ripple.w <= 0.0 || age < 0.0 || age > ${RIPPLE_LIFE_SECONDS.toFixed(2)}) continue;
-    float travelled = (1.0 - exp(-age * 1.4)) * 1.1;
+    vec2 farthestCorner = max(ripple.xy, u_resolution - ripple.xy);
+    float field = length(farthestCorner) / shortestSide;
+    float travelled = (1.0 - exp(-age * 1.4)) * field * 1.08;
     float distanceFromSource = length(pixel - ripple.xy) / shortestSide;
     float behind = travelled - distanceFromSource;
     float leadingEdge = smoothstep(-0.014, 0.0, behind);
     float life = 1.0 - smoothstep(${(RIPPLE_LIFE_SECONDS * 0.35).toFixed(2)}, ${RIPPLE_LIFE_SECONDS.toFixed(2)}, age);
-    float reach = 1.0 - smoothstep(0.5, 1.15, distanceFromSource);
+    float reach = 1.0 - smoothstep(field * 0.8, field * 1.04, distanceFromSource);
     float strength = leadingEdge * life * reach * ripple.w;
     wake += exp(-max(behind, 0.0) / 0.16) * strength;
     crest += exp(-abs(behind) / 0.024) * strength;
