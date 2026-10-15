@@ -1890,7 +1890,18 @@ mark.octopus-thread-find-active {
   user-select: none;
 }
 
+.composer-editor-root .composer-suggestion-line {
+  display: grid;
+  caret-color: transparent;
+}
+
+.composer-editor-root .composer-suggestion-line > :is(.ProseMirror-trailingBreak, .ProseMirror-separator) {
+  display: none;
+}
+
 .composer-editor-root .composer-suggestion {
+  grid-area: 1 / 1;
+  min-width: 0;
   color: var(--color-token-input-placeholder-foreground);
   opacity: .5;
   user-select: none;

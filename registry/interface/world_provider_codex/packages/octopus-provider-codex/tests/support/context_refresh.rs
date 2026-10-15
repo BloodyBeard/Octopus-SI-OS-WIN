@@ -3,7 +3,9 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
     use octopus_appserver_proto::{
         ApprovalsReviewer, AskForApproval, SandboxPolicy, SessionSource, Thread, ThreadStatus,
     };
-    for (interface_result, native_effect) in [(false, false), (true, false), (false, true)] {
+    for (interface_result, native_effect, quarantined_successor) in [
+        (false, false, false), (true, false, false), (false, true, false), (false, false, true),
+    ] {
         let effect_tool = if native_effect { "artifact.send" } else { "file.write" };
         let temp = tempfile::tempdir().unwrap();
         let socket_path = temp.path().join("refresh.sock");
@@ -22,9 +24,10 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
             let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
             let mut retired = false;
             let mut methods = Vec::new();
-            loop {
-                let rpc = next_test_rpc(&mut socket).await;
-                let octopus_appserver_proto::JSONRPCMessage::Request(request) = rpc else {
+            while let Some(Ok(frame)) = socket.next().await {
+                let tokio_tungstenite::tungstenite::Message::Text(frame) = frame else { continue; };
+                let octopus_appserver_proto::JSONRPCMessage::Request(request) =
+                    serde_json::from_str(&frame).unwrap() else {
                     continue;
                 };
                 methods.push(request.method.clone());
@@ -70,6 +73,13 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                     "turn/interrupt" => {
                         retired = true;
                         send_test_result(&mut socket, request.id, serde_json::json!({})).await;
+                        if quarantined_successor {
+                            socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({
+                                "id":"old-successor-request","method":"item/tool/call","params":{
+                                    "threadId":"old-thread","turnId":"old-turn","callId":"old-successor",
+                                    "namespace":"formed_interfaces","tool":"new-dcall","arguments":{}}
+                            }).to_string().into())).await.unwrap();
+                        }
                         let mut turn = source_thread.turns[0].clone();
                         turn.status = TurnStatus::Interrupted;
                         socket.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::json!({
@@ -126,6 +136,7 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                 };
                 send_test_result(&mut socket, request.id, response).await;
             }
+            methods
         });
         let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
             endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
@@ -321,17 +332,23 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
                 .is_err()
         );
         let admitted_result = result("write-call");
+        let (finished_tx, mut finished_rx) = tokio::sync::oneshot::channel();
         let receive = async {
-            driver
+            let result = driver
                 .refresh_native_context(context, &admitted_result, Some(&original), 7, current())
-                .await
-                .expect("context refresh")
+                .await;
+            let _ = finished_tx.send(());
+            result
         };
         let collect = async {
             let mut phases = Vec::new();
             let mut prepared: Option<CodexContinuityState> = None;
             loop {
-                match rx.recv().await.unwrap() {
+                let emission = tokio::select! {
+                    emission = rx.recv() => emission.unwrap(),
+                    _ = &mut finished_rx, if quarantined_successor => return phases,
+                };
+                match emission {
                     ProviderStreamEmission::ContextBoundary {
                         emissions,
                         admitted,
@@ -445,7 +462,17 @@ async fn changed_native_tools_continue_from_the_exact_completed_effect() {
         })
         .await
         .unwrap();
-        assert!(finished);
+        if quarantined_successor {
+            assert!(matches!(finished, Err(InterfaceDriverError::FailedClosed(message))
+                if message == "retired provider emitted an unadmitted successor effect"));
+            assert_eq!(phases, ["prepared"]);
+            assert_eq!(serde_json::to_value(sink.continuity_snapshot().unwrap().context_refresh.unwrap()).unwrap()["retired"], false);
+            assert!(driver.pending_request(&scope, "tool:write-call").await.unwrap().is_some());
+            driver.shutdown().await.unwrap();
+            assert!(!server.await.unwrap().iter().any(|method| matches!(method.as_str(), "thread/start" | "turn/start")));
+            continue;
+        }
+        assert!(finished.expect("context refresh"));
         assert_eq!(phases, ["prepared", "retired", "ready"]);
         assert!(
             !driver

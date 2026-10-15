@@ -469,11 +469,11 @@ async function boundedAgentPresetFixture(executable) {
     assert.equal(actualRoot.goal, request.root.goal);
     const setupFile = path.join(__dirname, "../electron/workspaceSetup.cjs");
     const check = Function("require", "module", `${await fs.readFile(setupFile, "utf8")}\nreturn {validatePlannedHomeRuns, validatePlannedHomeOwnership, readMutableWorkspaceSidecar};`)(require("node:module").createRequire(setupFile), { exports: {} });
-    const validationRoots = { runsRoot: path.join(home, "state", "runs"), interfaceRoot: path.join(active, "interface"), toolRoot: path.join(active, "tool"), artifactRoot: path.join(active, "artifact") };
-    const planWrites = nativeHomePlan.writes.map(write => ({ ...write, destination: write.filePath, afterDigest: crypto.createHash("sha256").update(write.content).digest("hex") }));
+    const validationRoots = { registryRoot: active, runsRoot: path.join(home, "state", "runs"), interfaceRoot: path.join(active, "interface"), toolRoot: path.join(active, "tool"), artifactRoot: path.join(active, "artifact") };
+    const planWrites = nativeHomePlan.writes.map(write => ({ ...write, destination: write.filePath, expectedBeforeDigest: write.expectedBeforeHash, afterDigest: crypto.createHash("sha256").update(write.content).digest("hex") }));
     const nativeHome = JSON.parse(planWrites.find(write => write.tag === `run:${nativeHomePlan.runId}`).content);
     const records = check.validatePlannedHomeRuns(validationRoots, nativeHomePlan, planWrites, nativeHome);
-    assert.equal(records.length, 5);
+    assert.equal(records.length, 9);
     const writer = records.find(run => run.interface_state && Object.values(run.interface_state).some(state => state.file_writer_target));
     const changedWriter = planWrites.map(write => write.tag === `run:${writer.id}` ? { ...write, content: JSON.stringify({ ...writer, trace: `${writer.trace}:changed` }) } : write);
     assert.throws(() => check.validatePlannedHomeRuns(validationRoots, nativeHomePlan, changedWriter, nativeHome), /declared initial record/);

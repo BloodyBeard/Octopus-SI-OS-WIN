@@ -69,7 +69,9 @@ type Props = {
   onTogglePinnedMessage: (message: ChatRenderMessage) => Promise<void>;
   onPinMessageExcerpt: (message: ChatRenderMessage, selection: { text: string; start: number; end: number }) => Promise<void>;
   onContinueInNewTask: (message: ChatRenderMessage) => void;
-  onEditUserMessage: (message: ChatRenderMessage, editedText?: string) => void;
+  onEditUserMessage: (message: ChatRenderMessage, editedText?: string) => boolean | Promise<boolean>;
+  onSteerUserMessage: (message: ChatRenderMessage, editedText: string) => Promise<boolean>;
+  steerableMessageId: string;
   revealPinnedContext: ChatPinnedContextItem | null;
   responseStreaming: boolean;
   onPinnedContextRevealed: () => void;
@@ -178,12 +180,15 @@ export function ChatMessageList({
   onPinMessageExcerpt,
   onContinueInNewTask,
   onEditUserMessage,
+  onSteerUserMessage,
+  steerableMessageId,
   revealPinnedContext,
   responseStreaming,
   onPinnedContextRevealed,
 }: Props) {
   const stableContinueInNewTask = useStableCallback(onContinueInNewTask);
   const stableEditUserMessage = useStableCallback(onEditUserMessage);
+  const stableSteerUserMessage = useStableCallback(onSteerUserMessage);
   const stableOperatorRequestResponse = useStableCallback(onOperatorRequestResponse);
   const stableOpenAssistantReview = useStableCallback(onOpenAssistantReview);
   const stableOpenAssistantVisualization = useStableCallback(onOpenAssistantVisualization);
@@ -785,6 +790,8 @@ export function ChatMessageList({
                       isLatestTurn={turnIndex === turns.length - 1}
                       onContinueInNewTask={stableContinueInNewTask}
                       onEditUserMessage={stableEditUserMessage}
+                      onSteerUserMessage={stableSteerUserMessage}
+                      steerableMessageId={steerableMessageId}
                       onOperatorRequestResponse={stableOperatorRequestResponse}
                       onOpenAssistantReview={stableOpenAssistantReview}
                       onOpenAssistantVisualization={stableOpenAssistantVisualization}
@@ -1413,6 +1420,8 @@ function ChatTurn({
   isLatestTurn,
   onContinueInNewTask,
   onEditUserMessage,
+  onSteerUserMessage,
+  steerableMessageId,
   onOperatorRequestResponse,
   onOpenAssistantReview,
   onOpenAssistantVisualization,
@@ -1433,6 +1442,8 @@ function ChatTurn({
   isLatestTurn: boolean;
   onContinueInNewTask: Props["onContinueInNewTask"];
   onEditUserMessage: Props["onEditUserMessage"];
+  onSteerUserMessage: Props["onSteerUserMessage"];
+  steerableMessageId: string;
   onOperatorRequestResponse: Props["onOperatorRequestResponse"];
   onOpenAssistantReview: Props["onOpenAssistantReview"];
   onOpenAssistantVisualization: Props["onOpenAssistantVisualization"];
@@ -1495,6 +1506,8 @@ function ChatTurn({
       onPinMessageExcerpt={onPinMessageExcerpt}
       onTogglePinnedMessage={onTogglePinnedMessage}
       onEditUserMessage={onEditUserMessage}
+      onSteerUserMessage={onSteerUserMessage}
+      steerable={message.id === steerableMessageId}
       pinned={Boolean(message.artifactId && pinnedArtifactIds.includes(message.artifactId))}
       pinning={Boolean(message.artifactId && pinningArtifactIds.includes(message.artifactId))}
       taskActionsEnabled={taskActionsEnabled}
@@ -1535,6 +1548,8 @@ function ChatTurn({
               onPinMessageExcerpt={onPinMessageExcerpt}
               onTogglePinnedMessage={onTogglePinnedMessage}
               onEditUserMessage={onEditUserMessage}
+              onSteerUserMessage={onSteerUserMessage}
+              steerable={visibleUser.id === steerableMessageId}
               pinned={Boolean(visibleUser.artifactId && pinnedArtifactIds.includes(visibleUser.artifactId))}
               pinning={Boolean(visibleUser.artifactId && pinningArtifactIds.includes(visibleUser.artifactId))}
               taskActionsEnabled={taskActionsEnabled}
@@ -1636,6 +1651,8 @@ function chatTurnPropsEqual(
     && previous.isLatestTurn === next.isLatestTurn
     && previous.onContinueInNewTask === next.onContinueInNewTask
     && previous.onEditUserMessage === next.onEditUserMessage
+    && previous.onSteerUserMessage === next.onSteerUserMessage
+    && previous.steerableMessageId === next.steerableMessageId
     && previous.onOperatorRequestResponse === next.onOperatorRequestResponse
     && previous.onOpenAssistantReview === next.onOpenAssistantReview
     && previous.onOpenAssistantVisualization === next.onOpenAssistantVisualization
@@ -1655,22 +1672,36 @@ const MemoizedChatTurn = memo(ChatTurn, chatTurnPropsEqual);
 
 type MessageFind = { query: string; offset: number; activeIndex: number };
 
-function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, onTogglePinnedMessage, pinned, pinning, taskActionsEnabled }: {
+function UserMessage({ find, message, onEditUserMessage, onSteerUserMessage, steerable = false, onPinMessageExcerpt, onTogglePinnedMessage, pinned, pinning, taskActionsEnabled }: {
   find?: MessageFind;
   message: ChatRenderMessage;
   onEditUserMessage: Props["onEditUserMessage"];
+  onSteerUserMessage: Props["onSteerUserMessage"];
+  steerable?: boolean;
   onTogglePinnedMessage: (message: ChatRenderMessage) => Promise<void>;
   onPinMessageExcerpt: Props["onPinMessageExcerpt"];
   pinned: boolean;
   pinning: boolean;
   taskActionsEnabled: boolean;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editIntent, setEditIntent] = useState<"steer" | "new-task" | null>(null);
   const [editText, setEditText] = useState(message.text);
+  const [editPending, setEditPending] = useState(false);
+  const [editError, setEditError] = useState("");
+  const [editExpired, setEditExpired] = useState(false);
+  const editRequestRef = useRef(0);
   useEffect(() => {
-    setEditing(false);
+    editRequestRef.current += 1;
+    setEditIntent(null);
     setEditText(message.text);
-  }, [message.id, message.text]);
+    setEditPending(false);
+    setEditError("");
+    setEditExpired(false);
+  }, [message.id]);
+  useEffect(() => {
+    if (!editIntent) setEditText(message.text);
+    if (editIntent === "steer" && !steerable) setEditExpired(true);
+  }, [editIntent, message.text, steerable]);
   const steering = message.eventKind === "steering";
   const steeringStatus = typeof message.eventData?.steering_status === "string"
     ? message.eventData.steering_status
@@ -1679,11 +1710,26 @@ function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, on
     ? "Message included in the current turn"
     : steeringStatus === "acknowledged" ? "Message accepted; waiting to enter the current turn"
     : steeringStatus === "failed" ? "Message delivery could not be confirmed" : "Message delivery pending";
-  if (editing && !steering) {
-    const submitEdit = () => {
+  if (editIntent && !steering) {
+    const unavailable = editIntent === "steer" && (editExpired || !steerable);
+    const submitEdit = async () => {
       const value = editText.trim();
-      if (!value) return;
-      onEditUserMessage(message, value);
+      if (!value || editPending || unavailable) return;
+      const request = ++editRequestRef.current;
+      setEditPending(true);
+      setEditError("");
+      try {
+        const accepted = await (editIntent === "steer"
+          ? onSteerUserMessage(message, value)
+          : onEditUserMessage(message, value));
+        if (request !== editRequestRef.current) return;
+        if (accepted) setEditIntent(null);
+        else setEditError("This edit was not confirmed. Your text has been kept.");
+      } catch {
+        if (request === editRequestRef.current) setEditError("This edit was not confirmed. Your text has been kept.");
+      } finally {
+        if (request === editRequestRef.current) setEditPending(false);
+      }
     };
     return (
       <div className="group flex w-full flex-col items-end justify-end gap-1">
@@ -1691,30 +1737,37 @@ function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, on
           <textarea
             aria-label="Edit operator message"
             autoFocus
+            readOnly={editPending}
             onChange={(event) => setEditText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 event.preventDefault();
-                setEditing(false);
+                if (editPending) return;
+                setEditIntent(null);
                 setEditText(message.text);
                 return;
               }
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
                 event.preventDefault();
-                submitEdit();
+                void submitEdit();
               }
             }}
             value={editText}
           />
-          {message.attachments?.length ? (
+          {editIntent === "new-task" && message.attachments?.length ? (
             <div className="chat-user-message-editor-note">Original attachment bytes are not projected. Reattach them in the new task before sending.</div>
           ) : null}
+          {unavailable || editError ? <div className="chat-user-message-editor-note" role="alert">
+            {unavailable ? "This reply is no longer accepting edits. Your text has been kept." : editError}
+          </div> : null}
           <div className="chat-user-message-editor-actions">
-            <OcButton onClick={() => {
-              setEditing(false);
+            <OcButton disabled={editPending} onClick={() => {
+              setEditIntent(null);
               setEditText(message.text);
             }} size="xs" variant="ghost">Cancel</OcButton>
-            <OcButton disabled={!editText.trim()} onClick={submitEdit} size="xs" variant="primary">Continue in new task</OcButton>
+            <OcButton disabled={!editText.trim() || editPending || unavailable} onClick={() => void submitEdit()} size="xs" variant="primary">
+              {editPending ? "Sending…" : editIntent === "steer" ? "Send to current reply" : "Continue in new task"}
+            </OcButton>
           </div>
         </div>
       </div>
@@ -1753,7 +1806,13 @@ function UserMessage({ find, message, onEditUserMessage, onPinMessageExcerpt, on
       ) : null}
       <MessageActions
         message={message}
-        onEditUserMessage={() => setEditing(true)}
+        editLabel={steerable ? "Edit current reply" : "Edit in new task"}
+        onEditUserMessage={() => {
+          setEditIntent(steerable ? "steer" : "new-task");
+          setEditText(message.text);
+          setEditError("");
+          setEditExpired(false);
+        }}
         onTogglePinnedMessage={onTogglePinnedMessage}
         pinned={pinned}
         pinning={pinning}
@@ -3310,6 +3369,7 @@ function MessageActions({
   isLatestTurn = true,
   onContinueInNewTask,
   onEditUserMessage,
+  editLabel = "Edit in new task",
   onTogglePinnedMessage,
   pinned,
   pinning,
@@ -3320,6 +3380,7 @@ function MessageActions({
   isLatestTurn?: boolean;
   onContinueInNewTask?: Props["onContinueInNewTask"];
   onEditUserMessage?: (message: ChatRenderMessage) => void;
+  editLabel?: string;
   onTogglePinnedMessage: (message: ChatRenderMessage) => Promise<void>;
   pinned: boolean;
   pinning: boolean;
@@ -3340,7 +3401,7 @@ function MessageActions({
       {taskActionsEnabled && user && message.eventKind !== "steering" && !message.pending ? (
         <MessageActionButton
           glyph="edit"
-          label="Edit in new task"
+          label={editLabel}
           onClick={() => onEditUserMessage?.(message)}
         />
       ) : null}

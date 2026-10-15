@@ -1156,6 +1156,9 @@ export function useChatWorkspace(
     && activeRun?.turnOpen
     && activeRun.chatInterfaceId,
   );
+  const steerableMessageId = latestSteerableUserMessageId(renderedMessages, activeRunId, canSteer);
+  const steerableMessageIdRef = useRef(steerableMessageId);
+  steerableMessageIdRef.current = steerableMessageId;
   const activeRunSubmitAllowed = activeRun?.writable && canQueueOnActiveRun;
   const canSendQueued = Boolean(enabled && runtimeReady && queueReady && activeRun?.writable && !loadingMessages
     && !activeRunSteeringPending && !applicationMutationPending
@@ -1464,20 +1467,32 @@ export function useChatWorkspace(
     setError("");
   }
 
-  function editUserMessageInNewTask(message: ChatRenderMessage, editedText?: string) {
+  async function steerUserMessage(message: ChatRenderMessage, editedText: string): Promise<boolean> {
+    const nextText = editedText.trim();
+    if (!nextText || !canSteer || message.id !== steerableMessageIdRef.current
+      || message.runId !== activeRunIdRef.current || message.role !== "user" || message.eventKind !== "message"
+      || message.pending || message.error) {
+      setError("This reply is no longer accepting edits. Your text has been kept.");
+      return false;
+    }
+    return submitSteeringMessage({ attachments: [], fromComposer: false,
+      editedMessageId: message.id, runKey: chatDraftKey(message.runId), text: nextText });
+  }
+
+  function editUserMessageInNewTask(message: ChatRenderMessage, editedText?: string): boolean {
     if (submitLockRef.current.has(chatDraftKey(""))) {
       setError("A new task is still being authored. Wait for its run identity before branching again.");
-      return;
+      return false;
     }
     const nextText = (editedText ?? message.text).trim();
     if (message.role !== "user" || message.eventKind === "steering" || !nextText) {
       setError("Only a completed operator message can be edited into a new task.");
-      return;
+      return false;
     }
     const sourceIndex = messages.findIndex((candidate) => candidate.id === message.id);
     if (sourceIndex < 0) {
       setError("The operator message is no longer present in the projected run.");
-      return;
+      return false;
     }
     const previous = [...messages.slice(0, sourceIndex)].reverse().find((candidate) => (
       candidate.role === "assistant"
@@ -1530,6 +1545,7 @@ export function useChatWorkspace(
       ? ""
       : "The source task does not identify one current Agent. Choose an Agent before sending the edited task.";
     setError([agentWarning, attachmentWarning].filter(Boolean).join(" "));
+    return true;
   }
 
   async function togglePinnedMessage(message: ChatRenderMessage) {
@@ -2782,7 +2798,7 @@ export function useChatWorkspace(
 
   async function submitSteeringMessage(input: {
     attachments: ChatAttachment[]; fromComposer: boolean; messageId?: string;
-    recoverPreparedMessage?: boolean; queueId?: string; runKey: string; text: string;
+    recoverPreparedMessage?: boolean; queueId?: string; runKey: string; text: string; editedMessageId?: string;
   }): Promise<boolean> {
     const run = activeRun;
     if (!queueOwner.active || !queueReady || !enabled || !runtimeReady || !canSteer || !run
@@ -2816,7 +2832,8 @@ export function useChatWorkspace(
       }
       const bridgeAttachments = await Promise.all(claimed.attachments.map(fileToBridgeAttachment));
       const status = (await loadChatRunStatuses([run.runId])).find((item) => item.runId === run.runId);
-      if (!deliveryStillAllowed(owner, run.runId) || !status?.turnOpen) {
+      if (!deliveryStillAllowed(owner, run.runId) || !status?.turnOpen
+        || input.editedMessageId && input.editedMessageId !== steerableMessageIdRef.current) {
         await queueStore.settle(queueId, owner, "failed", "The task stopped accepting steering before submission. The message was not sent.");
         return false;
       }
@@ -2985,6 +3002,8 @@ export function useChatWorkspace(
     deleteQueuedTurn: (...args: Parameters<typeof deleteQueuedTurn>) => deleteQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
     editQueuedTurn: (...args: Parameters<typeof editQueuedTurn>) => editQueuedTurn(...args).catch((failure) => setError(formatRuntimeError(failure))),
     editUserMessageInNewTask,
+    steerUserMessage,
+    steerableMessageId,
     endpoint,
     eeId,
     error: error || providerUsageError,
@@ -3142,6 +3161,13 @@ function clientAgentCapabilitySelectionFailure(
   const driverName = driverNames.find((name) => !agent.driverNames.includes(name));
   if (driverName) return `Worker Environment '${driverName}' is not provided by ${agent.name}.`;
   return taskCapabilitySelectionFailure(worker, applicationIds, driverNames, accessMode);
+}
+
+function latestSteerableUserMessageId(messages: readonly ChatRenderMessage[], runId: string, canSteer: boolean): string {
+  if (!canSteer || !runId) return "";
+  const latest = [...messages].reverse().find((message) => message.role === "user" && message.eventKind !== "steering");
+  return latest?.runId === runId && latest.eventKind === "message" && !latest.pending && !latest.error
+    && latest.eventData?._activity_turn_anchor !== true ? latest.id : "";
 }
 
 function operatorRequestResponseKind(message: ChatRenderMessage): "approval" | "elicitation" | "user_input" | null {

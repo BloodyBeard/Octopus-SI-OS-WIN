@@ -365,6 +365,7 @@ export function AgentPresetDialog({ busy = false, contexts, initialProjectEeId, 
             <Glyph className="mt-0.5 shrink-0 text-token-description-foreground" name="lightbulb" size={17} />
             <p className="m-0 text-sm leading-5 text-token-description-foreground">
               These defaults are applied only when a new task starts. Applications, context, and Worker Environments can still be removed before sending.
+              {" "}Choose Project access or Full access separately for each task in its composer.
             </p>
           </aside>
 

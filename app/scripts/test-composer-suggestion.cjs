@@ -45,10 +45,14 @@ test("ghost text stays outside the draft; acceptance consumes the first Enter, n
     assert.equal(view.state.doc.textContent, "");
     assert.equal(view.dom.querySelector(".composer-suggestion").textContent, "Покажи, как это работает.");
     assert.equal(view.dom.querySelector(".composer-suggestion").getAttribute("aria-hidden"), "true");
+    assert.ok(view.dom.querySelector("p.composer-suggestion-line > .composer-suggestion"));
+    assert.match(view.dom.getAttribute("aria-description"), /Покажи, как это работает/);
     press("Enter");
     assert.equal(submits, 0);
     assert.equal(view.state.doc.textContent, "Покажи, как это работает.");
     assert.equal(visibleComposerSuggestion(view.state), null);
+    assert.equal(view.dom.querySelector(".composer-suggestion-line"), null);
+    assert.equal(view.dom.hasAttribute("aria-description"), false);
     press("Enter");
     assert.equal(submits, 1);
     view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
@@ -66,6 +70,18 @@ test("ghost text stays outside the draft; acceptance consumes the first Enter, n
       assert.equal(view.state.doc.textContent, "Ещё вариант");
       view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
     }
+    set("dismiss", "A suggestion\nwith multiple lines");
+    view.dom.querySelector(".composer-suggestion").dispatchEvent(new dom.window.MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+    assert.equal(view.state.doc.textContent, "");
+    assert.equal(visibleComposerSuggestion(view.state), null);
+    assert.equal(view.dom.querySelector(".composer-suggestion-line"), null);
+    assert.equal(view.dom.hasAttribute("aria-description"), false);
+    assert.equal(document.activeElement, view.dom);
+    set("dismiss", "A suggestion\nwith multiple lines");
+    assert.equal(visibleComposerSuggestion(view.state), null);
+    view.dispatch(view.state.tr.insertText("My own message"));
+    assert.equal(view.state.doc.textContent, "My own message");
+    view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
     set("ime", "Не вводить за пользователя");
     view.dom.dispatchEvent(new dom.window.CompositionEvent("compositionstart", { bubbles: true }));
     assert.equal(visibleComposerSuggestion(view.state), null);

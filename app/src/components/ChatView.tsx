@@ -603,6 +603,8 @@ export function ChatView({
               toolPresentations={chat.toolPresentations}
               onContinueInNewTask={chat.continueInNewTask}
               onEditUserMessage={chat.editUserMessageInNewTask}
+              onSteerUserMessage={chat.steerUserMessage}
+              steerableMessageId={chat.steerableMessageId}
               onOperatorRequestResponse={chat.respondToOperatorRequest}
               onOpenAssistantReview={openAssistantReview}
               onOpenAssistantVisualization={openAssistantVisualization}

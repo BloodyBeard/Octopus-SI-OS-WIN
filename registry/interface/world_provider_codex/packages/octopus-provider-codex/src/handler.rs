@@ -886,6 +886,7 @@ pub(crate) struct InterruptedTurnDrainEvidence {
     pub(crate) disposition: &'static str,
     pub(crate) provider_error: Option<serde_json::Value>,
     native_terminal_events: Vec<serde_json::Value>,
+    source_continuity: Option<CodexContinuityState>,
 }
 
 impl InterruptedTurnDrainEvidence {
@@ -894,6 +895,7 @@ impl InterruptedTurnDrainEvidence {
             disposition,
             provider_error,
             native_terminal_events: Vec::new(),
+            source_continuity: None,
         }
     }
 }
@@ -907,6 +909,8 @@ pub(crate) struct InterruptedTurnDrainState {
     thread_id: String,
     turn_id: String,
     provider_error: Option<serde_json::Value>,
+    retained_events: Vec<serde_json::Value>,
+    deferred_events: Vec<AppServerEvent>,
 }
 
 impl InterruptedTurnDrainState {
@@ -915,18 +919,16 @@ impl InterruptedTurnDrainState {
             thread_id,
             turn_id,
             provider_error: None,
+            retained_events: Vec::new(),
+            deferred_events: Vec::new(),
         }
     }
 
     pub(crate) fn observe(&mut self, event: Option<AppServerEvent>) -> InterruptedDrainDecision {
         match event {
             Some(AppServerEvent::ServerNotification(notification)) => {
-                let matches = match server_notification_matches_turn(
-                    &notification,
-                    &self.thread_id,
-                    &self.turn_id,
-                ) {
-                    Ok(matches) => matches,
+                let frame = match serde_json::to_value(&notification) {
+                    Ok(frame) => frame,
                     Err(error) => {
                         return InterruptedDrainDecision::Complete(
                             InterruptedTurnDrainEvidence::transport(
@@ -936,7 +938,8 @@ impl InterruptedTurnDrainState {
                         );
                     }
                 };
-                if !matches {
+                if !native_frame_matches_turn(&frame, &self.thread_id, &self.turn_id) {
+                    self.deferred_events.push(AppServerEvent::ServerNotification(notification));
                     return InterruptedDrainDecision::Continue;
                 }
                 match notification {
@@ -957,26 +960,36 @@ impl InterruptedTurnDrainState {
                     ServerNotification::TurnCompleted(turn)
                         if turn.thread_id == self.thread_id && turn.turn.id == self.turn_id =>
                     {
+                        if !self.retained_events.is_empty() { self.retained_events.push(frame); }
                         let disposition = if self.provider_error.is_some() {
                             "turn_completed_after_provider_error"
                         } else {
                             "turn_completed"
                         };
-                        InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                        InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence {
                             disposition,
-                            self.provider_error.take(),
-                        ))
+                            provider_error: self.provider_error.take(),
+                            native_terminal_events: std::mem::take(&mut self.retained_events),
+                            source_continuity: None,
+                        })
                     }
                     _ => InterruptedDrainDecision::Continue,
                 }
             }
             Some(AppServerEvent::ServerRequest(request)) => {
-                InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
-                    "unexpected_server_request",
-                    Some(serde_json::json!({
-                        "method": server_request_method(&request),
-                    })),
-                ))
+                match serde_json::to_value(&request) {
+                    Ok(frame) if native_frame_matches_turn(&frame, &self.thread_id, &self.turn_id) => {
+                        self.retained_events.push(serde_json::json!({"quarantined_server_request": frame}));
+                        InterruptedDrainDecision::Continue
+                    }
+                    Ok(_) => {
+                        self.deferred_events.push(AppServerEvent::ServerRequest(request));
+                        InterruptedDrainDecision::Continue
+                    }
+                    Err(error) => InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
+                        "protocol_drift", Some(serde_json::json!({"error":error.to_string()})),
+                    )),
+                }
             }
             Some(AppServerEvent::UnknownServerNotification(notification)) => {
                 InterruptedDrainDecision::Complete(InterruptedTurnDrainEvidence::transport(
@@ -1273,6 +1286,17 @@ impl CodexTurnOutput {
             self.value["native_terminal_events"] = serde_json::Value::Array(events);
         }
         self
+    }
+
+    fn with_interrupted_drain(mut self, drain: InterruptedTurnDrainEvidence) -> Result<Self, InterfaceDriverError> {
+        self = self.with_native_terminal_events(drain.native_terminal_events);
+        if let Some(source) = drain.source_continuity {
+            self.value["native_terminal_source_continuity"] = serde_json::to_value(source)
+                .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+            self.value["result_origin"] = serde_json::json!("interrupted_turn_completion");
+            self.value["terminal_evidence_source"] = serde_json::json!("thread/read");
+        }
+        Ok(self)
     }
 
     fn approval_request(
@@ -1653,6 +1677,10 @@ impl NativeTerminalEvidence {
 
     fn outputs(&self, events: &[serde_json::Value]) -> Result<Vec<CodexTurnOutput>, InterfaceDriverError> {
         let turn = self.exact_turn(&self.thread_id, None)?;
+        let status = serde_json::to_value(&turn.status).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
+        if events.iter().any(|frame| frame["method"] == "turn/completed" && frame.pointer("/params/turn/status") != Some(&status)) {
+            return Err(InterfaceDriverError::FailedClosed("native terminal notification conflicts with the exact thread/read evidence".into()));
+        }
         let mut outputs = Vec::new();
         let finals = turn.items.iter().filter_map(|item| match item {
             ThreadItem::AgentMessage { id, text, phase: Some(MessagePhase::FinalAnswer) } => Some((id, text)),
@@ -7555,7 +7583,7 @@ impl CodexAppServerInterfaceDriver {
                     pending.turn_id.clone(),
                     result.ok,
                     context.source_artifact,
-                ).with_native_terminal_events(drain.native_terminal_events),
+                ).with_interrupted_drain(drain)?,
             )?;
             return Ok(true);
         }
@@ -7774,7 +7802,7 @@ impl CodexAppServerInterfaceDriver {
                     pending.turn_id.clone(),
                     result.ok,
                     context.source_artifact,
-                ).with_native_terminal_events(drain.native_terminal_events),
+                ).with_interrupted_drain(drain)?,
             )?;
             return Ok(true);
         }
@@ -8099,6 +8127,7 @@ impl CodexAppServerInterfaceDriver {
                 disposition: "native_terminal_read_confirmed",
                 provider_error: None,
                 native_terminal_events: events,
+                source_continuity: None,
             });
         }
         self.remove_pending_request(context.scope, &pending).await?;
@@ -8106,10 +8135,31 @@ impl CodexAppServerInterfaceDriver {
         let mut state =
             InterruptedTurnDrainState::new(pending.thread_id.clone(), pending.turn_id.clone());
         let mut client = self.client.lock().await;
+        let handle = client.request_handle();
         loop {
             match state.observe(client.next_event().await) {
                 InterruptedDrainDecision::Continue => {}
-                InterruptedDrainDecision::Complete(evidence) => return Ok(evidence),
+                InterruptedDrainDecision::Complete(mut evidence) => {
+                    client.restore_ready_events(std::mem::take(&mut state.deferred_events));
+                    evidence.native_terminal_events.append(&mut state.retained_events);
+                    drop(client);
+                    if !evidence.native_terminal_events.is_empty() {
+                        let terminal = read_exact_terminal_turn(
+                            &handle, &self.next_request_id, &pending.thread_id, &pending.turn_id,
+                        ).await.map_err(InterfaceDriverError::FailedClosed)?
+                            .ok_or_else(|| InterfaceDriverError::FailedClosed("drained requests have no exact closed native turn".into()))?;
+                        evidence.native_terminal_events.extend(take_native_terminal_events(
+                            &mut *self.client.lock().await, &terminal, &pending.thread_id, &pending.turn_id,
+                        )?);
+                        let mut continuity = context.sink.continuity_snapshot()
+                            .ok_or_else(|| InterfaceDriverError::FailedClosed("drained requests lost their interrupted continuity".into()))?;
+                        terminal.exact_turn(&continuity.thread_id, Some(&pending.turn_id))?;
+                        evidence.source_continuity = Some(continuity.clone());
+                        continuity.native_terminal = Some(terminal);
+                        context.sink.set_continuity(continuity);
+                    }
+                    return Ok(evidence);
+                }
             }
         }
     }
@@ -12523,21 +12573,24 @@ pub(crate) fn interrupted_result_closure_payload(
     let payload: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("provider closure payload is malformed: {error}"))?;
     let native_source;
-    let interrupted = if interrupted.pending.is_some() && interrupted.interrupted_pending.is_none() {
+    let ordinary = interrupted.pending.is_some() && interrupted.interrupted_pending.is_none();
+    let enriched = interrupted.native_terminal.is_none()
+        && payload.get("result_origin").and_then(serde_json::Value::as_str) == Some("interrupted_turn_completion");
+    let interrupted = if ordinary || enriched {
         if payload.get("native_terminal_source_continuity") != Some(&serde_json::to_value(interrupted).map_err(|error| error.to_string())?)
-            || payload.get("result_origin").and_then(serde_json::Value::as_str) != Some("native_turn_completion")
+            || payload.get("result_origin").and_then(serde_json::Value::as_str) != Some(if ordinary { "native_turn_completion" } else { "interrupted_turn_completion" })
             || payload.get("terminal_evidence_source").and_then(serde_json::Value::as_str) != Some("thread/read")
         {
-            return Err("control-free result closure changed its original ordinary source continuity".into());
+            return Err("native result closure changed its original source continuity".into());
         }
-        let settled = parse_codex_continuity(payload.get(CODEX_CONTINUITY_FIELD).ok_or("control-free result has no settled continuity")?, &interrupted.provider_interface, &interrupted.run)
+        let settled = parse_codex_continuity(payload.get(CODEX_CONTINUITY_FIELD).ok_or("native result has no settled continuity")?, &interrupted.provider_interface, &interrupted.run)
             .map_err(|error| error.to_string())?;
-        let terminal = settled.native_terminal.ok_or("control-free result closure has no exact native terminal proof")?;
-        terminal.exact_turn(&interrupted.thread_id, interrupted.pending.as_ref().map(pending_turn_id)).map_err(|error| error.to_string())?;
-        let (retired, retained) = interrupted_continuity(Some(interrupted.clone()))?;
-        if !retained { return Err("control-free closure has no exact external pending effect".into()); }
-        let mut retired = retired.ok_or("control-free closure lost its source continuity")?;
-        retired.context_generation = interrupted.context_generation;
+        let terminal = settled.native_terminal.ok_or("native result closure has no exact terminal proof")?;
+        let pending = if ordinary { interrupted.pending.as_ref() } else { interrupted.interrupted_pending.as_ref() }
+            .filter(|pending| interrupted_pending_has_external_result(pending)).ok_or("native result closure has no exact external pending effect")?;
+        terminal.exact_turn(&interrupted.thread_id, Some(pending_turn_id(pending))).map_err(|error| error.to_string())?;
+        let mut retired = interrupted.clone();
+        if ordinary { retired.interrupted_pending = retired.pending.take(); }
         retired.native_terminal = Some(terminal);
         native_source = retired;
         &native_source
@@ -12609,6 +12662,12 @@ pub(crate) fn interrupted_result_closure_payload(
         interrupted.run.as_str(),
     )
     .map_err(|error| error.to_string())?;
+    if enriched {
+        let mut expected = interrupted.clone();
+        expected.interrupted_pending = None;
+        expected.context_generation = closure.context_generation;
+        if closure != expected { return Err("native terminal enrichment changed the interrupted source contract".into()); }
+    }
     let retained = retained_native_output_payloads(&payload, context_output_labels)?;
     let minimum_generation = interrupted
         .context_generation
@@ -19619,7 +19678,7 @@ while IFS= read -r _; do :; done
         );
         assert_eq!(
             interrupted_closure_payload.pointer("/codex_continuity/context_generation"),
-            Some(&serde_json::json!(9))
+            Some(&serde_json::json!(interrupted.context_generation + 2))
         );
         assert!(interrupted_output_rx.recv().await.is_none());
 
@@ -22217,6 +22276,7 @@ while IFS= read -r _; do :; done
         use octopus_appserver_proto::{Thread, ThreadStatus, SessionSource};
         for (with_stop, cold, mode) in [
             (true, false, "completed"), (true, false, "completed_no_events"),
+            (true, false, "drained"), (true, false, "drained_conflict"),
             (true, true, "completed_no_events"), (true, true, "wrong_thread"), (true, true, "live"),
             (true, false, "wrong_thread"), (true, false, "wrong_turn"), (true, false, "absent"),
             (true, false, "live"), (true, false, "read_error"), (true, false, "wrong_item_turn"),
@@ -22224,7 +22284,8 @@ while IFS= read -r _; do :; done
             (false, false, "wrong_thread"), (false, false, "wrong_turn"), (false, false, "absent"),
             (false, false, "live"), (false, false, "read_error"), (false, false, "wrong_item_turn"),
         ] {
-            let terminal_case = matches!(mode, "completed" | "completed_no_events");
+            let draining = matches!(mode, "drained" | "drained_conflict");
+            let terminal_case = matches!(mode, "completed" | "completed_no_events") || draining;
             let temp = tempfile::tempdir().unwrap();
             let socket_path = temp.path().join("terminal.sock");
             let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
@@ -22233,7 +22294,7 @@ while IFS= read -r _; do :; done
                 items: vec![ThreadItem::Reasoning { id: "reason-a".into(), summary: vec!["Actual progress".into()], content: vec![] },
                     ThreadItem::AgentMessage { id: "final-a".into(), text: "Already produced native answer.".into(), phase: Some(MessagePhase::FinalAnswer) }],
                 items_view: TurnItemsView::Full,
-                status: if mode == "live" { TurnStatus::InProgress } else { TurnStatus::Completed },
+                status: match mode { "live" => TurnStatus::InProgress, "drained" | "drained_conflict" => TurnStatus::Interrupted, _ => TurnStatus::Completed },
                 error: None, started_at: Some(10), completed_at: Some(20), duration_ms: Some(10_000),
             };
             let thread = Thread {
@@ -22253,7 +22314,21 @@ while IFS= read -r _; do :; done
                     let octopus_appserver_proto::JSONRPCMessage::Request(stop) = next_test_rpc(&mut socket).await else { panic!("interrupt") };
                     assert_eq!(stop.method, "turn/interrupt");
                     assert_eq!(stop.params.as_ref().unwrap()["turnId"], "turn-a");
-                    send_test_error(&mut socket, stop.id, if terminal_case { "interrupt refused" } else { "no active turn to interrupt" }).await;
+                    if draining { send_test_result(&mut socket, stop.id, serde_json::json!({})).await; }
+                    else { send_test_error(&mut socket, stop.id, if terminal_case { "interrupt refused" } else { "no active turn to interrupt" }).await; }
+                }
+                if mode == "completed" || draining {
+                    let mut notification_turn = turn.clone();
+                    if mode == "drained_conflict" { notification_turn.status = TurnStatus::Failed; }
+                    for frame in [
+                        serde_json::json!({"method":"turn/completed","params":{"threadId":"other-thread","turn":turn}}),
+                        serde_json::json!({"id":"abandoned","method":"item/tool/call","params":{"threadId":"thread-a","turnId":"turn-a","callId":"abandoned","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"never execute"}}}),
+                        serde_json::json!({"id":"abandoned-two","method":"item/tool/call","params":{"threadId":"thread-a","turnId":"turn-a","callId":"abandoned-two","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"never execute"}}}),
+                        serde_json::json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":turn.items[1],"completedAtMs":20_000}}),
+                        serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":notification_turn}}),
+                    ] {
+                        socket.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await.unwrap();
+                    }
                 }
                 let octopus_appserver_proto::JSONRPCMessage::Request(read) = next_test_rpc(&mut socket).await else { panic!("thread/read") };
                 assert_eq!(read.method, "thread/read");
@@ -22261,16 +22336,6 @@ while IFS= read -r _; do :; done
                 if mode == "read_error" {
                     send_test_error(&mut socket, read.id, "read unavailable").await;
                 } else {
-                    if mode == "completed" {
-                        for frame in [
-                            serde_json::json!({"method":"turn/completed","params":{"threadId":"other-thread","turn":turn}}),
-                            serde_json::json!({"id":"abandoned","method":"item/tool/call","params":{"threadId":"thread-a","turnId":"turn-a","callId":"abandoned","namespace":"formed_interfaces","tool":"coder-dexec","arguments":{"command":"never execute"}}}),
-                            serde_json::json!({"method":"item/completed","params":{"threadId":"thread-a","turnId":"turn-a","item":turn.items[1],"completedAtMs":20_000}}),
-                            serde_json::json!({"method":"turn/completed","params":{"threadId":"thread-a","turn":turn}}),
-                        ] {
-                            socket.send(tokio_tungstenite::tungstenite::Message::Text(frame.to_string().into())).await.unwrap();
-                        }
-                    }
                     send_test_result(&mut socket, read.id, serde_json::to_value(ThreadReadResponse { thread }).unwrap()).await;
                     if mode != "wrong_thread" {
                         let mut metadata = serde_json::to_value(&turn).unwrap();
@@ -22374,8 +22439,8 @@ while IFS= read -r _; do :; done
             }
             if terminal_case || !with_stop {
                 let recovered = if let Some(applied) = applied {
-                    assert_eq!(applied.result.detail["already_terminal"], true);
-                    assert!(applied.result.detail.get("interrupted").is_none());
+                    if draining { assert_eq!(applied.result.detail["interrupted"], true); }
+                    else { assert_eq!(applied.result.detail["already_terminal"], true); assert!(applied.result.detail.get("interrupted").is_none()); }
                     let recovered = applied.result.continuity.unwrap();
                     assert_eq!(recovered.interrupted_pending, original.pending);
                     applied.durable_interrupt_handoff.unwrap().finish(Ok(()));
@@ -22411,24 +22476,36 @@ while IFS= read -r _; do :; done
                     }
                     assert!(checked.unwrap());
                 } else {
-                    assert!(tokio::time::timeout(std::time::Duration::from_secs(3), driver.resume_tool_result(
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(3), driver.resume_tool_result(
                         context, result.clone(), Some(&recovered), recovered.context_generation, false,
-                    )).await.unwrap().unwrap());
+                    )).await.unwrap();
+                    if mode == "drained_conflict" {
+                        assert!(result.unwrap_err().to_string().contains("native terminal notification conflicts"));
+                        assert!(outputs.try_recv().is_err()); driver.shutdown().await.unwrap(); server.await.unwrap(); continue;
+                    }
+                    assert!(result.unwrap());
                 }
                 let ProviderStreamEmission::InterruptedResult { stream: Some(stream), retained_outputs, closure, .. } = outputs.try_recv().unwrap() else { panic!("exact closure group") };
                 let closure_bytes = closure.artifact.read_payload_bytes().unwrap();
                 let closed: serde_json::Value = serde_json::from_slice(&closure_bytes).unwrap();
-                assert_eq!(closed["ok"], false); assert_eq!(closed["turn_interrupted"], false);
+                assert_eq!(closed["ok"], false); assert_eq!(closed["turn_interrupted"], draining);
                 assert_eq!(closed["result_disposition"], "durably_admitted_after_native_terminal");
                 assert_eq!(closed["codex_continuity"]["context_generation"], original.context_generation + 2 + u64::from(with_stop));
                 assert!(interrupted_result_closure_payload(TURN_INTERRUPTED_RESULT_LABEL, &closure_bytes, &recovered, &source.artifact, &labels).unwrap().is_some());
+                if draining {
+                    assert!(recovered.native_terminal.is_none());
+                    for field in ["thread_id", "context_generation", "interrupted_pending"] {
+                        let mut forged = closed.clone(); forged["native_terminal_source_continuity"][field] = serde_json::Value::Null;
+                        assert!(interrupted_result_closure_payload(TURN_INTERRUPTED_RESULT_LABEL, &serde_json::to_vec(&forged).unwrap(), &recovered, &source.artifact, &labels).is_err());
+                    }
+                }
                 assert_eq!(retained_outputs.len(), 2);
                 let answer: serde_json::Value = serde_json::from_slice(&retained_outputs[0].artifact.read_payload_bytes().unwrap()).unwrap();
                 assert_eq!(answer["text"], "Already produced native answer."); assert_eq!(answer["native_completed_at"], 20);
                 let completion: serde_json::Value = serde_json::from_slice(&retained_outputs[1].artifact.read_payload_bytes().unwrap()).unwrap();
                 assert_eq!(completion["turn"]["items"][0]["summary"][0], "Actual progress");
-                if mode == "completed" {
-                    assert!(completion["retained_native_events"].as_array().unwrap().iter().any(|event| event["quarantined_server_request"]["id"] == "abandoned"));
+                if mode == "completed" || draining {
+                    assert_eq!(completion["retained_native_events"].as_array().unwrap().iter().filter_map(|event| event["quarantined_server_request"]["id"].as_str()).collect::<Vec<_>>(), ["abandoned", "abandoned-two"]);
                 } else {
                     assert!(completion["retained_native_events"].as_array().unwrap().is_empty());
                 }
@@ -22439,7 +22516,7 @@ while IFS= read -r _; do :; done
                 assert_eq!(receipt["payload"]["returned_to_model"], false);
                 let replay = recover_retained_native_outputs(&closure.artifact, temp.path(), &labels).unwrap();
                 for (original, replay) in retained_outputs.iter().zip(replay) { assert_eq!(original.artifact.read_payload_bytes().unwrap(), replay.artifact.read_payload_bytes().unwrap()); }
-                if mode == "completed" {
+                if mode == "completed" || draining {
                     let Some(AppServerEvent::ServerNotification(ServerNotification::TurnCompleted(foreign))) = driver.client.lock().await.next_event().await else { panic!("unrelated event retained") };
                     assert_eq!(foreign.thread_id, "other-thread");
                 } else {

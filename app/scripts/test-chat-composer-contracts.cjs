@@ -196,7 +196,10 @@ const permissionToggle = sourceBetween(
 assert.match(permissionToggle, /aria-pressed=\{accessMode === "full_access"\}/);
 assert.match(permissionToggle, /onAccessModeChange\(accessMode === "full_access" \? "project_access" : "full_access"\)/);
 assert.match(permissionToggle, /composer-agent-access-toggle/);
-assert.match(permissionToggle, /inline-flex size-4 shrink-0/);
+assert.match(permissionToggle, /inline-flex shrink-0/);
+assert.match(permissionToggle, /<span>\{accessMode === "full_access" \? "Full access" : "Project access"\}<\/span>/);
+assert.match(permissionToggle, /disabled=\{locked \|\| !selectedWorker \|\| accessMode !== "full_access" && Boolean\(fullAccessUnavailableReason\)\}/);
+assert.match(permissionToggle, /aria-description=\{accessMode === "full_access" \? undefined : fullAccessUnavailableReason \|\| undefined\}/);
 assert.match(permissionToggle, /<TaskAccessIcon accessMode=\{accessMode\} className="icon-xs shrink-0" \/>/);
 assert.doesNotMatch(permissionToggle, /UtilityBarDropdown|UtilityBarItem|aria-haspopup|aria-expanded/);
 assert.doesNotMatch(permissionToggle, /CHIP_BUTTON_CLASS|title=|name="lock"/);

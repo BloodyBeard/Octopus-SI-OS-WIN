@@ -241,11 +241,15 @@ export function ProviderModelPicker({
   useEffect(() => { setSpeedOpen(false); }, [view]);
   const closeSpeed = () => { setSpeedOpen(false); (view === "simple" ? fastToggleRef : speedRowRef).current?.focus({ preventScroll: true }); };
   const speedKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.ctrlKey || event.altKey || event.metaKey) return;
     const items = [...event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitemradio]")];
     const current = items.indexOf(document.activeElement as HTMLElement);
     if (event.key === "ArrowLeft" || event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeSpeed(); return; }
-    const target = event.key === "ArrowDown" ? (current + 1) % items.length : event.key === "ArrowUp" ? (current - 1 + items.length) % items.length : null;
-    if (target !== null) { event.preventDefault(); items[target]?.focus({ preventScroll: true }); }
+    if (event.key === "Tab") { event.preventDefault(); event.stopPropagation(); closeMenu(); return; }
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); items[current]?.click(); return; }
+    const target = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : event.key === "ArrowDown" ? (current + 1) % items.length : event.key === "ArrowUp" ? (current - 1 + items.length) % items.length : null;
+    if (target !== null) { event.preventDefault(); event.stopPropagation(); items[target]?.focus({ preventScroll: true }); }
   };
   const toggleView = () => { setWarning(false); setMenuView((view) => view === "simple" ? "advanced" : "simple"); };
   const focusHoveredItem = (event: PointerEvent<HTMLButtonElement>) => {
@@ -326,6 +330,7 @@ export function ProviderModelPicker({
       {onServiceTierChange && activeModel && tiers.length > 1 ? <button ref={fastToggleRef} type="button" role="menuitem" tabIndex={-1} className="provider-model-fast-toggle" data-fast-toggle
         data-fast-mode-enabled={selectedTier !== "default" || undefined} data-maximum={selectedEffort === "ultra" || undefined}
         aria-haspopup={tiers.length > 2 ? "menu" : undefined} aria-expanded={tiers.length > 2 ? speedOpen : undefined} aria-pressed={tiers.length > 2 ? undefined : selectedTier !== "default"}
+        aria-controls={speedOpen ? id + "-speed-menu" : undefined}
         aria-label={"Speed " + tierLabel} data-picker-search-label="Speed"
         onClick={() => { if (tiers.length > 2) setSpeedOpen((value) => !value); else onServiceTierChange(selectedTier === "default" ? tiers[1].id : "default"); }}
         onKeyDown={(event) => { if (tiers.length > 2 && event.key === "ArrowRight") { event.preventDefault(); setSpeedOpen(true); } }}>
@@ -378,6 +383,7 @@ export function ProviderModelPicker({
       {onServiceTierChange && activeModel && tiers.length > 1 ? <div className="provider-model-speed-row">
         <OcMenuItem buttonRef={speedRowRef} role="menuitem" tabIndex={-1} data-speed-row label="Speed"
           aria-haspopup="menu" aria-expanded={speedOpen} aria-label={"Speed " + tierLabel}
+          aria-controls={speedOpen ? id + "-speed-menu" : undefined}
           onPointerMove={focusHoveredItem} onPointerLeave={leaveItem} onClick={() => setSpeedOpen((value) => !value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " " || event.key === "ArrowRight") { event.preventDefault(); setSpeedOpen(true); }
@@ -385,10 +391,14 @@ export function ProviderModelPicker({
           trailing={<span className="provider-model-speed-value"><span className="min-w-0 truncate">{tierLabel}</span><Glyph name="chevronDown" size={16} className="-rotate-90 shrink-0" /></span>} />
       </div> : null}
       </div></div>
-      {speedOpen && onServiceTierChange ? createPortal(<div ref={speedMenuRef} role="menu" aria-label="Speed" className="provider-model-menu provider-model-speed-menu" onKeyDown={speedKey}>
+      {speedOpen && onServiceTierChange ? createPortal(<div ref={speedMenuRef} id={id + "-speed-menu"} role="menu" aria-label="Speed" className="provider-model-menu provider-model-speed-menu" data-reduced-motion={reducedMotion || undefined} onKeyDown={speedKey}
+        onFocusCapture={(event) => {
+          for (const item of event.currentTarget.querySelectorAll<HTMLElement>("[role=menuitemradio]")) item.tabIndex = item === event.target ? 0 : -1;
+        }}>
         {tiers.map((tier) => <OcMenuItem key={tier.id} role="menuitemradio" tabIndex={-1} data-service-tier={tier.id}
           aria-checked={selectedTier === tier.id} selected={selectedTier === tier.id}
           label={tier.name} description={tier.description || undefined} descriptionAllowWrap
+          trailing={<span className="provider-model-speed-check" aria-hidden="true">{selectedTier === tier.id ? <Glyph name="check" size={16} /> : null}</span>}
           onPointerMove={focusHoveredItem} onClick={() => { onServiceTierChange(tier.id); closeSpeed(); }} />)}
       </div>, document.body) : null}
     </div>, document.body) : null}

@@ -10,7 +10,6 @@
   .provider-model-controls[data-warning] .provider-model-fast-toggle { visibility: hidden; pointer-events: none; }
   .provider-model-speed-row { margin: 4px -4px -4px; padding: 4px; border-top: .5px solid var(--color-border); }
   .provider-model-speed-value { display: inline-flex; min-width: 0; flex: none; align-items: center; gap: 2px; color: var(--color-text-tertiary); }
-  .provider-model-speed-menu { width: 233px; padding: 4px; animation: provider-menu-enter 120ms cubic-bezier(.23,1,.32,1); }
   .provider-model-trigger {
     position: relative; display: inline-flex; align-items: center; gap: 4px;
     height: var(--spacing-token-button-composer, 28px); padding: 0 8px;
@@ -33,6 +32,18 @@
     font-family: inherit; -webkit-app-region: no-drag;
   }
   .provider-model-menu { width: 254px; padding: 0; border-radius: var(--radius-2xl); box-shadow: 0 0 0 .5px var(--color-border), 0 0 0 .5px var(--color-token-border), var(--shadow-xl); overflow-y: auto; overscroll-behavior: contain; animation: provider-menu-enter 320ms cubic-bezier(.23,1,.32,1) 30ms both; transform-origin: center bottom; }
+  .provider-model-menu.provider-model-speed-menu {
+    --menu-item-padding: 6px 8px;
+    --radius-xl: 8px;
+    --text-sm: 13px;
+    --text-sm--line-height: 18px;
+    --text-xs: 12px;
+    --leading-dense: 16px;
+    width: 233px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px);
+    padding: 4px; border-radius: 12px;
+    animation: provider-menu-enter 120ms cubic-bezier(.23,1,.32,1);
+  }
+  .provider-model-speed-check { display: flex; width: 16px; height: 18px; flex: none; align-self: flex-start; align-items: center; justify-content: center; }
   .provider-model-tooltip { padding: 6px 10px; border-radius: 8px; font-size: var(--text-xs, 12px); line-height: 16px; pointer-events: none; }
   .provider-model-view-toggle, .provider-model-option { border: 0; border-radius: var(--radius-xl); color: inherit; background: transparent; font: inherit; cursor: var(--cursor-interaction, pointer); }
   .provider-model-view-toggle { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; min-height: 32px; border-radius: 8px; padding: 4px; font-size: var(--text-base); font-weight: 500; line-height: var(--text-sm--line-height, calc(1.25 / .875)); }

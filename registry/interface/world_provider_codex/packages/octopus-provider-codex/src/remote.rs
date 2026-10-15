@@ -604,22 +604,53 @@ impl RemoteAppServerClient {
             worker_handle,
         } = self;
         let mut worker_handle = worker_handle;
-        drop(event_rx);
         let (response_tx, response_rx) = oneshot::channel();
-        if command_tx
-            .send(RemoteClientCommand::Shutdown { response_tx })
-            .await
-            .is_ok()
-            && let Ok(Ok(close_result)) = timeout(SHUTDOWN_TIMEOUT, response_rx).await
+        let close_result = match timeout(
+            SHUTDOWN_TIMEOUT,
+            command_tx.send(RemoteClientCommand::Shutdown { response_tx }),
+        )
+        .await
         {
-            close_result?;
+            Ok(Ok(())) => match timeout(SHUTDOWN_TIMEOUT, response_rx).await {
+                Ok(Ok(result)) => Some(result),
+                Ok(Err(_)) => None,
+                Err(_) => Some(Err(IoError::new(
+                    ErrorKind::TimedOut,
+                    "timed out waiting for remote app-server shutdown response",
+                ))),
+            },
+            Ok(Err(_)) => None,
+            Err(_) => Some(Err(IoError::new(
+                ErrorKind::TimedOut,
+                "timed out queuing remote app-server shutdown command",
+            ))),
+        };
+        let worker_result = match timeout(SHUTDOWN_TIMEOUT, &mut worker_handle).await {
+            Ok(result) => result.map_err(|err| {
+                IoError::other(format!("remote app-server shutdown worker failed: {err}"))
+            }),
+            Err(_) => {
+                worker_handle.abort();
+                match worker_handle.await {
+                    Err(err) if err.is_panic() => Err(IoError::other(format!(
+                        "remote app-server shutdown worker failed: {err}"
+                    ))),
+                    _ => Err(IoError::new(
+                        ErrorKind::TimedOut,
+                        "timed out joining remote app-server shutdown worker",
+                    )),
+                }
+            }
+        };
+        drop(event_rx);
+        match (close_result, worker_result) {
+            (Some(Err(close)), Err(worker)) => {
+                Err(IoError::new(close.kind(), format!("{close}; {worker}")))
+            }
+            (Some(Err(close)), Ok(())) => Err(close),
+            (_, Err(worker)) => Err(worker),
+            (Some(Ok(())), Ok(())) | (None, Ok(())) => Ok(()),
         }
-
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut worker_handle).await {
-            worker_handle.abort();
-            let _ = worker_handle.await;
-        }
-        Ok(())
     }
 }
 
@@ -1015,5 +1046,65 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should complete when worker exits first");
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_failures_after_joining_worker() {
+        for failure in ["close", "panic", "response_timeout", "worker_timeout"] {
+            let (command_tx, mut command_rx) = mpsc::channel(1);
+            let (_event_tx, event_rx) = mpsc::unbounded_channel();
+            let (finished_tx, mut finished_rx) = oneshot::channel::<()>();
+            let worker_handle = tokio::spawn(async move {
+                let _finished = finished_tx;
+                let Some(RemoteClientCommand::Shutdown { response_tx }) = command_rx.recv().await
+                else {
+                    panic!("expected shutdown command");
+                };
+                match failure {
+                    "close" => {
+                        response_tx
+                            .send(Err(IoError::other("exact close failure")))
+                            .unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                    "panic" => panic!("exact shutdown worker panic"),
+                    "response_timeout" => {
+                        let _response_tx = response_tx;
+                        std::future::pending::<()>().await;
+                    }
+                    "worker_timeout" => {
+                        response_tx.send(Ok(())).unwrap();
+                        std::future::pending::<()>().await;
+                    }
+                    _ => unreachable!(),
+                }
+            });
+            let client = RemoteAppServerClient {
+                command_tx,
+                event_rx,
+                pending_events: VecDeque::new(),
+                server_version: None,
+                codex_home: None,
+                worker_handle,
+            };
+            let error = client.shutdown().await.expect_err(failure);
+            assert!(matches!(
+                finished_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Closed)
+            ));
+            match failure {
+                "close" => assert_eq!(error.to_string(), "exact close failure"),
+                "panic" => assert!(error.to_string().contains("exact shutdown worker panic")),
+                "response_timeout" => {
+                    assert_eq!(error.kind(), ErrorKind::TimedOut);
+                    assert!(error.to_string().contains("shutdown response"));
+                }
+                "worker_timeout" => {
+                    assert_eq!(error.kind(), ErrorKind::TimedOut);
+                    assert!(error.to_string().contains("joining"));
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }

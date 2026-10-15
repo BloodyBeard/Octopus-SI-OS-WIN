@@ -250,7 +250,7 @@ export function ComposerUtilityBar({
           <button
             aria-label={accessMode === "full_access" ? "Use project access" : "Use full access"}
             aria-pressed={accessMode === "full_access"}
-            className="composer-agent-access-toggle inline-flex size-4 shrink-0 cursor-interaction items-center justify-center bg-transparent focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border disabled:cursor-not-allowed disabled:opacity-40"
+            className="composer-agent-access-toggle inline-flex shrink-0 cursor-interaction items-center justify-center gap-1 rounded-md bg-transparent px-1 text-sm whitespace-nowrap hover:bg-token-foreground/5 focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border disabled:cursor-not-allowed disabled:opacity-40"
             data-composer-navigation-target="permissions"
             disabled={locked || !selectedWorker || accessMode !== "full_access" && Boolean(fullAccessUnavailableReason)}
             onClick={() => onAccessModeChange(accessMode === "full_access" ? "project_access" : "full_access")}
@@ -258,6 +258,7 @@ export function ComposerUtilityBar({
             type="button"
           >
             <TaskAccessIcon accessMode={accessMode} className="icon-xs shrink-0" />
+            <span>{accessMode === "full_access" ? "Full access" : "Project access"}</span>
           </button>
         </div>
 

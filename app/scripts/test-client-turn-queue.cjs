@@ -77,6 +77,34 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(submission.attachments, attachments);
 }
 (async () => {
+  const editedMessage = { id: "latest", runId: "run-a", role: "user", eventKind: "message", text: "original" };
+  const { latestSteerableUserMessageId } = workspaceActions(["latestSteerableUserMessageId"], {});
+  assert.equal(latestSteerableUserMessageId([editedMessage, { ...editedMessage, id: "steer", eventKind: "steering" }], "run-a", true), "latest");
+  for (const [patch, allowed] of [[{}, false], [{ pending: true }, true], [{ error: true }, true], [{ runId: "other" }, true], [{ eventKind: "control" }, true]]) {
+    assert.equal(latestSteerableUserMessageId([{ ...editedMessage, ...patch }], "run-a", allowed), "");
+  }
+  const editTarget = { current: "latest" }, editCalls = [], editErrors = [];
+  const { steerUserMessage } = workspaceActions(["steerUserMessage"], { canSteer: true, steerableMessageIdRef: editTarget,
+    activeRunIdRef: { current: "run-a" }, chatDraftKey: id => id, setError: value => editErrors.push(value),
+    submitSteeringMessage: async input => { editCalls.push(input); return true; } });
+  assert.equal(await steerUserMessage(editedMessage, " revised "), true);
+  assert.deepEqual(editCalls[0], { attachments: [], fromComposer: false, editedMessageId: "latest", runKey: "run-a", text: "revised" });
+  for (const target of ["", "next-turn"]) { editTarget.current = target; assert.equal(await steerUserMessage(editedMessage, "keep my draft"), false); }
+  assert.equal(editCalls.length, 1); assert.equal(editErrors.length, 2);
+  const settledEdits = [];
+  editTarget.current = "latest";
+  const { submitSteeringMessage: raceEdit } = workspaceActions(["submitSteeringMessage"], {
+    activeRun: { runId: "run-a", turnOpen: true, chatInterfaceId: "chat" }, queueOwner: { active: true, id: "owner" },
+    queueReady: true, enabled: true, runtimeReady: true, canSteer: true, chatDraftKey: id => id,
+    activeRunIdRef: { current: "run-a" }, steeringComposerRef: { current: new Set() }, steerableMessageIdRef: editTarget,
+    randomId: () => "edit", setSteeringComposerPendingRunKeys() {}, replaceQueuedTurns: async () => {},
+    queueStore: { claim: async () => ({ text: "keep my draft", attachments: [] }), settle: async (...args) => settledEdits.push(args) },
+    reasoningEffort: "high", endpoint: "local", fileToBridgeAttachment() {}, deliveryStillAllowed: () => true, deliveryScopeCurrent: () => true,
+    loadChatRunStatuses: async () => { editTarget.current = "next-turn"; return [{ runId: "run-a", turnOpen: true }]; },
+    submitOperatorSteer: () => assert.fail("an edit must not steer a later turn"), setError: value => assert.fail(value),
+  });
+  assert.equal(await raceEdit({ attachments: [], fromComposer: false, editedMessageId: "latest", runKey: "run-a", text: "keep my draft" }), false);
+  assert.equal(settledEdits[0][2], "failed");
   const submissions = [];
   const busyDraft = workspaceActions(["submitDraft"], {
     runtimeReady: true, queueReady: true, editingQueuedTurn: false, replyOpen: true,

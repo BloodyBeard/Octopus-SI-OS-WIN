@@ -498,7 +498,6 @@ impl SpawnAppServerClient {
             worker_handle,
         } = self;
         let mut worker_handle = worker_handle;
-        drop(event_rx);
         let (response_tx, response_rx) = oneshot::channel();
         let close_result = if command_tx
             .send(SpawnClientCommand::Shutdown { response_tx })
@@ -527,6 +526,7 @@ impl SpawnAppServerClient {
                 Ok(())
             }
         };
+        drop(event_rx);
         close_result.and(worker_result)
     }
 }
@@ -811,6 +811,7 @@ mod tests {
     use octopus_appserver_proto::ClientInfo;
     use octopus_appserver_proto::InitializeCapabilities;
     use octopus_appserver_proto::ServerNotification;
+    include!("../tests/support/transport_shutdown.rs");
 
     fn sample_initialize_params() -> InitializeParams {
         InitializeParams {

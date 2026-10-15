@@ -188,6 +188,17 @@ assert.equal(q('[data-provider-picker-menu]').dataset.view,'advanced');assert.eq
 assert.match(q('[data-speed-row]').textContent,/Speed\s*Ultra Fast/);await act(async()=>q('[data-speed-row]').click());
 assert.deepEqual([...document.querySelectorAll('[data-service-tier]')].map(e=>[e.dataset.serviceTier,e.dataset.textValue]),[['default','Standard'],['priority','Fast'],['ultrafast','Ultra Fast']]);
 assert.match(q('[data-service-tier="priority"]').textContent,/Declared Fast/);assert.equal(q('[data-service-tier="ultrafast"]').getAttribute('aria-checked'),'true');
+assert.equal(q('[data-speed-row]').getAttribute('aria-controls'),q('.provider-model-speed-menu').id);
+assert.equal(document.activeElement,q('[data-service-tier="ultrafast"]'));
+assert.equal(document.activeElement.tabIndex,0);
+assert.equal(document.querySelectorAll('.provider-model-speed-check').length,3);
+assert.equal(document.querySelectorAll('.provider-model-speed-check svg').length,1);
+await send(document.activeElement,'keydown',{key:'Home'});assert.equal(document.activeElement,q('[data-service-tier="default"]'));
+await send(document.activeElement,'keydown',{key:'End'});assert.equal(document.activeElement,q('[data-service-tier="ultrafast"]'));
+await send(document.activeElement,'keydown',{key:'ArrowUp'});assert.equal(document.activeElement,q('[data-service-tier="priority"]'));
+await send(document.activeElement,'keydown',{key:'Enter'});assert.deepEqual(chosenTiers,['priority']);assert.equal(q('[data-service-tier]'),null);
+assert.equal(document.activeElement,q('[data-speed-row]'));chosenTiers.length=0;
+await act(async()=>q('[data-speed-row]').click());
 await act(async()=>q('[data-service-tier="priority"]').click());assert.deepEqual(chosenTiers,['priority']);assert.equal(q('[data-service-tier]'),null);assert.equal(document.activeElement,q('[data-speed-row]'));
 await renderPicker({...tierProps,serviceTier:'default'});assert.equal(trigger().dataset.selectedServiceTier,'default');
 await act(async()=>q('[data-speed-row]').click());assert.equal(q('[data-service-tier="default"]').getAttribute('aria-checked'),'true');
@@ -197,6 +208,10 @@ await renderPicker({...tierProps,providers:[fastProvider],activeProvider:fastPro
 assert.match(trigger().getAttribute('aria-label'),/ultrafast · unavailable/);assert.match(q('[data-speed-row]').textContent,/ultrafast · unavailable/);
 await act(async()=>q('[data-speed-row]').click());assert.equal(q('[data-service-tier="ultrafast"]'),null);assert.deepEqual(chosenTiers,['priority']);
 await send(trigger(),'keydown',{key:'Escape'});console.log('PASS Speed row and submenu: declared tiers, descriptions, choice, explicit Standard and unsupported tier preservation');
+await renderPicker({...tierProps,reasoningEffort:'high',serviceTier:'default'});await send(trigger(),'keydown',{key:'ArrowDown'});
+if(view()==='advanced')await send(q('[data-provider-picker-panel="advanced"] [aria-checked="true"]'),'click');
+await send(q('[data-fast-toggle]'),'keydown',{key:'ArrowRight'});await send(document.activeElement,'keydown',{key:'Tab'});
+assert.equal(q('[role="menu"]'),null);assert.equal(document.activeElement,trigger());
 const renderControl=control=>act(async()=>root.render(React.createElement(React.StrictMode,null,control)));
 const tooltipWait=()=>act(async()=>{await new Promise(r=>setTimeout(r,230))});
 const controlRef=React.createRef(),controlCalls=[];

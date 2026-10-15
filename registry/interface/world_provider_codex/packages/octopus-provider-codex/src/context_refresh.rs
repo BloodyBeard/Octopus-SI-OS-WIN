@@ -953,6 +953,7 @@ impl CodexAppServerInterfaceDriver {
         }
         if !refresh.retired {
             let turn_id = pending_turn_id(&refresh.pending);
+            let mut events = Vec::new();
             let mut terminal = read_exact_terminal_turn(
                 &handle,
                 &self.next_request_id,
@@ -984,6 +985,7 @@ impl CodexAppServerInterfaceDriver {
                     if let InterruptedDrainDecision::Complete(evidence) =
                         drain.observe(client.next_event().await)
                     {
+                        client.restore_ready_events(std::mem::take(&mut drain.deferred_events));
                         if evidence.disposition != "turn_completed"
                             || evidence.provider_error.is_some()
                         {
@@ -992,6 +994,7 @@ impl CodexAppServerInterfaceDriver {
                                 evidence.disposition
                             )));
                         }
+                        events.extend(evidence.native_terminal_events);
                         break;
                     }
                 }
@@ -1010,12 +1013,12 @@ impl CodexAppServerInterfaceDriver {
                     "context refresh did not retire its original native turn".into(),
                 )
             })?);
-            let events = take_native_terminal_events(
+            events.extend(take_native_terminal_events(
                 &mut *self.client.lock().await,
                 refresh.terminal.as_ref().unwrap(),
                 &refresh.source_thread,
                 turn_id,
-            )?;
+            )?);
             if events
                 .iter()
                 .any(|event| event.get("quarantined_server_request").is_some())

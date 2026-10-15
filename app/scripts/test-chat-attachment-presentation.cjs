@@ -182,8 +182,10 @@ window.octopusTransport = {
   const layout = load("src/components/chat/ChatMessageList.tsx", {
     "./ChatAttachmentCard": { ChatAttachmentStrip },
     "layout-surfaces": { SelectableMessageText: ({ children }) => children, CollapsibleMessageBody: ({ children }) => children,
-      MessageContent: ({ text }) => React.createElement("span", null, text), MessageActions: () => null },
-  }, 'import { useEffect, useState } from "react"; import { ChatAttachmentStrip } from "./ChatAttachmentCard"; import { SelectableMessageText, CollapsibleMessageBody, MessageContent, MessageActions } from "layout-surfaces";\n' + functions + '\nexport { UserMessage };');
+      MessageContent: ({ text }) => React.createElement("span", null, text),
+      MessageActions: ({ onEditUserMessage, editLabel }) => React.createElement("button", { onClick: onEditUserMessage, "aria-label": editLabel }, "Edit"),
+      OcButton: ({ children, onClick, disabled }) => React.createElement("button", { onClick, disabled }, children) },
+  }, 'import { useEffect, useRef, useState } from "react"; import { ChatAttachmentStrip } from "./ChatAttachmentCard"; import { SelectableMessageText, CollapsibleMessageBody, MessageContent, MessageActions, OcButton } from "layout-surfaces";\n' + functions + '\nexport { UserMessage };');
   const gallery = [image, fixture("second.png", "image/png", "def"), fixture("third.png", "image/png", "ghi")];
   const docs = Array.from({ length: 5 }, (_, index) => fixture("file" + index + ".txt", "text/plain", "text" + index));
   const objects = new Map([...gallery, ...docs].map((data) => [data.file.id, data.bytes])); response = (params) => objects.get(params.attachment_id);
@@ -198,6 +200,33 @@ window.octopusTransport = {
   await React.act(async () => document.querySelector(".chat-attachment-lightbox").dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
   assert.equal(document.querySelector(".chat-attachment-lightbox img").alt, "image.png"); await click('button[aria-label="Close image preview"]');
   await renderMessage(""); assert.equal(container.querySelector("[data-user-message-bubble]"), null); assert.equal(container.querySelectorAll(".chat-attachment-card").length, 8);
+  let finishEdit, editFailure, branches = 0, editCount = 0;
+  const editProps = { message, steerable: true, onEditUserMessage: async () => { branches++; return true; },
+    onSteerUserMessage: () => { editCount++; return new Promise((resolve, reject) => { finishEdit = resolve; editFailure = reject; }); } };
+  const editRender = () => React.act(async () => tree.render(React.createElement(layout.UserMessage, editProps)));
+  const editAction = () => container.querySelector('.chat-user-message-editor-actions button:last-child');
+  await editRender(); await click('button[aria-label="Edit current reply"]');
+  await React.act(async () => {
+    const field = container.querySelector('textarea');
+    Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(field, 'My revised request');
+    field.dispatchEvent(new window.Event('input', { bubbles: true }));
+  });
+  assert.equal(editAction().textContent, 'Send to current reply');
+  assert.equal(container.querySelector('.chat-user-message-editor-note'), null, 'same-task editing does not request reattachment');
+  await React.act(async () => editAction().click()); assert.equal(editAction().disabled, true);
+  await React.act(async () => finishEdit(false)); assert.equal(container.querySelector('textarea').value, 'My revised request');
+  await React.act(async () => editAction().click());
+  await React.act(async () => editFailure(new Error('delivery failed'))); assert.equal(container.querySelector('textarea').value, 'My revised request');
+  editProps.steerable = false; await editRender(); assert.equal(editAction().disabled, true);
+  assert.equal(editAction().textContent, 'Send to current reply'); assert.match(container.querySelector('[role="alert"]').textContent, /no longer accepting/);
+  editProps.steerable = true; await editRender(); assert.equal(editAction().disabled, true, 'an expired edit cannot attach to a resumed turn');
+  assert.equal(branches, 0); assert.equal(editCount, 2);
+  await click('.chat-user-message-editor-actions button:first-child'); await click('button[aria-label="Edit current reply"]');
+  await React.act(async () => editAction().click()); await React.act(async () => finishEdit(true));
+  assert.equal(container.querySelector('textarea'), null, 'only accepted edits close the editor');
+  editProps.steerable = false; await editRender(); await click('button[aria-label="Edit in new task"]');
+  editProps.steerable = true; await editRender(); assert.equal(editAction().textContent, 'Continue in new task');
+  await React.act(async () => editAction().click()); assert.equal(branches, 1); assert.equal(container.querySelector('textarea'), null);
   await React.act(async () => tree.render(React.createElement(ChatAttachmentStrip, { attachments: [{ ...file, file: local }, { ...pdf.file, file: new Blob([pdf.content], { type: pdf.file.type }) }], onRemove: () => {} })));
   assert.ok(container.querySelector(".is-image.is-compact")); assert.ok(container.querySelector(".is-file-card")); assert.equal(container.querySelectorAll(".chat-attachment-scroll").length, 1);
   await React.act(async () => tree.unmount());

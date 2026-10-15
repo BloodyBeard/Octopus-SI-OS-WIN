@@ -3,7 +3,7 @@ import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import type { Node } from "prosemirror-model";
 
 export type ComposerSuggestion = { id: string; text: string };
-type SuggestionState = { suggestion: ComposerSuggestion | null; consumed: boolean; composing: boolean; acceptedId: string | null };
+type SuggestionState = { suggestion: ComposerSuggestion | null; consumed: boolean; composing: boolean; consumedId: string | null };
 export const composerSuggestionKey = new PluginKey<SuggestionState>("composer-suggestion");
 
 export function visibleComposerSuggestion(state: EditorState): ComposerSuggestion | null {
@@ -17,31 +17,38 @@ export function composerSuggestionPlugin(parse: (text: string) => Node): Plugin<
   return new Plugin<SuggestionState>({
     key: composerSuggestionKey,
     state: {
-      init: () => ({ suggestion: null, consumed: false, composing: false, acceptedId: null }),
+      init: () => ({ suggestion: null, consumed: false, composing: false, consumedId: null }),
       apply(transaction, previous) {
         const update = transaction.getMeta(composerSuggestionKey);
         if (!update) return previous;
         if (Object.hasOwn(update, "suggestion")) {
           return { ...previous, suggestion: update.suggestion,
-            consumed: previous.acceptedId === update.suggestion?.id };
+            consumed: previous.consumedId === update.suggestion?.id };
         }
-        if (update.consumed) return { ...previous, consumed: true, acceptedId: previous.suggestion?.id ?? null };
+        if (update.consumed) return { ...previous, consumed: true, consumedId: previous.suggestion?.id ?? null };
         return { ...previous, ...update };
       },
     },
     props: {
+      attributes(state): Record<string, string> {
+        const suggestion = visibleComposerSuggestion(state);
+        return suggestion ? { "aria-description": `Suggested message: ${suggestion.text} Press Tab, Right Arrow, or Enter to use it. Click to write your own message.` } : {};
+      },
       decorations(state) {
         const suggestion = visibleComposerSuggestion(state);
         if (!suggestion) return null;
-        return DecorationSet.create(state.doc, [Decoration.widget(1, () => {
-          const span = document.createElement("span");
-          span.className = "composer-suggestion";
-          span.textContent = suggestion.text;
-          span.contentEditable = "false";
-          span.setAttribute("aria-hidden", "true");
-          span.inert = true;
-          return span;
-        }, { side: -1, ignoreSelection: true })]);
+        return DecorationSet.create(state.doc, [
+          Decoration.node(0, state.doc.firstChild!.nodeSize, { class: "composer-suggestion-line" }),
+          Decoration.widget(1, () => {
+            const span = document.createElement("span");
+            span.className = "composer-suggestion";
+            span.textContent = suggestion.text;
+            span.contentEditable = "false";
+            span.setAttribute("aria-hidden", "true");
+            span.inert = true;
+            return span;
+          }, { side: -1, ignoreSelection: true }),
+        ]);
       },
       handleDOMEvents: {
         keydown(view, event) {
@@ -63,6 +70,7 @@ export function composerSuggestionPlugin(parse: (text: string) => Node): Plugin<
         mousedown(view, event) {
           if (event.button !== 0 || !visibleComposerSuggestion(view.state)) return false;
           event.preventDefault();
+          view.dispatch(view.state.tr.setMeta(composerSuggestionKey, { consumed: true }));
           view.focus();
           return true;
         },

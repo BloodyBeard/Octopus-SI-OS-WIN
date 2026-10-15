@@ -518,7 +518,7 @@ impl ProviderOutputHandoff {
         evidence.ok_or("completed settlement has no exact checked predecessor".into())
     }
 
-    fn completed_source_chain(&self, current: &[u8]) -> Result<Vec<CheckedRunTransition>, String> {
+    pub(super) fn completed_source_chain(&self, current: &[u8]) -> Result<Vec<CheckedRunTransition>, String> {
         let (_, source) = self.session.index()?.exact_provider_source_outbound(
             &self.config.run,
             &self.config.worker,
