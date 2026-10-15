@@ -2754,17 +2754,18 @@ impl CodexTurnControlBroker {
                         Some(output) => output.continuity_snapshot(),
                         None => continuity,
                     };
-                    if steer_waits_for_pending_continuity(&control, continuity.as_ref()) {
+                    if let Err(error) = validate_pending_steer_target(
+                        &control, continuity.as_ref(), &thread_id, &turn_id,
+                        &pending_requests, &scope, &effect_guard, &turn_interrupted,
+                    ).await {
                         return Ok(CodexTurnControlApplied {
                             result: failed_control_result(
                                 &control,
                                 Some(thread_id),
                                 Some(turn_id),
-                                "the active provider turn must settle its exact pending result before the operator message becomes the next turn",
+                                &error,
                             ),
-                            disposition: CodexTurnControlDisposition::DeferredTurn(
-                                CodexDeferredTurnCause::PendingSettlement,
-                            ),
+                            disposition: CodexTurnControlDisposition::Applied,
                             output,
                             handoff_barrier: Some(handoff_barrier),
                             durable_interrupt_handoff: None,
@@ -2854,17 +2855,18 @@ impl CodexTurnControlBroker {
                         Some(output) => output.continuity_snapshot(),
                         None => continuity,
                     };
-                    if steer_waits_for_pending_continuity(&control, continuity.as_ref()) {
+                    if let Err(error) = validate_pending_steer_target(
+                        &control, continuity.as_ref(), &thread_id, &turn_id,
+                        &pending_requests, &scope, &effect_guard, &turn_interrupted,
+                    ).await {
                         return Ok(CodexTurnControlApplied {
                             result: failed_control_result(
                                 &control,
                                 Some(thread_id),
                                 Some(turn_id),
-                                "the active provider turn must settle its exact pending result before the operator message becomes the next turn",
+                                &error,
                             ),
-                            disposition: CodexTurnControlDisposition::DeferredTurn(
-                                CodexDeferredTurnCause::PendingSettlement,
-                            ),
+                            disposition: CodexTurnControlDisposition::Applied,
                             output,
                             handoff_barrier: Some(handoff_barrier),
                             durable_interrupt_handoff: None,
@@ -2936,12 +2938,37 @@ impl CodexTurnControlBroker {
     }
 }
 
-fn steer_waits_for_pending_continuity(
+async fn validate_pending_steer_target(
     control: &CodexTurnControl,
     continuity: Option<&CodexContinuityState>,
-) -> bool {
-    matches!(control, CodexTurnControl::Steer { .. })
-        && continuity.is_some_and(|state| state.pending.is_some())
+    thread_id: &str,
+    turn_id: &str,
+    pending_requests: &PendingServerRequests,
+    scope: &TransportStateScope,
+    effect_guard: &tokio::sync::OwnedMutexGuard<()>,
+    turn_interrupted: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    if !matches!(control, CodexTurnControl::Steer { .. }) { return Ok(()); }
+    let Some(state) = continuity else { return Ok(()); };
+    if state.interrupted_pending.is_some() || turn_interrupted.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("the interrupted provider turn cannot accept steering".into());
+    }
+    let Some(durable) = state.pending.as_ref() else { return Ok(()); };
+    let requests = pending_requests.lock().await;
+    let mut matching = requests.iter().filter(|((candidate, _), pending)| {
+        candidate == scope && pending_coordinates_match(Some(durable), pending)
+    });
+    let Some(((_, key), pending)) = matching.next() else {
+        return Err("steering has no exact live pending app-server request".into());
+    };
+    if matching.next().is_some() || key != &pending.key || state.thread_id != thread_id
+        || pending.thread_id != thread_id || pending.turn_id != turn_id
+        || !Arc::ptr_eq(&pending.effect_gate, tokio::sync::OwnedMutexGuard::mutex(effect_guard))
+        || !Arc::ptr_eq(&pending.turn_interrupted, turn_interrupted)
+    {
+        return Err("steering target differs from the exact pending app-server request".into());
+    }
+    Ok(())
 }
 
 struct ControlTargetApplication {
@@ -2990,12 +3017,17 @@ async fn apply_control_to_target(
                         &turn_id,
                     ))
                     .await,
-                true,
+                continuity.as_ref().is_none_or(|state| state.pending.is_none()),
             );
             let SteerAttemptApplication::Retarget { actual_turn_id } = first else {
-                let SteerAttemptApplication::Complete(application) = first else {
+                let SteerAttemptApplication::Complete(mut application) = first else {
                     unreachable!()
                 };
+                if continuity.as_ref().is_some_and(|state| state.pending.is_some())
+                    && matches!(application.disposition, CodexTurnControlDisposition::DeferredTurn(_))
+                {
+                    application.disposition = CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::PendingSettlement);
+                }
                 return Ok(application);
             };
             before_external_effect(CodexTurnControlEffectIntent::Retarget {
@@ -11541,7 +11573,16 @@ fn validate_live_pending_continuity(
         .pending
         .as_ref()
         .or(recovered.interrupted_pending.as_ref());
-    let matches = match (durable_pending, &pending.kind) {
+    if !pending_coordinates_match(durable_pending, pending) {
+        return Err(InterfaceDriverError::FailedClosed(
+            "Codex durable pending coordinates do not match the live app-server request".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn pending_coordinates_match(durable: Option<&CodexPendingContinuity>, pending: &PendingServerRequest) -> bool {
+    match (durable, &pending.kind) {
         (
             Some(CodexPendingContinuity::DynamicTool {
                 native_operation: _,
@@ -11592,14 +11633,7 @@ fn validate_live_pending_continuity(
             },
         ) => turn_id == &pending.turn_id && request_key == &pending.key && method == pending_method,
         _ => false,
-    };
-    if !matches {
-        return Err(InterfaceDriverError::FailedClosed(
-            "Codex durable pending coordinates do not match the live app-server request"
-                .to_string(),
-        ));
     }
-    Ok(())
 }
 
 impl ProviderInput {
@@ -22131,26 +22165,6 @@ while IFS= read -r _; do :; done
 
     #[test]
     fn steer_ownership_defers_only_when_app_server_proves_the_target_turn_moved() {
-        let steer = CodexTurnControl::Steer {
-            control_id: "message-1".to_string(),
-            input: Vec::new(),
-        };
-        let pending = continuity(
-            "world_provider_codex",
-            "run-a",
-            "thread-1",
-            1,
-            Some(CodexPendingContinuity::DynamicTool {
-                native_operation: None,
-                turn_id: "turn-1".to_string(),
-                call_id: "call-1".to_string(),
-                tool: "coder.exec".to_string(),
-            }),
-        );
-        let settled = continuity("world_provider_codex", "run-a", "thread-1", 2, None);
-        assert!(steer_waits_for_pending_continuity(&steer, Some(&pending)));
-        assert!(!steer_waits_for_pending_continuity(&steer, Some(&settled)));
-
         let complete = |application| match application {
             SteerAttemptApplication::Complete(application) => application,
             SteerAttemptApplication::Retarget { .. } => panic!("expected completed steer attempt"),
@@ -22591,6 +22605,13 @@ while IFS= read -r _; do :; done
                 serde_json::json!({"turnId": "turn-2"}),
             )
             .await;
+            for accepted in [true, false] {
+                let octopus_appserver_proto::JSONRPCMessage::Request(request) = next_test_rpc(&mut socket).await else { panic!("pending steer") };
+                assert_eq!(request.method, "turn/steer");
+                assert_eq!(request.params.as_ref().unwrap()["expectedTurnId"], "turn-2");
+                if accepted { send_test_result(&mut socket, request.id, serde_json::json!({"turnId":"turn-2"})).await; }
+                else { send_test_error(&mut socket, request.id, "expected active turn id `turn-2` but found `turn-3`").await; }
+            }
             while socket.next().await.is_some() {}
         });
         let client = crate::RemoteAppServerClient::connect(crate::RemoteAppServerConnectArgs {
@@ -22645,6 +22666,44 @@ while IFS= read -r _; do :; done
         );
         assert!(application.result.acknowledged);
         assert_eq!(application.result.turn_id.as_deref(), Some("turn-2"));
+        let scope = TransportStateScope::Run("run-a".into());
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pending = PendingServerRequest { request_id: RequestId::String("request-a".into()), thread_id:"thread-1".into(), turn_id:"turn-2".into(),
+            key:"tool:call-a".into(), kind:PendingServerRequestKind::DynamicTool { call_id:"call-a".into(), tool:"coder.exec".into() },
+            effect_gate:gate.clone(), turn_interrupted:interrupted.clone() };
+        let state = continuity("world_provider_codex", "run-a", "thread-1", 4, Some(CodexPendingContinuity::DynamicTool {
+            native_operation:None, turn_id:"turn-2".into(), call_id:"call-a".into(), tool:"coder.exec".into(),
+        }));
+        let requests:PendingServerRequests=Arc::new(Mutex::new(BTreeMap::from([((scope.clone(),pending.key.clone()),pending.clone())])));
+        let broker=CodexTurnControlBroker::new(Some(4));
+        let barrier=ProviderHandoffBarrier::new(); barrier.finish(Ok(()));
+        let steer=||CodexTurnControl::Steer { control_id:"pending-message".into(), input:vec![UserInput::Text{text:"pending clarification".into(),text_elements:vec![]}] };
+        for (index,bad) in [Some("thread"),Some("key"),Some("gate"),Some("interrupted"),None,None].into_iter().enumerate() {
+            let mut live=pending.clone();
+            if bad==Some("thread") {live.thread_id="foreign".into();}
+            if bad==Some("key") {live.key="tool:wrong".into();}
+            if bad==Some("gate") {live.effect_gate=Arc::new(tokio::sync::Mutex::new(()));}
+            interrupted.store(bad==Some("interrupted"),std::sync::atomic::Ordering::Release);
+            requests.lock().await.insert((scope.clone(),pending.key.clone()),live);
+            broker.publish(CodexTurnControlTarget::Suspended { handle:AppServerRequestHandle::Remote(client.request_handle()),
+                request_ids:Arc::new(std::sync::atomic::AtomicI64::new(10)), pending_requests:requests.clone(),scope:scope.clone(),
+                output:Default::default(),continuity:Some(state.clone()),handoff_barrier:barrier.clone(),effect_gate:gate.clone(),
+                turn_interrupted:interrupted.clone(),thread_id:"thread-1".into(),turn_id:"turn-2".into() });
+            let mut intents=Vec::new();
+            let applied=broker.apply(steer(),|intent|{intents.push(intent);Ok(())}).await.unwrap();
+            assert_eq!(intents.len(),usize::from(bad.is_none()));
+            assert!(applied.result.continuity.is_none());
+            assert_eq!(applied.disposition,CodexTurnControlDisposition::Applied);
+            assert_eq!(requests.lock().await.get(&(scope.clone(),pending.key.clone())).unwrap().request_id,pending.request_id);
+            assert_eq!(applied.result.acknowledged,index==4);
+            if index==5 {assert_eq!(applied.result.detail["retarget_retry_exhausted"],true);}
+            drop(applied);
+        }
+        broker.publish(CodexTurnControlTarget::RecoveredPending {handle:AppServerRequestHandle::Remote(client.request_handle()),
+            request_ids:Arc::new(std::sync::atomic::AtomicI64::new(20)),continuity:state.clone(),effect_gate:gate});
+        let deferred=broker.apply(steer(),|_|panic!("cold pending must not dispatch")).await.unwrap();
+        assert_eq!(deferred.disposition,CodexTurnControlDisposition::DeferredTurn(CodexDeferredTurnCause::PendingSettlement));
         client.shutdown().await.unwrap();
         server.await.unwrap();
     }

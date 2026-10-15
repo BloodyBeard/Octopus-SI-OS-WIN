@@ -4176,6 +4176,7 @@ function createProjectionStore(options) {
           stream_seq: row.__stream.stream_seq,
           byte_start_offset: row.__stream.byte_start_offset,
           byte_end_offset: row.__stream.byte_end_offset,
+          source_movement_seq: row.__stream.source_movement_seq,
           recorded_at_unix_ms: row.__stream.recorded_at_unix_ms,
         },
       };
@@ -4194,7 +4195,7 @@ function createProjectionStore(options) {
     return ledgerArtifactId(row) || fallback;
   }
 
-  function operatorChatExpandedStreamRows(rows, payloads, runId) {
+  function operatorChatExpandedStreamRows(rows, payloads, runId, onHeader) {
     const expanded = [];
     for (const row of rows) {
       if (ledgerArtifactLabel(row) !== "turn.stream") {
@@ -4303,6 +4304,7 @@ function createProjectionStore(options) {
         previousSourceMovementSeq = value.source_movement_seq;
       }
       if (!sealed) throw new Error("sealed turn.stream has no seal row");
+      onHeader?.(header);
     }
     return expanded;
   }
@@ -6360,6 +6362,35 @@ function createProjectionStore(options) {
     let lastMovementSeq = initial.lastMovementSeq;
     let updatedAtMs = initial.updatedAtMs;
     let openedMovementSeq = initial.openedMovementSeq ?? null;
+    let activeNativeTurn = initial.activeNativeTurn ?? null;
+    let pendingInputs = [...(initial.pendingInputs ?? [])];
+    const nativeTurns = new Map(initial.nativeTurns ?? []);
+    const recordedInputs = new Map([...(initial.recordedInputs ?? [])].map(([key, inputs]) => [key, new Set(inputs)]));
+    const nativeKey = (payload) => {
+      const thread = stringValue(payload?.thread_id ?? payload?.threadId);
+      const turn = operatorChatEventIdentity(payload, "").turn_id;
+      return thread && turn ? JSON.stringify([thread, turn]) : null;
+    };
+    const observeNative = (payload, source) => {
+      const key = nativeKey(payload);
+      if (!key || !Number.isSafeInteger(source) || source < 0) return null;
+      nativeTurns.set(key, Math.min(nativeTurns.get(key) ?? source, source));
+      return key;
+    };
+    const settle = (payload, row, outcome) => {
+      const key = nativeKey(payload), nativeSource = nativeTurns.get(key);
+      const source = payload?.source_movement_seq ?? payload?.additional_details?.source_movement_seq;
+      pendingInputs = pendingInputs.filter((input) => {
+        if (row.seq <= input.seq) return true;
+        if (input.clientId && recordedInputs.get(key)?.has(input.clientId)) return false;
+        return nativeSource < input.seq || Number.isSafeInteger(source) && source < input.seq;
+      });
+      if (!key || activeNativeTurn === true || activeNativeTurn === key) activeNativeTurn = null;
+      open = pendingInputs.length > 0 || activeNativeTurn !== null;
+      state = open ? "working" : outcome;
+      recordedInputs.delete(key);
+      if (!open) recordedInputs.clear();
+    };
     for (const row of ordered) {
       lastMovementSeq = Math.max(lastMovementSeq, numberValue(row.seq, -1));
       updatedAtMs = Math.max(updatedAtMs, rowTimeMs(row));
@@ -6370,8 +6401,32 @@ function createProjectionStore(options) {
         if (!executionObserved) continue;
       }
       const label = ledgerArtifactLabel(row);
+      const providerMovement = isOperatorChatProviderMovement(entry, row);
+      let providerPayload;
+      if (providerMovement && label === "turn.stream") {
+        const payloads = new Map([[row, await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection })]]);
+        const expanded = operatorChatExpandedStreamRows([row], payloads, entry.runId,
+          (header) => observeNative(header, header.opened_source_movement_seq));
+        for (const event of expanded) {
+          if (event.__stream.event_kind !== "input_recorded") continue;
+          const receipt = payloads.get(event);
+          const key = observeNative(receipt, receipt.source_movement_seq);
+          if (!recordedInputs.has(key)) recordedInputs.set(key, new Set());
+          recordedInputs.get(key).add(receipt.client_id);
+        }
+      }
+      if (providerMovement && label !== "turn.stream") {
+        providerPayload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        observeNative(providerPayload, providerPayload?.source_movement_seq ?? providerPayload?.additional_details?.source_movement_seq ?? row.seq);
+      }
       const opening = await operatorChatTurnOpening(entry, row, protocol);
       if (opening) {
+        if (opening === "working") activeNativeTurn = nativeKey(providerPayload) ?? true;
+        if (row.kind === "InterfaceArrival" && label === protocol.inputLabel
+          && movementBoundaryInterface(row, "from") === entry.chatInterfaceId) {
+          const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+          pendingInputs.push({ seq: row.seq, clientId: stringValue(payload?.message_id) });
+        }
         if (!open) {
           open = true;
           openedMovementSeq = numberValue(row.seq, -1);
@@ -6381,7 +6436,6 @@ function createProjectionStore(options) {
         }
         continue;
       }
-      const providerMovement = isOperatorChatProviderMovement(entry, row);
       if (["turn.control.acknowledged", "turn.control.failed"].includes(label)) {
         if (!providerMovement) continue;
         const outcome = operatorTurnControlOutcome(
@@ -6390,14 +6444,25 @@ function createProjectionStore(options) {
         );
         if (outcome?.status === "acknowledged" && outcome.action === "resume") {
           open = true;
+          activeNativeTurn = nativeKey(outcome.payload) ?? true;
           openedMovementSeq = numberValue(row.seq, -1);
           state = "working";
           continue;
         }
         if (!open) continue;
+        if (label === "turn.control.failed" && outcome?.status === "failed" && outcome.action === "steer") {
+          const source = outcome.payload.source_movement_seq;
+          const previous = pendingInputs.length;
+          pendingInputs = pendingInputs.filter((input) => !(input.clientId === outcome.controlId
+            && Number.isSafeInteger(source) && source >= input.seq && source < row.seq));
+          if (pendingInputs.length !== previous) {
+            open = pendingInputs.length > 0 || activeNativeTurn !== null;
+            state = open ? "working" : "failed";
+            continue;
+          }
+        }
         if (operatorTurnControlEndsTurn(outcome)) {
-          open = false;
-          state = "idle";
+          settle(outcome.payload, row, "idle");
           continue;
         }
         state = "working";
@@ -6406,18 +6471,15 @@ function createProjectionStore(options) {
       if (!open) continue;
       if (providerMovement && label === "turn.completed") {
         const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
-        open = false;
-        state = stringValue(payload?.status ?? payload?.turn?.status) === "failed" ? "failed" : "idle";
+        settle(payload, row, stringValue(payload?.status ?? payload?.turn?.status) === "failed" ? "failed" : "idle");
         continue;
       }
       if (providerMovement && label === protocol.terminalOutputLabel) {
-        open = false;
-        state = "idle";
+        settle(await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }), row, "idle");
         continue;
       }
       if (providerMovement && label === "turn.interrupted.result") {
-        open = false;
-        state = "idle";
+        settle(await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }), row, "idle");
         continue;
       }
       if (providerMovement && label === protocol.errorOutputLabel) {
@@ -6426,19 +6488,18 @@ function createProjectionStore(options) {
           state = "working";
           continue;
         }
-        open = false;
-        state = "failed";
+        settle(payload, row, "failed");
         continue;
       }
       if (isOperatorChatProviderFailureRow(entry, row)) {
-        operatorChatProviderFailureActivity(entry, row, await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection }));
-        open = false;
-        state = "failed";
+        const payload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
+        operatorChatProviderFailureActivity(entry, row, payload);
+        settle(payload, row, "failed");
         continue;
       }
       state = "working";
     }
-    return { open, state, lastMovementSeq, updatedAtMs, openedMovementSeq, executionObserved };
+    return { open, state, lastMovementSeq, updatedAtMs, openedMovementSeq, executionObserved, activeNativeTurn, pendingInputs, nativeTurns, recordedInputs };
   }
 
   async function operatorChatTurnState(projection, entry, protocol) {

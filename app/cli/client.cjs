@@ -249,7 +249,7 @@ function createClient(environment, dependencies = {}) {
     const current = await task(runId);
     if (!current.chatInterfaceId) throw new Error("This task has no operator interface.");
     const { createTranscriptReducer } = require("./transcript.cjs");
-    const reducer = createTranscriptReducer(options.messageVerdict ? {} : { history: await rawHistory(current.id) });
+    const reducer = createTranscriptReducer({ history: await rawHistory(current.id) });
     const initial = await taskStatus(current.id);
     const afterSeq = options.afterSeq ?? initial.turn_opened_movement_seq;
     if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw new Error("This task has no recorded turn to follow.");
@@ -257,7 +257,18 @@ function createClient(environment, dependencies = {}) {
       if (options.runId !== current.id || options.chatInterfaceId !== current.chatInterfaceId
         || options.modelInterfaceId !== current.providerBoundInterfaceId) throw new Error("The submission receipt belongs to a different task.");
       if (afterSeq !== options.messageVerdict.admitted?.seq) throw new Error("The follow cursor has a different admission frontier from its receipt.");
-      for (const event of reducer.beginTurn(options)) yield event;
+      const events = reducer.beginTurn(options);
+      for (const entry of reducer.snapshot()) {
+        const m = entry.metadata;
+        if (m.direction === "out" && (m.source === "movement" ? m.movementSeq > afterSeq : m.sourceMovementSeq !== null && m.sourceMovementSeq >= afterSeq)) {
+          if (entry.request && entry.status !== "resolved") {
+            yield { type: "request", id: entry.id, kind: entry.request.kind, payload: entry.request.payload,
+              requestId: entry.request.payload?.request_id, status: entry.status, entry, runId: current.id };
+          } else yield { type: "message", entry, runId: current.id };
+        }
+      }
+      for (const event of events) yield event;
+      if (reducer.currentTurn().terminal) return;
     } else {
       const recorded = reducer.snapshot();
       const events = reducer.beginWatch({ runId: current.id, chatInterfaceId: current.chatInterfaceId,
@@ -286,10 +297,7 @@ function createClient(environment, dependencies = {}) {
       }, { runId: current.id, interfaceId: current.chatInterfaceId, afterSeq, cursor, waitMs: 500, limit: 256 }));
       cursor = batch.cursor;
       if (options.signal?.aborted || closed) return;
-      const visible = options.messageVerdict
-        ? { ...batch, artifacts: batch.artifacts.filter((artifact) => artifact.source !== "stream" || artifact.source_movement_seq >= afterSeq) }
-        : batch;
-      const events = reducer.pushBatch(visible);
+      const events = reducer.pushBatch(batch);
       for (const event of events) yield { ...event, ...(event.type === "request" ? { requestId: event.payload?.request_id } : {}), runId: current.id, cursor };
       if (events.some((event) => event.type === "status" && event.terminal && event.correlated)) return;
       if (reducer.currentTurn()?.correlationError) throw new Error(reducer.currentTurn().correlationError);

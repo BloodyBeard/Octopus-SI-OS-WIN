@@ -273,13 +273,23 @@ test("exact input_recorded links a relay source before durable completion", () =
 });
 
 test("new submission does not stop on prior output, even when it arrives after the new admission", () => {
-  const reducer = createTranscriptReducer(); reducer.beginTurn(receipt());
-  reducer.pushBatch([stream(1, "turn_started")]);
-  reducer.beginTurn(receipt({ messageId: "next", messageVerdict: { admitted: { seq: 200 } } }));
-  reducer.pushBatch([stream(2, "turn_started", { turn_id: "next-turn" }, { source_movement_seq: 200 })]);
-  assert.equal(ended(reducer.pushBatch([movement(210, "message", {}, { terminal: true })])).length, 0);
-  assert.equal(reducer.currentTurn().turnId, "next-turn");
-  assert.equal(ended(reducer.pushBatch([movement(220, "message", { turn_id: "next-turn" }, { terminal: true })])).length, 1);
+  const prior = stream(1, "turn_started", { thread_id: "thread" });
+  for (const mode of ["warm", "cold", "late"]) {
+    const historical = { ...prior, source_movement_seq: undefined, event_data: { ...prior.event_data,
+      _stream: { stream_id: STREAM, stream_seq: 1, source_movement_seq: 100 } } };
+    const reducer = createTranscriptReducer({ history: mode === "cold" ? [historical] : [] });
+    if (mode === "warm") reducer.pushBatch([prior]);
+    reducer.beginTurn(receipt({ messageId: "next", messageVerdict: { admitted: { seq: 200 } } }));
+    if (mode === "late") reducer.pushBatch([prior]);
+    assert.equal(reducer.currentTurn().turnId, "");
+    assert.equal(ended(reducer.pushBatch([movement(210, "message", { thread_id: "thread" }, { terminal: true })])).length, 0);
+    const input = recorded(2, { source_movement_seq: 100 });
+    input.event_data = { ...input.event_data, client_id: "next", source_movement_seq: 100 };
+    assert.equal(ended(reducer.pushBatch([{ ...input, event_data: { ...input.event_data, client_id: "other" } }])).length, 0);
+    input.stream_seq = 3; input.event_data.seq = 3;
+    assert.equal(ended(reducer.pushBatch([input])).length, 1);
+    assert.equal(reducer.currentTurn().outcome.movementSeq, 210);
+  }
 });
 
 test("durable admission frontier completes fresh turns without a provider source link", () => {
@@ -295,6 +305,22 @@ test("durable admission frontier completes fresh turns without a provider source
   assert.equal(ended(events)[0].state, "failed");
   assert.equal(events[0].type, "error");
   assert.equal(events[0].text, "Provider could not start");
+});
+
+test("an exact failed steer ends only its submission in live and restored history", () => {
+  const prior = stream(1, "turn_started", { thread_id: "thread" }, { source_movement_seq: 90 });
+  const failed = movement(120, "turn_control", { thread_id: "thread", control_id: "message", action: "steer",
+    status: "failed", source_movement_seq: 105 }, { label: "turn.control.failed", error: true });
+  for (const cold of [false, true]) {
+    const reducer = createTranscriptReducer({ history: cold ? [prior, failed] : [prior] });
+    let events = reducer.beginTurn(receipt());
+    if (!cold) {
+      for (const patch of [{ control_id: "other" }, { action: "stop" }, { source_movement_seq: 90 }])
+        assert.equal(ended(reducer.pushBatch([{ ...failed, artifact_id: JSON.stringify(patch), event_data: { ...failed.event_data, ...patch } }])).length, 0);
+      events = reducer.pushBatch([failed]);
+    }
+    assert.equal(ended(events)[0].state, "failed"); assert.equal(reducer.currentTurn().outcome.kind, "turn_control");
+  }
 });
 
 test("malformed native input receipt and conflicting turn identities cannot complete a watch", () => {

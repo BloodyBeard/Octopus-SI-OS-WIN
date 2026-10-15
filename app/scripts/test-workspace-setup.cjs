@@ -984,7 +984,49 @@ async function verifyOperatorChatStatusProjection(temporary) {
         assert.equal(page.activity.length, 1); assert.equal(page.activity[0].payload_error, "", label);
       }
     }
-    const retired = fixtureMovement(cases.length + 3, workspace, "turn.started", provider, "run");
+    let nextSeq = cases.length + 3;
+    const appendStatus = async (label, from, payload) => {
+      const movement = fixtureMovement(nextSeq++, workspace, label, from, "run");
+      await materializeFixtureMovement(octopusHomeRoot, movement, payload);
+      await fs.appendFile(ledgerPath, `${JSON.stringify(movement)}\n`);
+      return (await readStatuses()).chats[0];
+    };
+    for (const mode of ["queued", "recorded", "failed"]) {
+      const recorded = mode === "recorded", queued = mode === "queued";
+      const first = nextSeq, latest = first + 1, thread = "thread", turn = `turn-${first}`, clientId = `input-${latest}`;
+      await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: `input-${first}` });
+      await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: clientId });
+      await appendStatus("turn.started", provider, { thread_id: thread, turn_id: turn, source_movement_seq: first });
+      const header = { type: "header", schema_version: 1, seq: 0, provider_interface: provider, run: workspace.homeRunId,
+        thread_id: thread, turn_id: turn, opened_source_movement_seq: first, opened_at_unix_ms: 10 };
+      const input = { type: "input_recorded", seq: 1, recorded_at_unix_ms: 11, source_movement_seq: first,
+        provider_interface: provider, run: workspace.homeRunId, thread_id: thread, turn_id: turn, item_id: "native-input",
+        client_id: recorded ? clientId : "unrelated", stage: "input_recorded_in_turn", source_event: "thread/resume" };
+      const seal = { type: "seal", seq: 2, recorded_at_unix_ms: 12, source_movement_seq: first,
+        terminal_label: "turn.completed", terminal_artifact_payload_blake3: "a".repeat(64) };
+      await appendStatus("turn.stream", provider, Buffer.from([header, input, seal].map(JSON.stringify).join("\n") + "\n"));
+      if (mode === "failed") assert.equal((await appendStatus("turn.control.failed", provider,
+        { thread_id: thread, turn_id: turn, action: "steer", status: "failed", control_id: clientId, source_movement_seq: latest })).turn_open, true);
+      const status = await appendStatus("turn.completed", provider, { thread_id: thread, turn_id: turn });
+      assert.deepEqual([status.turn_open, status.turn_state, status.turn_opened_movement_seq, status.last_movement_seq],
+        [queued, queued ? "working" : "idle", first, nextSeq - 1]);
+      store.invalidate();
+      assert.deepEqual((await readStatuses()).chats[0], status, "cold replay retains pending input and actual ledger frontier");
+      if (queued) assert.equal((await appendStatus("turn.completed", provider,
+        { thread_id: thread, turn_id: `${turn}-next`, source_movement_seq: latest })).turn_open, false);
+      await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: `input-${nextSeq}` });
+      const delayed = await appendStatus("turn.completed", provider, { thread_id: thread, turn_id: turn });
+      assert.equal(delayed.turn_open, true, "settled native identities exclude delayed old output");
+      store.invalidate();
+      assert.deepEqual((await readStatuses()).chats[0], delayed);
+      assert.equal((await appendStatus("interface.artifact.output", provider, {})).turn_open, false);
+    }
+    const refusedSeq = nextSeq;
+    await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: "refused-input" });
+    for (const [action, id, expected] of [["stop", "refused-input", true], ["steer", "other", true], ["steer", "refused-input", false]])
+      assert.equal((await appendStatus("turn.control.failed", provider, { action, control_id: id, status: "failed", source_movement_seq: refusedSeq })).turn_open, expected);
+    store.invalidate(); assert.equal((await readStatuses()).chats[0].turn_state, "failed");
+    const retired = fixtureMovement(nextSeq, workspace, "turn.started", provider, "run");
     await materializeFixtureMovement(octopusHomeRoot, retired);
     await fs.appendFile(ledgerPath, `${JSON.stringify(retired)}\n`);
     assert.equal((await readStatuses()).chats[0].turn_state, "working");

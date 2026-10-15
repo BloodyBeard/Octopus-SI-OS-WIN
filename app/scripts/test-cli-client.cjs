@@ -124,6 +124,21 @@ test("an early idle projection cannot hide a final reply that has not arrived ye
   }, { turnOpen: false });
 });
 
+test("a new receipt hydrates prior native identity and retains an already completed current reply", async () => {
+  const old = { turn_id: "old", thread_id: "thread" };
+  const current = movement(130, { event_data: { turn_id: "new", thread_id: "thread" }, text: "Current reply" });
+  for (const completed of [false, true]) await fixture([[current]], async (client, reads) => {
+    const events = await Array.fromAsync(client.follow(run.run_id, receipt));
+    assert.equal(reads(), completed ? 0 : 1);
+    assert.equal(events.filter((event) => event.type === "status" && event.terminal).length, 1);
+    assert.equal(events.at(-1).turnId, "new");
+    assert.ok(events.some((event) => event.entry?.text === "Current reply"));
+    if (!completed) assert.ok(events.some((event) => event.type === "request" && event.requestId === "approval"));
+  }, { messages: [movement(90, { event_kind: "turn_started", terminal: false, event_data: old }),
+    movement(120, { event_data: old }), ...(completed ? [current] : [movement(125,
+      { event_kind: "approval", terminal: false, event_data: { request_id: "approval" } })])] });
+});
+
 test("submission, watch and restored idle projections wait past Stop ACK and reject stale closure providers", async () => {
   const ack = movement(110, { label: "turn.control.acknowledged", event_kind: "turn_control", event_data: {
     action: "stop", status: "acknowledged", turn_id: "turn", thread_id: "thread", detail: { exact_result_pending: true } } });

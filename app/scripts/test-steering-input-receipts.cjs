@@ -27,7 +27,8 @@ const live = extract(path.join(app, "../registry/interface/world_operator_chat/c
 const sealed = extract(path.join(app, "electron/projection.cjs"), [
   "operatorChatExpandedStreamRows", "validateOperatorRecordedInput", "operatorTurnStreamIdentity",
   "movementBoundaryInterface", "endpointId", "ledgerArtifactLabel", "stringValue", "contentHashHex",
-]);
+  "operatorChatEventData", "operatorChatEventIdentity", "objectOrEmpty", "numberValue",
+], { clientEventDataProjection: (payload) => ({ ...payload }) });
 const header = { type: "header", schema_version: 1, seq: 0, provider_interface: "provider-runtime",
   run: "run-a", thread_id: "native-thread", turn_id: "native-turn", opened_source_movement_seq: 5, opened_at_unix_ms: 10 };
 const receipt = { type: "input_recorded", seq: 1, recorded_at_unix_ms: 12, source_movement_seq: 5,
@@ -40,7 +41,7 @@ const encode = (rows) => Buffer.from(rows.map((row) => JSON.stringify(row)).join
 function history(bytes) {
   const row = { artifact: { id: "turn.stream:sealed" }, from: { Interface: header.provider_interface }, source_line: "1" };
   const payloads = new Map([[row, { __raw: bytes.toString("utf8") }]]);
-  const rows = sealed.operatorChatExpandedStreamRows([row], payloads, header.run);
+  const rows = sealed.operatorChatExpandedStreamRows([row], payloads, header.run, (checked) => assert.deepEqual(checked, header));
   return rows.map((row) => ({ row, payload: payloads.get(row) }));
 }
 for (const source of ["item/started", "item/completed", "thread/resume"]) {
@@ -59,6 +60,7 @@ for (const source of ["item/started", "item/completed", "thread/resume"]) {
   assert.equal(event.stream_id, historical.row.__stream.stream_id);
   assert.equal(event.byte_start_offset, historical.row.__stream.byte_start_offset);
   assert.equal(event.byte_end_offset, historical.row.__stream.byte_end_offset);
+  assert.equal(sealed.operatorChatEventData(historical.payload, "input_recorded", historical.row)._stream.source_movement_seq, 5);
   const tail = live.selectOperatorTurnStreamEvents(parsed, first.cursor, 1);
   assert.deepEqual(tail.events, []); assert.equal(tail.cursor.sealed, true);
 }

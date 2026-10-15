@@ -113,7 +113,7 @@ function toMessage(value, composed = false) {
       contentHash: string(value.contentHash ?? value.content_hash),
       label: string(value.label), direction: string(value.direction) || (role === "user" ? "in" : "out"),
       source, streamId, streamSeq,
-      sourceMovementSeq: integer(value.source_movement_seq ?? data.source_movement_seq ?? record(data.additional_details).source_movement_seq),
+      sourceMovementSeq: integer(value.source_movement_seq ?? stream.source_movement_seq ?? data.source_movement_seq ?? record(data.additional_details).source_movement_seq),
       byteStartOffset: integer(value.byte_start_offset ?? stream.byte_start_offset),
       byteEndOffset: integer(value.byte_end_offset ?? stream.byte_end_offset),
       createdAtMs: integer(value.createdAtMs ?? value.created_at_ms ?? value.recorded_at_unix_ms) ?? 0,
@@ -314,7 +314,32 @@ function createTranscriptReducer(options = {}) {
   }
   const messages = new Map(), seen = new Set(), streams = new Map(), groups = new Map(), sections = new Map();
   const calls = new Map(), requests = new Map(), resolutions = new Map(), observations = [], terminals = [], entryIds = new Map();
+  const priorNativeTurns = new Set();
   let turn = null, previousStatus = "";
+
+  function nativeTurnKey(message) {
+    const m = message.metadata;
+    return m.threadId && m.turnId ? JSON.stringify([m.threadId, m.turnId]) : null;
+  }
+
+  function belongsToPriorInput(message) {
+    const key = nativeTurnKey(message), m = message.metadata;
+    if (key && key === turn.recordedInputTurn) return false;
+    return priorNativeTurns.has(key) || m.sourceMovementSeq !== null && m.sourceMovementSeq < turn.admittedSeq;
+  }
+
+  function failedSteer(message) {
+    const m = message.metadata, data = message.data;
+    return message.source === "movement" && m.label === "turn.control.failed" && message.kind === "turn_control"
+      && data.action === "steer" && data.status === "failed" && string(data.control_id)
+      && integer(data.source_movement_seq) !== null && data.source_movement_seq === m.sourceMovementSeq;
+  }
+
+  function failedSubmission(message) {
+    return sameScope(message) && failedSteer(message) && message.data.control_id === turn.messageId
+      && message.metadata.sourceMovementSeq >= turn.admittedSeq
+      && message.metadata.movementSeq > message.metadata.sourceMovementSeq;
+  }
 
   function groupKey(message) {
     const m = message.metadata, data = message.data;
@@ -368,7 +393,7 @@ function createTranscriptReducer(options = {}) {
     seen.add(key);
     if (message.source === "stream" && m.streamId && m.streamSeq !== null) streams.set(streamKey, m.streamSeq);
     observations.push(message);
-    if (message.source === "movement" && message.terminal && !message.willRetry) terminals.push(message);
+    if (message.source === "movement" && (message.terminal || failedSteer(message)) && !message.willRetry) terminals.push(message);
     const group = groupKey(message), oldId = groups.get(group), previous = oldId ? messages.get(oldId) : null;
     let merged = message;
     if (previous) {
@@ -444,17 +469,19 @@ function createTranscriptReducer(options = {}) {
       && [data.thread_id, data.turn_id, data.item_id, data.client_id].every((value) => typeof value === "string" && value.length > 0 && value.trim() === value);
     const exactSource = m.sourceMovementSeq !== null && turn.sourceMovementSeqs.includes(m.sourceMovementSeq);
     if (!(input || exactSource) || !m.turnId) return;
+    if (!input && belongsToPriorInput(message)) return;
     if (turn.turnId && (turn.turnId !== m.turnId || turn.threadId && m.threadId && turn.threadId !== m.threadId)) {
       turn.correlationError = "The current submission has conflicting native turn identities.";
       return;
     }
     turn.turnId = m.turnId;
     if (m.threadId) turn.threadId = m.threadId;
+    if (input) turn.recordedInputTurn = nativeTurnKey(message);
     if (input && m.sourceMovementSeq !== null && !turn.sourceMovementSeqs.includes(m.sourceMovementSeq)) turn.sourceMovementSeqs.push(m.sourceMovementSeq);
   }
 
   function matchesTurn(message) {
-    if (!sameScope(message) || turn.correlationError) return false;
+    if (!sameScope(message) || turn.correlationError || belongsToPriorInput(message)) return false;
     const m = message.metadata;
     if (m.turnId && turn.turnId && m.turnId !== turn.turnId) return false;
     if (m.threadId && turn.threadId && m.threadId !== turn.threadId) return false;
@@ -463,7 +490,8 @@ function createTranscriptReducer(options = {}) {
   }
 
   function admittedMovement(message) {
-    if (!sameScope(message) || turn.correlationError) return false;
+    if (failedSubmission(message)) return true;
+    if (!sameScope(message) || turn.correlationError || belongsToPriorInput(message)) return false;
     const m = message.metadata;
     if (m.turnId && turn.turnId && m.turnId !== turn.turnId) return false;
     if (m.threadId && turn.threadId && m.threadId !== turn.threadId) return false;
@@ -471,6 +499,7 @@ function createTranscriptReducer(options = {}) {
   }
 
   function durableOutcome(message) {
+    if (failedSubmission(message)) return true;
     if (!admittedMovement(message) || !message.terminal || message.willRetry || pendingStop(message)) return false;
     if (message.kind === "interrupted_result" && !interruptedClosure(message)) return false;
     return !turn.stopPending || interruptedClosure(message) && message.metadata.turnId === turn.stopPending.turnId
@@ -502,6 +531,13 @@ function createTranscriptReducer(options = {}) {
   }
 
   function updateStatus(incoming, events) {
+    for (const message of incoming) {
+      if (!sameScope(message)) continue;
+      const source = message.metadata.sourceMovementSeq
+        ?? (message.source === "movement" ? message.metadata.movementSeq : null);
+      const key = nativeTurnKey(message);
+      if (key && source !== null && source < turn.admittedSeq) priorNativeTurns.add(key);
+    }
     for (const message of incoming) learnCorrelation(message);
     if (turn?.terminal) return;
     for (const message of incoming) {
@@ -540,11 +576,12 @@ function createTranscriptReducer(options = {}) {
     const admittedSeq = integer(input.afterSeq);
     if (admittedSeq === null) throw new TypeError("Watch requires the recorded turn admission frontier.");
     const providerSource = integer(input.providerSourceMovementSeq);
+    priorNativeTurns.clear();
     turn = { runId: input.runId, chatInterfaceId: input.chatInterfaceId, modelInterfaceId: input.modelInterfaceId,
       messageId: string(input.messageId) || undefined, admittedSeq,
       sourceMovementSeqs: [...new Set([admittedSeq, ...(providerSource === null ? [] : [providerSource])])],
       turnId: string(input.turnId), threadId: string(input.threadId), stopPending: null,
-      state: "working", terminal: false, outcome: null, correlationError: "" };
+      state: "working", terminal: false, outcome: null, correlationError: "", recordedInputTurn: null };
     previousStatus = "";
     const events = [{ type: "status", state: "working", terminal: false, correlated: true, messageId: turn.messageId,
       runId: turn.runId, interfaceId: turn.chatInterfaceId, turnId: turn.turnId || undefined }];

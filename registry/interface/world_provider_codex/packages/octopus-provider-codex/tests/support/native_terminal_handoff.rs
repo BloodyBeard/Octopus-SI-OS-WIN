@@ -106,7 +106,7 @@ async fn native_terminal_handoff_cases() {
                     if let Some(continuity)=payload.get("codex_continuity") { assert_eq!(continuity["context_generation"],current_record.interface_state[&gate_ctx.interface]["context_generation"]); }
                     if label==TURN_INTERRUPTED_RESULT_LABEL { assert_eq!(payload["source_artifact"],json!(expected_source)); }
                     delivered.push((label,cache_artifact(&gate_ctx,&incoming.artifact),seq)); incoming.verdict_tx.unwrap().send(DeliveryVerdict::Admitted{seq}).unwrap();
-                    if phase==3 { break; }
+                    if phase==3 || phase==22 { break; }
                 }
             }}
             delivered
@@ -805,6 +805,59 @@ async fn native_terminal_handoff_cases() {
         let mut before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
         let mut state=serde_json::to_value(continuity(before_context,Some(if with_stop {"interrupted_pending"}else{"pending"}))).unwrap();
         state["provider_interface"]=json!(descriptor.id); state["run"]=json!(run);
+        if settlement_phase==Some(22) {
+            let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+            let file=artifact(&root.join("message"),"operator.message",json!({"text":"start","message_id":"initial"}));
+            let row=edge(&ctx,&initial,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file);let source_seq=append(&ctx,row);
+            let session=ProviderHandoffSession::new(&ctx).unwrap();
+            let handoff=session.from_invocation(&ctx,&descriptor,&run,&input,source_seq,&initial).unwrap();
+            state["context_generation"]=json!(before_context+1);
+            let pending=artifact(&ctx.interface_var_dir().join("pending"),"interface.artifact.output",json!({"label":"interface.artifact.output","codex_continuity":state}));
+            let hand=Box::pin(handoff.hand_final(ProviderEmission{artifact:pending,route:ProviderEmissionRoute::ClientProjection}));
+            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
+            let (result,_)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(hand,gate)}).await.unwrap();result.unwrap();drop(handoff);
+            let before=std::fs::read(&plan.run_write.path).unwrap();let selected=RunRecord::from_bytes(&before).unwrap();
+            let cp=selected.checkpoints.iter().find(|cp|selected.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+            let file=artifact(&root.join("clarification"),"operator.message",json!({"text":"clarification","message_id":"steer-pending"}));
+            let row=edge(&ctx,&before,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file);let seq=append(&ctx,row);
+            let result=CodexTurnControlResult {control_id:"steer-pending".into(),action:"steer".into(),acknowledged:true,
+                thread_id:Some("thread-a".into()),turn_id:Some("turn-a".into()),detail:json!({"stage":"accepted_by_app_server","consumption_proven":false}),continuity:None};
+            persist_control_journal(&ctx,seq,&run,"steer-pending","steer",TurnControlJournalPhase::Result{result}).unwrap();
+            let broker=CodexTurnControlBroker::new(Some(source_seq));broker.finish();let gates=Default::default();let arbiter=InterruptedEffectArbiter::new(ctx.clone());
+            let source=|independent_reader|ControlSource {envelope:&input,source_movement_seq:seq,broker:&broker,control_gates:&gates,
+                control:decode_admitted_turn_control(&ctx,&descriptor,&input).unwrap().unwrap(),terminal_control_fenced:false,independent_reader};
+            handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,source(true)).await.unwrap();
+            assert!(matches!(load_control_journal(&ctx,seq,&run,"steer-pending","steer").unwrap().unwrap().phase,TurnControlJournalPhase::Result{..}));
+            assert_eq!(std::fs::read(&plan.run_write.path).unwrap(),before);
+            let hand=handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,source(false));
+            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,22,true);
+            let (_,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::try_join!(hand,async{Ok::<_,String>(gate.await)})}).await.unwrap().unwrap();
+            assert_eq!(delivered[0].0,"turn.input.acknowledged");
+            let after=std::fs::read(&plan.run_write.path).unwrap();let current=RunRecord::from_bytes(&after).unwrap();
+            assert_eq!(current.interface_state[&descriptor.id]["context_generation"],selected.interface_state[&descriptor.id]["context_generation"]);
+            assert_eq!(octopus_provider_run_authoring::provider_context_bindings(&current,&descriptor.id).unwrap(),octopus_provider_run_authoring::provider_context_bindings(&selected,&descriptor.id).unwrap());
+            let ledger=std::fs::read(&ctx.movements_path).unwrap();
+            let saved=load_control_journal(&ctx,seq,&run,"steer-pending","steer").unwrap().unwrap();
+            let TurnControlJournalPhase::Delivered{result}=saved.phase else {panic!("durable steer receipt")};
+            persist_control_journal(&ctx,seq,&run,"steer-pending","steer",TurnControlJournalPhase::Result{result}).unwrap();
+            let cold=ProviderHandoffSession::new(&ctx).unwrap();
+            handle_control_source(&ctx,&descriptor,&cold,&arbiter,&run,source(false)).await.unwrap();
+            assert_eq!(std::fs::read(&plan.run_write.path).unwrap(),after);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+            let cp=current.checkpoints.iter().find(|cp|current.active_checkpoints.contains(&cp.id)
+                && cp.inbound_interface()==Some(&InterfaceId::new(&plan.worker_interface_id)) && cp.outbound_interfaces().any(|id|id==&descriptor.id)).unwrap();
+            let file=artifact(&root.join("pending-result"),"coder.exec.result",json!({"label":"coder.exec.result","tool":"coder.exec","correlation_id":"call-a","ok":true,"body":{}}));
+            let row=edge(&ctx,&after,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file);let seq=append(&ctx,row);
+            let next=cold.from_invocation(&ctx,&descriptor,&run,&input,seq,&after).unwrap();
+            assert_eq!(next.recover_source().await.unwrap(),ProviderSourceRecovery::Process);
+            let recovered=recover_provider_result_continuity(&descriptor,&input,next.invocation_session_snapshot().as_ref(),&next.current_session_context_artifacts().await,&run,&after).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(recovered).unwrap(),state);
+            assert!(receiver.try_recv().is_err());return;
+        }
         if let Some(phase)=settlement_phase {
             settlement_case(&ctx,root,&plan.run_write.path,&plan.worker_interface_id,&descriptor,&run,&record,
                 &initial,state,before_context,native,phase,&authoring_id,&listener,&mut receiver,selected_file.as_ref()).await;
@@ -992,7 +1045,7 @@ async fn native_terminal_handoff_cases() {
         }
     }
     for (with_stop, with_answer, native_interrupted, settlement_phase) in [
-        (false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
+        (false,false,false,Some(22)),(false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
         (false,false,true,None),(true,false,true,None),(false,false,true,Some(0)),(false,false,true,Some(2)),(false,false,true,Some(3)),(false,false,true,Some(4)),(false,false,true,Some(5)),(false,false,true,Some(6)),(false,false,true,Some(7)),(false,false,true,Some(8)),(false,false,true,Some(9)),(false,false,true,Some(10)),(false,false,true,Some(11)),(false,false,true,Some(12)),(false,false,true,Some(13)),
         (false,false,true,Some(14)),(false,false,true,Some(15)),(false,false,true,Some(16)),(false,false,true,Some(17)),(false,false,true,Some(18)),(false,false,true,Some(19)),
         (false,false,true,Some(20)),(false,false,true,Some(21)),
