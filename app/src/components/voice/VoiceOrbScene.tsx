@@ -738,10 +738,14 @@ void main() {
   float inkCoverage = saturate(inkDensity * compression * 1.25) * sourceValid;
   vec2 edgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
   float edgeFade = smoothstep(0.012, 0.09, min(edgeDistance.x, edgeDistance.y));
-  float particleDensity = smoothstep(particleSeed - 0.06, particleSeed + 0.06, inkCoverage);
-  float particleEnvelope = mix(0.45, 0.85, inkCoverage) * edgeFade;
-  float particleSpark = fineDot * particleDensity * particleEnvelope * dustPresence;
-  float particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread);
+  float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
+  float formedCoverage = max(inkCoverage, formation);
+  float formationEdge = exp(-abs(formedCoverage - particleSeed) / 0.045) * step(0.02, formation);
+  float particleDensity = smoothstep(particleSeed - 0.06, particleSeed + 0.06, formedCoverage);
+  float particleEnvelope = mix(0.45, 0.85, formedCoverage) * max(edgeFade, formation);
+  float particleSpark = fineDot * particleDensity * particleEnvelope * max(dustPresence, formation);
+  float particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread)
+    * (1.0 + formation * mix(2.4, 1.3, lightSurface) + formationEdge * 0.9);
 
   float glyphPitch = max(1.15 * u_pixel_ratio, 1.6);
   vec2 glyphSpan = vec2(6.0, 9.0) * glyphPitch;
@@ -764,12 +768,6 @@ void main() {
     glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * edgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
   }
   particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
-  float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
-  float formationDot = 1.0 - smoothstep(0.16, 0.27, dotDistance);
-  float formationPatch = smoothstep(0.22, 0.82, fbm(gl_FragCoord.xy / (34.0 * max(u_pixel_ratio, 1.0)) + 5.7));
-  float formationDensity = formation * mix(0.22 + formationPatch * 0.78, 1.0, lightSurface);
-  float formationEdge = exp(-abs(formationDensity - particleSeed) / 0.045) * step(0.02, formationDensity);
-  float formationLit = formationDot * (smoothstep(particleSeed - 0.08, particleSeed + 0.08, formationDensity) * mix(mix(0.22, 0.95, particleSeed * particleSeed), mix(0.45, 0.9, particleSeed), lightSurface) + formationEdge * 0.55);
 
   float rimBuild = smoothstep(0.3, 0.76, u_reveal);
   float rimProgress = smoothstep(0.34, 0.82, u_reveal);
@@ -788,8 +786,6 @@ void main() {
   vec3 darkGlyph = mix(vec3(0.74, 0.77, 0.84), vec3(0.42, 0.66, 1.0), saturate(rippleCrest * 1.2));
   vec3 lightGlyph = mix(vec3(0.4, 0.47, 0.6), LIGHT_PARTICLE_INK * 0.92, saturate(rippleCrest * 1.2));
   revealedColor = mix(revealedColor, mix(darkGlyph, lightGlyph, lightSurface), saturate(glyphAlpha * mix(1.0, 1.15, lightSurface)));
-  vec3 darkFormation = mix(vec3(0.42, 0.6, 0.94), vec3(0.6, 0.78, 1.0), saturate(formationEdge));
-  revealedColor = mix(revealedColor, mix(darkFormation, LIGHT_PARTICLE_INK, lightSurface), saturate(formationLit));
   outputColor = vec4(clamp(revealedColor, 0.0, 1.0), 1.0);
 }
 `;
