@@ -62,7 +62,7 @@ const ACTIVE_FRAME_INTERVAL_MS = 1000 / 60;
 const RIPPLE_COUNT = 6;
 const RIPPLE_LIFE_SECONDS = 2.4;
 const FORM_COUNT = 4;
-const FORM_LIFE_SECONDS = 1.3;
+const FORM_LIFE_SECONDS = 1.25;
 const RIPPLE_IGNORED_TARGETS = "button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
@@ -242,13 +242,14 @@ float formationAt(vec2 pixel, float shortestSide, float pixelRatio) {
     if (box.z <= box.x || age < 0.0 || age > ${FORM_LIFE_SECONDS.toFixed(2)}) continue;
     vec2 halfSize = (box.zw - box.xy) * 0.5;
     float boxDistance = roundedBoxDistance(pixel - (box.xy + box.zw) * 0.5, halfSize, min(timing.y, min(halfSize.x, halfSize.y)));
-    float gather = 1.0 - pow(1.0 - smoothstep(0.0, 0.6, age), 3.0);
-    float reach = (1.0 - gather) * 0.3 * shortestSide;
-    float contour = exp(-abs(boxDistance - reach) / (5.0 * pixelRatio + reach * 0.18)) * (0.35 + 0.65 * gather) * (1.0 - smoothstep(0.55, 0.72, age));
-    float fill = (1.0 - smoothstep(-2.0 * pixelRatio, pixelRatio, boxDistance)) * smoothstep(0.32, 0.62, age) * 0.6;
-    float outline = exp(-abs(boxDistance) / (2.0 * pixelRatio)) * smoothstep(0.4, 0.62, age);
-    float dissolve = 1.0 - smoothstep(0.6, ${FORM_LIFE_SECONDS.toFixed(2)}, age);
-    total += max(max(contour, fill), outline) * dissolve * smoothstep(0.0, 0.12, age);
+    float inside = 1.0 - smoothstep(-1.5 * pixelRatio, pixelRatio, boxDistance);
+    float rim = exp(-abs(boxDistance) / (1.6 * pixelRatio));
+    float islands = valueNoise(pixel / (13.0 * pixelRatio) + vec2(float(index) * 7.3, 3.1));
+    float appear = smoothstep(0.0, 0.42, age - islands * 0.26);
+    float settle = smoothstep(0.34, 0.58, age);
+    float dissolve = 1.0 - smoothstep(0.66, ${FORM_LIFE_SECONDS.toFixed(2)}, age + (islands - 0.5) * 0.3);
+    float halo = exp(-max(boxDistance, 0.0) / (22.0 * pixelRatio)) * (1.0 - inside) * sin(PI * clamp(age / 0.8, 0.0, 1.0));
+    total += max(max(inside * appear * mix(0.62, 0.78, settle), rim * settle), halo * 0.3) * dissolve;
   }
   return saturate(total);
 }
@@ -765,7 +766,8 @@ void main() {
   particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
   float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
   float formationDot = 1.0 - smoothstep(0.16, 0.27, dotDistance);
-  float formationLit = formationDot * smoothstep(particleSeed - 0.08, particleSeed + 0.08, formation) * mix(0.45, 0.9, particleSeed);
+  float formationEdge = exp(-abs(formation - particleSeed) / 0.045) * step(0.02, formation);
+  float formationLit = formationDot * (smoothstep(particleSeed - 0.08, particleSeed + 0.08, formation) * mix(0.45, 0.9, particleSeed) + formationEdge * 0.55);
 
   float rimBuild = smoothstep(0.3, 0.76, u_reveal);
   float rimProgress = smoothstep(0.34, 0.82, u_reveal);
