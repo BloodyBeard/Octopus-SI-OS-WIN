@@ -1041,7 +1041,7 @@ assert.match(workspaceSurfacePane, /<WorkspacePaneHeaderActionsProvider host=\{c
 assert.match(paneHeaderActions, /return host \? createPortal\(children, host\) : null;/);
 assert.match(surfaceHost, /headerMode=\{paneRole === "primary" \? "window" : paneTabStripVisible \? "none" : "pane"\}/);
 assert.match(operatorShell, /const secondaryPaneTabStripVisible = secondaryPaneUsesTabStrip\(secondaryPaneTabs\);/);
-assert.match(operatorShell, /showWhenSingle: target\.surfaceId !== "chat"/);
+assert.match(operatorShell, /glyph: target\.surfaceId === "chat" \? "chat"[\s\S]*?showWhenSingle: true,/);
 assert.match(chatView, /headerMode === "pane" \? <ChatThreadHeader[\s\S]*?mode=\{headerMode\}/);
 assert.match(chatView, /<WorkspacePaneHeaderActions>[\s\S]*?<ChatThreadHeaderActions/);
 assert.match(chatThreadHeader, /dispatchOpenClientTaskActionsMenu\(activeRun\.runId, event\.currentTarget\)/);

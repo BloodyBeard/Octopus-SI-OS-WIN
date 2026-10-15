@@ -490,7 +490,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       <main className="voice-session-stage" ref={stageMainRef}>
         <i aria-hidden="true" className="voice-orb-probe" ref={orbProbeRef} />
         <div aria-hidden="true" className="voice-stage-scene">
-          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} sizeProbe={orbProbeRef} />
+          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} rippleSurface={stageMainRef} sizeProbe={orbProbeRef} />
         </div>
         <HomeResponseStage
           operatorRequests={homeOperatorRequests}

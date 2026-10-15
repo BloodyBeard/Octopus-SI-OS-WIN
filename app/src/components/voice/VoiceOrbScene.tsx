@@ -13,6 +13,7 @@ type Props = {
   animated?: boolean;
   onDispersed?: () => void;
   phase: VoicePhase;
+  rippleSurface?: RefObject<HTMLElement | null>;
   sizeProbe?: RefObject<HTMLElement | null>;
   sphere?: number;
 };
@@ -27,6 +28,7 @@ type OrbFrame = {
 type ResolvedActivity = {
   speaking: number;
   thinking: number;
+  voice: number;
 };
 
 type ShaderUniforms = {
@@ -37,12 +39,14 @@ type ShaderUniforms = {
   pixelRatio: WebGLUniformLocation;
   reveal: WebGLUniformLocation;
   resolution: WebGLUniformLocation;
+  ripples: WebGLUniformLocation;
   speaking: WebGLUniformLocation;
   speechTime: WebGLUniformLocation;
   sphere: WebGLUniformLocation;
   thinking: WebGLUniformLocation;
   thoughtTime: WebGLUniformLocation;
   time: WebGLUniformLocation;
+  voice: WebGLUniformLocation;
 };
 
 const REVEAL_SPAN = 1.8;
@@ -51,6 +55,10 @@ const REVEAL_DECAY = 3.2;
 const AMBIENT_GATE = 0.3;
 const MAX_RENDER_PIXEL_RATIO = 2;
 const FRAME_INTERVAL_MS = 1000 / 30;
+const ACTIVE_FRAME_INTERVAL_MS = 1000 / 60;
+const RIPPLE_COUNT = 6;
+const RIPPLE_LIFE_SECONDS = 2.4;
+const RIPPLE_IGNORED_TARGETS = "button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -77,12 +85,14 @@ uniform float u_time;
 uniform float u_thought_time;
 uniform float u_thinking;
 uniform float u_speaking;
+uniform float u_voice;
 uniform float u_speech_time;
 uniform float u_error;
 uniform float u_reveal;
 uniform float u_ambient;
 uniform float u_departing;
 uniform vec3 u_background;
+uniform vec4 u_ripples[${RIPPLE_COUNT}];
 
 out vec4 outputColor;
 
@@ -126,6 +136,95 @@ float fbm(vec2 p) {
     amplitude *= 0.5;
   }
   return total;
+}
+
+const int GLYPH_COUNT = 57;
+const ivec2 GLYPHS[GLYPH_COUNT] = ivec2[GLYPH_COUNT](
+  ivec2(476789, 26158),
+  ivec2(143492, 4238),
+  ivec2(476194, 4383),
+  ivec2(1017986, 1582),
+  ivec2(72018, 31810),
+  ivec2(1033153, 1582),
+  ivec2(205342, 17966),
+  ivec2(1016900, 8456),
+  ivec2(476718, 17966),
+  ivec2(476719, 1100),
+  ivec2(476721, 32305),
+  ivec2(1001022, 17982),
+  ivec2(476688, 16942),
+  ivec2(936497, 18012),
+  ivec2(1032734, 16927),
+  ivec2(1032734, 16912),
+  ivec2(476695, 17967),
+  ivec2(575039, 17969),
+  ivec2(231490, 2636),
+  ivec2(576152, 21073),
+  ivec2(541200, 16927),
+  ivec2(585397, 17969),
+  ivec2(575285, 20017),
+  ivec2(1001022, 16912),
+  ivec2(476721, 22093),
+  ivec2(1001022, 21073),
+  ivec2(508430, 1086),
+  ivec2(1020036, 4228),
+  ivec2(575025, 17966),
+  ivec2(575025, 17732),
+  ivec2(575029, 22186),
+  ivec2(574788, 10801),
+  ivec2(575018, 4228),
+  ivec2(1016900, 8735),
+  ivec2(449, 15919),
+  ivec2(541401, 17982),
+  ivec2(464, 16942),
+  ivec2(34227, 17967),
+  ivec2(465, 32270),
+  ivec2(206108, 8456),
+  ivec2(15921, 15406),
+  ivec2(541401, 17969),
+  ivec2(65730, 2636),
+  ivec2(541268, 25234),
+  ivec2(853, 22065),
+  ivec2(729, 17969),
+  ivec2(977, 31248),
+  ivec2(435, 15393),
+  ivec2(729, 16912),
+  ivec2(464, 14398),
+  ivec2(271240, 8486),
+  ivec2(561, 18029),
+  ivec2(561, 17732),
+  ivec2(561, 22186),
+  ivec2(554, 4433),
+  ivec2(561, 15406),
+  ivec2(994, 4383)
+);
+const vec3 LIGHT_PARTICLE_INK = vec3(${LIGHT_SCENE_PARTICLE_COLOR.join(", ")}) * vec3(0.62, 0.72, 0.94);
+
+void rippleAt(vec2 pixel, float shortestSide, out float wake, out float crest) {
+  wake = 0.0;
+  crest = 0.0;
+  for (int index = 0; index < ${RIPPLE_COUNT}; index += 1) {
+    vec4 ripple = u_ripples[index];
+    float age = u_time - ripple.z;
+    if (ripple.w <= 0.0 || age < 0.0 || age > ${RIPPLE_LIFE_SECONDS.toFixed(2)}) continue;
+    float travelled = (1.0 - exp(-age * 1.4)) * 1.1;
+    float distanceFromSource = length(pixel - ripple.xy) / shortestSide;
+    float behind = travelled - distanceFromSource;
+    float leadingEdge = smoothstep(-0.014, 0.0, behind);
+    float life = 1.0 - smoothstep(${(RIPPLE_LIFE_SECONDS * 0.35).toFixed(2)}, ${RIPPLE_LIFE_SECONDS.toFixed(2)}, age);
+    float reach = 1.0 - smoothstep(0.5, 1.15, distanceFromSource);
+    float strength = leadingEdge * life * reach * ripple.w;
+    wake += exp(-max(behind, 0.0) / 0.16) * strength;
+    crest += exp(-abs(behind) / 0.024) * strength;
+  }
+  wake = saturate(wake);
+  crest = saturate(crest);
+}
+
+float glyphBit(ivec2 glyph, int column, int rowFromTop) {
+  if (column < 0 || column > 4 || rowFromTop < 0 || rowFromTop > 6) return 0.0;
+  int packedRow = rowFromTop < 4 ? glyph.x >> (5 * (3 - rowFromTop)) : glyph.y >> (5 * (6 - rowFromTop));
+  return float((packedRow >> (4 - column)) & 1);
 }
 
 float waveCrest(float x, float layer, float thoughtTime) {
@@ -177,7 +276,7 @@ vec4 shadeWaveField(
   float waveActivity = max(thinking, speaking);
   float thoughtPresence = smoothstep(0.0, 0.16, waveActivity);
   float thoughtActivity = smoothstep(0.08, 0.72, waveActivity);
-  float speechAmplitude = 1.0 + saturate(speaking) * 0.06;
+  float speechAmplitude = 1.0 + saturate(speaking) * (saturate(u_voice) * 0.26 - 0.16);
   float restingCrest = -0.045 + sin(normalizedPoint.x * 2.18 + 0.62) * 0.052;
   float activeCrest = waveCrest(normalizedPoint.x, layer, thoughtTime) * speechAmplitude;
   float crest = mix(restingCrest, activeCrest, thoughtActivity);
@@ -257,7 +356,7 @@ vec4 shadeWaveField(
   float alpha = (
     (fieldAlpha + mistAlpha) * fieldVisibility +
     (glowAlpha + lineAlpha) * layerVisibility
-  ) * strength * thoughtPresence * (1.0 + thoughtActivity * 0.45);
+  ) * strength * thoughtPresence * (1.0 + thoughtActivity * 0.45) * (1.0 + saturate(speaking) * (saturate(u_voice) * 0.5 - 0.2));
   float luminance = 0.62 + lowerIllumination * 0.28 + line * 0.18 + field * 0.09 + mistTexture * mistAlpha * 0.9 + crestHotspot * lineGlow * 0.32;
   return vec4(lightTint * luminance * colorAmplitude, saturate(alpha));
 }
@@ -283,18 +382,14 @@ float voiceContour(
   coherentBase *= 0.62 + 0.38 * scatterCarrier;
   float secondaryCrests = (pow(crestCarrier, 3.0) + pow(scatterCarrier, 4.0) * 0.6) * highSpeech * 0.16;
   float coherentWave = (pow(saturate(coherentBase), 2.08) + secondaryCrests) * directionalWeight;
-  float syllable =
-    0.88 +
-    sin(time * 5.4) * 0.075 +
-    sin(time * 9.7 + 0.7) * 0.045;
-  float outwardWave = saturate(coherentWave * syllable);
+  float outwardWave = saturate(coherentWave * mix(0.78, 1.0, saturate(u_voice)));
   float waveVisibility = 0.12 + smoothstep(0.02, 0.42, outwardWave) * 0.88;
   float layerGrowth = pow(ring, 0.72);
   float amplitude = mix(0.008, 0.095, layerGrowth);
   float radialReach = (
     0.0015 +
     ring * 0.0065 +
-    amplitude * speechEnergy * outwardWave
+    amplitude * speechEnergy * mix(0.4, 1.0, saturate(u_voice)) * outwardWave
   );
   float ringRadius = SPHERE_RADIUS + radialReach;
   float fadeReach = 0.052 + speechEnergy * 0.028;
@@ -432,7 +527,7 @@ void main() {
 
   float surfaceLuminance = dot(u_background, vec3(0.2126, 0.7152, 0.0722));
   float lightSurfaceScale = smoothstep(0.58, 0.84, surfaceLuminance);
-  point /= 1.0 + saturate(u_speaking) * 0.1;
+  point /= 1.0 + saturate(u_speaking) * 0.06;
 
   float radius = length(point);
   float theta = atan(point.y, point.x);
@@ -459,7 +554,7 @@ void main() {
   float bottomPole = 1.0 - smoothstep(-0.92, -0.12, normalizedY);
   float shellDirection = 0.48 + topPole * 0.34 + bottomPole * 0.46;
   float shellDiffraction = 0.86 + cos(theta * 2.0 - 0.35) * 0.14;
-  float shellActivity = smoothstep(0.08, 0.84, max(u_speaking, u_thinking));
+  float shellActivity = smoothstep(0.08, 0.84, max(u_speaking * mix(0.5, 1.0, saturate(u_voice)), u_thinking));
   float shellPower = mix(0.42, 1.0, shellActivity);
   float lightFocus = saturate(dot(normalize(point + vec2(0.0001)), normalize(vec2(-0.34, 0.94))));
   float boostShape = mix(0.3, 1.0, pow(lightFocus, 1.25));
@@ -490,7 +585,7 @@ void main() {
       contourGlow += line * strength * strength;
     }
   }
-  float contourEnergy = saturate(u_speaking);
+  float contourEnergy = saturate(u_speaking) * mix(0.35, 1.15, saturate(u_voice));
   contours = saturate(contours * contourEnergy * 0.68);
   contourGlow = saturate(contourGlow * contourEnergy * 0.12);
   contours *= outside * (1.0 - lightSurface);
@@ -572,7 +667,7 @@ void main() {
   ) - 0.5;
   jitter *= 0.39;
   float dotDistance = length(localCell - jitter);
-  float fineDot = 1.0 - smoothstep(0.105, 0.185, dotDistance);
+  float fineDot = 1.0 - smoothstep(mix(0.105, 0.17, lightSurface), mix(0.185, 0.27, lightSurface), dotDistance);
   float particleSeed = interleavedNoise(cell + vec2(31.0, 53.0));
   vec2 orbPoint = point / max(SPHERE_RADIUS, 0.001);
   float orbRadius = length(orbPoint);
@@ -615,6 +710,28 @@ void main() {
   float particleSpark = fineDot * particleDensity * particleEnvelope * dustPresence;
   float particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread);
 
+  float glyphPitch = max(1.15 * u_pixel_ratio, 1.6);
+  vec2 glyphSpan = vec2(6.0, 9.0) * glyphPitch;
+  vec2 glyphCell = floor(gl_FragCoord.xy / glyphSpan);
+  float rippleWake;
+  float rippleCrest;
+  rippleAt((glyphCell + 0.5) * glyphSpan, shortestSide, rippleWake, rippleCrest);
+  float glyphAlpha = 0.0;
+  if (rippleWake + rippleCrest > 0.002) {
+    float glyphSeed = hash21(glyphCell + vec2(3.7, 11.3));
+    float glyphPatch = valueNoise(glyphCell * vec2(0.21, 0.34) + vec2(u_time * 0.05, 0.0));
+    float glyphDensity = saturate(0.3 + glyphPatch * 0.75 + inkCoverage * 0.5);
+    float glyphOn = step(glyphSeed, glyphDensity * saturate(rippleWake * 1.35 + rippleCrest));
+    float scrambleRate = mix(3.0, 18.0, rippleCrest);
+    float glyphPick = hash21(glyphCell * 1.37 + floor(u_time * scrambleRate + glyphSeed * 13.0));
+    ivec2 glyph = GLYPHS[min(int(glyphPick * float(GLYPH_COUNT)), GLYPH_COUNT - 1)];
+    vec2 glyphLocal = (gl_FragCoord.xy - glyphCell * glyphSpan) / glyphPitch;
+    float lit = glyphBit(glyph, int(floor(glyphLocal.x)), 7 - int(floor(glyphLocal.y)));
+    float glyphDot = 1.0 - smoothstep(0.26, 0.44, length(fract(glyphLocal) - 0.5));
+    glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * edgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
+  }
+  particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
+
   float rimBuild = smoothstep(0.3, 0.76, u_reveal);
   float rimProgress = smoothstep(0.34, 0.82, u_reveal);
   float rimCoordinate = abs(theta) / PI;
@@ -628,17 +745,22 @@ void main() {
   float structureMask = saturate(max(bodyReveal, assemblyRim));
   vec3 revealedColor = mix(u_background, color, structureMask);
   revealedColor += lightTint * particleLuminance * (1.0 - lightSurface);
-  revealedColor = mix(revealedColor, vec3(${LIGHT_SCENE_PARTICLE_COLOR.join(", ")}), saturate(particleLuminance * 0.9) * lightSurface);
+  revealedColor = mix(revealedColor, LIGHT_PARTICLE_INK, saturate(particleLuminance * 1.3) * lightSurface);
+  vec3 darkGlyph = mix(vec3(0.74, 0.77, 0.84), vec3(0.42, 0.66, 1.0), saturate(rippleCrest * 1.2));
+  vec3 lightGlyph = mix(vec3(0.4, 0.47, 0.6), LIGHT_PARTICLE_INK * 0.92, saturate(rippleCrest * 1.2));
+  revealedColor = mix(revealedColor, mix(darkGlyph, lightGlyph, lightSurface), saturate(glyphAlpha * mix(1.0, 1.15, lightSurface)));
   outputColor = vec4(clamp(revealedColor, 0.0, 1.0), 1.0);
 }
 `;
 
-export function VoiceOrbScene({ activity, ambient = false, animated = true, onDispersed, phase, sizeProbe, sphere = 0.235 }: Props) {
+export function VoiceOrbScene({ activity, ambient = false, animated = true, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onDispersedRef = useRef(onDispersed);
   onDispersedRef.current = onDispersed;
   const sizeProbeRef = useRef(sizeProbe);
   sizeProbeRef.current = sizeProbe;
+  const rippleSurfaceRef = useRef(rippleSurface);
+  rippleSurfaceRef.current = rippleSurface;
   const frameRef = useRef<OrbFrame>({ activity, ambient, phase, sphere });
   const requestRenderRef = useRef<(() => void) | null>(null);
   const [failure, setFailure] = useState("");
@@ -670,11 +792,15 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
     let revealElapsed = frameRef.current.ambient ? 0 : REVEAL_SPAN;
     let smoothAmbient = 1;
     let smoothSpeaking = 0;
+    let smoothVoice = 0;
     let smoothThinking = 0;
     let thoughtTime = staticScene ? 3.7 : 0;
     let speechTime = staticScene ? 3.7 : 0;
     let renderPixelRatio = 1;
     let measuredSphere = 0;
+    const ripples = new Float32Array(RIPPLE_COUNT * 4);
+    let nextRipple = 0;
+    let rippleUntil = 0;
     let background = readBackgroundColor(canvas);
     let program: WebGLProgram;
     let vertexArray: WebGLVertexArrayObject;
@@ -724,7 +850,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
         lastRenderTime = now;
         return;
       }
-      if (!staticScene && lastRenderTime && now - lastRenderTime < FRAME_INTERVAL_MS) {
+      if (!staticScene && lastRenderTime && now - lastRenderTime < (now < rippleUntil || !frameRef.current.ambient ? ACTIVE_FRAME_INTERVAL_MS : FRAME_INTERVAL_MS)) {
         scheduleDraw();
         return;
       }
@@ -742,10 +868,11 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       const seconds = staticScene ? 3.7 : now / 1000;
       const next = resolveActivity(frame.activity, frame.phase, seconds);
       smoothThinking = approach(smoothThinking, next.thinking, elapsed, next.thinking > smoothThinking ? 6 : 1.5);
-      smoothSpeaking = approach(smoothSpeaking, next.speaking, elapsed, next.speaking > smoothSpeaking ? 14 : 2.6);
+      smoothSpeaking = approach(smoothSpeaking, next.speaking, elapsed, next.speaking > smoothSpeaking ? 3.2 : 1.1);
+      smoothVoice = approach(smoothVoice, next.voice, elapsed, next.voice > smoothVoice ? 14 : 5);
       if (!staticScene) {
         thoughtTime += elapsed * smoothThinking * 1.8;
-        speechTime += elapsed * smoothSpeaking * 1.35;
+        speechTime += elapsed * smoothSpeaking * (0.55 + smoothVoice * 0.8) * 1.35;
       }
       const settledAmbient = frame.ambient
         && revealElapsed === 0
@@ -755,6 +882,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       if (settledAmbient) {
         smoothAmbient = 0;
         smoothSpeaking = 0;
+        smoothVoice = 0;
         smoothThinking = 0;
       }
 
@@ -763,12 +891,14 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       gl.useProgram(program);
       gl.bindVertexArray(vertexArray);
       gl.uniform3f(uniforms.background, background[0], background[1], background[2]);
+      gl.uniform4fv(uniforms.ripples, ripples);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
       gl.uniform1f(uniforms.pixelRatio, renderPixelRatio);
       gl.uniform1f(uniforms.time, seconds);
       gl.uniform1f(uniforms.thoughtTime, thoughtTime);
       gl.uniform1f(uniforms.thinking, smoothThinking);
       gl.uniform1f(uniforms.speaking, smoothSpeaking);
+      gl.uniform1f(uniforms.voice, smoothVoice);
       gl.uniform1f(uniforms.speechTime, speechTime);
       gl.uniform1f(uniforms.error, frame.phase === "error" ? 1 : 0);
       gl.uniform1f(uniforms.ambient, staticScene ? (frame.ambient ? 1 : 0) : smoothAmbient);
@@ -790,6 +920,24 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       if (staticScene) draw(performance.now());
       else scheduleDraw();
     };
+    const startRipple = (event: PointerEvent) => {
+      if (staticScene || event.button !== 0 || !frameRef.current.ambient) return;
+      if (event.target instanceof Element && event.target.closest(RIPPLE_IGNORED_TARGETS)) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const now = performance.now();
+      const slot = nextRipple * 4;
+      nextRipple = (nextRipple + 1) % RIPPLE_COUNT;
+      ripples[slot] = (event.clientX - rect.left) * (canvas.width / rect.width);
+      ripples[slot + 1] = canvas.height - (event.clientY - rect.top) * (canvas.height / rect.height);
+      ripples[slot + 2] = now / 1000;
+      ripples[slot + 3] = 1;
+      rippleUntil = now + RIPPLE_LIFE_SECONDS * 1000;
+      lastRenderTime = 0;
+      scheduleDraw();
+    };
+    const rippleTarget = rippleSurfaceRef.current?.current ?? null;
+    rippleTarget?.addEventListener("pointerdown", startRipple, { passive: true });
     const resizeAndDraw = () => {
       if (disposed) return;
       if (resize()) lastRenderTime = 0;
@@ -839,6 +987,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
     return () => {
       disposed = true;
       requestRenderRef.current = null;
+      rippleTarget?.removeEventListener("pointerdown", startRipple);
       observer.disconnect();
       intersectionObserver.disconnect();
       themeObserver.disconnect();
@@ -907,12 +1056,14 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     pixelRatio: requiredUniform(gl, program, "u_pixel_ratio"),
     reveal: requiredUniform(gl, program, "u_reveal"),
     resolution: requiredUniform(gl, program, "u_resolution"),
+    ripples: requiredUniform(gl, program, "u_ripples"),
     speaking: requiredUniform(gl, program, "u_speaking"),
     speechTime: requiredUniform(gl, program, "u_speech_time"),
     sphere: requiredUniform(gl, program, "u_sphere"),
     thinking: requiredUniform(gl, program, "u_thinking"),
     thoughtTime: requiredUniform(gl, program, "u_thought_time"),
     time: requiredUniform(gl, program, "u_time"),
+    voice: requiredUniform(gl, program, "u_voice"),
   };
 }
 
@@ -931,21 +1082,24 @@ function requiredUniform(gl: WebGL2RenderingContext, program: WebGLProgram, name
 
 function resolveActivity(activity: VoiceOrbActivity, phase: VoicePhase, time: number): ResolvedActivity {
   if (activity.source === "live") {
-    const speaking = clampUnit(clampUnit(activity.speakingLevel) * 1.8);
+    const voice = speechEnergy(activity.speakingLevel);
     const listening = phase === "listening" ? clampUnit(activity.listeningLevel * 1.6) * 0.6 : 0;
     return {
-      speaking,
+      speaking: smoothStep(0.12, 0.4, voice),
       thinking: Math.max(clampUnit(activity.thinkingLevel), listening),
+      voice,
     };
   }
-  if (phase === "error") return { speaking: 0, thinking: 0 };
+  if (phase === "error") return { speaking: 0, thinking: 0, voice: 0 };
   if (phase === "idle") {
+    const speaking = clampUnit(0.88 + Math.sin(time * 3.8) * 0.09 + Math.sin(time * 6.4 + 0.7) * 0.07);
     return {
-      speaking: clampUnit(0.88 + Math.sin(time * 3.8) * 0.09 + Math.sin(time * 6.4 + 0.7) * 0.07),
+      speaking,
       thinking: clampUnit(0.72 + Math.sin(time * 0.74) * 0.08),
+      voice: speaking,
     };
   }
-  if (phase === "requesting") return { speaking: 0.22, thinking: 0.86 };
+  if (phase === "requesting") return { speaking: 0.22, thinking: 0.86, voice: 0.22 };
 
   const cycle = time % 12;
   const voiceWindow = smoothStep(2.7, 3.65, cycle) * (1 - smoothStep(8.05, 9.1, cycle));
@@ -957,10 +1111,18 @@ function resolveActivity(activity: VoiceOrbActivity, phase: VoicePhase, time: nu
     + (1 - voiceWindow) * 0.36
     + Math.sin(time * 0.73) * 0.08
     + Math.sin(time * 1.17 + 1.4) * 0.05;
+  const speaking = clampUnit(0.2 + voiceWindow * voiceTexture * 0.8);
   return {
-    speaking: clampUnit(0.2 + voiceWindow * voiceTexture * 0.8),
+    speaking,
     thinking: clampUnit(thinking),
+    voice: speaking,
   };
+}
+
+function speechEnergy(meterLevel: number): number {
+  const rms = clampUnit(meterLevel) / 4.8;
+  if (rms <= 0) return 0;
+  return clampUnit((20 * Math.log10(rms) + 48) / 30);
 }
 
 function approach(current: number, target: number, elapsed: number, speed: number): number {

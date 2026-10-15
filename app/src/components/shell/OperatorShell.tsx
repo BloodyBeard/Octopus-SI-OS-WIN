@@ -916,13 +916,13 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     return {
       glyph: target.surfaceId === "chat" ? "chat" : surface?.glyph ?? "viewAll",
       id: tab.id,
-      showWhenSingle: target.surfaceId !== "chat" || Boolean(clientWindow.reattachWindowId),
+      showWhenSingle: true,
       title: target.surfaceId === "chat"
         ? activeRunIdentityPending ? "Opening task"
           : target.runId ? clientTaskTitle(target.runId, run?.title ?? "", taskOrganization) : "New task"
         : surface?.label || target.surfaceId,
     };
-  }), [activeSecondaryTabId, clientWindow.reattachWindowId, secondaryChatWorkspace.runs, secondaryRunIdentityReady, secondaryTabs, surfaceRegistry.workerEnvironmentSurfaces, taskOrganization, topology, visibleSurfaces]);
+  }), [activeSecondaryTabId, secondaryChatWorkspace.runs, secondaryRunIdentityReady, secondaryTabs, surfaceRegistry.workerEnvironmentSurfaces, taskOrganization, topology, visibleSurfaces]);
 
   const paneShortcut = useCallback((command: ClientCommandId) => {
     const bindings = keyboardShortcuts[command] ?? [];

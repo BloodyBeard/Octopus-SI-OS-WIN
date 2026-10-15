@@ -1856,6 +1856,7 @@ function createWindow(inheritedAccessToken = "", options = {}) {
   const clientWebContentsId = win.webContents.id;
   win.on("closed", () => {
     paneWindowDrag.removeOwner(clientWebContentsId);
+    if (clientWindows.entries().length === 0 && paneDragPreviewHost && !paneDragPreviewHost.win.isDestroyed()) paneDragPreviewHost.win.destroy();
     if (primaryWindow === win) primaryWindow = null;
     if (accessClaim) accessInheritanceClaims.delete(accessClaim);
   });
@@ -1926,6 +1927,7 @@ function presentPaneDestination(win) {
 }
 
 async function capturePaneDragPreview(source, captureRect) {
+  paneDragPreviewWindow();
   const zoom = source.win.webContents.getZoomFactor();
   const image = await source.win.webContents.capturePage({
     x: Math.floor(captureRect.x * zoom), y: Math.floor(captureRect.y * zoom),
@@ -1935,36 +1937,57 @@ async function capturePaneDragPreview(source, captureRect) {
   return { image, width: Math.ceil(captureRect.width * zoom), height: Math.ceil(captureRect.height * zoom), zoom };
 }
 
-async function openPaneDragPreview(capture, appearance) {
-  const margin = 24;
-  const radius = Math.round(appearance.radius * capture.zoom * 100) / 100;
+const PANE_DRAG_PREVIEW_MARGIN = 24;
+let paneDragPreviewHost = null;
+let paneDragPreviewGeneration = 0;
+
+function paneDragPreviewWindow() {
+  if (paneDragPreviewHost && !paneDragPreviewHost.win.isDestroyed()) return paneDragPreviewHost;
   const isMac = process.platform === "darwin";
-  const preview = new BrowserWindow({
-    width: capture.width + margin * 2, height: capture.height + margin * 2,
+  const win = new BrowserWindow({
+    width: 1, height: 1,
     show: false, frame: false, transparent: true, focusable: false, fullscreenable: false,
     skipTaskbar: true, alwaysOnTop: true, resizable: false, movable: false, minimizable: false, maximizable: false, hasShadow: false,
     ...(isMac ? { type: "panel" } : {}),
     webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false },
   });
-  preview.setIgnoreMouseEvents(true);
-  preview.setAlwaysOnTop(true, "pop-up-menu");
-  if (isMac) preview.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
-  preview.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.setIgnoreMouseEvents(true);
+  win.setAlwaysOnTop(true, "pop-up-menu");
+  if (isMac) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  void win.loadURL("data:text/html;charset=utf-8,").catch(() => {});
+  const host = { win };
+  win.once("closed", () => { if (paneDragPreviewHost === host) paneDragPreviewHost = null; });
+  paneDragPreviewHost = host;
+  return host;
+}
+
+async function openPaneDragPreview(capture, appearance) {
+  const margin = PANE_DRAG_PREVIEW_MARGIN;
+  const radius = Math.round(appearance.radius * capture.zoom * 100) / 100;
+  const { win: preview } = paneDragPreviewWindow();
+  const generation = ++paneDragPreviewGeneration;
+  const current = () => generation === paneDragPreviewGeneration && !preview.isDestroyed();
+  preview.hide();
+  preview.setContentSize(capture.width + margin * 2, capture.height + margin * 2);
   const html = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'"><style>html,body{margin:0;overflow:hidden;background:transparent}div{position:absolute;left:${margin}px;top:${margin}px;width:${capture.width}px;height:${capture.height}px;overflow:hidden;border-radius:${radius}px;background:${appearance.background || "transparent"};box-shadow:0 12px 32px rgb(0 0 0 / 22%),0 2px 8px rgb(0 0 0 / 14%)}img{display:block;width:${capture.width}px;height:${capture.height}px}</style><div><img alt="" src="${capture.image.toDataURL()}"></div>`;
   let readyTimer;
-  const ready = new Promise((resolve, reject) => {
-    preview.once("ready-to-show", resolve);
-    preview.once("closed", () => reject(new Error("Pane preview closed before it was ready.")));
-    readyTimer = setTimeout(() => reject(new Error("Pane preview did not become ready.")), 5000);
-  });
-  try { await Promise.all([ready, preview.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)]); }
-  catch (error) { if (!preview.isDestroyed()) preview.close(); throw error; }
-  finally { clearTimeout(readyTimer); }
+  try {
+    await Promise.race([
+      preview.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`),
+      new Promise((_, reject) => { readyTimer = setTimeout(() => reject(new Error("Pane preview did not become ready.")), 5000); }),
+    ]);
+  } catch (error) {
+    if (current()) preview.hide();
+    throw error;
+  } finally { clearTimeout(readyTimer); }
+  if (!current()) throw new Error("Pane preview was replaced before it was ready.");
+  preview.webContents.setZoomFactor(1);
   return {
-    close() { if (!preview.isDestroyed()) preview.close(); },
-    hide() { if (!preview.isDestroyed()) preview.hide(); },
-    setPosition(x, y) { if (preview.isDestroyed()) throw new Error("Pane preview closed."); preview.setPosition(Math.round(x - margin), Math.round(y - margin)); },
-    showInactive() { if (preview.isDestroyed()) throw new Error("Pane preview closed."); preview.showInactive(); },
+    close() { if (current()) { paneDragPreviewGeneration += 1; preview.hide(); } },
+    hide() { if (current()) preview.hide(); },
+    setPosition(x, y) { if (!current()) throw new Error("Pane preview closed."); preview.setPosition(Math.round(x - margin), Math.round(y - margin)); },
+    showInactive() { if (!current()) throw new Error("Pane preview closed."); preview.showInactive(); },
   };
 }
 

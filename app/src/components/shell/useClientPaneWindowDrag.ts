@@ -67,6 +67,7 @@ export function useClientPaneWindowDrag(options: Options) {
     let target = -1;
     let pointerX = start.x;
     let captureFrame = 0;
+    let beginning: Promise<unknown> | null = null;
     const session: Session = { cancel, phase };
     active.current = session;
     activator.setPointerCapture(pointerId);
@@ -182,7 +183,8 @@ export function useClientPaneWindowDrag(options: Options) {
       latest.current.onReorder?.(tabId, overId);
     }
     function capture() {
-      if (ending || !reference) return;
+      window.cancelAnimationFrame(captureFrame);
+      if (beginning || !reference) return beginning;
       const captureRect = toRect(chrome.getBoundingClientRect());
       const request: ClientPaneDragBeginRequest = {
         transferId: reference.transferId,
@@ -191,13 +193,12 @@ export function useClientPaneWindowDrag(options: Options) {
         offset: { x: clamp(grab.x, 0, captureRect.width), y: clamp(grab.y, 0, captureRect.height) },
         appearance: previewAppearance(chrome),
       };
-      void bridge!.beginClientPaneDrag(request).then((result) => {
-        if (ending || result?.phase === "cancelled") return;
-        strip = measureStrip();
-        follow();
+      beginning = bridge!.beginClientPaneDrag(request).then((result) => {
+        if (result?.phase === "cancelled" && !ending) { reference = null; cancel(); }
       }).catch((error) => {
         if (!ending) { cancel(); latest.current.onError(error); }
       });
+      return beginning;
     }
     const move = (input: PointerEvent) => {
       if (input.pointerId !== pointerId || ending) return;
@@ -207,7 +208,8 @@ export function useClientPaneWindowDrag(options: Options) {
         try {
           reference = latest.current.begin(tabId);
           session.transferId = reference.transferId;
-          captureFrame = window.requestAnimationFrame(() => { captureFrame = window.requestAnimationFrame(capture); });
+          strip = measureStrip();
+          captureFrame = window.requestAnimationFrame(() => { captureFrame = window.requestAnimationFrame(() => { void capture(); }); });
         } catch (error) { cancel(); latest.current.onError(error); return; }
       }
       if (!started) return;
@@ -223,7 +225,8 @@ export function useClientPaneWindowDrag(options: Options) {
       window.addEventListener("click", preventClick, { capture: true, once: true });
       window.setTimeout(() => window.removeEventListener("click", preventClick, true), 0);
       const released = !floating;
-      void bridge.finishClientPaneDrag({ transferId: reference.transferId }).then((outcome) => {
+      const transferId = reference.transferId;
+      void Promise.resolve(capture()).then(() => bridge.finishClientPaneDrag({ transferId })).then((outcome) => {
         if (outcome?.status === "transferred") {
           settleStrip(false);
           window.setTimeout(() => { if (chrome.isConnected) chrome.style.opacity = opacity; }, 2000);
