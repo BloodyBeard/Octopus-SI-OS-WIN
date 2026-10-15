@@ -496,18 +496,20 @@ assert.deepEqual(projectedCodeComments.map(({ id, sourceMessageId, title }) => (
   title: "Bound path",
 }]);
 
-const workspaceToolIds = fs.readdirSync(path.join(repoRoot, "registry", "tool"))
+const registryToolIds = fs.readdirSync(path.join(repoRoot, "registry", "tool"))
   .map((entry) => path.join(repoRoot, "registry", "tool", entry, "tool.json"))
   .filter((descriptorPath) => fs.existsSync(descriptorPath))
   .map((descriptorPath) => JSON.parse(fs.readFileSync(descriptorPath, "utf8")))
   .map((descriptor) => descriptor.id)
-  .filter((toolId) => typeof toolId === "string" && toolId.startsWith("workspace."))
+  .filter((toolId) => typeof toolId === "string")
   .sort();
 assert.deepEqual(
-  Object.keys(toolActivityPresentationCatalog).filter((toolId) => toolId.startsWith("workspace.")).sort(),
-  workspaceToolIds,
-  "every filesystem_workspace tool must have an exact conversation presentation",
+  Object.keys(toolActivityPresentationCatalog).sort(),
+  registryToolIds,
+  "every registry tool must have an exact conversation presentation",
 );
+assert.equal(toolActivityPresentationCatalog["file.read"].kind, "read");
+assert.equal(toolActivityPresentationCatalog["file.list"].kind, "list");
 assert.deepEqual(toolActivityPresentationCatalog["workspace.read_file"].target_arguments, ["path"]);
 assert.deepEqual(toolActivityPresentationCatalog["workspace.exec"].target_arguments, ["command"]);
 assert.deepEqual(toolActivityPresentationCatalog["workspace.grep"].query_arguments, ["query"]);
@@ -525,6 +527,14 @@ const projectedWorkspaceExec = toolPresentation.dynamicToolPresentation({
     tool: `workspace.exec__${workspaceToolSuffix}`,
   },
 }, {});
+const projectedRoomRead = toolPresentation.dynamicToolPresentation({
+  eventData: {
+    arguments: { path: "/home/registry/interface/world_operator_chat/activation.json" },
+    namespace: "formed_interfaces",
+    tool: `file.read__${workspaceToolSuffix}`,
+  },
+}, {});
+assert.equal(toolPresentation.dynamicToolReadLabel(projectedRoomRead, false), "Read activation.json");
 assert.equal(projectedWorkspaceRead.family, "read");
 assert.equal(toolPresentation.dynamicToolReadLabel(projectedWorkspaceRead, false), "Read life.rs");
 assert.equal(projectedWorkspaceExec.family, "exec");

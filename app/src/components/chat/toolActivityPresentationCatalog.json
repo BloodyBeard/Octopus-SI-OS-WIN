@@ -57,6 +57,22 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.clipboard_read": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Clipboard read",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.clipboard_write": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Clipboard write",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.close": {
     "kind": "tool",
     "conversation_visible": true,
@@ -111,6 +127,54 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.dom_click": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Dom click",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.dom_scroll": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Dom scroll",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.dom_snapshot": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Dom snapshot",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.download_arm": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Download arm",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.download_cancel": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Download cancel",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.download_wait": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Download wait",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.drag": {
     "kind": "tool",
     "conversation_visible": true,
@@ -127,10 +191,74 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.evaluate_readonly": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Evaluate readonly",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.filechooser_arm": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Filechooser arm",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.filechooser_cancel": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Filechooser cancel",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.filechooser_resume": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Filechooser resume",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.filechooser_set_files": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Filechooser set files",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.filechooser_wait": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Filechooser wait",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.forward": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Forward",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.history": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "History",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.history_resume": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "History resume",
     "target_arguments": [],
     "query_arguments": [],
     "surface": "browser"
@@ -159,6 +287,62 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.locator_check": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator check",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.locator_fill": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator fill",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.locator_press": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator press",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.locator_query": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator query",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.locator_select": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator select",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.locator_wait": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Locator wait",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.media_download": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Media download",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.navigate": {
     "kind": "tool",
     "conversation_visible": true,
@@ -169,10 +353,34 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.paste": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Paste",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.pdf": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Pdf",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.playwright_dom_snapshot": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Playwright dom snapshot",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.pointer_move": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Pointer move",
     "target_arguments": [],
     "query_arguments": [],
     "surface": "browser"
@@ -225,6 +433,14 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.tab_mark": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Tab mark",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.tab_new": {
     "kind": "tool",
     "conversation_visible": true,
@@ -259,6 +475,38 @@
     "query_arguments": [],
     "surface": "browser"
   },
+  "browser.viewport_reset": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Viewport reset",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.viewport_set": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Viewport set",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.visibility_get": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Visibility get",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "browser.visibility_set": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Visibility set",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
   "browser.wait": {
     "kind": "tool",
     "conversation_visible": true,
@@ -266,6 +514,21 @@
     "target_arguments": [],
     "query_arguments": [],
     "surface": "browser"
+  },
+  "browser.wait_complete": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Wait complete",
+    "target_arguments": [],
+    "query_arguments": [],
+    "surface": "browser"
+  },
+  "client.mcp": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Client MCP",
+    "target_arguments": [],
+    "query_arguments": []
   },
   "code_mode.cancel": {
     "kind": "tool",
@@ -285,7 +548,9 @@
     "kind": "command",
     "conversation_visible": true,
     "label": "Run code",
-    "target_arguments": ["script"],
+    "target_arguments": [
+      "script"
+    ],
     "query_arguments": []
   },
   "code_mode.wait": {
@@ -340,6 +605,27 @@
     ],
     "query_arguments": []
   },
+  "coder.process.list": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "List processes",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.process.signal": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Signal process",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.process.terminate": {
+    "kind": "command",
+    "conversation_visible": true,
+    "label": "Terminate process",
+    "target_arguments": [],
+    "query_arguments": []
+  },
   "coder.read_file": {
     "kind": "read",
     "conversation_visible": true,
@@ -356,10 +642,24 @@
     "target_arguments": [],
     "query_arguments": []
   },
+  "coder.worktree.diff": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Worktree diff",
+    "target_arguments": [],
+    "query_arguments": []
+  },
   "coder.worktree.snapshot": {
     "kind": "file_change",
     "conversation_visible": true,
     "label": "Worktree snapshot",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "coder.worktree.status": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Worktree status",
     "target_arguments": [],
     "query_arguments": []
   },
@@ -458,6 +758,33 @@
     "target_arguments": [],
     "query_arguments": []
   },
+  "context.discover": {
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Discover",
+    "target_arguments": [],
+    "query_arguments": [
+      "query"
+    ],
+    "target_kind": "artifact"
+  },
+  "context.prepare_publication": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Prepare publication",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "context.read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Read",
+    "target_arguments": [
+      "entry_id"
+    ],
+    "query_arguments": [],
+    "target_kind": "artifact"
+  },
   "exec.file_read": {
     "kind": "read",
     "conversation_visible": true,
@@ -482,6 +809,24 @@
     "label": "Run",
     "target_arguments": [
       "command"
+    ],
+    "query_arguments": []
+  },
+  "file.list": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "List files",
+    "target_arguments": [
+      "path"
+    ],
+    "query_arguments": []
+  },
+  "file.read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Read file",
+    "target_arguments": [
+      "path"
     ],
     "query_arguments": []
   },
@@ -512,6 +857,13 @@
     ],
     "query_arguments": []
   },
+  "file.write.memory_publication": {
+    "kind": "tool",
+    "conversation_visible": false,
+    "label": "Memory publication",
+    "target_arguments": [],
+    "query_arguments": []
+  },
   "file.write.slack_gateway": {
     "kind": "tool",
     "conversation_visible": false,
@@ -539,10 +891,115 @@
     ],
     "query_arguments": []
   },
+  "gui.app_click": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App click",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_drag": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App drag",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_key": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App key",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_move": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App move",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_paste": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App paste",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_resume": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App resume",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_scroll": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App scroll",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_secondary_action": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App secondary action",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_select_text": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App select text",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_set_value": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App set value",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_state": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App state",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.app_type": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "App type",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.apps": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Apps",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.cancel": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Cancel",
+    "target_arguments": [],
+    "query_arguments": []
+  },
   "gui.click": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Click",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.control": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Control",
     "target_arguments": [],
     "query_arguments": []
   },
@@ -557,6 +1014,13 @@
     "kind": "tool",
     "conversation_visible": true,
     "label": "Key",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "gui.move": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Move",
     "target_arguments": [],
     "query_arguments": []
   },
@@ -893,6 +1357,48 @@
     "kind": "tool",
     "conversation_visible": true,
     "label": "Status",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "skill.capture": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Capture",
+    "target_arguments": [],
+    "query_arguments": []
+  },
+  "skill.get": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Read",
+    "target_arguments": [
+      "id"
+    ],
+    "query_arguments": [],
+    "target_kind": "artifact"
+  },
+  "skill.list": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "List",
+    "target_arguments": [],
+    "query_arguments": [],
+    "target_kind": "artifact"
+  },
+  "skill.search": {
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Search",
+    "target_arguments": [],
+    "query_arguments": [
+      "query"
+    ],
+    "target_kind": "artifact"
+  },
+  "skill.upsert": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Upsert",
     "target_arguments": [],
     "query_arguments": []
   },
