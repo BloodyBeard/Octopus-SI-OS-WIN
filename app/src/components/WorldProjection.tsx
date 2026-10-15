@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
+import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
 import type { EnvironmentNode, InterfaceSummary, SelectionRef } from "../data/topology";
-import { ArtifactTransferSegments, type ArtifactTransfer, type TransferPoint, type TransferTrajectory } from "./ArtifactTransferAnimation";
+import { ArtifactTransferSegments, useArtifactTransferList, type ArtifactTransfer, type ArtifactTransferFeed, type TransferPoint, type TransferTrajectory } from "./ArtifactTransferAnimation";
 import { compactDashboardLabel, DashboardSvgLabel, DashboardTooltip } from "./DashboardLabel";
 
 // The two-layer projection (owner's reference): the SYSTEM surface below carries the zones
@@ -17,7 +17,7 @@ type Props = {
   environments: EnvironmentNode[];
   registeredWorldInterfaces: InterfaceSummary[];
   interfaceIndex: Record<string, InterfaceSummary>;
-  transfers: ArtifactTransfer[];
+  transferFeed: ArtifactTransferFeed;
   mode: "instances" | "routeSets";
   selected: SelectionRef | null;
   onSelect: (selection: SelectionRef) => void;
@@ -60,7 +60,7 @@ const WORLD_GRID_GAP_Y = 104;
 const WORLD_SURFACE_PAD = 86;
 const WORLD_SURFACE_MIN_HALF = 280;
 
-export function WorldProjection({ environments, registeredWorldInterfaces, interfaceIndex, transfers, mode, selected, onSelect }: Props) {
+export function WorldProjection({ environments, registeredWorldInterfaces, interfaceIndex, transferFeed, mode, selected, onSelect }: Props) {
   const [yawDeg, setYawDeg] = useState(DEFAULT_YAW);
   const [pitchDeg, setPitchDeg] = useState(DEFAULT_PITCH);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
@@ -101,7 +101,7 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
   const worldRows = Math.max(1, Math.ceil(scene.worldNodes.length / worldColumns));
   const worldGridHalfWidth = ((worldColumns - 1) * WORLD_GRID_GAP_X) / 2;
   const worldGridHalfDepth = ((worldRows - 1) * WORLD_GRID_GAP_Y) / 2;
-  const worldDots = scene.worldNodes.map((node, index) => {
+  const worldDots = useMemo(() => scene.worldNodes.map((node, index) => {
     const row = Math.floor(index / worldColumns);
     const column = index % worldColumns;
     const itemsInRow = Math.min(worldColumns, scene.worldNodes.length - row * worldColumns);
@@ -111,11 +111,21 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
       ...node,
       point: project(x, y, WORLD_ELEVATION),
     };
-  });
-  const worldDotByName = new Map<string, (typeof worldDots)[number]>();
-  for (const dot of worldDots) {
-    for (const member of dot.members) worldDotByName.set(member, dot);
-  }
+  }), [project, scene.worldNodes, worldColumns, worldRows]);
+  const worldDotByName = useMemo(() => {
+    const byName = new Map<string, (typeof worldDots)[number]>();
+    for (const dot of worldDots) {
+      for (const member of dot.members) byName.set(member, dot);
+    }
+    return byName;
+  }, [worldDots]);
+  const transferRuns = useMemo(() => scene.zones.flatMap((zone) => zone.runs.map((run) => ({
+    id: run.run.id,
+    worker: run.run.worker,
+    interfaces: run.run.interfaces.map((iface) => iface.name),
+    world: run.world,
+    point: project(run.x, run.y, 0),
+  }))), [project, scene.zones]);
   const boundNodeCount = worldDots.filter((dot) => dot.bound).length;
   const worldSurfaceHalfExtent = Math.max(
     WORLD_SURFACE_MIN_HALF,
@@ -190,18 +200,7 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
           ) : null}
 
           {scene.zones.flatMap((zone) => zoneRoutes(zone, project, worldDotByName))}
-          <ArtifactTransferSegments transfers={transfers} resolve={() => worldArtifactTrajectories(
-            transfers,
-            scene.zones.flatMap((zone) => zone.runs.map((run) => ({
-              id: run.run.id,
-              worker: run.run.worker,
-              interfaces: run.run.interfaces.map((iface) => iface.name),
-              world: run.world,
-              point: project(run.x, run.y, 0),
-            }))),
-            worldDotByName,
-            interfaceIndex,
-          )} />
+          <WorldArtifactTransfers feed={transferFeed} interfaces={interfaceIndex} runs={transferRuns} worldDots={worldDotByName} />
           {scene.zones.flatMap((zone) => zoneRuns(zone, project, selected, onSelect))}
 
           {worldDots.map((dot) => (
@@ -236,6 +235,20 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
       ) : null}
     </div>
   );
+}
+
+function WorldArtifactTransfers({ feed, interfaces, runs, worldDots }: {
+  feed: ArtifactTransferFeed;
+  interfaces: Record<string, InterfaceSummary>;
+  runs: TransferRunPoint[];
+  worldDots: Map<string, { point: TransferPoint }>;
+}) {
+  const transfers = useArtifactTransferList(feed);
+  const resolve = useCallback(
+    () => worldArtifactTrajectories(transfers, runs, worldDots, interfaces),
+    [interfaces, runs, transfers, worldDots],
+  );
+  return <ArtifactTransferSegments transfers={transfers} resolve={resolve} />;
 }
 
 type TransferRunPoint = {

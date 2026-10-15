@@ -3,7 +3,7 @@ import type { CheckpointRow, EnvironmentNode, RunProjection, SelectionRef, Topol
 import type { DashboardFilters, DashboardScope, DashboardTopologyMode } from "../uiState";
 import { Glyph } from "./IconGlyphs";
 import { WorldProjection } from "./WorldProjection";
-import { SystemArtifactTransfers, useArtifactTransfers } from "./ArtifactTransferAnimation";
+import { SystemArtifactTransfers, useArtifactTransferFeed } from "./ArtifactTransferAnimation";
 import { DashboardLabel, DashboardTooltip } from "./DashboardLabel";
 import { useAppErrorToast } from "../toasts";
 
@@ -112,7 +112,7 @@ type Props = {
 
 export function TopologyStage({ snapshot, query, scope, viewMode, filters, selected, onSelect }: Props) {
   const zoneMaskPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const artifactTransfers = useArtifactTransfers(snapshot.projection);
+  const artifactTransfers = useArtifactTransferFeed(snapshot.projection);
   useAppErrorToast(artifactTransfers.error);
   // Callback-state ref: the grid wrap appears only once the projection has zones, so the
   // wheel listener must attach when the ELEMENT arrives, not when the component mounts.
@@ -469,7 +469,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
               environments={snapshot.environments}
               registeredWorldInterfaces={registeredWorldInterfaces}
               interfaceIndex={snapshot.interfaceIndex}
-              transfers={artifactTransfers.transfers}
+              transferFeed={artifactTransfers.feed}
               mode={viewMode === "zones" ? "routeSets" : "instances"}
               selected={selected}
               onSelect={onSelect}
@@ -643,7 +643,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
                   );
                 })}
               </div>
-              <SystemArtifactTransfers container={wrapEl} interfaces={snapshot.interfaceIndex} transfers={artifactTransfers.transfers} />
+              <SystemArtifactTransfers container={wrapEl} feed={artifactTransfers.feed} interfaces={snapshot.interfaceIndex} />
             </div>
           </>
         )}

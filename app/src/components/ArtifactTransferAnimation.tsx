@@ -1,5 +1,5 @@
 import { useReducedMotion } from "motion/react";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useState, useSyncExternalStore } from "react";
 import type { InterfaceSummary, ProjectionStatus } from "../data/topology";
 import { hasProjectionBridge, readProjection } from "../projectionClient";
 import { subscribeProjectionChanges } from "../projectionLive";
@@ -134,13 +134,51 @@ export async function readArtifactTransferBatch(cursor: number | null) {
   return { nextSeq: nextSeq!, transfers: transfers.sort((a, b) => a.sequence - b.sequence) };
 }
 
+export type ArtifactTransferFeed = {
+  snapshot: () => ArtifactTransfer[];
+  subscribe: (listener: () => void) => () => void;
+};
+
+type ArtifactTransferStore = ArtifactTransferFeed & {
+  update: (next: (current: ArtifactTransfer[]) => ArtifactTransfer[]) => void;
+};
+
+const NO_TRANSFERS: ArtifactTransfer[] = [];
+
+function createArtifactTransferStore(): ArtifactTransferStore {
+  let transfers = NO_TRANSFERS;
+  const listeners = new Set<() => void>();
+  return {
+    snapshot: () => transfers,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    update: (next) => {
+      const value = next(transfers);
+      if (value === transfers) return;
+      transfers = value;
+      for (const listener of [...listeners]) listener();
+    },
+  };
+}
+
+export function useArtifactTransferList(feed: ArtifactTransferFeed): ArtifactTransfer[] {
+  return useSyncExternalStore(feed.subscribe, feed.snapshot, feed.snapshot);
+}
+
 export function useArtifactTransfers(projection: ProjectionStatus) {
+  const { feed, error } = useArtifactTransferFeed(projection);
+  return { transfers: useArtifactTransferList(feed), error };
+}
+
+export function useArtifactTransferFeed(projection: ProjectionStatus): { feed: ArtifactTransferFeed; error: string } {
   const reducedMotion = useReducedMotion();
   const enabled = projection.mode === "live" && reducedMotion === false && hasProjectionBridge();
-  const [transfers, setTransfers] = useState<ArtifactTransfer[]>([]);
+  const [store] = useState(createArtifactTransferStore);
   const [error, setError] = useState("");
   useEffect(() => {
-    setTransfers([]);
+    store.update(() => NO_TRANSFERS);
     setError("");
     if (!enabled) return;
     let cancelled = false;
@@ -158,7 +196,7 @@ export function useArtifactTransfers(projection: ProjectionStatus) {
           setError("");
           if (batch.transfers.length) {
             const now = window.performance.now();
-            setTransfers((current) => scheduleArtifactTransfers(current, batch.transfers, now));
+            store.update((current) => scheduleArtifactTransfers(current, batch.transfers, now));
           }
         } catch (failure) {
           if (!cancelled) setError(failure instanceof Error ? failure.message : String(failure));
@@ -172,9 +210,9 @@ export function useArtifactTransfers(projection: ProjectionStatus) {
     };
     const unsubscribe = subscribeProjectionChanges(request);
     request();
-    return () => { cancelled = true; unsubscribe(); };
-  }, [enabled, projection.endpoint]);
-  return { transfers: enabled ? transfers : [], error: enabled ? error : "" };
+    return () => { cancelled = true; unsubscribe(); store.update(() => NO_TRANSFERS); };
+  }, [enabled, projection.endpoint, store]);
+  return { feed: store, error: enabled ? error : "" };
 }
 
 export function transferSegment(points: TransferPoint[], progress: number) {
@@ -211,22 +249,26 @@ export function ArtifactTransferSegments({ transfers, resolve }: {
   resolve: () => TransferTrajectory[];
 }) {
   const prefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const [now, setNow] = useState(() => window.performance.now());
+  const [frame, setFrame] = useState<{ now: number; trajectories: TransferTrajectory[] }>(() => ({
+    now: window.performance.now(),
+    trajectories: [],
+  }));
   useEffect(() => {
     if (!transfers.length) return;
-    let frame = 0;
+    const trajectories = resolve();
+    let request = 0;
     const draw = () => {
       const time = window.performance.now();
-      setNow(time);
+      setFrame({ now: time, trajectories });
       if (transfers.some((transfer) => time - transfer.startedAt < ARTIFACT_TRANSFER_DURATION_MS)) {
-        frame = window.requestAnimationFrame(draw);
+        request = window.requestAnimationFrame(draw);
       }
     };
     draw();
-    return () => window.cancelAnimationFrame(frame);
-  }, [transfers]);
-  const segments = resolve().flatMap(({ transfer, points }) => {
-    const segment = transferSegment(points, (now - transfer.startedAt) / ARTIFACT_TRANSFER_DURATION_MS);
+    return () => window.cancelAnimationFrame(request);
+  }, [resolve, transfers]);
+  const segments = frame.trajectories.flatMap(({ transfer, points }) => {
+    const segment = transferSegment(points, (frame.now - transfer.startedAt) / ARTIFACT_TRANSFER_DURATION_MS);
     return segment ? [{ transfer, segment }] : [];
   });
   if (!segments.length) return null;
@@ -254,11 +296,12 @@ export function ArtifactTransferSegments({ transfers, resolve }: {
   );
 }
 
-export function SystemArtifactTransfers({ container, interfaces, transfers }: {
+export function SystemArtifactTransfers({ container, feed, interfaces }: {
   container: HTMLElement | null;
+  feed: ArtifactTransferFeed;
   interfaces: Record<string, InterfaceSummary>;
-  transfers: ArtifactTransfer[];
 }) {
+  const transfers = useArtifactTransferList(feed);
   const resolve = useCallback(() => {
     if (!container) return [];
     const origin = container.getBoundingClientRect();

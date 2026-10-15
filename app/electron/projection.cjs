@@ -474,7 +474,7 @@ function createProjectionStore(options) {
       case "projection.runtime.snapshot":
         return projectionSnapshot(projection);
       case "projection.runtime.topology":
-        return topologySnapshot(projection, params);
+        return cachedTopologySnapshot(projection, params);
       case "projection.ee_instances.list":
         return { ee_instances: limitRows(eeInstanceRows(projection, params.include_ledger !== false), params) };
       case "projection.runs.list":
@@ -2405,6 +2405,7 @@ function createProjectionStore(options) {
       ledgerMemo: new Map(),
       operatorChatsListCache: null,
       operatorActivityCache: null,
+      topologySnapshotCache: null,
       operatorChatMessagesCache: new Map(),
       operatorChatRunIndexCache: null,
       operatorChatStatusCursor: -1,
@@ -7685,6 +7686,22 @@ function createProjectionStore(options) {
         },
       };
     });
+  }
+
+  function cachedTopologySnapshot(projection, params) {
+    const key = JSON.stringify([
+      projection.generation,
+      params.include_ledger !== false,
+      [...new Set(arrayValue(params.focused_run_ids).map(stringValue).filter(Boolean))].sort(),
+    ]);
+    const cached = projection.topologySnapshotCache;
+    if (cached?.key === key) return cached.promise;
+    const promise = topologySnapshot(projection, params);
+    projection.topologySnapshotCache = { key, promise };
+    promise.catch(() => {
+      if (projection.topologySnapshotCache?.promise === promise) projection.topologySnapshotCache = null;
+    });
+    return promise;
   }
 
   async function topologySnapshot(projection, params) {

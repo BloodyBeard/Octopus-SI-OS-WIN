@@ -18,10 +18,11 @@ import {
   type WorkerEnvironmentProjection,
 } from "./data/topology";
 import { hasProjectionBridge, projectionTargetLabel, readProjection } from "./projectionClient";
-import { useProjectionGeneration } from "./projectionLive";
+import { currentProjectionStructureGeneration, useProjectionGeneration } from "./projectionLive";
 import type { OctopusRuntimeHostState, OctopusRuntimeTopologyProjection } from "./electron";
 
 type RuntimePayload = {
+  generation: number | null;
   snapshotRaw: any;
   eeRaw: any;
   runsRaw: any;
@@ -62,6 +63,11 @@ export function useRuntimeTopology(
   const loadedRef = useRef(false);
   const payloadRef = useRef<RuntimePayload | null>(null);
   const runtimeObservationRef = useRef<ClientRuntimeObservation | null>(null);
+  const readerRef = useRef<TopologyReader | null>(null);
+  const structureGenerationRef = useRef(0);
+  const generationRef = useRef(generation);
+  generationRef.current = generation;
+  const requestedGenerationRef = useRef<number | null>(null);
   const focusedRunKey = focusedRunIds.filter(Boolean).join("\u0000");
 
   useEffect(() => {
@@ -78,7 +84,6 @@ export function useRuntimeTopology(
   }, [enabled]);
 
   useEffect(() => {
-    let cancelled = false;
     if (!enabled) {
       // Keep the last projected world so returning to the surface is instant; only the
       // status tells the truth that reads are paused while the surface is closed.
@@ -93,7 +98,8 @@ export function useRuntimeTopology(
           },
         }
         : prev));
-      return () => { cancelled = true; };
+      readerRef.current = null;
+      return;
     }
     if (!hasProjectionBridge()) {
       setSnapshot(emptySnapshot({
@@ -102,7 +108,8 @@ export function useRuntimeTopology(
         label: "Projection bridge unavailable",
         detail: "Open the desktop app so the renderer can read registry and ledger projection files",
       }));
-      return () => { cancelled = true; };
+      readerRef.current = null;
+      return;
     }
 
     if (!loadedRef.current) {
@@ -118,33 +125,127 @@ export function useRuntimeTopology(
     }
 
     const focusedRuns = new Set(focusedRunKey.split("\u0000").filter(Boolean));
-    refreshProjection(focusedRuns, includeLedger, runtimeObservationRef.current)
-      .then((payload) => {
-        if (cancelled) return;
+    let appliedGeneration: number | null = null;
+    const reader = createTopologyReader(async (isCurrent) => {
+      try {
+        const payload = await refreshProjection(focusedRuns, includeLedger, runtimeObservationRef.current);
+        if (!isCurrent()) return;
         const next = runtimeObservationRef.current
           ? { ...payload, runtimeObservation: runtimeObservationRef.current }
           : payload;
+        const unchanged = payload.generation !== null && payload.generation === appliedGeneration && loadedRef.current;
+        appliedGeneration = payload.generation;
         loadedRef.current = true;
         payloadRef.current = next;
-        setSnapshot(projectRuntime(next));
-      })
-      .catch((error) => {
-        if (cancelled) return;
+        if (!unchanged) setSnapshot(projectRuntime(next));
+      } catch (error) {
+        if (!isCurrent()) return;
         const failure: ProjectionStatus = {
           mode: "error",
           endpoint: projectionTargetLabel(),
           label: "Projection read failed",
-          detail: String(error?.message ?? error),
+          detail: String((error as Error | undefined)?.message ?? error),
         };
         // A failed re-read keeps the last projected world visible and says so; only a
         // failure with nothing loaded yet leaves the world empty.
+        appliedGeneration = null;
         setSnapshot((prev) => (loadedRef.current ? { ...prev, projection: failure } : emptySnapshot(failure)));
-      });
+      }
+    });
+    readerRef.current = reader;
+    requestedGenerationRef.current = generationRef.current;
+    structureGenerationRef.current = currentProjectionStructureGeneration();
+    reader.request(true);
+    return () => {
+      if (readerRef.current === reader) readerRef.current = null;
+      reader.dispose();
+    };
+  }, [enabled, focusedRunKey, includeLedger]);
 
-    return () => { cancelled = true; };
-  }, [enabled, focusedRunKey, generation, includeLedger]);
+  useEffect(() => {
+    const reader = readerRef.current;
+    if (!reader || requestedGenerationRef.current === generation) return;
+    requestedGenerationRef.current = generation;
+    const structureGeneration = currentProjectionStructureGeneration();
+    const structural = structureGeneration !== structureGenerationRef.current;
+    structureGenerationRef.current = structureGeneration;
+    reader.request(structural);
+  }, [generation]);
 
   return snapshot;
+}
+
+type TopologyReader = {
+  dispose: () => void;
+  request: (urgent: boolean) => void;
+};
+
+const LEDGER_REFRESH_COST_FACTOR = 3;
+const LEDGER_REFRESH_IDLE_TIMEOUT_MS = 1_000;
+
+function createTopologyReader(read: (isCurrent: () => boolean) => Promise<void>): TopologyReader {
+  let disposed = false;
+  let reading = false;
+  let dirty = false;
+  let urgent = false;
+  let lastCostMs = 0;
+  let lastFinishedAtMs = Number.NEGATIVE_INFINITY;
+  let timer = 0;
+  let idle = 0;
+  const cancelScheduled = () => {
+    if (timer) window.clearTimeout(timer);
+    if (idle) window.cancelIdleCallback?.(idle);
+    timer = 0;
+    idle = 0;
+  };
+  const run = async () => {
+    cancelScheduled();
+    if (disposed || reading || !dirty) return;
+    dirty = false;
+    urgent = false;
+    reading = true;
+    const startedAtMs = performance.now();
+    try {
+      await read(() => !disposed);
+    } finally {
+      reading = false;
+      lastFinishedAtMs = performance.now();
+      lastCostMs = lastFinishedAtMs - startedAtMs;
+      schedule();
+    }
+  };
+  const schedule = () => {
+    if (disposed || reading || !dirty) return;
+    if (urgent) {
+      cancelScheduled();
+      void run();
+      return;
+    }
+    if (timer || idle) return;
+    const waitMs = Math.max(0, lastFinishedAtMs + lastCostMs * LEDGER_REFRESH_COST_FACTOR - performance.now());
+    timer = window.setTimeout(() => {
+      timer = 0;
+      if (typeof window.requestIdleCallback === "function") {
+        idle = window.requestIdleCallback(() => {
+          idle = 0;
+          void run();
+        }, { timeout: LEDGER_REFRESH_IDLE_TIMEOUT_MS });
+      } else {
+        void run();
+      }
+    }, waitMs);
+  };
+  return {
+    dispose: () => {
+      disposed = true;
+      cancelScheduled();
+    },
+    request: (isUrgent) => {
+      dirty = true;
+      urgent ||= isUrgent;
+      schedule();
+    },
+  };
 }
 
 async function refreshProjection(
@@ -163,6 +264,7 @@ async function refreshProjection(
   ]);
 
   return {
+    generation: Number.isSafeInteger(projection.generation) ? projection.generation as number : null,
     snapshotRaw: projection.snapshotRaw,
     eeRaw: projection.eeRaw,
     runsRaw: projection.runsRaw,
