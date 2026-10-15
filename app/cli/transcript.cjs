@@ -2,6 +2,7 @@
 
 const toolCatalog = require("../src/components/chat/toolActivityPresentationCatalog.json");
 const { normalizeChatRunEventProjection } = require("../build/cli/shared.cjs");
+const { nativeTurnRecordedInputs } = require("../electron/projection.cjs");
 
 const fragments = Object.freeze({ message_delta: "text", commentary_delta: "text",
   reasoning_delta: "delta", plan_delta: "delta", tool_output_delta: "delta", file_change_delta: "delta" });
@@ -459,7 +460,11 @@ function createTranscriptReducer(options = {}) {
   function learnCorrelation(message) {
     if (!sameScope(message) || turn.terminal) return;
     const m = message.metadata, data = message.data;
-    const input = message.kind === "input_recorded" && message.source === "stream"
+    const retainedInput = message.source === "movement" && m.label === "turn.completed"
+      && message.kind === "turn_completed" && m.movementSeq > turn.admittedSeq
+      && nativeTurnRecordedInputs(data).some((input) => input.client_id === turn.messageId
+        && input.turn_id === m.turnId && input.thread_id === m.threadId);
+    const input = retainedInput || message.kind === "input_recorded" && message.source === "stream"
       && data.type === "input_recorded" && data.stage === "input_recorded_in_turn"
       && data.client_id === turn.messageId && data.run === turn.runId && data.provider_interface === turn.modelInterfaceId
       && integer(data.source_movement_seq) === m.sourceMovementSeq
@@ -524,7 +529,8 @@ function createTranscriptReducer(options = {}) {
       }
     }
     return { type: "status", state, terminal: Boolean(final), correlated,
-      interrupted: final && (message.kind === "interrupted_result" && data.turn_interrupted === true || message.kind === "turn_control" && ["stop", "interrupt"].includes(data.action)),
+      interrupted: final && (data.native_terminal_status === "interrupted" || record(data.turn).status === "interrupted"
+        || message.kind === "interrupted_result" && data.turn_interrupted === true || message.kind === "turn_control" && ["stop", "interrupt"].includes(data.action)),
       ...(final ? { proof: "durable_movement_after_admission" } : {}),
       messageId: correlated ? turn.messageId : undefined, turnId: m.turnId || undefined,
       runId: m.runId, interfaceId: m.interfaceId, entry: present(messages.get(entryIds.get(receiptKey(message))) || message) };

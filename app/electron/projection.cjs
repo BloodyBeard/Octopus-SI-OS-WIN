@@ -41,6 +41,24 @@ const runRecordSchemaValidator = canonicalSchemaValidator.compile(runRecordSchem
 
 class ProjectionEvidenceError extends Error {}
 
+function nativeTurnRecordedInputs(payload) {
+  const turn = payload?.turn;
+  const exactId = (value) => typeof value === "string" && value.length > 0
+    && value.trim() === value && !/[\r\n\0]/.test(value);
+  if (!exactId(payload?.threadId) || !exactId(turn?.id) || turn.itemsView !== "full"
+    || !["completed", "failed", "interrupted"].includes(turn.status) || !Array.isArray(turn.items)
+    || payload._payload_projection?.truncated === true && payload._payload_projection.resolved !== true
+    || payload.thread_id !== undefined && payload.thread_id !== payload.threadId
+    || payload.turn_id !== undefined && payload.turn_id !== turn.id) return [];
+  const inputs = [];
+  for (const item of turn.items) {
+    if (item?.type !== "userMessage" || item.clientId === null || item.clientId === undefined) continue;
+    if (!exactId(item.id) || !exactId(item.clientId) || !Array.isArray(item.content)) return [];
+    inputs.push({ thread_id: payload.threadId, turn_id: turn.id, item_id: item.id, client_id: item.clientId });
+  }
+  return inputs;
+}
+
 const DESCRIPTOR_REGISTRIES = [
   { kind: "interface", file: "interface.json", identity: ["id", "rule_id"] },
   { kind: "ee_template", file: "ee_template.json", identity: ["id", "name"] },
@@ -6418,6 +6436,13 @@ function createProjectionStore(options) {
       if (providerMovement && label !== "turn.stream") {
         providerPayload = await resolveLedgerArtifactPayload(row, { projection: protocol.artifactReadProjection });
         observeNative(providerPayload, providerPayload?.source_movement_seq ?? providerPayload?.additional_details?.source_movement_seq ?? row.seq);
+        if (label === "turn.completed") {
+          for (const input of nativeTurnRecordedInputs(providerPayload)) {
+            const key = nativeKey(input);
+            if (!recordedInputs.has(key)) recordedInputs.set(key, new Set());
+            recordedInputs.get(key).add(input.client_id);
+          }
+        }
       }
       const opening = await operatorChatTurnOpening(entry, row, protocol);
       if (opening) {
@@ -7130,8 +7155,16 @@ function createProjectionStore(options) {
     ], false, { projection: protocol.artifactReadProjection });
     const expandedOutbound = operatorChatExpandedStreamRows(entry.outbound, payloads, entry.runId);
     const recordedInputs = new Map();
+    const nativeRecordedInputs = new Map();
     const runtimeProvider = operatorChatRuntimeProviderId(entry);
     for (const row of expandedOutbound) {
+      if (ledgerArtifactLabel(row) === "turn.completed" && movementBoundaryInterface(row, "from") === runtimeProvider) {
+        for (const input of nativeTurnRecordedInputs(payloads.get(row))) {
+          if (!nativeRecordedInputs.has(input.client_id)) nativeRecordedInputs.set(input.client_id, {
+            ...input, movement_seq: row.seq, artifact_id: ledgerArtifactId(row),
+          });
+        }
+      }
       if (row.__stream?.event_kind !== "input_recorded") continue;
       const receipt = payloads.get(row);
       if (receipt.provider_interface === runtimeProvider && !recordedInputs.has(receipt.client_id)) {
@@ -7185,6 +7218,8 @@ function createProjectionStore(options) {
           ? turnControlOutcomes.get(stringValue(payload?.message_id)) ?? null
           : null;
         const recordedInput = steering ? recordedInputs.get(stringValue(payload?.message_id)) : null;
+        const nativeCandidate = steering ? nativeRecordedInputs.get(stringValue(payload?.message_id)) : null;
+        const nativeRecordedInput = nativeCandidate?.movement_seq > row.seq ? nativeCandidate : null;
         messages.push({
           id: stringValue(payload?.message_id) || ledgerArtifactId(row) || `${runId}:in:${row.source_line}`,
           run_id: runId,
@@ -7195,9 +7230,10 @@ function createProjectionStore(options) {
           event_data: {
             ...projectedEventDataFor(payload, inboundEventKind, row),
             ...(steering ? {
-              steering_status: recordedInput ? "input_recorded" : controlOutcome?.status ?? "submitted",
+              steering_status: recordedInput || nativeRecordedInput ? "input_recorded" : controlOutcome?.status ?? "submitted",
               steering_provider_interface: runtimeProvider,
               steering_input_recorded: recordedInput ?? null,
+              steering_native_input: nativeRecordedInput ?? null,
               steering_control: controlOutcome
                 ? operatorChatEventData(controlOutcome.payload, "turn_control", controlOutcome.row)
                 : null,
@@ -14661,6 +14697,7 @@ function safeInterfacePathSegment(value) {
 }
 
 module.exports = {
+  nativeTurnRecordedInputs,
   createProjectionStore,
   mutateApplicationPrivateConfiguration,
   mutateOctopusOsWorkspace,

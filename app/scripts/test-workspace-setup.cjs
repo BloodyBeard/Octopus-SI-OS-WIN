@@ -991,8 +991,8 @@ async function verifyOperatorChatStatusProjection(temporary) {
       await fs.appendFile(ledgerPath, `${JSON.stringify(movement)}\n`);
       return (await readStatuses()).chats[0];
     };
-    for (const mode of ["queued", "recorded", "failed"]) {
-      const recorded = mode === "recorded", queued = mode === "queued";
+    for (const mode of ["queued", "recorded", "failed", "retained", "retained-failed", "retained-other"]) {
+      const recorded = mode === "recorded", queued = ["queued", "retained-other"].includes(mode), retained = mode.startsWith("retained");
       const first = nextSeq, latest = first + 1, thread = "thread", turn = `turn-${first}`, clientId = `input-${latest}`;
       await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: `input-${first}` });
       await appendStatus("operator.message", workspace.homeInterfaceId, { message_id: clientId });
@@ -1007,9 +1007,12 @@ async function verifyOperatorChatStatusProjection(temporary) {
       await appendStatus("turn.stream", provider, Buffer.from([header, input, seal].map(JSON.stringify).join("\n") + "\n"));
       if (mode === "failed") assert.equal((await appendStatus("turn.control.failed", provider,
         { thread_id: thread, turn_id: turn, action: "steer", status: "failed", control_id: clientId, source_movement_seq: latest })).turn_open, true);
-      const status = await appendStatus("turn.completed", provider, { thread_id: thread, turn_id: turn });
+      const status = await appendStatus("turn.completed", provider, retained
+        ? { threadId: thread, turn: { id: turn, status: mode === "retained-failed" ? "failed" : "interrupted", itemsView: "full",
+          items: [{ type: "userMessage", id: "native-input", clientId: queued ? "other" : clientId, content: [] }] } }
+        : { thread_id: thread, turn_id: turn });
       assert.deepEqual([status.turn_open, status.turn_state, status.turn_opened_movement_seq, status.last_movement_seq],
-        [queued, queued ? "working" : "idle", first, nextSeq - 1]);
+        [queued, queued ? "working" : mode === "retained-failed" ? "failed" : "idle", first, nextSeq - 1]);
       store.invalidate();
       assert.deepEqual((await readStatuses()).chats[0], status, "cold replay retains pending input and actual ledger frontier");
       if (queued) assert.equal((await appendStatus("turn.completed", provider,

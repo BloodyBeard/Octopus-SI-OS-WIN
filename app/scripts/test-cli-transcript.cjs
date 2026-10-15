@@ -323,6 +323,26 @@ test("an exact failed steer ends only its submission in live and restored histor
   }
 });
 
+test("retained full native inputs correlate cold and live recovery without a synthetic stream receipt", () => {
+  const prior = stream(1, "turn_started", { thread_id: "thread" }, { source_movement_seq: 90 });
+  const full = movement(120, "turn_completed", { threadId: "thread", turn: { id: "turn", status: "interrupted", itemsView: "full",
+    items: [{ type: "userMessage", id: "native-input", clientId: "message", content: [] }] } }, { label: "turn.completed" });
+  const closure = movement(130, "interrupted_result", { thread_id: "thread", result_kind: "tool_result", correlation_id: "call",
+    ok: true, returned_to_model: false, turn_interrupted: true, native_terminal_status: "interrupted",
+    result_disposition: "durably_admitted_after_native_terminal", source_artifact: { id: "result" } }, { terminal: true });
+  for (const cold of [false, true]) {
+    const reducer = createTranscriptReducer({ history: cold ? [prior, full, closure] : [prior] });
+    let events = reducer.beginTurn(receipt());
+    if (!cold) {
+      for (const patch of [{ thread_id: "other" }, { _payload_projection: { truncated: true } },
+        { turn: { ...full.event_data.turn, itemsView: "notLoaded" } }, { turn: { ...full.event_data.turn, items: [] } }])
+        assert.equal(ended(reducer.pushBatch([{ ...full, artifact_id: JSON.stringify(patch), event_data: { ...full.event_data, ...patch } }, closure])).length, 0);
+      events = reducer.pushBatch([full]);
+    }
+    assert.equal(ended(events)[0].interrupted, true); assert.equal(reducer.currentTurn().outcome.movementSeq, 130);
+  }
+});
+
 test("malformed native input receipt and conflicting turn identities cannot complete a watch", () => {
   const reducer = createTranscriptReducer(); reducer.beginTurn(receipt());
   reducer.pushBatch([recorded(1, { stream_id: "not-a-stream-hash" })]);
