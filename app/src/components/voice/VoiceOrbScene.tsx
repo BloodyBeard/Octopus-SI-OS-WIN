@@ -12,6 +12,7 @@ type Props = {
   ambient?: boolean;
   animated?: boolean;
   onDispersed?: () => void;
+  formationSurface?: RefObject<HTMLElement | null>;
   phase: VoicePhase;
   rippleSurface?: RefObject<HTMLElement | null>;
   sizeProbe?: RefObject<HTMLElement | null>;
@@ -36,6 +37,8 @@ type ShaderUniforms = {
   background: WebGLUniformLocation;
   departing: WebGLUniformLocation;
   error: WebGLUniformLocation;
+  formTiming: WebGLUniformLocation;
+  forms: WebGLUniformLocation;
   pixelRatio: WebGLUniformLocation;
   reveal: WebGLUniformLocation;
   resolution: WebGLUniformLocation;
@@ -58,6 +61,8 @@ const FRAME_INTERVAL_MS = 1000 / 30;
 const ACTIVE_FRAME_INTERVAL_MS = 1000 / 60;
 const RIPPLE_COUNT = 6;
 const RIPPLE_LIFE_SECONDS = 2.4;
+const FORM_COUNT = 4;
+const FORM_LIFE_SECONDS = 1.3;
 const RIPPLE_IGNORED_TARGETS = "button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
@@ -93,6 +98,8 @@ uniform float u_ambient;
 uniform float u_departing;
 uniform vec3 u_background;
 uniform vec4 u_ripples[${RIPPLE_COUNT}];
+uniform vec4 u_forms[${FORM_COUNT}];
+uniform vec4 u_form_timing[${FORM_COUNT}];
 
 out vec4 outputColor;
 
@@ -219,6 +226,31 @@ void rippleAt(vec2 pixel, float shortestSide, out float wake, out float crest) {
   }
   wake = saturate(wake);
   crest = saturate(crest);
+}
+
+float roundedBoxDistance(vec2 point, vec2 halfSize, float radius) {
+  vec2 corner = abs(point) - halfSize + radius;
+  return length(max(corner, 0.0)) + min(max(corner.x, corner.y), 0.0) - radius;
+}
+
+float formationAt(vec2 pixel, float shortestSide, float pixelRatio) {
+  float total = 0.0;
+  for (int index = 0; index < ${FORM_COUNT}; index += 1) {
+    vec4 box = u_forms[index];
+    vec4 timing = u_form_timing[index];
+    float age = u_time - timing.x;
+    if (box.z <= box.x || age < 0.0 || age > ${FORM_LIFE_SECONDS.toFixed(2)}) continue;
+    vec2 halfSize = (box.zw - box.xy) * 0.5;
+    float boxDistance = roundedBoxDistance(pixel - (box.xy + box.zw) * 0.5, halfSize, min(timing.y, min(halfSize.x, halfSize.y)));
+    float gather = 1.0 - pow(1.0 - smoothstep(0.0, 0.6, age), 3.0);
+    float reach = (1.0 - gather) * 0.3 * shortestSide;
+    float contour = exp(-abs(boxDistance - reach) / (5.0 * pixelRatio + reach * 0.18)) * (0.35 + 0.65 * gather) * (1.0 - smoothstep(0.55, 0.72, age));
+    float fill = (1.0 - smoothstep(-2.0 * pixelRatio, pixelRatio, boxDistance)) * smoothstep(0.32, 0.62, age) * 0.6;
+    float outline = exp(-abs(boxDistance) / (2.0 * pixelRatio)) * smoothstep(0.4, 0.62, age);
+    float dissolve = 1.0 - smoothstep(0.6, ${FORM_LIFE_SECONDS.toFixed(2)}, age);
+    total += max(max(contour, fill), outline) * dissolve * smoothstep(0.0, 0.12, age);
+  }
+  return saturate(total);
 }
 
 float glyphBit(ivec2 glyph, int column, int rowFromTop) {
@@ -731,6 +763,9 @@ void main() {
     glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * edgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
   }
   particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
+  float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
+  float formationDot = 1.0 - smoothstep(0.16, 0.27, dotDistance);
+  float formationLit = formationDot * smoothstep(particleSeed - 0.08, particleSeed + 0.08, formation) * mix(0.45, 0.9, particleSeed);
 
   float rimBuild = smoothstep(0.3, 0.76, u_reveal);
   float rimProgress = smoothstep(0.34, 0.82, u_reveal);
@@ -749,11 +784,12 @@ void main() {
   vec3 darkGlyph = mix(vec3(0.74, 0.77, 0.84), vec3(0.42, 0.66, 1.0), saturate(rippleCrest * 1.2));
   vec3 lightGlyph = mix(vec3(0.4, 0.47, 0.6), LIGHT_PARTICLE_INK * 0.92, saturate(rippleCrest * 1.2));
   revealedColor = mix(revealedColor, mix(darkGlyph, lightGlyph, lightSurface), saturate(glyphAlpha * mix(1.0, 1.15, lightSurface)));
+  revealedColor = mix(revealedColor, mix(lightTint * 0.92, LIGHT_PARTICLE_INK, lightSurface), saturate(formationLit));
   outputColor = vec4(clamp(revealedColor, 0.0, 1.0), 1.0);
 }
 `;
 
-export function VoiceOrbScene({ activity, ambient = false, animated = true, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
+export function VoiceOrbScene({ activity, ambient = false, animated = true, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onDispersedRef = useRef(onDispersed);
   onDispersedRef.current = onDispersed;
@@ -761,6 +797,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
   sizeProbeRef.current = sizeProbe;
   const rippleSurfaceRef = useRef(rippleSurface);
   rippleSurfaceRef.current = rippleSurface;
+  const formationSurfaceRef = useRef(formationSurface);
+  formationSurfaceRef.current = formationSurface;
   const frameRef = useRef<OrbFrame>({ activity, ambient, phase, sphere });
   const requestRenderRef = useRef<(() => void) | null>(null);
   const [failure, setFailure] = useState("");
@@ -800,7 +838,11 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
     let measuredSphere = 0;
     const ripples = new Float32Array(RIPPLE_COUNT * 4);
     let nextRipple = 0;
-    let rippleUntil = 0;
+    const forms = new Float32Array(FORM_COUNT * 4);
+    const formTiming = new Float32Array(FORM_COUNT * 4);
+    const formedElements = new WeakSet<Element>();
+    let nextForm = 0;
+    let activeUntil = 0;
     let background = readBackgroundColor(canvas);
     let program: WebGLProgram;
     let vertexArray: WebGLVertexArrayObject;
@@ -850,7 +892,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
         lastRenderTime = now;
         return;
       }
-      if (!staticScene && lastRenderTime && now - lastRenderTime < (now < rippleUntil || !frameRef.current.ambient ? ACTIVE_FRAME_INTERVAL_MS : FRAME_INTERVAL_MS)) {
+      if (!staticScene && lastRenderTime && now - lastRenderTime < (now < activeUntil || !frameRef.current.ambient ? ACTIVE_FRAME_INTERVAL_MS : FRAME_INTERVAL_MS)) {
         scheduleDraw();
         return;
       }
@@ -892,6 +934,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       gl.bindVertexArray(vertexArray);
       gl.uniform3f(uniforms.background, background[0], background[1], background[2]);
       gl.uniform4fv(uniforms.ripples, ripples);
+      gl.uniform4fv(uniforms.forms, forms);
+      gl.uniform4fv(uniforms.formTiming, formTiming);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
       gl.uniform1f(uniforms.pixelRatio, renderPixelRatio);
       gl.uniform1f(uniforms.time, seconds);
@@ -932,10 +976,42 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       ripples[slot + 1] = canvas.height - (event.clientY - rect.top) * (canvas.height / rect.height);
       ripples[slot + 2] = now / 1000;
       ripples[slot + 3] = 1;
-      rippleUntil = now + RIPPLE_LIFE_SECONDS * 1000;
+      activeUntil = Math.max(activeUntil, now + RIPPLE_LIFE_SECONDS * 1000);
       lastRenderTime = 0;
       scheduleDraw();
     };
+    const formFrom = () => {
+      const host = formationSurfaceRef.current?.current;
+      if (!host || staticScene) return;
+      const canvasRect = canvas.getBoundingClientRect();
+      if (canvasRect.width <= 0 || canvasRect.height <= 0) return;
+      const scaleX = canvas.width / canvasRect.width;
+      const scaleY = canvas.height / canvasRect.height;
+      const now = performance.now();
+      for (const element of host.querySelectorAll("[data-voice-forming].is-layout-ready")) {
+        if (formedElements.has(element)) continue;
+        formedElements.add(element);
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const slot = nextForm * 4;
+        nextForm = (nextForm + 1) % FORM_COUNT;
+        forms[slot] = (rect.left - canvasRect.left) * scaleX;
+        forms[slot + 1] = canvas.height - (rect.bottom - canvasRect.top) * scaleY;
+        forms[slot + 2] = (rect.right - canvasRect.left) * scaleX;
+        forms[slot + 3] = canvas.height - (rect.top - canvasRect.top) * scaleY;
+        formTiming[slot] = now / 1000;
+        formTiming[slot + 1] = (Number.parseFloat(getComputedStyle(element).borderTopLeftRadius) || 0) * scaleX;
+        activeUntil = Math.max(activeUntil, now + FORM_LIFE_SECONDS * 1000);
+        lastRenderTime = 0;
+        scheduleDraw();
+      }
+    };
+    const formationHost = formationSurfaceRef.current?.current ?? null;
+    const formationObserver = new MutationObserver(formFrom);
+    if (formationHost) {
+      formationObserver.observe(formationHost, { attributes: true, attributeFilter: ["class", "data-voice-forming"], childList: true, subtree: true });
+      formFrom();
+    }
     const rippleTarget = rippleSurfaceRef.current?.current ?? null;
     rippleTarget?.addEventListener("pointerdown", startRipple, { passive: true });
     const resizeAndDraw = () => {
@@ -988,6 +1064,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, onDi
       disposed = true;
       requestRenderRef.current = null;
       rippleTarget?.removeEventListener("pointerdown", startRipple);
+      formationObserver.disconnect();
       observer.disconnect();
       intersectionObserver.disconnect();
       themeObserver.disconnect();
@@ -1053,6 +1130,8 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     background: requiredUniform(gl, program, "u_background"),
     departing: requiredUniform(gl, program, "u_departing"),
     error: requiredUniform(gl, program, "u_error"),
+    formTiming: requiredUniform(gl, program, "u_form_timing"),
+    forms: requiredUniform(gl, program, "u_forms"),
     pixelRatio: requiredUniform(gl, program, "u_pixel_ratio"),
     reveal: requiredUniform(gl, program, "u_reveal"),
     resolution: requiredUniform(gl, program, "u_resolution"),

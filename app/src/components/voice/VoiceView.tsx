@@ -79,6 +79,8 @@ const VOICE_TITLE_KEY = "octopus.voice.session-title.v1";
 const VOICE_RECORDING_KEY = "octopus.voice.save-audio.v1";
 const VOICE_SPEAKER_KEY = "octopus.voice.speaker-enabled.v1";
 const VOICE_HIDDEN_SURFACES_KEY = "octopus.voice.hidden-surfaces.v1";
+const FORMING_DELIVERY_WINDOW_MS = 15_000;
+const FORMING_HOLD_MS = 1_600;
 const LAB_TASK_PROGRESS: TaskProgressWidget = {
   completion: 62,
   running: 7,
@@ -105,6 +107,10 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const [saveAudio] = useState(() => readStoredBoolean(storageKeys.recording, false));
   const [speakerEnabled, setSpeakerEnabled] = useState(() => readStoredBoolean(storageKeys.speaker, true));
   const widgetCanvasRef = useRef<HTMLDivElement>(null);
+  const viewOpenedAtRef = useRef(Date.now());
+  const seenSurfaceIdsRef = useRef(new Set<string>());
+  const formingTimersRef = useRef(new Set<number>());
+  const [formingSurfaceIds, setFormingSurfaceIds] = useState<ReadonlySet<string>>(() => new Set());
   const stageMainRef = useRef<HTMLElement>(null);
   const orbProbeRef = useRef<HTMLElement>(null);
   const outputMeter = useSyncExternalStore(
@@ -273,6 +279,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       && (!installedWidgetIdsHydratedRef.current || previousInstalledWidgetIdsRef.current.has(surface.document.id))
     : visibleHomeSurfaceIds.has(homeSurfaceIdentity(surface));
   const visibleSurfaces = allSurfaces.filter(surfaceVisible);
+  const visibleSurfaceKey = visibleSurfaces.map(homeSurfaceIdentity).join("\n");
   const leftSurfaces = visibleSurfaces.filter((surface) => (
     (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
     && surface.document.target.slot === "left"
@@ -281,6 +288,20 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
     && surface.document.target.slot === "right"
   ));
+
+  useEffect(() => {
+    const seen = seenSurfaceIdsRef.current;
+    const delivered = visibleSurfaces.filter((surface) => {
+      const identity = homeSurfaceIdentity(surface);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      const deliveredAt = surface.sourceDeliveredAt ? Date.parse(surface.sourceDeliveredAt) : Number.NaN;
+      return deliveredAt >= viewOpenedAtRef.current - FORMING_DELIVERY_WINDOW_MS;
+    });
+    if (delivered.length) formSurfaces(delivered.map(homeSurfaceIdentity));
+  }, [visibleSurfaceKey]);
+
+  useEffect(() => () => formingTimersRef.current.forEach((timer) => window.clearTimeout(timer)), []);
 
   useAppErrorToast(chatProductError(workspace) || "");
   useAppErrorToast(homeSurfaces.errors.join("\n"));
@@ -421,7 +442,17 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     return true;
   }
 
+  function formSurfaces(identities: string[]) {
+    setFormingSurfaceIds((current) => new Set([...current, ...identities]));
+    const timer = window.setTimeout(() => {
+      formingTimersRef.current.delete(timer);
+      setFormingSurfaceIds((current) => new Set([...current].filter((identity) => !identities.includes(identity))));
+    }, FORMING_HOLD_MS);
+    formingTimersRef.current.add(timer);
+  }
+
   function setSurfaceVisible(surface: AdmittedClientSurfaceDocument, visible: boolean) {
+    if (visible && !surfaceVisible(surface)) formSurfaces([homeSurfaceIdentity(surface)]);
     if (!surface.sourceExtensionId) {
       if (visible) homeSurfaces.restore(surface);
       else homeSurfaces.dismiss(surface);
@@ -490,7 +521,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       <main className="voice-session-stage" ref={stageMainRef}>
         <i aria-hidden="true" className="voice-orb-probe" ref={orbProbeRef} />
         <div aria-hidden="true" className="voice-stage-scene">
-          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} rippleSurface={stageMainRef} sizeProbe={orbProbeRef} />
+          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} formationSurface={widgetCanvasRef} rippleSurface={stageMainRef} sizeProbe={orbProbeRef} />
         </div>
         <HomeResponseStage
           operatorRequests={homeOperatorRequests}
@@ -558,6 +589,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
             key={homeSurfaceIdentity(surface)}
             onAction={handleSurfaceAction}
             onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
+            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface))}
             voicePlacement={{ count: leftSurfaces.length, index, slot: "left" }}
           />
         ))}
@@ -568,6 +600,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
             key={homeSurfaceIdentity(surface)}
             onAction={handleSurfaceAction}
             onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
+            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface))}
             voicePlacement={{ count: rightSurfaces.length, index, slot: "right" }}
           />
         ))}

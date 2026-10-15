@@ -38,6 +38,7 @@ import "./client-surfaces.css";
 import { homeSurfaceLayoutIdentity } from "./homePresentation";
 
 const VOICE_WIDGET_LAYOUT_RESET_EVENT = "octopus:voice-widget-layout-reset";
+const VOICE_FORMING_TRANSITION = { delay: 0.5, duration: 0.42, ease: [0.19, 1, 0.22, 1] as [number, number, number, number] };
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -45,6 +46,7 @@ type Props = {
   onAction?: (action: ClientSurfaceActionEvent) => boolean | void;
   onDismiss?: () => void;
   voicePlacement?: VoiceSurfacePlacement;
+  voiceForming?: boolean;
 };
 
 export type VoiceSurfacePlacement = {
@@ -62,7 +64,7 @@ type DataState = {
 const EMPTY_PROJECTION_SOURCES: NonNullable<ClientSurfaceDocument["sources"]> = [];
 const EMPTY_HOST_SOURCES: ClientSurfaceHostSource[] = [];
 
-export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDismiss, voicePlacement }: Props) {
+export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDismiss, voiceForming = false, voicePlacement }: Props) {
   const appearance = useAppearance();
   const document = admitted.document;
   const densityClass = document.render.kind === "native" ? ` density-${document.render.density ?? "standard"}` : "";
@@ -119,11 +121,12 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
         data-surface-interface={admitted.sourceInterfaceId}
+        data-voice-forming={voiceForming || undefined}
         data-voice-slot={voicePlacement?.slot}
         initial={{ opacity: 0 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={{ duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}
@@ -174,12 +177,13 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
         data-surface-interface={admitted.sourceInterfaceId}
+        data-voice-forming={voiceForming || undefined}
         data-voice-slot={voicePlacement?.slot}
         data-window-size={document.target.size ?? "standard"}
         initial={{ opacity: 0, scale: 0.985, y: 5 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={{ duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}
