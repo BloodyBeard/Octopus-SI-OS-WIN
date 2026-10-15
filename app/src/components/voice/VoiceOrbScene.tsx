@@ -783,7 +783,7 @@ void main() {
   vec3 revealedColor = mix(u_background, color, structureMask);
   revealedColor += lightTint * particleLuminance * (1.0 - lightSurface);
   revealedColor = mix(revealedColor, LIGHT_PARTICLE_INK, saturate(particleLuminance * 1.3) * lightSurface);
-  vec3 darkGlyph = mix(vec3(0.74, 0.77, 0.84), vec3(0.42, 0.66, 1.0), saturate(rippleCrest * 1.2));
+  vec3 darkGlyph = mix(vec3(0.72), vec3(0.97), saturate(rippleCrest * 1.2));
   vec3 lightGlyph = mix(vec3(0.4, 0.47, 0.6), LIGHT_PARTICLE_INK * 0.92, saturate(rippleCrest * 1.2));
   revealedColor = mix(revealedColor, mix(darkGlyph, lightGlyph, lightSurface), saturate(glyphAlpha * mix(1.0, 1.15, lightSurface)));
   outputColor = vec4(clamp(revealedColor, 0.0, 1.0), 1.0);
