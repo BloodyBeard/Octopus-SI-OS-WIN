@@ -2088,6 +2088,9 @@ process.stdin.on("data", chunk => { data += chunk; });
 process.stdin.on("end", () => {
   const request = JSON.parse(data);
   fs.appendFileSync(path.join(path.dirname(__filename), "revision-requests.jsonl"), data + "\\n");
+  if (process.argv[2] === "--inspect-input-payloads") {
+    process.stdout.write(JSON.stringify({ selected_payloads: [] })); return;
+  }
   if (process.argv[2]) {
     const root = path.join(request.artifact_root, "input-revisions");
     fs.mkdirSync(root, { recursive: true });
@@ -2215,6 +2218,21 @@ process.stdin.on("end", () => {
   assert.deepEqual(reauthored.interface_state[ACTIVE_CLIENT], ordinary.interface_state[ACTIVE_CLIENT]);
   assert.equal(reauthored.interface_state[ACTIVE_PROVIDER].unselected_new_default, undefined);
   assert.equal(handed.length, 4);
+  const progressed = structuredClone(reauthored);
+  progressed.interface_state[ACTIVE_PROVIDER].authoring_generation += 1;
+  const progressedBytes = JSON.stringify(progressed);
+  const steered = await submitOperatorTurn({ ...options, preparePayloadArtifactBindings: async ({ payloadArtifactBindings }) => {
+    await fs.promises.writeFile(runPath, progressedBytes); return payloadArtifactBindings;
+  } }, { ...nextRequest, messageId: "msg_existing_during_progress" });
+  assert.deepEqual(steered.clientWrites, []);
+  assert.equal(handed.length, 5);
+  assert.equal(await fs.promises.readFile(runPath, "utf8"), progressedBytes);
+  const sidecarPath = path.join(clientRegistryRoot, "octopus_os.json"), sidecar = JSON.parse(await fs.promises.readFile(sidecarPath));
+  sidecar.authoring_profile.payload_artifact_bindings = [{ id: "fixture.stale", content: Array(32).fill(1) }];
+  await fs.promises.writeFile(sidecarPath, JSON.stringify(sidecar));
+  await assert.rejects(submitOperatorTurn({ ...options, preparePayloadArtifactBindings: async s => s.payloadArtifactBindings },
+    { ...nextRequest, messageId: "msg_stale_payload_publication" }), /awaits publication of its installed input selection/);
+  assert.equal(handed.length, 5); assert.equal(await fs.promises.readFile(runPath, "utf8"), progressedBytes);
 });
 
 test("attachment crash before admission resumes only from an exact reattachment", async (t) => {
@@ -2839,7 +2857,14 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
   sidecar.owner_interface = ACTIVE_CLIENT;
   fs.writeFileSync(sidecarPath, JSON.stringify(sidecar));
   const changed = { ...document, text: `${document.text}\n` };
-  await assert.rejects(check(replay, changed), /RunRecord preimage changed/);
+  await check(replay, changed);
+  for (const field of ["id", "ee", "worker", "client", "declaration"]) {
+    const value = structuredClone(document.value);
+    if (field === "client") value.interface_state[ACTIVE_CLIENT].provider_runtime_interface = ACTIVE_CLIENT;
+    else if (field === "declaration") value.interface_state[ACTIVE_PROVIDER].run_authoring_binding.checkpoints = [];
+    else value[field] += field === "worker" ? " " : "_changed";
+    await assert.rejects(check(replay, { value, text: JSON.stringify(value) }), /identity or input authority changed|trimmed/);
+  }
   fs.writeFileSync(sidecarPath, `${JSON.stringify(sidecar)}\n`);
   await assert.rejects(check(replay, document), /private profile preimage changed/);
   console.log(`payload staging preparation retained at ${root}`);

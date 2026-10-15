@@ -491,12 +491,34 @@ async function prepareOperatorPayloadArtifactBindings(options, input) {
   if (bindings.some((reference) => contextIds.has(reference.id))) {
     throw new Error("payload staging collides with an explicit context artifact");
   }
-  return { bindings, sidecar, sidecarPath, runText: input.existingRunDocument?.text ?? null };
+  return {
+    bindings, sidecar, sidecarPath, chatInterfaceId: input.chatInterfaceId,
+    runScope: operatorPayloadRunScope(input.existingRunDocument, input.chatInterfaceId),
+  };
+}
+
+function operatorPayloadRunScope(document, chatInterfaceId) {
+  if (!document) return null;
+  const run = requiredObject(document.value, "operator payload RunRecord");
+  const state = requiredObject(run.interface_state, "operator payload interface state");
+  const client = requiredObject(state[chatInterfaceId], "operator payload client state");
+  const providerId = requiredString(client.provider_runtime_interface, "operator payload provider interface");
+  const provider = requiredObject(state[providerId], "operator payload provider state");
+  const declaration = Object.hasOwn(provider, "run_authoring_binding")
+    ? { providerDeclaration: requiredObject(provider.run_authoring_binding, "operator payload input declaration") }
+    : {};
+  return canonicalJson({
+    run: requiredTrimmedString(run.id, "operator payload run identity"),
+    ee: requiredTrimmedString(run.ee, "operator payload EE"),
+    worker: requiredTrimmedString(run.worker, "operator payload worker"),
+    client,
+    ...declaration,
+  });
 }
 
 async function assertPreparedOperatorPayloadSelection(prepared, currentRunDocument) {
-  if ((currentRunDocument?.text ?? null) !== prepared.runText) {
-    throw new Error("operator payload staging RunRecord preimage changed before authoring");
+  if (operatorPayloadRunScope(currentRunDocument, prepared.chatInterfaceId) !== prepared.runScope) {
+    throw new Error("operator payload staging RunRecord identity or input authority changed before authoring");
   }
   if (prepared.sidecar && await fs.readFile(prepared.sidecarPath, "utf8") !== prepared.sidecar.text) {
     throw new Error("operator payload staging private profile preimage changed before authoring");
@@ -567,6 +589,21 @@ async function planExistingProviderSelection(options, input) {
     `operator chat sidecar '${input.chatInterfaceId}' authoring_profile`,
   );
   const previousPayloadBindings = operatorPayloadArtifactBindings(authoringProfile.payload_artifact_bindings);
+  if (!retainedPhases.rearm) {
+    const inspected = await runOperatorRevisionCommand(resolvePackageExecutable(
+      config, resolveInstallationRoot(options), registryRoot, "topology_planner",
+    ), "--inspect-input-payloads", {
+      run_record_content: input.currentRunDocument.text, provider: providerInterfaceId,
+    });
+    const selected = operatorPayloadArtifactBindings(requiredArray(inspected.selected_payloads, "selected_payloads"));
+    if (canonicalJson(selected) !== canonicalJson(previousPayloadBindings)) {
+      throw new Error("operator payload profile awaits publication of its installed input selection");
+    }
+    if (input.preparedPayloadSelection) {
+      await assertPreparedOperatorPayloadSelection(input.preparedPayloadSelection,
+        await readJsonDocumentIfPresent(path.join(await resolveRunRecordsRoot(octopusHome), `${input.runId}.json`)));
+    }
+  }
   const payloadArtifactBindings = input.payloadArtifactBindings === undefined
     ? previousPayloadBindings
     : operatorPayloadArtifactBindings(input.payloadArtifactBindings);

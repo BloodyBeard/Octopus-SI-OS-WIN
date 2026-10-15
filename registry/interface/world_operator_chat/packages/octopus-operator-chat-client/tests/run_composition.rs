@@ -1017,7 +1017,7 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
     for separate_writer in [false, true] {
         let temp = tempfile::Builder::new().prefix("oct-rev-").tempdir_in("/tmp").unwrap(); let root = temp.path().canonicalize().unwrap();
         let request = support::client_fixture(&root); enable_native_profile(&root); let plan = plan_run_composition(&request).unwrap();
-        for edit in plan.descriptor_writes.iter().chain(plan.required_policy_updates.iter().map(|u| &u.write)).chain(std::iter::once(&plan.run_write)) {
+        for edit in plan.descriptor_writes.iter().chain(plan.required_policy_updates.iter().map(|u| &u.write)).chain(plan.run_writes.iter()).chain(std::iter::once(&plan.run_write)) {
             std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(&edit.path, &edit.content).unwrap();
         }
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../../registry/verifier/tool_call_allowed");
@@ -1069,6 +1069,8 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         let verify = |scope: &Value| cli("--verify-input-revision", scope);
         let operation = json!({"kind":"payloads","selected":selected});
         let before = current();
+        let inspect = |bytes: &str| cli("--inspect-input-payloads", &json!({"run_record_content":bytes,"provider":provider}));
+        assert_eq!(inspect(&before).unwrap()["selected_payloads"], json!([]));
         assert_eq!(prepare(&scope,json!({"kind":"owner_inputs","desired_inputs":[]}),&before).unwrap()["status"], "unchanged");
         assert_eq!(prepare(&scope,operation.clone(),&before).unwrap()["status"], "prepared");
         assert_eq!(current(),before);
@@ -1096,6 +1098,12 @@ async fn input_revision_cli_preserves_payload_intent_and_requires_checked_writer
         assert_eq!(current(),before); assert_eq!(b.writes,0);
         let (_,returned) = b.effect(&call).await; assert_eq!(b.writes,1);
         assert_ne!(current(),before);
+        assert_eq!(inspect(&current()).unwrap()["selected_payloads"], selected);
+        assert_eq!(inspect(&before).unwrap()["selected_payloads"], json!([]));
+        let mut classified: Value = serde_json::from_str(&current()).unwrap();
+        classified["interface_state"][provider.as_str()]["run_authoring_binding"]["payload_artifact_bindings"].as_array_mut().unwrap().push(json!({"id":"fixture.unbound","content":vec![0_u8;32]}));
+        assert_eq!(inspect(&classified.to_string()).unwrap()["selected_payloads"], selected);
+        assert!(cli("--inspect-input-payloads", &json!({"run_record_content":current(),"provider":"absent"})).is_err());
         assert_eq!(verify(&scope).unwrap()["status"], "awaiting_result");
         assert_eq!(prepare(&scope,operation,&before).unwrap()["status"], "prepared");
         assert_eq!(verify(&scope).unwrap()["status"], "awaiting_result");

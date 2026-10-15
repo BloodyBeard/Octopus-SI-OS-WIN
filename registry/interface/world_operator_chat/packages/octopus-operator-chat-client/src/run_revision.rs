@@ -90,6 +90,19 @@ pub struct RunRevisionVerification {
     pub selected_payloads: Option<Vec<ArtifactRef>>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputPayloadInspection {
+    pub run_record_content: String,
+    pub provider: InterfaceId,
+}
+
+pub fn inspect_input_payloads(request: InputPayloadInspection) -> Result<Value, String> {
+    Ok(json!({"selected_payloads": selected_payloads(
+        request.run_record_content.as_bytes(), &request.provider,
+    )?}))
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Proposal {

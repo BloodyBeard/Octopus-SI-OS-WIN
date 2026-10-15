@@ -158,6 +158,7 @@ jobs:
       - name: Home admission, stop and provider recovery
         run: |
           cargo test -p octopus-operator-chat-client --lib
+          cargo test --locked -p octopus-operator-chat-client --test run_composition input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results
           cargo test -p octopus-provider-run-authoring --lib
           cargo test -p octopus-provider-codex --lib native_terminal_answer_and_closure_reach_the_real_authoring_gate
 
