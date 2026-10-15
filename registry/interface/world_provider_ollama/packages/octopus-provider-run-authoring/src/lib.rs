@@ -921,10 +921,11 @@ pub trait CheckedRunEvidenceReader {
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String>;
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String>;
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String>;
-    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
+    fn concurrent_writer_start(&mut self, path: &Path, record: &RunRecord, before: &[u8], after_seq: u64, writers: &[CheckedRunWriter]) -> Result<u64, String> {
         let hash = ContentHash::of_bytes(before).to_hex();
         let mut first = None;
         let mut last_segment = None;
+        validate_checked_run_writers(writers)?;
         for sequence in 0..=after_seq {
             let row = self.admitted_movement(sequence)?.ok_or("checked writer evidence interval is incomplete")?;
             if row.kind != MovementKind::InterfaceOutbound { continue; }
@@ -933,7 +934,14 @@ pub trait CheckedRunEvidenceReader {
                 first.get_or_insert(sequence); last_segment = first;
             } else { first = None; }
         }
-        Ok(last_segment.map_or(after_seq, |sequence| sequence.saturating_sub(1)))
+        let observed = last_segment.map_or(after_seq, |sequence| sequence.saturating_sub(1));
+        for sequence in 0..=observed {
+            let row = self.admitted_movement(sequence)?.ok_or("checked writer evidence interval is incomplete")?;
+            if detached_writer_starts_at(self, &row, path, record, before, &hash, writers)? {
+                return sequence.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
+            }
+        }
+        Ok(observed)
     }
     fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
         input_revision::reader_readiness(self, record, provider, before_seq)
@@ -1004,8 +1012,8 @@ impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
         }
         self.artifact(reference).map(|(_, payload)| payload)
     }
-    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
-        concurrent_writer_evidence_start(self.evidence, record, before, after_seq)
+    fn concurrent_writer_start(&mut self, path: &Path, record: &RunRecord, before: &[u8], after_seq: u64, writers: &[CheckedRunWriter]) -> Result<u64, String> {
+        concurrent_writer_evidence_start(self.evidence, path, record, before, after_seq, writers)
     }
     fn input_rearm_ready(&mut self, record: &RunRecord, provider: &InterfaceId, before_seq: u64) -> Result<bool, String> {
         input_revision::readiness(self.evidence, record, provider, before_seq)
@@ -1533,7 +1541,7 @@ fn validate_observed_selected_reads(record: &RunRecord, metadata: &InvocationMet
     Ok(())
 }
 
-fn concurrent_writer_evidence_start(
+fn observed_run_evidence_start(
     evidence: &CheckedRunEvidence<'_>, record: &RunRecord, before: &[u8], after_seq: u64,
 ) -> Result<u64, String> {
     let hash = ContentHash::of_bytes(before).to_hex();
@@ -1575,6 +1583,75 @@ fn concurrent_writer_evidence_start(
     Ok(last_segment.map_or(after_seq, |seq| seq.saturating_sub(1)))
 }
 
+fn detached_writer_starts_at(
+    reader: &mut (impl CheckedRunEvidenceReader + ?Sized), call: &Movement, path: &Path,
+    record: &RunRecord, before: &[u8], before_hash: &str, writers: &[CheckedRunWriter],
+) -> Result<bool, String> {
+    if call.kind != MovementKind::InterfaceOutbound { return Ok(false); }
+    let Some(writer) = writers.iter().find(|writer| call.from == Endpoint::Interface(writer.source.clone())
+        && call.to == Endpoint::Interface(writer.door.clone())) else { return Ok(false); };
+    let (manifest, payload) = reader.artifact(call.artifact.as_ref().ok_or("observed writer call has no artifact")?)?;
+    if manifest.label != writer.call_label { return Ok(false); }
+    let artifact: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
+    if artifact.tool != writer.tool || artifact.arguments.get("ordered").is_none()
+        || artifact.arguments.pointer("/writes/1/expected_before_hash").and_then(|value| value.as_str()) != Some(before_hash)
+    { return Ok(false); }
+    let ordered: writer_run::OrderedArguments = serde_json::from_value(artifact.arguments).map_err(|error| error.to_string())?;
+    if !ordered.targets(path) { return Ok(false); }
+    let runtime = call.runtime().ok_or("observed writer call has no admitted coordinate")?;
+    let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
+        .ok_or("observed writer call has no admitted writer snapshot")?;
+    let snapshot = reader.snapshot(&hash)?;
+    if ContentHash::of_bytes(&snapshot) != hash { return Err("observed writer snapshot failed integrity".into()); }
+    let declaration = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
+    if declaration.id != runtime.run || declaration.ee != record.ee || declaration.worker != record.worker
+        || runtime.ee != record.ee || runtime.worker != record.worker || runtime.interface != writer.door {
+        return Err("observed writer snapshot changed its exact admitted scope".into());
+    }
+    let (preimage, _) = ordered.checked_call(writer, &snapshot, path, reader.max_payload_bytes())?;
+    Ok(preimage == before)
+}
+
+fn concurrent_writer_evidence_start(
+    evidence: &CheckedRunEvidence<'_>, path: &Path, record: &RunRecord, before: &[u8],
+    after_seq: u64, writers: &[CheckedRunWriter],
+) -> Result<u64, String> {
+    validate_checked_run_writers(writers)?;
+    let first = observed_run_evidence_start(evidence, record, before, after_seq)?;
+    let before_hash = ContentHash::of_bytes(before).to_hex();
+    let upper = first.checked_add(1).ok_or("checked writer evidence interval overflow")?;
+    let mut reader = FileCheckedRunReader::open(evidence, None)?;
+    // Detached calls pin their writer Run, while their ordered target write
+    // carries the selected Run's preimage. Both precede the same full checker.
+    let indexed = LedgerSqliteReader::open(evidence.ledger_index_path).ok().and_then(|index| {
+        if !index.progress().is_ok_and(|progress| progress.watermark >= upper) { return None; }
+        let mut sequences = BTreeSet::new();
+        for writer in writers {
+            for row in index.movement_rows_for_runtime_interface(writer.door.as_str(), 0, upper).ok()?? {
+                sequences.insert(row.seq);
+            }
+        }
+        Some(sequences)
+    });
+    if let Some(sequences) = indexed {
+        for seq in sequences {
+            let row = reader.admitted_movement(seq)?.ok_or("checked writer evidence interval is incomplete")?;
+            if detached_writer_starts_at(&mut reader, &row, path, record, before, &before_hash, writers)? {
+                return seq.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
+            }
+        }
+    } else {
+        while reader.next_seq < upper {
+            let seq = reader.next_seq;
+            let row = reader.movement(seq)?.ok_or("checked writer evidence interval is incomplete")?;
+            if detached_writer_starts_at(&mut reader, &row, path, record, before, &before_hash, writers)? {
+                return seq.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
+            }
+        }
+    }
+    Ok(first)
+}
+
 fn checked_selected_run_advance(
     ctx: &InterfaceLiftContext,
     path: &Path,
@@ -1614,8 +1691,8 @@ fn checked_selected_run_advance_state(
     let evidence = CheckedRunEvidence { movements_path:&ctx.movements_path,ledger_index_path:&ctx.ledger_index_path,blobs_dir:&ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
     if ContentHash::of_bytes(before) == ContentHash::of_bytes(after) { return Ok(Vec::new()); }
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
-    let first = concurrent_writer_evidence_start(&evidence, &record, before, after_seq)?;
     let writers = declared_writer_closure(&record, writers)?;
+    let first = concurrent_writer_evidence_start(&evidence, path, &record, before, after_seq, &writers)?;
     let mut reader = FileCheckedRunReader::open(&evidence, Some(first))?.with_provider_context(ctx);
     let scan_start = reader.next_seq;
     let chain = checked_run_file_chain_with_reader(&mut reader, path, before, CheckedRunTarget::Snapshot(after), first, scan_start,
@@ -1885,7 +1962,7 @@ pub fn checked_declared_run_advance(
 ) -> Result<Vec<CheckedRunTransition>, CheckedRunError> {
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let writers = declared_writer_closure(&record, seeds)?;
-    let first = concurrent_writer_evidence_start(evidence, &record, before, after_seq)?;
+    let first = concurrent_writer_evidence_start(evidence, path, &record, before, after_seq, &writers)?;
     let transitions = checked_run_file_chain_state(evidence, path, before, after, first, &writers)?;
     for transition in &transitions { validate_checked_owner_transition(transition)?; }
     Ok(transitions)
@@ -1901,37 +1978,7 @@ pub fn checked_declared_run_snapshot(
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let writers = declared_writer_closure(&record, seeds)?;
     validate_checked_run_writers(&writers)?;
-    let mut first = concurrent_writer_evidence_start(evidence, &record, before, after_seq)?;
-    let mut prefix = FileCheckedRunReader::open(evidence, None)?;
-    while prefix.next_seq <= first {
-        let Some(call) = prefix.movement(prefix.next_seq)? else { break; };
-        if call.kind != MovementKind::InterfaceOutbound || call.seq.0 >= observed_sequence { continue; }
-        let Some(writer) = writers.iter().find(|writer| call.from == Endpoint::Interface(writer.source.clone())
-            && call.to == Endpoint::Interface(writer.door.clone())) else { continue; };
-        let (manifest, payload) = prefix.artifact(call.artifact.as_ref().ok_or("observed writer call has no artifact")?)?;
-        if manifest.label != writer.call_label { continue; }
-        let artifact: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
-        if artifact.tool != writer.tool || artifact.arguments.get("ordered").is_none()
-            || artifact.arguments.pointer("/writes/1/expected_before_hash").and_then(|value| value.as_str())
-                .is_none_or(|hash| hash != ContentHash::of_bytes(before).to_hex()) { continue; }
-        let ordered: writer_run::OrderedArguments = serde_json::from_value(artifact.arguments).map_err(|error| error.to_string())?;
-        if !ordered.targets(path) { continue; }
-        let runtime = call.runtime().ok_or("observed writer call has no admitted coordinate")?;
-        let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
-            .ok_or("observed writer call has no admitted writer snapshot")?;
-        let snapshot = prefix.snapshot(&hash)?;
-        if ContentHash::of_bytes(&snapshot) != hash { return Err("observed writer snapshot failed integrity".into()); }
-        let declaration = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
-        if declaration.id != runtime.run || declaration.ee != record.ee || declaration.worker != record.worker
-            || runtime.ee != record.ee || runtime.worker != record.worker || runtime.interface != writer.door {
-            return Err("observed writer snapshot changed its exact admitted scope".into());
-        }
-        let (preimage, _) = ordered.checked_call(writer, &snapshot, path,evidence.max_payload_bytes)?;
-        if preimage == before {
-            first = call.seq.0.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary")?;
-            break;
-        }
-    }
+    let first = concurrent_writer_evidence_start(evidence, path, &record, before, after_seq, &writers)?;
     let mut reader = FileCheckedRunReader::open(evidence, Some(first))?;
     let scan_start = reader.next_seq;
     let transitions = checked_run_file_chain_with_reader(&mut reader, path, before,

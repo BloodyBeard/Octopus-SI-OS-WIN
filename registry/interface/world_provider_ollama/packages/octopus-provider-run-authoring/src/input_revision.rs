@@ -485,7 +485,7 @@ fn validate_static_revision_evidence(
         }
     }
     let writers = declared_writer_closure(&original, vec![writer.clone()])?;
-    let start = reader.concurrent_writer_start(&original, &bytes, source.seq)?;
+    let start = reader.concurrent_writer_start(path, &original, &bytes, source.seq, &writers)?;
     let mut history = PayloadHistoryReader(reader as &mut dyn CheckedRunEvidenceReader);
     let chain = checked_run_file_chain_with_reader(&mut history, path, &bytes, CheckedRunTarget::Snapshot(current),
         start, start.checked_add(1).ok_or("failed source history overflow")?, Some(before_seq), &writers, &[], None, None)
@@ -699,8 +699,8 @@ impl<R: CheckedRunEvidenceReader + ?Sized> CheckedRunEvidenceReader for PayloadH
     }
     fn artifact(&mut self, reference: &ArtifactRef) -> Result<(InterfaceArtifactManifest, Vec<u8>), String> { self.0.artifact(reference) }
     fn snapshot(&mut self, hash: &ContentHash) -> Result<Vec<u8>, String> { self.0.snapshot(hash) }
-    fn concurrent_writer_start(&mut self, record: &RunRecord, before: &[u8], after_seq: u64) -> Result<u64, String> {
-        self.0.concurrent_writer_start(record, before, after_seq)
+    fn concurrent_writer_start(&mut self, path: &Path, record: &RunRecord, before: &[u8], after_seq: u64, writers: &[CheckedRunWriter]) -> Result<u64, String> {
+        self.0.concurrent_writer_start(path, record, before, after_seq, writers)
     }
     fn input_payloads_ready(&mut self, path: &Path, current: &[u8], writer: &CheckedRunWriter, source: &InterfaceId, before_seq: u64) -> Result<bool, String> {
         self.0.input_payloads_ready(path, current, writer, source, before_seq)
@@ -744,7 +744,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
     }
     let (source, before, original) = anchor.ok_or("payload readiness lost its input history anchor")?;
     let writers = declared_writer_closure(&original, vec![writer.clone()])?;
-    let start = reader.concurrent_writer_start(&original, &before, source)?;
+    let start = reader.concurrent_writer_start(path, &original, &before, source, &writers)?;
     let mut replay = PayloadHistoryReader(reader);
     let chain = match checked_run_file_chain_with_reader(&mut replay, path, &before, CheckedRunTarget::Snapshot(current),
         start, start.checked_add(1).ok_or("payload readiness history interval overflow")?, Some(before_seq), &writers, &[], None, None) {

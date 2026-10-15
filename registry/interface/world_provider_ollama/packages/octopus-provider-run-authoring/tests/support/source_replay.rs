@@ -780,7 +780,7 @@ fn selected_ledger_checked_authoring_history() {
     let writer = CheckedRunWriter { owner:provider.clone(),source:config.authoring_source_interface.clone(),
         door:config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult).unwrap().interface().clone(),
         tool:profile.file_write_tool,call_label:profile.file_write_label,result_label:profile.file_write_result_label };
-    let start = concurrent_writer_evidence_start(&evidence, &RunRecord::from_bytes(&before).unwrap(), &before, 1452).unwrap();
+    let start = concurrent_writer_evidence_start(&evidence, &call.arguments.path, &RunRecord::from_bytes(&before).unwrap(), &before, 1452, std::slice::from_ref(&writer)).unwrap();
     let chain = checked_run_file_chain_state(&evidence, &call.arguments.path, &before, &after, start, &[writer]).unwrap();
     for transition in &chain { validate_checked_provider_transition(transition).unwrap(); }
     assert_eq!(chain.len(), 3);

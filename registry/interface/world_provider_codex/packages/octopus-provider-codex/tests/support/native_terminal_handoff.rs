@@ -58,16 +58,33 @@ async fn native_terminal_handoff_cases() {
                     let manifest:octopus_interfaces::InterfaceArtifactManifest=serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
                     if phase==8 || (phase==20 && writes==1) { break; }
                     let file=std::fs::read_dir(root.join("hand-in").join(authoring_id.as_str())).unwrap().map(|e|e.unwrap().path()).filter(|p|p.to_string_lossy().ends_with(".artifact.json")).find_map(|p| { let f=InterfaceArtifactFile::new(p).unwrap(); (serde_json::to_value(f.read_manifest().unwrap()).unwrap()==serde_json::to_value(&manifest).unwrap()).then_some(f) }).unwrap();
-                    let selected:serde_json::Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    let target_before=std::fs::read(path).unwrap();
+                    let selected:serde_json::Value=serde_json::from_slice(&target_before).unwrap();
                     let writer_path=selected["interface_state"][gate_ctx.interface.as_str()]["run_authoring_binding"]["writer_run"]["run"].as_str()
                         .map_or_else(||path.to_path_buf(),|run|root.join("runs").join(format!("{run}.json")));
                     let before=std::fs::read(&writer_path).unwrap(); let before_record=RunRecord::from_bytes(&before).unwrap();
                     let call_cp=before_record.checkpoints.iter().find(|cp|before_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(authoring_id)).unwrap();
                     let door=call_cp.outbound_interfaces().next().unwrap().clone(); let seq=append(&gate_ctx,edge(&gate_ctx,&before,call_cp,&file,MovementKind::InterfaceOutbound,door.clone()));
+                    let overlap=if phase==24 && writes==1 {
+                        let record=RunRecord::from_bytes(&target_before).unwrap();
+                        let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                            && cp.outbound_interfaces().any(|id|id==&gate_ctx.interface) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+                        let input=artifact(&root.join("clarification"),"operator.message",json!({"text":"clarification","message_id":"steer-pending"}));
+                        Some(append(gate_ctx,edge(gate_ctx,&target_before,cp,&input,MovementKind::InterfaceOutbound,gate_ctx.interface.clone())))
+                    } else {None};
                     let call:octopus_tool_handlers::ToolCallArtifact=serde_json::from_slice(&file.read_payload_bytes().unwrap()).unwrap();
                     let call_metadata=edge(gate_ctx,&before,call_cp,&file,MovementKind::InterfaceOutbound,door.clone()).invocation_metadata.unwrap().invocation().unwrap().clone();
                     let call_envelope=InterfaceInvocationEnvelope{artifact:cache_artifact(gate_ctx,&file),artifact_file:file,artifact_binding_payloads:vec![],metadata:Some(call_metadata)};
                     let body=octopus_system_room_env::execute_file_write_result(&call_envelope,&call.arguments,&["system_room".into()],&BTreeMap::from([("run_records_root".into(),root.join("runs"))]),&root.join(format!("effects-{writes}")),1<<24).unwrap();
+                    if let Some(source)=overlap {
+                        use octopus_provider_run_authoring::{CheckedRunEvidence,RunAuthoringProfile,declared_provider_run_writer,checked_declared_run_advance,CheckedRunError};
+                        let profile:RunAuthoringProfile=serde_json::from_value(gate_ctx.descriptor_snapshot.as_ref().unwrap().interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"].clone()).unwrap();
+                        let writer=declared_provider_run_writer(&RunRecord::from_bytes(&target_before).unwrap(),&gate_ctx.interface,&profile).unwrap();
+                        let limits=gate_ctx.required_host_io_limits().unwrap();
+                        let evidence=CheckedRunEvidence{movements_path:&gate_ctx.movements_path,ledger_index_path:&gate_ctx.ledger_index_path,blobs_dir:&gate_ctx.blobs_dir,max_control_frame_bytes:limits.max_control_frame_bytes,max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes};
+                        let pending=checked_declared_run_advance(&evidence,&path.canonicalize().unwrap(),&target_before,&std::fs::read(path).unwrap(),source,vec![writer]);
+                        assert!(matches!(&pending, Err(CheckedRunError::AwaitingResults{call_sequences}) if call_sequences==&[seq]), "call={seq} source={source}: {:?}",pending.as_ref().err());
+                    }
                     let after=std::fs::read(&writer_path).unwrap(); let after_record=RunRecord::from_bytes(&after).unwrap();
                     let result_cp=after_record.checkpoints.iter().find(|cp|after_record.active_checkpoints.contains(&cp.id)&&cp.inbound_interface()==Some(&door)&&cp.outbound_interfaces().any(|id|id==&gate_ctx.interface)).unwrap();
                     let label=gate_ctx.descriptor_snapshot.as_ref().unwrap().interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"]["file_write_result_label"].as_str().unwrap();
@@ -816,14 +833,15 @@ async fn native_terminal_handoff_cases() {
             state["context_generation"]=json!(before_context+1);
             let pending=artifact(&ctx.interface_var_dir().join("pending"),"interface.artifact.output",json!({"label":"interface.artifact.output","codex_continuity":state}));
             let hand=Box::pin(handoff.hand_final(ProviderEmission{artifact:pending,route:ProviderEmissionRoute::ClientProjection}));
-            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
+            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,24,true);
             let (result,_)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(hand,gate)}).await.unwrap();result.unwrap();drop(handoff);
             let before=std::fs::read(&plan.run_write.path).unwrap();let selected=RunRecord::from_bytes(&before).unwrap();
-            let cp=selected.checkpoints.iter().find(|cp|selected.active_checkpoints.contains(&cp.id)
-                && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
             let file=artifact(&root.join("clarification"),"operator.message",json!({"text":"clarification","message_id":"steer-pending"}));
-            let row=edge(&ctx,&before,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
-            let input=source_envelope(&ctx,root,&row,file);let seq=append(&ctx,row);
+            let reference=cache_artifact(&ctx,&file);
+            let row=std::fs::read_to_string(&ctx.movements_path).unwrap().lines().map(|line|serde_json::from_str::<Movement>(line).unwrap())
+                .find(|row|row.artifact.as_ref()==Some(&reference)).unwrap();
+            let seq=row.seq.0;let input=source_envelope(&ctx,root,&row,file);
+            assert_ne!(input.metadata().unwrap().runtime.as_ref().unwrap().run_record_hash.as_deref(),Some(ContentHash::of_bytes(&before).to_hex().as_str()));
             let result=CodexTurnControlResult {control_id:"steer-pending".into(),action:"steer".into(),acknowledged:true,
                 thread_id:Some("thread-a".into()),turn_id:Some("turn-a".into()),detail:json!({"stage":"accepted_by_app_server","consumption_proven":false}),continuity:None};
             persist_control_journal(&ctx,seq,&run,"steer-pending","steer",TurnControlJournalPhase::Result{result}).unwrap();

@@ -572,9 +572,11 @@ impl ProviderOutputHandoff {
             stable_run_observation(&self.run_path, current, limits.max_payload_bytes, || {
                 let start = concurrent_writer_evidence_start(
                     &evidence,
+                    &self.run_path,
                     &original,
                     &bytes,
                     self.source_movement_seq,
+                    &writers,
                 )?;
                 checked_run_file_chain_state(
                     &evidence,
