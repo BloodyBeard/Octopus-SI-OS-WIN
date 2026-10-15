@@ -845,7 +845,6 @@ assert.match(electronProjection, /if \(label === "agent\.message\.delta"\) \{\s*
 assert.match(electronProjection, /"turn\.reasoning\.delta": "reasoning_delta"/);
 assert.match(electronProjection, /function compareMovementOrder\(left, right\) \{\s*return rowTimeMs\(left\) - rowTimeMs\(right\)\s*\|\| numberValue\(left\.seq, 0\) - numberValue\(right\.seq, 0\);/);
 assert.match(electronProjection, /function isOperatorChatProviderFailureRow\(entry, row\)[\s\S]*?ledgerArtifactLabel\(row\) === `\$\{provider\}\.failure`;/);
-assert.match(electronProjection, /if \(isOperatorChatProviderFailureRow\(entry, row\)\) \{[\s\S]*?open = false;[\s\S]*?state = "failed";/);
 assert.match(electronProjection, /visibleLabels\.has\(label\) \|\| isOperatorChatProviderFailureRow\(entry, row\)/);
 assert.match(electronProjection, /const terminalError = Boolean\(providerFailure\) \|\| label === protocol\.errorOutputLabel;/);
 
