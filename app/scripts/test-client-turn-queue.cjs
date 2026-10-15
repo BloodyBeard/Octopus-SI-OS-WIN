@@ -443,6 +443,31 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   const externalClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
   await act(async () => document.querySelector("a").dispatchEvent(externalClick));
   assert.equal(externalClick.defaultPrevented, true, "external links still require their existing confirmation");
+  const realNow = performance.now;
+  let streamNow = 1_000;
+  Object.defineProperty(performance, "now", { configurable: true, value: () => streamNow });
+  try {
+    const streamed = (text, streaming) => act(async () => host.render(React.createElement(messageContent.MessageContent, {
+      streamKey: "reply", streaming, text, variant: "assistant" })));
+    const delayOf = (element) => Number.parseFloat(element.style.getPropertyValue("--fade-delay"));
+    const startOf = (element) => 1_000 + delayOf(element);
+    await streamed("1. First item\n2. `artifact.*` second\n3.", true);
+    const items = [...document.querySelectorAll("li")];
+    const ordered = [...document.querySelectorAll("li, .octopus-markdown-fade-in")];
+    const starts = ordered.filter((element) => element.tagName !== "LI" || element.style.getPropertyValue("--fade-delay") !== "600000ms").map(startOf);
+    assert.deepEqual(starts, [...starts].sort((left, right) => left - right), "streamed list markers, words and inline code reveal in document order");
+    assert.equal(startOf(items[1]), startOf(items[1].querySelector("code")), "a list item appears with its first unit, even when that unit is inline code");
+    assert.equal(items[2].style.getPropertyValue("--fade-delay"), "600000ms", "an empty streamed list item keeps its marker hidden");
+    streamNow = 2_000;
+    await streamed("1. First item\n2. `artifact.*` second\n3. Third", true);
+    assert.equal(document.querySelectorAll("li")[2], items[2]);
+    assert.equal(1_000 + delayOf(items[2]), 2_000 + delayOf(items[2].querySelector(".octopus-markdown-fade-in")), "the held item appears with its first word");
+    await streamed("1. First item\n2. `artifact.*` second\n3. Third", false);
+    assert.deepEqual([...document.querySelectorAll("li")], items, "completing the reply keeps the streamed markdown mounted");
+    assert.equal(document.querySelector("[data-markdown-animated], .octopus-markdown-fade-in"), null);
+  } finally {
+    Object.defineProperty(performance, "now", { configurable: true, value: realNow });
+  }
   const preferencesApi = load("src/clientPreferences.ts"); let loadedPreferences;
   const obsoletePreference = JSON.stringify({ activeRunSubmitBehavior: "queue", sendShortcut: "cmd-always" });
   localStorage.setItem("octopus.client-preferences.v1.test", obsoletePreference);

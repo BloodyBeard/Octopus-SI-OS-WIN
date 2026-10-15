@@ -11,6 +11,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ComponentProps,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -36,7 +37,8 @@ type MessageContentProps = {
 };
 
 type StreamingFadeTimeline = {
-  mountedSegments: WeakSet<HTMLElement>;
+  mountedAtByElement: WeakMap<HTMLElement, number>;
+  startAtByElement: WeakMap<HTMLElement, number>;
   nextSegmentStartAtMs: number;
   pendingSegmentKeyState: StreamingSegmentKeyState | null;
   segmentKeyState: StreamingSegmentKeyState;
@@ -51,12 +53,16 @@ type StreamingSegmentKeyState = {
 const STREAM_FADE_SEGMENT_DELAY_MS = 16;
 const STREAM_FADE_SEGMENT_MAX_DELAY_MS = 96;
 const STREAM_FADE_DURATION_MS = 150;
+const STREAM_PENDING_LEAD = "pending";
+const STREAM_PENDING_DELAY_MS = 600_000;
+const STREAM_LEAD_TAGS = new Set(["blockquote", "li", "table", "tr"]);
 
 const StreamingTimelineContext = createContext<StreamingFadeTimeline | null>(null);
 
 function createStreamingFadeTimeline(): StreamingFadeTimeline {
   return {
-    mountedSegments: new WeakSet(),
+    mountedAtByElement: new WeakMap(),
+    startAtByElement: new WeakMap(),
     nextSegmentStartAtMs: 0,
     pendingSegmentKeyState: null,
     segmentKeyState: { nextSegmentId: 0, previousSegments: [] },
@@ -70,15 +76,7 @@ function createMarkdownComponents(
 ): Components {
   const reasoning = variant === "reasoning";
   return {
-  span: ({ children, node: _node, ...props }) => {
-    const rawProps = props as unknown as Record<string, unknown>;
-    const rawSegmentKey = rawProps["data-stream-segment-key"] ?? rawProps.dataStreamSegmentKey;
-    const segmentKey = typeof rawSegmentKey === "string"
-      ? rawSegmentKey
-      : "";
-    if (segmentKey) return <StreamingFadeSegment segmentKey={segmentKey}>{children}</StreamingFadeSegment>;
-    return <span {...props}>{children}</span>;
-  },
+  span: MarkdownSpan,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   p: ({ children }) => <p className={reasoning ? "m-0 has-[.inline-markdown]:py-0.5" : "octopus-markdown-text octopus-markdown-paragraph"}>{children}</p>,
   h1: ({ children }) => <h1 className={reasoning ? "m-0 font-semibold" : "octopus-markdown-heading octopus-markdown-heading1"}>{children}</h1>,
@@ -108,35 +106,29 @@ function createMarkdownComponents(
     );
   },
   li: ({ children, className, node: _node, ...props }) => (
-    <li
+    <MarkdownListItem
       {...props}
       className={reasoning
         ? `m-0 ${className ?? ""}`.trim()
         : `octopus-markdown-text octopus-markdown-list-item ${className?.includes("task-list-item") ? "octopus-markdown-task-list-item" : ""} ${className ?? ""}`.trim()}
     >
       {children}
-    </li>
+    </MarkdownListItem>
   ),
-  blockquote: ({ children }) => <blockquote className="octopus-markdown-blockquote">{children}</blockquote>,
-  hr: () => <hr className="octopus-markdown-horizontal-rule" />,
+  blockquote: ({ children, node: _node, ...props }) => (
+    <StreamingContainer as="blockquote" className="octopus-markdown-blockquote" lead={streamingLeadKey(props)}>{children}</StreamingContainer>
+  ),
+  hr: ({ node: _node, ...props }) => <StreamingContainer as="hr" className="octopus-markdown-horizontal-rule" lead={streamingSegmentKey(props)} />,
   a: ({ children, href }) => <SafeMarkdownLink href={href} onOpenFile={onOpenFile}>{children}</SafeMarkdownLink>,
-  img: ({ alt, src }) => <SafeMarkdownImage alt={alt ?? ""} src={src ?? ""} />,
+  img: ({ alt, node: _node, src, ...props }) => <SafeMarkdownImage alt={alt ?? ""} revealKey={streamingSegmentKey(props)} src={src ?? ""} />,
   pre: ({ children }) => <>{children}</>,
-  code: ({ children, className }) => {
-    const raw = String(children);
-    const block = Boolean(className) || raw.includes("\n");
-    const value = raw.replace(/\n$/, "");
-    const language = /^language-(.+)$/.exec(className ?? "")?.[1] ?? "";
-    if (!block) {
-      return <code className="octopus-markdown-inline-markdown">{value}</code>;
-    }
-    if (language.toLocaleLowerCase() === "mermaid") return <MermaidBlock value={value} />;
-    return <CodeBlock language={language} value={value} />;
-  },
-  table: ({ children, node }) => <MarkdownTable node={node}>{children}</MarkdownTable>,
+  code: MarkdownCode,
+  table: ({ children, node, ...props }) => <MarkdownTable lead={streamingLeadKey(props)} node={node}>{children}</MarkdownTable>,
   thead: ({ children }) => <thead>{children}</thead>,
   tbody: ({ children }) => <tbody className="octopus-markdown-table-body">{children}</tbody>,
-  tr: ({ children }) => <tr className="octopus-markdown-table-row">{children}</tr>,
+  tr: ({ children, node: _node, ...props }) => (
+    <StreamingContainer as="tr" className="octopus-markdown-table-row" lead={streamingLeadKey(props)}>{children}</StreamingContainer>
+  ),
   th: ({ children }) => (
     <th className={`octopus-markdown-table-header-cell${Children.count(children) === 1 ? " octopus-markdown-single-child-table-cell" : ""}`}>
       {children}
@@ -150,8 +142,8 @@ function createMarkdownComponents(
       </td>
     );
   },
-  input: ({ checked, disabled, type }) => type === "checkbox" ? (
-    <div className="relative mr-1.5 inline-flex cursor-default align-[-0.125rem]">
+  input: ({ checked, disabled, node: _node, type, ...props }) => type === "checkbox" ? (
+    <StreamingContainer as="div" className="relative mr-1.5 inline-flex cursor-default align-[-0.125rem]" lead={streamingSegmentKey(props)}>
       <button
         aria-checked={Boolean(checked)}
         className="border-token-border peer data-[state=checked]:bg-token-checkbox-background data-[state=checked]:text-token-checkbox-foreground data-[state=checked]:border-token-border focus-visible:border-token-border focus-visible:ring-token-checkbox-background/50 focus-visible:ring-1 icon-2xs rounded-xs shrink-0 border shadow-sm outline-none transition-[background-color,border-color,box-shadow] disabled:cursor-not-allowed pointer-events-none"
@@ -164,21 +156,129 @@ function createMarkdownComponents(
           {checked ? <Glyph className="icon-xxs flex-shrink-0" name="check" size={10} /> : null}
         </span>
       </button>
-    </div>
+    </StreamingContainer>
   ) : null,
   };
 }
 
 const MarkdownSourceContext = createContext("");
 
-function MarkdownTable({ children, node }: { children: ReactNode; node?: { position?: { start?: { offset?: number }; end?: { offset?: number } } } }) {
+type StreamingReveal = { className?: string; ref?: (element: HTMLElement | null) => void };
+
+const NO_STREAMING_REVEAL: StreamingReveal = {};
+
+function streamingSegmentKey(props: object): string | undefined {
+  const row = props as Record<string, unknown>;
+  const value = row["data-stream-segment-key"] ?? row.dataStreamSegmentKey;
+  return typeof value === "string" ? value : undefined;
+}
+
+function streamingLeadKey(props: object): string | undefined {
+  const row = props as Record<string, unknown>;
+  const value = row["data-stream-lead-key"] ?? row.dataStreamLeadKey;
+  return typeof value === "string" ? value : undefined;
+}
+
+function withoutStreamingKeys<T extends object>(props: T): T {
+  const {
+    "data-stream-segment-key": _segment,
+    "data-stream-lead-key": _lead,
+    dataStreamSegmentKey: _segmentProperty,
+    dataStreamLeadKey: _leadProperty,
+    ...rest
+  } = props as Record<string, unknown>;
+  return rest as T;
+}
+
+function joinClassNames(...values: Array<string | undefined>): string | undefined {
+  const joined = values.filter(Boolean).join(" ");
+  return joined || undefined;
+}
+
+function useStreamingReveal(key: string | undefined, container = false): StreamingReveal {
+  const timeline = useContext(StreamingTimelineContext);
+  if (!timeline || key === undefined) return NO_STREAMING_REVEAL;
+  const startsAt = key === STREAM_PENDING_LEAD ? undefined : timeline.startAtMsByKey.get(key);
+  const settled = startsAt !== undefined && performance.now() >= startsAt + STREAM_FADE_DURATION_MS;
+  if (settled && !container) return NO_STREAMING_REVEAL;
+  return {
+    className: settled ? undefined : "octopus-markdown-fade-in",
+    ref: (element) => {
+      if (element) revealStreamingElement(element, key, timeline);
+    },
+  };
+}
+
+function revealStreamingElement(element: HTMLElement, key: string, timeline: StreamingFadeTimeline) {
+  let mountedAt = timeline.mountedAtByElement.get(element);
+  if (mountedAt === undefined) {
+    mountedAt = performance.now();
+    timeline.mountedAtByElement.set(element, mountedAt);
+  }
+  const previous = timeline.startAtByElement.get(element);
+  let startsAt = mountedAt + STREAM_PENDING_DELAY_MS;
+  if (key !== STREAM_PENDING_LEAD) {
+    startsAt = Math.min(previous ?? Number.POSITIVE_INFINITY, streamingStartAt(timeline, key));
+    timeline.startAtByElement.set(element, startsAt);
+  } else if (previous !== undefined) {
+    startsAt = previous;
+  }
+  const delay = `${Math.round(startsAt - mountedAt)}ms`;
+  if (element.style.getPropertyValue("--fade-delay") !== delay) element.style.setProperty("--fade-delay", delay);
+}
+
+function streamingStartAt(timeline: StreamingFadeTimeline, key: string): number {
+  let startsAt = timeline.startAtMsByKey.get(key);
+  if (startsAt === undefined) {
+    const now = performance.now();
+    startsAt = Math.min(Math.max(timeline.nextSegmentStartAtMs, now), now + STREAM_FADE_SEGMENT_MAX_DELAY_MS);
+    timeline.startAtMsByKey.set(key, startsAt);
+    timeline.nextSegmentStartAtMs = startsAt + STREAM_FADE_SEGMENT_DELAY_MS;
+  }
+  return startsAt;
+}
+
+function MarkdownSpan({ children, className, node: _node, ...props }: ComponentProps<"span"> & { node?: unknown }) {
+  const reveal = useStreamingReveal(streamingSegmentKey(props));
+  return <span {...withoutStreamingKeys(props)} className={joinClassNames(className, reveal.className)} ref={reveal.ref}>{children}</span>;
+}
+
+function MarkdownListItem({ children, className, ...props }: ComponentProps<"li">) {
+  const reveal = useStreamingReveal(streamingLeadKey(props), true);
+  return <li {...withoutStreamingKeys(props)} className={joinClassNames(className, reveal.className)} ref={reveal.ref}>{children}</li>;
+}
+
+function StreamingContainer({ as: Tag, children, className, lead }: {
+  as: "blockquote" | "div" | "hr" | "tr";
+  children?: ReactNode;
+  className: string;
+  lead: string | undefined;
+}) {
+  const reveal = useStreamingReveal(lead, true);
+  return <Tag className={joinClassNames(className, reveal.className)} ref={reveal.ref}>{children}</Tag>;
+}
+
+function MarkdownCode({ children, className, node: _node, ...props }: ComponentProps<"code"> & { node?: unknown }) {
+  const reveal = useStreamingReveal(streamingSegmentKey(props));
+  const raw = String(children);
+  const block = Boolean(className) || raw.includes("\n");
+  const value = raw.replace(/\n$/, "");
+  const language = /^language-(.+)$/.exec(className ?? "")?.[1] ?? "";
+  if (!block) {
+    return <code className={joinClassNames("octopus-markdown-inline-markdown", reveal.className)} ref={reveal.ref}>{value}</code>;
+  }
+  if (language.toLocaleLowerCase() === "mermaid") return <MermaidBlock reveal={reveal} value={value} />;
+  return <CodeBlock language={language} reveal={reveal} value={value} />;
+}
+
+function MarkdownTable({ children, lead, node }: { children: ReactNode; lead: string | undefined; node?: { position?: { start?: { offset?: number }; end?: { offset?: number } } } }) {
   const source = useContext(MarkdownSourceContext);
   const start = node?.position?.start?.offset;
   const end = node?.position?.end?.offset;
   const markdownSource = typeof start === "number" && typeof end === "number"
     ? source.slice(start, end)
     : textFromChildren(children);
-  return <TableBlock markdownSource={markdownSource}>{children}</TableBlock>;
+  return <TableBlock lead={lead} markdownSource={markdownSource}>{children}</TableBlock>;
 }
 
 function SafeMarkdownLink({ children, href = "", onOpenFile }: { children: ReactNode; href?: string; onOpenFile: MessageContentProps["onOpenFile"] }) {
@@ -248,7 +348,8 @@ function SafeMarkdownLink({ children, href = "", onOpenFile }: { children: React
   );
 }
 
-function SafeMarkdownImage({ alt, src }: { alt: string; src: string }) {
+function SafeMarkdownImage({ alt, revealKey, src }: { alt: string; revealKey?: string; src: string }) {
+  const reveal = useStreamingReveal(revealKey);
   const [allowed, setAllowed] = useState(false);
   const [failed, setFailed] = useState(false);
   let host = "external source";
@@ -268,7 +369,7 @@ function SafeMarkdownImage({ alt, src }: { alt: string; src: string }) {
 
   if (!external) {
     return (
-      <span className="my-2 flex min-h-16 w-full items-center gap-3 rounded-xl border border-token-border bg-token-foreground/[0.025] px-3 py-2 text-sm text-token-description-foreground">
+      <span className={joinClassNames("my-2 flex min-h-16 w-full items-center gap-3 rounded-xl border border-token-border bg-token-foreground/[0.025] px-3 py-2 text-sm text-token-description-foreground", reveal.className)} ref={reveal.ref}>
         <Glyph className="shrink-0" name="image" size={18} />
         <span className="min-w-0"><strong className="block font-medium text-token-text-secondary">Image preview unavailable</strong><span className="block truncate">{alt || "The message does not provide an admitted media URL."}</span></span>
       </span>
@@ -276,7 +377,7 @@ function SafeMarkdownImage({ alt, src }: { alt: string; src: string }) {
   }
   if (!allowed || failed) {
     return (
-      <span className="my-2 flex min-h-20 w-full items-center gap-3 rounded-xl border border-token-border bg-token-foreground/[0.025] px-3 py-2">
+      <span className={joinClassNames("my-2 flex min-h-20 w-full items-center gap-3 rounded-xl border border-token-border bg-token-foreground/[0.025] px-3 py-2", reveal.className)} ref={reveal.ref}>
         <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-token-list-hover-background text-token-description-foreground"><Glyph name="image" size={18} /></span>
         <span className="min-w-0 flex-1 text-sm"><strong className="block font-medium">{failed ? "Image could not be loaded" : "External image blocked"}</strong><span className="block truncate text-token-description-foreground">{alt || host}</span></span>
         <button
@@ -293,7 +394,7 @@ function SafeMarkdownImage({ alt, src }: { alt: string; src: string }) {
     );
   }
   return (
-    <span className="my-2 block overflow-auto rounded-xl border border-token-border bg-token-foreground/[0.025] p-2">
+    <span className={joinClassNames("my-2 block overflow-auto rounded-xl border border-token-border bg-token-foreground/[0.025] p-2", reveal.className)} ref={reveal.ref}>
       <img
         alt={alt}
         className="mx-auto max-h-[70vh] max-w-full rounded-lg object-contain"
@@ -374,51 +475,45 @@ export const MessageContent = memo(MessageContentView, (previous, next) => (
   && previous.find?.activeIndex === next.find?.activeIndex
 ));
 
-function StreamingFadeSegment({ children, segmentKey }: {
-  children: ReactNode;
-  segmentKey: string;
-}) {
-  const timeline = useContext(StreamingTimelineContext);
-  const startsAt = timeline?.startAtMsByKey.get(segmentKey);
-  if (!timeline || (startsAt !== undefined && performance.now() >= startsAt + STREAM_FADE_DURATION_MS)) {
-    return <span>{children}</span>;
-  }
-  return (
-    <span className="octopus-markdown-fade-in" ref={(element) => { if (element) startStreamingSegment(element, segmentKey, timeline); }}>
-      {children}
-    </span>
-  );
-}
-
-function startStreamingSegment(element: HTMLElement, segmentKey: string, timeline: StreamingFadeTimeline) {
-  if (timeline.mountedSegments.has(element)) return;
-  timeline.mountedSegments.add(element);
-  const now = performance.now();
-  let startsAt = timeline.startAtMsByKey.get(segmentKey);
-  if (startsAt === undefined) {
-    startsAt = Math.min(Math.max(timeline.nextSegmentStartAtMs, now), now + STREAM_FADE_SEGMENT_MAX_DELAY_MS);
-    timeline.startAtMsByKey.set(segmentKey, startsAt);
-    timeline.nextSegmentStartAtMs = startsAt + STREAM_FADE_SEGMENT_DELAY_MS;
-  }
-  element.style.setProperty("--fade-delay", `${Math.round(startsAt - now)}ms`);
-}
-
 function streamingTextPlugin(streamKey: string, timeline: StreamingFadeTimeline) {
   return () => (tree: HastNode) => {
-    const entries: Array<{ node: HastNode; parent: HastNode; segments: readonly string[]; startIndex: number }> = [];
     const contents: string[] = [];
+    const targets: HastNode[] = [];
+    const leads: Array<{ end: number; first: number; node: HastNode }> = [];
+    const unit = (content: string, target: HastNode) => {
+      contents.push(content);
+      targets.push(target);
+    };
 
-    function visit(node: HastNode, literal = false) {
-      if (!node.children?.length) return;
-      for (const child of node.children) {
-        if (child.type === "text" && typeof child.value === "string" && !literal) {
+    function visit(node: HastNode) {
+      const children = node.children;
+      if (!children?.length) return;
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        if (child.type === "text" && typeof child.value === "string") {
           const segments = cachedStreamingSegments(child.value);
-          entries.push({ node: child, parent: node, segments, startIndex: contents.length });
-          contents.push(...segments);
+          if (!segments.length) continue;
+          const spans = segments.map((segment) => ({ type: "element", tagName: "span", properties: {}, children: [{ type: "text", value: segment }] }));
+          spans.forEach((span, spanIndex) => unit(segments[spanIndex] ?? "", span));
+          children.splice(index, 1, ...spans);
+          index += spans.length - 1;
           continue;
         }
+        if (child.type !== "element") continue;
         const tagName = child.tagName?.toLowerCase() ?? "";
-        visit(child, literal || ["code", "pre", "math", "svg", "style"].includes(tagName));
+        if (tagName === "pre") {
+          const code = child.children?.find((candidate) => candidate.type === "element" && candidate.tagName === "code");
+          if (code) unit("\u0000pre", code);
+          continue;
+        }
+        if (["code", "hr", "img", "input"].includes(tagName) || hastClassNames(child).some((name) => name === "katex" || name === "katex-display")) {
+          unit(`\u0000${tagName}:${hastText(child)}`, child);
+          continue;
+        }
+        if (["math", "svg", "style"].includes(tagName)) continue;
+        const first = contents.length;
+        visit(child);
+        if (STREAM_LEAD_TAGS.has(tagName)) leads.push({ end: contents.length, first, node: child });
       }
     }
 
@@ -428,20 +523,28 @@ function streamingTextPlugin(streamKey: string, timeline: StreamingFadeTimeline)
       previousSegments: timeline.segmentKeyState.previousSegments,
     };
     const keys = reconcileStreamingSegmentKeys(contents, candidate);
-    for (const entry of entries) {
-      if (!entry.segments.length) continue;
-      const childIndex = entry.parent.children?.indexOf(entry.node) ?? -1;
-      if (childIndex < 0) continue;
-      const replacement = entry.segments.map((segment, index) => ({
-        type: "element",
-        tagName: "span",
-        properties: { dataStreamSegmentKey: `${streamKey}:${keys[entry.startIndex + index]}` },
-        children: [{ type: "text", value: segment }],
-      }));
-      entry.parent.children?.splice(childIndex, 1, ...replacement);
+    targets.forEach((target, index) => {
+      target.properties = { ...target.properties, dataStreamSegmentKey: `${streamKey}:${keys[index]}` };
+    });
+    for (const lead of leads) {
+      lead.node.properties = {
+        ...lead.node.properties,
+        dataStreamLeadKey: lead.first < lead.end ? `${streamKey}:${keys[lead.first]}` : STREAM_PENDING_LEAD,
+      };
     }
     timeline.pendingSegmentKeyState = candidate;
   };
+}
+
+function hastClassNames(node: HastNode): string[] {
+  const value = node.properties?.className;
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
+  return typeof value === "string" ? value.split(/\s+/).filter(Boolean) : [];
+}
+
+function hastText(node: HastNode): string {
+  if (node.type === "text") return node.value ?? "";
+  return (node.children ?? []).map(hastText).join("");
 }
 
 const STREAM_SEGMENT_CACHE_LIMIT = 500;
@@ -583,7 +686,8 @@ function findHighlightPlugin(options: { query: string; offset: number; activeInd
   };
 }
 
-function TableBlock({ children, markdownSource }: { children: ReactNode; markdownSource: string }) {
+function TableBlock({ children, lead, markdownSource }: { children: ReactNode; lead?: string; markdownSource: string }) {
+  const reveal = useStreamingReveal(lead, true);
   const [copied, setCopied] = useState(false);
   const resetTimerRef = useRef<number | null>(null);
 
@@ -604,7 +708,7 @@ function TableBlock({ children, markdownSource }: { children: ReactNode; markdow
   }
 
   return (
-    <div className="octopus-markdown-table-container">
+    <div className={joinClassNames("octopus-markdown-table-container", reveal.className)} ref={reveal.ref}>
       <div className="octopus-markdown-table-wrapper group relative" data-markdown-table tabIndex={-1}>
         <table className="octopus-markdown-text octopus-markdown-table">{children}</table>
         <div className="absolute end-0 top-0 select-none" data-markdown-copy="exclude">
@@ -626,7 +730,7 @@ function TableBlock({ children, markdownSource }: { children: ReactNode; markdow
 
 let mermaidRenderSequence = 0;
 
-function MermaidBlock({ value }: { value: string }) {
+function MermaidBlock({ reveal = NO_STREAMING_REVEAL, value }: { reveal?: StreamingReveal; value: string }) {
   const appearance = useAppearance();
   const systemDark = useSyncExternalStore(subscribeToColorScheme, systemPrefersDark, () => false);
   const theme = appearance.themeMode === "system" ? (systemDark ? "dark" : "light") : appearance.themeMode;
@@ -682,7 +786,7 @@ function MermaidBlock({ value }: { value: string }) {
   }, [copied]);
 
   return (
-    <div className="group/diagram relative my-2 w-full min-w-0 overflow-hidden rounded-xl border border-token-border bg-token-text-code-block-background text-token-foreground" data-mermaid-diagram>
+    <div className={joinClassNames("group/diagram relative my-2 w-full min-w-0 overflow-hidden rounded-xl border border-token-border bg-token-text-code-block-background text-token-foreground", reveal.className)} data-mermaid-diagram ref={reveal.ref}>
       <div className="flex min-h-8 items-center gap-2 px-2 text-sm text-token-description-foreground select-none">
         <span className="min-w-0 flex-1 truncate">Mermaid diagram</span>
         <button
@@ -730,7 +834,7 @@ function MermaidBlock({ value }: { value: string }) {
   );
 }
 
-function CodeBlock({ language, value }: { language: string; value: string }) {
+function CodeBlock({ language, reveal = NO_STREAMING_REVEAL, value }: { language: string; reveal?: StreamingReveal; value: string }) {
   const [copied, setCopied] = useState(false);
   const appearance = useAppearance();
   const systemDark = useSyncExternalStore(subscribeToColorScheme, systemPrefersDark, () => false);
@@ -752,9 +856,10 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
 
   return (
     <div
-      className={`relative w-full min-w-0 overflow-clip rounded-lg bg-token-text-code-block-background contain-inline-size ${theme} octopus-markdown-code-block`}
+      className={`relative w-full min-w-0 overflow-clip rounded-lg bg-token-text-code-block-background contain-inline-size ${theme} octopus-markdown-code-block${reveal.className ? ` ${reveal.className}` : ""}`}
       data-markdown-copy="code-block"
       data-theme={theme}
+      ref={reveal.ref}
     >
       <div
         className="flex items-center py-1 pe-2 ps-2 font-sans text-sm text-token-description-foreground select-none rounded-t-lg"
