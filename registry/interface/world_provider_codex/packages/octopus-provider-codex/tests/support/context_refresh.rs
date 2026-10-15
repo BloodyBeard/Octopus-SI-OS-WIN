@@ -558,7 +558,7 @@ async fn settled_native_history_reseeds_only_after_exact_result_proof() {
     let bytes = std::fs::read(&path).unwrap();
     let labels = codex_context_labels();
     let prove = |state: &CodexContinuityState, entries: &[SessionContextArtifact]| context_refresh::prove_native_history_retirement(&path, state, entries, &labels);
-    let proof = prove(&settled, &session).unwrap().unwrap();
+    assert!(prove(&settled, &session).unwrap().is_some());
     assert!(prove(&original, &session).unwrap().is_none());
     assert!(prove(&settled, &session[..1]).is_err());
     assert!(prove(&settled, &session[1..]).is_err());
@@ -575,7 +575,45 @@ async fn settled_native_history_reseeds_only_after_exact_result_proof() {
     rows[2]["payload"]["call_id"]=serde_json::json!("unrelated-function");
     std::fs::write(&path,rows.iter().map(|row|format!("{row}\n")).collect::<String>()).unwrap();
     assert!(prove(&settled,&session).unwrap_err().to_string().contains("exact pending correlation"));
-    std::fs::write(&path,&bytes).unwrap();
+    let mut rows=String::from_utf8(bytes).unwrap().lines().map(|line|serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
+    rows.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"outer-exec","output":"Script running with cell ID 1\nWall time 4.1 seconds\nOutput:\n"}}));
+    rows.push(serde_json::json!({"type":"response_item","payload":{"type":"function_call","call_id":"outer-wait","name":"wait","arguments":"{\"cell_id\":\"1\",\"max_tokens\":12000,\"yield_time_ms\":20000}"}}));
+    let write_rows = |rows: &[serde_json::Value]| std::fs::write(&path,rows.iter().map(|row|format!("{row}\n")).collect::<String>()).unwrap();
+    write_rows(&rows);
+    let proof = prove(&settled,&session).unwrap().unwrap();
+    let serialized = serde_json::to_value(&proof).unwrap();
+    assert_eq!(serialized["calls"][0]["interrupted_cell_wait"]["exec"], rows[2]["payload"]);
+    for (index, field, value) in [
+        (4,"arguments",serde_json::json!("{\"cell_id\":\"other\"}")),
+        (4,"arguments",serde_json::json!("{\"cell_id\":\"1\",\"terminate\":true}")),
+        (4,"arguments",serde_json::json!("{\"cell_id\":\"1\",\"other\":true}")),
+        (4,"namespace",serde_json::json!("other")), (4,"name",serde_json::json!("other")),
+        (3,"call_id",serde_json::json!("other")), (2,"name",serde_json::json!("other")),
+    ] {
+        let mut wrong=rows.clone(); wrong[index]["payload"][field]=value; write_rows(&wrong);
+        assert!(prove(&settled,&session).is_err(),"{index}/{field}");
+    }
+    let mut late=rows.clone(); late.swap(3,4); write_rows(&late);
+    assert!(prove(&settled,&session).is_err());
+    let mut foreign=rows.clone(); foreign.insert(4,serde_json::json!({"type":"turn_context","payload":{"turn_id":"other-turn"}})); write_rows(&foreign);
+    assert!(prove(&settled,&session).is_err());
+    let mut more=rows.clone(); let mut exec=rows[2].clone(); exec["payload"]["call_id"]=serde_json::json!("second-exec");
+    let mut yielded=rows[3].clone(); yielded["payload"]["call_id"]=serde_json::json!("second-exec");
+    yielded["payload"]["output"]=serde_json::json!("Script running with cell ID 2\nWall time 1.0 seconds\nOutput:\n");
+    more.splice(4..4,[exec,yielded]); write_rows(&more); assert!(prove(&settled,&session).is_err());
+    let mut prior=rows.clone(); let mut wait=rows[4].clone(); wait["payload"]["call_id"]=serde_json::json!("prior-wait");
+    let yielded=serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"prior-wait","output":"Script running with cell ID 1\nWall time 1.0 seconds\nOutput:\n"}});
+    prior.splice(4..4,[wait,yielded]); write_rows(&prior); assert!(prove(&settled,&session).unwrap().is_some());
+    prior[5]["payload"]["output"]=serde_json::json!("Script completed\nWall time 1.0 seconds\nOutput:\n");
+    write_rows(&prior); assert!(prove(&settled,&session).is_err());
+    prior[5]["payload"]["output"]=serde_json::json!("unproven completion");
+    write_rows(&prior); assert!(prove(&settled,&session).is_err());
+    prior[4]["payload"]["arguments"]=serde_json::json!("{\"cell_id\":\"2\"}");
+    prior[5]["payload"]["output"]=serde_json::json!("Script running with cell ID 2\nWall time 1.0 seconds\nOutput:\n");
+    write_rows(&prior); assert!(prove(&settled,&session).is_err());
+    let mut tampered=serialized; tampered["calls"][0]["interrupted_cell_wait"]["yielded"]["call_id"]=serde_json::json!("other");
+    assert!(serde_json::from_value::<NativeHistoryProof>(tampered).unwrap().validate(&settled).is_err());
+    write_rows(&rows); let bytes=std::fs::read(&path).unwrap();
     let socket_path = temp.path().join("retirement.sock");
     let mut listener = crate::uds::UnixListener::bind(&socket_path).await.unwrap();
     let cwd = octopus_util_abspath::AbsolutePathBuf::from_absolute_path(temp.path()).unwrap();

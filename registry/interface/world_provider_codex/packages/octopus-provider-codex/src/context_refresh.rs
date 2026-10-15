@@ -181,12 +181,85 @@ pub(super) struct NativeHistoryProof {
 struct RetiredNativeCall {
     turn_id: String,
     call: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interrupted_cell_wait: Option<InterruptedNativeCellWait>,
     pending: CodexPendingContinuity,
     closed_generation: u64,
     closure_artifact: ArtifactRef,
     closure_movement_seq: u64,
     result_artifact: ArtifactRef,
     result_movement_seq: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct InterruptedNativeCellWait {
+    exec: serde_json::Value,
+    yielded: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeCellWaitArgs {
+    cell_id: String,
+    #[serde(default, rename = "yield_time_ms")]
+    _yield_time_ms: u64,
+    #[serde(default, rename = "max_tokens")]
+    _max_tokens: Option<usize>,
+    #[serde(default)]
+    terminate: bool,
+}
+
+fn native_wait_args(call: &serde_json::Value) -> Option<NativeCellWaitArgs> {
+    let octopus_protocol::models::ResponseItem::FunctionCall { name, namespace, arguments, .. } =
+        serde_json::from_value(call.clone()).ok()? else { return None; };
+    if name != "wait" || namespace.as_deref().is_some_and(|value| value != "functions") {
+        return None;
+    }
+    let args: NativeCellWaitArgs = serde_json::from_str(&arguments).ok()?;
+    (!args.cell_id.is_empty() && args.cell_id.trim() == args.cell_id).then_some(args)
+}
+
+fn native_wait_cell(call: &serde_json::Value) -> Option<String> {
+    native_wait_args(call).filter(|args| !args.terminate).map(|args| args.cell_id)
+}
+
+fn native_cell_status(output: &serde_json::Value) -> Option<String> {
+    use octopus_protocol::models::{FunctionCallOutputBody, FunctionCallOutputContentItem, ResponseItem};
+    let body = match serde_json::from_value(output.clone()).ok()? {
+        ResponseItem::CustomToolCallOutput { output, .. } | ResponseItem::FunctionCallOutput { output, .. } => output.body,
+        _ => return None,
+    };
+    let text = match &body {
+        FunctionCallOutputBody::Text(text) => text,
+        FunctionCallOutputBody::ContentItems(items) => match items.first()? {
+            FunctionCallOutputContentItem::InputText { text } => text,
+            _ => return None,
+        },
+    };
+    let mut lines = text.lines();
+    let status = lines.next()?;
+    if !lines.next()?.starts_with("Wall time ")
+        || lines.next()? != "Output:" { return None; }
+    Some(status.to_owned())
+}
+
+fn native_yielded_cell(output: &serde_json::Value) -> Option<String> {
+    let status = native_cell_status(output)?;
+    let cell = status.strip_prefix("Script running with cell ID ")?;
+    (!cell.is_empty() && cell.trim() == cell).then(|| cell.to_owned())
+}
+
+impl InterruptedNativeCellWait {
+    fn matches(&self, call: &serde_json::Value) -> bool {
+        let Some(cell) = native_wait_cell(call) else { return false; };
+        let Ok(octopus_protocol::models::ResponseItem::CustomToolCall { name, call_id, .. }) =
+            serde_json::from_value(self.exec.clone()) else { return false; };
+        name == "exec" && !call_id.is_empty() && call_id.trim() == call_id
+            && self.yielded["type"] == "custom_tool_call_output"
+            && self.yielded["call_id"] == call_id && call["call_id"] != call_id
+            && native_yielded_cell(&self.yielded).as_ref() == Some(&cell)
+    }
 }
 
 fn pending_correlation(pending: &CodexPendingContinuity) -> Option<&str> {
@@ -227,9 +300,12 @@ impl NativeHistoryProof {
                     ))
                 })?;
             let call_id = match item {
-                octopus_protocol::models::ResponseItem::CustomToolCall { call_id, .. } => call_id,
+                octopus_protocol::models::ResponseItem::CustomToolCall { call_id, .. }
+                    if call.interrupted_cell_wait.is_none() => call_id,
                 octopus_protocol::models::ResponseItem::FunctionCall { call_id, .. }
-                    if pending_correlation(&call.pending) == Some(call_id.as_str()) => call_id,
+                    if call.interrupted_cell_wait.as_ref().map_or_else(
+                        || pending_correlation(&call.pending) == Some(call_id.as_str()),
+                        |wait| wait.matches(&call.call)) => call_id,
                 _ => return Err(InterfaceDriverError::FailedClosed("unfinished native function call requires its exact pending correlation and admitted result".into())),
             };
             if call_id.is_empty()
@@ -307,7 +383,7 @@ impl NativeHistoryRetirement {
 fn native_history_orphans(
     path: &Path,
     thread: &str,
-) -> Result<(u64, String, Vec<(String, serde_json::Value)>), InterfaceDriverError> {
+) -> Result<(u64, String, Vec<(String, serde_json::Value, Option<InterruptedNativeCellWait>)>), InterfaceDriverError> {
     let refused = |message: String| InterfaceDriverError::FailedClosed(message);
     let file = std::fs::File::open(path)
         .map_err(|error| refused(format!("native history cannot be read: {error}")))?;
@@ -326,6 +402,9 @@ fn native_history_orphans(
     let mut rolled_back = false;
     let mut known = BTreeMap::<String, (String, serde_json::Value)>::new();
     let mut open = BTreeMap::<String, (String, serde_json::Value)>::new();
+    let mut cells = BTreeMap::<String, (String, InterruptedNativeCellWait)>::new();
+    let mut seen_cells = BTreeSet::new();
+    let mut wait_cells = BTreeMap::new();
     loop {
         line.clear();
         let count = (&mut reader)
@@ -422,11 +501,32 @@ fn native_history_orphans(
                 .ok_or_else(|| refused("native history call has no canonical identity".into()))?
                 .to_owned();
             if kind.ends_with("_output") {
-                if let Some((_, call)) = open.remove(&id) {
+                if let Some((turn, call)) = open.remove(&id) {
                     if format!("{}_output", call["type"].as_str().unwrap_or_default()) != kind {
                         return Err(refused(
                             "native history output changed its call type".into(),
                         ));
+                    }
+                    if !from_compaction {
+                        if call["type"] == "custom_tool_call" && call["name"] == "exec" {
+                            if let Some(cell) = native_yielded_cell(&item) {
+                                if !seen_cells.insert(cell.clone()) {
+                                    return Err(refused("native history repeats a yielded cell identity".into()));
+                                }
+                                cells.insert(cell, (turn, InterruptedNativeCellWait { exec: call, yielded: item }));
+                            }
+                        } else if let Some(args) = native_wait_args(&call) {
+                            if let Some(cell) = native_yielded_cell(&item) {
+                                if cell != args.cell_id || !cells.contains_key(&cell) {
+                                    return Err(refused("native cell wait yielded without its exact retained exec".into()));
+                                }
+                            } else if cells.contains_key(&args.cell_id) {
+                                if !matches!(native_cell_status(&item).as_deref(), Some("Script completed" | "Script failed" | "Script terminated")) {
+                                    return Err(refused("native cell wait has no exact yielded or terminal result".into()));
+                                }
+                                cells.remove(&args.cell_id);
+                            }
+                        }
                     }
                 }
                 continue;
@@ -444,6 +544,12 @@ fn native_history_orphans(
                     "native call '{id}' has no exact retained turn ownership"
                 ))
             })?;
+            if !from_compaction {
+                if let Some((_, evidence)) = native_wait_cell(&item).and_then(|cell| cells.get(&cell))
+                    .filter(|(owner, _)| owner == &turn && cells.len() == 1) {
+                    wait_cells.insert(id.clone(), evidence.clone());
+                }
+            }
             if open
                 .insert(id.clone(), (turn.clone(), item.clone()))
                 .is_some()
@@ -480,7 +586,13 @@ fn native_history_orphans(
     Ok((
         size,
         blake3::Hasher::finalize(&hash).to_hex().to_string(),
-        open.into_values().collect(),
+        open.into_values().map(|(turn, call)| {
+            let wait = native_wait_cell(&call).and_then(|cell| cells.get(&cell))
+                .filter(|(owner, _)| owner == &turn && cells.len() == 1)
+                .filter(|(_, evidence)| call["call_id"].as_str().and_then(|id| wait_cells.get(id)) == Some(evidence))
+                .map(|(_, evidence)| evidence.clone());
+            (turn, call, wait)
+        }).collect(),
     ))
 }
 
@@ -499,7 +611,7 @@ pub(super) fn prove_native_history_retirement(
     }
     let refused = |message: &str| InterfaceDriverError::FailedClosed(message.into());
     let mut calls = Vec::new();
-    for (turn_id, call) in orphans {
+    for (turn_id, call, interrupted_cell_wait) in orphans {
         let mut proof = None;
         for entry in session.iter().filter(|entry| {
             entry.label == TURN_INTERRUPTED_RESULT_LABEL
@@ -542,6 +654,7 @@ pub(super) fn prove_native_history_retirement(
                 .ok_or_else(|| refused("native history closure lost its original external wait"))?;
             if call["type"] == "function_call"
                 && call["call_id"].as_str() != pending_correlation(pending)
+                && !interrupted_cell_wait.as_ref().is_some_and(|wait| wait.matches(&call))
             {
                 return Err(refused(
                     "unfinished native function call requires its exact pending correlation and admitted result",
@@ -622,6 +735,7 @@ pub(super) fn prove_native_history_retirement(
             proof = Some(RetiredNativeCall {
                 turn_id: turn_id.clone(),
                 call: call.clone(),
+                interrupted_cell_wait: interrupted_cell_wait.clone(),
                 pending: pending.clone(),
                 closed_generation: closed.context_generation,
                 closure_artifact: entry.source_artifact.clone(),
