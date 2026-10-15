@@ -31,7 +31,7 @@ use crate::handler::{
     is_admitted_peer_interrupt, is_provider_turn_input,
     is_inflight_turn_control_candidate_label, materialize_incompatible_continuity_turn_error,
     materialize_turn_control_result,
-    recover_provider_turn_continuity, reconcile_operator_session_continuity, reconcile_delivered_interrupted_continuity, recovered_failed_result_source, terminal_failure_continuity,
+    recover_provider_turn_continuity, reconcile_operator_session_continuity, reconcile_delivered_interrupted_continuity, recovered_failed_result_source, terminal_output_continuity,
     codex_projection_output_labels,
     validate_codex_projection_descriptor_contract, validate_durable_interrupted_continuity,
 };
@@ -230,7 +230,7 @@ struct ControlSource<'a> {
     broker: &'a Arc<CodexTurnControlBroker>,
     control_gates: &'a ControlSourceGates,
     control: CodexTurnControl,
-    terminal_retirement_pending: bool,
+    terminal_control_fenced: bool,
     independent_reader: bool,
 }
 
@@ -261,7 +261,7 @@ struct ControlResultDelivery<'a> {
     output: Option<Arc<ProviderOutputStream>>,
     handoff_barrier: Option<Arc<ProviderHandoffBarrier>>,
     effect_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    result: CodexTurnControlResult,
+    result: &'a mut CodexTurnControlResult,
     recovery: bool,
     defer_message_receipt: bool,
 }
@@ -790,7 +790,7 @@ async fn codex_life(
             {
                 match decode_admitted_turn_control(&ctx, &descriptor, &envelope) {
                     Ok(Some(control)) => {
-                        let terminal_retirement_pending = existing_control.is_some();
+                        let terminal_control_fenced = existing_control.is_some();
                         let broker = existing_control.clone().unwrap_or_else(|| {
                             let broker = CodexTurnControlBroker::new(None);
                             broker.finish();
@@ -808,7 +808,7 @@ async fn codex_life(
                                 broker: &broker,
                                 control_gates: &control_gates,
                                 control,
-                                terminal_retirement_pending,
+                                terminal_control_fenced,
                                 independent_reader: false,
                             },
                         )
@@ -884,7 +884,7 @@ async fn codex_life(
                                 broker,
                                 control_gates: &control_gates,
                                 control,
-                                terminal_retirement_pending: true,
+                                terminal_control_fenced: true,
                                 independent_reader: false,
                             },
                         )
@@ -951,7 +951,7 @@ async fn codex_life(
                                 broker: &broker,
                                 control_gates: &control_gates,
                                 control,
-                                terminal_retirement_pending: false,
+                                terminal_control_fenced: true,
                                 independent_reader: false,
                             },
                         )
@@ -1482,7 +1482,7 @@ async fn process_control_reader_source(
                     broker,
                     control_gates,
                     control,
-                    terminal_retirement_pending: true,
+                    terminal_control_fenced: true,
                     independent_reader: true,
                 },
             )
@@ -1628,7 +1628,7 @@ async fn handle_control_source(
         broker,
         control_gates,
         control,
-        terminal_retirement_pending,
+        terminal_control_fenced,
         independent_reader,
     } = source;
     let gate = control_source_gate(control_gates, run).await;
@@ -1751,7 +1751,7 @@ async fn handle_control_source(
             )
         }
         None => {
-            let mut applied = if terminal_retirement_pending
+            let mut applied = if terminal_control_fenced
                 && terminal_control_is_satisfied(&action)
                 && broker.is_finished()
             {
@@ -1796,7 +1796,7 @@ async fn handle_control_source(
                 )?;
                 return Ok(ControlSourceDisposition::DeferredTurn);
             }
-            if terminal_retirement_pending
+            if terminal_control_fenced
                 && terminal_control_is_satisfied(&action)
                 && broker.is_finished()
                 && control_finished_without_dispatch(&applied.result)
@@ -1834,7 +1834,7 @@ async fn handle_control_source(
             output,
             handoff_barrier,
             effect_guard,
-            result: result.clone(),
+            result: &mut result,
             recovery,
             defer_message_receipt: independent_reader,
         },
@@ -1921,7 +1921,7 @@ async fn handle_malformed_control_source_inner(
     let control_id = envelope.artifact.id.as_str().to_string();
     let action = "decode".to_string();
     let journal = load_control_journal(ctx, source_movement_seq, run, &control_id, &action)?;
-    let (result, recovery) = match journal.map(|journal| journal.phase) {
+    let (mut result, recovery) = match journal.map(|journal| journal.phase) {
         Some(TurnControlJournalPhase::Delivered { .. }) => return Ok(()),
         Some(TurnControlJournalPhase::DeferredTurn { .. }) => {
             return Err(
@@ -1986,7 +1986,7 @@ async fn handle_malformed_control_source_inner(
             output,
             handoff_barrier,
             effect_guard,
-            result: result.clone(),
+            result: &mut result,
             recovery,
             defer_message_receipt: false,
         },
@@ -4837,13 +4837,13 @@ async fn hand_control_result(
     } = delivery;
     let interrupted_continuity = exact_interrupted_control_continuity(&result)?;
     let control_id = result.control_id.clone();
-    let artifact = materialize_turn_control_result(
+    let mut artifact = materialize_turn_control_result(
         &ctx.interface_var_dir().join("emitted"),
         source_movement_seq,
         result.clone(),
     )
     .map_err(|error| format!("codex turn-control result failed to materialize: {error}"))?;
-    let artifact_ref = materialized_artifact_ref(&artifact)?;
+    let mut artifact_ref = materialized_artifact_ref(&artifact)?;
     let mut admitted_seq = if recovery {
         await_artifact_admission_scan(ctx, run, source_movement_seq, &artifact_ref)
             .await?
@@ -4904,6 +4904,27 @@ async fn hand_control_result(
                 ));
             }
             ProviderSourceRecovery::Process => {
+                if result.continuity.is_none()
+                    && result.acknowledged
+                    && terminal_control_is_satisfied(&result.action)
+                    && result.thread_id.is_none() && result.turn_id.is_none()
+                    && result.detail == terminally_satisfied_control(&control_id, &result.action).result.detail
+                {
+                    let context = handoff.current_session_context_artifacts().await;
+                    let continuity = terminal_output_continuity(
+                        descriptor, envelope, &context, run, &handoff.current_run_record_bytes().await,
+                    ).map_err(|error| error.to_string())?;
+                    if continuity.as_ref().is_some_and(codex_continuity_waits_for_result) {
+                        return Err("terminal turn-control receipt still has an unresolved native effect".into());
+                    }
+                    result.continuity = continuity;
+                    persist_control_journal(ctx, source_movement_seq, run, &control_id, &result.action,
+                        TurnControlJournalPhase::Result { result: result.clone() })?;
+                    artifact = materialize_turn_control_result(
+                        &ctx.interface_var_dir().join("emitted"), source_movement_seq, result.clone(),
+                    ).map_err(|error| format!("codex turn-control result failed to materialize: {error}"))?;
+                    artifact_ref = materialized_artifact_ref(&artifact)?;
+                }
                 let emission = ProviderEmission { artifact, route: ProviderEmissionRoute::ClientProjection };
                 if result.continuity.is_none() && (!result.acknowledged || matches!(result.action.as_str(), "queue_message" | "steer")) {
                     handoff.hand_observation(emission, true).await?;
@@ -6494,7 +6515,7 @@ async fn emit_terminal_error_message(
 ) -> Result<(), String> {
     let current_session_context = handoff.current_session_context_artifacts().await;
     let output_root = ctx.interface_var_dir().join("emitted");
-    let artifact = match terminal_failure_continuity(
+    let artifact = match terminal_output_continuity(
         descriptor,
         &turn.envelope,
         &current_session_context,
@@ -7958,7 +7979,7 @@ mod tests {
             let descriptor = descriptor();
             let interrupted = continuity(8, Some("interrupted_pending"));
             let pending = continuity(7, Some("pending"));
-            let ack_result = CodexTurnControlResult {
+            let mut ack_result = CodexTurnControlResult {
                 control_id: "control-a".to_string(),
                 action: "stop".to_string(),
                 acknowledged: true,
@@ -8072,7 +8093,7 @@ mod tests {
                     output: None,
                     handoff_barrier: None,
                     effect_guard: None,
-                    result: ack_result,
+                    result: &mut ack_result,
                     recovery: true,
                     defer_message_receipt: false,
                 },
@@ -8156,7 +8177,7 @@ mod tests {
                         broker: &broker,
                         control_gates: &control_gates,
                         control,
-                        terminal_retirement_pending: true,
+                        terminal_control_fenced: true,
                         independent_reader: false,
                     },
                 )
@@ -8221,13 +8242,13 @@ mod tests {
                 TURN_INTERRUPTED_RESULT_LABEL, closure_payload.clone(),
                 materialized_artifact_ref(&closure.artifact).unwrap(), 5,
             )).unwrap()];
-            let settled = serde_json::to_value(terminal_failure_continuity(&descriptor, &message_envelope, &context, &run,
+            let settled = serde_json::to_value(terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
                 br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
             ).unwrap().unwrap()).unwrap();
             assert_eq!(settled["thread_id"], "thread-a");
             assert_eq!(settled["context_generation"], 11);
             context[0].payload["codex_continuity"]["context_generation"] = json!(11);
-            assert!(terminal_failure_continuity(&descriptor, &message_envelope, &context, &run,
+            assert!(terminal_output_continuity(&descriptor, &message_envelope, &context, &run,
                 br#"{"id":"run-a","interface_state":{"world_provider_codex":{"context_generation":10}}}"#,
             ).unwrap_err().to_string().contains("terminal Codex continuity is ahead of its authored context"));
             assert!(output_rx.recv().await.is_none());
@@ -8415,7 +8436,7 @@ mod tests {
                 }),
             );
             let result_ref = materialized_artifact_ref(&result).unwrap();
-            let ack_result = CodexTurnControlResult {
+            let mut ack_result = CodexTurnControlResult {
                 control_id: "control-a".to_string(),
                 action: "stop".to_string(),
                 acknowledged: true,
@@ -8478,7 +8499,7 @@ mod tests {
                     output: None,
                     handoff_barrier: None,
                     effect_guard: None,
-                    result: ack_result,
+                    result: &mut ack_result,
                     recovery: true,
                     defer_message_receipt: false,
                 },
@@ -9329,7 +9350,7 @@ mod tests {
                 ControlSource { envelope: &envelope, source_movement_seq: 0,
                     broker: &broker, control_gates: &gates,
                     control: CodexTurnControl::Inject { control_id: "queue-a".into(), items: vec![] },
-                    terminal_retirement_pending: true, independent_reader: true,
+                    terminal_control_fenced: true, independent_reader: true,
                 }).await.unwrap(), ControlSourceDisposition::Handled);
             assert!(matches!(load_control_journal(&ctx, 0, &run, "queue-a", "queue_message")
                 .unwrap().unwrap().phase, TurnControlJournalPhase::Result { .. }));

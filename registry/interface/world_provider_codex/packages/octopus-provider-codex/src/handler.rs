@@ -15189,7 +15189,7 @@ fn reconcile_current_session_continuity(
     Ok(Some(current))
 }
 
-pub(crate) fn terminal_failure_continuity(
+pub(crate) fn terminal_output_continuity(
     descriptor: &InterfaceDescriptor,
     input: &InterfaceInvocationEnvelope,
     current_session_context: &[SessionContextArtifact],
@@ -17865,7 +17865,7 @@ mod tests {
                 }),
             ),
         };
-        let settled = terminal_failure_continuity(
+        let settled = terminal_output_continuity(
             &descriptor,
             &input,
             std::slice::from_ref(&old_artifact),
@@ -17934,7 +17934,7 @@ mod tests {
             72,
         ))
         .unwrap();
-        let retained = terminal_failure_continuity(
+        let retained = terminal_output_continuity(
             &descriptor,
             &input,
             &[old_artifact, newest_artifact],

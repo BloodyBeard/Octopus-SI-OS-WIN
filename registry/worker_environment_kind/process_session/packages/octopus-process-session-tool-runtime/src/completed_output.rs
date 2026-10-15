@@ -699,7 +699,8 @@ pub fn prepare_tool_output_recovery(
     if owner.door_interface != ctx.interface { return Err("selected completion belongs to another door owner".into()); }
     let source = original_source(ctx, source_movement_seq)?;
     let source_ctx = ctx.with_source_movement(source.movement.clone());
-    let call = decoder(&source_ctx, &source.envelope, ToolDoorArtifactDecodePurpose::HistoricalIdentity)?
+    let call = decoder(&source_ctx, &source.envelope, ToolDoorArtifactDecodePurpose::HistoricalIdentity)
+        .map_err(|error| error.to_string())?
         .ok_or("selected source is not a tool invocation of this owner")?;
     if call.correlation_id.as_deref().is_none_or(str::is_empty) {
         return Err("selected historical result requires an exact nonempty tool correlation".into());

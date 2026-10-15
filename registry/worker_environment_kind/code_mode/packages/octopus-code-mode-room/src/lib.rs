@@ -1207,7 +1207,12 @@ pub fn decode_code_mode_door_artifact(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     envelope: &InterfaceInvocationEnvelope,
     purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose,
-) -> Result<Option<ToolCallArtifact>, String> {
+) -> Result<Option<ToolCallArtifact>, octopus_tool_door_runtime::ToolDoorArtifactDecodeError> {
+    let checked_error = |error| match error {
+        octopus_provider_run_authoring::CheckedRunError::AwaitingResults { call_sequences } =>
+            octopus_tool_door_runtime::ToolDoorArtifactDecodeError::AwaitingResults { call_sequences },
+        error => octopus_tool_door_runtime::ToolDoorArtifactDecodeError::Invalid(error.to_string()),
+    };
     let load_config = || -> Result<CodeModeConfig, String> {
         let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
             &ctx.interface_registry_dir().join(config::CONFIG_FILE),
@@ -1235,7 +1240,7 @@ pub fn decode_code_mode_door_artifact(
                 None
             };
         if let Some(config) = current.as_ref() {
-            continuation::reconcile_checked_provider_advance(ctx,&root,config,Some(envelope))?;
+            continuation::reconcile_checked_provider_advance(ctx,&root,config,Some(envelope)).map_err(checked_error)?;
         }
         return continuation::decode_ready(
             &root,
@@ -1244,7 +1249,7 @@ pub fn decode_code_mode_door_artifact(
             purpose,
             current.as_ref(),
         )
-        .map(Some);
+        .map(Some).map_err(Into::into);
     }
     if continuation::consume_authoring_result(ctx, envelope)? {
         return Ok(None);
@@ -1262,7 +1267,7 @@ pub fn decode_code_mode_door_artifact(
                 None
             };
         if let Some(config) = current.as_ref() {
-            continuation::reconcile_checked_provider_advance(ctx,&root,config,Some(envelope))?;
+            continuation::reconcile_checked_provider_advance(ctx,&root,config,Some(envelope)).map_err(checked_error)?;
         }
         return continuation::decode_result(
             &root,
@@ -1272,7 +1277,7 @@ pub fn decode_code_mode_door_artifact(
             current.as_ref(),
             ctx.source_movement(envelope)?,
         )
-        .map(Some);
+        .map(Some).map_err(Into::into);
     }
     let call =
         octopus_tool_door_runtime::default_tool_door_artifact_decoder(ctx, envelope, purpose)?;

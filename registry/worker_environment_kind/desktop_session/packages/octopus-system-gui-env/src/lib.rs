@@ -438,7 +438,7 @@ pub fn decode_gui_door_artifact(
     ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
     envelope: &InterfaceInvocationEnvelope,
     purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose,
-) -> Result<Option<ToolCallArtifact>, String> {
+) -> Result<Option<ToolCallArtifact>, octopus_tool_door_runtime::ToolDoorArtifactDecodeError> {
     if envelope.read_artifact_manifest().map_err(|error| error.to_string())?.label != "operator.approval.response" {
         let call = octopus_tool_door_runtime::default_tool_door_artifact_decoder(ctx, envelope, purpose)?;
         if purpose == octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose::Dispatch {
@@ -472,7 +472,7 @@ pub fn decode_gui_door_artifact(
         },
         octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose::HistoricalIdentity =>
             app_authorization::historical_identity(ctx, &private.join("desktop-host"), &door, envelope),
-    }.map(Some)
+    }.map(Some).map_err(Into::into)
 }
 
 async fn dispatch(

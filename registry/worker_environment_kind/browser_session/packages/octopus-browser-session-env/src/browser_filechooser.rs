@@ -89,7 +89,7 @@ pub(crate) fn decoded_response(envelope: &InterfaceInvocationEnvelope, tool: &st
     let value = response(envelope)?;
     Ok(ToolCallArtifact { tool: tool.into(), arguments: json!({"request_id":value.request_id}), correlation_id: Some(format!("browser-upload-resume:{}",digest_id(&value.request_id)?)), label: None, source_interface_evidence: BTreeMap::new() })
 }
-pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::InterfaceLiftContext, envelope: &InterfaceInvocationEnvelope, purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose) -> Result<Option<ToolCallArtifact>, String> {
+pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::InterfaceLiftContext, envelope: &InterfaceInvocationEnvelope, purpose: octopus_tool_door_runtime::ToolDoorArtifactDecodePurpose) -> Result<Option<ToolCallArtifact>, octopus_tool_door_runtime::ToolDoorArtifactDecodeError> {
     let file = ctx.interface_registry_dir().join("interface.json");
     let mut input = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&file).map_err(|error| error.to_string())?;
     let stat = input.metadata().map_err(|error| error.to_string())?;
@@ -146,8 +146,8 @@ pub fn decode_filechooser_door_artifact(ctx: &octopus_tool_door_runtime::Interfa
             }
         }
         let (tool,scope)=matched.ok_or("Browser response has no retained original request")?;
-        return if scope == "browser_history_read" { history::decoded_response(envelope,&tool).map(Some) }
-            else { decoded_response(envelope,&tool).map(Some) };
+        return if scope == "browser_history_read" { history::decoded_response(envelope,&tool).map(Some).map_err(Into::into) }
+            else { decoded_response(envelope,&tool).map(Some).map_err(Into::into) };
     }
     let call = octopus_tool_door_runtime::default_tool_door_artifact_decoder(ctx, envelope, purpose)?;
     if call.as_ref().is_some_and(|call| approval.as_ref().is_some_and(|approval| approval.resume_tool == call.tool)

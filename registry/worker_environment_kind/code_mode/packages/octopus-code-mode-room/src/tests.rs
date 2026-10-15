@@ -2643,6 +2643,20 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         wake.2.read_artifact_manifest().unwrap().label,
         "code_mode.frontier_ready"
     );
+    if matches!(case, FrontierCase::Full) && order == 1 {
+        use octopus_tool_door_runtime::{ToolDoorArtifactDecodeError as DecodeError, ToolDoorArtifactDecodePurpose as Purpose};
+        admission.probe_unsubmitted_output.store(true, Ordering::SeqCst);
+        let peer = admission.clone();
+        let progress = tokio::spawn(async move { peer.provider_progress(12).await });
+        admission.peer_write_applied.notified().await;
+        let expected = admission.deliveries.lock().unwrap().iter().rev().find(|row| row.to.as_str() == "system_provider_file_test").unwrap().seq;
+        let pending = admission.door.lock().await.decode_record(wake.0, &wake.2, super::decode_code_mode_door_artifact, Purpose::Dispatch);
+        assert!(matches!(pending, Err(DecodeError::AwaitingResults { call_sequences }) if call_sequences == vec![expected]));
+        admission.provider_result_release.notify_one();
+        progress.await.unwrap().unwrap();
+        admission.probe_unsubmitted_output.store(false, Ordering::SeqCst);
+        assert!(admission.door.lock().await.decode_record(wake.0, &wake.2, super::decode_code_mode_door_artifact, Purpose::Dispatch).unwrap().is_some());
+    }
     if matches!(case, FrontierCase::ReadinessFailure) {
         Box::pin(failure_return_tests::actual_readiness_failure_return(&admission, &handoff, &formation, &wake, &durable, &room, &kind)).await;
         observer.abort();

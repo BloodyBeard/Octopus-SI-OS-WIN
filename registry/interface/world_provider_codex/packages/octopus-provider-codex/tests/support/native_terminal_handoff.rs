@@ -30,7 +30,7 @@ async fn native_terminal_handoff_cases() {
             "runtime":{"run":record.id,"ee":record.ee,"worker":record.worker,"checkpoint":checkpoint.id,
                 "interface":if kind == MovementKind::InterfaceArrival { ctx.interface.clone() } else { target.clone() },"epoch":checkpoint.epoch.0,"run_record_hash":hash.to_hex()},
             "grant":{"tools":tools,"interfaces":interfaces,"worker_environment_kinds":["system_room"],"mark_outcomes":record.checkpoints.iter().flat_map(|cp|cp.required_verified_artifacts.iter().map(|r|r.mark.clone())).collect::<BTreeSet<_>>(),
-                "role_artifacts":checkpoint.artifact_bindings.iter().filter(|b|!record.interface_state.get(&ctx.interface).and_then(|state|state.get("run_authoring_binding")).and_then(|binding|binding.get("payload_artifact_bindings")).and_then(serde_json::Value::as_array).is_some_and(|refs|refs.iter().any(|reference|reference["id"]==b.id.as_str()))).map(|b|b.id.clone()).collect::<Vec<_>>(),
+                "role_artifacts":checkpoint.artifact_bindings.iter().filter(|b|record.interface_state.get(&ctx.interface).and_then(|state|state.get("run_authoring_binding")).and_then(|binding|binding.get("checkpoints")).and_then(serde_json::Value::as_array).is_some_and(|templates|templates.iter().any(|template|template["static_artifact_bindings"].as_array().is_some_and(|ids|ids.contains(&json!(b.id))))) && !record.interface_state[&ctx.interface]["run_authoring_binding"]["payload_artifact_bindings"].as_array().is_some_and(|refs|refs.iter().any(|reference|reference["id"]==b.id.as_str()))).map(|b|b.id.clone()).collect::<Vec<_>>(),
                 "artifact_access":checkpoint.artifact_bindings.iter().map(|b|(b.id.to_string(),b.access.clone())).collect::<BTreeMap<_,_>>()},
             "artifact_binding_refs":checkpoint.artifact_bindings.iter().map(|b| { let content=b.id.as_str().rsplit(':').next().and_then(ContentHash::from_hex).filter(|h|ctx.blobs_dir.join(h.to_hex()).exists()).unwrap_or_else(|| { let payload=std::fs::read(ctx.interface_dir.parent().unwrap().parent().unwrap().join("artifact").join(b.id.as_str()).join("artifact.json")).unwrap(); let hash=ContentHash::of_bytes(&payload); std::fs::write(ctx.blobs_dir.join(hash.to_hex()),payload).unwrap(); hash }); ArtifactRef{id:b.id.clone(),content} }).collect::<Vec<_>>(),
             "checkpoint_binding_policy":{"inbound":checkpoint.interface_binding,"outbound":checkpoint.outbound_interface_bindings},
@@ -365,7 +365,7 @@ async fn native_terminal_handoff_cases() {
                     tokio::spawn(async move {let broker=CodexTurnControlBroker::new(None);broker.finish();let gates=Default::default();
                         let control=decode_admitted_turn_control(&ctx,&descriptor,&stop).unwrap().unwrap();
                         handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,ControlSource {envelope:&stop,source_movement_seq:stop_seq,
-                            broker:&broker,control_gates:&gates,control,terminal_retirement_pending:false,independent_reader:false}).await})};
+                            broker:&broker,control_gates:&gates,control,terminal_control_fenced:false,independent_reader:false}).await})};
                 replay_control.await.unwrap().unwrap();
                 assert_eq!(std::fs::read(run_path).unwrap(),after);assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);assert!(methods.try_recv().is_err());
                 assert!(!String::from_utf8(ledger).unwrap().lines().any(|line|serde_json::from_str::<Movement>(line).unwrap().artifact==Some(materialized_artifact_ref(&seed).unwrap())));
@@ -476,7 +476,7 @@ async fn native_terminal_handoff_cases() {
                 let control=decode_admitted_turn_control(&ctx,&descriptor,&stop).unwrap().unwrap();
                 let admit=Box::pin(handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,ControlSource {
                     envelope:&stop,source_movement_seq:stop_seq,broker:&broker,control_gates:&gates,control,
-                    terminal_retirement_pending:true,independent_reader:true,
+                    terminal_control_fenced:true,independent_reader:true,
                 }));
                 let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&stop.artifact,0,1,true,0,true);
                 let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(admit,gate)}).await.unwrap();
@@ -868,6 +868,15 @@ async fn native_terminal_handoff_cases() {
             assert_eq!(emissions[2].artifact.read_manifest().unwrap().label,"turn.completed");
             assert!(handoff.hand_observation(ProviderEmission{artifact:emissions[1].artifact.clone(),route:emissions[1].route.clone()},false).await.unwrap_err().contains("cannot change the selected context"));
         }
+        let idle_stop_case=with_stop && !with_answer && !native_interrupted && !legacy;
+        let delayed_stop=idle_stop_case.then(|| {
+            let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id)
+                && cp.interface_binding.as_ref().unwrap().admits("operator.turn.control")).unwrap();
+            let file=artifact(&root.join("delayed-stop"),"operator.turn.control",json!({"action":"stop","control_id":"idle-0"}));
+            let row=edge(&ctx,&initial,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file); (input,append(&ctx,row))
+        });
         let mut all_delivered=Vec::new();
         let control = CodexTurnControlBroker::new(Some(source_seq));
         assert!(!control.is_finished());
@@ -901,6 +910,56 @@ async fn native_terminal_handoff_cases() {
         assert_eq!(Box::pin(handoff.recover_source()).await.unwrap(),ProviderSourceRecovery::Completed);
         if with_stop { assert!(arbiter.reconciled(&run).await.unwrap()); } else { assert!(!interrupted_effect_journal_path(&ctx,&run).exists()); }
         assert_eq!(recover_sealed_interrupted_result(&ctx,&descriptor,&turn,&original).unwrap().unwrap().1,source_closure);
+        if let Some(delayed)=delayed_stop {
+            for index in 0..2 {
+                let (input,seq)=if index==0 {delayed.clone()} else {
+                    let bytes=std::fs::read(&plan.run_write.path).unwrap();let record=RunRecord::from_bytes(&bytes).unwrap();
+                    let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                        && cp.outbound_interfaces().any(|id|id==&descriptor.id)
+                        && cp.interface_binding.as_ref().unwrap().admits("operator.turn.control")).unwrap();
+                    let file=artifact(&root.join("idle-stop"),"operator.turn.control",json!({"action":"stop","control_id":"idle-1"}));
+                    let row=edge(&ctx,&bytes,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+                    let input=source_envelope(&ctx,root,&row,file); (input,append(&ctx,row))
+                };
+                let id=format!("idle-{index}");let broker=CodexTurnControlBroker::new(None);broker.finish();
+                let gates=ControlSourceGates::default();let session=ProviderHandoffSession::new(&ctx).unwrap();
+                let admit=handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,ControlSource {
+                    envelope:&input,source_movement_seq:seq,broker:&broker,control_gates:&gates,
+                    control:decode_admitted_turn_control(&ctx,&descriptor,&input).unwrap().unwrap(),
+                    terminal_control_fenced:true,independent_reader:false,
+                });
+                let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
+                let (handled,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(admit,gate)}).await.unwrap();
+                assert_eq!(handled.unwrap(),ControlSourceDisposition::Handled);assert_eq!(delivered.len(),1);
+                let saved=load_control_journal(&ctx,seq,&run,&id,"stop").unwrap().unwrap();
+                let TurnControlJournalPhase::Delivered { result:saved }=saved.phase else {panic!("delivered control")};
+                assert!(saved.acknowledged);
+                let continuity=serde_json::to_value(saved.continuity.as_ref().unwrap()).unwrap();
+                assert_eq!(continuity["context_generation"],json!(settled_generation+index+1));
+                assert!(continuity["pending"].is_null()&&continuity["interrupted_pending"].is_null());
+                persist_control_journal(&ctx,seq,&run,&id,"stop",TurnControlJournalPhase::Result {result:saved}).unwrap();
+                let ledger=std::fs::read(&ctx.movements_path).unwrap();let bytes=std::fs::read(&plan.run_write.path).unwrap();
+                let cold=ProviderHandoffSession::new(&ctx).unwrap();
+                assert_eq!(handle_control_source(&ctx,&descriptor,&cold,&arbiter,&run,ControlSource {
+                    envelope:&input,source_movement_seq:seq,broker:&broker,control_gates:&gates,
+                    control:decode_admitted_turn_control(&ctx,&descriptor,&input).unwrap().unwrap(),
+                    terminal_control_fenced:true,independent_reader:false,
+                }).await.unwrap(),ControlSourceDisposition::Handled);
+                assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger);
+                assert_eq!(std::fs::read(&plan.run_write.path).unwrap(),bytes);
+            }
+            let bytes=std::fs::read(&plan.run_write.path).unwrap();let current=RunRecord::from_bytes(&bytes).unwrap();
+            let cp=current.checkpoints.iter().find(|cp|current.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id)
+                && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+            let file=artifact(&root.join("after-idle-stop"),"operator.message",json!({"text":"next message"}));
+            let row=edge(&ctx,&bytes,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file);let seq=append(&ctx,row);
+            let next=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&input,seq,&bytes).unwrap();
+            let recovered=recover_provider_turn_continuity(&descriptor,&input,next.invocation_session_snapshot().as_ref(),&run,&bytes).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(recovered).unwrap()["context_generation"],current.interface_state[&descriptor.id]["context_generation"]);
+            assert!(next.input_changes_context().await);
+        }
         if native_interrupted {
             let history=root.join("native-history.jsonl");
             std::fs::write(&history,concat!("{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-a\"}}\n",

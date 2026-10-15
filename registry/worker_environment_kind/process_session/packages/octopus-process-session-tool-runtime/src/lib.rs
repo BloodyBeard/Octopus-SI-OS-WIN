@@ -7534,6 +7534,10 @@ fn validate_tool_door_journal_transition(
                 ToolDoorJournalState::Completed
             )
             | (
+                Some(ToolDoorJournalState::Prepared),
+                ToolDoorJournalState::Refused
+            )
+            | (
                 Some(ToolDoorJournalState::InFlight),
                 ToolDoorJournalState::Completed
             )
@@ -7632,6 +7636,7 @@ fn create_tool_door_journal_temp(parent: &Path) -> Result<(PathBuf, std::fs::Fil
 
 enum ToolDoorAction {
     Complete(ToolDoorJournalState),
+    AwaitingResults,
     RecoverIndeterminate,
     Recover {
         call: ToolCallArtifact,
@@ -7662,6 +7667,7 @@ struct WorkerEnvironmentReleaseRequest {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolDoorRowState {
+    AwaitingResults,
     InFlight,
     Completed,
 }
@@ -7683,7 +7689,51 @@ pub type ToolDoorArtifactDecoder = fn(
     &InterfaceLiftContext,
     &InterfaceInvocationEnvelope,
     ToolDoorArtifactDecodePurpose,
-) -> Result<Option<ToolCallArtifact>, String>;
+) -> Result<Option<ToolCallArtifact>, ToolDoorArtifactDecodeError>;
+
+#[derive(Debug)]
+pub enum ToolDoorArtifactDecodeError {
+    Invalid(String),
+    AwaitingResults { call_sequences: Vec<u64> },
+}
+
+impl From<String> for ToolDoorArtifactDecodeError {
+    fn from(error: String) -> Self { Self::Invalid(error) }
+}
+
+impl From<&str> for ToolDoorArtifactDecodeError {
+    fn from(error: &str) -> Self { Self::Invalid(error.to_string()) }
+}
+
+impl std::fmt::Display for ToolDoorArtifactDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => formatter.write_str(error),
+            Self::AwaitingResults { call_sequences } =>
+                write!(formatter, "tool artifact awaits checked results for calls {call_sequences:?}"),
+        }
+    }
+}
+
+impl ToolDoorArtifactDecodeError {
+    fn into_action(self, purpose: ToolDoorArtifactDecodePurpose) -> ToolDoorAction {
+        let error = match self {
+            Self::AwaitingResults { call_sequences }
+                if purpose == ToolDoorArtifactDecodePurpose::Dispatch
+                    && !call_sequences.is_empty()
+                    && call_sequences.windows(2).all(|pair| pair[0] < pair[1]) =>
+                return ToolDoorAction::AwaitingResults,
+            Self::AwaitingResults { call_sequences } => format!(
+                "tool artifact cannot await results with purpose {purpose:?} and call sequences {call_sequences:?}"),
+            Self::Invalid(error) => error,
+        };
+        ToolDoorAction::Failure {
+            class: "invalid_tool_artifact",
+            details: serde_json::json!({ "error": error }),
+            target: None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolDoorArtifactDecodePurpose {
@@ -7695,8 +7745,8 @@ pub fn default_tool_door_artifact_decoder(
     _ctx: &InterfaceLiftContext,
     envelope: &InterfaceInvocationEnvelope,
     _purpose: ToolDoorArtifactDecodePurpose,
-) -> Result<Option<ToolCallArtifact>, String> {
-    decode_tool_call(envelope)
+) -> Result<Option<ToolCallArtifact>, ToolDoorArtifactDecodeError> {
+    decode_tool_call(envelope).map_err(Into::into)
 }
 
 pub fn owned_tool_door_interface_life(owner: ToolDoorOwner) -> Result<InterfaceLiftFn, String> {
@@ -7775,8 +7825,19 @@ async fn tool_door_loop(
                 rows.len()
             )
         })?;
-        let batch = reader.read_new_uncommitted_limit(available)?;
-        let filled_window = available > 0 && batch.len() == available;
+        let incoming = reader.read_new_uncommitted_limit(available)?;
+        let filled_window = available > 0 && incoming.len() == available;
+        let deferred = rows.iter().filter_map(|(&seq, row)|
+            (row.state == ToolDoorRowState::AwaitingResults).then_some(seq)).collect::<Vec<_>>();
+        let mut batch = Vec::with_capacity(deferred.len() + incoming.len());
+        for seq in deferred {
+            let row = rows.remove(&seq).ok_or_else(|| format!("deferred tool-door row {seq} disappeared"))?;
+            if journal.state(seq, &row.movement_digest)? != Some(ToolDoorJournalState::Prepared) {
+                return Err(format!("deferred tool-door row {seq} is not prepared"));
+            }
+            batch.push(row.own);
+        }
+        batch.extend(incoming);
         for own in batch {
             let seq = own.movement.seq.0;
             let movement_digest = tool_door_movement_digest(&own.movement)?;
@@ -7842,19 +7903,20 @@ async fn tool_door_loop(
                     unreachable!("terminal journal states were handled above")
                 }
             };
-            let should_spawn = !matches!(&action, ToolDoorAction::Complete(_));
+            let should_spawn = !matches!(&action, ToolDoorAction::Complete(_) | ToolDoorAction::AwaitingResults);
             if matches!(
                 &action,
                 ToolDoorAction::Invoke { .. } | ToolDoorAction::Release { .. }
             ) {
                 journal.begin(seq, &movement_digest)?;
             }
-            let state = if should_spawn {
-                ToolDoorRowState::InFlight
-            } else {
-                let ToolDoorAction::Complete(state) = action else { unreachable!() };
-                journal.finish(seq, &movement_digest, state)?;
-                ToolDoorRowState::Completed
+            let state = match &action {
+                ToolDoorAction::AwaitingResults => ToolDoorRowState::AwaitingResults,
+                ToolDoorAction::Complete(state) => {
+                    journal.finish(seq, &movement_digest, *state)?;
+                    ToolDoorRowState::Completed
+                }
+                _ => ToolDoorRowState::InFlight,
             };
             let invocation_ctx = ctx.with_source_movement(own.movement.clone());
             rows.insert(
@@ -7882,6 +7944,7 @@ async fn tool_door_loop(
         }
         advance_tool_door_frontier(&mut reader, &mut journal, &mut rows)?;
         if filled_window && rows.len() < maximum_in_flight {
+            tokio::task::yield_now().await;
             continue;
         }
         tokio::select! {
@@ -7944,13 +8007,7 @@ fn prepare_tool_door_action(
     let call = match decoder(&decoder_context, &envelope, purpose) {
         Ok(Some(call)) => call,
         Ok(None) => return ToolDoorAction::Complete(ToolDoorJournalState::Completed),
-        Err(error) => {
-            return ToolDoorAction::Failure {
-                class: "invalid_tool_artifact",
-                details: serde_json::json!({ "error": error }),
-                target: None,
-            };
-        }
+        Err(error) => return error.into_action(purpose),
     };
     let target = ToolResultTarget::from(&call);
     let granted_tools = match envelope.granted_tool_names() {
@@ -8018,6 +8075,7 @@ async fn execute_tool_door_action(
 ) -> Result<ToolDoorJournalState, String> {
     match action {
         ToolDoorAction::Complete(state) => Ok(state),
+        ToolDoorAction::AwaitingResults => Err("deferred tool artifact cannot execute before its checked results".into()),
         ToolDoorAction::RecoverIndeterminate => {
             hand_tool_effect_indeterminate(ctx, source_movement_seq, None, None, None).await
         }
@@ -8432,7 +8490,7 @@ fn tool_door_admitted_result_state(
     tool_door_admitted_result_state_at(
         &ctx.ledger_read_handles()?, &ctx.interface, source, call, envelope, None,
         |movement, candidate| decoder(&ctx.with_source_movement(movement.clone()), candidate,
-            ToolDoorArtifactDecodePurpose::HistoricalIdentity),
+            ToolDoorArtifactDecodePurpose::HistoricalIdentity).map_err(|error| error.to_string()),
     )
 }
 
@@ -8904,6 +8962,65 @@ mod tool_process_private_boundary_tests {
     }
     mod completed_output_tests {
         include!("../tests/support/completed_output.rs");
+
+        #[tokio::test]
+        async fn deferred_decode_preserves_prepared_sources_across_wake_cancel_and_refusal() {
+            use std::io::Write;
+            use ToolDoorArtifactDecodeError as DecodeError;
+            async fn until(running: std::pin::Pin<&mut impl std::future::Future<Output=Result<(),String>>>, done: impl Fn() -> bool) {
+                tokio::select! {
+                    result = running => panic!("door stopped: {result:?}"),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(5), async { while !done() { tokio::task::yield_now().await; } }) => result.unwrap(),
+                }
+            }
+            fn receipt(ctx: &InterfaceLiftContext, source: &Movement) {
+                let mut row = source.clone(); row.seq = Seq(2); row.lamport = Lamport(3); row.to = Endpoint::Interface(InterfaceId::new("foreign"));
+                writeln!(std::fs::OpenOptions::new().append(true).open(&ctx.movements_path).unwrap(), "{}", serde_json::to_string(&row).unwrap()).unwrap();
+            }
+            fn decode(ctx: &InterfaceLiftContext, envelope: &InterfaceInvocationEnvelope, purpose: ToolDoorArtifactDecodePurpose) -> Result<Option<ToolCallArtifact>, DecodeError> {
+                assert_eq!(purpose, ToolDoorArtifactDecodePurpose::Dispatch);
+                let source = ctx.source_movement(envelope)?;
+                let name = if source.seq.0 == 0 { "attempts" } else { "unrelated" };
+                std::fs::OpenOptions::new().create(true).append(true).open(ctx.interface_var_dir().join(name)).unwrap().write_all(b"x").unwrap();
+                if source.seq.0 != 0 { return Ok(None); }
+                if std::fs::read_to_string(&ctx.movements_path).unwrap().lines().count() < 3 {
+                    if ctx.interface_var_dir().join("early").exists() { receipt(ctx, source); }
+                    return Err(DecodeError::AwaitingResults { call_sequences: vec![0] });
+                }
+                if ctx.interface_var_dir().join("invalid").exists() { return Err("run change awaits admitted checked file.write results for calls [0]".into()); }
+                Ok(None)
+            }
+            for (early, refused) in [(true, false), (false, false), (false, true)] {
+                let root = tempfile::tempdir().unwrap(); let root = root.path().canonicalize().unwrap();
+                let (mut ctx, _, _, mut outputs, source) = completed_fixture(&root, 1).await;
+                for (flag, enabled) in [("early", early), ("invalid", refused)] { if enabled { std::fs::write(ctx.interface_var_dir().join(flag), []).unwrap(); } }
+                let mut unrelated = source.clone(); unrelated.seq = Seq(1); unrelated.lamport = Lamport(2);
+                write_recovery_ledger(&root, &[source.clone(), unrelated]);
+                let owner = ToolDoorOwner { worker_environment_kind:WorkerEnvironmentKindId::new("test.room"), door_interface:ctx.interface.clone(), max_in_flight:2, private_read_max_bytes:4096, root_slot_transform:None };
+                let path = ctx.interface_var_dir().join(TOOL_DOOR_EFFECT_JOURNAL_FILE);
+                let state = |seq| ToolDoorEffectJournal::read_only(path.clone(),65536).unwrap().entries.get(&seq).map(|entry| entry.state);
+                {
+                    let hot = tool_door_loop(&ctx, &owner, Arc::new(ToolProcessBrokerHost::new(owner.clone()).unwrap()), decode); tokio::pin!(hot);
+                    until(hot.as_mut(), || state(1) == Some(ToolDoorJournalState::Completed) && state(0) == Some(if early { ToolDoorJournalState::Completed } else { ToolDoorJournalState::Prepared })).await;
+                    assert!(std::fs::read(ctx.interface_var_dir().join("attempts")).unwrap().len() <= 3);
+                    ctx.cancel.cancel(); hot.await.unwrap();
+                }
+                if !early {
+                    assert_eq!(LedgerTailReader::open_named(&ctx, "tool-door").unwrap().next_seq(), 0);
+                    ctx.cancel = tokio_util::sync::CancellationToken::new();
+                    let attempts = std::fs::read(ctx.interface_var_dir().join("attempts")).unwrap().len();
+                    let cold = tool_door_loop(&ctx, &owner, Arc::new(ToolProcessBrokerHost::new(owner.clone()).unwrap()), decode); tokio::pin!(cold);
+                    until(cold.as_mut(), || std::fs::read(ctx.interface_var_dir().join("attempts")).unwrap().len() > attempts).await; receipt(&ctx, &source);
+                    if refused {
+                        let output = tokio::select! { output = tokio::time::timeout(std::time::Duration::from_secs(5), outputs.recv()) => output.unwrap().unwrap(), result = &mut cold => panic!("door stopped: {result:?}") };
+                        output.verdict_tx.unwrap().send(DeliveryVerdict::refused(RefusedReason::CheckpointSpent, serde_json::json!({}))).unwrap();
+                    }
+                    until(cold.as_mut(), || state(0) == Some(if refused { ToolDoorJournalState::Refused } else { ToolDoorJournalState::Completed })).await;
+                    ctx.cancel.cancel(); cold.await.unwrap();
+                }
+                assert_eq!(std::fs::read(ctx.interface_var_dir().join("unrelated")).unwrap(), b"x");
+            }
+        }
     }
     use super::{
         BoundedJsonLineReader, TOOL_DOOR_EFFECT_JOURNAL_FILE, ToolDoorEffectJournal,
@@ -10146,6 +10263,10 @@ mod tool_process_private_boundary_tests {
             compacted.state(10, &digest).unwrap(),
             Some(ToolDoorJournalState::Indeterminate)
         );
+        use super::{ToolDoorAction, ToolDoorArtifactDecodeError as DecodeError, ToolDoorArtifactDecodePurpose as Purpose};
+        for (purpose, calls) in [(Purpose::Dispatch, vec![]), (Purpose::Dispatch, vec![2, 2]), (Purpose::Dispatch, vec![2, 1]), (Purpose::HistoricalIdentity, vec![1])] {
+            assert!(matches!(DecodeError::AwaitingResults { call_sequences: calls }.into_action(purpose), ToolDoorAction::Failure { class: "invalid_tool_artifact", .. }));
+        }
     }
 
     #[test]
@@ -10273,7 +10394,7 @@ mod tool_process_private_boundary_tests {
             ctx: &InterfaceLiftContext,
             envelope: &InterfaceInvocationEnvelope,
             purpose: super::ToolDoorArtifactDecodePurpose,
-        ) -> Result<Option<ToolCallArtifact>, String> {
+        ) -> Result<Option<ToolCallArtifact>, super::ToolDoorArtifactDecodeError> {
             assert_eq!(
                 purpose,
                 super::ToolDoorArtifactDecodePurpose::HistoricalIdentity,
@@ -10304,7 +10425,7 @@ mod tool_process_private_boundary_tests {
             };
             serde_json::from_slice(&bound.read_bytes().expect("bound bytes"))
                 .map(Some)
-                .map_err(|error| error.to_string())
+                .map_err(|error| super::ToolDoorArtifactDecodeError::Invalid(error.to_string()))
         }
         let approval_artifact = store_recovery_artifact(root.path(), "operator.approval.response", br#"{"operator_approval_response":{"request_id":"request-1","call_id":"call-1","decision":"accept"}}"#);
         let mut approval = source.clone();
@@ -10943,7 +11064,7 @@ pub mod owner_contract_tests {
             envelope: &InterfaceInvocationEnvelope,
             decoder: ToolDoorArtifactDecoder,
             purpose: ToolDoorArtifactDecodePurpose,
-        ) -> Result<Option<ToolCallArtifact>, String> {
+        ) -> Result<Option<ToolCallArtifact>, ToolDoorArtifactDecodeError> {
             let movement = self
                 .sources
                 .get(&seq)
