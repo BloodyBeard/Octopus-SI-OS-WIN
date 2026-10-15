@@ -679,13 +679,13 @@
   display: inline-grid;
 }
 
-.octopus-markdown-root .octopus-markdown-fade-in, .octopus-markdown-root hr, .octopus-markdown-root li, .octopus-markdown-root tr, .octopus-markdown-root blockquote {
+.octopus-markdown-root[data-markdown-animated] :is(.octopus-markdown-fade-in, hr, li, tr, blockquote) {
   opacity: 0;
   animation: octopus-markdown-fade-in var(--duration, var(--transition-duration-basic)) var(--fade-easing, cubic-bezier(.37, .55, .86, .88)) forwards;
   animation-delay: var(--fade-delay, 0s);
 }
 
-.octopus-markdown-root .octopus-markdown-fade-list-decoration::marker {
+.octopus-markdown-root[data-markdown-animated] .octopus-markdown-fade-list-decoration::marker {
   animation: octopus-markdown-fade-in-marker var(--duration, var(--transition-duration-basic)) var(--fade-easing, cubic-bezier(.37, .55, .86, .88)) forwards;
   animation-delay: var(--fade-delay, 0s);
 }
@@ -696,7 +696,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .octopus-markdown-root .octopus-markdown-fade-in, .octopus-markdown-root hr, .octopus-markdown-root li, .octopus-markdown-root tr, .octopus-markdown-root blockquote, .octopus-markdown-root .octopus-markdown-image-enter {
+  .octopus-markdown-root[data-markdown-animated] :is(.octopus-markdown-fade-in, hr, li, tr, blockquote), .octopus-markdown-root .octopus-markdown-image-enter {
     --duration: 0s;
     opacity: 1;
     animation-duration: 0s;
@@ -704,7 +704,7 @@
     animation-delay: 0s !important;
   }
 
-  .octopus-markdown-root .octopus-markdown-fade-list-decoration::marker {
+  .octopus-markdown-root[data-markdown-animated] .octopus-markdown-fade-list-decoration::marker {
     animation-duration: 0s;
     animation-delay: 0s !important;
   }

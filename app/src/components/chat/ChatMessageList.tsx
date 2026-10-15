@@ -2214,7 +2214,7 @@ function AssistantResponseContent({ find, message, onOpenAssistantReview, onOpen
       />
     </>
   );
-  return streamingChrome ? <div className="octopus-assistant-streaming min-w-0">{content}</div> : content;
+  return <div className={streamingChrome && streaming ? "octopus-assistant-streaming min-w-0" : "min-w-0"}>{content}</div>;
 }
 
 function TraceReadTarget({ message, presentation, onOpenFile }: {

@@ -2708,27 +2708,9 @@ mark.octopus-thread-find-active {
   min-width: 0;
 }
 
-@keyframes octopus-streaming-markdown-fade-in {
-  to {
-    opacity: 1;
-  }
-}
-
-.octopus-streaming-markdown .octopus-streaming-markdown__segment {
-  opacity: 0;
-  animation: octopus-streaming-markdown-fade-in var(--transition-duration-basic, 150ms) cubic-bezier(.37, .55, .86, .88) forwards;
-  animation-delay: var(--octopus-stream-fade-delay, 0ms);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .composer-submit-spinner {
     animation: none;
-  }
-
-  .octopus-streaming-markdown .octopus-streaming-markdown__segment {
-    opacity: 1;
-    animation-duration: 0ms !important;
-    animation-delay: 0ms !important;
   }
 
   .octopus-turn-activity [class*="transition"],

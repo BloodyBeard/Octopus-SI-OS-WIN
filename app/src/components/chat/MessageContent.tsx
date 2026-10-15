@@ -36,11 +36,11 @@ type MessageContentProps = {
 };
 
 type StreamingFadeTimeline = {
-  delayMsByKey: Map<string, number>;
+  mountedSegments: WeakSet<HTMLElement>;
   nextSegmentStartAtMs: number;
   pendingSegmentKeyState: StreamingSegmentKeyState | null;
   segmentKeyState: StreamingSegmentKeyState;
-  settledKeys: Set<string>;
+  startAtMsByKey: Map<string, number>;
 };
 
 type StreamingSegmentKeyState = {
@@ -48,19 +48,24 @@ type StreamingSegmentKeyState = {
   previousSegments: Array<{ content: string; key: string }>;
 };
 
+const STREAM_FADE_SEGMENT_DELAY_MS = 16;
+const STREAM_FADE_SEGMENT_MAX_DELAY_MS = 96;
+const STREAM_FADE_DURATION_MS = 150;
+
+const StreamingTimelineContext = createContext<StreamingFadeTimeline | null>(null);
+
 function createStreamingFadeTimeline(): StreamingFadeTimeline {
   return {
-    delayMsByKey: new Map(),
+    mountedSegments: new WeakSet(),
     nextSegmentStartAtMs: 0,
     pendingSegmentKeyState: null,
     segmentKeyState: { nextSegmentId: 0, previousSegments: [] },
-    settledKeys: new Set(),
+    startAtMsByKey: new Map(),
   };
 }
 
 function createMarkdownComponents(
   variant: NonNullable<MessageContentProps["variant"]>,
-  streamingTimeline: StreamingFadeTimeline | null,
   onOpenFile: MessageContentProps["onOpenFile"],
 ): Components {
   const reasoning = variant === "reasoning";
@@ -71,9 +76,7 @@ function createMarkdownComponents(
     const segmentKey = typeof rawSegmentKey === "string"
       ? rawSegmentKey
       : "";
-    if (streamingTimeline && segmentKey) {
-      return <StreamingFadeSegment segmentKey={segmentKey} timeline={streamingTimeline}>{children}</StreamingFadeSegment>;
-    }
+    if (segmentKey) return <StreamingFadeSegment segmentKey={segmentKey}>{children}</StreamingFadeSegment>;
     return <span {...props}>{children}</span>;
   },
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
@@ -312,12 +315,12 @@ function MessageContentView({ compactHeadings = false, find, onOpenFile, streamK
   const streamingTimeline = streaming ? timelineRef.current?.timeline ?? null : null;
   const components = useMemo(
     () => {
-      const defaults = createMarkdownComponents(variant, streamingTimeline, onOpenFile);
+      const defaults = createMarkdownComponents(variant, onOpenFile);
       if (!compactHeadings) return defaults;
       const heading: Components["h1"] = ({ children }) => <span>{children}</span>;
       return { ...defaults, h1: heading, h2: heading, h3: heading, h4: heading, h5: heading, h6: heading };
     },
-    [compactHeadings, onOpenFile, streamingTimeline, variant],
+    [compactHeadings, onOpenFile, variant],
   );
   const streamingPlugin = useMemo(
     () => streaming && streamingTimeline ? streamingTextPlugin(streamKey, streamingTimeline) : null,
@@ -342,17 +345,19 @@ function MessageContentView({ compactHeadings = false, find, onOpenFile, streamK
 
   return (
     <MarkdownSourceContext.Provider value={text}>
-      <div className={`${className}${streaming ? " octopus-streaming-markdown" : ""}`}>
-        <Markdown
-          components={components}
-          rehypePlugins={rehypePlugins}
-          remarkPlugins={MARKDOWN_REMARK_PLUGINS}
-          skipHtml
-          urlTransform={safeUrlTransform}
-        >
-          {presentation}
-        </Markdown>
-      </div>
+      <StreamingTimelineContext.Provider value={streamingTimeline}>
+        <div className={`${className}${streaming ? " octopus-streaming-markdown" : ""}`} data-markdown-animated={streaming ? "" : undefined}>
+          <Markdown
+            components={components}
+            rehypePlugins={rehypePlugins}
+            remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+            skipHtml
+            urlTransform={safeUrlTransform}
+          >
+            {presentation}
+          </Markdown>
+        </div>
+      </StreamingTimelineContext.Provider>
     </MarkdownSourceContext.Provider>
   );
 }
@@ -369,34 +374,33 @@ export const MessageContent = memo(MessageContentView, (previous, next) => (
   && previous.find?.activeIndex === next.find?.activeIndex
 ));
 
-function StreamingFadeSegment({ children, segmentKey, timeline }: {
+function StreamingFadeSegment({ children, segmentKey }: {
   children: ReactNode;
   segmentKey: string;
-  timeline: StreamingFadeTimeline;
 }) {
-  const settled = timeline.settledKeys.has(segmentKey);
+  const timeline = useContext(StreamingTimelineContext);
+  const startsAt = timeline?.startAtMsByKey.get(segmentKey);
+  if (!timeline || (startsAt !== undefined && performance.now() >= startsAt + STREAM_FADE_DURATION_MS)) {
+    return <span>{children}</span>;
+  }
   return (
-    <span
-      className={settled ? undefined : "octopus-streaming-markdown__segment"}
-      onAnimationEnd={(event) => {
-        if (event.target === event.currentTarget) timeline.settledKeys.add(segmentKey);
-      }}
-      ref={(element) => {
-        if (!element) return;
-        let delay = timeline.delayMsByKey.get(segmentKey);
-        if (delay === undefined) {
-          const now = performance.now();
-          const startsAt = Math.max(timeline.nextSegmentStartAtMs, now);
-          delay = Math.max(Math.round(startsAt - now), 0);
-          timeline.delayMsByKey.set(segmentKey, delay);
-          timeline.nextSegmentStartAtMs = startsAt + (delay < 800 ? 24 : 6);
-        }
-        element.style.setProperty("--octopus-stream-fade-delay", `${delay}ms`);
-      }}
-    >
+    <span className="octopus-markdown-fade-in" ref={(element) => { if (element) startStreamingSegment(element, segmentKey, timeline); }}>
       {children}
     </span>
   );
+}
+
+function startStreamingSegment(element: HTMLElement, segmentKey: string, timeline: StreamingFadeTimeline) {
+  if (timeline.mountedSegments.has(element)) return;
+  timeline.mountedSegments.add(element);
+  const now = performance.now();
+  let startsAt = timeline.startAtMsByKey.get(segmentKey);
+  if (startsAt === undefined) {
+    startsAt = Math.min(Math.max(timeline.nextSegmentStartAtMs, now), now + STREAM_FADE_SEGMENT_MAX_DELAY_MS);
+    timeline.startAtMsByKey.set(segmentKey, startsAt);
+    timeline.nextSegmentStartAtMs = startsAt + STREAM_FADE_SEGMENT_DELAY_MS;
+  }
+  element.style.setProperty("--fade-delay", `${Math.round(startsAt - now)}ms`);
 }
 
 function streamingTextPlugin(streamKey: string, timeline: StreamingFadeTimeline) {
