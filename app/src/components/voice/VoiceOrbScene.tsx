@@ -14,6 +14,7 @@ type Props = {
   onDispersed?: () => void;
   formationSurface?: RefObject<HTMLElement | null>;
   phase: VoicePhase;
+  fieldSurface?: RefObject<HTMLElement | null>;
   rippleSurface?: RefObject<HTMLElement | null>;
   sizeProbe?: RefObject<HTMLElement | null>;
   sphere?: number;
@@ -36,6 +37,7 @@ type ShaderUniforms = {
   ambient: WebGLUniformLocation;
   background: WebGLUniformLocation;
   departing: WebGLUniformLocation;
+  sceneTop: WebGLUniformLocation;
   error: WebGLUniformLocation;
   formTiming: WebGLUniformLocation;
   forms: WebGLUniformLocation;
@@ -63,7 +65,7 @@ const RIPPLE_COUNT = 6;
 const RIPPLE_LIFE_SECONDS = 2.4;
 const FORM_COUNT = 4;
 const FORM_LIFE_SECONDS = 0.9;
-const RIPPLE_IGNORED_TARGETS = "button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
+const RIPPLE_IGNORED_TARGETS = ".chat-composer, button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -85,6 +87,7 @@ const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
 uniform vec2 u_resolution;
+uniform float u_scene_top;
 uniform float u_pixel_ratio;
 uniform float u_time;
 uniform float u_thought_time;
@@ -555,9 +558,10 @@ vec3 frostGlass(vec2 p, float t) {
 }
 
 void main() {
-  float shortestSide = min(u_resolution.x, u_resolution.y);
+  vec2 sceneResolution = vec2(u_resolution.x, u_resolution.y - u_scene_top);
+  float shortestSide = min(sceneResolution.x, sceneResolution.y);
   float antialias = 1.0 / shortestSide;
-  vec2 point = (gl_FragCoord.xy - u_resolution * 0.5) / shortestSide;
+  vec2 point = (gl_FragCoord.xy - sceneResolution * 0.5) / shortestSide;
   point.y -= 0.028;
 
   float surfaceLuminance = dot(u_background, vec3(0.2126, 0.7152, 0.0722));
@@ -738,8 +742,10 @@ void main() {
   float inkHollow = mix(0.5, 1.0, smoothstep(0.1, 1.15, sourceReach));
   float inkDensity = inkEnvelope * inkHollow * (smoothstep(0.46, 0.8, inkLobes) * 0.42 + inkTendril * 0.9);
   float inkCoverage = saturate(inkDensity * compression * 1.25) * sourceValid;
-  vec2 edgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
+  vec2 edgeDistance = (sceneResolution * 0.5 - abs(gl_FragCoord.xy - sceneResolution * 0.5)) / shortestSide;
   float edgeFade = smoothstep(0.012, 0.09, min(edgeDistance.x, edgeDistance.y));
+  vec2 canvasEdgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
+  float canvasEdgeFade = smoothstep(0.004, 0.03, min(canvasEdgeDistance.x, canvasEdgeDistance.y));
   float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
   float formedCoverage = max(inkCoverage, formation * mix(1.0, 0.5, lightSurface));
   float formationEdge = exp(-abs(formedCoverage - particleSeed) / 0.045) * step(0.02, formation);
@@ -767,7 +773,7 @@ void main() {
     vec2 glyphLocal = (gl_FragCoord.xy - glyphCell * glyphSpan) / glyphPitch;
     float lit = glyphBit(glyph, int(floor(glyphLocal.x)), 7 - int(floor(glyphLocal.y)));
     float glyphDot = 1.0 - smoothstep(0.26, 0.44, length(fract(glyphLocal) - 0.5));
-    glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * edgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
+    glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * canvasEdgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
   }
   particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
 
@@ -792,7 +798,7 @@ void main() {
 }
 `;
 
-export function VoiceOrbScene({ activity, ambient = false, animated = true, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
+export function VoiceOrbScene({ activity, ambient = false, animated = true, fieldSurface, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onDispersedRef = useRef(onDispersed);
   onDispersedRef.current = onDispersed;
@@ -800,6 +806,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, form
   sizeProbeRef.current = sizeProbe;
   const rippleSurfaceRef = useRef(rippleSurface);
   rippleSurfaceRef.current = rippleSurface;
+  const fieldSurfaceRef = useRef(fieldSurface);
+  fieldSurfaceRef.current = fieldSurface;
   const formationSurfaceRef = useRef(formationSurface);
   formationSurfaceRef.current = formationSurface;
   const frameRef = useRef<OrbFrame>({ activity, ambient, phase, sphere });
@@ -839,6 +847,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, form
     let speechTime = staticScene ? 3.7 : 0;
     let renderPixelRatio = 1;
     let measuredSphere = 0;
+    let sceneTop = 0;
     const ripples = new Float32Array(RIPPLE_COUNT * 4);
     let nextRipple = 0;
     const forms = new Float32Array(FORM_COUNT * 4);
@@ -865,11 +874,17 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, form
     }
 
     const resize = () => {
+      const field = fieldSurfaceRef.current?.current;
+      const host = canvas.parentElement;
+      const extend = field && host ? Math.max(0, Math.round(host.getBoundingClientRect().top - field.getBoundingClientRect().top)) : 0;
+      canvas.style.top = extend ? `${-extend}px` : "";
+      canvas.style.height = extend ? `calc(100% + ${extend}px)` : "";
       const rect = canvas.getBoundingClientRect();
       const pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_RENDER_PIXEL_RATIO);
       renderPixelRatio = pixelRatio;
       const probeWidth = sizeProbeRef.current?.current?.clientWidth ?? 0;
-      const shortestCssSide = Math.min(rect.width, rect.height);
+      const shortestCssSide = Math.min(rect.width, rect.height - extend);
+      sceneTop = extend * pixelRatio;
       measuredSphere = probeWidth > 0 && shortestCssSide > 0 ? Math.min(0.36, (probeWidth * 0.285) / shortestCssSide) : 0;
       const width = Math.max(1, Math.round(rect.width * pixelRatio));
       const height = Math.max(1, Math.round(rect.height * pixelRatio));
@@ -940,6 +955,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, form
       gl.uniform4fv(uniforms.forms, forms);
       gl.uniform4fv(uniforms.formTiming, formTiming);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
+      gl.uniform1f(uniforms.sceneTop, sceneTop);
       gl.uniform1f(uniforms.pixelRatio, renderPixelRatio);
       gl.uniform1f(uniforms.time, seconds);
       gl.uniform1f(uniforms.thoughtTime, thoughtTime);
@@ -1052,6 +1068,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, form
     };
     observer.observe(canvas);
     if (sizeProbeRef.current?.current) observer.observe(sizeProbeRef.current.current);
+    if (fieldSurfaceRef.current?.current) observer.observe(fieldSurfaceRef.current.current);
     intersectionObserver.observe(canvas);
     window.addEventListener("resize", resizeAndDraw);
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -1138,6 +1155,7 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     pixelRatio: requiredUniform(gl, program, "u_pixel_ratio"),
     reveal: requiredUniform(gl, program, "u_reveal"),
     resolution: requiredUniform(gl, program, "u_resolution"),
+    sceneTop: requiredUniform(gl, program, "u_scene_top"),
     ripples: requiredUniform(gl, program, "u_ripples"),
     speaking: requiredUniform(gl, program, "u_speaking"),
     speechTime: requiredUniform(gl, program, "u_speech_time"),

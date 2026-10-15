@@ -107,6 +107,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const [saveAudio] = useState(() => readStoredBoolean(storageKeys.recording, false));
   const [speakerEnabled, setSpeakerEnabled] = useState(() => readStoredBoolean(storageKeys.speaker, true));
   const widgetCanvasRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<HTMLElement>(null);
   const viewOpenedAtRef = useRef(Date.now());
   const seenSurfaceIdsRef = useRef(new Set<string>());
   const formingTimersRef = useRef(new Set<number>());
@@ -493,7 +494,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   }
 
   return (
-    <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`}>
+    <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`} ref={viewRef}>
       <header className="voice-session-heading">
         <VoiceSessionTitle
           editable={!callActive}
@@ -521,7 +522,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       <main className="voice-session-stage" ref={stageMainRef}>
         <i aria-hidden="true" className="voice-orb-probe" ref={orbProbeRef} />
         <div aria-hidden="true" className="voice-stage-scene">
-          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} formationSurface={widgetCanvasRef} rippleSurface={stageMainRef} sizeProbe={orbProbeRef} />
+          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} fieldSurface={viewRef} formationSurface={widgetCanvasRef} rippleSurface={viewRef} sizeProbe={orbProbeRef} />
         </div>
         <HomeResponseStage
           operatorRequests={homeOperatorRequests}
