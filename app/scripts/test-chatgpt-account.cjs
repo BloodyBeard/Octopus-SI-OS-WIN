@@ -16,7 +16,7 @@ function loadTs(relative, imports = {}, extraSource = "") {
   const module = { exports: {} };
   const source = fs.readFileSync(path.join(__dirname, "../src", relative), "utf8") + extraSource;
   const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  new Function("module", "exports", "require", output)(module, module.exports, (name) => imports[name] ?? (name.endsWith(".css") ? {} : require(name)));
+  new Function("module", "exports", "require", output)(module, module.exports, (name) => imports[name] ?? imports.$fallback?.(name) ?? (name.endsWith(".css") ? {} : require(name)));
   return module.exports;
 }
 
@@ -470,4 +470,55 @@ test("account menu prefers top placement and retains viewport collision handling
   assert.equal(crowded.side, "bottom"); assert.equal(crowded.top, 106);
   const right = dropdownPlacement(anchor, 240, 120, 1000, 800, "start", 6, 0, "right");
   assert.equal(right.side, "right"); assert.equal(right.left, 70); assert.equal(right.top, 350);
+});
+
+test("local expiry returns to unlock before account discovery and ignores stale access reads", async () => {
+  const dom = new (require("jsdom").JSDOM)('<div id="root"></div>', { url: "https://client.test" });
+  const previous = new Map();
+  for (const [key, value] of Object.entries({ window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })) {
+    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  }
+  const locked = { configured: true, authenticated: false, profile: null, expiresAt: null };
+  const live = { ...locked, authenticated: true, profile: "live", expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  let status = locked, read = async () => status, access, expiry, enabled, account = null;
+  window.setTimeout = (callback) => { expiry = callback; return 1; }; window.clearTimeout = () => { expiry = null; };
+  const { useClientAccess } = loadTs("useClientAccess.ts", { "./clientAccess": { readClientAccessStatus: () => read() } });
+  const { App } = loadTs("App.tsx", {
+    "./useClientAccess": { useClientAccess: () => (access = useClientAccess()) },
+    "./clientAccess": { readTouchIdStatus: async () => ({ available: false }) },
+    "./account/useChatgptAccount": { useChatgptAccount: (value) => { enabled = value; return { account }; } },
+    "./onboarding/chatgptSignIn": { chatgptSignInAvailable: () => true },
+    "./onboarding/onboardingStorage": { recordOnboardingVisit: () => ({ completed: true }) },
+    "./runtimeHost": { useRuntimeHost: () => ({ ready: true, available: true, phase: "ready" }) },
+    "./clientPreferences": { ClientPreferencesProvider: ({ children }) => children },
+    "./components/onboarding/WorkspaceSetupGate": { WorkspaceSetupGate: ({ children }) => children },
+    $fallback: (name) => name.startsWith(".") ? new Proxy({}, { get: (_, key) => () => String(key) }) : undefined,
+  });
+  const root = require("react-dom/client").createRoot(document.getElementById("root"));
+  const act = (callback) => React.act(async () => { callback(); await tick(); });
+  try {
+    await act(() => root.render(React.createElement(App)));
+    assert.match(document.body.textContent, /PasswordGate/); assert.equal(enabled, false);
+    status = live; await act(() => access.setAccess(live));
+    assert.match(document.body.textContent, /ChatGptSignInGate/); assert.equal(enabled, true);
+    account = signedIn; await act(() => access.setAccess({ ...live }));
+    assert.match(document.body.textContent, /OperatorShell/);
+    status = locked; await act(() => expiry());
+    assert.match(document.body.textContent, /PasswordGate/); assert.equal(enabled, false);
+    status = live; await act(() => access.setAccess(live));
+    let finish; read = () => new Promise(resolve => { finish = resolve; });
+    await act(() => window.dispatchEvent(new window.Event("focus")));
+    await act(() => access.setAccess({ ...live })); await act(() => finish(locked));
+    assert.match(document.body.textContent, /OperatorShell/);
+    read = async () => locked; await act(() => window.dispatchEvent(new window.Event("focus")));
+    assert.match(document.body.textContent, /PasswordGate/);
+    status = { ...locked, configured: false }; read = async () => status; account = null;
+    await act(() => access.setAccess(status)); assert.match(document.body.textContent, /ChatGptSignInGate/);
+  } finally {
+    await act(() => root.unmount()); dom.window.close();
+    for (const [key, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+    }
+  }
 });

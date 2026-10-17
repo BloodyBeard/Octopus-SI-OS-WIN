@@ -17,7 +17,8 @@ import {
   resetOnboardingState,
   type OnboardingState,
 } from "./onboarding/onboardingStorage";
-import { lockClientAccess, readClientAccessStatus, readTouchIdStatus, setTouchIdEnabled, unlockWithTouchId } from "./clientAccess";
+import { lockClientAccess, readTouchIdStatus, setTouchIdEnabled, unlockWithTouchId } from "./clientAccess";
+import { useClientAccess } from "./useClientAccess";
 import type { OctopusClientAccessStatus, OctopusTouchIdStatus } from "./electron";
 import { appToast, AppToastViewport } from "./toasts";
 import { ClientPreferencesProvider } from "./clientPreferences";
@@ -38,8 +39,7 @@ const LOCK_TOUCH_ID_FRAME_SCALES = [1, 2 / 3];
 export function App() {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(() => initializeOnboarding());
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
-  const [access, setAccess] = useState<OctopusClientAccessStatus | null>(null);
-  const [accessError, setAccessError] = useState("");
+  const { access, accessError, setAccess } = useClientAccess();
   const runtimeHost = useRuntimeHost();
   const windowMode = useMemo(() => new URLSearchParams(window.location.search).get("window"), []);
   const clientWindow = useMemo(
@@ -49,7 +49,8 @@ export function App() {
   const primaryWindowControls = windowMode ? null : <TrafficLights />;
   const welcomeMode = useMemo(() => new URLSearchParams(window.location.search).get("welcome"), []);
   const showWelcome = !welcomeDismissed && (onboardingState.completed !== true || welcomeMode === "1");
-  const chatgpt = useChatgptAccount(Boolean(access && access.profile !== "lab" && (!showWelcome || windowMode)));
+  const localUnlockRequired = Boolean(access?.configured && !access.authenticated);
+  const chatgpt = useChatgptAccount(Boolean(access && !localUnlockRequired && access.profile !== "lab" && (!showWelcome || windowMode)));
   const accountGateRequired = chatgptSignInAvailable() && !chatgpt.account?.signedIn;
   const [runtimeHasBeenReady, setRuntimeHasBeenReady] = useState(runtimeHost.ready);
   const launchGate = access?.profile !== "lab"
@@ -68,18 +69,6 @@ export function App() {
   useEffect(() => {
     if (launchGate) setLaunchVisible(true);
   }, [launchGate]);
-
-  useEffect(() => {
-    void readClientAccessStatus()
-      .then(setAccess)
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setAccessError(message);
-        appToast.danger(message);
-      });
-  }, []);
-
-  useEffect(() => window.octopusTransport?.onClientAccessLocked?.(setAccess), []);
 
   if (!access) {
     return (
@@ -159,6 +148,10 @@ export function App() {
     );
   }
 
+  if (localUnlockRequired) {
+    return <>{primaryWindowControls}<LockScreen mode="unlock" onUnlock={setAccess} /><AppToastViewport /></>;
+  }
+
   if (accountGateRequired && access.profile !== "lab") {
     return <>{primaryWindowControls}<ChatGptSignInGate /><AppToastViewport /></>;
   }
@@ -183,10 +176,6 @@ export function App() {
 
   if (launchGate) {
     return <>{primaryWindowControls}{launchOverlay}<AppToastViewport /></>;
-  }
-
-  if (access.configured && !access.authenticated) {
-    return <>{primaryWindowControls}<LockScreen mode="unlock" onUnlock={setAccess} />{launchOverlay}<AppToastViewport /></>;
   }
 
   if (!access.authenticated || !access.profile) {

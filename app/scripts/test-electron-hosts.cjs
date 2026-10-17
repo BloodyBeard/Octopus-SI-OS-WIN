@@ -473,7 +473,7 @@ async function verifyBootSourceContract() {
   assert.match(appSource, /useEffect\(\(\) => \{\s*if \(runtimeHost\.ready\) setRuntimeHasBeenReady\(true\);\s*\}, \[runtimeHost\.ready\]\);/);
   assert.match(appSource, /useEffect\(\(\) => \{\s*if \(launchGate\) setLaunchVisible\(true\);\s*\}, \[launchGate\]\);/);
   assert.match(appSource, /if \(access\.profile !== "lab" && runtimeHost\.available && runtimeHost\.phase === "probing" && !runtimeHasBeenReady\) \{/);
-  assert.ok(appSource.indexOf("if (launchGate) {") < appSource.indexOf("if (access.configured && !access.authenticated)"));
+  assert.ok(appSource.indexOf("if (localUnlockRequired) {") < appSource.indexOf("if (accountGateRequired && access.profile"));
   assert.match(appSource, /<LaunchTerminal\s+[\s\S]*?key="boot-launch-terminal"/);
   assert.equal(appSource.includes(["Runtime", "Terminal", "Dock"].join("")), false);
   assert.match(mainSource, /let runtimeProjectionHasBeenReady = false;[\s\S]*?const projectionChanged = projectionReady && !runtimeProjectionHasBeenReady;[\s\S]*?if \(projectionReady\) runtimeProjectionHasBeenReady = true;/);
