@@ -252,6 +252,7 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
   return (
     <>
       <TopBar
+        className="is-event-log"
         accessProfile={accessProfile}
         mode="wide"
         onQueryChange={onQueryChange}
@@ -261,7 +262,7 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
         title={title}
         titleInWindowChrome={titleInWindowChrome}
         toolbar={(
-          <>
+          <div className="eventlog-toolbar">
             <div className="eventlog-filters">
               {focusedMovement ? (
                 <button className="eventlog-filter" onClick={clearFilters} title="Clear movement filter and show all movements" type="button">
@@ -287,7 +288,7 @@ export function EventLogView({ accessProfile, focusedMovement, onClearMovement, 
                 ? `${rows.length} / ${total} movements`
                 : `${visibleRows.length} filtered / ${rows.length} loaded`}
             </span>
-          </>
+          </div>
         )}
       />
       <section className="workspace-panel is-event-log">

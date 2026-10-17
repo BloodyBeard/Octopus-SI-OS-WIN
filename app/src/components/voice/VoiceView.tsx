@@ -631,11 +631,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
         ) : null}
       </AnimatePresence>
 
-      <div className="home-secondary-actions">
-        {onViewModeChange ? (
-          <HomeActivityToggle expanded={false} onToggle={() => onViewModeChange("activity")} />
-        ) : null}
-      </div>
     </section>
   );
 }
@@ -987,6 +982,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           serviceTier={workspace.serviceTier}
           resumeAvailable={workspace.resumeAvailable}
           runId={workspace.activeRunId}
+          suggestionSourceSequence={workspace.activeRun?.lastTerminalMessage?.movementSeq}
           isSubmitting={workspace.submitting}
           submissionMode={workspace.busy ? "queue" : "send"}
           canSteer={workspace.canSteer}
@@ -999,20 +995,6 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
         />
       </div>
     </div>
-  );
-}
-
-export function HomeActivityToggle({ expanded, onToggle }: { expanded: boolean; onToggle: () => void }) {
-  return (
-    <button
-      aria-expanded={expanded}
-      className={`home-agent-activity-toggle${expanded ? " is-expanded" : ""}`}
-      onClick={onToggle}
-      type="button"
-    >
-      <Glyph name={expanded ? "chevronUp" : "chevronDown"} size={12} />
-      <span>Activity</span>
-    </button>
   );
 }
 

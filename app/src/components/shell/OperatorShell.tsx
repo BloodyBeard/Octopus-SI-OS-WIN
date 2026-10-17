@@ -3,7 +3,6 @@ import { AppShell, readSidebarWidth } from "./AppShell";
 import { isVoiceCallActive } from "../voice/voicePresentation";
 import { SurfacePage } from "./SurfacePage";
 import { TaskBrowserPane, emptyTaskBrowserTabs, type TaskBrowserTabs } from "./TaskBrowserPane";
-import type { TitlebarSurfaceAction } from "./DesktopTitleBar";
 import { MarkActivityView } from "../activity/MarkActivityView";
 import { ScheduledWorkspaceProvider } from "../scheduled/ScheduledWorkspace";
 import type { MarkActivityItem } from "../activity/markActivity";
@@ -550,7 +549,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const [dashboardFilters, setDashboardFilters] = useState<DashboardFilters>(defaultDashboardFilters);
   const [secondaryDashboardFilters, setSecondaryDashboardFilters] = useState<DashboardFilters>(defaultDashboardFilters);
   const [homeViewMode, setHomeViewMode] = useState<HomeViewMode>("voice");
-  const [homeWidgetsOpen, setHomeWidgetsOpen] = useState(false);
   const [secondaryHomeViewMode, setSecondaryHomeViewMode] = useState<HomeViewMode>("voice");
   const homeChatIdentityReady = Boolean(homeRunId && homeChatWorkspace.activeRunId === homeRunId
     && homeChatWorkspace.activeRun?.runId === homeRunId && homeChatWorkspace.activeRun.clientSurfaceRole === "home");
@@ -652,11 +650,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     }
   }, [accessProfile, activeSecondaryTabId, clientWindow.scope, clientWindowInitialTarget, homeRunId, initialTargetConsumptionKey, secondaryPaneOpen, secondaryTabs, windowStateStorage]);
 
-  useEffect(() => {
-    if (activeSurface?.id !== "voice" || homeViewMode !== "voice") {
-      setHomeWidgetsOpen(false);
-    }
-  }, [activeSurface?.id, homeViewMode]);
   const effectiveSelection = useMemo(
     () => resolveSelection(selectedRef, topology),
     [selectedRef, topology],
@@ -1135,7 +1128,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   }, [openChat]);
 
   const openNavigationSection = useCallback((section: ClientNavigationSection) => {
-    setHomeWidgetsOpen(false);
     setSecondaryPaneFocused(false);
     if (section === "home") {
       openVoice();
@@ -2334,18 +2326,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const titlebarTask = activeSurface.rendererKind === "builtin.chat" && primarySurfaceTarget.runId !== homeRunId
     ? taskChatRuns.find((run) => run.runId === primarySurfaceTarget.runId)
     : undefined;
-  const titlebarSurfaceActions: TitlebarSurfaceAction[] = [];
-  if (activeSurface.id === "voice" && homeViewMode === "voice") {
-    titlebarSurfaceActions.push({
-      glyph: "widgets",
-      label: "Home widgets",
-      onClick: () => setHomeWidgetsOpen((open) => {
-        const next = !open;
-        return next;
-      }),
-      pressed: homeWidgetsOpen,
-    });
-  }
 
   return (
     <ScheduledWorkspaceProvider key={JSON.stringify([accessProfile, runtimeHost.home])} active={accessProfile === "live" && (activeSurface.id === "scheduled" || (secondaryPaneOpen && secondarySurfaceId === "scheduled"))}>
@@ -2401,11 +2381,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         secondaryPaneOpen={secondaryPaneOpen}
         secondaryPane={secondaryPane}
         secondaryTaskPaneWidthPercent={clientPreferences.secondaryTaskPaneWidthPercent}
-        titlebarSurfaceActions={titlebarSurfaceActions}
         titlebarSurfaceContext={titlebarTask
           ? { glyph: "folder", title: clientTaskTitle(titlebarTask.runId, titlebarTask.title, taskOrganization) }
           : { glyph: activeSurface.chrome.titlebarGlyph ?? activeSurface.glyph, title: activeSurface.label }}
-        titlebarSurfaceTitle={activeSurface.id === "voice" && homeViewMode === "activity" ? "Agent activity" : undefined}
         onTitlebarSurfaceContextPointerDown={!clientWindow.primary && titlebarTransferTarget ? (event) => titlebarWindowPointerDown(clientWindow.windowId, event) : undefined}
         surfaceErrors={surfaceRegistry.errors}
         onNavigationChange={openNavigationSection}
@@ -2420,9 +2398,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
         onAgentChatOrderIdsChange={setAgentChatOrderIds}
         onAgentProjectFilterEeIdChange={setProjectFilterEeId}
         onToggleSecondaryPane={toggleSecondaryPane}
-        onTitlebarSurfaceTitleClick={activeSurface.id === "voice" && homeViewMode === "activity"
-          ? () => setHomeViewMode("voice")
-          : undefined}
         onSecondaryPaneFocusedChange={setSecondaryPaneFocused}
         onPrimaryPaneBlockedChange={setPrimaryPaneBlocked}
         onSecondaryPaneOpenChange={setSecondaryPaneOpen}
@@ -2479,8 +2454,6 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
             voiceSession={voiceSession}
             homeViewMode={homeViewMode}
             onHomeViewModeChange={setHomeViewMode}
-            homeWidgetsOpen={homeWidgetsOpen}
-            onHomeWidgetsOpenChange={setHomeWidgetsOpen}
             paneRole="primary"
             inspectorOpen={inspectorOpen}
             onSelect={handleSelect}

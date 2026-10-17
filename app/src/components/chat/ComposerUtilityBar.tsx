@@ -186,7 +186,7 @@ export function ComposerUtilityBar({
           </UtilityBarDropdown>
         </ProjectClearSlot>
 
-        <div className={`${CHIP_BUTTON_CLASS} composer-agent-access-control !gap-1 !py-0 !pr-1.5 !pl-0`}>
+        <div className="composer-agent-access-control flex min-w-0 items-center gap-1">
           <UtilityBarDropdown
             collapse="none"
             disabled={locked || !agentOptions.length}
@@ -202,7 +202,6 @@ export function ComposerUtilityBar({
               : locked
                 ? "This task's Agent identity is unavailable"
                 : "Select an agent for this task"}
-            triggerVariant="embedded"
             value={selectedAgent?.name || (taskConfiguration ? "Task configuration" : locked ? "Agent unavailable" : "Choose agent")}
             valueClassName="max-w-40 text-sm"
           >
@@ -247,10 +246,13 @@ export function ComposerUtilityBar({
             )}
           </UtilityBarDropdown>
 
+          <ShellTooltip label={locked ? "Access is fixed for this task" : !selectedWorker ? "Choose an agent to set access"
+            : accessMode !== "full_access" && fullAccessUnavailableReason ? fullAccessUnavailableReason
+            : accessMode === "full_access" ? "Use project access" : "Use full access"}>
           <button
             aria-label={accessMode === "full_access" ? "Use project access" : "Use full access"}
             aria-pressed={accessMode === "full_access"}
-            className="composer-agent-access-toggle inline-flex shrink-0 cursor-interaction items-center justify-center gap-1 rounded-md bg-transparent px-1 text-sm whitespace-nowrap hover:bg-token-foreground/5 focus:outline-none focus-visible:ring-1 focus-visible:ring-token-focus-border disabled:cursor-not-allowed disabled:opacity-40"
+            className={`${CHIP_BUTTON_CLASS} composer-agent-access-toggle shrink-0`}
             data-composer-navigation-target="permissions"
             disabled={locked || !selectedWorker || accessMode !== "full_access" && Boolean(fullAccessUnavailableReason)}
             onClick={() => onAccessModeChange(accessMode === "full_access" ? "project_access" : "full_access")}
@@ -260,6 +262,7 @@ export function ComposerUtilityBar({
             <TaskAccessIcon accessMode={accessMode} className="icon-xs shrink-0" />
             <span>{accessMode === "full_access" ? "Full access" : "Project access"}</span>
           </button>
+          </ShellTooltip>
         </div>
 
         <UtilityBarDropdown
@@ -446,7 +449,6 @@ function UtilityBarDropdown({
   indicator = "chevron",
   navigationTarget,
   title,
-  triggerVariant = "default",
   value,
   valueClassName = "",
 }: {
@@ -459,7 +461,6 @@ function UtilityBarDropdown({
   indicator?: "none" | "chevron" | "collapsible-chevron";
   navigationTarget: string;
   title: string;
-  triggerVariant?: "default" | "embedded";
   value: string;
   valueClassName?: string;
 }) {
@@ -520,9 +521,7 @@ function UtilityBarDropdown({
           aria-disabled={disabled || undefined}
           aria-expanded={open}
           aria-haspopup="menu"
-          className={triggerVariant === "embedded"
-            ? "composer-agent-selector-trigger composer-utility-label no-drag flex min-w-0 cursor-interaction items-center gap-1 border-0 bg-transparent px-1.5 !pr-0 py-0 text-sm leading-[18px] text-token-text-tertiary select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40"
-            : CHIP_BUTTON_CLASS}
+          className={CHIP_BUTTON_CLASS}
           data-composer-navigation-target={navigationTarget}
           data-state={open ? "open" : "closed"}
           disabled={disabled}

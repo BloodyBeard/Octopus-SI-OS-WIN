@@ -314,10 +314,12 @@
   display: none;
 }
 
-.composer-agent-access-control:hover,
-.composer-agent-access-control:has(.composer-agent-selector-trigger[data-state="open"]),
-.composer-agent-access-control:has(> button:focus-visible) {
-  background: var(--color-token-list-hover-background);
+.composer-agent-access-control > .chat-tooltip-trigger:first-child {
+  overflow: hidden;
+}
+
+.composer-agent-access-control .composer-utility-label {
+  max-width: 100%;
 }
 
 .composer-utility-static .composer-utility-dropdown-label-value,

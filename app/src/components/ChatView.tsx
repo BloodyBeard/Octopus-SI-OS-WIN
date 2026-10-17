@@ -452,6 +452,7 @@ export function ChatView({
         onServiceTierChange={chat.chooseServiceTier}
         resumeAvailable={chat.resumeAvailable}
         runId={chat.activeRunId}
+        suggestionSourceSequence={chat.activeRun?.lastTerminalMessage?.movementSeq}
         submissionMode={chat.busy ? "queue" : "send"}
         submitBlockReason={chat.submitBlockReason}
         text={chat.text}

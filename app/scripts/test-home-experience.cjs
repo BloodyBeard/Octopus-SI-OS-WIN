@@ -311,17 +311,28 @@ test("Activity renders the unchanged Home chat and provider trace without a task
 test("opening Home activity retains the Home component and unsent draft", async () => {
   let mounts = 0, homeProps;
   const Home = props => { homeProps = props; React.useEffect(() => { mounts++; }, []); return React.createElement("textarea", { defaultValue: "Unsent Home message" }); };
-  const { HomeSurface } = loader({
+  const load = loader({
     "../voice/VoiceView": { VoiceView: Home },
     "../voice/HomeAgentActivityView": { HomeAgentActivityView: () => React.createElement("section", { "data-home-activity": true }) },
     "../voice/useHomeActivityWorkspace": { useHomeRunActivity: () => ({ entries: [] }) },
-  })("src/components/shell/HomeSurface.tsx");
+  });
+  const { HomeSurface } = load("src/components/shell/HomeSurface.tsx");
+  const { WorkspacePaneHeaderActionsProvider } = load("src/components/shell/WorkspacePaneHeaderActions.tsx");
+  const toolbar = document.createElement("div");
+  document.body.append(toolbar);
+  function Pane(props) {
+    const [mode, setMode] = React.useState("voice");
+    return React.createElement(WorkspacePaneHeaderActionsProvider, { host: toolbar },
+      React.createElement(HomeSurface, { ...props, homeViewMode: mode, onHomeViewModeChange: setMode }));
+  }
   const props = { voiceSession: session("listening"), homeViewMode: "voice", homeRunId: "home", onHomeViewModeChange: noop };
-  const view = await mount(HomeSurface, props);
+  const view = await mount(Pane, props);
   try {
     const draft = view.container.querySelector("textarea");
     draft.value = "Draft kept during call";
-    await view.render({ ...props, homeViewMode: "activity" });
+    assert.deepEqual([...toolbar.querySelectorAll("button")].map(node => node.getAttribute("aria-label")), ["Activity", "Home widgets"]);
+    await click(button(toolbar, "Activity"));
+    assert.equal(button(toolbar, "Activity").getAttribute("aria-expanded"), "true");
     assert.equal(view.container.querySelector("textarea"), draft);
     assert.equal(draft.value, "Draft kept during call");
     const homeLayer = draft.closest(".home-view-transition__surface");
@@ -332,13 +343,15 @@ test("opening Home activity retains the Home component and unsent draft", async 
     assert.equal(homeProps.session, props.voiceSession);
     assert.equal(view.container.querySelector("[data-home-activity]").closest(".home-view-transition__surface").hidden, false);
     assert.equal(view.container.querySelector("aside, .home-view-transition__activity, .home-view-transition__layout"), null);
-    await view.render(props);
+    await click(button(toolbar, "Home widgets"));
+    assert.equal(homeProps.widgetsOpen, true);
+    assert.equal(button(toolbar, "Activity").getAttribute("aria-expanded"), "false");
     assert.equal(mounts, 1);
     assert.equal(draft.closest(".home-view-transition__surface").hidden, false);
     assert.equal(homeLayer.hasAttribute("inert"), false);
     assert.equal(motionState.get(homeLayer).animate.opacity, 1);
     assert.equal(homeProps.commandsActive, true);
-  } finally { await view.close(); }
+  } finally { await view.close(); toolbar.remove(); }
 });
 
 test("Home sequences reply fade before the call scene and preserves drafts, replies and widget provenance", async () => {

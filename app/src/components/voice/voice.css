@@ -14,7 +14,7 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   box-sizing: border-box;
   padding: clamp(28px, 7cqh, 78px) clamp(14px, 3cqw, 44px) clamp(12px, 2cqh, 20px);
   overflow: hidden;
@@ -24,7 +24,7 @@
 }
 
 .voice-view.has-home-composer {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 [data-theme="light"] .voice-projection-card,
@@ -2050,41 +2050,6 @@
   height: 100%;
 }
 
-.home-secondary-actions {
-  position: relative;
-  z-index: 8;
-  display: flex;
-  max-width: calc(100% - 36px);
-  align-items: center;
-  grid-row: 4;
-  grid-column: 1;
-  justify-self: center;
-  margin-top: 10px;
-  color: var(--voice-text-faint);
-  font-size: var(--text-xs, 11px);
-  white-space: nowrap;
-  transition: opacity 180ms ease, transform 220ms cubic-bezier(.16, 1, .3, 1);
-}
-
-
-.voice-view.has-home-composer .home-secondary-actions {
-  grid-row: 3;
-}
-
-.home-agent-activity-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  color: var(--voice-text-muted, var(--color-token-text-secondary));
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  font-size: var(--text-xs, 11px);
-  font-weight: 500;
-}
-
 .home-widgets-control {
   position: absolute;
   z-index: 40;
@@ -2130,12 +2095,6 @@
   height: .5px;
   margin: 4px;
   background: var(--color-token-border);
-}
-
-.home-agent-activity-toggle:hover,
-.home-agent-activity-toggle:focus-visible {
-  color: var(--voice-text-soft, var(--color-token-foreground));
-  background: transparent;
 }
 
 .home-view-transition {
@@ -2845,9 +2804,6 @@ button.voice-call-puck-copy {
     height: 54px;
   }
 
-  .home-secondary-actions {
-    margin-top: 10px;
-  }
 
   .voice-detail-panel {
     top: 0;
@@ -2952,9 +2908,6 @@ button.voice-call-puck-copy {
     padding-top: 6px;
   }
 
-  .home-secondary-actions {
-    margin-top: 8px;
-  }
 
   .voice-round-button.oc-icon-button-root {
     width: 50px;

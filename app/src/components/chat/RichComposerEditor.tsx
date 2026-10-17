@@ -126,8 +126,9 @@ export const RichComposerEditor = forwardRef<RichComposerEditorHandle, Props>(fu
   useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view || serializePrompt(view.state) === text) return;
+    const suggestionState = composerSuggestionKey.getState(view.state);
     const next = createEditorState(text, view.state.plugins);
-    view.updateState(next);
+    view.updateState(suggestionState ? next.apply(next.tr.setMeta(composerSuggestionKey, suggestionState)) : next);
   }, [text]);
 
   useEffect(() => {

@@ -183,11 +183,11 @@ assert.match(workspace, /return taskCapabilitySelectionFailure\(worker, applicat
 assert.match(capabilitySelection, /accessMode === "full_access"[\s\S]*?HOST_FILESYSTEM_ROOT_SLOT/);
 const agentAccessControl = sourceBetween(
   utilityBar,
-  '<div className={`${CHIP_BUTTON_CLASS} composer-agent-access-control',
+  '<div className="composer-agent-access-control',
   "\n\n        <UtilityBarDropdown",
 );
 assert.match(agentAccessControl, /navigationTarget="workspace-agent"[\s\S]*?indicator="none"|indicator="none"[\s\S]*?navigationTarget="workspace-agent"/);
-assert.match(agentAccessControl, /triggerVariant="embedded"/);
+assert.doesNotMatch(agentAccessControl, /triggerVariant="embedded"/);
 const permissionToggle = sourceBetween(
   agentAccessControl,
   "aria-label={accessMode === \"full_access\" ? \"Use project access\" : \"Use full access\"}",
@@ -196,13 +196,13 @@ const permissionToggle = sourceBetween(
 assert.match(permissionToggle, /aria-pressed=\{accessMode === "full_access"\}/);
 assert.match(permissionToggle, /onAccessModeChange\(accessMode === "full_access" \? "project_access" : "full_access"\)/);
 assert.match(permissionToggle, /composer-agent-access-toggle/);
-assert.match(permissionToggle, /inline-flex shrink-0/);
+assert.match(permissionToggle, /CHIP_BUTTON_CLASS.*shrink-0/);
 assert.match(permissionToggle, /<span>\{accessMode === "full_access" \? "Full access" : "Project access"\}<\/span>/);
 assert.match(permissionToggle, /disabled=\{locked \|\| !selectedWorker \|\| accessMode !== "full_access" && Boolean\(fullAccessUnavailableReason\)\}/);
 assert.match(permissionToggle, /aria-description=\{accessMode === "full_access" \? undefined : fullAccessUnavailableReason \|\| undefined\}/);
 assert.match(permissionToggle, /<TaskAccessIcon accessMode=\{accessMode\} className="icon-xs shrink-0" \/>/);
 assert.doesNotMatch(permissionToggle, /UtilityBarDropdown|UtilityBarItem|aria-haspopup|aria-expanded/);
-assert.doesNotMatch(permissionToggle, /CHIP_BUTTON_CLASS|title=|name="lock"/);
+assert.doesNotMatch(permissionToggle, /title=|name="lock"/);
 assert.match(agentAccessControl, /label=\{\([\s\S]*?<TaskAccessIcon[\s\S]*?agent\.id === agentPresetId \? accessMode : defaultAccessMode/);
 assert.match(utilityBar, /function TaskAccessIcon[\s\S]*?accessMode === "full_access" \? " text-token-warning" : " text-token-text-tertiary"/);
 assert.match(utilityBar, /function TaskAccessIcon[\s\S]*?\? <FullAccessIcon aria-hidden className=\{resolvedClassName\} \/>[\s\S]*?: <ProjectAccessIcon aria-hidden className=\{resolvedClassName\} \/>/);

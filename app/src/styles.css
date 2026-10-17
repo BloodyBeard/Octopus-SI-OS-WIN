@@ -3844,10 +3844,10 @@
   font-size: var(--ui-font-11_5, 11.5px);
 }
 
-@media (max-width: 1180px) {
+@container surface-page (max-width: 900px) {
   .eventlog-head,
   .eventlog-row-line {
-    grid-template-columns: 88px minmax(130px, 1fr) minmax(190px, 1.5fr) minmax(90px, 0.7fr);
+    grid-template-columns: 80px minmax(0, 1fr) minmax(0, 1.5fr) minmax(0, 0.7fr);
   }
 
   .eventlog-head span:nth-child(5),
@@ -3858,6 +3858,20 @@
   .eventlog-detail {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@container surface-page (max-width: 560px) {
+  .eventlog-head,
+  .eventlog-row-line {
+    grid-template-columns: 68px minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 8px;
+    padding-inline: 10px;
+  }
+
+  .eventlog-head span:nth-child(4),
+  .eventlog-row-line .eventlog-environment { display: none; }
+  .eventlog-route { flex-wrap: wrap; gap: 2px; }
+  .eventlog-route .eventlog-endpoint { flex-basis: 100%; }
 }
 
 /* ------------------------------------------------------------------------- */

@@ -234,6 +234,7 @@ export function QuickTaskWindow({ accessProfile, runtimeReady, runtimeHome }: {
           serviceTier={chat.serviceTier}
           resumeAvailable={chat.resumeAvailable}
           runId={chat.activeRunId}
+          suggestionSourceSequence={chat.activeRun?.lastTerminalMessage?.movementSeq}
           submissionMode={chat.busy ? "queue" : "send"}
           canSteer={chat.canSteer}
           onSteer={chat.steerCurrentTurn}

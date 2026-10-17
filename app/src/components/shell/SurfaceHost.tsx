@@ -50,8 +50,6 @@ export type SurfaceHostProps = {
   voiceSession: VoiceSession;
   homeViewMode: HomeViewMode;
   onHomeViewModeChange?: (mode: HomeViewMode) => void;
-  homeWidgetsOpen?: boolean;
-  onHomeWidgetsOpenChange?: (open: boolean) => void;
   paneRole: "primary" | "secondary";
   paneTabStripVisible?: boolean;
   commandsActive: boolean;
@@ -92,8 +90,6 @@ function SurfaceContent({
   voiceSession,
   homeViewMode,
   onHomeViewModeChange,
-  homeWidgetsOpen = false,
-  onHomeWidgetsOpenChange,
   paneRole,
   paneTabStripVisible = false,
   commandsActive,
@@ -150,7 +146,7 @@ function SurfaceContent({
           query={query}
           searchFocusTick={searchFocusTick}
           title={surface.label}
-          titleInWindowChrome={paneRole === "primary"}
+          titleInWindowChrome={paneRole === "primary" || paneTabStripVisible}
         />
       </Suspense>
     );
@@ -159,7 +155,7 @@ function SurfaceContent({
   return (
     <div className={workspacePanelClass(surface)}>
       <Suspense fallback={surfaceFallback}>
-        {renderSurface(accessProfile, surface, topology, query, searchFocusTick, chatWorkspace, homeRunId, voiceSession, homeViewMode, onHomeViewModeChange, homeWidgetsOpen, onHomeWidgetsOpenChange, paneRole, paneTabStripVisible, commandsActive, onSelect, onOpenFiles, voiceSurfaces, installedVoiceWidgetIds, installedVoiceWidgetsReady, builtinVoiceWidgetSources, workerEnvironmentSurfaces)}
+        {renderSurface(accessProfile, surface, topology, query, searchFocusTick, chatWorkspace, homeRunId, voiceSession, homeViewMode, onHomeViewModeChange, paneRole, paneTabStripVisible, commandsActive, onSelect, onOpenFiles, voiceSurfaces, installedVoiceWidgetIds, installedVoiceWidgetsReady, builtinVoiceWidgetSources, workerEnvironmentSurfaces)}
       </Suspense>
     </div>
   );
@@ -176,8 +172,6 @@ function renderSurface(
   voiceSession: VoiceSession,
   homeViewMode: HomeViewMode,
   onHomeViewModeChange: SurfaceHostProps["onHomeViewModeChange"],
-  homeWidgetsOpen: boolean,
-  onHomeWidgetsOpenChange: SurfaceHostProps["onHomeWidgetsOpenChange"],
   paneRole: "primary" | "secondary",
   paneTabStripVisible: boolean,
   commandsActive: boolean,
@@ -203,7 +197,7 @@ function renderSurface(
     case "builtin.chat":
       return <ChatView commandsActive={commandsActive} composerVisible={chatWorkspace.activeRun?.writable !== false} headerMode={paneRole === "primary" ? "window" : paneTabStripVisible ? "none" : "pane"} onOpenFiles={onOpenFiles} searchFocusTick={searchFocusTick} surfaces={workerEnvironmentSurfaces} topology={topology} workspace={chatWorkspace} />;
     case "builtin.voice":
-      return <HomeSurface accessProfile={accessProfile} commandsActive={commandsActive} homeRunId={homeRunId} voiceSession={voiceSession} homeViewMode={homeViewMode} onHomeViewModeChange={onHomeViewModeChange} homeWidgetsOpen={homeWidgetsOpen} onHomeWidgetsOpenChange={onHomeWidgetsOpenChange} searchFocusTick={searchFocusTick} chatWorkspace={chatWorkspace} onOpenFiles={onOpenFiles} voiceSurfaces={voiceSurfaces} installedVoiceWidgetIds={installedVoiceWidgetIds} installedVoiceWidgetsReady={installedVoiceWidgetsReady} builtinVoiceWidgetSources={builtinVoiceWidgetSources} workerEnvironmentSurfaces={workerEnvironmentSurfaces} topology={topology} />;
+      return <HomeSurface accessProfile={accessProfile} commandsActive={commandsActive} homeRunId={homeRunId} voiceSession={voiceSession} homeViewMode={homeViewMode} onHomeViewModeChange={onHomeViewModeChange} searchFocusTick={searchFocusTick} chatWorkspace={chatWorkspace} onOpenFiles={onOpenFiles} voiceSurfaces={voiceSurfaces} installedVoiceWidgetIds={installedVoiceWidgetIds} installedVoiceWidgetsReady={installedVoiceWidgetsReady} builtinVoiceWidgetSources={builtinVoiceWidgetSources} workerEnvironmentSurfaces={workerEnvironmentSurfaces} topology={topology} />;
     case "builtin.scheduled":
       return <ScheduledView accessProfile={accessProfile} searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} />;
     case "builtin.worker_environments":

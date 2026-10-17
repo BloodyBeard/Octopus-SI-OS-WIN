@@ -95,6 +95,16 @@ enum OutputAdmission {
     Settled { verdict: DeliveryVerdict },
 }
 
+fn retryable_admission(verdict: &DeliveryVerdict) -> bool {
+    match verdict {
+        DeliveryVerdict::Refused { reason: RefusedReason::RegistryUnstable, .. } => true,
+        DeliveryVerdict::Refused { reason: RefusedReason::StaleEpoch, detail } => {
+            detail.get("reason_detail").and_then(serde_json::Value::as_str) == Some("arrival_target_changed")
+        }
+        _ => false,
+    }
+}
+
 enum RecoveryProgress {
     Ready,
     AwaitingLedgerTail,
@@ -341,8 +351,8 @@ impl CompletedOutputs {
                 match &self.outputs[index].admission {
                     OutputAdmission::Settled { verdict: DeliveryVerdict::Admitted { .. } }
                         if callback.is_none() || self.outputs[index].callback_completed => break,
-                    OutputAdmission::Settled { verdict: DeliveryVerdict::Refused { reason, detail } }
-                        if *reason != RefusedReason::RegistryUnstable && (callback.is_none() || self.outputs[index].callback_completed) => {
+                    OutputAdmission::Settled { verdict: verdict @ DeliveryVerdict::Refused { reason, detail } }
+                        if !retryable_admission(verdict) && (callback.is_none() || self.outputs[index].callback_completed) => {
                         refused.get_or_insert((*reason, detail.clone()));
                         break;
                     }
@@ -359,12 +369,12 @@ impl CompletedOutputs {
                 if !matches!(&self.outputs[index].admission, OutputAdmission::Settled { verdict: saved } if *saved == verdict) {
                     return Err("completed-output callback returned without the exact tracked dispatch verdict".into());
                 }
-                let unstable = matches!(verdict, DeliveryVerdict::Refused { reason: RefusedReason::RegistryUnstable, .. });
+                let retry = retryable_admission(&verdict);
                 self.outputs[index].callback_completed = true;
                 self.save(ctx)?;
-                if unstable {
+                if retry {
                     tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err("completed output remains retained while registry admission is unavailable".into()),
+                        _ = ctx.cancel.cancelled() => return Err("completed output remains retained while admission is unavailable".into()),
                         _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
                     }
                 }
@@ -392,8 +402,7 @@ impl CompletedOutputs {
                 }
                 match &output.admission {
                     OutputAdmission::AwaitingVerdict { .. } => return Err("completed output admission has no exact verdict; retained without retry".into()),
-                    OutputAdmission::Settled { verdict } if !matches!(verdict,
-                        DeliveryVerdict::Refused { reason: RefusedReason::RegistryUnstable, .. }) => return Ok(verdict.clone()),
+                    OutputAdmission::Settled { verdict } if !retryable_admission(verdict) => return Ok(verdict.clone()),
                     _ => {}
                 }
                 if owner_ctx.cancel.is_cancelled() { return Err("completed output remains retained while admission is cancelled".into()); }
@@ -474,7 +483,8 @@ impl CompletedOutputs {
                 let DeliveryVerdict::Refused { reason, .. } = &delivery.delivery_verdict else {
                     return Err("retained output refusal carries an admitted verdict".into());
                 };
-                if refused.get(&index).is_some_and(|prior| !matches!(prior, DeliveryVerdict::Refused { reason: prior_reason, .. } if prior_reason == reason)) {
+                if refused.get(&index).is_some_and(|prior| !matches!(prior, DeliveryVerdict::Refused { reason: prior_reason, .. } if prior_reason == reason)
+                    || retryable_admission(prior) != retryable_admission(&delivery.delivery_verdict)) {
                     return Err("retained output attempt has conflicting refused verdicts".into());
                 }
                 refused.entry(index).or_insert_with(|| delivery.delivery_verdict.clone());

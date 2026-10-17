@@ -1599,14 +1599,10 @@ impl Runtime {
         };
         if let Some(expected) = inv.run_record_hash {
             if expected != run_record.hash {
-                return Err(RuntimeError::DescriptorDrift {
-                    reason: RefusedReason::StaleEpoch,
-                    detail: format!(
-                        "run '{}' record changed after its arrival target was resolved: expected hash {}, found {}",
-                        inv.run.as_str(),
-                        expected.to_hex(),
-                        run_record.hash.to_hex()
-                    ),
+                return Err(RuntimeError::ArrivalTargetChanged {
+                    run: inv.run.clone(),
+                    expected,
+                    observed: run_record.hash,
                 });
             }
         }
@@ -2183,6 +2179,12 @@ pub enum RuntimeError {
     UnknownInterface(InterfaceId),
     #[error("interface boundary failed closed: {0}")]
     InterfaceBoundaryFailed(String),
+    #[error("run '{}' record changed after its arrival target was resolved: expected hash {}, found {}", run.as_str(), expected.to_hex(), observed.to_hex())]
+    ArrivalTargetChanged {
+        run: RunId,
+        expected: ContentHash,
+        observed: ContentHash,
+    },
     #[error("delivery refused ({}): {detail}", reason.as_str())]
     DescriptorDrift {
         reason: RefusedReason,
@@ -2198,6 +2200,7 @@ impl RuntimeError {
             RuntimeError::VerifiedArtifactRejected { .. } => RefusedReason::VerificationFailed,
             RuntimeError::UnknownInterface(_) => RefusedReason::UnknownInterface,
             RuntimeError::InterfaceBoundaryFailed(_) => RefusedReason::Policy,
+            RuntimeError::ArrivalTargetChanged { .. } => RefusedReason::StaleEpoch,
             RuntimeError::DescriptorDrift { reason, .. } => *reason,
         }
     }
@@ -2223,6 +2226,13 @@ impl RuntimeError {
             RuntimeError::DescriptorDrift { reason, detail } => serde_json::json!({
                 "message": detail,
                 "reason_detail": reason.as_str(),
+            }),
+            RuntimeError::ArrivalTargetChanged { run, expected, observed } => serde_json::json!({
+                "message": self.to_string(),
+                "reason_detail": "arrival_target_changed",
+                "run": run.as_str(),
+                "expected_run_record_hash": expected.to_hex(),
+                "observed_run_record_hash": observed.to_hex(),
             }),
             RuntimeError::InterfaceBoundaryFailed(message) => serde_json::json!({
                 "message": message,
@@ -3400,6 +3410,17 @@ mod tests {
                 ),
             ])
             .expect("registry generation advances");
+
+        let path = dir.join("r1.json");
+        let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["active_checkpoints"] = serde_json::json!(["c2"]);
+        record["checkpoints"][0]["id"] = serde_json::json!("c2");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let changed = runtime.admit_resolved_interface_checkpoint(&target, artifact.clone(), "turn.input".into()).await.err().unwrap();
+        assert_eq!(changed.refused_reason(), RefusedReason::StaleEpoch);
+        assert_eq!(changed.refusal_detail()["reason_detail"], "arrival_target_changed");
+        let target = runtime.resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &artifact).unwrap().remove(0);
+        assert_eq!(target.checkpoint.as_str(), "c2");
 
         let observation = runtime
             .admit_resolved_interface_checkpoint(&target, artifact, "turn.input".to_string())

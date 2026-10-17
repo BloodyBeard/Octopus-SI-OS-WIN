@@ -31,8 +31,49 @@
 .surface-page .topbar-actions { display: flex; min-width: 0; flex: 0 1 auto; flex-wrap: wrap; margin-left: auto; }
 .surface-page .topbar-filter-button { display: flex; }
 .surface-page .surface-search-field { width: auto; min-width: min(180px, 100%); max-width: 380px; flex: 1 1 200px; }
-.surface-page .eventlog-filters { flex-wrap: wrap; }
-.surface-page .eventlog-count { min-width: 0; white-space: normal; }
+.surface-page > .topbar.is-event-log {
+  padding: 12px 16px;
+}
+
+.surface-page .is-event-log .topbar-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 2fr);
+  align-items: start;
+}
+
+.surface-page .is-event-log .surface-search-field {
+  width: 100%;
+  max-width: none;
+}
+
+.eventlog-toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.surface-page .eventlog-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  flex: 1 1 100%;
+  overflow: visible;
+}
+
+.surface-page .eventlog-filter {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.surface-page .eventlog-filter > span { white-space: nowrap; }
+.surface-page .eventlog-filter select { width: 100%; min-width: 0; max-width: none; }
+.surface-page .eventlog-filters > button { grid-column: 1 / -1; justify-self: start; }
+.surface-page .eventlog-count { min-width: 0; white-space: normal; text-align: right; }
+
+@container surface-page (max-width: 900px) {
+  .surface-page .is-event-log .topbar-row { grid-template-columns: minmax(0, 1fr); }
+}
 
 .surface-page > .workspace-panel,
 .surface-page > .workspace-grid {
@@ -53,11 +94,16 @@
 .surface-page .workspace-grid .inspector { display: flex; }
 
 @container surface-page (max-width: 680px) {
-  .surface-page > .topbar { gap: 8px; padding: 12px; }
+  .surface-page > .topbar,
+  .surface-page > .topbar.is-event-log { gap: 8px; padding: 12px; }
   .surface-page .topbar-row { flex-basis: 100%; }
   .surface-page .topbar-actions { width: 100%; justify-content: flex-end; }
   .surface-page > .workspace-panel,
   .surface-page > .workspace-grid { margin: 0 12px 12px; }
   .surface-page > .workspace-panel.is-chat,
   .surface-page > .workspace-panel.is-immersive { margin: 0; }
+}
+
+@container surface-page (max-width: 560px) {
+  .surface-page .eventlog-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

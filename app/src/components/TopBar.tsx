@@ -14,6 +14,7 @@ import {
 } from "../uiState";
 
 type Props = {
+  className?: string;
   accessProfile: OctopusClientAccessProfile;
   inspectorOpen?: boolean;
   title: string;
@@ -35,6 +36,7 @@ type Props = {
 };
 
 export function TopBar({
+  className = "",
   accessProfile,
   inspectorOpen = true,
   title,
@@ -73,7 +75,7 @@ export function TopBar({
   }
 
   return (
-    <header className={`topbar${dashboardMode ? "" : " is-wide"}${titleInWindowChrome ? " is-window-titled" : ""}`}>
+    <header className={`topbar${dashboardMode ? "" : " is-wide"}${titleInWindowChrome ? " is-window-titled" : ""} ${className}`}>
       <div aria-hidden={titleInWindowChrome || undefined} className="topbar-title">{title}</div>
       <div className="topbar-row">
         <SurfaceSearchBox

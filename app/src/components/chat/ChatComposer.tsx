@@ -44,6 +44,7 @@ type Props = {
   driverNames?: string[];
   eeId?: string;
   runId?: string;
+  suggestionSourceSequence?: number;
   workerEnvironmentRooms?: ChatWorkerEnvironmentRoom[];
   workerInterfaceId?: string;
   executionContextLocked?: boolean;
@@ -113,6 +114,7 @@ export function ChatComposer({
   driverNames,
   eeId,
   runId,
+  suggestionSourceSequence,
   workerEnvironmentRooms,
   workerInterfaceId,
   executionContextLocked,
@@ -190,7 +192,7 @@ export function ChatComposer({
     },
   });
   const voiceLayoutActive = dictation.isDictating || dictation.isTranscribing;
-  const suggestion = useComposerSuggestion(runId ?? "", accessProfile === "live"
+  const suggestion = useComposerSuggestion(runId ?? "", suggestionSourceSequence, accessProfile === "live"
     && activeProvider?.runtimeHandlerRef === "codex_app_server" && !turnOpen && !isSubmitting
     && !editingQueuedTurn && !voiceLayoutActive);
   const hasSubmissionPayload = Boolean(text.trim() || attachments.length);

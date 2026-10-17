@@ -180,8 +180,10 @@ async fn completed_output_legacy_unknown_requires_positive_owner_proof_after_com
 
 #[tokio::test]
 async fn completed_outputs_survive_transient_refusal_and_cold_broker_recovery_without_effect_replay() {
-    for (reason, cancelled_before_save) in [(RefusedReason::RegistryUnstable, true), (RefusedReason::RegistryUnstable, false),
-        (RefusedReason::Policy, false), (RefusedReason::Malformed, false)] {
+    for (reason, cancelled_before_save, target_changed) in [(RefusedReason::RegistryUnstable, true, false), (RefusedReason::RegistryUnstable, false, false),
+        (RefusedReason::StaleEpoch, false, true), (RefusedReason::StaleEpoch, false, false),
+        (RefusedReason::Policy, false, false), (RefusedReason::Malformed, false, false), (RefusedReason::CheckpointSpent, false, false)] {
+        let retryable = reason == RefusedReason::RegistryUnstable || target_changed;
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let (ctx, input, completion, mut arrivals, source) = completed_fixture(&root, 1).await;
@@ -201,8 +203,10 @@ async fn completed_outputs_survive_transient_refusal_and_cold_broker_recovery_wi
         } else {
             let first = tokio::select! { output=arrivals.recv()=>output.unwrap(), _=&mut hot=>panic!("completion ended before hand-in") };
             assert!(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().is_some());
-            first.verdict_tx.unwrap().send(DeliveryVerdict::Refused {reason, detail:serde_json::json!({"test":"refusal"})}).unwrap();
-            if reason == RefusedReason::RegistryUnstable {
+            let verdict = DeliveryVerdict::Refused {reason, detail:serde_json::json!({"reason_detail":
+                if target_changed { "arrival_target_changed" } else { reason.as_str() }})};
+            first.verdict_tx.unwrap().send(verdict.clone()).unwrap();
+            if retryable {
                 tokio::time::timeout(std::time::Duration::from_secs(3), async {
                     loop {
                         tokio::select! {
@@ -213,6 +217,15 @@ async fn completed_outputs_survive_transient_refusal_and_cold_broker_recovery_wi
                         if receipt["outputs"][0]["admission"]["state"] == "settled" { break; }
                     }
                 }).await.unwrap();
+                if target_changed {
+                    let retry = tokio::select! { output=arrivals.recv()=>output.unwrap(), _=&mut hot=>panic!("changed target terminated delivery") };
+                    assert_eq!(retry.artifact.manifest_path(), expected_path);
+                    assert_eq!(retry.artifact.read_payload_bytes().unwrap(), expected_bytes);
+                    let mut refusal = completed_refusal(&ctx, &retry.artifact, 1, reason);
+                    refusal.invocation_metadata = Some(verdict.clone().into());
+                    write_recovery_ledger(&root, &[source.clone(), refusal]);
+                    retry.verdict_tx.unwrap().send(verdict).unwrap();
+                }
                 ctx.cancel.cancel();
                 assert!(matches!(hot.await, ToolProcessBrokerResult::OutputPending { .. }));
             } else {
@@ -231,7 +244,7 @@ async fn completed_outputs_survive_transient_refusal_and_cold_broker_recovery_wi
         let host = Arc::new(ToolProcessBrokerHost::new(owner.clone()).unwrap());
         let cold = tool_door_loop(&ctx, &owner, host.clone(), default_tool_door_artifact_decoder);
         tokio::pin!(cold);
-        if reason == RefusedReason::RegistryUnstable {
+        if retryable {
             let output = tokio::select! { output=arrivals.recv()=>output.unwrap(), result=&mut cold=>panic!("cold recovery failed: {result:?}") };
             assert_eq!(output.artifact.manifest_path(), expected_path);
             assert_eq!(output.artifact.read_payload_bytes().unwrap(), expected_bytes);
