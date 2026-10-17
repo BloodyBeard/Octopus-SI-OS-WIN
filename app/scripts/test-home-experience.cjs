@@ -23,7 +23,7 @@ const motion = new Proxy({}, { get: (_, tag) => {
   if (!motionNodes.has(tag)) motionNodes.set(tag, React.forwardRef(({ animate, exit, initial, transition, layout, onAnimationComplete, children, ...props }, ref) => {
     const node = React.useRef(null);
     React.useImperativeHandle(ref, () => node.current);
-    React.useLayoutEffect(() => { motionState.set(node.current, { animate, transition, onAnimationComplete }); });
+    React.useLayoutEffect(() => { motionState.set(node.current, { initial, animate, transition, onAnimationComplete }); });
     return React.createElement(tag, { ...props, ref: node }, children);
   }));
   return motionNodes.get(tag);
@@ -521,10 +521,9 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
   const installedProps = { ...props, installedWidgetIds: [...props.installedWidgetIds, addedWidget.document.id], surfaces: [...surfaces, addedWidget] };
   try {
     assert.ok(resumed.container.querySelector('[data-widget="Installed extension"]'));
-    assert.equal(orbProps.ambient, true);
-    const fade = motionState.get(resumed.container.querySelector(".home-response-stage__body"));
-    await act(async () => fade.onAnimationComplete({ opacity: 0 }));
     assert.equal(orbProps.ambient, false);
+    const fade = motionState.get(resumed.container.querySelector(".home-response-stage__body"));
+    assert.deepEqual([fade.initial.opacity, fade.animate.opacity], [0, 0]);
     await resumed.render(installedProps);
     assert.equal(resumed.container.querySelector('[data-widget="Newly installed extension"]'), null);
     assert.equal(button(resumed.container, "Newly installed extension").getAttribute("aria-checked"), "false");

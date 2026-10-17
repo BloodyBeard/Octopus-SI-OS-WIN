@@ -7807,7 +7807,7 @@ function createProjectionStore(options) {
     const outcomeIndex = includeLedger ? requiredVerifiedArtifactOutcomeIndex(projection) : new Map();
     const recordByRun = new Map(arrayValue(projection.runRecords).map((record) => [record.run_id, record]));
     const bindings = bindingRows(projection);
-    const artifacts = includeLedger ? artifactRows(projection).map(withoutRawProjectionEvidence) : [];
+    const artifacts = includeLedger ? artifactRows(projection).map(topologyArtifactRow) : [];
     const marks = includeLedger ? markRows(projection).map(withoutRawProjectionEvidence) : [];
     const envelopes = includeLedger ? envelopeRows(projection) : [];
     const bindingsByRun = groupRowsBy(bindings, "run_id");
@@ -14343,6 +14343,25 @@ function contentHashHex(content) {
   return content.map((byte) => (Number(byte) & 0xff).toString(16).padStart(2, "0")).join("");
 }
 
+function topologyArtifactRow(row) {
+  const fields = [
+    "artifact_id", "id", "name", "label", "artifact_label", "route_label", "status",
+    "run_id", "ee_id", "recorded_at_unix_ms", "created_at_unix_ms", "ts_unix_ms",
+    "created_at", "ts", "time",
+  ];
+  const projected = {};
+  for (const field of fields) {
+    if (Object.hasOwn(row, field)) projected[field] = row[field];
+  }
+  if (row.meta && typeof row.meta === "object" && !Array.isArray(row.meta)) {
+    projected.meta = {};
+    for (const field of ["run_id", "ee_id"]) {
+      if (Object.hasOwn(row.meta, field)) projected.meta[field] = row.meta[field];
+    }
+  }
+  return projected;
+}
+
 function limitRows(rows, params) {
   const limit = numberValue(params?.limit, rows.length);
   if (!limit || limit < 0) return rows;
@@ -14698,6 +14717,7 @@ function safeInterfacePathSegment(value) {
 
 module.exports = {
   nativeTurnRecordedInputs,
+  topologyArtifactRow,
   createProjectionStore,
   mutateApplicationPrivateConfiguration,
   mutateOctopusOsWorkspace,

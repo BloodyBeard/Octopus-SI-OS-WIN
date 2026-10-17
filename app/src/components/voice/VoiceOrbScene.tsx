@@ -62,7 +62,7 @@ const MAX_RENDER_PIXEL_RATIO = 2;
 const FRAME_INTERVAL_MS = 1000 / 30;
 const ACTIVE_FRAME_INTERVAL_MS = 1000 / 60;
 const RIPPLE_COUNT = 6;
-const RIPPLE_LIFE_SECONDS = 2.4;
+const RIPPLE_LIFE_SECONDS = 1.8;
 const FORM_COUNT = 4;
 const FORM_LIFE_SECONDS = 0.9;
 const RIPPLE_IGNORED_TARGETS = ".chat-composer, button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
@@ -219,7 +219,7 @@ void rippleAt(vec2 pixel, float shortestSide, out float wake, out float crest) {
     if (ripple.w <= 0.0 || age < 0.0 || age > ${RIPPLE_LIFE_SECONDS.toFixed(2)}) continue;
     vec2 farthestCorner = max(ripple.xy, u_resolution - ripple.xy);
     float field = length(farthestCorner) / shortestSide;
-    float travelled = (1.0 - exp(-age * 1.4)) * field * 1.08;
+    float travelled = (1.0 - exp(-age * (1.4 / 1.5))) * field * 1.08;
     float distanceFromSource = length(pixel - ripple.xy) / shortestSide;
     float behind = travelled - distanceFromSource;
     float leadingEdge = smoothstep(-0.014, 0.0, behind);

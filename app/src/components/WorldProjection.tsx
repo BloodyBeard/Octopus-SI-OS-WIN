@@ -248,7 +248,7 @@ function WorldArtifactTransfers({ feed, interfaces, runs, worldDots }: {
     () => worldArtifactTrajectories(transfers, runs, worldDots, interfaces),
     [interfaces, runs, transfers, worldDots],
   );
-  return <ArtifactTransferSegments transfers={transfers} resolve={resolve} onPresent={feed.present} />;
+  return <ArtifactTransferSegments transfers={transfers} resolve={resolve} presentation={feed.presentation} onPresent={feed.present} />;
 }
 
 type TransferRunPoint = {

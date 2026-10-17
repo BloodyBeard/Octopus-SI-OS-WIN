@@ -54,6 +54,17 @@ test("topology retains ordered joins, focused details, refusal rows and input da
   assert.ok(result.eventLog.some(row => row.kind === "DeliveryRefused" && row.tone === "amber"));
   assert.ok(result.projection.detail.includes("retained warning"));
   assert.equal(project({ ...payload, eeRaw: {} }).environments.length, 0);
+  const { topologyArtifactRow } = require("../electron/projection.cjs");
+  const heavy = Object.fromEntries(["routes", "module_source", "source_content", "text", "operations", "authoring"].map(key => [key, "payload".repeat(256)]));
+  payload.artifactsRaw.artifacts.push(...["recorded_at_unix_ms", "created_at_unix_ms", "ts_unix_ms", "created_at", "ts", "time"].map(field => ({ name: field, route_label: "metadata", meta: { run_id: "run-0", ee_id: "ee-1", ...heavy }, [field]: "2026-10-17T00:00:00Z" })));
+  for (const rows of [payload.artifactsRaw, payload.runDetailsRaw["run-0"].detail]) rows.artifacts = rows.artifacts.map((row, index) => ({ ...row, ...heavy, label: `label-${index}` }));
+  const full = JSON.stringify(payload), compact = structuredClone(payload);
+  for (const rows of [compact.artifactsRaw, compact.runDetailsRaw["run-0"].detail]) rows.artifacts = rows.artifacts.map(topologyArtifactRow);
+  assert.deepEqual(project(compact), project(payload));
+  assert.equal(JSON.stringify(payload), full);
+  const beforeBytes = Buffer.byteLength(JSON.stringify(payload.artifactsRaw)), afterBytes = Buffer.byteLength(JSON.stringify(compact.artifactsRaw));
+  assert.ok(afterBytes < beforeBytes / 10);
+  console.log(JSON.stringify({ name: "topology-artifact-summary-payload", equivalentOutput: true, beforeBytes, afterBytes }));
 });
 
 test("60 voice parent updates preserve topology output and skip unrelated stage renders", async () => {
@@ -120,7 +131,7 @@ test("120 transfer frames retain every visible segment without React frame commi
     const root = createRoot(document.getElementById("root")), rendered = [];
     try {
       await React.act(async () => root.render(React.createElement(React.Profiler, { id: "frames", onRender: () => commits++ },
-        React.createElement("svg", null, React.createElement(module.exports.ArtifactTransferSegments, { transfers, resolve, onPresent() {} })))));
+        React.createElement("svg", null, React.createElement(module.exports.ArtifactTransferSegments, { transfers, resolve, presentation() {}, onPresent() {} })))));
       const initialCommits = commits, start = performance.now();
       for (let frame = 1; frame <= 120; frame++) {
         now = 1000 + frame * 1000 / 60;

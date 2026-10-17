@@ -8,6 +8,7 @@ export const ARTIFACT_TRANSFER_DURATION_MS = 500;
 export const ARTIFACT_TRANSFER_GAP_MS = 300;
 export const ARTIFACT_TRANSFER_PATH_LIMIT = 48;
 const TRANSFER_KINDS = ["ArtifactMoved", "InterfaceArrival", "InterfaceOutbound"];
+const MAX_TRANSFER_FRAME_MS = ARTIFACT_TRANSFER_DURATION_MS / 2;
 
 export type ArtifactTransfer = {
   id: string;
@@ -25,8 +26,9 @@ export type ArtifactTransfer = {
 
 export type TransferPoint = { x: number; y: number };
 export type TransferTrajectory = { transfer: ArtifactTransfer; points: TransferPoint[] };
+type TransferPresentation = { startedAt: number; updatedAt: number; completedAt?: number };
 
-export function scheduleArtifactTransfers(current: ArtifactTransfer[], batch: Omit<ArtifactTransfer, "startedAt">[], now: number, presented: ReadonlyMap<number, number>): ArtifactTransfer[] {
+export function scheduleArtifactTransfers(current: ArtifactTransfer[], batch: Omit<ArtifactTransfer, "startedAt">[], now: number, presented: ReadonlyMap<number, TransferPresentation>): ArtifactTransfer[] {
   type PendingTransfer = Omit<ArtifactTransfer, "startedAt">;
   type Path = { anchor?: ArtifactTransfer; pending: Map<string, PendingTransfer>; lastSequence: number };
   const paths = new Map<string, Path>();
@@ -56,9 +58,12 @@ export function scheduleArtifactTransfers(current: ArtifactTransfer[], batch: Om
     });
   };
   for (const transfer of current) {
-    const startedAt = presented.get(transfer.sequence);
-    if (startedAt === undefined) coalesce(transfer);
-    else if (now < startedAt + interval) pathFor(transfer).anchor = { ...transfer, startedAt };
+    const presentation = presented.get(transfer.sequence);
+    if (!presentation) coalesce(transfer);
+    else if (presentation.completedAt === undefined || now < presentation.completedAt + ARTIFACT_TRANSFER_GAP_MS) {
+      pathFor(transfer).anchor = { ...transfer, startedAt: presentation.completedAt === undefined
+        ? presentation.startedAt : presentation.completedAt - ARTIFACT_TRANSFER_DURATION_MS };
+    }
   }
   for (const transfer of batch) coalesce(transfer);
   return [...paths.values()]
@@ -137,7 +142,8 @@ export async function readArtifactTransferBatch(cursor: number | null) {
 export type ArtifactTransferFeed = {
   snapshot: () => ArtifactTransfer[];
   subscribe: (listener: () => void) => () => void;
-  present: (sequence: number, startedAt: number) => void;
+  presentation: (sequence: number) => TransferPresentation | undefined;
+  present: (sequence: number, presentation: TransferPresentation) => void;
 };
 
 type ArtifactTransferStore = ArtifactTransferFeed & {
@@ -150,11 +156,13 @@ const NO_TRANSFERS: ArtifactTransfer[] = [];
 function createArtifactTransferStore(): ArtifactTransferStore {
   let transfers = NO_TRANSFERS;
   const listeners = new Set<() => void>();
-  const presented = new Map<number, number>();
+  const presented = new Map<number, TransferPresentation>();
   const store: ArtifactTransferStore = {
     snapshot: () => transfers,
-    present: (sequence, startedAt) => {
-      if (!presented.has(sequence) && transfers.some((transfer) => transfer.sequence === sequence)) presented.set(sequence, startedAt);
+    presentation: (sequence) => presented.get(sequence),
+    present: (sequence, presentation) => {
+      if (presented.get(sequence)?.completedAt !== undefined) return;
+      if (transfers.some((transfer) => transfer.sequence === sequence)) presented.set(sequence, presentation);
     },
     subscribe: (listener) => {
       listeners.add(listener);
@@ -254,15 +262,16 @@ export function transferSegment(points: TransferPoint[], progress: number) {
   return segment.length > 1 ? segment : null;
 }
 
-export function ArtifactTransferSegments({ transfers, resolve, onPresent, container }: {
+export function ArtifactTransferSegments({ transfers, resolve, presentation, onPresent, container }: {
   transfers: ArtifactTransfer[];
   resolve: () => TransferTrajectory[];
+  presentation: ArtifactTransferFeed["presentation"];
   onPresent: ArtifactTransferFeed["present"];
   container?: HTMLElement | null;
 }) {
   const prefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const layer = useRef<SVGGElement>(null);
-  const playback = useRef(new Map<number, { startedAt: number; shown: boolean }>());
+  const playback = useRef(new Map<number, { startedAt: number; updatedAt: number; shown: boolean; completed: boolean }>());
   const [trajectories, setTrajectories] = useState<TransferTrajectory[]>([]);
   useLayoutEffect(() => {
     setTrajectories(resolve());
@@ -301,10 +310,17 @@ export function ArtifactTransferSegments({ transfers, resolve, onPresent, contai
     }
     const paths = layer.current!.querySelectorAll<SVGPathElement>(".artifact-transfer-segment");
     const gradients = layer.current!.querySelectorAll<SVGLinearGradientElement>("linearGradient");
+    const mountedAt = window.performance.now();
     const nodes = trajectories.map(({ transfer, points }, index) => {
       let clock = playback.current.get(transfer.sequence);
       if (!clock) {
-        clock = { startedAt: transfer.startedAt, shown: false };
+        const retained = presentation(transfer.sequence);
+        clock = {
+          startedAt: retained?.startedAt ?? Math.max(transfer.startedAt, mountedAt),
+          updatedAt: retained?.updatedAt ?? mountedAt,
+          shown: retained !== undefined,
+          completed: retained?.completedAt !== undefined,
+        };
         playback.current.set(transfer.sequence, clock);
       }
       return { transfer, points, clock, path: paths[index], gradient: gradients[index],
@@ -313,33 +329,39 @@ export function ArtifactTransferSegments({ transfers, resolve, onPresent, contai
       && (point.x !== points[index - 1].x || point.y !== points[index - 1].y)))
       .sort((left, right) => left.transfer.startedAt - right.transfer.startedAt || left.transfer.sequence - right.transfer.sequence);
     let request = 0;
-    const draw = () => {
+    const draw = (advance: boolean) => {
       const time = window.performance.now();
       const pathEnds = new Map<string, number>();
       let pending = false;
       for (const { transfer, points, clock, path, gradient, key } of nodes) {
-        if (!clock.shown) {
-          clock.startedAt = Math.max(clock.startedAt, pathEnds.get(key) ?? clock.startedAt);
-          if (time >= clock.startedAt + ARTIFACT_TRANSFER_DURATION_MS) clock.startedAt = time;
+        if (advance && !clock.completed) {
+          if (!clock.shown) clock.startedAt = Math.max(clock.startedAt, pathEnds.get(key) ?? clock.startedAt);
+          const elapsed = Math.max(0, time - Math.max(clock.updatedAt, clock.startedAt));
+          clock.startedAt += Math.max(0, elapsed - MAX_TRANSFER_FRAME_MS);
+          clock.updatedAt = time;
+          clock.completed = time >= clock.startedAt + ARTIFACT_TRANSFER_DURATION_MS;
         }
-        pathEnds.set(key, clock.startedAt + ARTIFACT_TRANSFER_DURATION_MS + ARTIFACT_TRANSFER_GAP_MS);
-        const segment = transferSegment(points, (time - clock.startedAt) / ARTIFACT_TRANSFER_DURATION_MS);
+        pathEnds.set(key, (clock.completed ? clock.updatedAt : clock.startedAt + ARTIFACT_TRANSFER_DURATION_MS) + ARTIFACT_TRANSFER_GAP_MS);
+        const segment = transferSegment(points, (clock.updatedAt - clock.startedAt) / ARTIFACT_TRANSFER_DURATION_MS);
         path.setAttribute("d", segment ? segment.map((point, index) => `${index ? "L" : "M"}${point.x},${point.y}`).join(" ") : "");
         if (segment) {
-          if (!clock.shown) onPresent(transfer.sequence, clock.startedAt);
+          onPresent(transfer.sequence, { startedAt: clock.startedAt, updatedAt: clock.updatedAt });
           clock.shown = true;
           gradient.setAttribute("x1", String(segment[0].x));
           gradient.setAttribute("y1", String(segment[0].y));
           gradient.setAttribute("x2", String(segment.at(-1)!.x));
           gradient.setAttribute("y2", String(segment.at(-1)!.y));
         }
-        pending ||= time < clock.startedAt + ARTIFACT_TRANSFER_DURATION_MS;
+        if (clock.completed && clock.shown) onPresent(transfer.sequence, {
+          startedAt: clock.startedAt, updatedAt: clock.updatedAt, completedAt: clock.updatedAt,
+        });
+        pending ||= !clock.completed;
       }
-      if (pending) request = window.requestAnimationFrame(draw);
+      if (pending) request = window.requestAnimationFrame(() => draw(true));
     };
-    draw();
+    draw(false);
     return () => { if (request) window.cancelAnimationFrame(request); };
-  }, [onPresent, trajectories, transfers]);
+  }, [onPresent, presentation, trajectories, transfers]);
   return (
     <g className="artifact-transfer-animations" aria-hidden="true" ref={layer}>
       <defs>
@@ -406,7 +428,7 @@ export function SystemArtifactTransfers({ container, feed, interfaces }: {
   }, [container, interfaces, transfers]);
   return transfers.length ? (
     <svg className="system-transfer-layer" aria-hidden="true">
-      <ArtifactTransferSegments transfers={transfers} resolve={resolve} onPresent={feed.present} container={container} />
+      <ArtifactTransferSegments transfers={transfers} resolve={resolve} presentation={feed.presentation} onPresent={feed.present} container={container} />
     </svg>
   ) : null;
 }

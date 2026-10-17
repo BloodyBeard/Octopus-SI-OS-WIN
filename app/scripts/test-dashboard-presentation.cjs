@@ -45,9 +45,11 @@ test("live transfer pages retain exact ledger order and pace later batches witho
   assert.deepEqual(scheduled.map((row) => [row.startedAt, row.movementCount, row.firstSequence, row.lastSequence]), [[1000, 3, 10, 12], [1800, 1, 14, 14]]);
   for (const row of scheduled) assert.deepEqual(Object.fromEntries(Object.keys(batch.transfers[0]).map((key) => [key, row[key]])), batch.transfers.find((item) => item.sequence === row.sequence));
   const next = { ...batch.transfers.at(-1), sequence: 16, id: "movement-16" };
-  const presented = new Map(scheduled.map(row => [row.sequence, row.startedAt]));
+  const presented = new Map(scheduled.map(row => [row.sequence, { startedAt: row.startedAt, updatedAt: row.startedAt + 500, completedAt: row.startedAt + 500 }]));
   assert.equal(animation.scheduleArtifactTransfers(scheduled, [next], 2000, presented).at(-1).startedAt, 2600);
   assert.equal(animation.scheduleArtifactTransfers(scheduled, [next], 5000, presented)[0].startedAt, 5000);
+  presented.set(scheduled[0].sequence, { startedAt: scheduled[0].startedAt, updatedAt: scheduled[0].startedAt });
+  assert.ok(animation.scheduleArtifactTransfers(scheduled, [next], 5000, presented).some(row => row.sequence === scheduled[0].sequence));
   assert.equal(JSON.stringify(batch.transfers).includes("startedAt"), false);
   assert.equal(JSON.stringify(rows), original);
   pages.push({ next_seq: 15, movements: [] });
@@ -65,7 +67,7 @@ test("System transfer geometry follows layout changes and refuses ambiguous anch
   window.HTMLElement.prototype.getBoundingClientRect = function () { return { x: this.dataset.projectionInterface === "b" ? right : 0, y: 0, width: 10, height: 10 }; };
   const animation = load("src/components/ArtifactTransferAnimation.tsx", { "../projectionClient": {}, "../projectionLive": {} });
   const transfers = [{ id: "geometry", sequence: 1, from: "a", to: "b", runId: "run", checkpointId: "checkpoint", startedAt: now }];
-  const feed = { snapshot: () => transfers, subscribe: () => () => {}, present() {} }, interfaces = { a: { type: "system", descriptor: { role: "worker" } }, b: { type: "system", descriptor: {} } };
+  const feed = { snapshot: () => transfers, subscribe: () => () => {}, presentation() {}, present() {} }, interfaces = { a: { type: "system", descriptor: { role: "worker" } }, b: { type: "system", descriptor: {} } };
   const frame = async time => { now = time; await React.act(async () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(time)); }); };
   try {
     await React.act(async () => root.render(React.createElement(animation.SystemArtifactTransfers, { container: surface, feed, interfaces })));
@@ -103,7 +105,7 @@ test("sustained bursts bound memory and lag while unrelated paths run together a
       page = { next_seq: (tick + 1) * 100, movements: rows };
       await React.act(async () => changed());
       const presented = displayed.transfers.find(row => row.startedAt <= now && now < row.startedAt + 500);
-      if (presented) feed.present(presented.sequence, presented.startedAt);
+      if (presented) feed.present(presented.sequence, { startedAt: presented.startedAt, updatedAt: presented.startedAt + 500, completedAt: presented.startedAt + 500 });
       assert.equal(displayed.error, "");
       assert.ok(displayed.transfers.length <= 3);
       assert.ok(displayed.transfers.every((row) => row.startedAt <= now + 1600));
@@ -127,7 +129,7 @@ test("sustained bursts bound memory and lag while unrelated paths run together a
 test("real feeds retain unseen anchor transfers independently per pane, expire seen bursts and dispose", async () => {
   const dom = new JSDOM('<div id="seen"><div data-run-id="run"><b data-projection-interface="a" data-projection-anchor="worker"></b><b data-projection-interface="b" data-projection-checkpoint="checkpoint"></b></div><div id="root-seen"></div></div><div id="unseen"><div id="root-unseen"></div></div>');
   Object.assign(globalThis, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
-  let now = 1000, next = 0, page = { next_seq: 0, movements: [] };
+  let now = 1000, next = 0, renderer = 0, page = { next_seq: 0, movements: [] };
   const frames = new Map(), listeners = new Set(), feeds = {}, errors = {};
   Object.defineProperty(window.performance, "now", { value: () => now });
   window.requestAnimationFrame = fn => { frames.set(++next, fn); return next; }; window.cancelAnimationFrame = id => frames.delete(id);
@@ -138,7 +140,7 @@ test("real feeds retain unseen anchor transfers independently per pane, expire s
     "../projectionLive": { subscribeProjectionChanges: fn => { listeners.add(fn); return () => listeners.delete(fn); } },
   });
   const interfaces = { a: { type: "system", descriptor: { role: "worker" } }, b: { type: "system", descriptor: {} } };
-  function Pane({ id }) { const current = animation.useArtifactTransferFeed({ mode: "live", endpoint: "fixture" }); feeds[id] = current.feed; errors[id] = current.error; return React.createElement(animation.SystemArtifactTransfers, { container: document.getElementById(id), feed: current.feed, interfaces }); }
+  function Pane({ id }) { const current = animation.useArtifactTransferFeed({ mode: "live", endpoint: "fixture" }); feeds[id] = current.feed; errors[id] = current.error; return React.createElement(animation.SystemArtifactTransfers, { container: document.getElementById(id), feed: current.feed, interfaces, key: renderer }); }
   const roots = ["seen", "unseen"].map(id => [id, createRoot(document.getElementById(`root-${id}`))]);
   const notify = async () => React.act(async () => { for (const fn of [...listeners]) fn(); });
   const frame = async time => { now = time; await React.act(async () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(now)); }); };
@@ -146,13 +148,20 @@ test("real feeds retain unseen anchor transfers independently per pane, expire s
     await React.act(async () => { for (const [id, root] of roots) root.render(React.createElement(Pane, { id })); });
     page = { next_seq: 1, movements: [movement(0)] }; await notify(); await frame(1250);
     assert.ok(document.querySelector('#seen [data-movement-id="movement-0"]').getAttribute("d"));
+    await frame(1500);
+    const completed = feeds.seen.presentation(0);
+    now = 1550; renderer++;
+    await React.act(async () => roots[0][1].render(React.createElement(Pane, { id: "seen" })));
+    await frame(1600); assert.equal(document.querySelector('#seen [data-movement-id="movement-0"]').getAttribute("d"), "");
+    feeds.seen.present(0, { startedAt: 1550, updatedAt: 1600 }); assert.deepEqual(feeds.seen.presentation(0), completed);
     now = 2000; page = { next_seq: 2, movements: [movement(1, "c", "d")] }; await notify();
     assert.ok(!feeds.seen.snapshot().some(row => row.sequence === 0));
     assert.ok(feeds.unseen.snapshot().some(row => row.sequence === 0));
     await React.act(async () => document.getElementById("unseen").prepend(document.querySelector('#seen [data-run-id="run"]').cloneNode(true)));
-    await frame(2250);
+    await frame(2250); await frame(2300);
     const rendered = document.querySelector('#unseen [data-movement-id="movement-0"]');
     assert.ok(rendered.getAttribute("d")); assert.equal(rendered.dataset.firstSequence, "0");
+    await frame(2500); await frame(2750);
     now = 3100; page = { next_seq: 3, movements: [movement(2, "c", "d")] }; await notify();
     assert.ok(!feeds.unseen.snapshot().some(row => row.sequence === 0));
     assert.deepEqual(errors, { seen: "", unseen: "" });
@@ -187,27 +196,38 @@ test("request and return with distinct checkpoint traces have a visible gap and 
   const resolve = () => transfers.map((transfer) => ({ transfer, points: transfer.from === provider
     ? [{ x: 0, y: 0 }, { x: 100, y: 0 }] : [{ x: 100, y: 0 }, { x: 0, y: 0 }] }));
   const ids = () => [...document.querySelectorAll('.artifact-transfer-segment[d]:not([d=""])')].map((node) => node.dataset.movementId);
-  const frame = async (at) => {
-    now = at;
-    await React.act(async () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach((callback) => callback(at)); });
+  const frame = async (at, step = 16) => {
+    while (now < at) {
+      now = Math.min(at, now + step);
+      await React.act(async () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach((callback) => callback(now)); });
+    }
   };
   try {
     let commits = 0;
     const render = (transfers, resolve) => React.createElement(React.Profiler, { id: "transfers", onRender: () => commits++ },
-      React.createElement("svg", null, React.createElement(animation.ArtifactTransferSegments, { transfers, resolve, onPresent() {} })));
+      React.createElement("svg", null, React.createElement(animation.ArtifactTransferSegments, { transfers, resolve, presentation() {}, onPresent() {} })));
     await React.act(async () => root.render(render(transfers, resolve)));
+    now = 1100; await React.act(async () => root.render(render(transfers, () => resolve())));
+    now = 1200; await React.act(async () => root.render(render(transfers, () => resolve())));
+    assert.deepEqual(ids(), [], "layout redraws cannot advance playback before RAF");
     const initialCommits = commits;
     await frame(1250); assert.deepEqual(ids(), ["movement-2260"]);
     await frame(1650); assert.deepEqual(ids(), []); assert.equal(frames.size, 1);
     await frame(2050); assert.deepEqual(ids(), ["movement-2275"]);
-    await frame(2301); assert.deepEqual(ids(), []); assert.equal(frames.size, 0);
+    await frame(2317); assert.deepEqual(ids(), []); assert.equal(frames.size, 0);
     assert.equal(commits, initialCommits, "animation frames must not commit React renders");
     const delayed = [{ ...transfers[0], sequence: 3000, id: "delayed", startedAt: 1000 }];
     now = 4000;
     await React.act(async () => root.render(render(delayed, () => [{ transfer: delayed[0], points: [{ x: 0, y: 0 }, { x: 100, y: 0 }] }])));
-    await frame(4250); assert.deepEqual(ids(), ["delayed"]);
+    await frame(4600, 600); assert.deepEqual(ids(), ["delayed"], "a stalled frame must paint instead of restarting at zero");
     assert.equal(document.querySelector('[data-movement-id="delayed"]').dataset.firstSequence, String(transfers[0].firstSequence));
-    await frame(4501); assert.deepEqual(ids(), []); assert.equal(frames.size, 0);
+    await frame(4901); assert.deepEqual(ids(), []); assert.equal(frames.size, 0);
+    now = 6000;
+    const stalled = transfers.map((transfer, i) => ({ ...transfer, sequence: 4000 + i, id: `stalled-${i}`, startedAt: 6000 + i * 800 }));
+    await React.act(async () => root.render(render(stalled, () => stalled.map(transfer => ({ transfer, points: [{ x: 0, y: 0 }, { x: 100, y: 0 }] })))));
+    await frame(6100, 100); await frame(6700, 600); await frame(7300, 600);
+    await frame(7516); assert.deepEqual(ids(), [], "the gap starts at actual completion even after an overshooting frame");
+    await frame(7616); assert.deepEqual(ids(), ["stalled-1"]);
     await React.act(async () => root.render(render([], () => [])));
     assert.equal(frames.size, 0);
   } finally { await React.act(async () => root.unmount()); dom.window.close(); }

@@ -212,7 +212,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const callActiveRef = useRef(callActive);
   callActiveRef.current = callActive;
   const callState = voicePresentation(session.phase);
-  const [callSceneReady, setCallSceneReady] = useState(false);
+  const [callSceneReady, setCallSceneReady] = useState(callActive);
   const replyHidden = callActive || callSceneReady;
   const voiceStartDisabledReason = !homeRunId
     ? "Home is not available yet."
@@ -826,7 +826,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
         aria-hidden={replyHidden}
         className="home-response-stage__body"
         inert={replyHidden}
-        initial={{ opacity: 1 }}
+        initial={{ opacity: replyHidden ? 0 : 1 }}
         onAnimationComplete={(definition) => {
           if (replyHidden && typeof definition === "object" && !Array.isArray(definition) && definition.opacity === 0) onReplyHidden();
         }}

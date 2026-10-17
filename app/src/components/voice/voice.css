@@ -421,6 +421,10 @@
   pointer-events: none;
 }
 
+.home-response-stage.is-call .home-response-stage__composer-footer::before {
+  content: none;
+}
+
 .home-response-stage__composer {
   position: relative;
   z-index: 1;
@@ -2420,6 +2424,7 @@
   font-size: 14px;
   line-height: 22px;
   text-align: center;
+  text-shadow: 0 1px 4px var(--voice-bg), 0 0 12px var(--voice-bg);
   text-wrap: balance;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
