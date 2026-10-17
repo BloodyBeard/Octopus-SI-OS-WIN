@@ -50,6 +50,8 @@ type ClientRuntimeObservation = {
 // Accent rotation only — the stage lays zones out itself (CSS grid + measured links).
 // There is no fixed number of EEs and no pixel map: every projected zone renders.
 const ACCENTS: Accent[] = ["green", "blue", "purple", "amber"];
+const TIME_FORMATTER = new Intl.DateTimeFormat([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const DATE_FORMATTER = new Intl.DateTimeFormat([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
 export function useRuntimeTopology(
   enabled = true,
@@ -402,18 +404,39 @@ function projectRuntime(payload: RuntimePayload): TopologySnapshot {
   });
   const bindingByRun = new Map<string, any>(bindingEntries);
   const orderedEes = orderEes(allEes);
+  const runsByEe = groupRowsBy(runs, (run) => runEeId(run, bindingByRun));
+  const eeIdsByRun = new Map<string, Set<string>>();
+  for (const run of runs) {
+    const runId = stringValue(run?.run_id);
+    if (!runId) continue;
+    const eeIds = eeIdsByRun.get(runId) ?? new Set<string>();
+    eeIds.add(runEeId(run, bindingByRun));
+    eeIdsByRun.set(runId, eeIds);
+  }
+  const interfacePositions = interfaces.map((_, index) => index);
+  const projectionIndex = {
+    runsByEe,
+    childCounts: groupRowsBy(allEes, (ee) => stringValue(ee?.parent_ee_id ?? ee?.parent_id ?? ee?.parent?.ee_id)),
+    bindings: indexScopedRows(bindings, (row) => stringValue(row?.ee_id), (row) => stringValue(row?.run_id), eeIdsByRun),
+    artifacts: indexScopedRows(artifacts, artifactEeId, artifactRunId, eeIdsByRun),
+    marks: indexScopedRows(marks, artifactEeId, artifactRunId, eeIdsByRun),
+    movements: indexScopedRows(movements, (row) => stringValue(row?.raw_ee_id), (row) => stringValue(row?.raw_run_id), eeIdsByRun),
+    workerEnvironmentsByEe: groupRowsBy(workerEnvironments, workerEnvironmentEeId),
+    workerEnvironmentsByRun: groupRowsBy(workerEnvironments, (row) => stringValue(row?.run_id ?? row?.run ?? row?.meta?.run_id)),
+    workerEnvironmentsById: firstRowsBy(workerEnvironments, (row) => stringValue(row?.worker_environment_id)),
+    interfaces,
+    interfacesByRuleId: firstRowsBy(interfaces, (iface) => stringValue(iface?.rule_id)),
+    interfacePositionsById: groupRowsBy(interfacePositions, (position) => stringValue(interfaces[position]?.rule_id ?? interfaces[position]?.template_name)),
+    interfacePositionsByTemplate: groupRowsBy(interfacePositions, (position) => stringValue(interfaces[position]?.ee_template_name)),
+    workerInterfaceIds: new Set(interfaces.filter((iface) => (
+      stringValue(iface?.interface_type).toLowerCase() === "system"
+      && stringValue(iface?.role).toLowerCase() === "worker"
+    )).map((iface) => stringValue(iface?.rule_id ?? iface?.id)).filter(Boolean)),
+  };
   const environments = orderedEes.map((ee, index) => projectEnvironment({
     ee,
     index,
-    allEes,
-    runs,
-    interfaces,
-    bindings,
-    bindingByRun,
-    artifacts,
-    marks,
-    workerEnvironments,
-    movements,
+    projectionIndex,
     runDetailsRaw: payload.runDetailsRaw,
     runCheckpointsByRun,
   }));
@@ -464,24 +487,33 @@ function projectRuntime(payload: RuntimePayload): TopologySnapshot {
   };
 }
 
+type TopologyProjectionIndex = {
+  runsByEe: Map<string, any[]>;
+  childCounts: Map<string, any[]>;
+  bindings: ScopedRows;
+  artifacts: ScopedRows;
+  marks: ScopedRows;
+  movements: ScopedRows;
+  workerEnvironmentsByEe: Map<string, any[]>;
+  workerEnvironmentsByRun: Map<string, any[]>;
+  workerEnvironmentsById: Map<string, any>;
+  interfaces: any[];
+  interfacesByRuleId: Map<string, any>;
+  interfacePositionsById: Map<string, number[]>;
+  interfacePositionsByTemplate: Map<string, number[]>;
+  workerInterfaceIds: Set<string>;
+};
+
 type ProjectEnvironmentArgs = {
   ee: any;
   index: number;
-  allEes: any[];
-  runs: any[];
-  interfaces: any[];
-  bindings: any[];
-  bindingByRun: Map<string, any>;
-  artifacts: any[];
-  marks: any[];
-  workerEnvironments: any[];
-  movements: any[];
+  projectionIndex: TopologyProjectionIndex;
   runDetailsRaw: RuntimePayload["runDetailsRaw"];
   runCheckpointsByRun: Map<string, any[]>;
 };
 
 function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
-  const { ee, index, allEes, runs, interfaces, bindings, bindingByRun, artifacts, marks, workerEnvironments, movements, runDetailsRaw, runCheckpointsByRun } = args;
+  const { ee, index, projectionIndex, runDetailsRaw, runCheckpointsByRun } = args;
   const accent = ACCENTS[index % ACCENTS.length];
   const eeId = stringValue(ee?.ee_id);
   const templateName = stringValue(ee?.template_name) || shortId(eeId) || `ee_${index + 1}`;
@@ -490,9 +522,8 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
   const policy = policyProjection.policy;
   const goal = stringValue(ee?.goal_ref?.title ?? ee?.goal ?? descriptor?.goal);
   const status: EnvironmentStatus = "projected";
-  const eeRuns = runs.filter((run) => runEeId(run, bindingByRun) === eeId);
-  const eeRunIds = new Set(eeRuns.map((run) => stringValue(run?.run_id)).filter(Boolean));
-  const eeBindings = bindings.filter((binding) => stringValue(binding?.ee_id) === eeId || eeRunIds.has(stringValue(binding?.run_id)));
+  const eeRuns = projectionIndex.runsByEe.get(eeId) ?? [];
+  const eeBindings = projectionIndex.bindings.byEe.get(eeId) ?? [];
   const declaredInterfaceIds = refs(policy?.allowed_interfaces ?? policy?.allowed_interface_templates ?? descriptor?.allowed_interfaces ?? descriptor?.allowed_interface_templates);
   // Interface bindings live in the runs' CHECKPOINTS (owner): each checkpoint is an artifact
   // movement through an interface binding. A zone's bound interfaces are only the interfaces
@@ -512,39 +543,23 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
     ...eeBindings.map((binding) => stringValue(binding?.interface_id)).filter(Boolean),
     ...runCheckpointInterfaceNames,
   ]);
-  const eeInterfaceIds = new Set(boundInterfaceIds);
-  const eeInterfaces = interfaces.filter((iface) => {
-    const ruleId = stringValue(iface?.rule_id ?? iface?.template_name);
-    return eeInterfaceIds.has(ruleId) || stringValue(iface?.ee_template_name) === templateName;
-  });
-  const eeWorkerEnvironments = workerEnvironments.filter((workerEnvironment) => (
-    workerEnvironmentEeId(workerEnvironment) === eeId
-  ));
-  const workerInterfaceIds = new Set(
-    interfaces
-      .filter((iface) => (
-        stringValue(iface?.interface_type).toLowerCase() === "system"
-        && stringValue(iface?.role).toLowerCase() === "worker"
-      ))
-      .map((iface) => stringValue(iface?.rule_id ?? iface?.id))
-      .filter(Boolean),
-  );
+  const interfacePositions = new Set(projectionIndex.interfacePositionsByTemplate.get(templateName));
+  for (const id of boundInterfaceIds) {
+    for (const position of projectionIndex.interfacePositionsById.get(id) ?? []) interfacePositions.add(position);
+  }
+  const eeInterfaces = [...interfacePositions].sort((left, right) => left - right).map((position) => projectionIndex.interfaces[position]);
+  const eeWorkerEnvironments = projectionIndex.workerEnvironmentsByEe.get(eeId) ?? [];
   const workers = unique([
     ...eeRuns.map((run) => stringValue(run?.worker)).filter(Boolean),
-    ...declaredInterfaceIds.filter((interfaceId) => workerInterfaceIds.has(interfaceId)),
+    ...declaredInterfaceIds.filter((interfaceId) => projectionIndex.workerInterfaceIds.has(interfaceId)),
   ]);
-  const eeArtifacts = artifacts.filter((artifact) => artifactBelongsToEe(artifact, eeId, eeRunIds));
-  const eeMarks = marks.filter((mark) => artifactBelongsToEe(mark, eeId, eeRunIds));
-  const eeMovements = movements.filter((movement) => movementBelongsToEe(movement, eeId, eeRunIds));
+  const eeArtifacts = projectionIndex.artifacts.byEe.get(eeId) ?? [];
+  const eeMarks = projectionIndex.marks.byEe.get(eeId) ?? [];
+  const eeMovements = projectionIndex.movements.byEe.get(eeId) ?? [];
   const runProjections = eeRuns.map((run) => projectRun({
     run,
     eeId,
-    interfaces,
-    bindings,
-    artifacts,
-    marks,
-    workerEnvironments,
-    movements,
+    projectionIndex,
     detailBundle: runDetailsRaw[stringValue(run?.run_id)],
     checkpointRowsRaw: runCheckpointsByRun.get(stringValue(run?.run_id)),
   }));
@@ -593,7 +608,7 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
     description: `EE scope ${templateName} contains runs, interface bindings, artifact movement, worker environments, and policy data for this goal boundary.`,
     stats: [
       { label: "Status", value: statusLabel(status), tone: statusTone(status) },
-      { label: "Child EEs", value: String(countChildren(eeId, allEes)) },
+      { label: "Child EEs", value: String(projectionIndex.childCounts.get(eeId)?.length ?? 0) },
       { label: "Active Runs", value: `${activeRuns} / ${eeRuns.length}` },
       { label: "Worker Refs", value: compactList(workers) || "none" },
       { label: "Bound Interfaces", value: compactList(boundInterfaceIds) || "none" },
@@ -634,18 +649,13 @@ function projectEnvironment(args: ProjectEnvironmentArgs): EnvironmentNode {
 type ProjectRunArgs = {
   run: any;
   eeId: string;
-  interfaces: any[];
-  bindings: any[];
-  artifacts: any[];
-  marks: any[];
-  workerEnvironments: any[];
-  movements: any[];
+  projectionIndex: TopologyProjectionIndex;
   detailBundle?: { detail?: any; trace?: any; error?: string };
   checkpointRowsRaw?: any[];
 };
 
 function projectRun(args: ProjectRunArgs): RunProjection {
-  const { run, eeId, interfaces, bindings, artifacts, marks, workerEnvironments, movements, detailBundle, checkpointRowsRaw } = args;
+  const { run, eeId, projectionIndex, detailBundle, checkpointRowsRaw } = args;
   const detail = detailBundle?.detail ?? {};
   const runFull = detail?.run ?? run;
   const runId = stringValue(runFull?.run_id ?? run?.run_id);
@@ -653,7 +663,7 @@ function projectRun(args: ProjectRunArgs): RunProjection {
   const worker = stringValue(runFull?.worker ?? run?.worker) || "not projected";
   const declaredStatus = normalizeStatus(runFull?.status ?? run?.status);
   const detailBindings = array(detail?.bindings);
-  const runBindings = detailBindings.length ? detailBindings : bindings.filter((binding) => stringValue(binding?.run_id) === runId);
+  const runBindings = detailBindings.length ? detailBindings : (projectionIndex.bindings.byRun.get(runId) ?? []);
   // Interface bindings live in the CHECKPOINTS (owner), not as run-level rows: each
   // checkpoint is an artifact movement through an interface binding. A run's bound
   // interfaces are the union of its checkpoints' inbound + outbound interface bindings.
@@ -668,11 +678,11 @@ function projectRun(args: ProjectRunArgs): RunProjection {
     ? unique(runBindings.map((binding) => stringValue(binding?.interface_id)).filter(Boolean))
     : checkpointInterfaceNames;
   const detailArtifacts = array(detail?.artifacts).concat(array(detail?.run_artifacts));
-  const runArtifacts = detailArtifacts.length ? detailArtifacts : artifacts.filter((artifact) => stringValue(artifact?.run_id ?? artifact?.meta?.run_id) === runId);
+  const runArtifacts = detailArtifacts.length ? detailArtifacts : (projectionIndex.artifacts.byRun.get(runId) ?? []);
   const detailMarks = array(detail?.marks);
-  const runMarks = detailMarks.length ? detailMarks : marks.filter((mark) => stringValue(mark?.run_id ?? mark?.meta?.run_id) === runId);
-  const runMovements = movements.filter((movement) => movementBelongsToRun(movement, runId));
-  const projectedWorkerEnvironments = workerEnvironmentsForRun(runFull, detail, workerEnvironments)
+  const runMarks = detailMarks.length ? detailMarks : (projectionIndex.marks.byRun.get(runId) ?? []);
+  const runMovements = projectionIndex.movements.byRun.get(runId) ?? [];
+  const projectedWorkerEnvironments = workerEnvironmentsForRun(runFull, detail, projectionIndex)
     .map(workerEnvironmentProjection)
     .filter((projection) => Boolean(projection.id));
   const checkpoints = checkpointRows({ checkpoints: projectedCheckpointRows }, runBindings);
@@ -702,6 +712,7 @@ function projectRun(args: ProjectRunArgs): RunProjection {
     artifacts: runArtifacts.length,
     marks: runMarks.length,
   };
+  const bindingsByInterface = firstRowsBy(runBindings, (binding) => stringValue(binding?.interface_id));
 
   return {
     id: runId,
@@ -729,8 +740,8 @@ function projectRun(args: ProjectRunArgs): RunProjection {
     // A run's interfaces ARE its checkpoint bindings (interface_binding / outbound_interface
     // _bindings on each checkpoint) — the realized truth, not a declared superset.
     interfaces: runInterfaceNames.map((name) => {
-      const binding = runBindings.find((item) => stringValue(item?.interface_id) === name);
-      const iface = interfaces.find((item) => stringValue(item?.rule_id) === name);
+      const binding = bindingsByInterface.get(name);
+      const iface = projectionIndex.interfacesByRuleId.get(name);
       return interfaceRow(iface ?? { rule_id: name }, binding);
     }),
     bindings: runBindings.map((binding) => bindingRow(binding)),
@@ -751,7 +762,8 @@ function projectRun(args: ProjectRunArgs): RunProjection {
 
 function orderEes(ees: any[]): any[] {
   const roots = ees.filter((ee) => !stringValue(ee?.parent_ee_id ?? ee?.parent_id ?? ee?.parent?.ee_id));
-  const rest = ees.filter((ee) => roots.indexOf(ee) === -1);
+  const rootSet = new Set(roots);
+  const rest = ees.filter((ee) => !rootSet.has(ee));
   return [...roots, ...rest];
 }
 
@@ -1001,6 +1013,7 @@ function requiredVerifiedArtifactRows(checkpoint: any) {
 
 function eventRowsFromMovements(movements: any[], limit: number): EventLogRow[] {
   return movements
+    .slice(0, limit)
     .map((movement) => {
       const kind = stringValue(movement?.kind) || "movement";
       const artifact = stringValue(movement?.artifact_label ?? movement?.artifact_id) || "artifact";
@@ -1012,8 +1025,7 @@ function eventRowsFromMovements(movements: any[], limit: number): EventLogRow[] 
         tone: failed ? "amber" : "blue",
         kind,
       } as EventLogRow;
-    })
-    .slice(0, limit);
+    });
 }
 
 function movementEndpointText(value: any): string {
@@ -1023,16 +1035,54 @@ function movementEndpointText(value: any): string {
   return `${kind}:${shortId(id) || id}`;
 }
 
-function movementBelongsToRun(movement: any, runId: string): boolean {
-  return stringValue(movement?.raw_run_id) === runId;
+type ScopedRows = { byRun: Map<string, any[]>; byEe: Map<string, any[]> };
+
+function groupRowsBy<T>(rows: T[], key: (row: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const id = key(row);
+    const members = groups.get(id);
+    if (members) members.push(row);
+    else groups.set(id, [row]);
+  }
+  return groups;
 }
 
-function movementBelongsToEe(movement: any, eeId: string, runIds: Set<string>): boolean {
-  return stringValue(movement?.raw_ee_id) === eeId || runIds.has(stringValue(movement?.raw_run_id));
+function firstRowsBy<T>(rows: T[], key: (row: T) => string): Map<string, T> {
+  const index = new Map<string, T>();
+  for (const row of rows) {
+    const id = key(row);
+    if (!index.has(id)) index.set(id, row);
+  }
+  return index;
 }
 
-function countChildren(eeId: string, ees: any[]): number {
-  return ees.filter((ee) => stringValue(ee?.parent_ee_id ?? ee?.parent_id ?? ee?.parent?.ee_id) === eeId).length;
+function indexScopedRows(
+  rows: any[],
+  eeKey: (row: any) => string,
+  runKey: (row: any) => string,
+  eeIdsByRun: Map<string, Set<string>>,
+): ScopedRows {
+  const byRun = groupRowsBy(rows, runKey);
+  const byEe = new Map<string, any[]>();
+  for (const row of rows) {
+    const targets = new Set(eeIdsByRun.get(runKey(row)));
+    targets.add(eeKey(row));
+    for (const id of targets) {
+      const members = byEe.get(id);
+      if (members) members.push(row);
+      else byEe.set(id, [row]);
+    }
+  }
+  return { byRun, byEe };
+}
+
+function artifactRunId(row: any): string {
+  return stringValue(row?.run_id ?? row?.meta?.run_id);
+}
+
+function artifactEeId(row: any): string {
+  return stringValue(row?.ee_id ?? row?.meta?.ee_id);
 }
 
 function topRunItems(runs: RunProjection[]): TopologyItem[] {
@@ -1070,7 +1120,7 @@ function workerEnvironmentEeId(workerEnvironment: any): string {
   return stringValue(workerEnvironment?.ee_id ?? meta.ee_id);
 }
 
-function workerEnvironmentsForRun(run: any, detail: any, workerEnvironments: any[]): any[] {
+function workerEnvironmentsForRun(run: any, detail: any, projectionIndex: TopologyProjectionIndex): any[] {
   const meta = record(run?.meta) ?? {};
   const inline = record(detail?.worker_environment) ?? record(run?.worker_environment) ?? record(meta.worker_environment) ?? {};
   const runId = stringValue(run?.run_id ?? run?.id ?? meta.run_id);
@@ -1088,15 +1138,15 @@ function workerEnvironmentsForRun(run: any, detail: any, workerEnvironments: any
   );
   const candidates = [
     ...array(detail?.worker_environments),
-    ...workerEnvironments.filter((item) => stringValue(item?.run_id ?? item?.run ?? item?.meta?.run_id) === runId),
+    ...(projectionIndex.workerEnvironmentsByRun.get(runId) ?? []),
   ];
   if (workerEnvironmentId && Object.keys(inline).length > 0) candidates.unshift(inline);
   const exact = workerEnvironmentId
-    ? workerEnvironments.find((item) => stringValue(item?.worker_environment_id) === workerEnvironmentId)
+    ? projectionIndex.workerEnvironmentsById.get(workerEnvironmentId)
     : undefined;
   if (exact) candidates.unshift(Object.keys(inline).length > 0 ? { ...exact, ...inline } : exact);
   const sameRun = runId
-    ? workerEnvironments.filter((item) => stringValue(item?.run_id ?? item?.run ?? item?.meta?.run_id) === runId)
+    ? (projectionIndex.workerEnvironmentsByRun.get(runId) ?? [])
     : [];
   if (!workerEnvironmentId && Object.keys(inline).length > 0 && sameRun.length === 1) {
     const formed = sameRun[0];
@@ -1114,12 +1164,6 @@ function workerEnvironmentsForRun(run: any, detail: any, workerEnvironments: any
     byId.set(id, item);
   }
   return [...byId.values()];
-}
-
-function artifactBelongsToEe(item: any, eeId: string, runIds: Set<string>): boolean {
-  const meta = record(item?.meta) ?? {};
-  const runId = stringValue(item?.run_id ?? meta.run_id);
-  return stringValue(item?.ee_id ?? meta.ee_id) === eeId || Boolean(runId && runIds.has(runId));
 }
 
 function normalizeStatus(value: unknown): EnvironmentStatus {
@@ -1265,19 +1309,14 @@ function formatTime(ms: number): string {
   if (!ms) return "";
   const date = new Date(ms);
   if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return TIME_FORMATTER.format(date);
 }
 
 function formatDate(value: string): string {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString([], {
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return DATE_FORMATTER.format(date);
 }
 
 function durationSince(value: string): string {

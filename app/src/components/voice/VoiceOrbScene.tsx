@@ -14,7 +14,7 @@ type Props = {
   onDispersed?: () => void;
   formationSurface?: RefObject<HTMLElement | null>;
   phase: VoicePhase;
-  fieldSurface?: RefObject<HTMLElement | null>;
+  sceneSurface?: RefObject<HTMLElement | null>;
   rippleSurface?: RefObject<HTMLElement | null>;
   sizeProbe?: RefObject<HTMLElement | null>;
   sphere?: number;
@@ -37,7 +37,7 @@ type ShaderUniforms = {
   ambient: WebGLUniformLocation;
   background: WebGLUniformLocation;
   departing: WebGLUniformLocation;
-  sceneTop: WebGLUniformLocation;
+  scene: WebGLUniformLocation;
   error: WebGLUniformLocation;
   formTiming: WebGLUniformLocation;
   forms: WebGLUniformLocation;
@@ -87,7 +87,7 @@ const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
 uniform vec2 u_resolution;
-uniform float u_scene_top;
+uniform vec4 u_scene;
 uniform float u_pixel_ratio;
 uniform float u_time;
 uniform float u_thought_time;
@@ -558,10 +558,10 @@ vec3 frostGlass(vec2 p, float t) {
 }
 
 void main() {
-  vec2 sceneResolution = vec2(u_resolution.x, u_resolution.y - u_scene_top);
+  vec2 sceneResolution = u_scene.zw;
   float shortestSide = min(sceneResolution.x, sceneResolution.y);
   float antialias = 1.0 / shortestSide;
-  vec2 point = (gl_FragCoord.xy - sceneResolution * 0.5) / shortestSide;
+  vec2 point = (gl_FragCoord.xy - u_scene.xy - sceneResolution * 0.5) / shortestSide;
   point.y -= 0.028;
 
   float surfaceLuminance = dot(u_background, vec3(0.2126, 0.7152, 0.0722));
@@ -588,106 +588,125 @@ void main() {
   vec3 glowTint = mix(lightTint, mix(vec3(0.62, 0.67, 0.97), errorTint, u_error), lightSurface);
   vec3 waveTint = mix(lightTint, mix(vec3(0.31, 0.37, 0.8), errorTint, u_error), lightSurface);
 
-  float normalizedY = point.y / SPHERE_RADIUS;
-  float topPole = smoothstep(0.12, 0.92, normalizedY);
-  float bottomPole = 1.0 - smoothstep(-0.92, -0.12, normalizedY);
-  float shellDirection = 0.48 + topPole * 0.34 + bottomPole * 0.46;
-  float shellDiffraction = 0.86 + cos(theta * 2.0 - 0.35) * 0.14;
-  float shellActivity = smoothstep(0.08, 0.84, max(u_speaking * mix(0.5, 1.0, saturate(u_voice)), u_thinking));
-  float shellPower = mix(0.42, 1.0, shellActivity);
-  float lightFocus = saturate(dot(normalize(point + vec2(0.0001)), normalize(vec2(-0.34, 0.94))));
-  float boostShape = mix(0.3, 1.0, pow(lightFocus, 1.25));
-  float shellPowerShaped = 0.42 + max(0.0, shellPower - 0.42) * boostShape;
-  float outwardDistance = max(0.0, radius - SPHERE_RADIUS);
-  float canvasFade = 1.0 - smoothstep(0.405, 0.49, radius);
-  float haloCore = exp(-outwardDistance / 0.010);
-  float haloTail = exp(-outwardDistance / mix(0.042, 0.06, shellActivity));
-  float haloProfile = haloCore * 0.6 + haloTail * 0.19;
-  float haloDirection = 0.64 + shellDirection * 0.36;
-  float haloTexture =
-    0.93 +
-    sin(theta * 3.0 + outwardDistance * 24.0) * 0.045 +
-    sin(theta * 7.0 - outwardDistance * 11.0 + 0.74) * 0.025;
-  float shellOuterRadiance = haloProfile * haloDirection * shellDiffraction * haloTexture * shellPowerShaped * outside * canvasFade;
-  float haloDither = (interleavedNoise(gl_FragCoord.xy) - 0.5) / 255.0;
-  shellOuterRadiance = max(0.0, shellOuterRadiance + haloDither * mix(0.7, 1.25, 1.0 - haloProfile) * outside * canvasFade);
-  shellOuterRadiance *= 1.0 - lightSurface;
-
-  float contours = 0.0;
-  float contourGlow = 0.0;
-  if (radius >= SPHERE_RADIUS - antialias) {
-    for (int index = 0; index < 8; index += 1) {
-      float ring = float(index) / 7.0;
-      float line = voiceContour(point, radius, theta, ring, u_speech_time, u_speaking, antialias);
-      float strength = mix(0.98, 0.6, pow(ring, 0.88));
-      contours += line * strength;
-      contourGlow += line * strength * strength;
-    }
-  }
-  float contourEnergy = saturate(u_speaking) * mix(0.35, 1.15, saturate(u_voice));
-  contours = saturate(contours * contourEnergy * 0.68);
-  contourGlow = saturate(contourGlow * contourEnergy * 0.12);
-  contours *= outside * (1.0 - lightSurface);
-  contourGlow *= outside * (1.0 - lightSurface);
-
-  float outerAlpha = saturate(shellOuterRadiance + contours + contourGlow);
-  float outerLuminance = 0.73 + shellDirection * 0.055 + sqrt(saturate(contours)) * 0.2 + contourGlow * 0.045;
-  vec3 outerColor = glowTint * outerLuminance;
-
-  vec3 lightDirection = normalize(vec3(-0.42, 0.7, 0.88));
-  vec3 normal = normalize(vec3(point / SPHERE_RADIUS, depth));
-  float diffuse = saturate(dot(normal, lightDirection));
-  float lowerLight = 1.0 - smoothstep(-0.78, 0.46, normalizedY);
-  float bodyLuminance = 0.038 + depth * 0.022 + diffuse * 0.018;
-  bodyLuminance += (1.0 - smoothstep(0.28, 0.96, normalizedRadius)) * 0.0075;
-  bodyLuminance += lowerLight * (0.04 + depth * 0.05);
-  vec3 frostBody = vec3(0.0);
-  if (lightSurface > 0.001 && radius < contourRadius * 1.02) {
-    frostBody = frostGlass(point / contourRadius, u_speech_time * 0.7 + u_thought_time * 1.6);
-  }
-  vec3 bodyBase = mix(vec3(bodyLuminance), frostBody, lightSurface);
-  vec3 body = mix(bodyBase, bodyBase * vec3(1.2, 0.72, 0.74), u_error * 0.52);
-
-  float waveTime = u_thought_time + u_speech_time;
-  vec4 membraneBack = shadeWaveField(point, 0.0, 0.42, waveTime, u_thinking, u_speaking, waveTint, antialias);
-  vec4 membraneUpper = shadeWaveField(point, 1.0, 0.76, waveTime, u_thinking, u_speaking, waveTint, antialias);
-  vec4 membraneMiddle = shadeWaveField(point, 2.0, 0.94, waveTime, u_thinking, u_speaking, waveTint, antialias);
-  vec4 membraneLower = shadeWaveField(point, 3.0, 0.7, waveTime, u_thinking, u_speaking, waveTint, antialias);
-  float lowerDepth = (1.0 - smoothstep(-0.16, 0.12, point.y)) * sphere;
-  float membranePresence = 1.0 - lightSurface;
-  vec3 sphereColor = body;
-  sphereColor = mix(sphereColor, membraneBack.rgb, membraneBack.a * membranePresence);
-  sphereColor = mix(sphereColor, membraneUpper.rgb, membraneUpper.a * membranePresence);
-  sphereColor = mix(sphereColor, membraneMiddle.rgb, membraneMiddle.a * membranePresence);
-  sphereColor = mix(sphereColor, membraneLower.rgb, membraneLower.a * membranePresence);
-  sphereColor += waveTint * lowerDepth * depth * 0.032;
-
-  float innerRim = 1.0 - smoothstep(
-    antialias * 0.18,
-    antialias * 1.35,
-    abs(radius - SPHERE_RADIUS)
+  float bodyReveal = smoothstep(
+    mix(0.52, 0.08, u_departing),
+    mix(0.985, 0.86, u_departing),
+    u_reveal
   );
-  float rimAngle = 0.48 + 0.52 * lightFocus;
-  float fresnel = pow(1.0 - depth, 3.4);
-  float rimCoreDirection = shellDirection * (1.0 - topPole * 0.24);
-  float rim = innerRim * rimCoreDirection * (1.42 + rimAngle * 0.58) * shellPowerShaped;
-  float inwardDistance = max(0.0, SPHERE_RADIUS - radius);
-  float shellInnerCore = exp(-inwardDistance * 115.0) * 0.38;
-  float shellInnerScatter = exp(-inwardDistance * 24.0) * 0.34;
-  float shellInnerAtmosphere = exp(-inwardDistance * 7.5) * 0.14;
-  float shellInnerRadiance = (
-    shellInnerCore +
-    shellInnerScatter +
-    shellInnerAtmosphere
-  ) * shellDirection * shellDiffraction * shellPowerShaped;
-  float shellFresnel = fresnel * shellDirection * (0.042 + topPole * 0.068 + bottomPole * 0.108) * shellPowerShaped;
-  sphereColor += glowTint * (rim + shellInnerRadiance + shellFresnel) * sphere * (1.0 - lightSurface);
+  float rimBuild = smoothstep(0.3, 0.76, u_reveal);
+  float rimProgress = smoothstep(0.34, 0.82, u_reveal);
+  float rimCoordinate = abs(theta) / PI;
+  float rimSweep = 1.0 - smoothstep(rimProgress, rimProgress + 0.055, rimCoordinate);
+  float assemblyRim = exp(-abs(radius - SPHERE_RADIUS) / 0.0042) * rimBuild * rimSweep;
+  float structureMask = saturate(max(bodyReveal, assemblyRim));
+  float contourLimit = SPHERE_RADIUS + 0.0015 + 0.0065 + 0.095 + antialias;
+  vec3 color = u_background;
+  if (structureMask > 0.0 && (sphere > 0.0 || (lightSurface < 1.0 && (radius < 0.49 || (outside > 0.0 && u_speaking > 0.0 && radius <= contourLimit))))) {
+    float normalizedY = point.y / SPHERE_RADIUS;
+    float topPole = smoothstep(0.12, 0.92, normalizedY);
+    float bottomPole = 1.0 - smoothstep(-0.92, -0.12, normalizedY);
+    float shellDirection = 0.48 + topPole * 0.34 + bottomPole * 0.46;
+    float shellDiffraction = 0.86 + cos(theta * 2.0 - 0.35) * 0.14;
+    float shellActivity = smoothstep(0.08, 0.84, max(u_speaking * mix(0.5, 1.0, saturate(u_voice)), u_thinking));
+    float shellPower = mix(0.42, 1.0, shellActivity);
+    float lightFocus = saturate(dot(normalize(point + vec2(0.0001)), normalize(vec2(-0.34, 0.94))));
+    float boostShape = mix(0.3, 1.0, pow(lightFocus, 1.25));
+    float shellPowerShaped = 0.42 + max(0.0, shellPower - 0.42) * boostShape;
+    float outwardDistance = max(0.0, radius - SPHERE_RADIUS);
+    float canvasFade = 1.0 - smoothstep(0.405, 0.49, radius);
+    float haloCore = exp(-outwardDistance / 0.010);
+    float haloTail = exp(-outwardDistance / mix(0.042, 0.06, shellActivity));
+    float haloProfile = haloCore * 0.6 + haloTail * 0.19;
+    float haloDirection = 0.64 + shellDirection * 0.36;
+    float haloTexture =
+      0.93 +
+      sin(theta * 3.0 + outwardDistance * 24.0) * 0.045 +
+      sin(theta * 7.0 - outwardDistance * 11.0 + 0.74) * 0.025;
+    float shellOuterRadiance = haloProfile * haloDirection * shellDiffraction * haloTexture * shellPowerShaped * outside * canvasFade;
+    float haloDither = (interleavedNoise(gl_FragCoord.xy) - 0.5) / 255.0;
+    shellOuterRadiance = max(0.0, shellOuterRadiance + haloDither * mix(0.7, 1.25, 1.0 - haloProfile) * outside * canvasFade);
+    shellOuterRadiance *= 1.0 - lightSurface;
 
-  vec3 color = mix(u_background, outerColor, outerAlpha * (1.0 - sphere));
-  color = mix(color, sphereColor, sphere);
-  float displayDither = (interleavedNoise(gl_FragCoord.xy + vec2(17.0, 41.0)) - 0.5) / 255.0;
-  float ditherMask = saturate(outerAlpha * 7.0) * (1.0 - sphere) * canvasFade;
-  color += vec3(displayDither * 1.7 * ditherMask);
+    float contours = 0.0;
+    float contourGlow = 0.0;
+    if (outside > 0.0 && radius <= contourLimit && u_speaking > 0.0 && lightSurface < 1.0) {
+      for (int index = 0; index < 8; index += 1) {
+        float ring = float(index) / 7.0;
+        float line = voiceContour(point, radius, theta, ring, u_speech_time, u_speaking, antialias);
+        float strength = mix(0.98, 0.6, pow(ring, 0.88));
+        contours += line * strength;
+        contourGlow += line * strength * strength;
+      }
+    }
+    float contourEnergy = saturate(u_speaking) * mix(0.35, 1.15, saturate(u_voice));
+    contours = saturate(contours * contourEnergy * 0.68);
+    contourGlow = saturate(contourGlow * contourEnergy * 0.12);
+    contours *= outside * (1.0 - lightSurface);
+    contourGlow *= outside * (1.0 - lightSurface);
+
+    float outerAlpha = saturate(shellOuterRadiance + contours + contourGlow);
+    float outerLuminance = 0.73 + shellDirection * 0.055 + sqrt(saturate(contours)) * 0.2 + contourGlow * 0.045;
+    vec3 outerColor = glowTint * outerLuminance;
+
+    color = mix(u_background, outerColor, outerAlpha * (1.0 - sphere));
+    if (sphere > 0.0) {
+      vec3 lightDirection = normalize(vec3(-0.42, 0.7, 0.88));
+      vec3 normal = normalize(vec3(point / SPHERE_RADIUS, depth));
+      float diffuse = saturate(dot(normal, lightDirection));
+      float lowerLight = 1.0 - smoothstep(-0.78, 0.46, normalizedY);
+      float bodyLuminance = 0.038 + depth * 0.022 + diffuse * 0.018;
+      bodyLuminance += (1.0 - smoothstep(0.28, 0.96, normalizedRadius)) * 0.0075;
+      bodyLuminance += lowerLight * (0.04 + depth * 0.05);
+      vec3 frostBody = vec3(0.0);
+      if (lightSurface > 0.001 && radius < contourRadius * 1.02) {
+        frostBody = frostGlass(point / contourRadius, u_speech_time * 0.7 + u_thought_time * 1.6);
+      }
+      vec3 bodyBase = mix(vec3(bodyLuminance), frostBody, lightSurface);
+      vec3 body = mix(bodyBase, bodyBase * vec3(1.2, 0.72, 0.74), u_error * 0.52);
+
+      vec3 sphereColor = body;
+      if (lightSurface < 1.0 && max(u_thinking, u_speaking) > 0.0) {
+        float waveTime = u_thought_time + u_speech_time;
+        vec4 membraneBack = shadeWaveField(point, 0.0, 0.42, waveTime, u_thinking, u_speaking, waveTint, antialias);
+        vec4 membraneUpper = shadeWaveField(point, 1.0, 0.76, waveTime, u_thinking, u_speaking, waveTint, antialias);
+        vec4 membraneMiddle = shadeWaveField(point, 2.0, 0.94, waveTime, u_thinking, u_speaking, waveTint, antialias);
+        vec4 membraneLower = shadeWaveField(point, 3.0, 0.7, waveTime, u_thinking, u_speaking, waveTint, antialias);
+        float membranePresence = 1.0 - lightSurface;
+        sphereColor = mix(sphereColor, membraneBack.rgb, membraneBack.a * membranePresence);
+        sphereColor = mix(sphereColor, membraneUpper.rgb, membraneUpper.a * membranePresence);
+        sphereColor = mix(sphereColor, membraneMiddle.rgb, membraneMiddle.a * membranePresence);
+        sphereColor = mix(sphereColor, membraneLower.rgb, membraneLower.a * membranePresence);
+      }
+      float lowerDepth = (1.0 - smoothstep(-0.16, 0.12, point.y)) * sphere;
+      sphereColor += waveTint * lowerDepth * depth * 0.032;
+
+      float innerRim = 1.0 - smoothstep(
+        antialias * 0.18,
+        antialias * 1.35,
+        abs(radius - SPHERE_RADIUS)
+      );
+      float rimAngle = 0.48 + 0.52 * lightFocus;
+      float fresnel = pow(1.0 - depth, 3.4);
+      float rimCoreDirection = shellDirection * (1.0 - topPole * 0.24);
+      float rim = innerRim * rimCoreDirection * (1.42 + rimAngle * 0.58) * shellPowerShaped;
+      float inwardDistance = max(0.0, SPHERE_RADIUS - radius);
+      float shellInnerCore = exp(-inwardDistance * 115.0) * 0.38;
+      float shellInnerScatter = exp(-inwardDistance * 24.0) * 0.34;
+      float shellInnerAtmosphere = exp(-inwardDistance * 7.5) * 0.14;
+      float shellInnerRadiance = (
+        shellInnerCore +
+        shellInnerScatter +
+        shellInnerAtmosphere
+      ) * shellDirection * shellDiffraction * shellPowerShaped;
+      float shellFresnel = fresnel * shellDirection * (0.042 + topPole * 0.068 + bottomPole * 0.108) * shellPowerShaped;
+      sphereColor += glowTint * (rim + shellInnerRadiance + shellFresnel) * sphere * (1.0 - lightSurface);
+
+      color = mix(color, sphereColor, sphere);
+    }
+    float displayDither = (interleavedNoise(gl_FragCoord.xy + vec2(17.0, 41.0)) - 0.5) / 255.0;
+    float ditherMask = saturate(outerAlpha * 7.0) * (1.0 - sphere) * canvasFade;
+    color += vec3(displayDither * 1.7 * ditherMask);
+  }
 
   float dustArrival = smoothstep(0.015, 0.13, u_reveal);
   float dustDeparture = 1.0 - smoothstep(0.72, 0.98, u_reveal);
@@ -697,64 +716,7 @@ void main() {
   float spread = u_ambient * ambientPhase;
   float handoff = u_departing * (1.0 - smoothstep(0.25, 0.9, u_reveal));
   float dustPresence = max(min(1.0, windowDust + spread), handoff);
-  float particleCell = 2.9 * max(u_pixel_ratio, 1.0);
-  vec2 cell = floor(gl_FragCoord.xy / particleCell);
-  vec2 localCell = fract(gl_FragCoord.xy / particleCell) - 0.5;
-  vec2 jitter = vec2(
-    interleavedNoise(cell + vec2(11.0, 37.0)),
-    interleavedNoise(cell + vec2(79.0, 19.0))
-  ) - 0.5;
-  jitter *= 0.39;
-  float dotDistance = length(localCell - jitter);
-  float fineDot = 1.0 - smoothstep(mix(0.105, 0.17, lightSurface), mix(0.185, 0.27, lightSurface), dotDistance);
-  float particleSeed = interleavedNoise(cell + vec2(31.0, 53.0));
-  vec2 orbPoint = point / max(SPHERE_RADIUS, 0.001);
-  float orbRadius = length(orbPoint);
-  float orbTheta = atan(orbPoint.y, orbPoint.x);
-  float openness = saturate(spread * (1.0 - gather));
-  float squeeze = 1.0 - smoothstep(0.0, 1.0, 1.0 - openness) * 0.965;
-  float shellRadius = 1.025;
-  float sourceRadius = shellRadius + (orbRadius - shellRadius) / squeeze;
-  float sourceValid = step(0.0, sourceRadius);
-  float sourceReach = max(sourceRadius, 0.0);
-  float swirl = (1.0 - squeeze) * 1.35 / (0.7 + sourceReach);
-  float sourceTheta = orbTheta - swirl;
-  vec2 source = vec2(cos(sourceTheta), sin(sourceTheta)) * sourceReach;
-  float compression = min(3.2, sourceReach / max(orbRadius, 0.02) / squeeze);
-  float inkScale = mix(1.0, SPHERE_RADIUS / 0.235, smoothstep(0.0, 1.0, openness));
-  vec2 inkBody = source * inkScale;
-  float inkSpin = u_time * 0.012;
-  vec2 inkPoint = mat2(cos(inkSpin), sin(inkSpin), -sin(inkSpin), cos(inkSpin)) * inkBody * 1.25;
-  vec2 inkWarpA = vec2(
-    fbm(inkPoint * 0.75 + vec2(0.0, u_time * 0.02)),
-    fbm(inkPoint * 0.75 + vec2(5.2, -u_time * 0.017))
-  ) - 0.5;
-  vec2 inkWarpB = vec2(
-    fbm(inkPoint * 1.6 + inkWarpA * 2.0 + vec2(1.7, u_time * 0.03)),
-    fbm(inkPoint * 1.6 + inkWarpA * 2.0 + vec2(8.3, -u_time * 0.025))
-  ) - 0.5;
-  vec2 inkFlow = inkPoint + inkWarpA * 1.6 + inkWarpB * 0.9;
-  float inkLobes = fbm(inkFlow * 0.95 + 3.1);
-  float inkRidge = 1.0 - saturate(abs(fbm(inkFlow * 2.1 + 7.7) - 0.48) * 9.0);
-  float inkTendril = pow(inkRidge, 3.0) * smoothstep(0.3, 0.5, inkLobes);
-  float inkEdge = length(vec2(inkBody.x / 1.7, inkBody.y)) + (fbm(inkBody * 1.1 + 11.0) - 0.5) * 0.8;
-  float inkEnvelope = 1.0 - smoothstep(1.0, 2.0, inkEdge);
-  float inkHollow = mix(0.5, 1.0, smoothstep(0.1, 1.15, sourceReach));
-  float inkDensity = inkEnvelope * inkHollow * (smoothstep(0.46, 0.8, inkLobes) * 0.42 + inkTendril * 0.9);
-  float inkCoverage = saturate(inkDensity * compression * 1.25) * sourceValid;
-  vec2 edgeDistance = (sceneResolution * 0.5 - abs(gl_FragCoord.xy - sceneResolution * 0.5)) / shortestSide;
-  float edgeFade = smoothstep(0.012, 0.09, min(edgeDistance.x, edgeDistance.y));
-  vec2 canvasEdgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
-  float canvasEdgeFade = smoothstep(0.004, 0.03, min(canvasEdgeDistance.x, canvasEdgeDistance.y));
   float formation = formationAt(gl_FragCoord.xy, shortestSide, max(u_pixel_ratio, 1.0));
-  float formedCoverage = max(inkCoverage, formation * mix(1.0, 0.5, lightSurface));
-  float formationEdge = exp(-abs(formedCoverage - particleSeed) / 0.045) * step(0.02, formation);
-  float particleDensity = smoothstep(particleSeed - 0.06, particleSeed + 0.06, formedCoverage);
-  float particleEnvelope = mix(0.45, 0.85, formedCoverage) * max(edgeFade, formation);
-  float particleSpark = fineDot * particleDensity * particleEnvelope * max(dustPresence, formation);
-  float particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread)
-    * (1.0 + formation * mix(2.4, 0.35, lightSurface) + formationEdge * 0.9);
-
   float glyphPitch = max(1.15 * u_pixel_ratio, 1.6);
   vec2 glyphSpan = vec2(6.0, 9.0) * glyphPitch;
   vec2 glyphCell = floor(gl_FragCoord.xy / glyphSpan);
@@ -762,32 +724,84 @@ void main() {
   float rippleCrest;
   rippleAt((glyphCell + 0.5) * glyphSpan, shortestSide, rippleWake, rippleCrest);
   float glyphAlpha = 0.0;
-  if (rippleWake + rippleCrest > 0.002) {
-    float glyphSeed = hash21(glyphCell + vec2(3.7, 11.3));
-    float glyphPatch = valueNoise(glyphCell * vec2(0.21, 0.34) + vec2(u_time * 0.05, 0.0));
-    float glyphDensity = saturate(0.3 + glyphPatch * 0.75 + inkCoverage * 0.5);
-    float glyphOn = step(glyphSeed, glyphDensity * saturate(rippleWake * 1.35 + rippleCrest));
-    float scrambleRate = mix(3.0, 18.0, rippleCrest);
-    float glyphPick = hash21(glyphCell * 1.37 + floor(u_time * scrambleRate + glyphSeed * 13.0));
-    ivec2 glyph = GLYPHS[min(int(glyphPick * float(GLYPH_COUNT)), GLYPH_COUNT - 1)];
-    vec2 glyphLocal = (gl_FragCoord.xy - glyphCell * glyphSpan) / glyphPitch;
-    float lit = glyphBit(glyph, int(floor(glyphLocal.x)), 7 - int(floor(glyphLocal.y)));
-    float glyphDot = 1.0 - smoothstep(0.26, 0.44, length(fract(glyphLocal) - 0.5));
-    glyphAlpha = lit * glyphDot * glyphOn * saturate(spread) * canvasEdgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
-  }
-  particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
+  float particleLuminance = 0.0;
+  if (dustPresence > 0.0 || formation > 0.0 || (rippleWake + rippleCrest > 0.002 && sphere * bodyReveal < 1.0)) {
+    float particleCell = 2.9 * max(u_pixel_ratio, 1.0);
+    vec2 cell = floor(gl_FragCoord.xy / particleCell);
+    vec2 localCell = fract(gl_FragCoord.xy / particleCell) - 0.5;
+    vec2 jitter = vec2(
+      interleavedNoise(cell + vec2(11.0, 37.0)),
+      interleavedNoise(cell + vec2(79.0, 19.0))
+    ) - 0.5;
+    jitter *= 0.39;
+    float dotDistance = length(localCell - jitter);
+    float fineDot = 1.0 - smoothstep(mix(0.105, 0.17, lightSurface), mix(0.185, 0.27, lightSurface), dotDistance);
+    float particleSeed = interleavedNoise(cell + vec2(31.0, 53.0));
+    vec2 orbPoint = point / max(SPHERE_RADIUS, 0.001);
+    float orbRadius = length(orbPoint);
+    float orbTheta = atan(orbPoint.y, orbPoint.x);
+    float openness = saturate(spread * (1.0 - gather));
+    float squeeze = 1.0 - smoothstep(0.0, 1.0, 1.0 - openness) * 0.965;
+    float shellRadius = 1.025;
+    float sourceRadius = shellRadius + (orbRadius - shellRadius) / squeeze;
+    float sourceValid = step(0.0, sourceRadius);
+    float sourceReach = max(sourceRadius, 0.0);
+    float swirl = (1.0 - squeeze) * 1.35 / (0.7 + sourceReach);
+    float sourceTheta = orbTheta - swirl;
+    vec2 source = vec2(cos(sourceTheta), sin(sourceTheta)) * sourceReach;
+    float compression = min(3.2, sourceReach / max(orbRadius, 0.02) / squeeze);
+    float inkScale = mix(1.0, SPHERE_RADIUS / 0.235, smoothstep(0.0, 1.0, openness));
+    vec2 inkBody = source * inkScale;
+    float inkCoverage = 0.0;
+    if (sourceValid > 0.0 && length(vec2(inkBody.x / 1.7, inkBody.y)) < 2.0 + 0.5 * 0.8) {
+      float inkSpin = u_time * 0.012;
+      vec2 inkPoint = mat2(cos(inkSpin), sin(inkSpin), -sin(inkSpin), cos(inkSpin)) * inkBody * 1.25;
+      vec2 inkWarpA = vec2(
+        fbm(inkPoint * 0.75 + vec2(0.0, u_time * 0.02)),
+        fbm(inkPoint * 0.75 + vec2(5.2, -u_time * 0.017))
+      ) - 0.5;
+      vec2 inkWarpB = vec2(
+        fbm(inkPoint * 1.6 + inkWarpA * 2.0 + vec2(1.7, u_time * 0.03)),
+        fbm(inkPoint * 1.6 + inkWarpA * 2.0 + vec2(8.3, -u_time * 0.025))
+      ) - 0.5;
+      vec2 inkFlow = inkPoint + inkWarpA * 1.6 + inkWarpB * 0.9;
+      float inkLobes = fbm(inkFlow * 0.95 + 3.1);
+      float inkRidge = 1.0 - saturate(abs(fbm(inkFlow * 2.1 + 7.7) - 0.48) * 9.0);
+      float inkTendril = pow(inkRidge, 3.0) * smoothstep(0.3, 0.5, inkLobes);
+      float inkEdge = length(vec2(inkBody.x / 1.7, inkBody.y)) + (fbm(inkBody * 1.1 + 11.0) - 0.5) * 0.8;
+      float inkEnvelope = 1.0 - smoothstep(1.0, 2.0, inkEdge);
+      float inkHollow = mix(0.5, 1.0, smoothstep(0.1, 1.15, sourceReach));
+      float inkDensity = inkEnvelope * inkHollow * (smoothstep(0.46, 0.8, inkLobes) * 0.42 + inkTendril * 0.9);
+      inkCoverage = saturate(inkDensity * compression * 1.25) * sourceValid;
+    }
+    vec2 edgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
+    float edgeFade = smoothstep(0.012, 0.09, min(edgeDistance.x, edgeDistance.y));
+    vec2 canvasEdgeDistance = (u_resolution * 0.5 - abs(gl_FragCoord.xy - u_resolution * 0.5)) / shortestSide;
+    float canvasEdgeFade = smoothstep(0.004, 0.03, min(canvasEdgeDistance.x, canvasEdgeDistance.y));
+    float formedCoverage = max(inkCoverage, formation * mix(1.0, 0.5, lightSurface));
+    float formationEdge = exp(-abs(formedCoverage - particleSeed) / 0.045) * step(0.02, formation);
+    float particleDensity = smoothstep(particleSeed - 0.06, particleSeed + 0.06, formedCoverage);
+    float particleEnvelope = mix(0.45, 0.85, formedCoverage) * max(edgeFade, formation);
+    float particleSpark = fineDot * particleDensity * particleEnvelope * max(dustPresence, formation);
+    particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread)
+      * (1.0 + formation * mix(2.4, 0.35, lightSurface) + formationEdge * 0.9);
 
-  float rimBuild = smoothstep(0.3, 0.76, u_reveal);
-  float rimProgress = smoothstep(0.34, 0.82, u_reveal);
-  float rimCoordinate = abs(theta) / PI;
-  float rimSweep = 1.0 - smoothstep(rimProgress, rimProgress + 0.055, rimCoordinate);
-  float assemblyRim = exp(-abs(radius - SPHERE_RADIUS) / 0.0042) * rimBuild * rimSweep;
-  float bodyReveal = smoothstep(
-    mix(0.52, 0.08, u_departing),
-    mix(0.985, 0.86, u_departing),
-    u_reveal
-  );
-  float structureMask = saturate(max(bodyReveal, assemblyRim));
+    if (rippleWake + rippleCrest > 0.002 && sphere * bodyReveal < 1.0) {
+      float glyphSeed = hash21(glyphCell + vec2(3.7, 11.3));
+      float glyphPatch = valueNoise(glyphCell * vec2(0.21, 0.34) + vec2(u_time * 0.05, 0.0));
+      float glyphDensity = saturate(0.3 + glyphPatch * 0.75 + inkCoverage * 0.5);
+      float glyphOn = step(glyphSeed, glyphDensity * saturate(rippleWake * 1.35 + rippleCrest));
+      float scrambleRate = mix(3.0, 18.0, rippleCrest);
+      float glyphPick = hash21(glyphCell * 1.37 + floor(u_time * scrambleRate + glyphSeed * 13.0));
+      ivec2 glyph = GLYPHS[min(int(glyphPick * float(GLYPH_COUNT)), GLYPH_COUNT - 1)];
+      vec2 glyphLocal = (gl_FragCoord.xy - glyphCell * glyphSpan) / glyphPitch;
+      float lit = glyphBit(glyph, int(floor(glyphLocal.x)), 7 - int(floor(glyphLocal.y)));
+      float glyphDot = 1.0 - smoothstep(0.26, 0.44, length(fract(glyphLocal) - 0.5));
+      glyphAlpha = lit * glyphDot * glyphOn * (1.0 - sphere * bodyReveal) * canvasEdgeFade * saturate(0.2 + rippleWake * 0.32 + rippleCrest * 0.62);
+    }
+    particleLuminance *= 1.0 + rippleCrest * saturate(spread) * 0.8;
+  }
+
   vec3 revealedColor = mix(u_background, color, structureMask);
   revealedColor += lightTint * particleLuminance * (1.0 - lightSurface);
   revealedColor = mix(revealedColor, LIGHT_PARTICLE_INK, saturate(particleLuminance * 1.3) * lightSurface);
@@ -798,7 +812,7 @@ void main() {
 }
 `;
 
-export function VoiceOrbScene({ activity, ambient = false, animated = true, fieldSurface, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
+export function VoiceOrbScene({ activity, ambient = false, animated = true, sceneSurface, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onDispersedRef = useRef(onDispersed);
   onDispersedRef.current = onDispersed;
@@ -806,8 +820,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
   sizeProbeRef.current = sizeProbe;
   const rippleSurfaceRef = useRef(rippleSurface);
   rippleSurfaceRef.current = rippleSurface;
-  const fieldSurfaceRef = useRef(fieldSurface);
-  fieldSurfaceRef.current = fieldSurface;
+  const sceneSurfaceRef = useRef(sceneSurface);
+  sceneSurfaceRef.current = sceneSurface;
   const formationSurfaceRef = useRef(formationSurface);
   formationSurfaceRef.current = formationSurface;
   const frameRef = useRef<OrbFrame>({ activity, ambient, phase, sphere });
@@ -836,6 +850,9 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
     let animationFrame = 0;
     let canvasVisible = true;
     let pageVisible = document.visibilityState !== "hidden";
+    const visibilityRoot = rippleSurfaceRef.current?.current ?? canvas.closest(".voice-view") ?? canvas.parentElement;
+    const surfaceIsVisible = () => !visibilityRoot?.closest('[hidden], [aria-hidden="true"]');
+    let surfaceVisible = surfaceIsVisible();
     let previousTime = performance.now();
     let lastRenderTime = 0;
     let revealElapsed = frameRef.current.ambient ? 0 : REVEAL_SPAN;
@@ -847,7 +864,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
     let speechTime = staticScene ? 3.7 : 0;
     let renderPixelRatio = 1;
     let measuredSphere = 0;
-    let sceneTop = 0;
+    const scene = new Float32Array(4);
     const ripples = new Float32Array(RIPPLE_COUNT * 4);
     let nextRipple = 0;
     const forms = new Float32Array(FORM_COUNT * 4);
@@ -874,20 +891,20 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
     }
 
     const resize = () => {
-      const field = fieldSurfaceRef.current?.current;
-      const host = canvas.parentElement;
-      const extend = field && host ? Math.max(0, Math.round(host.getBoundingClientRect().top - field.getBoundingClientRect().top)) : 0;
-      canvas.style.top = extend ? `${-extend}px` : "";
-      canvas.style.height = extend ? `calc(100% + ${extend}px)` : "";
       const rect = canvas.getBoundingClientRect();
       const pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_RENDER_PIXEL_RATIO);
       renderPixelRatio = pixelRatio;
-      const probeWidth = sizeProbeRef.current?.current?.clientWidth ?? 0;
-      const shortestCssSide = Math.min(rect.width, rect.height - extend);
-      sceneTop = extend * pixelRatio;
-      measuredSphere = probeWidth > 0 && shortestCssSide > 0 ? Math.min(0.36, (probeWidth * 0.285) / shortestCssSide) : 0;
       const width = Math.max(1, Math.round(rect.width * pixelRatio));
       const height = Math.max(1, Math.round(rect.height * pixelRatio));
+      const sceneRect = sceneSurfaceRef.current?.current?.getBoundingClientRect() ?? rect;
+      const scaleX = width / Math.max(rect.width, 1);
+      const scaleY = height / Math.max(rect.height, 1);
+      scene[0] = (sceneRect.left - rect.left) * scaleX;
+      scene[1] = (rect.bottom - sceneRect.bottom) * scaleY;
+      scene[2] = Math.max(1, sceneRect.width * scaleX);
+      scene[3] = Math.max(1, sceneRect.height * scaleY);
+      const probeWidth = sizeProbeRef.current?.current?.clientWidth ?? 0;
+      measuredSphere = probeWidth > 0 ? Math.min(0.36, (probeWidth * scaleX * 0.285) / Math.min(scene[2], scene[3])) : 0;
       const cleared = canvas.width !== width || canvas.height !== height;
       if (cleared) {
         canvas.width = width;
@@ -898,14 +915,14 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
     };
 
     const scheduleDraw = () => {
-      if (disposed || staticScene || animationFrame || !canvasVisible || !pageVisible) return;
+      if (disposed || staticScene || animationFrame || !canvasVisible || !pageVisible || !surfaceVisible) return;
       animationFrame = window.requestAnimationFrame(draw);
     };
 
     const draw = (now: number) => {
       animationFrame = 0;
       if (disposed) return;
-      if (!canvasVisible || !pageVisible) {
+      if (!canvasVisible || !pageVisible || !surfaceVisible) {
         previousTime = now;
         lastRenderTime = now;
         return;
@@ -955,7 +972,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
       gl.uniform4fv(uniforms.forms, forms);
       gl.uniform4fv(uniforms.formTiming, formTiming);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
-      gl.uniform1f(uniforms.sceneTop, sceneTop);
+      gl.uniform4fv(uniforms.scene, scene);
       gl.uniform1f(uniforms.pixelRatio, renderPixelRatio);
       gl.uniform1f(uniforms.time, seconds);
       gl.uniform1f(uniforms.thoughtTime, thoughtTime);
@@ -972,11 +989,15 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
       gl.bindVertexArray(null);
       const dispersed = frame.ambient && (staticScene || revealElapsed === 0);
       if (dispersed) onDispersedRef.current?.();
-      if (!staticScene && !settledAmbient) scheduleDraw();
+      if (!staticScene && (!settledAmbient || now < activeUntil)) scheduleDraw();
     };
 
     const loseContext = (event: Event) => {
       event.preventDefault();
+      disposed = true;
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      requestRenderRef.current = null;
       setFailure("The voice scene lost its graphics context");
     };
     requestRenderRef.current = () => {
@@ -984,7 +1005,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
       else scheduleDraw();
     };
     const startRipple = (event: PointerEvent) => {
-      if (staticScene || event.button !== 0 || !frameRef.current.ambient) return;
+      if (staticScene || event.button !== 0 || !surfaceVisible || !canvasVisible || !pageVisible) return;
       if (event.target instanceof Element && event.target.closest(RIPPLE_IGNORED_TARGETS)) return;
       const rect = canvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
@@ -1035,6 +1056,8 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
     rippleTarget?.addEventListener("pointerdown", startRipple, { passive: true });
     const resizeAndDraw = () => {
       if (disposed) return;
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
       if (resize()) lastRenderTime = 0;
       draw(performance.now());
     };
@@ -1066,9 +1089,24 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
         animationFrame = 0;
       }
     };
+    const surfaceObserver = new MutationObserver(() => {
+      const visible = surfaceIsVisible();
+      if (surfaceVisible === visible) return;
+      surfaceVisible = visible;
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      if (surfaceVisible) {
+        previousTime = performance.now();
+        lastRenderTime = 0;
+        resizeAndDraw();
+      }
+    });
+    for (let ancestor = visibilityRoot; ancestor; ancestor = ancestor.parentElement) {
+      surfaceObserver.observe(ancestor, { attributes: true, attributeFilter: ["hidden", "aria-hidden"] });
+    }
     observer.observe(canvas);
     if (sizeProbeRef.current?.current) observer.observe(sizeProbeRef.current.current);
-    if (fieldSurfaceRef.current?.current) observer.observe(fieldSurfaceRef.current.current);
+    if (sceneSurfaceRef.current?.current) observer.observe(sceneSurfaceRef.current.current);
     intersectionObserver.observe(canvas);
     window.addEventListener("resize", resizeAndDraw);
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -1088,6 +1126,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
       observer.disconnect();
       intersectionObserver.disconnect();
       themeObserver.disconnect();
+      surfaceObserver.disconnect();
       window.removeEventListener("resize", resizeAndDraw);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       canvas.removeEventListener("webglcontextlost", loseContext);
@@ -1095,7 +1134,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, fiel
       gl.deleteVertexArray(vertexArray);
       gl.deleteProgram(program);
     };
-  }, [staticScene]);
+  }, [failure, staticScene]);
 
   useEffect(() => {
     requestRenderRef.current?.();
@@ -1155,7 +1194,7 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     pixelRatio: requiredUniform(gl, program, "u_pixel_ratio"),
     reveal: requiredUniform(gl, program, "u_reveal"),
     resolution: requiredUniform(gl, program, "u_resolution"),
-    sceneTop: requiredUniform(gl, program, "u_scene_top"),
+    scene: requiredUniform(gl, program, "u_scene"),
     ripples: requiredUniform(gl, program, "u_ripples"),
     speaking: requiredUniform(gl, program, "u_speaking"),
     speechTime: requiredUniform(gl, program, "u_speech_time"),

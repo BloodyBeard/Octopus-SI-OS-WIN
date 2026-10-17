@@ -27,6 +27,9 @@ async fn native_planning_reads_the_acknowledged_tip_after_progress_without_repla
             let turn = json!({"id":"turn-a","items":[],"itemsView":"full","status":"inProgress","error":null});
             for message in [
                 json!({"method":"turn/started","params":{"threadId":"thread-a","turn":turn}}),
+                json!({"method":"turn/moderationMetadata","params":{"threadId":"thread-a","turnId":"other-turn","metadata":{"ignored":true}}}),
+                json!({"method":"turn/moderationMetadata","params":{"threadId":"other-thread","turnId":"turn-a","metadata":{"ignored":true}}}),
+                json!({"method":"turn/moderationMetadata","params":{"threadId":"thread-a","turnId":"turn-a","metadata":{"review":{"state":"complete"},"scores":[0,0.5],"opaque":null}}}),
                 json!({"id":"planning-request","method":"item/tool/call","params":{
                     "threadId":"thread-a","turnId":"turn-a","callId":"planning-call",
                     "namespace":"formed_interfaces","tool":"list_runs","arguments":{}

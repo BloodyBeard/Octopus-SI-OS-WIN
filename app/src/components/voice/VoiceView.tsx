@@ -495,6 +495,9 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
 
   return (
     <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`} ref={viewRef}>
+      <div aria-hidden="true" className="voice-home-scene">
+        <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} sceneSurface={stageMainRef} formationSurface={widgetCanvasRef} rippleSurface={viewRef} sizeProbe={orbProbeRef} />
+      </div>
       <header className="voice-session-heading">
         <VoiceSessionTitle
           editable={!callActive}
@@ -521,9 +524,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
       />
       <main className="voice-session-stage" ref={stageMainRef}>
         <i aria-hidden="true" className="voice-orb-probe" ref={orbProbeRef} />
-        <div aria-hidden="true" className="voice-stage-scene">
-          <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} fieldSurface={viewRef} formationSurface={widgetCanvasRef} rippleSurface={viewRef} sizeProbe={orbProbeRef} />
-        </div>
         <HomeResponseStage
           operatorRequests={homeOperatorRequests}
           onOperatorRequestResponse={workspace.respondToOperatorRequest}

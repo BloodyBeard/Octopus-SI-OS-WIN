@@ -42,6 +42,7 @@ jobs:
           npm run test:workspace-setup
           node scripts/test-home-experience.cjs
           node scripts/test-home-voice-contracts.cjs
+          node --test scripts/test-dashboard-presentation.cjs scripts/test-topology-performance.cjs
           node scripts/test-task-environment-summary.cjs
           node scripts/test-client-turn-queue.cjs
           node scripts/test-client-artifact-delivery.cjs
@@ -180,6 +181,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_PROFILE_TEST_OPT_LEVEL: "1"
       CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: "true"
     steps:

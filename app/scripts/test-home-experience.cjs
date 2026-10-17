@@ -381,6 +381,14 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
   try {
     assert.equal(window.localStorage.getItem(visibilityKey), null);
     await view.render(props);
+    const homeRoot = view.container.querySelector(".voice-view");
+    const scene = homeRoot.querySelector(":scope > .voice-home-scene");
+    assert.ok(scene);
+    assert.equal(orbProps.sceneSurface.current, homeRoot.querySelector(".voice-session-stage"));
+    assert.equal(orbProps.rippleSurface.current, homeRoot);
+    const sceneCss = fs.readFileSync(path.join(appRoot, "src/components/voice/voice.css"), "utf8").match(/\.voice-home-scene \{([^}]+)\}/)[1];
+    assert.match(sceneCss, /position: absolute;[\s\S]*inset: 0;/);
+    assert.match(sceneCss, /pointer-events: none;/);
     assert.deepEqual([...view.container.querySelectorAll("[data-widget]")].map(node => node.dataset.widget), ["Delivered widget"]);
     assert.equal(button(view.container, "Installed extension").getAttribute("aria-checked"), "false");
     await click(button(view.container, "Installed extension"));

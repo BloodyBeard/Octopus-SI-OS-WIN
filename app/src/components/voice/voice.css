@@ -679,8 +679,9 @@
   pointer-events: none;
 }
 
-.voice-stage-scene {
+.voice-home-scene {
   position: absolute;
+  z-index: 0;
   inset: 0;
   display: flex;
   align-items: center;
@@ -688,7 +689,7 @@
   pointer-events: none;
 }
 
-.voice-stage-scene .voice-orb-scene-failure {
+.voice-home-scene .voice-orb-scene-failure {
   width: min(320px, 62%);
 }
 

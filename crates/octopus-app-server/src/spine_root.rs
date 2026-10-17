@@ -1722,10 +1722,20 @@ pub async fn build_embedded_spine(
     let root = &config.registry_root;
     let packages = RegistryPackages::load(root)
         .map_err(|error| format!("loading registry packages failed: {error}"))?;
-    for dangling in &packages.dangling_ceiling_refs {
+    if !packages.dangling_ceiling_refs.is_empty() {
+        let workers = packages
+            .dangling_ceiling_refs
+            .iter()
+            .map(|reference| &reference.worker)
+            .collect::<BTreeSet<_>>();
+        let interfaces = packages
+            .dangling_ceiling_refs
+            .iter()
+            .map(|reference| (&reference.field, &reference.target))
+            .collect::<BTreeSet<_>>();
         eprintln!(
-            "boot warning: worker '{}' {} grants '{}', absent from the live registry — a typed dangling fact, not boot poison; emission toward it refuses at send time through the delivery protocol",
-            dangling.worker, dangling.field, dangling.target
+            "policy     {} interface targets across {} worker ceilings are unavailable; requests to them will be refused. References: {}/interface/<worker>/policy.json (ceiling.interfaces)",
+            interfaces.len(), workers.len(), root.display()
         );
     }
     let mut persisted_ee_instances = load_persisted_ee_instances(&config.ee_instances_root)?;

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
+import { memo, useCallback, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type WheelEvent as ReactWheelEvent } from "react";
 import type { EnvironmentNode, InterfaceSummary, SelectionRef } from "../data/topology";
 import { ArtifactTransferSegments, useArtifactTransferList, type ArtifactTransfer, type ArtifactTransferFeed, type TransferPoint, type TransferTrajectory } from "./ArtifactTransferAnimation";
 import { compactDashboardLabel, DashboardSvgLabel, DashboardTooltip } from "./DashboardLabel";
@@ -60,7 +60,7 @@ const WORLD_GRID_GAP_Y = 104;
 const WORLD_SURFACE_PAD = 86;
 const WORLD_SURFACE_MIN_HALF = 280;
 
-export function WorldProjection({ environments, registeredWorldInterfaces, interfaceIndex, transferFeed, mode, selected, onSelect }: Props) {
+export const WorldProjection = memo(function WorldProjection({ environments, registeredWorldInterfaces, interfaceIndex, transferFeed, mode, selected, onSelect }: Props) {
   const [yawDeg, setYawDeg] = useState(DEFAULT_YAW);
   const [pitchDeg, setPitchDeg] = useState(DEFAULT_PITCH);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
@@ -235,7 +235,7 @@ export function WorldProjection({ environments, registeredWorldInterfaces, inter
       ) : null}
     </div>
   );
-}
+});
 
 function WorldArtifactTransfers({ feed, interfaces, runs, worldDots }: {
   feed: ArtifactTransferFeed;
@@ -248,7 +248,7 @@ function WorldArtifactTransfers({ feed, interfaces, runs, worldDots }: {
     () => worldArtifactTrajectories(transfers, runs, worldDots, interfaces),
     [interfaces, runs, transfers, worldDots],
   );
-  return <ArtifactTransferSegments transfers={transfers} resolve={resolve} />;
+  return <ArtifactTransferSegments transfers={transfers} resolve={resolve} onPresent={feed.present} />;
 }
 
 type TransferRunPoint = {
@@ -314,8 +314,9 @@ function buildScene(
   mode: "instances" | "routeSets",
 ) {
   const byParent = new Map<string, EnvironmentNode[]>();
+  const environmentIds = new Set(environments.map((env) => env.id));
   for (const env of environments) {
-    const key = env.parentId && environments.some((item) => item.id === env.parentId) ? env.parentId : "";
+    const key = env.parentId && environmentIds.has(env.parentId) ? env.parentId : "";
     const list = byParent.get(key) ?? [];
     list.push(env);
     byParent.set(key, list);
@@ -339,13 +340,14 @@ function buildScene(
     const w = innerW + ZONE_PAD * 2;
     const h = ZONE_HEAD + innerH + ZONE_PAD;
 
+    const worldInterfaceIds = new Set(env.worldInterfaces);
     const runNodes: RunNode[] = runs.map((run, index) => {
       const col = index % cols;
       const row = Math.floor(index / cols);
       const itemsInRow = Math.min(n - row * cols, cols);
       const rowStart = ZONE_PAD + (innerW - itemsInRow * RUN_CELL) / 2;
       const boundInterfaces = dedupe(run.interfaces.map((item) => item.name));
-      const world = boundInterfaces.filter((name) => env.worldInterfaces.includes(name));
+      const world = boundInterfaces.filter((name) => worldInterfaceIds.has(name));
       return {
         run,
         lx: rowStart + col * RUN_CELL + RUN_CELL / 2,

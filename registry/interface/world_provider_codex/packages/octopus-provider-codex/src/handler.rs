@@ -9257,6 +9257,7 @@ fn intentionally_unprojected_server_notification(notification: &ServerNotificati
             | ServerNotification::ThreadGoalCleared(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::RawResponseItemCompleted(_)
+            | ServerNotification::TurnModerationMetadata(_)
             | ServerNotification::AppListUpdated(_)
             | ServerNotification::RemoteControlStatusChanged(_)
             | ServerNotification::ExternalAgentConfigImportProgress(_)

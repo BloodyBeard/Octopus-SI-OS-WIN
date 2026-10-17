@@ -110,7 +110,7 @@ type Props = {
 };
 
 
-export function TopologyStage({ snapshot, query, scope, viewMode, filters, selected, onSelect }: Props) {
+export const TopologyStage = memo(function TopologyStage({ snapshot, query, scope, viewMode, filters, selected, onSelect }: Props) {
   const zoneMaskPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
   const artifactTransfers = useArtifactTransferFeed(snapshot.projection);
   useAppErrorToast(artifactTransfers.error);
@@ -244,6 +244,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
   }), [filters, normalizedQuery, levelEnvironments]);
 
   const zonedEnvironments = useMemo(() => {
+    if (scope === "World" || viewMode !== "zones") return [];
     const matching = snapshot.environments.filter((env) => {
       if (!filters.statuses[env.status]) return false;
       if (normalizedQuery && !environmentMatches(env, normalizedQuery)) return false;
@@ -259,7 +260,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
       }
     }
     return Array.from(withAncestors.values());
-  }, [filters, normalizedQuery, snapshot.environments]);
+  }, [filters, normalizedQuery, snapshot.environments, scope, viewMode]);
 
   // THIS IS TOPOLOGY, not a list (owner): zones live at REAL coordinates on the surface.
   // Drag a card anywhere; the position pins and persists per level. A card without a pin
@@ -382,6 +383,10 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
       material: zonePalette.materialsById.get(item.zone.id) ?? ZONE_MATERIALS[0],
     })),
   [zoneLayout.zones, zoneMaskPrefix, zonePalette.materialsById]);
+  const materialHoles = useMemo(() => new Map(zoneMaterialOrder.map(({ zone }, index) => [
+    zone.id,
+    zoneMaterialHoles(zone, zoneMaterialOrder.slice(index + 1).map((item) => item.zone)),
+  ])), [zoneMaterialOrder]);
   const zoneLayoutRef = useRef(zoneLayout);
   zoneLayoutRef.current = zoneLayout;
   const runDragRef = useRef<{
@@ -555,8 +560,8 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
                       aria-hidden="true"
                     >
                       <defs>
-                        {zoneMaterialOrder.map(({ zone, maskId }, index) => {
-                          const holes = zoneMaterialHoles(zone, zoneMaterialOrder.slice(index + 1).map((item) => item.zone));
+                        {zoneMaterialOrder.map(({ zone, maskId }) => {
+                          const holes = materialHoles.get(zone.id) ?? [];
                           return (
                             <g key={`defs-${zone.id}`}>
                               <mask id={maskId} maskUnits="userSpaceOnUse" x={0} y={0} width={zoneLayout.width} height={zoneLayout.height}>
@@ -666,7 +671,7 @@ export function TopologyStage({ snapshot, query, scope, viewMode, filters, selec
       </div>
     </section>
   );
-}
+});
 
 function TransferBurstLegend() {
   return <DashboardTooltip text="Repeated traffic is grouped by run and interface pair. The first movement in each direction anchors its burst; newer repeats join that burst. Related steps keep recorded order with a 300 ms pause. Independent paths animate together. Only recent paths animate; full movement history stays in the ledger.">
@@ -774,7 +779,7 @@ const EnvironmentCard = memo(function EnvironmentCard({
   );
 });
 
-function RunNodeCard({
+const RunNodeCard = memo(function RunNodeCard({
   run,
   env,
   selected,
@@ -870,7 +875,7 @@ function RunNodeCard({
 
     </article>
   );
-}
+});
 
 function CheckpointAsRunBlock({
   checkpoint,
