@@ -345,7 +345,9 @@ function createProjectionStore(options) {
         segments.length === 3
         && /^ledger-cursor(?:\.[A-Za-z0-9_-]+)?\.json$/.test(segments[2])
       ) return null;
-      if (segments.length === 3 && segments[2].endsWith(".json")) return "structure";
+      if (segments.length === 3 && segments[2].endsWith(".json")) {
+        return segments[2] === INTERFACE_PRIVATE_ENVIRONMENT_FILE ? "structure" : "runs";
+      }
       return segments[2] === "worker-environments"
         && segments.length === 5
         && ["worker_environment.json", "live_state.json"].includes(segments[4])
@@ -447,7 +449,8 @@ function createProjectionStore(options) {
   async function readProjection(request) {
     await beforeRead();
     const { method, params } = parseProjectionReadRequest(request);
-    if (method === "projection.interface_artifacts.list" || method === "projection.client_actions.list") {
+    if (method === "projection.interface_artifacts.list" || method === "projection.client_actions.list"
+      || method === "projection.movements.list") {
       const home = octopusHome();
       if (method === "projection.client_actions.list" && params.home !== home) {
         throw new Error("Client action read does not match the selected Home.");
@@ -466,6 +469,8 @@ function createProjectionStore(options) {
         case "projection.client_actions.list":
           return { home, run_id: params.run_id, interface_id: params.interface_id,
             actions: await clientActionRows(ledgerView, params) };
+        case "projection.movements.list":
+          return readMovementPage(ledgerView, params);
       }
     }
     const exactInterface = params.interface_id ?? params.interface;
@@ -642,20 +647,6 @@ function createProjectionStore(options) {
         return { providers: await operatorProviderStatusRows(projection) };
       case "projection.scheduled_interfaces.list":
         return { scheduled_interfaces: await scheduledInterfaceRows(projection) };
-      case "projection.movements.list": {
-        const indexed = await readIndexedMovementPage(projection, params);
-        if (indexed) return indexed;
-        if (movementPageRequiresIndex(params)) {
-          throw new Error("ledger index is required for cursor paging or search");
-        }
-        await refreshLedgerProjection(projection);
-        const movements = await movementRows(projection);
-        return {
-          movements: limitRows(movements, params),
-          total: movements.length,
-          next_seq: movements.reduce((next, row) => Math.max(next, row.seq + 1), 0),
-        };
-      }
       case "projection.movements.payload":
         return await movementPayloadPreview(params);
       case "projection.client_surfaces.list":
@@ -670,7 +661,6 @@ function createProjectionStore(options) {
   }
 
   function projectionRequiresFullLedger(method, params) {
-    if (method === "projection.movements.list") return false;
     if (params.include_ledger === false && [
       "projection.runtime.snapshot",
       "projection.ee_instances.list",
@@ -692,6 +682,21 @@ function createProjectionStore(options) {
 
   async function movementRows(projection) {
     return projectMovementRows(projection, projection.ledgerRows);
+  }
+
+  async function readMovementPage(projection, params) {
+    const indexed = await readIndexedMovementPage(projection, params);
+    if (indexed) return indexed;
+    if (movementPageRequiresIndex(params)) {
+      throw new Error("ledger index is required for cursor paging or search");
+    }
+    await refreshLedgerProjection(projection);
+    const movements = await movementRows(projection);
+    return {
+      movements: limitRows(movements, params),
+      total: movements.length,
+      next_seq: movements.reduce((next, row) => Math.max(next, row.seq + 1), 0),
+    };
   }
 
   async function recentMovementRows(projection, limit) {

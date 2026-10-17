@@ -665,7 +665,7 @@ test("movement cursors cover indexed rows, an unindexed burst, partial writes an
       VALUES (0, 0, 1000, 'cursor-test', 'InterfaceOutbound', 'interface', 'source', 'interface', 'target');`);
   db.close();
   const projection = createProjectionStore({ resolveRepoRoot: () => path.resolve(appRoot, ".."), octopusHome: () => root,
-    sourceRegistry: () => path.join(temporary, "registry"), localPackageLibrary: () => path.join(temporary, "library"), projectEePolicies: async () => ({ environments: [], issues: [] }) });
+    sourceRegistry: () => { throw new Error("Movement paging must not read registry configuration"); }, localPackageLibrary: () => path.join(temporary, "library"), projectEePolicies: async () => ({ environments: [], issues: [] }) });
   const read = params => projection.read({ contract_version: 1, method: "projection.movements.list", params: { limit: 2, ...params } });
   try {
     const first = await read({});
