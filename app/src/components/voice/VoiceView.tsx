@@ -18,6 +18,7 @@ import { appToast, useAppErrorToast } from "../../toasts";
 import type { ChatWorkspace } from "../chat";
 import { OperatorRequestSurface } from "../chat/OperatorRequestSurface";
 import { MessageContent } from "../chat/MessageContent";
+import { conversationTraceAdmission } from "../chat/conversationTrace";
 import type { ChatAttachmentView, ChatRenderMessage, ChatToolPresentationIndex } from "../chat/types";
 import type { OctopusClientAccessProfile } from "../../electron";
 import { Glyph, type GlyphName } from "../IconGlyphs";
@@ -26,7 +27,7 @@ import { ChatComposer } from "../chat/ChatComposer";
 import type { ProjectedFileSource } from "../chat/ProjectedFilePicker";
 import { AirHandVoiceController } from "./AirHandVoiceController";
 import { HomeCallControls } from "./HomeCallControls";
-import { HomeTurnActivity, homeTurnActivity } from "./HomeTurnActivity";
+import { HomeTurnActivity, homeTurnActivity, homeTurnTerminalNotice } from "./HomeTurnActivity";
 import { projectHomeVoiceContext } from "./voiceCallArtifacts";
 import { isVoiceCallActive, voicePresentation } from "./voicePresentation";
 import { VoiceOrbScene } from "./VoiceOrbScene";
@@ -101,6 +102,13 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [environmentMaximized, setEnvironmentMaximized] = useState(false);
   const [hiddenSurfaceIds, setHiddenSurfaceIds] = useState(() => readStoredStringSet(storageKeys.hiddenSurfaces));
+  useEffect(() => {
+    const refresh = (event: StorageEvent) => {
+      if (event.key === storageKeys.hiddenSurfaces || event.key === null) setHiddenSurfaceIds(readStoredStringSet(storageKeys.hiddenSurfaces));
+    };
+    window.addEventListener("storage", refresh);
+    return () => window.removeEventListener("storage", refresh);
+  }, [storageKeys.hiddenSurfaces]);
   const installedWidgetIdsHydratedRef = useRef(false);
   const previousInstalledWidgetIdsRef = useRef(new Set<string>());
   const [sessionTitle, setSessionTitle] = useState(() => readStoredText(storageKeys.title, "Home"));
@@ -325,16 +333,11 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   useEffect(() => {
     if (!installedWidgetsReady) return;
     const previous = previousInstalledWidgetIdsRef.current;
-    const newlyInstalled = installedWidgetIds.filter((id) => !previous.has(id));
-    const hydrated = installedWidgetIdsHydratedRef.current;
     previousInstalledWidgetIdsRef.current = new Set([...previous, ...installedWidgetIds]);
     installedWidgetIdsHydratedRef.current = true;
     setHiddenSurfaceIds((current) => {
       if (current === null) return new Set(installedWidgetIds);
-      if (!hydrated || !newlyInstalled.length) return current;
-      const next = new Set(current);
-      newlyInstalled.forEach((id) => next.add(id));
-      return next;
+      return current;
     });
   }, [installedWidgetIds, installedWidgetsReady]);
 
@@ -740,7 +743,8 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const text = response?.text.trim() ?? "";
-  const working = busy && !submitting;
+  const activityNotice = homeTurnTerminalNotice(activity);
+  const working = busy && !submitting && !failure && !activityNotice;
   const streamingText = working ? streamingResponse?.text ?? "" : "";
   const responseStreaming = Boolean(streamingText.trim());
   const attachments = response?.attachments ?? [];
@@ -752,7 +756,9 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   const datedResponse = responseDate && Number.isFinite(responseDate.getTime()) ? responseDate : null;
   const turnFailed = Boolean(failure);
   const quiet = submitting || turnFailed;
-  const hasResponse = operatorRequests.length > 0 || responseStreaming || working || submitting || finalVisible || turnFailed;
+  const retainedActivity = !quiet && !loading && (Boolean(activityNotice)
+    || activity.some((message) => conversationTraceAdmission(message, toolPresentations) === "visible"));
+  const hasResponse = operatorRequests.length > 0 || responseStreaming || working || submitting || finalVisible || turnFailed || retainedActivity;
   const compact = operatorRequests.length > 0 ? false : responseStreaming
     ? isCompactHomeResponse(streamingText, [])
     : submitting
@@ -761,7 +767,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
     ? true
     : finalVisible
     ? isCompactHomeResponse(text, attachments)
-    : !turnFailed;
+    : !turnFailed && !retainedActivity;
 
   useLayoutEffect(() => {
     const stage = stageRef.current;
@@ -792,7 +798,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   return (
     <motion.section
       animate={{ opacity: 1 }}
-      aria-busy={busy || submitting}
+      aria-busy={working || submitting}
       aria-label="Home latest response viewport"
       className={`home-response-stage${working ? " is-generating is-transient" : ""}${hasResponse ? " has-response" : " is-empty"}${compact ? " is-compact" : " is-expanded"}${scrolled ? " is-scrolled" : ""}${dragOver ? " is-drag-over" : ""}${replyHidden ? " is-call" : ""}`}
       initial={{ opacity: 0 }}
@@ -856,9 +862,9 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
                 ) : null}
                 {!responseStreaming && attachments.length ? <HomeResponseAttachments attachments={attachments} /> : null}
               </article>
-            ) : working ? (
-              <article className="home-response-output home-response-output--live" key="working">
-                <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} />
+            ) : working || retainedActivity ? (
+              <article className={`home-response-output${working ? " home-response-output--live" : ""}`} key="activity">
+                <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} turnInProgress={working} terminalNotice={activityNotice} />
               </article>
             ) : quiet || loading ? null : (
               <div className="home-response-empty" key="empty">

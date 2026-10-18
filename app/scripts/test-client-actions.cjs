@@ -11,7 +11,7 @@ const { createProjectionStore } = require('../electron/projection.cjs');
 const { createFixtureProjectionStore } = require('../electron/fixtureProjection.cjs');
 const contract = require('../electron/projectionReadContract.cjs');
 const dom = new JSDOM('<body></body>', { url: 'https://client.test' });
-for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node']) globalThis[key] = dom.window[key];
+for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'StorageEvent']) globalThis[key] = dom.window[key];
 Object.defineProperty(globalThis, 'navigator', { configurable: true, value: dom.window.navigator });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { createRoot } = require('react-dom/client');
@@ -67,17 +67,74 @@ test('actions require exact admitted outbound evidence and immutable manifest/pa
 async function harness(read, props = {}) {
   const source = await fs.readFile(path.join(__dirname, '../src/shell/useAdmittedClientActions.ts'), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  const module = { exports: {} }, opens = [], refusals = [], reads = [];
+  const module = { exports: {} }, opens = [], refusals = [], reads = [], results = [];
+  const semantics = await import('../electron/clientActionSemantics.mjs');
   let generation = 0;
-  Function('module', 'exports', 'require', compiled)(module, module.exports, id => id === 'react' ? React : id === '../projectionClient' ? { readProjection: (method, params) => { assert.equal(method, 'projection.client_actions.list'); reads.push(params); return read(params); } } : { useProjectionGeneration: () => generation });
+  Function('module', 'exports', 'require', compiled)(module, module.exports, id => id === 'react' ? React : id.includes('clientActionSemantics') ? semantics : id === '../projectionClient' ? {
+    readProjection: (method, params) => { assert.equal(method, 'projection.client_actions.list'); reads.push(params); return read(params); },
+    submitInterfaceArtifact: async request => { results.push(request); if (props.deliver) await props.deliver(request); },
+  } : { useProjectionGeneration: () => generation });
   function Consumer(options) { module.exports.useAdmittedClientActions(options); return null; }
   const options = { ...scope, enabled: true, surfaces: [{ id: 'dashboard' }, { id: 'scheduled' }], openSurface: surface => { const cursor = JSON.parse(window.localStorage.getItem(`octopus.client-actions.cursor.v1:${JSON.stringify([options.home, options.runId, options.interfaceId])}`)); assert.ok(cursor.last_consumed.seq >= 0); opens.push(surface.id); }, onRefusal: reason => refusals.push(reason), ...props };
   let root, container;
   const render = async (changes = {}, bump = false) => { Object.assign(options, changes); if (bump) generation++; if (!root) { container = document.createElement('div'); document.body.append(container); root = createRoot(container); } await React.act(async () => root.render(React.createElement(Consumer, { ...options }))); };
   const close = async () => { if (!root) return; await React.act(async () => root.unmount()); container.remove(); root = null; };
   await render();
-  return { render, close, opens, refusals, reads, options };
+  return { render, close, opens, refusals, reads, results, options };
 }
+
+test('widget results resume after lost admission without repeating the saved action', async () => {
+  window.localStorage.clear(); let calls = 0, fail = true;
+  const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'inventory' };
+  const view = await harness(params => response(params, params.after_seq < 3 ? [identity(3, { action: request })] : []), {
+    widgets: async () => { calls++; return [{ widget_id: 'clock', state: 'hidden' }]; },
+    deliver: async () => { if (fail) throw new Error('receipt admission unavailable'); },
+  });
+  try {
+    assert.equal(calls, 1); assert.equal(view.results.length, 1); assert.match(view.refusals[0], /admission unavailable/);
+    fail = false; await view.render({}, true);
+    assert.equal(calls, 1); assert.equal(view.results.length, 2); assert.deepEqual(view.results[0], view.results[1]);
+    assert.equal(view.results[1].interfaceId, 'room'); assert.equal(view.results[1].label, 'client.action.result');
+    assert.equal(view.results[1].payload.request_seq, 3); assert.equal(view.results[1].payload.ok, true);
+    await view.close(); await view.render(); assert.equal(calls, 1); assert.equal(view.results.length, 2);
+    await view.close(); window.localStorage.clear();
+    const pendingKey = `octopus.client-widget-result.v1:${JSON.stringify([scope.home, scope.runId, scope.interfaceId])}`;
+    const { ok, widgets, ...prepared } = view.results[0].payload;
+    window.localStorage.setItem(pendingKey, JSON.stringify({ ...prepared, phase: 'prepared' }));
+    await view.render(); assert.equal(calls, 1); assert.equal(view.results.at(-1).payload.ok, false);
+    assert.match(view.results.at(-1).payload.error, /effect is unconfirmed/);
+  } finally { await view.close(); }
+});
+
+test('widget controls use actual extension receipts, exact document revisions and saved visibility', async t => {
+  window.localStorage.clear();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'octopus-widget-controls-'));
+  const store = require('../electron/clientExtensions.cjs').createClientExtensionStore({ root });
+  t.after(async () => { store.close(); delete window.octopusTransport; await fs.rm(root, { recursive: true, force: true }); });
+  const bundled = require('esbuild').buildSync({ stdin: { contents: 'export * from "./src/client-surfaces/homeWidgetControls"; export {materializeClientExtensions} from "./src/extensions/useClientExtensions";', resolveDir: path.resolve(__dirname, '..') }, bundle: true, platform: 'node', format: 'cjs', write: false, external: ['react'], loader: { '.css': 'empty' }, define: { 'import.meta.env.DEV': 'false' } });
+  const module = { exports: {} }; Function('module', 'exports', 'require', bundled.outputFiles[0].text)(module, module.exports, require);
+  const { applyHomeWidgetAction, materializeClientExtensions, homeWidgetHiddenKey } = module.exports;
+  window.octopusTransport = { clientExtensions: () => store.snapshot() };
+  const lifecycle = async (id, operationId, action) => store.applyLifecycle({ id, operationId, action, expectedGeneration: (await store.snapshot()).generation, expectedRevision: store.builtinRevision(id) });
+  const extensionState = async () => ({ ...materializeClientExtensions(await store.snapshot(), 'live', ''), hydrated: true,
+    install: (id, op) => lifecycle(id, op, 'install'), uninstall: (id, op) => lifecycle(id, op, 'remove') });
+  const item = { sourceDigest: 'sha256:document', sourceRunId: scope.runId, sourceInterfaceId: scope.interfaceId, sourceArtifactId: 'client.surface.document:original', sourceSequence: 1,
+    document: { id: 'hello', title: 'Hello', revision: 1, target: { kind: 'voice.widget', slot: 'right' } } };
+  const options = { ...scope, accessProfile: 'live', surfaces: [item, { ...item, sourceRunId: 'foreign', document: { ...item.document, id: 'foreign' } }], extensions: await extensionState() };
+  const query = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'list' };
+  const list = () => applyHomeWidgetAction(options, query, 'widget_inventory');
+  const change = (widget, state) => applyHomeWidgetAction(options, { ...query, action: 'set_widget', widget_id: widget.widget_id, source_digest: widget.source_digest, state }, `widget_${state}_fixture`);
+  let rows = await list(); assert.ok(!rows.some(row => row.widget_id === 'foreign'));
+  const hello = rows.find(row => row.widget_id === 'hello'), builtin = rows.find(row => row.widget_id === 'builtin.voice.live-context');
+  for (const state of ['hidden', 'visible', 'removed', 'visible']) assert.equal((await change(hello, state)).find(row => row.widget_id === 'hello').state, state);
+  await assert.rejects(change({ ...hello, source_digest: 'foreign' }, 'removed'), /revision changed/);
+  await change(builtin, 'removed'); options.extensions = await extensionState();
+  assert.equal((await list()).find(row => row.widget_id === builtin.widget_id).installed, false);
+  await change(builtin, 'visible'); options.extensions = await extensionState();
+  rows = await list(); assert.equal(rows.find(row => row.widget_id === builtin.widget_id).state, 'visible');
+  assert.equal(rows.find(row => row.widget_id === builtin.widget_id).installed, true);
+  window.localStorage.setItem(homeWidgetHiddenKey('live'), '{}'); await assert.rejects(list(), /malformed/);
+});
 
 test('durable consumption precedes navigation, never replays on generation/remount, and scopes each Home', async () => {
   window.localStorage.clear();

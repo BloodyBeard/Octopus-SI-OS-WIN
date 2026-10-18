@@ -17,6 +17,7 @@ const KINDS = {
 async function main() {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-")));
   try {
+    if (process.argv[2] === "--plan-admission") return await rendererPlanAdmission(path.join(temporary, "renderer"));
     await relaunchSelection(path.join(temporary, "launch"));
     await rendererPlanAdmission(path.join(temporary, "renderer"));
     await coldPresetLoader(path.join(temporary, "cold-preset"));
@@ -99,6 +100,12 @@ async function rendererPlanAdmission(root) {
     extensions: (native.extensions ?? []).map((entry) => ({ extensionId: entry.extension_id, version: "1.0.0", sourceDigest: "sha256:" + "3".repeat(64), desiredState: "available" })),
     projectKeysByPackage: Object.fromEntries(components.map((entry) => [entry.packageId, draft.projects.map((project) => project.key)])) };
   const request = renderer.compileWorkspaceInitializeRequest(draft, pack.recipe, pack);
+  assert.deepEqual(request.home.doorHostSlots, { system_workspace_env: { workspace_root: "/", host_filesystem_root: "/" } });
+  assert.ok(request.home.selectedWorkerEnvironmentKinds.includes("filesystem_workspace"));
+  const cli = require("../cli/setup.cjs").compileSetupPlan(native, { operationId: draft.operationId, workspaceName: "Fresh", workspaceGoal: "Fresh",
+    projects: [], model: draft.providerModel, reasoningEffort: draft.reasoningEffort, recommended: [] });
+  assert.deepEqual(cli.workspace.request.home.doorHostSlots, request.home.doorHostSlots);
+  assert.throws(() => renderer.compileWorkspaceInitializeRequest(draft, { ...pack.recipe, door_host_slots: { system_workspace_env: { host_filesystem_root: "relative" } } }, pack), /absolute path/);
   const requestDigest = await renderer.workspaceInitializeRequestDigest(request);
   const plan = compile(draft, pack, selection, requestDigest);
   assert.equal(admit({ packs: [native] }, plan), native);
@@ -108,6 +115,8 @@ async function rendererPlanAdmission(root) {
     pack.components.map((entry, index) => index === 0 ? { ...entry, sourceDigest: "" } : entry),
   ]) assert.throws(() => compile(draft, { ...pack, components }, selection, requestDigest), /one verified package snapshot/);
   for (const mutate of [
+    (request) => { request.home.doorHostSlots = {}; },
+    (request) => { request.home.doorHostSlots.system_workspace_env.host_filesystem_root = "/limited"; },
     (request) => { delete request.task; },
     (request) => { request.task.workerInterfaceId = request.home.workerInterfaceId; },
     (request) => { request.task.contextArtifactBindings = []; },

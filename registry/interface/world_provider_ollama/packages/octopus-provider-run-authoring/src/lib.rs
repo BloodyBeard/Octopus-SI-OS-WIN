@@ -9293,6 +9293,10 @@ async fn send_authoring_manifest(
             &config.authoring_source_interface,
         );
     tokio::time::timeout(timeout, async move {
+      loop {
+        if ctx.cancel.is_cancelled() {
+            return Err("interface authoring hand-in was cancelled".into());
+        }
         let stream = tokio::net::UnixStream::connect(&socket)
             .await
             .map_err(|error| {
@@ -9304,7 +9308,7 @@ async fn send_authoring_manifest(
         let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/rpc", stream)
             .await
             .map_err(|error| format!("interface authoring websocket upgrade failed: {error}"))?;
-        ws.send(WsMessage::Text(text.into()))
+        ws.send(WsMessage::Text(text.clone().into()))
             .await
             .map_err(|error| format!("interface authoring send failed: {error}"))?;
         let reply = ws
@@ -9320,7 +9324,14 @@ async fn send_authoring_manifest(
         let verdict: DeliveryVerdict = serde_json::from_str(&reply)
             .map_err(|error| format!("interface authoring verdict is malformed: {error}"))?;
         let _ = ws.close(None).await;
-        Ok(verdict)
+        if !verdict.awaits_current_source() {
+            return Ok(verdict);
+        }
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err("interface authoring hand-in was cancelled".into()),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+      }
     })
     .await
     .map_err(|_| {
@@ -16885,6 +16896,8 @@ mod tests {
                 &probe_ctx, &descriptor, &run, &independent_input, 1, &probe_bytes,
             ).unwrap();
             assert!(!independent_handoff.source_carries_context);
+            let restored = probe_session.failed_source_handoff(&probe_ctx, &descriptor, &run, &independent_input, 1).unwrap();
+            assert_eq!(restored.state.try_lock().unwrap().consumed_context_free_independent_input.as_ref(), Some(&independent));
             assert!(independent_handoff.invocation_session_snapshot().is_none());
             let state = independent_handoff.state.try_lock().unwrap();
             assert!(state.session_context.artifacts.is_empty());

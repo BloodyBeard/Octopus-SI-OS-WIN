@@ -57,6 +57,7 @@ import type { SelectionRef } from "../../data/topology";
 import type { OctopusClientAccessProfile, OctopusClientWindowCloseRequest } from "../../electron";
 import { useRuntimeTopology } from "../../runtimeTopology";
 import { useClientSurfaces } from "../../shell/surfaceRegistry";
+import { applyHomeWidgetAction } from "../../client-surfaces/homeWidgetControls";
 import { useAdmittedClientActions } from "../../shell/useAdmittedClientActions";
 import type { ClientSurfaceDescriptor } from "../../shell/surfaceTypes";
 import {
@@ -2130,6 +2131,9 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     interfaceId: homeChatWorkspace.activeRun?.chatInterfaceId ?? "",
     surfaces: visibleSurfaces.filter((surface) => !isSidebarOnlySurface(surface)),
     openSurface: (surface) => openPrimarySurface(surface, true),
+    widgets: (action, operationId) => applyHomeWidgetAction({ accessProfile, runId: homeRunId,
+      interfaceId: homeChatWorkspace.activeRun?.chatInterfaceId ?? "",
+      surfaces: surfaceRegistry.voiceSurfaces, extensions: surfaceRegistry.extensions }, action, operationId),
     onRefusal: (reason) => appToast.warning(reason),
   });
 

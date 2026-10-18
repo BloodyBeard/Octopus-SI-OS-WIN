@@ -8,7 +8,7 @@ const React = require("react");
 const { act } = React;
 const { JSDOM } = require("jsdom");
 const appRoot = path.resolve(__dirname, "..");
-const dom = new JSDOM("<html><body></body></html>", { url: "https://octopus.test" });
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "https://octopus.test", pretendToBeVisual: true });
 for (const key of ["window", "document", "HTMLElement", "Element", "Node", "CustomEvent"]) globalThis[key] = dom.window[key];
 Object.defineProperty(globalThis, "navigator", { configurable: true, value: dom.window.navigator });
 const { createRoot } = require("react-dom/client");
@@ -343,6 +343,8 @@ test("opening Home activity retains the Home component and unsent draft", async 
     assert.equal(homeProps.session, props.voiceSession);
     assert.equal(view.container.querySelector("[data-home-activity]").closest(".home-view-transition__surface").hidden, false);
     assert.equal(view.container.querySelector("aside, .home-view-transition__activity, .home-view-transition__layout"), null);
+    assert.equal(button(toolbar, "Home widgets"), undefined);
+    await click(button(toolbar, "Activity"));
     await click(button(toolbar, "Home widgets"));
     assert.equal(homeProps.widgetsOpen, true);
     assert.equal(button(toolbar, "Activity").getAttribute("aria-expanded"), "false");
@@ -367,10 +369,9 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     "../../toasts": { appToast: { warning: noop, info: () => assert.fail("Routine voice context must not toast") }, useAppErrorToast: error => assert.doesNotMatch(error, /Exact (call|device) diagnostic/) },
     "../chat/OperatorRequestSurface": { OperatorRequestSurface: () => null },
     "../chat/MessageContent": { MessageContent: ({ text }) => React.createElement("span", null, text) },
-    "../chat/TurnActivity": { TurnActivity: ({ activities, activityWindow, renderActivity, turnInProgress }) => React.createElement("div", { "data-activity-window": activityWindow, "data-working": turnInProgress }, activities.map(message => React.createElement("div", { key: message.id }, renderActivity(message)))) },
+    "../../appearance": { useShouldReduceMotion: () => true },
     "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
-    "../chat/toolPresentation": {},
-    "../CadencedShimmerText": { CadencedShimmerText: ({ children }) => React.createElement("span", null, children) },
+    "../CadencedShimmerText": { CadencedShimmerText: ({ children, active }) => React.createElement("span", { "data-active": active }, children) },
     "../chat/ChatComposer": { ChatComposer: composer },
     "../chat/QueuedMessageList": { QueuedMessageList: () => null },
     "./AirHandVoiceController": { AirHandVoiceController: () => null },
@@ -499,8 +500,33 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     ];
     await view.render({ ...props, workspace: { ...workspace, busy: true, renderedMessages: [prompt, ...unrelated, commentary] } });
     assert.equal(body.querySelector('[aria-label="Current run activity"]').textContent, commentary.text);
-    assert.equal(body.querySelector('[data-activity-window="latest-context"]').dataset.working, "true");
+    assert.equal(body.querySelector('.octopus-turn-activity').dataset.state, "working");
     assert.doesNotMatch(body.textContent, /Octopus is working|Previous turn|Private work|Other Home/);
+    const tool = { ...commentary, id: "write", eventKind: "file_change", text: "", eventData: { changes: [{ path: "notes.txt", kind: "update" }], status: "completed" } };
+    const terminal = { ...commentary, id: "terminal", eventKind: "turn_completed", text: "", terminal: true };
+    for (const [status, notice] of [["interrupted", "Turn interrupted before a final reply."], ["completed", "Turn ended without a final reply."]]) {
+      await view.render({ ...props, workspace: { ...workspace, busy: status === "interrupted", renderedMessages: [prompt, ...unrelated, commentary, tool, { ...terminal, eventData: { turn: { status } } }] } });
+      assert.match(body.textContent, new RegExp(commentary.text));
+      assert.match(body.textContent, new RegExp(notice));
+      assert.doesNotMatch(body.textContent, /What would you like to do|Octopus is working|Previous turn|Private work|Other Home/);
+      assert.equal(body.closest('.home-response-stage').getAttribute('aria-busy'), "false");
+      assert.equal(body.querySelector('[data-active="true"], .home-response-output--live'), null);
+      const disclosure = body.querySelector('button[aria-expanded]');
+      assert.ok(disclosure);
+      if (disclosure.getAttribute('aria-expanded') === "false") await click(disclosure);
+      await act(async () => new Promise(resolve => window.requestAnimationFrame(resolve)));
+      assert.equal(body.querySelector('.octopus-agent-activity-body').getAttribute('aria-hidden'), "false");
+      assert.match(body.textContent, /Updated notes.txt/);
+    }
+    const failure = { ...terminal, id: "error", eventKind: "error", error: true, text: "Exact provider error" };
+    await view.render({ ...props, workspace: { ...workspace, renderedMessages: [prompt, commentary, tool, failure] } });
+    assert.match(body.querySelector('[role="alert"]').textContent, /Exact provider error/);
+    assert.equal(body.querySelector('.home-live-activity'), null);
+    for (const messages of [[], [prompt, commentary, tool, terminal, { ...prompt, id: "new", createdAtMs: 2000 }]]) {
+      await view.render({ ...props, workspace: { ...workspace, renderedMessages: messages } });
+      assert.match(body.textContent, /What would you like to do/);
+      assert.equal(body.querySelector('.home-live-activity'), null);
+    }
     const warning = { ...commentary, id: "warning", eventKind: "warning", text: "Provider diagnostic. ".repeat(20), eventData: { detail: "Diagnostic detail" } };
     await view.render({ ...props, workspace: { ...workspace, busy: true, renderedMessages: [prompt, warning] } });
     const notice = body.querySelector(".conversation-notice.is-danger");
@@ -538,11 +564,10 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     const fade = motionState.get(resumed.container.querySelector(".home-response-stage__body"));
     assert.deepEqual([fade.initial.opacity, fade.animate.opacity], [0, 0]);
     await resumed.render(installedProps);
-    assert.equal(resumed.container.querySelector('[data-widget="Newly installed extension"]'), null);
-    assert.equal(button(resumed.container, "Newly installed extension").getAttribute("aria-checked"), "false");
+    assert.ok(resumed.container.querySelector('[data-widget="Newly installed extension"]'));
+    assert.equal(button(resumed.container, "Newly installed extension").getAttribute("aria-checked"), "true");
     assert.ok(resumed.container.querySelector('[data-widget="Installed extension"]'));
     await click(button(resumed.container, "Installed extension"));
-    await click(button(resumed.container, "Newly installed extension"));
     await resumed.render({ ...installedProps, installedWidgetIds: [], surfaces: [] });
     await resumed.render(installedProps);
     assert.equal(resumed.container.querySelector('[data-widget="Installed extension"]'), null);

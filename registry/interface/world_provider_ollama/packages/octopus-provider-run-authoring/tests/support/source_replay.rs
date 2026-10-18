@@ -1,6 +1,38 @@
 use super::*;
 
 #[tokio::test]
+async fn authoring_retains_exact_request_while_registry_changes() {
+    let mut fixture = CompletedInputReplayFixture::new();
+    let control = tempfile::tempdir_in("/tmp").unwrap();
+    let handoff = &mut fixture.handoff;
+    handoff.ctx.root_slots.insert("app_server_control_root".into(), control.path().into());
+    let socket = octopus_app_server_interface::interface_control_socket_path_from_root(
+        control.path(), &handoff.config.authoring_source_interface);
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let manifest = std::fs::read(fixture.input_file.manifest_path()).unwrap();
+    let original_run = std::fs::read(&handoff.run_path).unwrap();
+    for terminal in [DeliveryVerdict::Admitted { seq: 42 }, DeliveryVerdict::refused(
+        octopus_ledger::RefusedReason::Policy, serde_json::json!({"message":"revoked"}))] {
+        let serve = async {
+            for verdict in [DeliveryVerdict::refused(octopus_ledger::RefusedReason::RegistryUnstable,
+                serde_json::json!({"message":"registry changed before admission"})), terminal.clone()] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(socket.next().await.unwrap().unwrap().into_text().unwrap().as_bytes(), manifest);
+                assert_eq!(std::fs::read(&handoff.run_path).unwrap(), original_run);
+                socket.send(WsMessage::Text(serde_json::to_string(&verdict).unwrap().into())).await.unwrap();
+            }
+        };
+        let (result, ()) = tokio::join!(handoff.send_authoring_manifest(&manifest), serve);
+        assert_eq!(result.unwrap(), terminal);
+    }
+    handoff.ctx.cancel.cancel();
+    assert!(handoff.send_authoring_manifest(&manifest).await.unwrap_err().contains("cancelled"));
+    assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+}
+
+#[tokio::test]
 async fn pending_output_retains_original_fanout_across_restart_and_refuses_legacy_ambiguity() {
     use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, ArtifactDelivery, DeliveryMetadata, MovementMetadata};
     let mut fixture = CompletedInputReplayFixture::new();

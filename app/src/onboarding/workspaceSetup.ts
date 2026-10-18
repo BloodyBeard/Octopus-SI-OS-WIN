@@ -72,6 +72,7 @@ export type WorkspaceSetupHomeRecipe = {
   task: WorkspaceSetupTaskRecipe;
   provider_interface_id: string;
   worker_interface_id: string;
+  door_host_slots?: Record<string, Record<string, string>>;
   context_artifact_bindings: Array<{ id: string }>;
   selected_worker_environment_kinds: string[];
   project_defaults: Array<{
@@ -322,6 +323,7 @@ export function compileWorkspaceInitializeRequest(
     [
       "provider_interface_id",
       "worker_interface_id",
+      "door_host_slots",
       "context_artifact_bindings",
       "selected_worker_environment_kinds",
       "project_defaults",
@@ -329,7 +331,7 @@ export function compileWorkspaceInitializeRequest(
       "task",
     ],
     "Workspace Home recipe",
-    ["agent_presets"],
+    ["agent_presets", "door_host_slots"],
   );
   if (!Array.isArray(recipe.context_artifact_bindings)) {
     throw new Error("Workspace Home recipe context bindings must be an array");
@@ -400,7 +402,7 @@ export function compileWorkspaceInitializeRequest(
       providerModel: requiredText(value.providerModel, "Selected model", 256),
       serviceTier: value.serviceTier ?? "default", reasoningEffort: value.reasoningEffort ?? "",
       workerInterfaceId: requiredId(recipe.worker_interface_id, "Workspace Home worker"),
-      doorHostSlots: {},
+      doorHostSlots: homeDoorHostSlots(recipe.door_host_slots),
       contextArtifactBindings,
       selectedWorkerEnvironmentKinds,
     },
@@ -605,6 +607,22 @@ function exactRecord(value: unknown, allowed: readonly string[], label: string, 
   const missing = allowed.filter((key) => !optional.includes(key) && !(key in record));
   if (missing.length) throw new Error(`${label} is missing fields: ${missing.join(", ")}`);
   return record;
+}
+
+function homeDoorHostSlots(value: unknown): Record<string, Record<string, string>> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Workspace Home folder access must be an object");
+  return Object.fromEntries(Object.entries(value).map(([door, slots]) => {
+    requiredId(door, "Workspace Home folder-access interface");
+    if (!slots || typeof slots !== "object" || Array.isArray(slots)) throw new Error(`Workspace Home folder access '${door}' must be an object`);
+    return [door, Object.fromEntries(Object.entries(slots).map(([slot, root]) => {
+      requiredId(slot, "Workspace Home folder-access slot");
+      if (typeof root !== "string" || !root.startsWith("/") || root.includes("\0") || root.trim() !== root) {
+        throw new Error(`Workspace Home folder access '${door}.${slot}' requires an absolute path`);
+      }
+      return [slot, root];
+    }))];
+  }));
 }
 
 function requiredOperationId(value: unknown): string {

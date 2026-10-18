@@ -3,13 +3,13 @@ import { Decoration, DecorationSet, type EditorView } from "prosemirror-view";
 import type { Node } from "prosemirror-model";
 
 export type ComposerSuggestion = { id: string; text: string };
-type SuggestionState = { suggestion: ComposerSuggestion | null; consumed: boolean; composing: boolean; focused: boolean; consumedId: string | null };
+type SuggestionState = { suggestion: ComposerSuggestion | null; consumed: boolean; composing: boolean; consumedId: string | null };
 export const composerSuggestionKey = new PluginKey<SuggestionState>("composer-suggestion");
 
 export function visibleComposerSuggestion(state: EditorState): ComposerSuggestion | null {
   const value = composerSuggestionKey.getState(state);
   const first = state.doc.firstChild;
-  return value && !value.consumed && !value.composing && !value.focused && state.doc.childCount === 1
+  return value && !value.consumed && !value.composing && state.doc.childCount === 1
     && first?.type.name === "paragraph" && first.content.size === 0 ? value.suggestion : null;
 }
 
@@ -17,7 +17,7 @@ export function composerSuggestionPlugin(parse: (text: string) => Node): Plugin<
   return new Plugin<SuggestionState>({
     key: composerSuggestionKey,
     state: {
-      init: () => ({ suggestion: null, consumed: false, composing: false, focused: false, consumedId: null }),
+      init: () => ({ suggestion: null, consumed: false, composing: false, consumedId: null }),
       apply(transaction, previous) {
         const update = transaction.getMeta(composerSuggestionKey);
         if (!update) return previous;
@@ -51,8 +51,6 @@ export function composerSuggestionPlugin(parse: (text: string) => Node): Plugin<
         ]);
       },
       handleDOMEvents: {
-        focus(view) { view.dispatch(view.state.tr.setMeta(composerSuggestionKey, { focused: true })); return false; },
-        blur(view) { view.dispatch(view.state.tr.setMeta(composerSuggestionKey, { focused: false })); return false; },
         keydown(view, event) {
           if (view.composing || event.isComposing || event.keyCode === 229) return false;
           const suggestion = visibleComposerSuggestion(view.state);

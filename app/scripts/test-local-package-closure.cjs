@@ -222,7 +222,7 @@ async function run(preparedExecutable) {
     const pack = catalog.packs.find((entry) => entry.id === "codex");
     assert.ok(pack);
     assert.equal(pack.workspace_setup.selection, "included");
-    assert.deepEqual(pack.workspace_setup.home.selected_worker_environment_kinds, ["browser_session", "code_mode", "desktop_session", "system_room"]);
+    assert.deepEqual(pack.workspace_setup.home.selected_worker_environment_kinds, ["browser_session", "code_mode", "desktop_session", "filesystem_workspace", "system_room"]);
     assert.deepEqual(pack.workspace_setup.project_defaults, [
       { package_id: "world_provider_codex", default_for_new_tasks: true },
       { package_id: "driver.browser_session", default_for_new_tasks: true },
@@ -292,7 +292,7 @@ async function run(preparedExecutable) {
       workerInterfaceId: home.worker_interface_id,
       eeId: "ee_existence",
       clientSurfaceRole: "home",
-      doorHostSlots: {},
+      doorHostSlots: home.door_host_slots,
       contextArtifactBindings: home.context_artifact_bindings,
       selectedWorkerEnvironmentKinds: home.selected_worker_environment_kinds,
     });
@@ -300,7 +300,8 @@ async function run(preparedExecutable) {
     assert.equal(plan.workerInterfaceId.startsWith(`${home.worker_interface_id}_`), true);
     assert.equal(plan.authoringProfile.ee_id, "ee_existence");
     assert.equal(plan.authoringProfile.worker_choice_interface, home.worker_interface_id);
-    assert.deepEqual(plan.authoringProfile.selected_worker_environment_kinds, ["browser_session", "code_mode", "desktop_session", "system_room"]);
+    assert.deepEqual(plan.authoringProfile.selected_worker_environment_kinds, home.selected_worker_environment_kinds);
+    assert.deepEqual(plan.authoringProfile.door_host_slots, home.door_host_slots);
     assert.ok(plan.requiredToolIds.some((toolId) => toolId.startsWith("file.write__authoring_")));
     assert.ok(plan.writes.some((write) => write.tag.startsWith("run:")));
     const main = JSON.parse(plan.writes.find((write) => write.tag === `run:${plan.runId}`).content);
@@ -337,7 +338,7 @@ async function run(preparedExecutable) {
       workerInterfaceId: task.worker_interface_id,
       eeId: "ee_project_preflight",
       clientSurfaceRole: "task",
-      doorHostSlots: plan.authoringProfile.door_host_slots,
+      doorHostSlots: {},
       externalInputs: [{
         checkpointId: "cp_link_result_probe",
         interfaceId: "system_worker_operator_home",
@@ -453,7 +454,7 @@ async function boundedAgentPresetFixture(executable) {
     const request = {
       action: "initialize_workspace", operationId: "cu_preset_workspace_001",
       root: { key: "root", templateName: "existence", name: "Desktop work", goal: "Operate desktop tasks" },
-      home: { name: "Home", providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort, workerInterfaceId: homeRecipe.worker_interface_id, doorHostSlots: {}, contextArtifactBindings: homeRecipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: homeRecipe.selected_worker_environment_kinds },
+      home: { name: "Home", providerInterfaceId: providerId, providerModel: model, reasoningEffort: effort, workerInterfaceId: homeRecipe.worker_interface_id, doorHostSlots: homeRecipe.door_host_slots, contextArtifactBindings: homeRecipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: homeRecipe.selected_worker_environment_kinds },
       task: { workerInterfaceId: taskRecipe.worker_interface_id, contextArtifactBindings: taskRecipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds },
       projects: [{ key: "desktop", parentKey: "root", templateName: "project", name: "Desktop", goal: "Desktop tasks", presentation: { icon: "folder", color: "blue" } }],
       agentPresets: [choice],

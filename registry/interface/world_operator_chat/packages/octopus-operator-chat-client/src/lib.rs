@@ -690,6 +690,7 @@ fn plan_operator_chat_topology_files_for_source(
         &topology,
         &mut identity,
         &selected_context,
+        request.existing_run_record.as_ref(),
     )?;
     let selected_publication_evidence = publication_evidence.clone();
     publication_evidence = publication_selection::retain_publication_evidence(&retained_evidence, &publication_evidence)?;
@@ -2103,6 +2104,61 @@ struct PlannedCodeModeSource {
     content: String,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedPreludeSource {
+    source: octopus_ledger::ArtifactRef,
+    snapshot: octopus_ledger::ArtifactRef,
+    source_sha256: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedPreludeSnapshot {
+    id: String,
+    run: String,
+    source: octopus_ledger::ArtifactRef,
+    source_sha256: String,
+    source_content: String,
+}
+
+fn code_mode_source_bytes(
+    registry: &Path, identity: &PlannedIdentity, owner: &str, source_id: &str,
+    existing: Option<&serde_json::Value>,
+) -> Result<Vec<u8>, String> {
+    let state = match existing {
+        Some(run) => run.get("interface_state").and_then(serde_json::Value::as_object)
+            .ok_or("retained run has no interface state")?.get(owner),
+        None => None,
+    };
+    let Some(state) = state else {
+        return octopus_interfaces::read_artifact_carrier_file_bounded(
+            &registry.join("artifact").join(source_id).join("artifact.json"), 1024 * 1024,
+        ).map_err(|error| error.to_string());
+    };
+    let sources: Vec<RetainedPreludeSource> = serde_json::from_value(
+        state.get("prelude_sources").cloned().ok_or("retained Code Mode owner has no source evidence")?,
+    ).map_err(|error| error.to_string())?;
+    let matches = sources.iter().filter(|source| source.source.id.as_str() == source_id).collect::<Vec<_>>();
+    let [source] = matches.as_slice() else { return Err("retained Code Mode source is absent or duplicated".into()); };
+    let snapshot_id = format!("{source_id}__source__{}", identity.chat_id);
+    if source.snapshot.id.as_str() != snapshot_id { return Err("retained Code Mode snapshot has another owner".into()); }
+    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(
+        &registry.join("artifact").join(&snapshot_id).join("artifact.json"), 8 * 1024 * 1024,
+    ).map_err(|error| error.to_string())?;
+    let body: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let snapshot: RetainedPreludeSnapshot = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let content = snapshot.source_content.into_bytes();
+    let source_body: serde_json::Value = serde_json::from_slice(&content).map_err(|error| error.to_string())?;
+    if snapshot.id != snapshot_id || snapshot.run != identity.run_id || snapshot.source != source.source
+        || source.snapshot.content != octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&body))
+        || source.source.content != octopus_ledger::ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&source_body))
+        || snapshot.source_sha256 != source.source_sha256 || source.source_sha256 != format!("{:x}", Sha256::digest(&content))
+        || content.len() > 1024 * 1024
+    { return Err("retained Code Mode source differs from its exact snapshot evidence".into()); }
+    Ok(content)
+}
+
 struct PlannedCodeModeOwner {
     recipe: CodeModeTaskRecipe,
     prelude_sources: Vec<PlannedCodeModeSource>,
@@ -2124,6 +2180,7 @@ fn plan_code_mode_owners(
     capabilities: &FormedCapabilityTopology,
     identity: &mut PlannedIdentity,
     context: &[ArtifactBindingSeed],
+    existing: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     for (source, binding) in &capabilities.tool_bindings {
         let Some(recipe) = binding
@@ -2237,9 +2294,7 @@ fn plan_code_mode_owners(
             }})
         };
         for prelude_source_id in &selected_sources {
-            let path = registry_root.join("artifact").join(prelude_source_id).join("artifact.json");
-            let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&path, 1024 * 1024)
-                .map_err(|e| e.to_string())?;
+            let bytes = code_mode_source_bytes(registry_root, identity, owner, prelude_source_id, existing)?;
             source_bytes = source_bytes.checked_add(bytes.len() as u64)
                 .filter(|total| *total <= max_source_bytes)
                 .ok_or("selected prelude sources exceed the room source byte bound")?;
@@ -7686,7 +7741,7 @@ mod tests {
         let pack = read("app/distribution/local-packages/packs/codex.json");
         let home = &pack["workspace_setup"]["home"];
         let kinds = home["selected_worker_environment_kinds"].as_array().unwrap().iter().map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>();
-        assert_eq!(kinds,BTreeSet::from(["browser_session","desktop_session","code_mode","system_room"]));
+        assert_eq!(kinds,BTreeSet::from(["browser_session","desktop_session","code_mode","filesystem_workspace","system_room"]));
         for artifact in ["artifact-worker-role-template","artifact-grounding-system-architecture","artifact-codebase-layout","artifact-code-mode-browser-prelude","artifact-code-mode-cua-prelude"] {
             assert!(home["context_artifact_bindings"].as_array().unwrap().iter().any(|reference|reference["id"]==artifact));
         }
@@ -7697,7 +7752,7 @@ mod tests {
         assert_eq!(pack["workspace_setup"]["agent_presets"].as_array().unwrap().iter().map(|preset| preset["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["computer-use"]);
         let manifest = read("app/distribution/local-packages/packages/world_operator_chat.json");
         let required = manifest["required_packages"].as_array().unwrap().iter().map(|v|v.as_str().unwrap()).collect::<BTreeSet<_>>();
-        assert_eq!(required,BTreeSet::from(["driver.browser_session","driver.desktop_session","driver.system_room","driver.code_mode","artifact.codex_context","world_provider_realtime"]));
+        assert_eq!(required,BTreeSet::from(["driver.browser_session","driver.desktop_session","driver.filesystem_workspace","driver.system_room","driver.code_mode","artifact.codex_context","world_provider_realtime"]));
         let desktop = read("app/distribution/local-packages/packages/driver.desktop_session.json");
         assert!(!desktop["required_packages"].as_array().unwrap().contains(&serde_json::json!("world_operator_chat")), "the client-to-desktop package dependency cannot cycle back to the client");
         let driver = read("app/distribution/local-packages/packages/driver.code_mode.json");
@@ -7733,7 +7788,7 @@ mod tests {
             })).unwrap()
         };
         let source_profile: OctopusOsAuthoringProfile = serde_json::from_value(serde_json::json!({
-            "ee_id":"ee_existence","worker_choice_interface":home["worker_interface_id"],"door_host_slots":{},
+            "ee_id":"ee_existence","worker_choice_interface":home["worker_interface_id"],"door_host_slots":home["door_host_slots"],
             "context_artifact_bindings":home["context_artifact_bindings"],"selected_worker_environment_kinds":home["selected_worker_environment_kinds"]
         })).unwrap();
         let mut inherited = source_profile.clone();
@@ -7777,8 +7832,9 @@ mod tests {
                 assert!(delivery["text"].as_str().unwrap().contains(&request.ee_instances_root.display().to_string()));
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
-                for label in ["client.surface.document", "client.action", "realtime.session.update"] {
+                for label in ["client.surface.document", "client.action", "client.action.result", "realtime.session.update"] {
                     let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)).unwrap();
+                    assert_eq!(template.include_context, label == "client.action.result");
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
                     let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)).unwrap();
                     assert!(checkpoint.artifact_bindings.iter().any(|binding| binding.id == instruction_source.id && binding.access.read));
@@ -7797,6 +7853,13 @@ mod tests {
             let mcp_tool = exact(format!("tool:{}", plan.capability_tools["client.mcp"]));
             assert_eq!(mcp_tool["handler_config"], read("registry/tool/client.mcp/tool.json")["handler_config"]);
             let worker_policy = exact(format!("policy:{}", plan.worker_interface_id));
+            let workspace = exact(format!("interface:{}", plan.capability_doors["system_workspace_env"]));
+            for slot in ["workspace_root", "host_filesystem_root"] {
+                assert_eq!(workspace["interface_driver_config"]["host_slots"][slot]["path"], "/");
+            }
+            for tool in ["workspace.read_file", "workspace.write_file", "workspace.exec", "workspace.write_stdin", "workspace.process.terminate"] {
+                assert!(worker_policy["ceiling"]["tools"].as_array().unwrap().contains(&serde_json::json!(plan.capability_tools[tool])));
+            }
             assert!(worker_policy["ceiling"]["tools"].as_array().unwrap().contains(&serde_json::json!(plan.capability_tools["client.mcp"])));
             let sidecar = exact(format!("octopus-os:{}", plan.chat_interface_id));
             let parsed: OctopusOsInterfaceSidecar = serde_json::from_value(sidecar.clone()).unwrap();
@@ -7952,6 +8015,7 @@ mod tests {
             std::fs::write(&ee_path, ee_bytes).unwrap();
             let mut narrowed=make_request(&inherited,role,&format!("{id}_narrowed"));
             narrowed.selected_worker_environment_kinds=vec!["browser_session".into(),"code_mode".into()];
+            narrowed.door_host_slots.remove("system_workspace_env");
             narrowed.context_artifact_bindings.retain(|reference|reference.id!="artifact-code-mode-cua-prelude");
             let narrower=plan_operator_chat_topology(&narrowed).expect("explicitly deselected desktop is not restored by the default");
             assert!(!narrower.capability_doors.contains_key("system_gui"));
@@ -8126,6 +8190,19 @@ mod tests {
         let resumed=plan_operator_chat_topology(&request).expect("replanning preserves exact source provenance and live owner pins");
         let resumed_run:serde_json::Value=serde_json::from_str(&resumed.run_record_content).unwrap();
         assert_eq!(resumed_run["interface_state"][owner]["prelude_sources"],run["interface_state"][owner]["prelude_sources"]);
+        let published_path=registry_root.join("artifact").join(source["source"]["id"].as_str().unwrap()).join("artifact.json");
+        let mut updated:serde_json::Value=serde_json::from_slice(&source_bytes).unwrap();
+        updated["module_source"]=serde_json::json!(format!("{}\n// New package revision",updated["module_source"].as_str().unwrap()));
+        std::fs::write(&published_path,updated.to_string()).unwrap();
+        let retained=plan_operator_chat_topology(&request).expect("package updates preserve the existing exact prelude snapshot");
+        assert!(!retained.interface_writes.iter().any(|write|write.tag==format!("artifact:{}",prelude["id"].as_str().unwrap())));
+        let retained_run:serde_json::Value=serde_json::from_str(&retained.run_record_content).unwrap();
+        assert_eq!(retained_run["interface_state"][owner]["prelude_sources"],run["interface_state"][owner]["prelude_sources"]);
+        let snapshot_path=registry_root.join("artifact").join(source["snapshot"]["id"].as_str().unwrap()).join("artifact.json");
+        let original=std::fs::read(&snapshot_path).unwrap();
+        std::fs::write(&snapshot_path,b"{}").unwrap();assert!(plan_operator_chat_topology(&request).is_err());
+        std::fs::remove_file(&snapshot_path).unwrap();assert!(plan_operator_chat_topology(&request).is_err());
+        std::fs::write(&snapshot_path,original).unwrap();std::fs::write(published_path,&source_bytes).unwrap();
         request.existing_run_record.as_mut().unwrap()["interface_state"][owner]["prelude_sources"][0]["source_sha256"]=serde_json::json!("0".repeat(64));
         assert!(plan_operator_chat_topology(&request).is_err());
         request.existing_run_record=None;

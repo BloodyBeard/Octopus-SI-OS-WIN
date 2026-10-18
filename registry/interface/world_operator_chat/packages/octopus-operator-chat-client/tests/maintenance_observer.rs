@@ -271,8 +271,8 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
         .0
         .clone();
     let mut previous = record;
-    for cycle in ["revision-a", "revision-b"] {
-        let request = OperatorChatPlanRequest {
+    for cycle in ["revision-a", "revision-b", "revision-interrupted"] {
+        let mut request = OperatorChatPlanRequest {
             registry_root: root.join("registry"),
             ee_instances_root: root.join("ee"),
             ee_policy_root: None,
@@ -310,6 +310,35 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
                 continued_from: None,
             },
         };
+        if cycle == "revision-interrupted" {
+            let provider=&plan.provider_interface_id;let label="turn.interrupted.result";
+            let mut pending=previous.clone();let parsed=RunRecord::from_bytes(&serde_json::to_vec(&pending).unwrap()).unwrap();
+            let templates=pending["interface_state"][provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap();
+            let template=templates.iter().find(|t|t["role"]=="provider_artifact_output"
+                && serde_json::from_value::<octopus_policy::AuthoredInterfaceBinding>(t["interface_binding"].clone()).unwrap().admits(label)).unwrap();
+            let mut row=parsed.checkpoints.iter().find(|cp|parsed.active_checkpoints.contains(&cp.id)
+                && json!(cp.interface_binding)==template["interface_binding"] && json!(cp.outbound_interface_bindings)==template["outbound_interface_bindings"]).unwrap().clone();
+            let removed=parsed.checkpoints.iter().filter(|cp|cp.inbound_interface().is_some_and(|id|id.as_str()==provider) && cp.id!=row.id
+                && !templates.iter().any(|t|(t["role"]=="provider_interface_output" || t["role"]=="provider_tool_output"
+                    && t["result_receiving"].as_object().is_some_and(|r|!r.is_empty()))
+                    && json!(cp.interface_binding)==t["interface_binding"] && json!(cp.outbound_interface_bindings)==t["outbound_interface_bindings"]))
+                .map(|cp|json!(cp.id)).collect::<Vec<_>>();
+            row.interface_binding.as_mut().unwrap().config.artifact_policy=octopus_policy::BindingArtifactPolicy::Allow {names:vec![label.into()],namespaces:vec![]};
+            pending["active_checkpoints"].as_array_mut().unwrap().retain(|id|!removed.contains(id));
+            pending["interface_state"][provider]["frontier_checkpoint_ids"].as_array_mut().unwrap().retain(|id|!removed.contains(id));
+            *pending["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp|cp["id"]==row.id.as_str()).unwrap()=json!(row);
+            let file=octopus_interfaces::InterfaceArtifactFile::write(root.join("private").join(provider),label,b"{\"status\":\"interrupted\"}").unwrap();
+            let hash=octopus_ledger::ContentHash::of_bytes(&std::fs::read(file.manifest_path()).unwrap()).to_hex();
+            pending["interface_state"][provider]["pending_handoff"]=json!({"terminal":true,"source_movement_seq":0,"items":[{
+                "artifact_id":format!("{label}:{hash}"),"artifact_content_hash":hash,"artifact_label":label,
+                "manifest_relative_path":file.manifest_path().strip_prefix(root.join("private").join(provider)).unwrap(),
+                "checkpoint":{"id":row.id,"epoch":row.epoch,"interface_binding":row.interface_binding,"outbound_interface_bindings":row.outbound_interface_bindings,
+                    "artifact_bindings":row.artifact_bindings.iter().map(|b|b.id.clone()).collect::<Vec<_>>(),"required_verified_artifacts":row.required_verified_artifacts}}]});
+            request.existing_run_record=Some(pending.clone());std::fs::write(&plan.run_write.path,pending.to_string()).unwrap();
+            octopus_provider_run_authoring::provider_context_bindings(&RunRecord::from_bytes(pending.to_string().as_bytes()).unwrap(),&provider.clone().into()).unwrap();
+            let mut unproven=request.clone();unproven.existing_run_record.as_mut().unwrap()["interface_state"][provider].as_object_mut().unwrap().remove("pending_handoff");
+            assert!(plan_operator_chat_topology(&unproven).is_err());
+        }
         let next = plan_operator_chat_topology(&request).unwrap();
         assert!(
             next.run_writes.is_empty(),

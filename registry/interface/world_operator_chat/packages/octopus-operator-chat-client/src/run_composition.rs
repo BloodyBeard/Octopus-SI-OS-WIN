@@ -563,6 +563,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &topology,
         &mut identity,
         &selected_context,
+        None,
     )?;
     validate_private_identity(request, &identity)?;
     let mut writes = resolved.artifact_writes;

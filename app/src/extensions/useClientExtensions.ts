@@ -163,7 +163,7 @@ export function useClientExtensions(accessProfile: OctopusClientAccessProfile): 
   };
 }
 
-function materializeClientExtensions(
+export function materializeClientExtensions(
   snapshot: ClientExtensionStoreSnapshot,
   accessProfile: OctopusClientAccessProfile,
   readError: string,

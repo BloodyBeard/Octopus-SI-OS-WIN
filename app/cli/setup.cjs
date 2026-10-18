@@ -344,7 +344,7 @@ function compileSetupPlan(pack, choices) {
     operationId: choices.operationId,
     root: { key: "root", templateName: "existence", name: humanText(choices.workspaceName, "Workspace name", 80), goal: humanText(choices.workspaceGoal, "Workspace goal", 240) },
     home: { name: "Home", providerInterfaceId: recipe.provider_interface_id, providerModel: choices.model,
-      workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort, doorHostSlots: {},
+      workerInterfaceId: recipe.worker_interface_id, reasoningEffort: choices.reasoningEffort, doorHostSlots: structuredClone(recipe.door_host_slots ?? {}),
       contextArtifactBindings: recipe.context_artifact_bindings, selectedWorkerEnvironmentKinds: recipe.selected_worker_environment_kinds },
     task: { workerInterfaceId: taskRecipe.worker_interface_id, contextArtifactBindings: taskRecipe.context_artifact_bindings,
       selectedWorkerEnvironmentKinds: taskRecipe.selected_worker_environment_kinds },

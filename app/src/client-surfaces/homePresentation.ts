@@ -82,7 +82,7 @@ export function selectHomeSurfaceDocuments(
       const expiry = homeSurfaceExpiry(item);
       if (expiry !== null && expiry <= now) continue;
       if (expiry !== null) nextExpiry = nextExpiry === null ? expiry : Math.min(nextExpiry, expiry);
-      documents.push(item);
+      if (!dismissed.has(`removed:${homeSurfaceIdentity(item)}`)) documents.push(item);
     } catch (error) {
       errors.push(`${item.document.title}: ${error instanceof Error ? error.message : String(error)}`);
     }

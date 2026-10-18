@@ -117,13 +117,13 @@ pub(super) fn plan(
     let ids = interfaces(identity);
     let contract = json!({
         "widget":{"interface":ids[0],"label":"client.surface.document","recipient_interface":identity.chat_interface_id,"document_contract":"artifact-home-widget-authoring"},
-        "client_action":{"interface":ids[0],"label":"client.action","recipient_interface":identity.chat_interface_id,"schema":"octopus.client_action","schema_version":1,"actions":["open_surface"]},
+        "client_action":{"interface":ids[0],"label":"client.action","recipient_interface":identity.chat_interface_id,"schema":"octopus.client_action","schema_version":1,"actions":["open_surface","list_widgets","set_widget"],"result_label":"client.action.result"},
         "voice_update":{"run":voice.context.run_id,"interface":ids[1],"label":"realtime.session.update","recipient_interface":voice.context.provider_id,"payload":{"call_id":"copy from the admitted realtime.delegation artifact","correlation_id":"same admitted call correlation","update_id":"new stable identity for this one semantic update","delegation_id":"same admitted delegation or null","channel":"commentary","text":"Model-selected public progress or result, grounded in Task evidence"}},
         "run":identity.run_id,
         "authoring":authoring
     });
     let text = format!(
-        "Exact Home artifact delivery addresses for this run:\n{}\n\nFor widgets and client navigation use the actual granted client.mcp tool and its publish_widget/open_client_surface catalogue operations with the stated System presentation interface. The MCP adapter uses artifact.send under the same grant. During a live call, the client shares your public progress, answer fragments, completed replies and errors with voice as they appear. Answer an admitted voice delegation with ordinary public output; do not call artifact.send merely to repeat that output. For independent Task returns or a deliberately separate voice update, use the actual granted artifact.send tool with the stated System interface, label, and payload. The runtime admits this artifact once and delivers it both to the listed recipient and to Home's exact text provider. Home re-arms its widget receipt. Voice updates reach separate Home and Voice checkpoints; each Run re-arms only its own input through its declared checked writer. A widget receipt is presentation evidence; it does not ask for or force an outward text reply. Decide whether any response is useful. Task workers can use the same return pins only after authoring those exact bindings, policy and readable role closure in their own runs. Never resend an admitted artifact to make it visible. Voice updates must copy call_id/correlation_id/delegation_id from actual admitted voice semantics, not private transport state or guessed values. A sent update is not speech-playback proof; inspect its realtime.session.updated evidence. Stopping voice does not cancel Tasks. Use artifact-home-widget-authoring for native/sandbox and persistent/transient document payloads.",
+        "Exact Home artifact delivery addresses for this run:\n{}\n\nFor widgets and client navigation use the actual granted client.mcp tool and its list_widgets/set_widget/publish_widget/open_client_surface catalogue operations with the stated System presentation interface. The MCP adapter uses artifact.send under the same grant. list_widgets and set_widget return admission first; the client subsequently returns client.action.result with the same request_id and actual saved widget state. Use exact widget_id/source_digest from that inventory and wait for the result before dependent actions. These controls do not require Computer Use or source edits. During a live call, the client shares your public progress, answer fragments, completed replies and errors with voice as they appear. Answer an admitted voice delegation with ordinary public output; do not call artifact.send merely to repeat that output. For independent Task returns or a deliberately separate voice update, use the actual granted artifact.send tool with the stated System interface, label, and payload. The runtime admits this artifact once and delivers it both to the listed recipient and to Home's exact text provider. Home re-arms its widget receipt. Voice updates reach separate Home and Voice checkpoints; each Run re-arms only its own input through its declared checked writer. A widget receipt is presentation evidence; it does not ask for or force an outward text reply. Decide whether any response is useful. Task workers can use the same return pins only after authoring those exact bindings, policy and readable role closure in their own runs. Never resend an admitted artifact to make it visible. Voice updates must copy call_id/correlation_id/delegation_id from actual admitted voice semantics, not private transport state or guessed values. A sent update is not speech-playback proof; inspect its realtime.session.updated evidence. Stopping voice does not cancel Tasks. Use artifact-home-widget-authoring for native/sandbox and persistent/transient document payloads.",
         pretty_json(&contract)?
     );
     let text = format!("{text}\n\n{AUTHORING_COORDINATE_GUIDANCE}");
@@ -274,8 +274,17 @@ pub(super) fn wire(
         return Ok(content);
     }
     let mut record: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-    for is_voice in [false, true] {
-        let mut template = template(identity, is_voice)?;
+    let result_binding = |id: &str| AuthoredInterfaceBinding {
+        interface: InterfaceId::new(id),
+        config: InterfaceBindingConfig {
+            artifact_policy: BindingArtifactPolicy::Allow { names: vec!["client.action.result".into()], namespaces: Vec::new() },
+        },
+    };
+    let mut result = bound_checkpoint_template(BoundCheckpointRole::IndependentInput,
+        result_binding(&interfaces(identity)[0]), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
+    result.include_context = true;
+    result.name.push_str("_result");
+    for mut template in [template(identity, false)?, template(identity, true)?, result] {
         for binding in context {
             let id = octopus_descriptors::ArtifactId::new(&binding.id);
             if !roles.contains(&binding.id) && !template.static_artifact_bindings.contains(&id) {

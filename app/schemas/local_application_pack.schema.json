@@ -70,6 +70,15 @@
           "properties": {
             "provider_interface_id": { "$ref": "#/$defs/id" },
             "worker_interface_id": { "$ref": "#/$defs/id" },
+            "door_host_slots": {
+              "type": "object",
+              "propertyNames": { "$ref": "#/$defs/id" },
+              "additionalProperties": {
+                "type": "object",
+                "propertyNames": { "$ref": "#/$defs/id" },
+                "additionalProperties": { "type": "string", "pattern": "^/[^\\u0000]*$" }
+              }
+            },
             "context_artifact_bindings": {
               "type": "array",
               "maxItems": 64,

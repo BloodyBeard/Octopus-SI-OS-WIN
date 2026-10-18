@@ -18,36 +18,61 @@ export function homeTurnActivity(messages: ChatRenderMessage[], promptCreatedAtM
   ));
 }
 
-export function HomeTurnActivity({ activities, startedAtMs, toolPresentations }: {
+export function homeTurnTerminalNotice(activities: ChatRenderMessage[]): string | null {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const message = activities[index];
+    const data = homeEventRecord(message.eventData);
+    const kind = message.eventKind;
+    const action = homeEventText(data.action);
+    const control = kind === "turn_control" && data.status === "acknowledged";
+    if (kind === "turn_started" || control && action === "resume") return null;
+    const stopped = control && (action === "stop" || action === "interrupt");
+    if (!stopped && kind !== "interrupted_result" && kind !== "turn_completed" && message.label !== "turn.completed") continue;
+    const status = homeEventText(data.native_terminal_status, homeEventRecord(data.turn).status, data.status).toLocaleLowerCase();
+    if (stopped || status === "interrupted" || kind === "interrupted_result" && !status && data.turn_interrupted !== false) {
+      return "Turn interrupted before a final reply.";
+    }
+    if (status === "cancelled" || status === "canceled") return "Turn cancelled before a final reply.";
+    if (status === "failed") return "Turn failed before a final reply.";
+    return "Turn ended without a final reply.";
+  }
+  return null;
+}
+
+export function HomeTurnActivity({ activities, startedAtMs, toolPresentations, turnInProgress, terminalNotice }: {
   activities: ChatRenderMessage[];
   startedAtMs: number;
   toolPresentations: ChatToolPresentationIndex;
+  turnInProgress: boolean;
+  terminalNotice: string | null;
 }) {
   const hasActivity = activities.some((message) => conversationTraceAdmission(message, toolPresentations) === "visible");
-  if (!hasActivity) return <span role="status"><CadencedShimmerText active>Octopus is working</CadencedShimmerText></span>;
+  if (!hasActivity && turnInProgress) return <span role="status"><CadencedShimmerText active>Octopus is working</CadencedShimmerText></span>;
   return (
     <section aria-label="Current run activity" className="home-live-activity">
-      <TurnActivity
+      {terminalNotice ? <p role="status">{terminalNotice}</p> : null}
+      {hasActivity ? <TurnActivity
         activities={activities}
         activityWindow="latest-context"
         presentation="conversation"
-        renderActivity={(message) => <HomeActivityDetail message={message} toolPresentations={toolPresentations} />}
+        renderActivity={(message) => <HomeActivityDetail message={message} toolPresentations={toolPresentations} turnInProgress={turnInProgress} />}
         startedAtMs={startedAtMs}
         statusBoundaryVisible={false}
         toolPresentations={toolPresentations}
-        turnInProgress
-      />
+        turnInProgress={turnInProgress}
+      /> : null}
     </section>
   );
 }
 
-function HomeActivityDetail({ message, toolPresentations }: {
+function HomeActivityDetail({ message, toolPresentations, turnInProgress }: {
   message: ChatRenderMessage;
   toolPresentations: ChatToolPresentationIndex;
+  turnInProgress: boolean;
 }) {
   const kind = message.eventKind ?? "message";
   if (["commentary", "commentary_delta", "reasoning", "reasoning_delta", "plan", "plan_delta"].includes(kind)) {
-    return message.text ? <MessageContent text={message.text} streaming={kind.endsWith("_delta")} streamKey={message.id} variant={kind.startsWith("reasoning") ? "reasoning" : "assistant"} /> : null;
+    return message.text ? <MessageContent text={message.text} streaming={turnInProgress && kind.endsWith("_delta")} streamKey={message.id} variant={kind.startsWith("reasoning") ? "reasoning" : "assistant"} /> : null;
   }
   const data = homeEventRecord(message.eventData);
   if (kind === "warning" && homeEventText(data.source) !== "model_safety_buffering") {
@@ -69,7 +94,7 @@ function HomeActivityDetail({ message, toolPresentations }: {
       {actions.map((action) => (
         <li key={action.id}>
           {action.glyph ? <Glyph name={action.glyph} size={13} /> : null}
-          <CadencedShimmerText active={homeActivityIsActive(message)}>{action.label}</CadencedShimmerText>
+          <CadencedShimmerText active={turnInProgress && homeActivityIsActive(message)}>{action.label}</CadencedShimmerText>
         </li>
       ))}
     </ul>

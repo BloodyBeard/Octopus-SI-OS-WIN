@@ -28,8 +28,8 @@ fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPl
     use octopus_ledger::ContentHash;
     let provider = &plan.provider_interface_id;
     let parsed = RunRecord::from_bytes(before.to_string().as_bytes()).unwrap();
-    let output = before["interface_state"][provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap()
-        .iter().find(|cp|cp["role"] == "provider_tool_output").unwrap();
+    let templates = before["interface_state"][provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap();
+    let output = templates.iter().find(|cp|cp["role"] == "provider_tool_output").unwrap();
     let tool = output["required_verified_artifacts"][0]["params"]["tools"][0].as_str().unwrap();
     let label = output["required_verified_artifacts"][0]["artifact_label"].as_str().unwrap();
     let row = parsed.checkpoints.iter().find(|cp|parsed.active_checkpoints.contains(&cp.id)
@@ -42,7 +42,13 @@ fn pending_tool_handoff(request: &RunCompositionRequest, plan: &RunCompositionPl
     let hash = ContentHash::of_bytes(&std::fs::read(call.manifest_path()).unwrap()).to_hex();
     let mut pending = before.clone();
     let removed = parsed.checkpoints.iter().filter(|cp|cp.inbound_interface().is_some_and(|id|id.as_str()==provider.as_str())
-        && cp.id != row.id).map(|cp|json!(cp.id)).collect::<Vec<_>>();
+        && cp.id != row.id && !templates.iter().any(|template|
+            (template["role"] == "provider_interface_output" || template["role"] == "provider_tool_output"
+                && template["result_receiving"].as_object().is_some_and(|rows| !rows.is_empty()))
+            && json!(cp.interface_binding) == template["interface_binding"]
+            && json!(cp.outbound_interface_bindings) == template["outbound_interface_bindings"]
+            && json!(cp.required_verified_artifacts) == template["required_verified_artifacts"]))
+        .map(|cp|json!(cp.id)).collect::<Vec<_>>();
     pending["active_checkpoints"].as_array_mut().unwrap().retain(|id|!removed.contains(id));
     pending["interface_state"][provider]["frontier_checkpoint_ids"].as_array_mut().unwrap().retain(|id|!removed.contains(id));
     let binding = json!({"interface":provider,"config":{"artifact_policy":{"mode":"allow","names":[label],"namespaces":[]}}});
@@ -955,6 +961,14 @@ fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlemen
     assert_eq!(adopted["writes"].as_array().unwrap().len(),1); assert_eq!(adopted["writes"][0]["path"],json!(tool_path));
     let next: Value = serde_json::from_str(adopted["writes"][0]["content"].as_str().unwrap()).unwrap();
     assert_eq!(next["handler_config"],canonical["handler_config"]);
+    for fields in config["tool_contract_updates"][0]["predecessors"].as_array().unwrap() {
+        let mut previous = next.clone();
+        for (pointer, value) in fields.as_object().unwrap() { *previous.pointer_mut(pointer).unwrap() = value.clone(); }
+        std::fs::write(&tool_path,serde_json::to_vec(&previous).unwrap()).unwrap();
+        let replay=plan().unwrap();assert_eq!(replay["status"],"planned");
+        assert_eq!(serde_json::from_str::<Value>(replay["writes"][0]["content"].as_str().unwrap()).unwrap(),next);
+    }
+    std::fs::write(&tool_path,&before).unwrap();
     let current = RunRecord::from_bytes(&run_before).unwrap();
     let call = octopus_interfaces::InterfaceArtifactFile::write(root.join("accepted-call"), "tool.call",
         &serde_json::to_vec(&json!({"tool":tool,"arguments":{},"correlation_id":"pending-contract-call"})).unwrap()).unwrap();

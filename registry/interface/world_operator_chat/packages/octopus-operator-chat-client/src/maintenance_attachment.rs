@@ -166,7 +166,16 @@ fn validate_retained(existing: &Value, declaration: &Value, identity: &PlannedId
             && checkpoint.required_verified_artifacts == template.required_verified_artifacts
     }).count();
     if checkpoints != 1 {
-        return Err("accepted maintenance source does not retain one exact active terminal checkpoint".into());
+        let pending = existing.get("interface_state").and_then(|states| states.get(&identity.model_interface_id))
+            .and_then(|state| state.get("pending_handoff"));
+        let ended_without_terminal = record.status.as_str() == Some("idle") && pending.is_some_and(|pending|
+            pending.get("terminal") == Some(&serde_json::json!(true))
+                && pending.get("items").and_then(Value::as_array).is_some_and(|items| !items.is_empty()
+                    && items.iter().all(|item| item.get("artifact_label").and_then(Value::as_str).is_some_and(|label| label != terminal))));
+        if checkpoints != 0 || !ended_without_terminal {
+            return Err("accepted maintenance source does not retain one exact active terminal checkpoint".into());
+        }
+        octopus_provider_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&identity.model_interface_id))?;
     }
     Ok(relay.into())
 }

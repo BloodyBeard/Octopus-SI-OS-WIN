@@ -4,6 +4,7 @@
     "interfaces": [
       "system_browser",
       "system_code_mode",
+      "system_workspace_env",
       "system_interface_authoring",
       "system_room",
       "system_worker_operator_home",
@@ -16,6 +17,17 @@
       "world_provider_realtime"
     ],
     "tools": [
+      "workspace.apply_patch",
+      "workspace.build",
+      "workspace.exec",
+      "workspace.grep",
+      "workspace.list_dir",
+      "workspace.process.list",
+      "workspace.process.signal",
+      "workspace.process.terminate",
+      "workspace.read_file",
+      "workspace.write_file",
+      "workspace.write_stdin",
       "browser.back",
       "browser.click",
       "browser.close",
@@ -109,7 +121,8 @@
       "browser_session",
       "system_room",
       "code_mode",
-      "desktop_session"
+      "desktop_session",
+      "filesystem_workspace"
     ],
     "mark_outcomes": [
       "operator.approval",

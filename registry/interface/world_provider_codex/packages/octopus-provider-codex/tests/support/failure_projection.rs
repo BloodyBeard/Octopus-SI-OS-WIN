@@ -61,4 +61,22 @@ async fn unavailable_failed_source_projection_retains_original_error_without_arr
     assert!(std::fs::read(&ctx.movements_path).unwrap().is_empty());
     assert!(!ctx.interface_var_dir().join("emitted").exists());
     assert!(!ctx.interface_var_dir().join("ledger-cursor.json").exists());
+    for (label, independent, expected) in [
+        ("client.surface.document", true, "turn.input.acknowledged"),
+        ("client.action.result", false, "turn.error"),
+        ("operator.turn.control", true, "turn.error"),
+        ("client.surface.document", false, "turn.error"),
+    ] {
+        let file=InterfaceArtifactFile::write(temp.path().join("input"),label,b"{}").unwrap();
+        let source=QueuedTurn { seq:9, envelope:InterfaceInvocationEnvelope {
+            artifact:materialized_artifact_ref(&file).unwrap(),artifact_file:file,artifact_binding_payloads:Vec::new(),metadata:None,
+        }};
+        let result=materialize_consumed_source_outcome(&ctx,&source,"missing outcome",independent).unwrap();
+        assert_eq!(result.read_manifest().unwrap().label,expected);
+        let body:serde_json::Value=serde_json::from_slice(&result.read_payload_bytes().unwrap()).unwrap();
+        if expected=="turn.input.acknowledged" {
+            assert_eq!(body["source_artifact"],source.envelope.artifact.id.as_str());assert_eq!(body["source_movement_seq"],9);
+            assert_eq!(body["status"],"acknowledged");assert!(body.get("message").is_none());
+        } else { assert_eq!(body["message"],"missing outcome"); }
+    }
 }

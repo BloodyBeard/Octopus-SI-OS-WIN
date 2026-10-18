@@ -6045,7 +6045,7 @@ async fn record_invalid_provider_context(
         "codex turn stopped because its admitted provider context is invalid (movement seq {}): {error}",
         turn.seq
     );
-    if author_failed_provider_source(ctx, descriptor, handoff_session, run, turn, &message).await? {
+    if author_failed_provider_source(ctx, descriptor, handoff_session, run, turn, &message, false).await? {
         return Ok(());
     }
     Err(message)
@@ -6075,6 +6075,7 @@ async fn author_failed_provider_source(
     run: &RunId,
     turn: &QueuedTurn,
     message: &str,
+    restore_consumed: bool,
 ) -> Result<bool, String> {
     let unavailable = match handoff_session.failed_source_handoff(
         ctx,
@@ -6085,7 +6086,8 @@ async fn author_failed_provider_source(
     ) {
         Ok(handoff) => match handoff
             .hand_failed_source(ProviderEmission {
-                artifact: materialize_failed_source_error(ctx, turn.seq, message)?,
+                artifact: materialize_consumed_source_outcome(ctx, turn, message,
+                    restore_consumed && handoff.consumes_context_free_independent_input().await)?,
                 route: ProviderEmissionRoute::ClientProjection,
             })
             .await
@@ -6104,6 +6106,20 @@ async fn author_failed_provider_source(
         "codex failed provider source could not be authored into the run"
     );
     Ok(false)
+}
+
+fn materialize_consumed_source_outcome(
+    ctx: &InterfaceLiftContext, turn: &QueuedTurn, message: &str, context_free_independent: bool,
+) -> Result<octopus_interfaces::InterfaceArtifactFile, String> {
+    if context_free_independent {
+        let manifest = turn.envelope.read_artifact_manifest().map_err(|error| error.to_string())?;
+        if !is_inflight_turn_control_candidate_label(&manifest.label) {
+            return crate::handler::materialize_independent_input_receipt(
+                &ctx.interface_var_dir().join("emitted"), turn.seq, &manifest.label, &turn.envelope.artifact,
+            ).map_err(|error| error.to_string());
+        }
+    }
+    materialize_failed_source_error(ctx, turn.seq, message)
 }
 
 async fn restore_consumed_provider_inputs(
@@ -6130,7 +6146,7 @@ async fn restore_consumed_provider_inputs(
         let message = format!(
             "codex turn ended without a projected outcome (movement seq {source}); its input checkpoint was restored and the message can be sent again"
         );
-        author_failed_provider_source(ctx, descriptor, handoff_session, &run, &turn, &message)
+        author_failed_provider_source(ctx, descriptor, handoff_session, &run, &turn, &message, true)
             .await?;
     }
     Ok(())

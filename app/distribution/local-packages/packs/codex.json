@@ -84,6 +84,12 @@
     "home": {
       "provider_interface_id": "world_provider_codex",
       "worker_interface_id": "system_worker_operator_home",
+      "door_host_slots": {
+        "system_workspace_env": {
+          "workspace_root": "/",
+          "host_filesystem_root": "/"
+        }
+      },
       "context_artifact_bindings": [
         {
           "id": "artifact-worker-role-template"
@@ -117,6 +123,7 @@
         "browser_session",
         "code_mode",
         "desktop_session",
+        "filesystem_workspace",
         "system_room"
       ]
     },

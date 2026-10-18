@@ -2405,6 +2405,7 @@ async function verifyRootFirstSetup(temporary) {
   Object.assign(draft, { spaceName: "Chosen space", spaceGoal: "Chosen root goal", providerModel: "fixture-model", reasoningEffort: "high" });
   const recipe = setupRequest("recipe_root_12345678").home;
   const request = compileWorkspaceInitializeRequest(draft, { provider_interface_id: recipe.providerInterfaceId, worker_interface_id: recipe.workerInterfaceId,
+    door_host_slots: { system_workspace_env: { workspace_root: "/", host_filesystem_root: "/" } },
     context_artifact_bindings: recipe.contextArtifactBindings, selected_worker_environment_kinds: recipe.selectedWorkerEnvironmentKinds, project_defaults: [],
     task: { worker_interface_id: setupRequest("recipe_root_12345678").task.workerInterfaceId,
       context_artifact_bindings: [], selected_worker_environment_kinds: ["git_worktree"] } });
@@ -2456,6 +2457,8 @@ async function verifyRootFirstSetup(temporary) {
     assert.equal(record.goal, project.goal);
   }
   const sidecar = JSON.parse(await fs.readFile(path.join(registry, "interface", outcome.homeInterfaceId, "octopus_os.json")));
+  assert.deepEqual(sidecar.authoring_profile.door_host_slots, request.home.doorHostSlots);
+  assert.ok(sidecar.task_authoring_profiles.every((profile) => Object.keys(profile.door_host_slots).length === 0));
   assert.equal(sidecar.presentation.name, draft.spaceName);
   assert.deepEqual(sidecar.presentation.projects, request.projects.map((project) => ({ ee_id: projectIds.get(project.key), name: project.name, ...project.presentation })));
   assert.equal((await initializeWorkspace(options)).changed, false);
@@ -2793,6 +2796,10 @@ async function verifyProjectPolicies() {
 
 const execution = process.argv[2] === "conditioned-recover"
   ? recoverWorkspaceTransactions({ octopusHomeRoot: process.argv[3], registryRoot: path.join(process.argv[3], "registry") })
+  : process.argv[2] === "home-recipe"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-home-recipe-test-")).then(async temporary => {
+    try { await verifyRootFirstSetup(await fs.realpath(temporary)); } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
   : process.argv[2] === "conditioned-publication"
   ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-conditioned-test-")).then(async temporary => {
     try { await verifyConditionedPublicationRecovery(await fs.realpath(temporary)); }

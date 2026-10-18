@@ -1406,6 +1406,7 @@ function requireClientSetupPack(catalog, plan) {
     || plan.provider.interface_id !== recipe.provider_interface_id
     || requestHome?.providerInterfaceId !== recipe.provider_interface_id
     || requestHome?.workerInterfaceId !== recipe.worker_interface_id
+    || stableClientSetupJson(requestHome?.doorHostSlots ?? {}) !== stableClientSetupJson(recipe.door_host_slots ?? {})
     || typeof requestHome?.providerModel !== "string" || !requestHome.providerModel.trim()
     || stableClientSetupJson(requestHome?.contextArtifactBindings ?? []) !== stableClientSetupJson(recipe.context_artifact_bindings)
     || stableClientSetupJson(requestHome?.selectedWorkerEnvironmentKinds ?? []) !== stableClientSetupJson(recipe.selected_worker_environment_kinds)

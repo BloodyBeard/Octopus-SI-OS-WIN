@@ -95,7 +95,6 @@ async function initializeWorkspace(options) {
         projects: request.projects,
         providerInterfaceId: request.home.providerInterfaceId,
         providerModel: request.home.providerModel,
-        homeAuthoringProfile: plan.authoringProfile,
         task: request.task,
       });
       for (const choice of request.agentPresets ?? []) {
@@ -1468,13 +1467,12 @@ async function preflightInitialWorkspaceProjects({
   projects,
   providerInterfaceId,
   providerModel,
-  homeAuthoringProfile,
   task,
 }) {
   const rootProfile = {
     ee_id: materialized.rootEeId,
     worker_choice_interface: task.workerInterfaceId,
-    door_host_slots: parseDoorHostSlots(homeAuthoringProfile.door_host_slots),
+    door_host_slots: {},
     ...(task.contextArtifactBindings.length ? { context_artifact_bindings: structuredClone(task.contextArtifactBindings) } : {}),
     ...(task.selectedWorkerEnvironmentKinds.length ? { selected_worker_environment_kinds: [...task.selectedWorkerEnvironmentKinds] } : {}),
   };

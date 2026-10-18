@@ -1193,15 +1193,8 @@ function createProjectionStore(options) {
     );
     const text = bytes.toString("utf8");
     if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Client action payload must be UTF-8 JSON.");
-    const action = JSON.parse(text);
-    if (!action || typeof action !== "object" || Array.isArray(action)
-      || Object.keys(action).length !== 4
-      || action.schema !== "octopus.client_action" || action.schema_version !== 1
-      || action.action !== "open_surface" || typeof action.surface_id !== "string"
-      || !action.surface_id || action.surface_id !== action.surface_id.trim()) {
-      throw new Error("Client action must be an exact octopus.client_action v1 open_surface payload.");
-    }
-    return action;
+    const { parseClientAction } = await import("./clientActionSemantics.mjs");
+    return parseClientAction(JSON.parse(text));
   }
 
   async function interfaceArtifactPayloadRows(projection, params) {

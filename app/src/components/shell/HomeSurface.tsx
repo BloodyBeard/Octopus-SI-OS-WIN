@@ -63,13 +63,15 @@ export function HomeSurface({
               onHomeViewModeChange?.(activityOpen ? "voice" : "activity");
             }}><Glyph name="transcript" size={16} /></button>
         </ShellTooltip>
-        <ShellTooltip label="Home widgets">
-          <button aria-label="Home widgets" aria-expanded={widgetsOpen} className="app-titlebar-action no-drag"
-            data-state={widgetsOpen ? "open" : "closed"} type="button" onClick={() => {
-              onHomeViewModeChange?.("voice");
-              setWidgetsOpen((open) => !open);
-            }}><Glyph name="widgets" size={16} /></button>
-        </ShellTooltip>
+        {!activityOpen ? (
+          <ShellTooltip label="Home widgets">
+            <button aria-label="Home widgets" aria-expanded={widgetsOpen} className="app-titlebar-action no-drag"
+              data-state={widgetsOpen ? "open" : "closed"} type="button" onClick={() => {
+                onHomeViewModeChange?.("voice");
+                setWidgetsOpen((open) => !open);
+              }}><Glyph name="widgets" size={16} /></button>
+          </ShellTooltip>
+        ) : null}
       </WorkspacePaneHeaderActions>
       <motion.div
         animate={{ opacity: activityOpen ? 0 : 1 }}

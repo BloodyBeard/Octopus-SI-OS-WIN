@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { readProjection } from "../projectionClient";
+import { readProjection, submitInterfaceArtifact } from "../projectionClient";
+import { parseClientAction, type WidgetAction } from "../../electron/clientActionSemantics.mjs";
 import { useProjectionGeneration } from "../projectionLive";
 import type { ClientSurfaceDescriptor } from "./surfaceTypes";
 
@@ -15,6 +16,7 @@ type ClientActionOptions = ActionScope & {
   enabled: boolean;
   surfaces: readonly ClientSurfaceDescriptor[];
   openSurface: (surface: ClientSurfaceDescriptor) => void;
+  widgets?: (action: WidgetAction, operationId: string) => Promise<unknown>;
   onRefusal: (reason: string) => void;
 };
 
@@ -57,17 +59,11 @@ function readCursor(storage: Storage, key: string, scope: ActionScope): number {
   return deliveryIdentity(cursor.last_consumed, scope).seq;
 }
 
-function actionSurfaceId(row: Record<string, unknown>): string {
+function clientAction(row: Record<string, unknown>) {
   if (Object.hasOwn(row, "error")) {
     throw new Error(typeof row.error === "string" && row.error ? row.error : "Client action payload could not be verified.");
   }
-  const action = object(row.action);
-  if (Object.keys(action).length !== 4 || action.schema !== "octopus.client_action"
-    || action.schema_version !== 1 || action.action !== "open_surface"
-    || typeof action.surface_id !== "string" || !action.surface_id || action.surface_id !== action.surface_id.trim()) {
-    throw new Error("Client action must be an exact open_surface request.");
-  }
-  return action.surface_id;
+  return parseClientAction(row.action);
 }
 
 export function useAdmittedClientActions(options: ClientActionOptions): void {
@@ -79,6 +75,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
   const active = useRef({ key: scopeKey });
   if (active.current.key !== scopeKey) active.current = { key: scopeKey };
   const lastFailure = useRef("");
+  const serial = useRef(new Map<string, Promise<void>>());
 
   useEffect(() => {
     if (!scopeKey) return;
@@ -87,7 +84,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
     const key = CURSOR_PREFIX + scopeKey;
     let cancelled = false;
     const current = () => !cancelled && active.current === token && latest.current.enabled;
-    const refuse = (reason: string) => latest.current.onRefusal(`Client navigation refused: ${reason}`);
+    const refuse = (reason: string) => latest.current.onRefusal(`Client action refused: ${reason}`);
 
     async function consume(): Promise<void> {
       try {
@@ -117,13 +114,62 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
           for (const { row, identity } of deliveries) {
             if (!current()) return;
             if (identity.seq <= readCursor(storage, key, scope)) continue;
+            let action;
+            try { action = clientAction(row); } catch (error) { refuse(error instanceof Error ? error.message : String(error)); }
+            if (action && action.action !== "open_surface") {
+              const pendingKey = `octopus.client-widget-result.v1:${scopeKey}`;
+              const retained = storage.getItem(pendingKey);
+              let receipt: Record<string, unknown>;
+              if (retained !== null) {
+                receipt = object(JSON.parse(retained));
+                if (receipt.schema !== "octopus.client_action_result" || receipt.schema_version !== 1
+                  || typeof receipt.observed_at !== "string" || !Number.isFinite(Date.parse(receipt.observed_at))
+                  || !["prepared", "completed"].includes(String(receipt.phase))
+                  || receipt.phase === "completed" && (typeof receipt.ok !== "boolean"
+                    || (receipt.ok ? !Array.isArray(receipt.widgets) : typeof receipt.error !== "string"))) {
+                  throw new Error("Saved widget action result is malformed.");
+                }
+                if (receipt.request_artifact !== identity.artifact_id || receipt.request_seq !== identity.seq
+                  || receipt.request_id !== action.request_id || receipt.action !== action.action) {
+                  if (typeof receipt.request_seq !== "number" || receipt.request_seq > readCursor(storage, key, scope)) {
+                    throw new Error("A different Home widget action still awaits its result delivery.");
+                  }
+                  storage.removeItem(pendingKey);
+                  receipt = {};
+                }
+              } else receipt = {};
+              if (!receipt.request_artifact) {
+                const base = { schema: "octopus.client_action_result", schema_version: 1,
+                  observed_at: new Date().toISOString(),
+                  request_artifact: identity.artifact_id, request_seq: identity.seq, request_id: action.request_id, action: action.action };
+                const prepared = JSON.stringify({ ...base, phase: "prepared" });
+                storage.setItem(pendingKey, prepared);
+                if (storage.getItem(pendingKey) !== prepared) throw new Error("Widget action preparation could not be saved.");
+                try {
+                  if (!latest.current.widgets) throw new Error("Home widget controls are unavailable.");
+                  const widgets = await latest.current.widgets(action, `widget_${identity.artifact_id.split(":")[1]}`);
+                  receipt = { ...base, phase: "completed", ok: true, widgets };
+                } catch (error) {
+                  receipt = { ...base, phase: "completed", ok: false, error: error instanceof Error ? error.message : String(error) };
+                }
+                storage.setItem(pendingKey, JSON.stringify(receipt));
+              } else if (receipt.phase === "prepared") {
+                receipt = { ...receipt, phase: "completed", ok: false,
+                  error: "The client stopped before this widget action saved its result. Its effect is unconfirmed; use a new list_widgets request to inspect current state before another change." };
+                storage.setItem(pendingKey, JSON.stringify(receipt));
+              }
+              if (!current()) return;
+              await submitInterfaceArtifact({ interfaceId: identity.from.Interface, runId: scope.runId,
+                label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
+            }
             storage.setItem(key, JSON.stringify({
               schema_version: 1, home: scope.home, run_id: scope.runId, interface_id: scope.interfaceId,
               last_consumed: identity,
             }));
             if (readCursor(storage, key, scope) !== identity.seq) throw new Error("Client action cursor could not be saved.");
             try {
-              const surfaceId = actionSurfaceId(row);
+              if (!action || action.action !== "open_surface") continue;
+              const surfaceId = action.surface_id;
               const surface = latest.current.surfaces.find((candidate) => candidate.id === surfaceId);
               if (!surface) throw new Error(`Surface ${surfaceId} is unavailable.`);
               latest.current.openSurface(surface);
@@ -144,7 +190,9 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
         lastFailure.current = failure;
       }
     }
-    void consume();
+    const queued = (serial.current.get(scopeKey) ?? Promise.resolve()).then(() => current() ? consume() : undefined);
+    serial.current.set(scopeKey, queued);
+    void queued.finally(() => { if (serial.current.get(scopeKey) === queued) serial.current.delete(scopeKey); });
     return () => { cancelled = true; };
   }, [generation, scopeKey]);
 }

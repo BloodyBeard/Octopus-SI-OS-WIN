@@ -474,6 +474,8 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
     document["data"]=json!({"summary":"Publication fixture: 10 °C"});document["render"]["density"]=json!("comfortable");
     let mut invalid=document.clone();invalid["glyph"]=json!("cloud");invalid["revision"]=json!(1);
     let publish = json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":target,"document":document}}});
+    let widget_requests = [json!({"schema":"octopus.client_action","schema_version":1,"action":"list_widgets","request_id":"inventory"}),
+        json!({"schema":"octopus.client_action","schema_version":1,"action":"set_widget","request_id":"hide","widget_id":"hello","source_digest":"sha256:exact","state":"hidden"})];
     let requests = [
         json!({"method":"tools/list"}),
         json!({"method":"tools/call","params":{"name":"read_artifact","arguments":{"id":"context:visible"}}}),
@@ -482,6 +484,8 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
         json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":target,"document":invalid}}}),
         publish.clone(), publish,
         json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":"system_foreign","document":document}}}),
+        json!({"method":"tools/call","params":{"name":"list_widgets","arguments":{"interface":target,"action":widget_requests[0]}}}),
+        json!({"method":"tools/call","params":{"name":"set_widget","arguments":{"interface":target,"action":widget_requests[1]}}}),
     ];
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_octopus-artifact-bound-tool"))
         .env_clear().current_dir(&root)
@@ -507,7 +511,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             "manifest_path":input.manifest_path(),"artifact_bindings":bindings,"metadata":metadata,
             "source_movement_seq":41+request_id,"worker_environment":formation,"worker_environment_kind":&*kind,
         }})).await;
-        if matches!(request_id, 6 | 7) {
+        if matches!(request_id, 6 | 7 | 9 | 10) {
             let emission = read_message(&mut stdout).await;
             assert_eq!(emission["kind"], "system_emission", "{emission}");
             assert_eq!(emission["request_id"], request_id);
@@ -516,10 +520,10 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             let emitted_path = PathBuf::from(emission["artifact"]["manifest_path"].as_str().unwrap());
             assert!(emitted_path.starts_with(process_var_dir.join(format!("invocations/{request_id}/artifact/emitted"))));
             let emitted = InterfaceArtifactFile::new(emitted_path).unwrap().read_bounded(1024*1024, 1024*1024).unwrap();
-            assert_eq!(emitted.manifest.label, "client.surface.document");
-            assert_eq!(serde_json::from_slice::<Value>(&emitted.payload_bytes).unwrap(), document);
+            assert_eq!(emitted.manifest.label, if request_id >= 9 { "client.action" } else { "client.surface.document" });
+            assert_eq!(serde_json::from_slice::<Value>(&emitted.payload_bytes).unwrap(), if request_id >= 9 { widget_requests[request_id as usize - 9].clone() } else { document.clone() });
             write_message(&mut stdin, &json!({"kind":"delivery_verdict","request_id":request_id,
-                "event_id":emission["event_id"],"verdict":if request_id == 6 {json!({"admitted":{"seq":991}})} else {refused.clone()},
+                "event_id":emission["event_id"],"verdict":if request_id != 7 {json!({"admitted":{"seq":991}})} else {refused.clone()},
             })).await;
         }
         let lifecycle = read_message(&mut stdout).await;
@@ -558,14 +562,14 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
             match request_id {
                 2 => { assert_eq!(body["id"], "context:visible"); assert_eq!(body["text"], "bound context"); }
                 3 | 4 | 8 => assert!(body["error"].as_str().is_some(), "{body}"),
-                6 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
+                6 | 9 | 10 => assert_eq!(body, &json!({"admitted":{"seq":991}})),
                 7 => assert_eq!(body, &refused),
                 _ => unreachable!(),
             }
         }
     }
     assert_eq!(std::fs::read_to_string(&ambient).unwrap(), "ambient data must stay unread");
-    write_message(&mut stdin, &json!({"kind":"release_worker_environment","request_id":9,
+    write_message(&mut stdin, &json!({"kind":"release_worker_environment","request_id":11,
         "formation":formation,"worker_environment_kind":&*kind,"mode":"live_owner",
     })).await;
     let released = read_message(&mut stdout).await;
