@@ -2,6 +2,7 @@ use std::path::Path;
 
 use octopus_descriptors::{loader, Descriptor, EeId};
 use octopus_ee::{bootstrap_ee_instance_id, EeInstance, EeTemplateDescriptor};
+use octopus_file_storage::publication::{self, DigestAlgorithm, DirectoryMove, PublicationOutcome};
 
 pub fn ensure_bootstrap_ee_instances(
     registry_root: &Path,
@@ -51,13 +52,14 @@ pub fn ensure_bootstrap_ee_instances(
             ee_instances_root.display()
         )
     })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
+    publication::create_dir_all(parent).map_err(|error| {
         format!(
             "EE state parent '{}' cannot be created: {error}",
             parent.display()
         )
     })?;
-    let staging = parent.join(format!(".octopus-ee-bootstrap-{}", uuid::Uuid::new_v4()));
+    let attempt = uuid::Uuid::new_v4();
+    let staging = parent.join(format!(".octopus-ee-bootstrap-{attempt}"));
     std::fs::create_dir(&staging).map_err(|error| {
         format!(
             "EE bootstrap staging directory '{}' cannot be created: {error}",
@@ -86,35 +88,15 @@ pub fn ensure_bootstrap_ee_instances(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    match std::fs::rename(&staging, ee_instances_root) {
-        Ok(()) => {}
-        Err(error) if ee_instances_root.exists() => {
-            let _ = std::fs::remove_dir_all(&staging);
-            let existing = std::fs::read(&root_path).map_err(|read_error| {
-                format!(
-                    "concurrently installed EE root '{}' cannot be read after {error}: {read_error}",
-                    root_path.display()
-                )
-            })?;
-            validate_existing_root(&root_path, &root, &existing)?;
-            return Ok(0);
-        }
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!(
-                "installing EE instance root '{}' failed: {error}",
-                ee_instances_root.display()
-            ));
-        }
+    let expected = publication::snapshot_directory(&staging, DigestAlgorithm::Sha256)
+        .map_err(|error| format!("cannot prepare EE root publication: {error}"))?;
+    let result = publication::publish_directory_moves(&format!("ee-bootstrap:{attempt}"), &[DirectoryMove {
+        source: staging, destination: ee_instances_root.to_path_buf(), expected,
+    }]).map_err(|error| format!("cannot publish EE instance root '{}': {error}", ee_instances_root.display()))?;
+    if result.error.is_some() || !matches!(result.receipts.as_slice(), [receipt] if receipt.outcome == PublicationOutcome::Applied) {
+        return Err(format!("EE instance root '{}' was not published: {}", ee_instances_root.display(),
+            result.error.as_deref().unwrap_or("publication has no exact applied receipt")));
     }
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            format!(
-                "EE state parent '{}' did not sync: {error}",
-                parent.display()
-            )
-        })?;
     Ok(1)
 }
 
@@ -161,7 +143,7 @@ mod tests {
     #[test]
     fn boot_ees_are_durable_and_idempotent() {
         let root = tempfile::tempdir().unwrap();
-        let instances = root.path().join("ee_instances");
+        let instances = root.path().canonicalize().unwrap().join("ee_instances");
         assert_eq!(
             ensure_bootstrap_ee_instances(&registry_root(), &instances).unwrap(),
             1
@@ -180,7 +162,7 @@ mod tests {
     #[test]
     fn normal_boot_never_resurrects_a_deleted_root() {
         let root = tempfile::tempdir().unwrap();
-        let instances = root.path().join("ee_instances");
+        let instances = root.path().canonicalize().unwrap().join("ee_instances");
         ensure_bootstrap_ee_instances(&registry_root(), &instances).unwrap();
         let path = instances.join("ee_existence.json");
         std::fs::remove_file(&path).unwrap();

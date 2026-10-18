@@ -80,6 +80,7 @@ pub struct InterfaceOutboundArtifactRefusal {
     pub invocation_metadata: iface::InvocationMetadata,
 }
 
+#[derive(Clone)]
 pub struct InterfaceArtifactAdmission {
     pub run: RunId,
     pub checkpoint: Option<CheckpointId>,
@@ -119,12 +120,34 @@ pub struct InterfaceArrivalTarget {
     pub outbound_bindings: Vec<AuthoredInterfaceBinding>,
     arriving_interface: InterfaceId,
     source_movement_seq: Option<u64>,
+    pub delivery_scope_seq: Option<u64>,
 }
 
 impl InterfaceArrivalTarget {
     pub fn with_source_movement_seq(mut self, seq: u64) -> Self {
         self.source_movement_seq = Some(seq);
         self
+    }
+
+    pub fn from_retained_snapshot(coordinates: &octopus_ledger::RuntimeInvocationMetadata, snapshot: RunRecordSnapshot, scope_seq: u64) -> Result<Self, String> {
+        if ContentHash::of_bytes(&snapshot.bytes) != snapshot.hash
+            || coordinates.run_record_hash.as_deref() != Some(snapshot.hash.to_hex().as_str()) {
+            return Err("retained arrival snapshot differs from its captured source".into());
+        }
+        let record = run_record::RunRecord::from_bytes(&snapshot.bytes).map_err(|error| error.to_string())?;
+        let checkpoint = record.checkpoint(&coordinates.checkpoint).ok_or("retained arrival checkpoint is absent")?;
+        if record.id != coordinates.run || record.ee != coordinates.ee || record.worker != coordinates.worker
+            || !record.active_checkpoints.contains(&coordinates.checkpoint) || checkpoint.epoch.0 != coordinates.epoch
+            || checkpoint.inbound_interface() != Some(&coordinates.interface) {
+            return Err("retained arrival coordinates differ from the pinned active checkpoint".into());
+        }
+        Ok(Self {
+            run: record.id.clone(), checkpoint: checkpoint.id.clone(), ee: record.ee.clone(), worker: record.worker.clone(),
+            epoch: checkpoint.epoch, run_trace: record.trace.clone(), checkpoint_trace: checkpoint.trace.clone(),
+            inbound_binding: checkpoint.interface_binding.clone().ok_or("retained arrival has no interface binding")?,
+            outbound_bindings: checkpoint.outbound_interface_bindings.clone(), run_record: snapshot,
+            arriving_interface: coordinates.interface.clone(), source_movement_seq: None, delivery_scope_seq: Some(scope_seq),
+        })
     }
 }
 
@@ -210,6 +233,14 @@ impl RunGrantResolution {
 
 pub trait RunGrantResolver: Send + Sync {
     fn resolve_run_grant(&self, query: RunGrantQuery<'_>) -> Result<RunGrantResolution, String>;
+
+    fn acquire_commit_guard(&self, _record: &run_record::RunRecord, _marks: &[Mark]) -> Result<Option<Box<dyn AdmissionSourceGuard>>, String> {
+        Ok(None)
+    }
+}
+
+pub trait AdmissionSourceGuard: Send {
+    fn validate(&self) -> Result<(), String>;
 }
 
 pub trait ContextArtifactResolver: Send + Sync {
@@ -407,6 +438,8 @@ impl RuntimeGate {
         outbound_interface_bindings: Vec<AuthoredInterfaceBinding>,
         checkpoint_admission: iface::CheckpointAdmissionMetadata,
         source_movement_seq: Option<u64>,
+        delivery_scope_seq: Option<u64>,
+        pending: Option<&Movement>,
     ) -> Result<Observation, RuntimeError> {
         let admitted_checkpoint = inv.checkpoint.clone().ok_or_else(|| {
             RuntimeError::InterfaceBoundaryFailed(format!(
@@ -481,6 +514,24 @@ impl RuntimeGate {
             .with_artifact_binding_refs(admitted_artifact_bindings.clone())
             .with_checkpoint_admission(checkpoint_admission);
         invocation_metadata.source_movement_seq = source_movement_seq;
+        invocation_metadata.delivery_scope_seq = delivery_scope_seq;
+        if let Some(pending) = pending {
+            let prior = pending.invocation_metadata.as_ref().and_then(ledger::MovementMetadata::invocation)
+                .ok_or_else(|| RuntimeError::InterfaceBoundaryFailed("pending arrival has no invocation metadata".into()))?;
+            if pending.kind != MovementKind::InterfaceArrival
+                || pending.artifact.as_ref() != Some(&inv.artifact)
+                || pending.from != Endpoint::Interface(inv.interface.clone())
+                || pending.to != Endpoint::Interface(invocation_metadata.runtime.as_ref().unwrap().worker.clone())
+                || !invocation_metadata.retains_required_admission_contract(prior)
+            {
+                return Err(RuntimeError::DescriptorDrift { reason: RefusedReason::StaleEpoch,
+                    detail: "pending arrival changed its exact artifact or required checkpoint contract".into() });
+            }
+            invocation_metadata.replaces_arrival_seq = prior.replaces_arrival_seq;
+            if invocation_metadata != *prior {
+                invocation_metadata.replaces_arrival_seq = Some(pending.seq.0);
+            }
+        }
         let admitted_mark_outcomes = self
             .admit_required_verified_artifacts(
                 &inv,
@@ -583,17 +634,15 @@ impl RuntimeGate {
             })?;
         let mark = tokio::task::spawn_blocking(move || prepared.run())
             .await
-            .map_err(|error| {
-                RuntimeError::InterfaceBoundaryFailed(format!(
-                    "verified-artifact verifier task failed to join: {error}"
-                ))
+            .map_err(|error| RuntimeError::DescriptorDrift {
+                reason: RefusedReason::RegistryUnstable,
+                detail: format!("verified-artifact verifier execution did not complete: {error}"),
             })?
             .map_err(|error| RuntimeError::VerifiedArtifactRejected {
                 error,
                 invocation_metadata: Box::new(invocation_metadata),
             })?;
         let admitted = vec![mark];
-        self.admitted.lock().unwrap().extend(admitted.clone());
         Ok(admitted)
     }
 }
@@ -714,11 +763,21 @@ pub struct PreparedInterfaceCheckpointAdmission {
     reservation: CheckpointAdmissionReservation,
     admitted: AdmittedCheckpointArtifact,
     checkpoint_complete: bool,
+    source_guard: Option<Box<dyn AdmissionSourceGuard>>,
+    run_guard: octopus_file_storage::publication::ReadGuard,
 }
 
 impl PreparedInterfaceCheckpointAdmission {
     pub fn observation(&self) -> &Observation {
         &self.observation
+    }
+
+    pub fn validate_commit(&self) -> Result<(), RuntimeError> {
+        self.run_guard.verify().map_err(admission_sources_changed)?;
+        if let Some(guard) = &self.source_guard {
+            guard.validate().map_err(admission_sources_changed)?;
+        }
+        Ok(())
     }
 
     pub fn commit(self) -> Observation {
@@ -727,9 +786,20 @@ impl PreparedInterfaceCheckpointAdmission {
             reservation,
             admitted,
             checkpoint_complete,
+            source_guard: _source_guard,
+            run_guard: _run_guard,
         } = self;
+        reservation.inner.gate.admitted.lock().unwrap()
+            .extend(observation.admitted_mark_outcomes.iter().cloned());
         reservation.commit(admitted, checkpoint_complete);
         observation
+    }
+}
+
+fn admission_sources_changed(error: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::DescriptorDrift {
+        reason: RefusedReason::RegistryUnstable,
+        detail: format!("admission sources changed before durable admission: {error}"),
     }
 }
 
@@ -1360,12 +1430,15 @@ impl Runtime {
                 .as_ref()
                 .map(|admission| admission.required_artifact_labels.as_slice())
                 .unwrap_or_default();
-            if runtime.run != inv.run
-                || runtime.checkpoint != *checkpoint
-                || runtime.ee != *ee
-                || runtime.worker != *worker
-                || runtime.interface != inv.interface
-                || runtime.epoch != inv.epoch.0
+            if !runtime.same_checkpoint_coordinates(&octopus_ledger::RuntimeInvocationMetadata {
+                run: inv.run.clone(),
+                checkpoint: checkpoint.clone(),
+                ee: ee.clone(),
+                worker: worker.clone(),
+                interface: inv.interface.clone(),
+                epoch: inv.epoch.0,
+                run_record_hash: None,
+            })
                 || prior_required_labels != required_artifact_labels.as_slice()
                 || prior.invocation_metadata.grant != *metadata_projection
                 || prior.invocation_metadata.artifact_binding_refs != artifact_binding_refs
@@ -1514,7 +1587,8 @@ impl Runtime {
                 .as_ref()
                 .map(|prior| prior.required_artifact_labels.as_slice())
                 .unwrap_or_default();
-            if prior.invocation_metadata.runtime != metadata.runtime
+            if !prior.invocation_metadata.runtime.as_ref()
+                .is_some_and(|prior| prior.same_checkpoint_coordinates(runtime))
                 || prior.invocation_metadata.grant != metadata.grant
                 || prior.invocation_metadata.artifact_binding_refs != metadata.artifact_binding_refs
                 || prior.invocation_metadata.required_verified_artifacts
@@ -1579,14 +1653,11 @@ impl Runtime {
         &self,
         inv: &mut InterfaceArtifactAdmission,
     ) -> Result<RunRecordAdmission, RuntimeError> {
-        let Some((record, run_record)) = self.load_run_record_with_hash(&inv.run).map_err(|e| {
-            RuntimeError::DescriptorDrift {
-                reason: RefusedReason::UnknownRun,
-                detail: format!(
-                    "run '{}' record could not be read for artifact arrival admission: {e}",
-                    inv.run.as_str()
-                ),
-            }
+        let Some((record, run_record)) = self.load_run_record_with_hash(&inv.run).map_err(|error| {
+            admission_sources_changed(format!(
+                "run '{}' record could not be read for artifact arrival admission: {error}",
+                inv.run.as_str()
+            ))
         })?
         else {
             return Err(RuntimeError::DescriptorDrift {
@@ -1813,6 +1884,7 @@ impl Runtime {
                 outbound_bindings: checkpoint.outbound_interface_bindings.clone(),
                 arriving_interface: interface.clone(),
                 source_movement_seq: None,
+                delivery_scope_seq: None,
             });
         }
         Ok(targets)
@@ -1835,6 +1907,29 @@ impl Runtime {
             });
         }
         Ok(targets)
+    }
+
+    pub fn refresh_retained_interface_arrival_target(&self, original: &InterfaceArrivalTarget) -> Result<InterfaceArrivalTarget, RuntimeError> {
+        self.require_known_interface(&original.arriving_interface)?;
+        let changed = |detail: String| RuntimeError::DescriptorDrift { reason: RefusedReason::StaleEpoch, detail };
+        // A failed observation cannot prove that the original recipient was removed
+        // or replaced. Preserve the edge until current state can be established.
+        let (record, snapshot) = self.load_run_record_with_hash(&original.run)
+            .map_err(|error| admission_sources_changed(format!(
+                "retained arrival run '{}' could not be observed: {error}", original.run.as_str()
+            )))?
+            .ok_or_else(|| changed("retained arrival run was removed".into()))?;
+        let previous = run_record::RunRecord::from_bytes(&original.run_record.bytes)
+            .map_err(|error| changed(error.to_string()))?;
+        if record.ee != original.ee || record.worker != original.worker
+            || record.trace != previous.trace
+            || !record.active_checkpoints.contains(&original.checkpoint)
+            || record.checkpoint(&original.checkpoint) != previous.checkpoint(&original.checkpoint) {
+            return Err(changed("the original receiving checkpoint was removed or its contract changed".into()));
+        }
+        let mut current = original.clone();
+        current.run_record = snapshot;
+        Ok(current)
     }
 
     pub fn resolve_system_interface_emission_grant(
@@ -2018,8 +2113,12 @@ impl Runtime {
         &self,
         mut inv: InterfaceArtifactAdmission,
         source_movement_seq: Option<u64>,
+        delivery_scope_seq: Option<u64>,
+        pending: Option<&Movement>,
     ) -> Result<PreparedInterfaceCheckpointAdmission, RuntimeError> {
+        let registry_generation = self.inner.registry_generation.load(Ordering::Acquire);
         let admitted_checkpoint = self.admit_run_record_artifact_arrival(&mut inv)?;
+        let mut commit_inv = inv.clone();
         let admitted_artifact_bindings = admitted_checkpoint.artifact_bindings.clone();
         let required_verified_artifacts = admitted_checkpoint.required_verified_artifacts.clone();
         let inbound_interface_binding = admitted_checkpoint.inbound_binding.clone();
@@ -2082,8 +2181,38 @@ impl Runtime {
                 outbound_interface_bindings.clone(),
                 checkpoint_admission,
                 source_movement_seq,
+                delivery_scope_seq,
+                pending,
             )
             .await?;
+        let run_directory = self.inner.run_records_dir.lock().unwrap().clone()
+            .ok_or_else(|| admission_sources_changed("run-record directory is not configured"))?;
+        let run_guard = octopus_file_storage::publication::ReadGuard::try_acquire(
+            &[run_directory.join(format!("{}.json", spent_run.as_str()))], &[],
+        ).map_err(admission_sources_changed)?;
+        let resolver = self.inner.run_grant_resolver.read().unwrap().clone();
+        let (record, _) = self.load_run_record_with_hash(&spent_run)
+            .map_err(admission_sources_changed)?
+            .ok_or_else(|| admission_sources_changed("verified run was removed before admission"))?;
+        let source_guard = resolver.as_ref()
+            .map(|resolver| resolver.acquire_commit_guard(&record, &observation.admitted_mark_outcomes))
+            .transpose().map_err(admission_sources_changed)?.flatten();
+        let current = self.admit_run_record_artifact_arrival(&mut commit_inv)?;
+        let metadata = &observation.invocation_metadata;
+        let runtime = metadata.runtime.as_ref()
+            .ok_or_else(|| admission_sources_changed("prepared admission lost its runtime coordinates"))?;
+        if current.ee != runtime.ee || current.worker != runtime.worker
+            || current.metadata_projection != metadata.grant
+            || current.artifact_bindings != metadata.artifact_binding_refs
+            || current.required_verified_artifacts != metadata.required_verified_artifacts
+            || metadata.checkpoint_binding_policy.as_ref() != Some(&iface::CheckpointBindingPolicySnapshot {
+                inbound: current.inbound_binding,
+                outbound: current.outbound_bindings,
+            })
+            || self.inner.registry_generation.load(Ordering::Acquire) != registry_generation
+        {
+            return Err(admission_sources_changed("the verified checkpoint, bindings or current grant changed"));
+        }
         let admitted = AdmittedCheckpointArtifact {
             artifact_label: spent_artifact_label,
             artifact: spent_artifact,
@@ -2118,6 +2247,8 @@ impl Runtime {
             reservation,
             admitted,
             checkpoint_complete,
+            source_guard,
+            run_guard,
         })
     }
 
@@ -2125,7 +2256,7 @@ impl Runtime {
         &self,
         inv: InterfaceArtifactAdmission,
     ) -> Result<Observation, RuntimeError> {
-        self.admit_interface_checkpoint(inv, None)
+        self.admit_interface_checkpoint(inv, None, None, None)
             .await
             .map(PreparedInterfaceCheckpointAdmission::commit)
     }
@@ -2135,6 +2266,7 @@ impl Runtime {
         target: &InterfaceArrivalTarget,
         artifact: ArtifactRef,
         artifact_label: String,
+        pending: Option<&Movement>,
     ) -> Result<PreparedInterfaceCheckpointAdmission, RuntimeError> {
         self.admit_interface_checkpoint(
             InterfaceArtifactAdmission {
@@ -2147,6 +2279,8 @@ impl Runtime {
                 run_record_hash: Some(target.run_record.hash),
             },
             target.source_movement_seq,
+            target.delivery_scope_seq,
+            pending,
         )
         .await
     }
@@ -2249,6 +2383,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    mod publication_admission {
+        include!("../tests/support/publication_admission.rs");
+    }
+
     fn test_verifier_package_pin() -> octopus_ledger::VerifierPackagePin {
         octopus_ledger::VerifierPackagePin {
             descriptor_content: octopus_ledger::ContentHash::of_bytes(b"test verifier descriptor"),
@@ -2332,6 +2470,24 @@ mod tests {
         }
     }
 
+    struct PanickingVerification;
+
+    impl VerifiedArtifactAdmission for PanickingVerification {
+        fn prepare_required_verified_artifact(
+            &self,
+            _required: &RequiredVerifiedArtifact,
+            _input: VerificationInput,
+        ) -> Result<Box<dyn PreparedVerification>, VerifiedArtifactError> {
+            Ok(Box::new(Self))
+        }
+    }
+
+    impl PreparedVerification for PanickingVerification {
+        fn run(self: Box<Self>) -> Result<Mark, VerifiedArtifactError> {
+            panic!("fixture verifier execution panicked");
+        }
+    }
+
     struct FailFirstThenPassVerifiedArtifactAdmission {
         calls: AtomicU64,
     }
@@ -2343,13 +2499,13 @@ mod tests {
             input: VerificationInput,
         ) -> Result<Box<dyn PreparedVerification>, VerifiedArtifactError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(VerifiedArtifactError::VerifierRejected {
+                return Ok(Box::new(ReadyVerification::rejected(VerifiedArtifactError::VerifierRejected {
                     mark: required.mark.as_str().to_string(),
                     verifier: required.verifier.as_str().to_string(),
                     artifact: input.artifact.id.as_str().to_string(),
                     verifier_package: None,
                     details: serde_json::json!({ "reason": "first build was red" }),
-                });
+                })));
             }
             Ok(Box::new(ReadyVerification::passed(
                 Mark::passed_with_class(
@@ -2998,11 +3154,7 @@ mod tests {
     #[tokio::test]
     async fn failed_verifier_leaves_checkpoint_open_for_retry() {
         let runtime = runtime_with_interface_catalog();
-        runtime.set_verified_artifact_admission(Arc::new(
-            FailFirstThenPassVerifiedArtifactAdmission {
-                calls: AtomicU64::new(0),
-            },
-        ));
+        runtime.set_verified_artifact_admission(Arc::new(PanickingVerification));
         let dir = temp_test_dir("verifier-fail-keeps-checkpoint-open");
         runtime.set_run_records_dir(dir.clone());
         let grant = grant_with_interfaces(&["world_test"], &["coder.build.ok"]);
@@ -3033,6 +3185,13 @@ mod tests {
             run_record_hash: None,
         };
 
+        let interrupted = runtime.admit_bound_interface_checkpoint(build_result()).await.unwrap_err();
+        assert_eq!(interrupted.refused_reason(), RefusedReason::RegistryUnstable);
+        assert!(ledger::DeliveryVerdict::refused(interrupted.refused_reason(), interrupted.refusal_detail()).awaits_current_source());
+        assert!(runtime.admitted_mark_outcomes().is_empty());
+        runtime.set_verified_artifact_admission(Arc::new(FailFirstThenPassVerifiedArtifactAdmission {
+            calls: AtomicU64::new(0),
+        }));
         let err = runtime
             .admit_bound_interface_checkpoint(build_result())
             .await
@@ -3042,6 +3201,7 @@ mod tests {
             RefusedReason::VerificationFailed,
             "a failed verifier surfaces as verification_failed, got {err:?}"
         );
+        assert!(!ledger::DeliveryVerdict::refused(err.refused_reason(), err.refusal_detail()).awaits_current_source());
         assert!(
             runtime.admitted_mark_outcomes().is_empty(),
             "a failed verifier must not admit a mark"
@@ -3412,18 +3572,51 @@ mod tests {
             .expect("registry generation advances");
 
         let path = dir.join("r1.json");
+        let original_bytes = std::fs::read(&path).unwrap();
+        let mut retained = target.clone();
+        retained.delivery_scope_seq = Some(41);
+        let assert_reason = |error: RuntimeError, reason: RefusedReason| {
+            assert_eq!(error.refused_reason(), reason);
+            assert_eq!(ledger::DeliveryVerdict::refused(reason, error.refusal_detail()).awaits_current_source(), reason == RefusedReason::RegistryUnstable);
+        };
+        for read_failure in [true, false] {
+            if read_failure {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"{\"incomplete\":").unwrap();
+            }
+            assert_reason(runtime.refresh_retained_interface_arrival_target(&retained).unwrap_err(), RefusedReason::RegistryUnstable);
+            assert_reason(runtime.admit_resolved_interface_checkpoint(&retained, artifact.clone(), "turn.input".into(), None).await.err().unwrap(), RefusedReason::RegistryUnstable);
+            if read_failure { std::fs::remove_dir(&path).unwrap(); }
+            std::fs::write(&path, &original_bytes).unwrap();
+            let resumed = runtime.refresh_retained_interface_arrival_target(&retained).unwrap();
+            assert_eq!(resumed.delivery_scope_seq, retained.delivery_scope_seq);
+            assert_eq!(resumed.run_record.hash, retained.run_record.hash);
+            let prepared = runtime.admit_resolved_interface_checkpoint(&resumed, artifact.clone(), "turn.input".into(), None).await.unwrap();
+            prepared.validate_commit().unwrap();
+            drop(prepared);
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_reason(runtime.refresh_retained_interface_arrival_target(&retained).unwrap_err(), RefusedReason::StaleEpoch);
+        std::fs::write(&path, &original_bytes).unwrap();
         let mut record: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["checkpoints"][0]["epoch"] = serde_json::json!(1);
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert_reason(runtime.refresh_retained_interface_arrival_target(&retained).unwrap_err(), RefusedReason::StaleEpoch);
+        record["checkpoints"][0]["epoch"] = serde_json::json!(0);
         record["active_checkpoints"] = serde_json::json!(["c2"]);
         record["checkpoints"][0]["id"] = serde_json::json!("c2");
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
-        let changed = runtime.admit_resolved_interface_checkpoint(&target, artifact.clone(), "turn.input".into()).await.err().unwrap();
+        assert_reason(runtime.refresh_retained_interface_arrival_target(&retained).unwrap_err(), RefusedReason::StaleEpoch);
+        let changed = runtime.admit_resolved_interface_checkpoint(&target, artifact.clone(), "turn.input".into(), None).await.err().unwrap();
         assert_eq!(changed.refused_reason(), RefusedReason::StaleEpoch);
         assert_eq!(changed.refusal_detail()["reason_detail"], "arrival_target_changed");
         let target = runtime.resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &artifact).unwrap().remove(0);
         assert_eq!(target.checkpoint.as_str(), "c2");
 
         let observation = runtime
-            .admit_resolved_interface_checkpoint(&target, artifact, "turn.input".to_string())
+            .admit_resolved_interface_checkpoint(&target, artifact, "turn.input".to_string(), None)
             .await
             .expect("stale target is re-formed before admission")
             .commit();

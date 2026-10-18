@@ -10,12 +10,16 @@ name = "octopus_app_server"
 path = "src/lib.rs"
 doctest = false
 
+[features]
+owner-contract-tests = []
+
 [dependencies]
 octopus-interfaces = { path = "../octopus-interfaces" }
 octopus-descriptors = { path = "../octopus-descriptors" }
 octopus-ledger = { path = "../octopus-ledger" }
 octopus-ledger-index = { path = "../octopus-ledger-index" }
 octopus-runtime = { path = "../octopus-runtime" }
+octopus-file-storage = { path = "../octopus-file-storage" }
 octopus-interface-projection = { path = "../octopus-interface-projection" }
 octopus-marks = { path = "../octopus-marks" }
 octopus-policy = { path = "../octopus-policy" }

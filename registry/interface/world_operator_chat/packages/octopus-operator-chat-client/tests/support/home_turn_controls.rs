@@ -49,8 +49,16 @@ impl Boundary {
                 _ = &mut done => break,
                 arrival = self.arrivals.recv() => {
                     let arrival = arrival.unwrap();
-                    let verdict = self.admit(&arrival.artifact, &self.ctx.interface.clone()).await;
-                    arrival.verdict_tx.unwrap().send(verdict).unwrap();
+                    if let Some(retained) = arrival.retained {
+                        let file = arrival.artifact.capture_bounded(1<<20, 1<<26).unwrap();
+                        let result = octopus_app_server::admit_retained_interface_artifact_arrival(
+                            &self.runtime, &mut self.log, &mut self.blobs, &file, &self.ctx.interface, &retained.id,
+                        ).await.map_err(|error| error.to_string());
+                        retained.reply.send(result).unwrap();
+                    } else {
+                        let verdict = self.admit(&arrival.artifact, &self.ctx.interface.clone()).await;
+                        arrival.verdict_tx.unwrap().send(verdict).unwrap();
+                    }
                 }
                 connection = self.socket.accept() => {
                     let mut ws = tokio_tungstenite::accept_async(connection.unwrap().0).await.unwrap();

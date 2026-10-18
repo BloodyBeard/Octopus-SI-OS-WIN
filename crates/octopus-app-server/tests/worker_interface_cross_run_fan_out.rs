@@ -442,6 +442,7 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
         serde_json::from_slice(&std::fs::read(&emitter_path).unwrap()).unwrap();
     emitter["checkpoints"][0]["epoch"] = serde_json::json!(1);
     write_run_record(&artifact_root, &embedded.runtime, &emitter);
+    embedded.reload_registry_snapshot_on_artifact_arrival().unwrap();
     let fresh = octopus_app_server::InterfaceArtifactArrivalFromInterface::new(
         &embedded.runtime,
         &mut log,
@@ -464,7 +465,8 @@ async fn worker_interface_delivers_executor_artifact_cross_run_to_the_planner_th
     assert_eq!(
         fresh.delivered.len(),
         2,
-        "a fresh emission of identical content must admit the re-armed receiver edges"
+        "a fresh emission must admit re-armed receiver edges: {:?}",
+        log.read_from(Seq(0)).into_iter().filter(|row| row.kind == MovementKind::DeliveryRefused).collect::<Vec<_>>()
     );
     assert_ne!(fresh.admitted_seq(), source.seq.0);
 }
@@ -1117,4 +1119,127 @@ async fn the_same_boundary_artifact_admits_each_freshly_armed_checkpoint() {
         ),
         "the concrete checkpoint edge is the idempotency boundary, got: {spent}"
     );
+}
+
+#[tokio::test]
+async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart() {
+    use octopus_app_server::admit_retained_interface_artifact_arrival as deliver;
+    use octopus_file_storage::publication::WriteGuard;
+    use octopus_ledger::{ArtifactDelivery, DeliveryVerdict};
+    let root = tempfile::tempdir().unwrap();
+    let blobs: SharedBlobs = Arc::new(std::sync::Mutex::new(InMemoryBlobs::new()));
+    let config = || SpineRootConfig {
+        registry_root: registry_root(), run: RunId::new("first"), blobs: blobs.clone(),
+        interface_artifact_root: root.path().into(), run_records_root: root.path().join("runs"),
+        ee_instances_root: root.path().join("ee_instances"),
+    };
+    let embedded = support::build_test_spine(config()).await.unwrap();
+    let record = |id: &str, checkpoint: &str, verified: bool| serde_json::json!({
+        "id":id, "ee":"ee_existence", "worker":"system_worker_coder_max", "trace":format!("trace:{id}"),
+        "status":"running", "interface_state":{}, "active_checkpoints":[checkpoint], "checkpoints":[{
+            "id":checkpoint, "run":id, "trace":format!("trace:{id}:{checkpoint}"), "epoch":0,
+            "interface_binding":support::all_binding("world_terminal"), "outbound_interface_bindings":[],
+            "artifact_bindings":support::worker_role_artifact_bindings(&["system_worker_coder_max"]),
+            "required_verified_artifacts":if verified { serde_json::json!([{
+                "mark":"coder.build.ok", "artifact_label":"coder.build.result", "verifier":"build_success", "params":{}
+            }, {
+                "mark":"coder.build.ok", "artifact_label":"second.result", "verifier":"artifact_exists", "params":{}
+            }]) } else { serde_json::json!([]) }
+        }]
+    });
+    write_run_record(root.path(), &embedded.runtime, &record("first", "first_0", false));
+    write_run_record(root.path(), &embedded.runtime, &record("second", "second_0", true));
+    let artifact = captured_boundary_artifact(root.path().join("output"), "coder.build.result", &serde_json::to_vec(&build_success_payload()).unwrap());
+    let interface = InterfaceId::new("world_terminal");
+    let mut log = LiveMovementLog::new(InMemoryLog::new());
+    let mut blob_handle = SharedBlobHandle::new(blobs.clone());
+    let busy = WriteGuard::acquire(&root.path().join("runs/second.json"), false).unwrap();
+    let first = deliver(&embedded, &mut log, &mut blob_handle, &artifact, &interface, "completion:1").await.unwrap();
+    assert!(matches!(first, ArtifactDelivery::Pending { .. }));
+    assert_eq!(log.read_from(Seq(0)).iter().filter(|row| row.kind == MovementKind::InterfaceArrival).count(), 1);
+    drop(busy);
+    let ArtifactDelivery::Pending { scope_seq } = first else { unreachable!() };
+    let source = log.read_at(Seq(scope_seq)).unwrap().artifact.unwrap();
+    let mut target = embedded.runtime.resolve_interface_arrival_targets(&interface, &source).unwrap()
+        .into_iter().find(|target| target.run.as_str() == "second").unwrap();
+    target.delivery_scope_seq = Some(scope_seq);
+    let prepared = embedded.runtime.admit_resolved_interface_checkpoint(
+        &target, source.clone(), "coder.build.result".into(), None,
+    ).await.unwrap();
+    let prefix = log.append(MovementDraft {
+        trace:target.checkpoint_trace.clone(), kind:MovementKind::InterfaceArrival,
+        from:Endpoint::Interface(interface.clone()), to:Endpoint::Interface(target.worker.clone()),
+        artifact:Some(source), invocation_metadata:Some(prepared.observation().invocation_metadata.clone().into()),
+        causal_floor:None,
+    });
+    drop(prepared);
+    let other = captured_boundary_artifact(root.path().join("other"), "second.result", b"independent requirement");
+    deliver(&embedded, &mut log, &mut blob_handle, &other, &interface, "completion:2").await.unwrap();
+    write_run_record(root.path(), &embedded.runtime, &record("first", "first_1", false));
+    write_run_record(root.path(), &embedded.runtime, &record("later", "later_0", false));
+    let mut second = record("second", "second_0", true);
+    second["interface_state"] = serde_json::json!({"world_terminal":{"draft":"later independent context"}});
+    write_run_record(root.path(), &embedded.runtime, &second);
+    drop(embedded);
+    let cold = support::build_test_spine(config()).await.unwrap();
+    cold.runtime.reconstruct_spent_checkpoints_from_log(&log).unwrap();
+    let file = root.path().join("runs/second.json");
+    let bytes = std::fs::read(&file).unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    assert_eq!(deliver(&cold, &mut log, &mut blob_handle, &artifact, &interface, "completion:1").await.unwrap(),
+        ArtifactDelivery::Pending { scope_seq });
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::write(&file, bytes).unwrap();
+    let completed = deliver(&cold, &mut log, &mut blob_handle, &artifact, &interface, "completion:1").await.unwrap();
+    assert!(matches!(completed, ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { .. } }));
+    let rows = log.read_from(Seq(0));
+    let arrivals: Vec<_> = rows.iter().filter(|row| row.kind == MovementKind::InterfaceArrival).collect();
+    assert_eq!(arrivals.len(), 4);
+    assert!(arrivals.iter().any(|row| row.runtime().unwrap().checkpoint.as_str() == "second_0"));
+    assert!(!arrivals.iter().any(|row| matches!(row.runtime().unwrap().checkpoint.as_str(), "first_1" | "later_0")));
+    assert_eq!(rows.iter().filter(|row| matches!(row.kind, MovementKind::MarkOutcomeAdmitted(_))).count(), 2);
+    let replacement = arrivals.iter().find(|row| row.invocation_metadata.as_ref().unwrap().invocation().unwrap()
+        .replaces_arrival_seq == Some(prefix.seq.0)).unwrap();
+    let proofs = octopus_ledger::InterfaceArrivalMarkProofIndex::from_movements(&rows).unwrap();
+    assert!(proofs.proof_lamport(&prefix).is_none());
+    assert!(proofs.proof_lamport(replacement).is_some());
+    let mark = rows.iter().find(|row| row.invocation_metadata.as_ref().and_then(|metadata| metadata.mark_outcome())
+        .is_some_and(|mark| mark.arrival_seq == Some(replacement.seq.0))).unwrap();
+    assert!(!octopus_ledger::mark_outcome_proves_interface_arrival(&prefix, mark));
+    let mut invalid = rows.clone();
+    if let Some(octopus_ledger::MovementMetadata::Invocation(metadata)) = &mut invalid[replacement.seq.0 as usize].invocation_metadata {
+        metadata.replaces_arrival_seq = Some(prefix.seq.0 + 1);
+    }
+    assert!(octopus_ledger::InterfaceArrivalMarkProofIndex::from_movements(&invalid).is_err());
+    let saved_index = std::mem::take(&mut *cold.arrival_dedup.lock().unwrap());
+    for warm in [false, true] {
+        let mut corrupt_log = LiveMovementLog::new(InMemoryLog::new());
+        let mut index = octopus_ledger_index::ArrivalDedupIndex::default();
+        for row in &invalid {
+            if warm && row.seq == replacement.seq { index.catch_up(&corrupt_log).unwrap(); }
+            corrupt_log.append(MovementDraft {
+                trace: row.trace.clone(), kind: row.kind.clone(), from: row.from.clone(), to: row.to.clone(),
+                artifact: row.artifact.clone(), invocation_metadata: row.invocation_metadata.clone(),
+                causal_floor: Some(octopus_ledger::Lamport(row.lamport.0 - 1)),
+            });
+        }
+        index.catch_up(&corrupt_log).unwrap();
+        assert!(index.retained_arrival_scope(&interface, "completion:1").is_err());
+        assert!(index.retained_arrival_edges(scope_seq).is_err());
+        *cold.arrival_dedup.lock().unwrap() = index;
+        let before = corrupt_log.len();
+        assert!(deliver(&cold, &mut corrupt_log, &mut blob_handle, &artifact, &interface, "completion:1").await.is_err());
+        assert_eq!(corrupt_log.len(), before, "index corruption cannot become a terminal recipient refusal");
+    }
+    *cold.arrival_dedup.lock().unwrap() = saved_index;
+    cold.runtime.reconstruct_spent_checkpoints_from_log(&log).unwrap();
+    let before = log.len();
+    assert_eq!(deliver(&cold, &mut log, &mut blob_handle, &artifact, &interface, "completion:1").await.unwrap(), completed);
+    assert_eq!(log.len(), before);
+    let changed = captured_boundary_artifact(root.path().join("changed"), "coder.build.result", b"different output");
+    assert!(deliver(&cold, &mut log, &mut blob_handle, &changed, &interface, "completion:1").await.is_err());
+    deliver(&cold, &mut log, &mut blob_handle, &artifact, &interface, "new deliberate submission").await.unwrap();
+    assert!(log.read_from(Seq(before as u64)).iter().any(|row| row.kind == MovementKind::InterfaceArrival
+        && row.runtime().unwrap().checkpoint.as_str() == "first_1"));
 }

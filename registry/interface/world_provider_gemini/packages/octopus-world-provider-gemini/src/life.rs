@@ -340,6 +340,7 @@ async fn drive_preflight_failure(
     };
     match handoff.recover_source().await? {
         ProviderSourceRecovery::Process => emit_error(ctx, &turn, &handoff, failure, 0).await,
+        ProviderSourceRecovery::Bridged { .. } => Ok(()),
         ProviderSourceRecovery::Completed => Ok(()),
         ProviderSourceRecovery::Interrupted {
             last_artifact_label,
@@ -379,6 +380,7 @@ async fn drive_with_retries(
     };
     match handoff.recover_source().await? {
         ProviderSourceRecovery::Process => {}
+        ProviderSourceRecovery::Bridged { .. } => return Ok(()),
         ProviderSourceRecovery::Completed => return Ok(()),
         ProviderSourceRecovery::Interrupted {
             last_artifact_label,

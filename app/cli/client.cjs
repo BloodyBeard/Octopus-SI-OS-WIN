@@ -12,7 +12,8 @@ const { readContentAddressedArtifactPayload, readContentAddressedArtifactProject
 const { createClientAttachmentStagingStore, stageClientAttachmentPaths } = require("../electron/clientAttachments.cjs");
 const { submitClientInterfaceArtifact } = require("../electron/clientArtifacts.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
-const { mutateWorkspaceProject } = require("../electron/workspaceSetup.cjs");
+const { mutateWorkspaceProject, readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
+const { taskRetirementBarrier } = require("./environment.cjs");
 const shared = require("../build/cli/shared.cjs");
 
 const execute = promisify(execFile);
@@ -28,6 +29,8 @@ function createClient(environment, dependencies = {}) {
     localPackageRegistry: () => env.packageRoots.sourceRegistryRoot,
     localPackageLibrary: () => env.packageRoots.libraryRoot,
     octopusHome: () => env.home,
+    readWorkspaceSetupState: (options) => readWorkspaceSetupState({ ...options,
+      publication: env.packageRoots.publication, retirementBarrier: taskRetirementBarrier(env) }),
     projectEePolicies: async () => {
       const { stdout } = await execute(env.runtimeBinary, ["project-ee-policies"], {
         env: { ...process.env, ...env.launchEnv },
@@ -407,7 +410,8 @@ function createClient(environment, dependencies = {}) {
     const result = await mutateOctopusOsWorkspace(registryRoot, env.home, scope, request, {
       chatContexts: raw,
       taskLifecycle,
-      commitClientAuthoring: (plan) => commitProjectionClientAuthoring(env.home, registryRoot, plan, { retirementBarrier }),
+      commitClientAuthoring: (plan) => commitProjectionClientAuthoring(env.home, registryRoot, plan,
+        { publication: env.packageRoots.publication, retirementBarrier }),
       withTaskAuthoringLock: chat.withOperatorRunAuthoringLock,
       readTaskStatus: async (id) => {
         store.invalidate(false, "runs");
@@ -415,7 +419,7 @@ function createClient(environment, dependencies = {}) {
       },
       releaseTaskWorkerEnvironments: (input) => chat.releaseOperatorTaskWorkerEnvironments(submitOptions, input),
       mutateWorkspaceProject: (scope, request) => chat.withOperatorWorkspaceTopologyLock(env.home, () => mutateWorkspaceProject({
-        octopusHomeRoot: env.home, registryRoot, scope, request, retirementBarrier,
+        octopusHomeRoot: env.home, registryRoot, scope, request, publication: env.packageRoots.publication, retirementBarrier,
         planOperatorSurface: ({ eeInstancesRoot, request }) => chat.planOperatorChatSurface({
           ...submitOptions, eeInstancesRoot: () => eeInstancesRoot,
         }, request),

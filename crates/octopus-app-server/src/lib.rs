@@ -9,10 +9,22 @@ pub use arrival::{
     SystemInterfaceEmissionOutcome, recover_durable_checkpoint_outbound_tail,
 };
 
+#[cfg(feature = "owner-contract-tests")]
+pub mod owner_contract_tests {
+    pub async fn arrive_retained_artifact(
+        owner: &mut super::InterfaceArtifactArrivalFromInterface<'_>,
+        artifact: &super::InterfaceArtifactFile,
+        identity: &str,
+    ) -> Result<octopus_ledger::ArtifactDelivery, super::ArrivalError> {
+        owner.arrive_retained_artifact(artifact, identity).await
+    }
+}
+
 pub mod artifact_arrival;
 pub use artifact_arrival::{
     InterfaceArtifactArrivalAdmission, InterfaceArtifactArrivalAdmissionError,
     InterfaceArtifactArrivalAdmissionOutcome, admit_interface_artifact_arrival,
+    admit_retained_interface_artifact_arrival,
     admit_system_interface_emission, admit_system_interface_reference_emission,
 };
 

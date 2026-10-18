@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::os::unix::fs::MetadataExt;
 
 use octopus_interface_transport::InterfaceLifeOwnership;
 use octopus_ledger::{Endpoint, MovementKind};
@@ -38,6 +39,13 @@ fn close(mut child: Child) {
     drop(child.stdin.take());
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
+fn command(child: &mut Child, reader: &mut BufReader<ChildStdout>, command: Value) -> Value {
+    writeln!(child.stdin.as_mut().unwrap(), "{command}").unwrap();
+    let mut line = String::new();
+    assert!(reader.read_line(&mut line).unwrap() > 0, "native command returned no response");
+    serde_json::from_str(&line).unwrap()
 }
 
 fn fixture(root: &Path) -> RetirementFixture {
@@ -82,11 +90,12 @@ fn fixture(root: &Path) -> RetirementFixture {
     records.sort_by_key(|row| row["run"].as_str().unwrap().to_string());
     originals.sort_by_key(|row| row["file"].as_str().unwrap().to_string());
     let selection = json!({"schema_version":1,"source_run":source["id"],"interface_ids":interfaces,"records":records});
-    let context = json!({"operation_id":"retirement-fixture","roots":{"registry_root":root.join("registry"),
+    let mut context = json!({"operation_id":"retirement-fixture","roots":{"registry_root":root.join("registry"),
         "run_records_root":request.roots.run_records_root,"ledger_root":root.join("ledger"),"interface_private_state_root":request.roots.interface_private_state_root},
         "selection_digest":digest(&octopus_descriptors::canonical_bytes(&selection)),"selection":selection,
         "retired":originals.iter().map(|row| json!({"file":row["file"],"expected_digest":null})).collect::<Vec<_>>(),
-        "originals":originals,"prior_proof":null});
+        "originals":originals,"prior_proof":null,
+        "directory_inventory":{"schema_version":1,"removals":[],"originals":[],"retired":[]}});
     let mut generated = BTreeSet::new();
     for write in &plan.descriptor_writes {
         for relative in ["registry/interface", "registry/tool"] {
@@ -100,6 +109,19 @@ fn fixture(root: &Path) -> RetirementFixture {
     assert!(generated.remove(&provider_root));
     let mut removals = vec![provider_root];
     removals.extend(generated);
+    let mut evidence = std::collections::BTreeMap::new();
+    for directory in removals.iter().filter(|path| path.starts_with(root.join("registry/tool"))) {
+        let metadata = std::fs::symlink_metadata(directory).unwrap();
+        context["directory_inventory"]["removals"].as_array_mut().unwrap().push(json!({
+            "path":directory,"identity":{"device":metadata.dev(),"inode":metadata.ino()}}));
+        let file = directory.join("tool.json");
+        let descriptor: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        for file in [file, root.join("registry/interface").join(descriptor["interface"].as_str().unwrap()).join("octopus_os.json")] {
+            let content = std::fs::read_to_string(&file).unwrap();
+            evidence.insert(file.clone(), json!({"file":file,"expected_digest":digest(content.as_bytes()),"content":content}));
+        }
+    }
+    context["directory_inventory"]["originals"] = json!(evidence.into_values().collect::<Vec<_>>());
     for id in context["selection"]["interface_ids"].as_array().unwrap() {
         let id = id.as_str().unwrap();
         if !removals.contains(&root.join("registry/interface").join(id)) { continue; }
@@ -141,7 +163,55 @@ fn real_retirement_holds_and_cold_proof_preserve_the_exact_ledger_boundary() {
     let Some(proof) = proof else { panic!("{}", String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr)); };
     let interface = context["selection"]["interface_ids"][0].as_str().unwrap().into();
     assert!(InterfaceLifeOwnership::try_acquire(&root.join("interfaces"), &interface).unwrap().is_none());
-    std::fs::remove_dir_all(root.join("registry/interface").join(&plan.provider_interface_id)).unwrap();
+    let source = root.join("registry/interface").join(&plan.provider_interface_id);
+    let transaction = root.join("client-state/workspace/transactions/retirement-fixture");
+    std::fs::create_dir_all(transaction.join("removed")).unwrap();
+    let tombstone = transaction.join("removed/0000");
+    let snapshot = command(&mut child, &mut reader, json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":source}));
+    assert_eq!(snapshot["proof"], proof);
+    assert_eq!(snapshot["preimage"]["digest_algorithm"], "sha256");
+    let tool = PathBuf::from(context["directory_inventory"]["removals"][0]["path"].as_str().unwrap());
+    let tool_snapshot = command(&mut child, &mut reader, json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":tool}));
+    let moves = json!([{"source":source,"destination":tombstone,"expected":snapshot["preimage"]},
+        {"source":tool,"destination":transaction.join("removed/0001"),"expected":tool_snapshot["preimage"]}]);
+    let publication = command(&mut child, &mut reader, json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture",
+        "operation_id":"retirement-fixture:directory","moves":moves}));
+    assert_eq!(publication["result"]["error"], Value::Null);
+    assert_eq!(publication["result"]["receipts"][1]["outcome"], "applied");
+    assert!(!tool.exists());
+    assert!(!source.exists() && tombstone.exists());
+    assert!(InterfaceLifeOwnership::try_acquire(&root.join("interfaces"), &interface).unwrap().is_none());
+    let blocked = command(&mut child, &mut reader, json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":transaction}));
+    writeln!(child.stdin.as_mut().unwrap(), "{}", json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture",
+        "operation_id":"retirement-fixture:premature-cleanup","moves":[{"source":transaction,"destination":transaction.with_file_name(".cleanup-retirement-fixture"),
+            "expected":blocked["preimage"]}]})).unwrap();
+    let mut refused = String::new(); assert_eq!(reader.read_line(&mut refused).unwrap(), 0);
+    drop(child.stdin.take()); let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("reclaimed before moving"));
+    assert!(transaction.exists() && tombstone.exists());
+    context["prior_proof"] = proof.clone();
+    let mut changed = context.clone();
+    changed["directory_inventory"]["removals"][0]["identity"]["inode"] = json!(0);
+    let (child, _, refused) = start(&changed); assert!(refused.is_none());
+    assert!(String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).contains("another exact transaction"));
+    let (mut child, mut reader, reacquired) = start(&context); assert_eq!(reacquired.as_ref(), Some(&proof));
+    let repeated = command(&mut child, &mut reader, json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture",
+        "operation_id":"retirement-fixture:directory","moves":moves}));
+    assert_eq!(repeated["result"], publication["result"]);
+    for receipt in publication["result"]["receipts"].as_array().unwrap() {
+        command(&mut child, &mut reader, json!({"operation":"reclaim_directory","transaction_id":"retirement-fixture",
+            "tombstone":receipt["movement"]["destination"],"receipt":receipt,"expected":receipt["movement"]["expected"]}));
+    }
+    assert!(!tombstone.exists());
+    let snapshot = command(&mut child, &mut reader, json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":transaction}));
+    let cleanup = transaction.with_file_name(".cleanup-retirement-fixture");
+    let moved_root = command(&mut child, &mut reader, json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture",
+        "operation_id":"retirement-fixture:cleanup","moves":[{"source":transaction,"destination":cleanup,"expected":snapshot["preimage"]}]}));
+    assert_eq!(moved_root["result"]["receipts"][0]["outcome"], "applied");
+    command(&mut child, &mut reader, json!({"operation":"reclaim_directory","transaction_id":"retirement-fixture","tombstone":cleanup,
+        "receipt":moved_root["result"]["receipts"][0],"expected":snapshot["preimage"]}));
+    assert!(!transaction.exists() && !cleanup.exists());
     writeln!(child.stdin.as_mut().unwrap(), "{{\"operation\":\"assert_held\"}}").unwrap();
     let mut line = String::new(); reader.read_line(&mut line).unwrap();
     assert_eq!(serde_json::from_str::<Value>(&line).unwrap(), proof);
@@ -167,6 +237,43 @@ fn real_retirement_holds_and_cold_proof_preserve_the_exact_ledger_boundary() {
     let (child, _, proof) = start(&context);
     assert!(proof.is_none());
     assert!(String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).contains("prefix changed"));
+}
+
+#[cfg(unix)]
+#[test]
+fn native_retirement_refuses_unselected_aliases_and_changed_commands() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let RetirementFixture { plan, mut context, .. } = fixture(&root);
+    for write in plan.run_writes.iter().chain([&plan.run_write]) { std::fs::remove_file(&write.path).unwrap(); }
+    let (child, _, proof) = start(&context);
+    context["prior_proof"] = proof.unwrap(); close(child);
+    let private = root.join("interfaces").join(&plan.provider_interface_id);
+    let outside = root.join("registry/artifact/retained-knowledge");
+    let transaction = root.join("client-state/workspace/transactions/retirement-fixture");
+    std::fs::create_dir_all(&transaction).unwrap();
+    std::os::unix::fs::symlink(&outside, transaction.join("removed")).unwrap();
+    for value in [
+        json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":outside}),
+        json!({"operation":"snapshot_directory","transaction_id":"different-operation","path":private}),
+        json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":transaction.join("removed/0000")}),
+        json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture","operation_id":"other:step","moves":[]}),
+        json!({"operation":"assert_held","extra":true}),
+    ] {
+        let (mut child, mut reader, proof) = start(&context); assert!(proof.is_some());
+        writeln!(child.stdin.as_mut().unwrap(), "{value}").unwrap();
+        let mut response = String::new(); assert_eq!(reader.read_line(&mut response).unwrap(), 0);
+        drop(child.stdin.take()); let output = child.wait_with_output().unwrap();
+        assert!(!output.status.success());
+        assert!(outside.join("artifact.json").exists() && private.exists());
+    }
+    let (mut child, mut reader, proof) = start(&context); assert!(proof.is_some());
+    let snapshot = command(&mut child, &mut reader, json!({"operation":"snapshot_directory","transaction_id":"retirement-fixture","path":private}));
+    child.kill().unwrap(); let mut input = child.stdin.take().unwrap(); child.wait().unwrap();
+    let tombstone = transaction.join("removed/0000");
+    assert!(writeln!(&mut input, "{}", json!({"operation":"publish_directory_moves","transaction_id":"retirement-fixture",
+        "operation_id":"retirement-fixture:after-death","moves":[{"source":private,"destination":tombstone,"expected":snapshot["preimage"]}]})).is_err());
+    assert!(private.exists() && outside.join("artifact.json").exists());
 }
 
 fn cjs_fixture_command(root: &Path, fixture: &RetirementFixture, mode: &str) -> std::process::Output {

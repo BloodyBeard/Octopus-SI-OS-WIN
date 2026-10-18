@@ -304,7 +304,7 @@ async function submitOperatorTurn(options, request) {
           workerInterfaceId: plan.workerInterfaceId,
           clientSurfaceRole: plan.clientSurfaceRole,
         },
-        clientWrites: await commitClientWrites(plan.writes),
+        clientWrites: await commitClientWrites(plan.writes, options),
         outboundCursorOffset: plan.ledgerOffset,
       };
     }
@@ -370,7 +370,7 @@ async function submitOperatorTurn(options, request) {
         && path.extname(filePath) === ".json";
       const previousSocket = providerSelectionWrites.some((write) => changesClientConfiguration(write.filePath))
         ? await interfaceSocketIdentity(octopusHome, chatInterfaceId) : null;
-      const clientWrites = [...revisionWrites, ...await commitClientWrites(providerSelectionWrites)];
+      const clientWrites = [...revisionWrites, ...await commitClientWrites(providerSelectionWrites, options)];
       return {
         submission: activeRun,
         clientWrites,
@@ -821,14 +821,14 @@ function operatorRevisionDeferred(proof) {
   return error;
 }
 
-async function runOperatorRevisionCommand(planner, flag, request) {
+async function runOperatorRevisionCommand(planner, flag, request, maximumResponseBytes = 4 * 1024 * 1024) {
   const output = await new Promise((resolve, reject) => {
     const child = spawn(planner, [flag], { stdio: ["pipe", "pipe", "pipe"] });
     const stdout = [], stderr = [];
     let size = 0;
     child.stdout.on("data", (chunk) => {
       size += chunk.length;
-      if (size > 4 * 1024 * 1024) { child.kill(); reject(new Error("operator input revision response exceeds its bound")); }
+      if (size > maximumResponseBytes) { child.kill(); reject(new Error("operator input revision response exceeds its bound")); }
       else stdout.push(chunk);
     });
     child.stderr.on("data", (chunk) => { if (Buffer.concat(stderr).length < 256 * 1024) stderr.push(chunk); });
@@ -1009,7 +1009,7 @@ async function readExistingOperatorMessageEnvelope(options, input) {
 }
 
 async function prepareOperatorMessageAdmission(options, input) {
-  const state = await readOrCreateOperatorMessageAdmission(input);
+  const state = await readOrCreateOperatorMessageAdmission(options, input);
   return recoverOperatorMessageAdmission(
     options,
     input,
@@ -1020,7 +1020,7 @@ async function prepareOperatorMessageAdmission(options, input) {
 }
 
 async function admitOperatorMessage(options, input) {
-  const state = await readOrCreateOperatorMessageAdmission(input);
+  const state = await readOrCreateOperatorMessageAdmission(options, input);
   let { admission, document } = state;
   const { admissionPath } = state;
   const recovered = await recoverOperatorMessageAdmission(
@@ -1047,7 +1047,7 @@ async function admitOperatorMessage(options, input) {
     "operator message admission seq",
   );
   admission = { ...admission, phase: "admitted", movement_seq: movementSeq };
-  await writeOperatorMessageAdmission(admissionPath, document, admission);
+  await writeOperatorMessageAdmission(options, admissionPath, document, admission);
   return {
     outboundCursorOffset: admission.outbound_cursor_offset,
     recovered: false,
@@ -1055,7 +1055,7 @@ async function admitOperatorMessage(options, input) {
   };
 }
 
-async function readOrCreateOperatorMessageAdmission(input) {
+async function readOrCreateOperatorMessageAdmission(options, input) {
   const admissionRoot = path.join(input.artifactRoot, "message-admissions");
   await fs.mkdir(admissionRoot, { recursive: true, mode: 0o700 });
   await fs.chmod(admissionRoot, 0o700);
@@ -1077,7 +1077,7 @@ async function readOrCreateOperatorMessageAdmission(input) {
       ),
       movement_seq: null,
     };
-    document = await writeOperatorMessageAdmission(admissionPath, null, admission);
+    document = await writeOperatorMessageAdmission(options, admissionPath, null, admission);
   }
   return { admissionPath, document, admission };
 }
@@ -1197,7 +1197,7 @@ async function recoverOperatorMessageAdmission(options, input, admissionPath, do
   if (recovered === null) return null;
   if (admission.phase === "prepared") {
     admission = { ...admission, phase: "admitted", movement_seq: recovered };
-    await writeOperatorMessageAdmission(admissionPath, document, admission);
+    await writeOperatorMessageAdmission(options, admissionPath, document, admission);
   }
   return {
     outboundCursorOffset: admission.outbound_cursor_offset,
@@ -1392,14 +1392,14 @@ function operatorMessageAdmissionRecord(value, expected) {
   return normalized;
 }
 
-async function writeOperatorMessageAdmission(filePath, prior, value) {
+async function writeOperatorMessageAdmission(options, filePath, prior, value) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
   await commitClientWrites([{
     filePath,
     content: text,
     tag: `operator-message-admission:${value.message_id}`,
     expectedBeforeHash: prior ? sha256Hex(Buffer.from(prior.text)) : null,
-  }]);
+  }], options);
   return { text, value };
 }
 
@@ -1859,7 +1859,8 @@ async function planOperatorChatPackageAdoption(options, request) {
   const runId = safeSegment(request?.runId, "runId");
   const expectedRunHash = safeSha256(request?.expectedRunHash, "expectedRunHash");
   const runsRoot = await resolveRunRecordsRoot(home);
-  const current = await readJsonDocumentIfPresent(path.join(runsRoot, `${runId}.json`));
+  const runPath = path.join(runsRoot, `${runId}.json`);
+  const current = await readJsonDocumentIfPresent(runPath);
   if (!current || sha256Hex(Buffer.from(current.text)) !== expectedRunHash) {
     throw new Error(`native package adoption run '${runId}' changed before planning`);
   }
@@ -1868,9 +1869,10 @@ async function planOperatorChatPackageAdoption(options, request) {
   const providerPath = path.join(registryRoot, "interface", provider, "interface.json");
   const descriptor = await readJsonDocumentIfPresent(providerPath);
   if (!descriptor) throw new Error(`native package adoption provider '${provider}' is absent`);
+  const eeInstancesRoot = await resolveEeInstancesRoot(home, options);
   const planner = resolvePackageExecutable(config, resolveInstallationRoot(options), registryRoot, "topology_planner");
   const plan = await runOperatorRevisionCommand(planner, "--plan-native-adoption", {
-    roots: { registry_root: registryRoot, ee_instances_root: await resolveEeInstancesRoot(home, options),
+    roots: { registry_root: registryRoot, ee_instances_root: eeInstancesRoot,
       run_records_root: runsRoot, interface_private_state_root: path.join(home, "interfaces") },
     ledger_root: path.join(home, "ledger"), client_template_interface: config.interface,
     run_id: runId, expected_run_hash: expectedRunHash, expected_provider_hash: sha256Hex(Buffer.from(descriptor.text)),
@@ -1881,16 +1883,24 @@ async function planOperatorChatPackageAdoption(options, request) {
   }
   const writes = requiredArray(plan.writes, "native adoption writes");
   const catalogPath = path.join(registryRoot, "artifact", `artifact-run-affordances-${identity.chatId}`, "artifact.json");
+  const worker = safeSegment(current.value.worker, "native adoption worker");
+  const workerPolicyPath = path.join(registryRoot, "interface", worker, "policy.json");
   const toolPaths = new Map(requiredArray(Object.hasOwn(config, "tool_contract_updates") ? config.tool_contract_updates : [], "client.tool_contract_updates").map((update) => {
     const tool = `${safeContractToken(update.source_tool, "tool contract source tool")}__${identity.chatId}`;
     const door = `${safeSegment(update.source_interface, "tool contract source interface")}_${identity.chatId}`;
     return [path.join(registryRoot, "tool", tool, "tool.json"), { tool, door }];
   }));
+  const policyWrite = writes.find(write => write.path === workerPolicyPath);
+  const runWrite = writes.find(write => write.path === runPath);
+  let workerOwnership;
   if (plan.status === "planned") {
-    const nativeWrites = writes.filter((write) => !toolPaths.has(write.path));
+    const toolWrites = writes.filter(write => toolPaths.has(write.path));
+    const nativeWrites = writes.filter(write => !toolPaths.has(write.path) && write !== policyWrite && write !== runWrite);
+    const ordered = [...toolWrites, ...(policyWrite ? [policyWrite] : []), ...(runWrite ? [runWrite] : []), ...nativeWrites];
     if (!writes.length || new Set(writes.map((write) => write.path)).size !== writes.length
+      || ordered.some((write, index) => write !== writes[index]) || policyWrite && !runWrite
       || (nativeWrites.length && (nativeWrites.length !== 2 || writes.at(-2)?.path !== catalogPath || writes.at(-1)?.path !== providerPath))) {
-      throw new Error("native package adoption may write only declared private tools followed by its exact catalog and provider declaration");
+      throw new Error("native package adoption may write only declared private tools, its exact worker policy and target Run, followed by its exact catalog and provider declaration");
     }
     for (const write of writes) {
       safeSha256(write.expected_before_hash, "native adoption write preimage");
@@ -1903,20 +1913,69 @@ async function planOperatorChatPackageAdoption(options, request) {
         }
       }
     }
+    if (runWrite) {
+      const next = requiredObject(JSON.parse(runWrite.content), "native adoption target Run");
+      const nextIdentity = chatIdentityFromRunRecord(config, runId, next);
+      if (runWrite.tag !== `run:${runId}` || runWrite.expected_before_hash !== expectedRunHash
+        || next.worker !== worker || next.ee !== current.value.ee || nextIdentity.interfaceId !== identity.interfaceId
+        || next.interface_state[identity.interfaceId].provider_runtime_interface !== provider) {
+        throw new Error("native result adoption changed its exact target Run or owner identity");
+      }
+    }
+    if (policyWrite) {
+      const next = requiredObject(JSON.parse(policyWrite.content), "native adoption worker policy");
+      workerOwnership = await readJsonDocumentIfPresent(path.join(registryRoot, "interface", worker, "octopus_os.json"));
+      const owner = workerOwnership?.value;
+      if (policyWrite.tag !== `policy:${worker}` || next.id !== worker || owner?.schema_version !== 1
+        || owner.workspace !== "octopus_os" || owner.interface !== worker || owner.owner_interface !== identity.interfaceId
+        || owner.component !== "worker" || owner.surface_role !== current.value.interface_state[identity.interfaceId].client_surface_role) {
+        throw new Error("native result adoption policy is not owned by its exact client worker");
+      }
+    }
   } else if (writes.length) throw new Error("deferred or unchanged native adoption contains writes");
   if (plan.status === "deferred") requiredString(plan.reason, "native adoption deferral reason");
-  const toolEvidencePaths = new Set(writes.flatMap((write) => {
+  const evidencePaths = new Set([runPath, path.join(home, "ledger/movements.jsonl"), ...writes.flatMap((write) => {
     const tool = toolPaths.get(write.path);
-    return tool ? [path.join(home, "ledger/movements.jsonl"),
-      path.join(home, "interfaces", tool.door, "tool-door-effect-frontier.jsonl"),
+    return tool ? [path.join(home, "interfaces", tool.door, "tool-door-effect-frontier.jsonl"),
       path.join(home, "interfaces", tool.door, "ledger-cursor.tool-door.json")] : [];
-  }));
-  for (const preimage of requiredArray(plan.preimages, "native adoption preimages")) {
+  })]);
+  const bound = current.value.interface_state[provider]?.run_authoring_binding;
+  for (const checkpoint of bound?.checkpoints ?? []) {
+    const door = checkpoint.role === "provider_tool_output" && checkpoint.outbound_interface_bindings?.length === 1
+      ? checkpoint.outbound_interface_bindings[0].interface
+      : checkpoint.role === "authoring_result" ? checkpoint.interface_binding?.interface : null;
+    if (door === null) continue;
+    const root = path.join(home, "interfaces", safeSegment(door, "native adoption evidence door"));
+    for (const name of ["tool-door-effect-frontier.jsonl", "ledger-cursor.tool-door.json"]) evidencePaths.add(path.join(root, name));
+  }
+  const preimages = requiredArray(plan.preimages, "native adoption preimages"), pins = new Map();
+  for (const pin of preimages) {
+    if (pins.has(pin.path) && pins.get(pin.path) !== pin.sha256) throw new Error("native adoption repeats inconsistent dependency preimages");
+    pins.set(pin.path, pin.sha256);
+  }
+  const ancestors = new Set();
+  for (let ee = safeSegment(current.value.ee, "native adoption Run EE"); ee !== undefined && ee !== null;) {
+    const file = path.join(eeInstancesRoot, `${safeSegment(ee, "native adoption EE")}.json`);
+    if (ancestors.has(file)) throw new Error("native adoption EE chain cycles");
+    ancestors.add(file); evidencePaths.add(file);
+    const document = await readJsonDocumentIfPresent(file);
+    if (!document || pins.get(file) !== sha256Hex(Buffer.from(document.text))) throw new Error(`native adoption preimage changed at '${file}'`);
+    ee = document.value.parent_ee_id;
+  }
+  const deliveryRoot = path.join(home, "interfaces", provider, "handoff-delivery");
+  for (const preimage of preimages) {
     const file = absolutePath(preimage.path, "native adoption preimage path");
-    if (file !== path.join(runsRoot, `${runId}.json`) && !file.startsWith(`${registryRoot}${path.sep}`) && !toolEvidencePaths.has(file)) {
+    const delivery = path.dirname(file) === deliveryRoot && /^[0-9a-f]{64}\.json$/.test(path.basename(file));
+    if (file !== preimage.path || !file.startsWith(`${registryRoot}${path.sep}`) && !evidencePaths.has(file) && !delivery) {
       throw new Error("native adoption preimage is outside its exact run, Registry and tool completion evidence");
     }
     if (preimage.sha256 !== null) safeSha256(preimage.sha256, "native adoption preimage hash");
+  }
+  if (plan.status === "planned") {
+    for (const write of writes) if (pins.get(write.path) !== write.expected_before_hash) throw new Error("native adoption write lacks its exact dependency preimage");
+    if (workerOwnership && pins.get(path.join(registryRoot, "interface", worker, "octopus_os.json")) !== sha256Hex(Buffer.from(workerOwnership.text))) {
+      throw new Error("native adoption worker ownership lacks its exact dependency preimage");
+    }
   }
   return plan;
 }
@@ -1941,6 +2000,7 @@ async function adoptOperatorChatPackageUpdates(options, request) {
         }
         await assertStopped();
         await commit({ label: `adopt client package declarations for ${runId}`,
+          condition: { octopus_home: absolutePath(options.octopusHome(), "octopusHome"), preimages: plan.preimages },
           writes: plan.writes.map((write) => ({file:write.path,content:write.content,beforeDigest:write.expected_before_hash,label:write.tag})),
           removals: [], publishBarrierPath: plan.writes.at(-1).path });
         for (const write of plan.writes) {
@@ -2438,7 +2498,7 @@ async function releaseOperatorTaskWorkerEnvironments(options, request) {
         content: nextText,
         tag: `run-release:${runId}:${formation.worker_environment_id}`,
         expectedBeforeHash: currentDigest,
-      }]);
+      }], options);
       current = { value: next, text: nextText };
       currentDigest = sha256Hex(Buffer.from(nextText));
 
@@ -2803,7 +2863,7 @@ async function updateOperatorChatPins(options, request) {
       content,
       tag: `run-pins:${runId}`,
       expectedBeforeHash: sha256Hex(Buffer.from(document.text)),
-    }]);
+    }], options);
     return {
       runId,
       pinnedArtifactIds: next.map((binding) => binding.id),
@@ -3734,11 +3794,11 @@ async function withOperatorWorkspaceTopologyLock(octopusHome, operation) {
   }
 }
 
-async function commitClientWrites(writes) {
+async function commitClientWrites(writes, options) {
   const paths = new Set();
   for (const write of writes) {
     write.filePath = absolutePath(write.filePath, `${write.tag}.path`);
-    if (typeof write.content !== "string") throw new Error(`${write.tag}.content must be a string`);
+    if (typeof write.content !== "string" && write.content !== null) throw new Error(`${write.tag}.content must be text or null`);
     if (write.expectedBeforeHash !== null
       && !/^[0-9a-f]{64}$/.test(stringValue(write.expectedBeforeHash))) {
       throw new Error(`${write.tag}.expectedBeforeHash must be a lowercase SHA-256 hash or null`);
@@ -3748,122 +3808,24 @@ async function commitClientWrites(writes) {
     }
     paths.add(write.filePath);
   }
-  const parents = new Set(writes.map((write) => path.dirname(write.filePath)));
-  await Promise.all([...parents].map((parent) => fs.mkdir(parent, { recursive: true })));
-  const staged = new Array(writes.length).fill(null);
-  const evidence = new Array(writes.length).fill(null);
-  let next = 0;
-  let stageFailure = null;
-  const lanes = Math.max(1, Math.min(8, writes.length));
-  await Promise.all(Array.from({ length: lanes }, async () => {
-    for (;;) {
-      if (stageFailure) return;
-      const index = next;
-      next += 1;
-      if (index >= writes.length) return;
-      try {
-        const outcome = await stageClientWrite(writes[index]);
-        if (outcome.evidence) evidence[index] = outcome.evidence;
-        else staged[index] = outcome;
-      } catch (error) {
-        if (!stageFailure) stageFailure = error;
-        return;
-      }
-    }
-  }));
-  try {
-    if (stageFailure) throw stageFailure;
-    for (let index = 0; index < writes.length; index += 1) {
-      if (evidence[index]) continue;
-      evidence[index] = await installClientWrite(writes[index], staged[index]);
-    }
-  } finally {
-    for (const entry of staged) {
-      if (!entry) continue;
-      await fs.unlink(entry.staged).catch((error) => {
-        if (error?.code !== "ENOENT") throw error;
-      });
-    }
-    for (const parent of parents) await syncDirectory(parent);
-  }
-  return evidence;
+  if (writes.length === 0) return [];
+  const receipts = await publishOperatorFiles(options, writes);
+  return receipts.map((receipt, index) => ({ path: writes[index].filePath, tag: writes[index].tag,
+    beforeHash: receipt.before_hash, afterHash: receipt.after_hash, bytes: receipt.bytes,
+    changed: receipt.before_hash !== receipt.after_hash }));
 }
 
-async function stageClientWrite(write) {
-  const bytes = Buffer.from(write.content);
-  const afterHash = sha256Hex(bytes);
-  const parent = path.dirname(write.filePath);
-  const initial = await readFileHashIfPresent(write.filePath);
-  if (initial?.hash === afterHash) {
-    return {
-      evidence: {
-        path: write.filePath,
-        tag: write.tag,
-        beforeHash: write.expectedBeforeHash,
-        afterHash,
-        bytes: bytes.byteLength,
-        changed: false,
-      },
-    };
-  }
-  const observedHash = initial?.hash ?? null;
-  if (observedHash !== write.expectedBeforeHash) {
-    throw new Error(
-      `client authoring conflict for '${write.filePath}': expected ${write.expectedBeforeHash ?? "<absent>"}, observed ${observedHash ?? "<absent>"}`,
-    );
-  }
-  const staged = path.join(
-    parent,
-    `.${path.basename(write.filePath)}.octopus-client-${process.pid}-${randomToken(16)}.tmp`,
+async function publishOperatorFiles(options, writes) {
+  if (Array.isArray(writes) && writes.length === 0) return [];
+  return (await loadStoragePublisher(options)).publishFiles(writes);
+}
+
+async function loadStoragePublisher(options) {
+  const config = await readConfig();
+  const planner = resolvePackageExecutable(
+    config, resolveInstallationRoot(options), resolveRegistryRoot(options), "topology_planner",
   );
-  try {
-    const handle = await fs.open(staged, "wx", 0o600);
-    try {
-      await handle.writeFile(bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  } catch (error) {
-    await fs.unlink(staged).catch(() => {});
-    throw error;
-  }
-  return { staged, afterHash, byteLength: bytes.byteLength };
-}
-
-async function installClientWrite(write, entry) {
-  const current = await readFileHashIfPresent(write.filePath);
-  const currentHash = current?.hash ?? null;
-  if (currentHash !== write.expectedBeforeHash) {
-    throw new Error(
-      `client authoring conflict for '${write.filePath}' after staging: expected ${write.expectedBeforeHash ?? "<absent>"}, observed ${currentHash ?? "<absent>"}`,
-    );
-  }
-  if (write.expectedBeforeHash === null) {
-    try {
-      await fs.link(entry.staged, write.filePath);
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const raced = await readFileHashIfPresent(write.filePath);
-      if (raced?.hash !== entry.afterHash) {
-        throw new Error(`client authoring create raced with different bytes at '${write.filePath}'`);
-      }
-    }
-  } else {
-    await fs.rename(entry.staged, write.filePath);
-  }
-  const installed = await readFileHashIfPresent(write.filePath);
-  if (installed?.hash !== entry.afterHash) {
-    throw new Error(`client authoring installed unexpected bytes at '${write.filePath}'`);
-  }
-  return {
-    path: write.filePath,
-    tag: write.tag,
-    beforeHash: write.expectedBeforeHash,
-    afterHash: entry.afterHash,
-    bytes: entry.byteLength,
-    changed: true,
-  };
+  return require("./publication.cjs").createStoragePublisher(planner, runOperatorRevisionCommand);
 }
 
 async function readFileHashIfPresent(filePath) {
@@ -7940,6 +7902,8 @@ function positiveInteger(value, field) {
 }
 
 module.exports = {
+  loadStoragePublisher,
+  publishOperatorFiles,
   loadOperatorTaskLifecycle,
   adoptOperatorChatPackageUpdates,
   assertGenericOperatorChatArtifactAllowed,

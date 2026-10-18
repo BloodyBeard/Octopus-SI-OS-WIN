@@ -15,7 +15,7 @@ const KINDS = {
 };
 
 async function main() {
-  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-"));
+  const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-")));
   try {
     await rendererPlanAdmission(path.join(temporary, "renderer"));
     await coldPresetLoader(path.join(temporary, "cold-preset"));
@@ -108,7 +108,7 @@ async function coldPresetLoader(root) {
   const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
   const vm = require("node:vm");
   const home = path.join(root, "home");
-  const roots = { sourceRegistryRoot: path.join(root, "source"), activeRegistryRoot: path.join(home, "registry"), libraryRoot: path.join(root, "library"), stateRoot: path.join(home, "client", "package-state") };
+  const roots = { publication: require("./support/native-publication.cjs").nativePublication(), sourceRegistryRoot: path.join(root, "source"), activeRegistryRoot: path.join(home, "registry"), libraryRoot: path.join(root, "library"), stateRoot: path.join(home, "client", "package-state") };
   const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`); };
   const worker = "system_worker_fixture";
   const provider = "world_provider_fixture";

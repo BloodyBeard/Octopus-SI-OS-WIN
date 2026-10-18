@@ -1,10 +1,11 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use octopus_descriptors::{EeId, EeTemplateId};
 use octopus_ee::EeInstance;
+use octopus_file_storage::publication::{DigestAlgorithm, PublicationOutcome, WriteGuard};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,54 +112,7 @@ pub fn migrate(octopus_home: &Path) -> Result<MigrationOutcome, String> {
         });
     }
 
-    for (index, write) in writes.iter().enumerate() {
-        let observed = fs::read(&write.path).map_err(|error| {
-            format!(
-                "cannot re-read EE instance '{}': {error}",
-                write.path.display()
-            )
-        })?;
-        if observed != write.original {
-            return Err(format!(
-                "EE instance '{}' changed after migration preflight",
-                write.path.display()
-            ));
-        }
-        let temporary =
-            write
-                .path
-                .with_extension(format!("json.migrate-{}-{}", std::process::id(), index));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| {
-                format!(
-                    "cannot create migration file '{}': {error}",
-                    temporary.display()
-                )
-            })?;
-        fs::set_permissions(&temporary, write.permissions.clone()).map_err(|error| {
-            format!(
-                "cannot preserve permissions on '{}': {error}",
-                temporary.display()
-            )
-        })?;
-        file.write_all(&write.replacement)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| {
-                format!(
-                    "cannot persist migration file '{}': {error}",
-                    temporary.display()
-                )
-            })?;
-        fs::rename(&temporary, &write.path).map_err(|error| {
-            format!(
-                "cannot commit EE instance migration '{}': {error}",
-                write.path.display()
-            )
-        })?;
-    }
+    for write in &writes { publish_migration(write)?; }
     fs::File::open(&ee_root)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| {
@@ -172,6 +126,24 @@ pub fn migrate(octopus_home: &Path) -> Result<MigrationOutcome, String> {
         migrated: writes.len(),
         current,
     })
+}
+
+fn publish_migration(write: &PlannedWrite) -> Result<(), String> {
+    let operation = format!("ee-migration:{}", uuid::Uuid::new_v4());
+    let guard = WriteGuard::acquire_operation(&write.path, false, &operation).map_err(|error| error.to_string())?;
+    if fs::read(&write.path).map_err(|error| error.to_string())? != write.original
+        || fs::metadata(&write.path).map_err(|error| error.to_string())?.permissions() != write.permissions
+    {
+        return Err(format!("EE instance '{}' changed after migration preflight", write.path.display()));
+    }
+    let before = format!("{:x}", Sha256::digest(&write.original));
+    let receipt = guard.publish(&operation, Some(&before), &write.replacement, DigestAlgorithm::Sha256)
+        .map_err(|error| format!("cannot publish EE migration '{}': {error}", write.path.display()))?;
+    if receipt.outcome != PublicationOutcome::Applied {
+        return Err(format!("EE migration '{}' was {:?}: {}", write.path.display(), receipt.outcome,
+            receipt.error.as_deref().unwrap_or("publication has no applied evidence")));
+    }
+    Ok(())
 }
 
 fn resolve_ee_root(octopus_home: &Path) -> Result<PathBuf, String> {
@@ -268,5 +240,12 @@ mod tests {
         let second = migrate(home.path()).unwrap();
         assert_eq!(second.migrated, 0);
         assert_eq!(second.current, 1);
+        let path = fs::canonicalize(ee_root.join("ee_root.json")).unwrap();
+        let stale = PlannedWrite { original: fs::read(&path).unwrap(), replacement: b"stale proposal".to_vec(),
+            permissions: fs::metadata(&path).unwrap().permissions(), path: path.clone() };
+        let before = format!("{:x}", Sha256::digest(&stale.original));
+        octopus_file_storage::publication::publish(&path, "fixture-concurrent-ee", Some(&before), b"concurrent edit").unwrap();
+        assert!(publish_migration(&stale).unwrap_err().contains("changed after migration preflight"));
+        assert_eq!(fs::read(&path).unwrap(), b"concurrent edit");
     }
 }

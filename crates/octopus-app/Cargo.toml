@@ -16,6 +16,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 octopus-descriptors = { path = "../octopus-descriptors" }
+octopus-file-storage = { path = "../octopus-file-storage" }
 octopus-ledger = { path = "../octopus-ledger" }
 octopus-ledger-index = { path = "../octopus-ledger-index" }
 octopus-ledger-store = { path = "../octopus-ledger-store", default-features = false }
@@ -37,6 +38,7 @@ notify.workspace = true
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tempfile = "3"
 octopus-worker-env = { path = "../octopus-worker-env" }
+octopus-verifiers = { path = "../octopus-verifiers" }
 
 [lints.rust]
 unsafe_code = "forbid"

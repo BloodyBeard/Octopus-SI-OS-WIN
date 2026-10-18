@@ -383,7 +383,13 @@ async function commitClientAuthoringTransaction(options) {
         const outcome = await recoverClientAuthoringTransaction(roots, transactionRoot, options?.retirementBarrier);
         if (outcome !== "rolled_back") recovered = true;
       } catch (recoveryError) {
-        throw new Error(`${errorMessage(error)}; client authoring recovery failed closed: ${errorMessage(recoveryError)}`);
+        const failure = new Error(`${errorMessage(error)}; client authoring recovery failed closed: ${errorMessage(recoveryError)}`, { cause: error });
+        if (recoveryError?.code || error?.code) failure.code = recoveryError?.code || error.code;
+        for (const field of ["publicationReceipts", "publicationResult", "publicationRequests"]) {
+          if (recoveryError && Object.hasOwn(recoveryError, field)) failure[field] = recoveryError[field];
+          else if (error && Object.hasOwn(error, field)) failure[field] = error[field];
+        }
+        throw failure;
       }
       if (!recovered || plan.retirement) throw error;
     }
@@ -394,7 +400,7 @@ async function commitClientAuthoringTransaction(options) {
 function parseClientAuthoringPlan(value) {
   const plan = exactObject(
     value,
-    ["operationId", "label", "writes", "removals", "retirement"],
+    ["operationId", "label", "writes", "removals", "retirement", "condition"],
     ["operationId", "label", "writes", "removals"],
     "Client authoring plan",
   );
@@ -411,6 +417,9 @@ function parseClientAuthoringPlan(value) {
     );
     if (write.content !== null && typeof write.content !== "string") {
       throw new Error(`Client authoring write ${index + 1} content must be text or null`);
+    }
+    if (write.content === null && write.expectedBeforeDigest === null) {
+      throw new Error(`Client authoring removal ${index + 1} requires a nonnull preimage`);
     }
     if (typeof write.publishBarrier !== "boolean") {
       throw new Error(`Client authoring write ${index + 1} has an invalid publish barrier`);
@@ -465,13 +474,38 @@ function parseClientAuthoringPlan(value) {
       }
     }
   }
+  const condition = Object.hasOwn(plan, "condition") ? parsePublicationCondition(plan.condition) : undefined;
+  if (condition && (removals.length || Object.hasOwn(plan, "retirement")
+    || writes.some(write => write.content === null || write.expectedBeforeDigest === null
+      || !condition.preimages.some(pin => pin.path === write.destination && pin.sha256 === write.expectedBeforeDigest)))) {
+    throw new Error("Conditioned client authoring requires existing-file updates with complete target preimages");
+  }
   return {
     operationId: requiredOperationId(plan.operationId),
     label: requiredHumanText(plan.label, "Client authoring plan label", 240),
     writes,
     removals,
+    ...(condition ? { condition } : {}),
     ...(Object.hasOwn(plan, "retirement") ? { retirement: parseRetirementSelection(plan.retirement) } : {}),
   };
+}
+
+function parsePublicationCondition(value) {
+  const condition = exactObject(value, ["octopus_home", "preimages"], ["octopus_home", "preimages"], "Workspace publication condition");
+  const normalPath = value => {
+    const target = requiredAbsolutePath(value, "Workspace publication condition path");
+    if (target !== value || target.split(path.sep).includes(".octopus-publication")) throw new Error("Workspace publication condition requires normal absolute paths");
+    return target;
+  };
+  if (!Array.isArray(condition.preimages) || condition.preimages.length > 4096) throw new Error("Workspace publication condition exceeds its preimage bound");
+  const paths = new Set();
+  return { octopus_home: normalPath(condition.octopus_home), preimages: condition.preimages.map(value => {
+    const pin = exactObject(value, ["path", "sha256"], ["path", "sha256"], "Workspace publication preimage");
+    const target = normalPath(pin.path);
+    if (paths.has(target)) throw new Error("Workspace publication condition repeats a dependency");
+    paths.add(target);
+    return { path: target, sha256: optionalDigest(pin.sha256, "Workspace publication preimage SHA-256") };
+  }) };
 }
 
 function parseRetirementSelection(value) {
@@ -507,11 +541,12 @@ function parseRetirementSelection(value) {
 }
 
 function parseRetirementJournal(value, journal) {
-  const retirement = exactObject(value, ["schema_version", "selection", "selection_digest", "proof"],
-    ["schema_version", "selection", "selection_digest", "proof"], "Task retirement journal");
+  const retirement = exactObject(value, ["schema_version", "selection", "selection_digest", "directory_inventory", "proof"],
+    ["schema_version", "selection", "selection_digest", "proof", ...(value?.schema_version === 2 ? ["directory_inventory"] : [])], "Task retirement journal");
   const selection = parseRetirementSelection(retirement.selection);
   const selectionDigest = sha256(Buffer.from(stableJson(selection)));
-  if (retirement.schema_version !== 1 || retirement.selection_digest !== selectionDigest) {
+  if (![1, 2].includes(retirement.schema_version) || retirement.selection_digest !== selectionDigest
+    || retirement.schema_version === 1 && Object.hasOwn(retirement, "directory_inventory")) {
     throw new Error("Task retirement journal changed its selection pin");
   }
   for (const row of selection.records) {
@@ -524,8 +559,9 @@ function parseRetirementJournal(value, journal) {
       throw new Error("Task retirement publication barrier differs from its source Run");
     }
   }
+  const inventory = retirement.schema_version === 2 ? parseRetirementDirectoryInventory(retirement.directory_inventory) : null;
   const ctx = { operation_id: journal.operation_id, selection_digest: selectionDigest, selection,
-    originals: selection.records.map(({ file, expected_digest }) => ({ file, expected_digest })).sort((a, b) => a.file.localeCompare(b.file)) };
+    ...(inventory ? { directory_inventory: inventory } : {}), originals: selection.records.map(({ file, expected_digest }) => ({ file, expected_digest })).sort((a, b) => a.file.localeCompare(b.file)) };
   ctx.retired = ctx.originals.map(({ file }) => ({ file, expected_digest: null }));
   const proof = retirement.proof === null ? null : parseHeldRetirementProof(retirement.proof, ctx);
   if (!proof && ["published", "committed", "cleaned"].includes(journal.phase)
@@ -536,26 +572,63 @@ function parseRetirementJournal(value, journal) {
     throw new Error("Task retirement cleanup started without a durable held proof");
   }
   if (proof && journal.writes.some((write) => !["applied", "unchanged"].includes(write.state))
-    || journal.phase === "cleaned" && journal.removals.some((removal) => removal.state !== "moved")
+    || journal.phase === "cleaned" && journal.removals.some((removal) => removal.state !== (journal.schema_version >= 3 ? "reclaimed" : "moved"))
     || journal.phase === "rolled_back" && journal.writes.some((write) => !["rolled_back", "unchanged"].includes(write.state))) {
     throw new Error("Task retirement journal phase differs from its durable target writes");
   }
-  return { schema_version: 1, selection, selection_digest: selectionDigest, proof };
+  return { schema_version: retirement.schema_version, selection, selection_digest: selectionDigest,
+    ...(inventory ? { directory_inventory: inventory } : {}), proof };
+}
+
+function parseRetirementDirectoryInventory(value) {
+  const fields = ["schema_version", "removals", "originals", "retired"];
+  const inventory = exactObject(value, fields, fields, "Task retirement directory inventory");
+  if (inventory.schema_version !== 1 || !Array.isArray(inventory.removals) || inventory.removals.length > 1024
+    || !Array.isArray(inventory.originals) || !Array.isArray(inventory.retired)) throw new Error("Task retirement directory inventory has invalid typed arrays");
+  const removals = inventory.removals.map(pin => {
+    exactObject(pin, ["path", "identity"], ["path", "identity"], "Retirement directory pin");
+    exactObject(pin.identity, ["device", "inode"], ["device", "inode"], "Retirement directory identity");
+    return { path: requiredAbsolutePath(pin.path, "Retirement directory path"), identity: {
+      device: requiredFileIdentityNumber(pin.identity.device, "Retirement directory device"), inode: requiredFileIdentityNumber(pin.identity.inode, "Retirement directory inode") } };
+  });
+  const originals = inventory.originals.map(original => {
+    exactObject(original, ["file", "expected_digest", "content"], ["file", "expected_digest", "content"], "Retirement directory original");
+    if (typeof original.content !== "string" || Buffer.from(original.content).toString() !== original.content
+      || sha256(Buffer.from(original.content)) !== original.expected_digest) throw new Error("Retirement directory original changed its exact UTF-8 bytes");
+    const document = JSON.parse(original.content);
+    if (!document || typeof document !== "object" || Array.isArray(document)) throw new Error("Retirement directory original must be a JSON object");
+    return { file: requiredAbsolutePath(original.file, "Retirement directory original path"), expected_digest: requiredDigest(original.expected_digest, "Retirement directory original digest"), content: original.content };
+  });
+  const retired = inventory.retired.map(pin => {
+    exactObject(pin, ["file", "expected_digest"], ["file", "expected_digest"], "Retirement directory retired file");
+    if (pin.expected_digest !== null) throw new Error("Retirement directory retired evidence must be an explicit file removal");
+    return { file: requiredAbsolutePath(pin.file, "Retirement directory retired path"), expected_digest: null };
+  });
+  for (const [rows, key] of [[removals, "path"], [originals, "file"], [retired, "file"]]) {
+    if (new Set(rows.map(row => row[key])).size !== rows.length) throw new Error("Retirement directory inventory repeats an exact path");
+  }
+  if (retired.some(pin => !originals.some(original => original.file === pin.file))) throw new Error("Retirement retired file lacks its exact original");
+  return { schema_version: 1, removals, originals, retired };
 }
 
 function parseHeldRetirementProof(value, ctx) {
-  const proof = exactObject(value, ["schema_version", "phase", "operation_id", "selection_digest", "interface_ids", "originals", "retired", "ledger_boundary"],
-    ["schema_version", "phase", "operation_id", "selection_digest", "interface_ids", "originals", "retired", "ledger_boundary"], "Task retirement held proof");
+  const fields = ["schema_version", "phase", "operation_id", "selection_digest", ...(ctx.directory_inventory ? ["directory_inventory_digest"] : []),
+    "interface_ids", "originals", "retired", "ledger_boundary"];
+  const proof = exactObject(value, fields, fields, "Task retirement held proof");
   const originals = ctx.originals.map(({ file, expected_digest }) => ({ file, expected_digest }));
-  if (proof.schema_version !== 1 || proof.phase !== "held" || proof.operation_id !== ctx.operation_id
+  const version = ctx.directory_inventory ? 2 : 1;
+  const inventoryDigest = ctx.directory_inventory ? sha256(Buffer.from(stableJson(ctx.directory_inventory))) : null;
+  if (proof.schema_version !== version || proof.phase !== "held" || proof.operation_id !== ctx.operation_id
+    || inventoryDigest !== null && proof.directory_inventory_digest !== inventoryDigest
     || proof.selection_digest !== ctx.selection_digest || stableJson(proof.interface_ids) !== stableJson(ctx.selection.interface_ids)
     || stableJson(proof.originals) !== stableJson(originals) || stableJson(proof.retired) !== stableJson(ctx.retired)) {
-    throw new Error("Task retirement held proof differs from the exact operation and preimages");
+    throw new Error("Task retirement held proof differs from the exact operation, inventory and preimages");
   }
   const boundary = exactObject(proof.ledger_boundary, ["complete_offset", "sequence", "sha256"],
     ["complete_offset", "sequence", "sha256"], "Task retirement ledger boundary");
-  return { schema_version: 1, phase: "held", operation_id: ctx.operation_id, selection_digest: ctx.selection_digest,
-    interface_ids: [...ctx.selection.interface_ids], originals, retired: ctx.retired.map((entry) => ({ ...entry })),
+  return { schema_version: version, phase: "held", operation_id: ctx.operation_id, selection_digest: ctx.selection_digest,
+    ...(inventoryDigest !== null ? { directory_inventory_digest: inventoryDigest } : {}),
+    interface_ids: [...ctx.selection.interface_ids], originals, retired: ctx.retired.map(entry => ({ ...entry })),
     ledger_boundary: { complete_offset: requiredFileIdentityNumber(boundary.complete_offset, "Task retirement ledger offset"),
       sequence: requiredFileIdentityNumber(boundary.sequence, "Task retirement ledger sequence"),
       sha256: requiredDigest(boundary.sha256, "Task retirement ledger prefix hash") } };
@@ -568,6 +641,8 @@ async function normalizeRoots(options) {
   return {
     octopusHomeRoot,
     registryRoot,
+    publishFiles: options?.publishFiles ?? options?.publication?.publishFiles,
+    publication: options?.publication,
     eeInstancesRoot: path.join(octopusHomeRoot, "state", "ee_instances"),
     runsRoot: path.join(octopusHomeRoot, "state", "runs"),
     interfaceRoot: path.join(registryRoot, "interface"),
@@ -581,6 +656,7 @@ async function normalizeRoots(options) {
     receiptsRoot: path.join(stateRoot, "receipts"),
     projectReceiptsRoot: path.join(stateRoot, "topology-receipts"),
     clientAuthoringReceiptsRoot: path.join(stateRoot, "client-authoring-receipts"),
+    cleanupPlansRoot: path.join(stateRoot, "directory-cleanup"),
     transactionsRoot: path.join(stateRoot, "transactions"),
   };
 }
@@ -595,6 +671,7 @@ async function ensureStateRoots(roots) {
   await ensurePlainParent(roots.stateRoot, roots.receiptsRoot);
   await ensurePlainParent(roots.stateRoot, roots.projectReceiptsRoot);
   await ensurePlainParent(roots.stateRoot, roots.clientAuthoringReceiptsRoot);
+  await ensurePlainParent(roots.stateRoot, roots.cleanupPlansRoot);
   await ensurePlainParent(roots.stateRoot, roots.transactionsRoot);
   for (const directory of [
     roots.runsRoot,
@@ -603,6 +680,7 @@ async function ensureStateRoots(roots) {
     roots.receiptsRoot,
     roots.projectReceiptsRoot,
     roots.clientAuthoringReceiptsRoot,
+    roots.cleanupPlansRoot,
     roots.transactionsRoot,
   ]) {
     await realPlainDirectory(directory, directory);
@@ -1041,7 +1119,7 @@ function exactProjectAgentSourceProfile(profiles, catalog, eeId) {
 }
 
 async function assertNoRunReferencesEe(roots, eeId) {
-  for (const entry of await fs.readdir(roots.runsRoot, { withFileTypes: true })) {
+  for (const entry of await publicDirectoryEntries(roots.runsRoot)) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const record = (await readJson(path.join(roots.runsRoot, entry.name), `Run record ${entry.name}`)).value;
     if (record.ee === eeId) throw new Error(`Project EE '${eeId}' is still referenced by run '${String(record.id)}'`);
@@ -1219,7 +1297,7 @@ function validateProjectIntents(projects) {
 }
 
 async function readBootstrapRoot(roots) {
-  const entries = await fs.readdir(roots.eeInstancesRoot, { withFileTypes: true });
+  const entries = await publicDirectoryEntries(roots.eeInstancesRoot);
   const candidates = [];
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
@@ -1350,7 +1428,7 @@ async function readTemplate(roots, id) {
 async function createEeOverlay(roots, eeWrites) {
   const overlay = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-workspace-ee-")));
   try {
-    const entries = await fs.readdir(roots.eeInstancesRoot, { withFileTypes: true });
+    const entries = await publicDirectoryEntries(roots.eeInstancesRoot);
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".json")) {
         throw new Error(`EE instance root contains an invalid entry '${entry.name}'`);
@@ -2216,12 +2294,14 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
   await fs.mkdir(path.join(stagingRoot, "before"), { mode: 0o700 });
   await syncDirectory(roots.transactionsRoot);
   const journalWrites = [];
+  const publicationAttempt = crypto.randomUUID();
   try {
     for (const [index, write] of writes.entries()) {
       const destinationRoot = allowedDestinationRoot(roots, write.destination);
       await validateExistingPath(destinationRoot, write.destination);
       const before = await readFileIfPresent(write.destination);
       const beforeDigest = before ? sha256(before) : null;
+      if (before && !Buffer.from(before.toString("utf8")).equals(before)) throw new Error(`Workspace destination '${write.tag}' is not reversible through its UTF-8 publication contract`);
       if (beforeDigest === write.afterDigest) {
         if (beforeDigest !== write.expectedBeforeDigest) {
           throw new Error(`Workspace write '${write.tag}' changed before staging`);
@@ -2272,12 +2352,15 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
     await syncDirectory(stagingRoot);
     const journal = {
       schema,
-      schema_version: 1,
+      schema_version: 2,
       operation_id: request.operationId,
       request_digest: request.digest,
       phase: "staged",
       receipt,
-      writes: journalWrites,
+      writes: journalWrites.map((write, index) => ({ ...write,
+        publication: journalPublication(request.operationId, index,
+          writes[index].content === null ? 0 : Buffer.byteLength(writes[index].content),
+          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, false, publicationAttempt) })),
     };
     await writeJournal(stagingRoot, journal);
     await fs.rename(stagingRoot, transactionRoot);
@@ -2291,6 +2374,7 @@ async function stageWorkspaceTransaction(roots, request, writes, receipt, schema
 }
 
 async function stageClientAuthoringTransaction(roots, plan) {
+  if (plan.condition && plan.condition.octopus_home !== roots.octopusHomeRoot) throw new Error("Client publication condition belongs to another Home");
   if (plan.retirement) assertRetirementPaths(roots, plan.retirement, plan.writes, plan.removals);
   const transactionRoot = path.join(roots.transactionsRoot, plan.operationId);
   if (!pathInside(roots.transactionsRoot, transactionRoot)) {
@@ -2308,6 +2392,7 @@ async function stageClientAuthoringTransaction(roots, plan) {
   await fs.mkdir(path.join(stagingRoot, "before"), { mode: 0o700 });
   await fs.mkdir(path.join(stagingRoot, "removed"), { mode: 0o700 });
   await syncDirectory(roots.transactionsRoot);
+  const publicationAttempt = crypto.randomUUID();
   try {
     const journalWrites = [];
     for (const [index, write] of plan.writes.entries()) {
@@ -2315,12 +2400,13 @@ async function stageClientAuthoringTransaction(roots, plan) {
       await validateExistingPath(destinationRoot, write.destination);
       const before = await readFileIfPresent(write.destination);
       const beforeDigest = before ? sha256(before) : null;
+      if (before && !Buffer.from(before.toString("utf8")).equals(before)) throw new Error(`Client destination '${write.tag}' is not reversible through its UTF-8 publication contract`);
       if (beforeDigest !== write.expectedBeforeDigest) {
         throw new Error(
           `Client authoring write '${write.tag}' expected ${write.expectedBeforeDigest ?? "an absent file"}, found ${beforeDigest ?? "an absent file"}`,
         );
       }
-      if (beforeDigest === write.afterDigest) {
+      if (beforeDigest === write.afterDigest && !plan.condition) {
         journalWrites.push({
           destination: write.destination,
           expected_before_digest: write.expectedBeforeDigest,
@@ -2361,6 +2447,8 @@ async function stageClientAuthoringTransaction(roots, plan) {
       const destinationRoot = allowedDestinationRoot(roots, removal.destination);
       await validateExistingRemovalPath(destinationRoot, removal.destination, removal.type);
       const identity = await snapshotClientAuthoringRemoval(removal);
+      const expected = plan.retirement ? null : parseDirectoryPreimage(await requireDirectoryPublisher(roots).snapshotDirectory(removal.destination));
+      if (expected) assertDirectoryTree(expected, removal.expectedDev, removal.expectedIno, identity.treeEntries);
       journalRemovals.push({
         destination: removal.destination,
         type: removal.type,
@@ -2371,22 +2459,29 @@ async function stageClientAuthoringTransaction(roots, plan) {
         tombstone: path.join("removed", String(index).padStart(4, "0")),
         tag: removal.tag,
         state: "staged",
+        publication: directoryPlan(`${plan.operationId}:remove:${publicationAttempt}:${index}`,
+          removal.destination, path.join(transactionRoot, "removed", String(index).padStart(4, "0")), expected),
       });
     }
     await syncDirectory(path.join(stagingRoot, "after"));
     await syncDirectory(path.join(stagingRoot, "before"));
     await syncDirectory(path.join(stagingRoot, "removed"));
     await syncDirectory(stagingRoot);
+    const directoryInventory = plan.retirement ? await captureRetirementDirectoryInventory(roots, plan) : null;
     await writeJournal(stagingRoot, parseClientAuthoringJournal({
       schema: "octopus.client_authoring_transaction",
-      schema_version: 1,
+      schema_version: plan.condition ? 4 : 3,
       operation_id: plan.operationId,
       label: plan.label,
       phase: "staged",
-      writes: journalWrites,
+      writes: journalWrites.map((write, index) => ({ ...write,
+        publication: journalPublication(plan.operationId, index,
+          plan.writes[index].content === null ? 0 : Buffer.byteLength(plan.writes[index].content),
+          write.before_file ? fsSync.statSync(path.join(stagingRoot, write.before_file)).size : 0, false, publicationAttempt) })),
       removals: journalRemovals,
-      ...(plan.retirement ? { retirement: { schema_version: 1, selection: plan.retirement,
-        selection_digest: sha256(Buffer.from(stableJson(plan.retirement))), proof: null } } : {}),
+      ...(plan.condition ? { condition: plan.condition } : {}),
+      ...(plan.retirement ? { retirement: { schema_version: 2, selection: plan.retirement,
+        selection_digest: sha256(Buffer.from(stableJson(plan.retirement))), directory_inventory: directoryInventory, proof: null } } : {}),
     }));
     await fs.rename(stagingRoot, transactionRoot);
     await syncDirectory(roots.transactionsRoot);
@@ -2424,7 +2519,7 @@ async function commitTransaction(roots, transactionRoot, onProgress) {
       await verifyAppliedWrite(write);
       continue;
     }
-    await applyJournalWrite(roots, transactionRoot, write);
+    await applyJournalWrite(roots, transactionRoot, journal, index);
     journal.writes[index].state = "applied";
     await writeJournal(transactionRoot, journal);
     reportProgress(
@@ -2440,6 +2535,8 @@ async function commitTransaction(roots, transactionRoot, onProgress) {
   journal.receipt = {
     ...journal.receipt,
     completed_at: journal.receipt.completed_at || new Date().toISOString(),
+    ...(journal.schema_version >= 2 || journal.writes.some((write) => write.publication)
+      ? { publication_evidence: journalPublicationEvidence(journal) } : {}),
   };
   journal.phase = "published";
   await writeJournal(transactionRoot, journal);
@@ -2448,6 +2545,65 @@ async function commitTransaction(roots, transactionRoot, onProgress) {
   await writeJournal(transactionRoot, journal);
   reportProgress(onProgress, journal.operation_id, "complete", 100, "Octopus is ready");
   await finalizeCommittedTransaction(roots, transactionRoot, journal);
+}
+
+async function captureRetirementDirectoryInventory(roots, plan) {
+  const records = new Map();
+  for (const row of plan.retirement.records) {
+    const document = await readJson(row.file, "Retirement inventory Run");
+    if (document.digest !== row.expected_digest) throw new Error("Retirement inventory Run changed before staging");
+    records.set(row.run, document.value);
+  }
+  const source = records.get(plan.retirement.source_run);
+  const states = exactObject(source.interface_state, Object.keys(source.interface_state ?? {}), [], "Retirement source interface state");
+  const companionIds = new Set(Object.values(states).flatMap(state => {
+    const ownership = state?.maintenance_observer?.lifecycle_ownership;
+    if (ownership === undefined) return [];
+    if (!Array.isArray(ownership.private_interface_ids)) throw new Error("Retirement source has an invalid private interface inventory");
+    return ownership.private_interface_ids.map(id => requiredId(id, "Retirement private interface"));
+  }));
+  const implicit = new Set(plan.retirement.interface_ids.flatMap(id => [path.join(roots.interfaceRoot, id),
+    path.join(roots.privateInterfacesRoot, id), path.join(roots.interfaceHandInRoot, id)]));
+  const originals = new Map(), removals = [], retired = [];
+  const read = async file => {
+    allowedDestinationRoot(roots, file);
+    const bytes = await readFileNoFollow(file), content = bytes.toString("utf8");
+    if (!Buffer.from(content).equals(bytes)) throw new Error("Retirement ownership evidence is not exact UTF-8");
+    const value = JSON.parse(content);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Retirement ownership evidence is not a JSON object");
+    const original = { file, expected_digest: sha256(bytes), content };
+    if (originals.has(file) && stableJson(originals.get(file)) !== stableJson(original)) throw new Error("Retirement ownership evidence changed during staging");
+    originals.set(file, original);
+    return value;
+  };
+  for (const removal of plan.removals) {
+    if (implicit.has(removal.destination)) continue;
+    removals.push({ path: removal.destination, identity: { device: removal.expectedDev, inode: removal.expectedIno } });
+    let owner, persistent = false;
+    if (path.dirname(removal.destination) === roots.toolRoot) {
+      owner = requiredId((await read(path.join(removal.destination, "tool.json"))).interface, "Retirement tool owner");
+    } else if (path.dirname(removal.destination) === roots.artifactRoot) {
+      const file = path.join(removal.destination, "artifact.json"), descriptor = await read(file);
+      const artifactStates = records.get(descriptor.run)?.interface_state;
+      if (!artifactStates || typeof artifactStates !== "object" || Array.isArray(artifactStates)) throw new Error("Retirement artifact has no selected original Run");
+      const snapshots = Object.entries(artifactStates).filter(([, state]) => Array.isArray(state?.prelude_sources)
+        && state.prelude_sources.some(source => source?.snapshot?.id === descriptor.id));
+      if (snapshots.length > 1) throw new Error("Retirement artifact has ambiguous snapshot ownership");
+      if (snapshots.length) owner = snapshots[0][0];
+      else { owner = requiredId(descriptor.owner_interface, "Retirement artifact owner"); persistent = true; }
+      if (plan.writes.some(write => write.destination === file && write.content === null)) retired.push({ file, expected_digest: null });
+    } else {
+      const relative = path.relative(roots.privateInterfacesRoot, removal.destination).split(path.sep);
+      if (relative.length !== 3 || relative[1] !== "worker-environments" || relative.some(part => !SAFE_ID.test(part))) {
+        throw new Error("Retirement additional directory has no exact private owner shape");
+      }
+      await read(path.join(removal.destination, "worker_environment.json"));
+    }
+    if (owner && !companionIds.has(owner)) await read(path.join(roots.interfaceRoot, owner, "octopus_os.json"));
+    if (persistent) await read(path.join(roots.interfaceRoot, owner, "code_mode.json"));
+  }
+  return { schema_version: 1, removals: removals.sort((a, b) => a.path.localeCompare(b.path)),
+    originals: [...originals.values()].sort((a, b) => a.file.localeCompare(b.file)), retired: retired.sort((a, b) => a.file.localeCompare(b.file)) };
 }
 
 function assertRetirementPaths(roots, selection, writes, removals) {
@@ -2468,7 +2624,10 @@ function assertRetirementPaths(roots, selection, writes, removals) {
   }
   for (const removal of removals) {
     for (const root of [roots.interfaceRoot, roots.privateInterfacesRoot, roots.interfaceHandInRoot]) {
-      if (pathInside(root, removal.destination) && (path.dirname(removal.destination) !== root
+      const relative = path.relative(root, removal.destination).split(path.sep);
+      const workerEnvironment = root === roots.privateInterfacesRoot && relative.length === 3
+        && relative[1] === "worker-environments" && relative.every(part => SAFE_ID.test(part));
+      if (pathInside(root, removal.destination) && !workerEnvironment && (path.dirname(removal.destination) !== root
         || !selection.interface_ids.includes(path.basename(removal.destination)))) {
         throw new Error("Task retirement plan removes an interface outside its held ownership");
       }
@@ -2487,7 +2646,9 @@ function requireRetirementBarrier(barrier) {
 
 async function retirementContext(roots, transactionRoot, journal) {
   const retirement = journal.retirement;
+  if (!retirement.directory_inventory) throw directoryUncertain("Task retirement lacks its saved native owner inventory");
   assertRetirementPaths(roots, retirement.selection, journal.writes, journal.removals);
+  assertRetirementInventory(roots, journal);
   const originals = [];
   for (const row of retirement.selection.records) {
     const write = journal.writes.find((entry) => entry.destination === row.file);
@@ -2508,7 +2669,24 @@ async function retirementContext(roots, transactionRoot, journal) {
     roots: { registry_root: roots.registryRoot, run_records_root: roots.runsRoot,
       ledger_root: path.join(roots.octopusHomeRoot, "ledger"), interface_private_state_root: roots.privateInterfacesRoot },
     selection: retirement.selection, selection_digest: retirement.selection_digest, originals,
+    directory_inventory: retirement.directory_inventory,
     retired: originals.map(({ file }) => ({ file, expected_digest: null })), prior_proof: retirement.proof };
+}
+
+function assertRetirementInventory(roots, journal) {
+  const inventory = journal.retirement.directory_inventory;
+  const implicit = new Set(journal.retirement.selection.interface_ids.flatMap(id => [path.join(roots.interfaceRoot, id),
+    path.join(roots.privateInterfacesRoot, id), path.join(roots.interfaceHandInRoot, id)]));
+  const pins = journal.removals.filter(removal => !implicit.has(removal.destination)).map(removal => ({ path: removal.destination,
+    identity: { device: removal.expected_dev, inode: removal.expected_ino } })).sort((a, b) => a.path.localeCompare(b.path));
+  if (stableJson(pins) !== stableJson(inventory.removals)) throw new Error("Task retirement directory inventory changed its exact removal roots");
+  for (const original of inventory.originals) allowedDestinationRoot(roots, original.file);
+  for (const pin of inventory.retired) {
+    const original = inventory.originals.find(original => original.file === pin.file);
+    if (!journal.writes.some(write => write.destination === pin.file && write.after_digest === null && write.before_digest === original.expected_digest)) {
+      throw new Error("Task retirement directory inventory changed its exact retired descriptor write");
+    }
+  }
 }
 
 async function verifyRetirementTargets(ctx, retired) {
@@ -2570,7 +2748,7 @@ async function commitClientAuthoringJournal(roots, transactionRoot, retirementBa
     return withHeldRetirement(roots, transactionRoot, journal, retirementBarrier, (held) =>
       finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier, held));
   }
-  if (journal.phase === "committed") {
+  if (["committed", "cleaned"].includes(journal.phase)) {
     await finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier);
     return;
   }
@@ -2589,13 +2767,14 @@ async function commitClientAuthoringJournal(roots, transactionRoot, retirementBa
     Number(journal.writes[left].publish_barrier) - Number(journal.writes[right].publish_barrier)
     || left - right
   ));
-  for (const index of ordered) {
+  if (journal.condition) await publishConditionedJournal(roots, transactionRoot, journal, ordered);
+  else for (const index of ordered) {
     const write = journal.writes[index];
     if (write.state === "unchanged" || write.state === "applied") {
       await verifyAppliedWrite(write);
       continue;
     }
-    await applyJournalWrite(roots, transactionRoot, write);
+    await applyJournalWrite(roots, transactionRoot, journal, index);
     journal.writes[index].state = "applied";
     await writeJournal(transactionRoot, journal);
   }
@@ -2608,253 +2787,267 @@ async function commitClientAuthoringJournal(roots, transactionRoot, retirementBa
 }
 
 async function finishClientAuthoringJournal(roots, transactionRoot, journal, retirementBarrier, held) {
-  if (journal.phase === "committed") {
+  if (["committed", "cleaned"].includes(journal.phase)) {
     return finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held);
   }
   journal.phase = "published";
   await writeJournal(transactionRoot, journal);
   for (const index of journal.removals.keys()) {
     if (held) await verifyHeldRetirementProof(held);
-    await applyClientAuthoringRemoval(roots, transactionRoot, journal.removals[index], journal);
-    journal.removals[index].state = "moved";
+    await applyClientAuthoringRemoval(roots, transactionRoot, journal.removals[index], journal, held, index);
+    if (!journal.removals[index].publication?.reclaimed) journal.removals[index].state = "moved";
     await writeJournal(transactionRoot, journal);
+    if (held) await verifyHeldRetirementProof(held);
   }
-  await verifyClientAuthoringRemovals(roots, transactionRoot, journal);
+  await verifyClientAuthoringRemovals(roots, transactionRoot, journal, held);
   journal.phase = "committed";
   await writeJournal(transactionRoot, journal);
   await writeClientAuthoringReceipt(roots, clientAuthoringReceipt(journal));
   await finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held);
 }
 
-async function applyClientAuthoringRemoval(roots, transactionRoot, removal, journal) {
+function requireDirectoryPublisher(roots, held) {
+  const publisher = held ? held.guard : roots.publication;
+  if (!publisher || ["snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"].some(method => typeof publisher[method] !== "function")) {
+    throw new Error(held ? "Task retirement holder has no native directory publisher" : "Workspace requires a native directory publisher");
+  }
+  return publisher;
+}
+
+function directoryUncertain(label) {
+  const error = new Error(`${label}: original native directory publication evidence is unavailable; checked legacy import is required`);
+  error.code = "workspace_directory_publication_uncertain";
+  return error;
+}
+
+function directoryPlan(operationId, source, destination, expected) {
+  return { operation_id: operationId, moves: expected ? [{ source, destination, expected }] : [],
+    receipts: [], started: false, reclaimed: false };
+}
+
+async function submitDirectoryPlan(publisher, publication, persist) {
+  const accept = async values => {
+    const candidate = parseDirectoryPlan({ ...publication, receipts: values });
+    for (const [index, receipt] of publication.receipts.entries()) {
+      if (!candidate.receipts[index] || stableJson(candidate.receipts[index]) !== stableJson(receipt)) {
+        throw new Error("Workspace directory publication changed its retained receipt");
+      }
+    }
+    publication.receipts = candidate.receipts;
+    await persist();
+  };
+  if (!publication.moves.length) throw new Error("Workspace directory publication has no prepared movement");
+  if (!publication.started) { publication.started = true; await persist(); }
+  try {
+    const receipts = await publisher.publishDirectoryMoves(publication.operation_id, publication.moves);
+    await accept(receipts);
+    if (receipts.length !== publication.moves.length || receipts.some(receipt => receipt.outcome !== "applied")) {
+      const error = new Error("Workspace directory publication has no complete applied proof");
+      error.publicationReceipts = publication.receipts;
+      throw error;
+    }
+  } catch (error) {
+    if (Array.isArray(error?.publicationReceipts) && error.publicationReceipts.length) await accept(error.publicationReceipts);
+    throw error;
+  }
+}
+
+async function applyClientAuthoringRemoval(roots, transactionRoot, removal, journal, held, index) {
   const destinationRoot = allowedDestinationRoot(roots, removal.destination);
   await requireClientAuthoringRoot(destinationRoot);
+  const publisher = requireDirectoryPublisher(roots, held);
   const tombstone = transactionFile(transactionRoot, removal.tombstone, "removal tombstone");
-  const source = await inspectClientAuthoringRemoval(removal.destination, removal.type);
-  const removed = await inspectClientAuthoringRemoval(tombstone, removal.type);
-  const retiredState = await isRetiredInterfaceStateRemoval(roots, journal, removal);
-  if (source.exists && removed.exists) {
-    throw new Error(`Client authoring removal '${removal.tag}' exists at both source and tombstone`);
+  if (removal.state === "reclaimed") {
+    if (await pathExists(removal.destination) || await pathExists(tombstone)) throw new Error(`Reclaimed directory '${removal.tag}' was restored`);
+    return;
   }
-  if (source.exists) {
-    assertClientAuthoringRemovalIdentity(source, removal, "source", retiredState);
-    const parentStat = await fs.lstat(path.dirname(removal.destination));
-    if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
-      throw new Error(`Client authoring removal '${removal.tag}' parent changed`);
+  if (!removal.publication?.moves.length) {
+    if (removal.state !== "staged" || !await pathExists(removal.destination) || await pathExists(tombstone)) {
+      throw directoryUncertain(`Client authoring removal '${removal.tag}'`);
     }
-    await fs.rename(removal.destination, tombstone);
-    await syncDirectory(path.dirname(removal.destination));
-    await syncDirectory(path.dirname(tombstone));
-  } else if (!removed.exists) {
-    throw new Error(`Client authoring removal '${removal.tag}' is absent from source and tombstone`);
+    const expected = parseDirectoryPreimage(await publisher.snapshotDirectory(removal.destination));
+    assertDirectoryTree(expected, removal.expected_dev, removal.expected_ino, removal.tree_entries);
+    if (!removal.publication) removal.publication = directoryPlan(`${journal.operation_id}:remove:${crypto.randomUUID()}:${index}`,
+      removal.destination, tombstone, expected);
+    else removal.publication.moves = [{ source: removal.destination, destination: tombstone, expected }];
+    await writeJournal(transactionRoot, journal);
   }
-  const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-  assertClientAuthoringRemovalIdentity(durable, removal, "tombstone", retiredState);
-  if (await pathExists(removal.destination)) {
-    throw new Error(`Client authoring removal '${removal.tag}' remained published after tombstoning`);
+  await submitDirectoryPlan(publisher, removal.publication, () => writeJournal(transactionRoot, journal));
+  if (await pathExists(removal.destination)) throw new Error(`Client authoring removal '${removal.tag}' remained published after tombstoning`);
+  const actual = parseDirectoryPreimage(await publisher.snapshotDirectory(tombstone));
+  if (stableJson(actual) !== stableJson(removal.publication.moves[0].expected)) {
+    throw new Error(`Client authoring removal '${removal.tag}' tombstone identity changed`);
   }
 }
 
-async function verifyClientAuthoringRemovals(roots, transactionRoot, journal) {
+async function verifyClientAuthoringRemovals(roots, transactionRoot, journal, held) {
+  const publisher = journal.removals.length ? requireDirectoryPublisher(roots, held) : null;
   for (const removal of journal.removals) {
-    if (await pathExists(removal.destination)) {
-      throw new Error(`Client authoring removal '${removal.tag}' is still present`);
-    }
+    if (await pathExists(removal.destination)) throw new Error(`Client authoring removal '${removal.tag}' is still present`);
     const tombstone = transactionFile(transactionRoot, removal.tombstone, "removal tombstone");
-    const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-    assertClientAuthoringRemovalIdentity(durable, removal, "tombstone",
-      await isRetiredInterfaceStateRemoval(roots, journal, removal));
+    if (!removal.publication || removal.publication.receipts[0]?.outcome !== "applied") {
+      throw directoryUncertain(`Client authoring removal '${removal.tag}'`);
+    }
+    if (removal.publication.reclaimed) {
+      if (await pathExists(tombstone)) throw new Error(`Reclaimed directory '${removal.tag}' was restored`);
+    } else if (stableJson(parseDirectoryPreimage(await publisher.snapshotDirectory(tombstone))) !== stableJson(removal.publication.moves[0].expected)) {
+      throw new Error(`Client authoring removal '${removal.tag}' tombstone identity changed`);
+    }
   }
-}
-
-async function isRetiredInterfaceStateRemoval(roots, journal, removal) {
-  if (![roots.privateInterfacesRoot, roots.interfaceHandInRoot].includes(path.dirname(removal.destination))) return false;
-  const interfaceId = path.basename(removal.destination);
-  if (!SAFE_ID.test(interfaceId)) return false;
-  const descriptorPath = path.join(roots.interfaceRoot, interfaceId);
-  const descriptor = journal.removals.find((entry) => entry.destination === descriptorPath);
-  if (!descriptor || descriptor.state !== "moved" || await pathExists(descriptorPath)) return false;
-  const references = (value) => typeof value === "string" ? value === interfaceId
-    : Array.isArray(value) ? value.some(references)
-    : value !== null && typeof value === "object"
-      ? Object.entries(value).some(([key, entry]) => key === interfaceId || references(entry)) : false;
-  for (const entry of await fs.readdir(roots.runsRoot, { withFileTypes: true })) {
-    if (!entry.name.endsWith(".json")) continue;
-    const run = await readJson(path.join(roots.runsRoot, entry.name), "Run before private state removal");
-    if (references(run.value)) throw new Error(`Interface '${interfaceId}' private state is still referenced by '${entry.name}'`);
-  }
-  return true;
 }
 
 async function finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, held) {
+  if (journal.retirement && !held) return withHeldRetirement(roots, transactionRoot, journal, retirementBarrier, guard =>
+    finalizeClientAuthoringTransaction(roots, transactionRoot, journal, retirementBarrier, guard));
+  const existing = await readDirectoryCleanupPlan(roots, journal.operation_id);
+  if (existing) return resumeDirectoryCleanup(roots, existing, retirementBarrier, held);
+  const publisher = requireDirectoryPublisher(roots, held);
   if (held) await verifyHeldRetirementProof(held);
   await verifyJournalWrites(journal.writes);
-  await verifyClientAuthoringRemovals(roots, transactionRoot, journal);
-  const receipt = await readClientAuthoringReceipt(roots, journal.operation_id);
-  if (!receipt) await writeClientAuthoringReceipt(roots, clientAuthoringReceipt(journal));
-  else if (stableJson(receipt) !== stableJson(clientAuthoringReceipt(journal))) {
-    throw new Error(`Client authoring receipt '${journal.operation_id}' conflicts with its committed journal`);
+  for (const removal of journal.removals) {
+    if (!removal.publication || removal.publication.receipts[0]?.outcome !== "applied") {
+      throw directoryUncertain(`Client authoring cleanup '${removal.tag}'`);
+    }
+    if (await pathExists(removal.destination)) throw new Error(`Client authoring cleanup '${removal.tag}' found its source restored`);
+    if (!removal.publication.reclaimed) {
+      if (held) await verifyHeldRetirementProof(held);
+      await publisher.reclaimDirectory(removal.publication.moves[0].destination,
+        removal.publication.receipts[0], removal.publication.moves[0].expected);
+      removal.publication.reclaimed = true;
+      removal.state = "reclaimed";
+      await writeJournal(transactionRoot, journal);
+    }
   }
-  const cleanupRoot = path.join(roots.transactionsRoot, `.cleanup-${journal.operation_id}`);
-  if (await pathExists(cleanupRoot)) {
-    throw new Error(`Client authoring cleanup path already exists for '${journal.operation_id}'`);
-  }
-  await fs.rename(transactionRoot, cleanupRoot);
-  await syncDirectory(roots.transactionsRoot);
-  await cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, held);
+  if (held) await persistHeldRetirementProof(transactionRoot, journal, held);
+  journal.phase = "cleaned";
+  await writeJournal(transactionRoot, journal);
+  const receipt = clientAuthoringReceipt(journal);
+  await writeClientAuthoringReceipt(roots, receipt);
+  const expected = parseDirectoryPreimage(await publisher.snapshotDirectory(transactionRoot));
+  await assertCleanupTree(transactionRoot, expected, journal);
+  const plan = { schema: "octopus.client_authoring_cleanup", schema_version: 4, operation_id: journal.operation_id,
+    journal, retirement_context: held ? structuredClone(held.ctx) : null,
+    publication: directoryPlan(`${journal.operation_id}:cleanup:${crypto.randomUUID()}`, transactionRoot,
+      path.join(roots.transactionsRoot, `.cleanup-${journal.operation_id}`), expected) };
+  parseDirectoryCleanupPlan(roots, plan);
+  await writeDirectoryCleanupPlan(roots, plan, "wx");
+  await resumeDirectoryCleanup(roots, plan, retirementBarrier, held);
 }
 
 async function cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, held) {
-  if (!pathInside(roots.transactionsRoot, cleanupRoot)) {
-    throw new Error("Client authoring cleanup escapes its transaction root");
-  }
   const match = /^\.cleanup-([A-Za-z0-9_-]{8,96})$/.exec(path.basename(cleanupRoot));
-  if (!match) throw new Error("Client authoring cleanup directory has an invalid name");
-  let document;
-  try {
-    document = await readJson(
-      path.join(cleanupRoot, "journal.json"),
-      `Client authoring cleanup ${match[1]}`,
-    );
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-    const entries = await fs.readdir(cleanupRoot);
-    if (entries.length) throw new Error("Client authoring cleanup lost its journal before becoming empty");
-    const receipt = await readClientAuthoringReceipt(roots, match[1]);
-    if (!receipt) throw new Error("Client authoring cleanup lost both journal and durable receipt");
-    await verifyClientAuthoringReceipt(roots, receipt);
-    await fs.rmdir(cleanupRoot);
-    await syncDirectory(roots.transactionsRoot);
-    return;
-  }
-  const journal = parseClientAuthoringJournal(document.value);
-  if (journal.operation_id !== match[1] || !["committed", "cleaned"].includes(journal.phase)) {
-    throw new Error("Client authoring cleanup does not prove a committed transaction");
-  }
-  const receipt = await readClientAuthoringReceipt(roots, journal.operation_id);
-  if (!receipt || stableJson(receipt) !== stableJson(clientAuthoringReceipt(journal))) {
-    throw new Error("Client authoring cleanup has no matching durable receipt");
-  }
-  await verifyJournalWrites(journal.writes);
-  if (journal.retirement && journal.phase !== "cleaned" && !held) {
-    return withHeldRetirement(roots, cleanupRoot, journal, retirementBarrier, (reacquired) =>
-      cleanupCommittedClientAuthoringTransaction(roots, cleanupRoot, retirementBarrier, reacquired));
-  }
-  const declaredStagedFiles = new Set(journal.writes.flatMap((write) => (
-    [write.after_file, write.before_file].filter(Boolean)
-  )));
-  for (const directory of ["after", "before"]) {
-    const candidate = path.join(cleanupRoot, directory);
-    const entries = await directoryEntriesIfPresent(candidate);
-    if (entries === null) continue;
-    for (const entry of entries) {
-      const relative = path.join(directory, entry);
-      if (!declaredStagedFiles.has(relative)) {
-        throw new Error(`Client authoring cleanup contains unknown staged file '${relative}'`);
-      }
-    }
-  }
-  const cleanupTombstones = async () => {
-    for (const removal of journal.removals) {
-      if (await pathExists(removal.destination)) {
-        throw new Error(`Client authoring cleanup '${removal.tag}' found its source restored`);
-      }
-      const tombstone = transactionFile(cleanupRoot, removal.tombstone, "cleanup tombstone");
-      const durable = await inspectClientAuthoringRemoval(tombstone, removal.type);
-      if (!durable.exists) continue;
-      if (journal.phase === "cleaned") throw new Error("Cleaned task retirement journal still contains a private tombstone");
-      if (held) await verifyHeldRetirementProof(held);
-      await removeCommittedClientAuthoringTombstone(tombstone, durable, removal,
-        await isRetiredInterfaceStateRemoval(roots, journal, removal));
-    }
-  };
-  if (journal.retirement) {
-    if (journal.phase !== "cleaned") await persistHeldRetirementProof(cleanupRoot, journal, held);
-    await cleanupTombstones();
-    if (journal.phase !== "cleaned") {
-      await persistHeldRetirementProof(cleanupRoot, journal, held);
-      journal.phase = "cleaned";
-      await writeJournal(cleanupRoot, journal);
-    }
-  }
-  for (const write of journal.writes) {
-    for (const [relative, digest] of [
-      [write.after_file, write.after_digest],
-      [write.before_file, write.before_digest],
-    ]) {
-      if (!relative) continue;
-      const staged = transactionFile(cleanupRoot, relative, "cleanup staged file");
-      const bytes = await readFileIfPresent(staged);
-      if (!bytes) continue;
-      if (sha256(bytes) !== digest) {
-        throw new Error(`Client authoring cleanup staged bytes for '${write.tag}' changed`);
-      }
-      await fs.unlink(staged);
-      await syncDirectory(path.dirname(staged));
-    }
-  }
-  if (!journal.retirement) await cleanupTombstones();
-  for (const directory of ["after", "before", "removed"]) {
-    const candidate = path.join(cleanupRoot, directory);
-    const entries = await directoryEntriesIfPresent(candidate);
-    if (entries === null) continue;
-    if (entries.length) {
-      throw new Error(`Client authoring cleanup directory '${directory}' is not empty`);
-    }
-    await fs.rmdir(candidate);
-    await syncDirectory(cleanupRoot);
-  }
-  await fs.unlink(path.join(cleanupRoot, "journal.json"));
-  await syncDirectory(cleanupRoot);
-  await fs.rmdir(cleanupRoot);
-  await syncDirectory(roots.transactionsRoot);
+  if (!match || cleanupRoot !== path.join(roots.transactionsRoot, `.cleanup-${match[1]}`)) throw new Error("Client authoring cleanup has an invalid exact path");
+  const plan = await readDirectoryCleanupPlan(roots, match[1]);
+  if (!plan) throw directoryUncertain(`Client authoring cleanup '${match[1]}'`);
+  await resumeDirectoryCleanup(roots, plan, retirementBarrier, held);
 }
 
-async function removeCommittedClientAuthoringTombstone(tombstone, actual, removal, retiredState = false) {
-  if (actual.dev !== removal.expected_dev || actual.ino !== removal.expected_ino) {
-    throw new Error(`Client authoring cleanup '${removal.tag}' tombstone identity changed`);
-  }
-  const expected = new Map((retiredState ? actual.treeEntries : removal.tree_entries).map((entry) => [
-    entry.relative_path,
-    `${entry.type}\0${entry.digest ?? ""}`,
-  ]));
-  for (const entry of actual.treeEntries) {
-    if (expected.get(entry.relative_path) !== `${entry.type}\0${entry.digest ?? ""}`) {
-      throw new Error(`Client authoring cleanup '${removal.tag}' contains unknown or changed data`);
+async function assertCleanupTree(transactionRoot, expected, journal) {
+  const allowed = new Map(["after", "before", "removed"].map(name => [name, { kind: "directory", digest: null }]));
+  allowed.set("journal.json", { kind: "file", digest: sha256(await readFileNoFollow(path.join(transactionRoot, "journal.json"))) });
+  for (const write of journal.writes) {
+    for (const [file, digest] of [[write.after_file, write.after_digest], [write.before_file, write.before_digest]]) {
+      if (file) allowed.set(file, { kind: "file", digest });
     }
   }
-  const ordered = [...actual.treeEntries].sort((left, right) => (
-    right.relative_path.split("/").length - left.relative_path.split("/").length
-    || Number(left.type === "directory") - Number(right.type === "directory")
-    || right.relative_path.localeCompare(left.relative_path)
-  ));
-  for (const entry of ordered) {
-    const candidate = path.resolve(tombstone, ...entry.relative_path.split("/"));
-    if (!pathInside(tombstone, candidate)) {
-      throw new Error(`Client authoring cleanup '${removal.tag}' entry escapes its tombstone`);
-    }
-    await requireClientAuthoringRoot(path.dirname(candidate));
-    const stat = await fs.lstat(candidate);
-    const matchesType = entry.type === "symlink" ? stat.isSymbolicLink()
-      : entry.type === "directory" ? stat.isDirectory() : stat.isFile();
-    if (!matchesType) {
-      throw new Error(`Client authoring cleanup '${removal.tag}' entry changed type`);
-    }
-    if (entry.type !== "directory") {
-      const bytes = entry.type === "symlink"
-        ? await fs.readlink(candidate, { encoding: "buffer" })
-        : await readFileNoFollow(candidate);
-      if (sha256(bytes) !== entry.digest) {
-        throw new Error(`Client authoring cleanup '${removal.tag}' entry changed bytes`);
-      }
-      await fs.unlink(candidate);
-    } else {
-      await fs.rmdir(candidate);
-    }
-    await syncDirectory(path.dirname(candidate));
+  if ([...allowed].some(([name, entry]) => entry.kind === "file" && !expected.entries.some(candidate => candidate.relative_path === name))) {
+    throw new Error("Workspace cleanup contains missing staged files");
   }
-  await fs.rmdir(tombstone);
-  await syncDirectory(path.dirname(tombstone));
+  for (const entry of expected.entries) {
+    const declared = allowed.get(entry.relative_path);
+    if (!declared || declared.kind !== entry.kind || declared.digest !== entry.digest) {
+      throw new Error(`Workspace cleanup contains unknown or changed data '${entry.relative_path}'`);
+    }
+  }
+}
+
+function directoryCleanupPath(roots, operationId) {
+  return path.join(roots.cleanupPlansRoot, `${requiredOperationId(operationId)}.json`);
+}
+
+async function writeDirectoryCleanupPlan(roots, plan, flag) {
+  await writeJsonAtomic(directoryCleanupPath(roots, plan.operation_id), plan, 0o600, flag);
+}
+
+async function readDirectoryCleanupPlan(roots, operationId) {
+  try { return parseDirectoryCleanupPlan(roots, (await readJson(directoryCleanupPath(roots, operationId), "Workspace directory cleanup plan")).value); }
+  catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+}
+
+function parseDirectoryCleanupPlan(roots, value) {
+  const fields = ["schema", "schema_version", "operation_id", "journal", "retirement_context", "publication"];
+  const plan = exactObject(value, fields, fields, "Workspace directory cleanup plan");
+  const operationId = requiredOperationId(plan.operation_id), journal = parseClientAuthoringJournal(plan.journal);
+  if (plan.schema !== "octopus.client_authoring_cleanup" || plan.schema_version !== 4 || journal.operation_id !== operationId
+    || journal.phase !== "cleaned" || journal.removals.some(removal => !removal.publication?.reclaimed)) {
+    throw new Error("Workspace directory cleanup lacks its completed typed journal");
+  }
+  for (const write of journal.writes) allowedDestinationRoot(roots, write.destination);
+  for (const removal of journal.removals) allowedDestinationRoot(roots, removal.destination);
+  for (const removal of journal.removals) {
+    if (removal.publication.moves[0]?.destination !== path.join(roots.transactionsRoot, operationId, removal.tombstone)) {
+      throw new Error("Workspace cleanup changed its original tombstone coordinate");
+    }
+  }
+  const publication = parseDirectoryPlan(plan.publication);
+  if (!publication.operation_id.startsWith(`${operationId}:cleanup:`) || publication.moves.length !== 1
+    || publication.moves[0].source !== path.join(roots.transactionsRoot, operationId)
+    || publication.moves[0].destination !== path.join(roots.transactionsRoot, `.cleanup-${operationId}`)) {
+    throw new Error("Workspace directory cleanup movement differs from its exact transaction");
+  }
+  const ctx = plan.retirement_context;
+  if (journal.retirement) {
+    if (!journal.retirement.directory_inventory) throw directoryUncertain("Workspace cleanup lacks its saved native owner inventory");
+    assertRetirementInventory(roots, journal);
+    const contextFields = ["operation_id", "roots", "selection", "selection_digest", "originals", "retired", "directory_inventory", "prior_proof"];
+    exactObject(ctx, contextFields, contextFields, "Workspace cleanup retirement context");
+    if (ctx.operation_id !== operationId || stableJson(ctx.selection) !== stableJson(journal.retirement.selection)
+      || stableJson(parseRetirementDirectoryInventory(ctx.directory_inventory)) !== stableJson(journal.retirement.directory_inventory)
+      || ctx.selection_digest !== journal.retirement.selection_digest || stableJson(ctx.roots) !== stableJson({
+        registry_root: roots.registryRoot, run_records_root: roots.runsRoot, ledger_root: path.join(roots.octopusHomeRoot, "ledger"),
+        interface_private_state_root: roots.privateInterfacesRoot }) || !Array.isArray(ctx.originals)
+      || ctx.originals.length !== journal.retirement.selection.records.length) throw new Error("Workspace cleanup changed its held retirement context");
+    for (const original of ctx.originals) {
+      exactObject(original, ["file", "expected_digest", "content"], ["file", "expected_digest", "content"], "Workspace cleanup original Run");
+      const row = journal.retirement.selection.records.find(row => row.file === original.file);
+      if (!row || original.expected_digest !== row.expected_digest || typeof original.content !== "string"
+        || sha256(Buffer.from(original.content)) !== row.expected_digest) throw new Error("Workspace cleanup original Run bytes changed");
+    }
+    if (stableJson(ctx.originals.map(({ file, expected_digest }) => ({ file, expected_digest }))) !== stableJson(journal.retirement.proof.originals)
+      || stableJson(ctx.retired) !== stableJson(journal.retirement.proof.retired)) throw new Error("Workspace cleanup changed its retirement frontier");
+    parseHeldRetirementProof(ctx.prior_proof, ctx);
+  } else if (ctx !== null) throw new Error("Workspace cleanup has an unrelated retirement context");
+  return { ...plan, journal, publication };
+}
+
+async function resumeDirectoryCleanup(roots, plan, retirementBarrier, held) {
+  const publication = plan.publication, move = publication.moves[0];
+  if (publication.reclaimed) {
+    if (await pathExists(move.source) || await pathExists(move.destination)) throw new Error("Reclaimed workspace transaction was restored");
+    return;
+  }
+  const receipt = await readClientAuthoringReceipt(roots, plan.operation_id);
+  if (!receipt || stableJson(receipt) !== stableJson(clientAuthoringReceipt(plan.journal))) throw new Error("Workspace cleanup lost its exact public receipt");
+  await verifyClientAuthoringReceipt(roots, receipt);
+  if (plan.retirement_context && !held) {
+    let entered = false, completed = false;
+    await requireRetirementBarrier(retirementBarrier).withHeldProof(plan.retirement_context, async guard => {
+      if (entered) throw new Error("Task retirement cleanup holder was entered twice");
+      entered = true;
+      await resumeDirectoryCleanup(roots, plan, retirementBarrier, { ctx: plan.retirement_context, guard });
+      completed = true;
+    });
+    if (!completed) throw new Error("Task retirement holder did not complete native directory cleanup");
+    return;
+  }
+  const publisher = requireDirectoryPublisher(roots, held);
+  if (held) await verifyHeldRetirementProof(held);
+  await submitDirectoryPlan(publisher, publication, () => writeDirectoryCleanupPlan(roots, plan));
+  if (held) await verifyHeldRetirementProof(held);
+  await publisher.reclaimDirectory(move.destination, publication.receipts[0], move.expected);
+  publication.reclaimed = true;
+  await writeDirectoryCleanupPlan(roots, plan);
+  if (await pathExists(move.source) || await pathExists(move.destination)) throw new Error("Workspace native cleanup left a transaction endpoint present");
 }
 
 async function directoryEntriesIfPresent(directory) {
@@ -2868,52 +3061,125 @@ async function directoryEntriesIfPresent(directory) {
   }
 }
 
-async function applyJournalWrite(roots, transactionRoot, write) {
-  const destinationRoot = allowedDestinationRoot(roots, write.destination);
-  await ensurePlainParent(destinationRoot, path.dirname(write.destination));
-  const current = await readFileIfPresent(write.destination);
-  const currentDigest = current ? sha256(current) : null;
-  if (currentDigest === write.after_digest) return;
-  if (currentDigest !== write.before_digest) {
-    throw new Error(`Workspace destination '${write.destination}' changed during commit`);
+function journalPublication(operationId, index, bytes, rollbackBytes, legacyApplied = false, attemptId = crypto.randomUUID()) {
+  return { attempt_id: attemptId, operation_id: `workspace:${operationId}:${attemptId}:${index}:forward`,
+    rollback_operation_id: `workspace:${operationId}:${attemptId}:${index}:rollback`, bytes, rollback_bytes: rollbackBytes,
+    started: false, rollback_started: false, receipt: null, rollback_receipt: null, legacy_applied: legacyApplied };
+}
+
+function publicationUncertain(write) {
+  const error = new Error(`Workspace publication for '${write.destination}' is uncertain: no exact applied operation receipt`);
+  error.code = "workspace_publication_uncertain";
+  return error;
+}
+
+async function journalContent(transactionRoot, write, reverse = false) {
+  const digest = reverse ? write.before_digest : write.after_digest;
+  if (digest === null) return null;
+  const file = reverse ? write.before_file : write.after_file;
+  const bytes = await readFileNoFollow(transactionFile(transactionRoot, file, "publication content"));
+  const text = bytes.toString("utf8");
+  if (sha256(bytes) !== digest || !Buffer.from(text).equals(bytes)) {
+    throw new Error(`Workspace publication snapshot for '${write.tag}' is corrupt or not exact UTF-8`);
   }
-  if (write.after_digest === null) {
-    await fs.unlink(write.destination);
-    await syncDirectory(path.dirname(write.destination));
-    await verifyAppliedWrite(write);
+  return text;
+}
+
+async function applyJournalWrite(roots, transactionRoot, journal, index) {
+  const write = journal.writes[index];
+  const destinationRoot = allowedDestinationRoot(roots, write.destination);
+  await validateExistingPath(destinationRoot, write.destination);
+  const content = await journalContent(transactionRoot, write);
+  if (!write.publication) {
+    const current = await readFileIfPresent(write.destination);
+    const digest = current ? sha256(current) : null;
+    if (digest === write.after_digest && digest !== write.before_digest) throw publicationUncertain(write);
+    if (digest !== write.before_digest) throw new Error(`Workspace destination '${write.destination}' changed during commit`);
+    const before = await journalContent(transactionRoot, write, true);
+    write.publication = journalPublication(journal.operation_id, index,
+      content === null ? 0 : Buffer.byteLength(content), before === null ? 0 : Buffer.byteLength(before));
+    await writeJournal(transactionRoot, journal);
+  }
+  await publishJournalOperation(roots, transactionRoot, journal, index, content, false);
+  await verifyAppliedWrite(write);
+}
+
+async function publishJournalOperation(roots, transactionRoot, journal, index, content, reverse) {
+  const write = journal.writes[index], publication = write.publication;
+  const receiptKey = reverse ? "rollback_receipt" : "receipt";
+  const startedKey = reverse ? "rollback_started" : "started";
+  const operationId = reverse ? publication.rollback_operation_id : publication.operation_id;
+  const before = reverse ? write.after_digest : write.before_digest;
+  const after = reverse ? write.before_digest : write.after_digest;
+  const bytes = reverse ? publication.rollback_bytes : publication.bytes;
+  if ((content === null ? 0 : Buffer.byteLength(content)) !== bytes) throw new Error("Workspace publication byte count changed");
+  if (publication[receiptKey]?.outcome === "applied") return;
+  if (typeof roots.publishFiles !== "function") throw new Error("Workspace destination effects require the native file publisher");
+  publication[startedKey] = true;
+  await writeJournal(transactionRoot, journal);
+  const accept = (receipt) => parsePublicationReceipt(receipt, operationId, write.destination, before, after, bytes);
+  try {
+    const receipts = await roots.publishFiles([{ filePath: write.destination, tag: write.tag,
+      operationId, expectedBeforeHash: before, content }], journal.condition
+        ? { octopus_home: journal.condition.octopus_home, preimages: reverse ? [] : journal.condition.preimages } : undefined);
+    if (!Array.isArray(receipts) || receipts.length !== 1) throw new Error("Workspace publication omitted its exact receipt");
+    publication[receiptKey] = accept(receipts[0]);
+  } catch (error) {
+    if (Array.isArray(error.publicationReceipts) && error.publicationReceipts.length === 1) {
+      publication[receiptKey] = accept(error.publicationReceipts[0]);
+    }
+    await writeJournal(transactionRoot, journal);
+    throw error;
+  }
+  await writeJournal(transactionRoot, journal);
+  if (publication[receiptKey].outcome !== "applied") {
+    const error = new Error(`Workspace publication ${publication[receiptKey].outcome}: ${publication[receiptKey].error ?? write.tag}`);
+    error.code = "client_publication_failed";
+    throw error;
+  }
+}
+
+async function publishConditionedJournal(roots, transactionRoot, journal, ordered) {
+  if (ordered.every(index => journal.writes[index].publication.receipt?.outcome === "applied")) {
+    for (const index of ordered) journal.writes[index].state = "applied";
     return;
   }
-  const afterPath = transactionFile(transactionRoot, write.after_file, "after file");
-  const after = await readFileNoFollow(afterPath);
-  if (sha256(after) !== write.after_digest) throw new Error(`Workspace staged bytes for '${write.tag}' are corrupt`);
-  if (write.before_digest === null) {
-    try {
-      await writeSyncedFile(write.destination, after, 0o600, "wx");
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-      const raced = await readFileIfPresent(write.destination);
-      if (!raced || sha256(raced) !== write.after_digest) {
-        throw new Error(`Workspace write '${write.tag}' raced with different bytes`);
+  if (typeof roots.publishFiles !== "function") throw new Error("Workspace destination effects require the native file publisher");
+  const writes = await Promise.all(ordered.map(async index => {
+    const write = journal.writes[index];
+    const content = await journalContent(transactionRoot, write);
+    if (Buffer.byteLength(content) !== write.publication.bytes) throw new Error("Workspace conditioned publication byte count changed");
+    return { filePath: write.destination, tag: write.tag, operationId: write.publication.operation_id,
+      expectedBeforeHash: write.before_digest, content };
+  }));
+  for (const index of ordered) journal.writes[index].publication.started = true;
+  await writeJournal(transactionRoot, journal);
+  const accept = receipts => {
+    if (!Array.isArray(receipts) || receipts.length > ordered.length) throw new Error("Workspace conditioned publication returned a malformed prefix");
+    for (const [position, receipt] of receipts.entries()) {
+      const write = journal.writes[ordered[position]], publication = write.publication;
+      if (position && receipts[position - 1].outcome !== "applied") throw new Error("Workspace conditioned publication continued after refusal");
+      const exact = parsePublicationReceipt(receipt, publication.operation_id, write.destination,
+        write.before_digest, write.after_digest, publication.bytes);
+      if (publication.receipt && stableJson(publication.receipt) !== stableJson(exact)) throw new Error("Workspace conditioned publication changed its retained original receipt");
+      publication.receipt = exact;
+      if (exact.outcome === "applied") write.state = "applied";
+      else for (const tail of ordered.slice(position + 1)) {
+        if (journal.writes[tail].publication.receipt) throw new Error("Workspace conditioned publication has evidence after refusal");
+        journal.writes[tail].publication.started = false;
       }
     }
-    await syncFile(write.destination);
-  } else {
-    const temporary = path.join(path.dirname(write.destination), `.${path.basename(write.destination)}.workspace-${crypto.randomBytes(8).toString("hex")}.tmp`);
-    try {
-      await writeSyncedFile(temporary, after, 0o600, "wx");
-      const observed = await readFileIfPresent(write.destination);
-      if (!observed || sha256(observed) !== write.before_digest) {
-        throw new Error(`Workspace write '${write.tag}' changed after staging`);
-      }
-      await fs.rename(temporary, write.destination);
-    } finally {
-      await fs.unlink(temporary).catch((error) => {
-        if (error?.code !== "ENOENT") throw error;
-      });
-    }
+  };
+  try {
+    const receipts = await roots.publishFiles(writes, journal.condition);
+    accept(receipts);
+    if (receipts.length !== ordered.length || receipts.some(receipt => receipt.outcome !== "applied")) throw new Error("Workspace conditioned publication lacks complete applied receipts");
+  } catch (error) {
+    if (Array.isArray(error?.publicationReceipts)) accept(error.publicationReceipts);
+    await writeJournal(transactionRoot, journal);
+    throw error;
   }
-  await syncDirectory(path.dirname(write.destination));
-  await verifyAppliedWrite(write);
+  await writeJournal(transactionRoot, journal);
 }
 
 async function rollbackTransaction(roots, transactionRoot) {
@@ -2951,50 +3217,37 @@ async function rollbackTransaction(roots, transactionRoot) {
       if (currentDigest !== write.after_digest) throw new Error(`Workspace unchanged write '${write.tag}' drifted during rollback`);
       continue;
     }
-    if (currentDigest === write.before_digest) {
+    if (write.state === "rolled_back") {
+      if (currentDigest !== write.before_digest) throw new Error(`Workspace rolled-back write '${write.tag}' changed after restoration`);
+      continue;
+    }
+    if (write.publication?.started && !["applied", "not_applied"].includes(write.publication.receipt?.outcome)) {
+      throw publicationUncertain(write);
+    }
+    if (currentDigest === write.before_digest && (!write.publication
+      || !write.publication.started && !write.publication.legacy_applied
+      || write.publication.receipt?.outcome === "not_applied")) {
       if (write.state !== "rolled_back") {
         journal.writes[index].state = "rolled_back";
         await writeJournal(transactionRoot, journal);
       }
       continue;
     }
-    if (write.state === "rolled_back") {
-      throw new Error(`Workspace rolled-back write '${write.tag}' changed after restoration`);
-    }
-    if (currentDigest !== write.after_digest) {
+    if (currentDigest !== write.after_digest && !write.publication?.rollback_started) {
       throw new Error(`Workspace rollback found changed bytes at '${write.destination}'`);
     }
-    if (write.before_digest === null) {
-      await fs.unlink(write.destination);
-    } else {
-      const beforePath = transactionFile(transactionRoot, write.before_file, "before file");
-      const before = await readFileNoFollow(beforePath);
-      if (sha256(before) !== write.before_digest) throw new Error(`Workspace rollback snapshot for '${write.tag}' is corrupt`);
-      if (journal.retirement && write.after_digest === null) {
-        try {
-          await writeSyncedFile(write.destination, before, 0o600, "wx");
-        } catch (error) {
-          if (error?.code !== "EEXIST") throw error;
-          const raced = await readFileIfPresent(write.destination);
-          if (!raced || sha256(raced) !== write.before_digest) throw new Error("Task retirement restoration raced with changed Run bytes");
-        }
-      } else {
-        const temporary = path.join(path.dirname(write.destination), `.${path.basename(write.destination)}.rollback-${crypto.randomBytes(8).toString("hex")}.tmp`);
-        try {
-          await writeSyncedFile(temporary, before, 0o600, "wx");
-          if (journal.retirement) {
-            const observed = await readFileIfPresent(write.destination);
-            if ((observed ? sha256(observed) : null) !== write.after_digest) {
-              throw new Error(`Task retirement rollback found changed bytes at '${write.destination}'`);
-            }
-          }
-          await fs.rename(temporary, write.destination);
-        } finally {
-          await fs.unlink(temporary).catch((error) => { if (error?.code !== "ENOENT") throw error; });
-        }
-      }
+    const before = await journalContent(transactionRoot, write, true);
+    if (!write.publication) {
+      if (write.state !== "applied") throw publicationUncertain(write);
+      const after = await journalContent(transactionRoot, write);
+      write.publication = journalPublication(journal.operation_id, index,
+        after === null ? 0 : Buffer.byteLength(after), before === null ? 0 : Buffer.byteLength(before), true);
+      await writeJournal(transactionRoot, journal);
     }
-    await syncDirectory(path.dirname(write.destination));
+    if (!write.publication.legacy_applied && write.publication.receipt?.outcome !== "applied") throw publicationUncertain(write);
+    await publishJournalOperation(roots, transactionRoot, journal, index, before, true);
+    const restored = await readFileIfPresent(write.destination);
+    if ((restored ? sha256(restored) : null) !== write.before_digest) throw new Error(`Workspace rollback restoration for '${write.tag}' changed`);
     journal.writes[index].state = "rolled_back";
     await writeJournal(transactionRoot, journal);
   }
@@ -3007,13 +3260,28 @@ async function rollbackTransaction(roots, transactionRoot) {
     }
     return finalizeRolledBackRetirement(roots, transactionRoot, journal);
   }
+  await writeRollbackEvidence(roots, journal);
   await fs.rm(transactionRoot, { recursive: true, force: true });
   await syncDirectory(roots.transactionsRoot);
+}
+
+async function writeRollbackEvidence(roots, journal) {
+  if (!journal.writes.some((write) => write.publication)) return;
+  const attempt = journal.writes.find((write) => write.publication).publication.attempt_id;
+  const file = path.join(roots.stateRoot, `rollback-${journal.operation_id}-${attempt}.json`);
+  const evidence = { schema: "octopus.workspace_rollback_receipt", schema_version: journal.condition ? 2 : 1,
+    ...(journal.condition ? { condition: journal.condition } : {}),
+    operation_id: journal.operation_id, journal_schema: journal.schema, writes: journal.writes };
+  const existing = await readFileIfPresent(file);
+  if (existing) {
+    if (stableJson(JSON.parse(existing.toString("utf8"))) !== stableJson(evidence)) throw new Error("Workspace rollback evidence changed");
+  } else await writeJsonAtomic(file, evidence, 0o600, "wx");
 }
 
 async function finalizeRolledBackRetirement(roots, transactionRoot, journal) {
   journal.phase = "rolled_back";
   await writeJournal(transactionRoot, journal);
+  await writeRollbackEvidence(roots, journal);
   const cleanupRoot = path.join(roots.transactionsRoot, `.rollback-${journal.operation_id}`);
   if (await pathExists(cleanupRoot)) throw new Error("Task retirement rollback cleanup path already exists");
   await fs.rename(transactionRoot, cleanupRoot);
@@ -3061,9 +3329,22 @@ async function cleanupRolledBackRetirement(roots, cleanupRoot) {
 }
 
 async function recoverWorkspaceTransactionsUnlocked(roots, retirementBarrier) {
-  const entries = await fs.readdir(roots.transactionsRoot, { withFileTypes: true });
   let recovered = 0;
+  for (const entry of await fs.readdir(roots.cleanupPlansRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) throw new Error("Workspace directory cleanup root contains a foreign entry");
+    const operationId = requiredOperationId(entry.name.slice(0, -5));
+    const plan = await readDirectoryCleanupPlan(roots, operationId);
+    if (plan.operation_id !== operationId) throw new Error("Workspace directory cleanup has another operation id");
+    const pending = !plan.publication.reclaimed;
+    await resumeDirectoryCleanup(roots, plan, retirementBarrier);
+    if (pending) recovered += 1;
+  }
+  const entries = await fs.readdir(roots.transactionsRoot, { withFileTypes: true });
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (entry.name === ".octopus-publication") {
+      await requirePublicationMetadata(path.join(roots.transactionsRoot, entry.name));
+      continue;
+    }
     if (entry.isDirectory() && /^\.stage-[A-Za-z0-9_-]{8,96}-[a-f0-9]{16}$/.test(entry.name)) {
       await fs.rm(path.join(roots.transactionsRoot, entry.name), { recursive: true, force: true });
       await syncDirectory(roots.transactionsRoot);
@@ -3108,6 +3389,11 @@ async function recoverTransaction(roots, transactionRoot, retirementBarrier) {
 }
 
 async function recoverClientAuthoringTransaction(roots, transactionRoot, retirementBarrier) {
+  const cleanup = await readDirectoryCleanupPlan(roots, requiredOperationId(path.basename(transactionRoot)));
+  if (cleanup) {
+    await resumeDirectoryCleanup(roots, cleanup, retirementBarrier);
+    return "committed";
+  }
   if (!await pathExists(transactionRoot)) {
     const operationId = requiredOperationId(path.basename(transactionRoot));
     const cleanupRoot = path.join(roots.transactionsRoot, `.cleanup-${operationId}`);
@@ -3126,6 +3412,10 @@ async function recoverClientAuthoringTransaction(roots, transactionRoot, retirem
   const journal = await readJournal(roots, transactionRoot);
   if (journal.schema !== "octopus.client_authoring_transaction") {
     throw new Error("Client authoring recovery received another transaction schema");
+  }
+  if (journal.condition && (journal.phase === "rolling_back" || journal.writes.some(write => write.publication.receipt?.outcome === "not_applied"))) {
+    await rollbackTransaction(roots, transactionRoot);
+    return "rolled_back";
   }
   if (journal.retirement && !journal.retirement.proof) {
     await rollbackTransaction(roots, transactionRoot);
@@ -3151,6 +3441,7 @@ async function readJournal(roots, transactionRoot) {
   const file = path.join(transactionRoot, "journal.json");
   const document = await readJson(file, `Workspace transaction ${path.basename(transactionRoot)}`);
   const journal = parseJournal(document.value);
+  if (journal.condition && journal.condition.octopus_home !== roots.octopusHomeRoot) throw new Error("Workspace publication condition belongs to another Home");
   if (journal.operation_id !== path.basename(transactionRoot)) {
     throw new Error("Workspace transaction directory disagrees with its operation id");
   }
@@ -3186,6 +3477,9 @@ async function readJournal(roots, transactionRoot) {
   for (const removal of journal.removals ?? []) {
     allowedDestinationRoot(roots, removal.destination);
     transactionFile(transactionRoot, removal.tombstone, "removal tombstone");
+    if (removal.publication?.moves.length && removal.publication.moves[0].destination !== transactionFile(transactionRoot, removal.tombstone, "removal tombstone")) {
+      throw new Error("Workspace directory plan changed its exact tombstone destination");
+    }
     if (stagedFiles.has(removal.tombstone)) throw new Error("Workspace transaction repeats a staged path");
     stagedFiles.add(removal.tombstone);
   }
@@ -3221,55 +3515,62 @@ function parseJournal(value) {
 function parseClientAuthoringJournal(value) {
   const journal = exactObject(
     value,
-    ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals", "retirement"],
+    ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals", "retirement", "condition"],
     ["schema", "schema_version", "operation_id", "label", "phase", "writes", "removals"],
     "Client authoring transaction journal",
   );
-  if (journal.schema !== "octopus.client_authoring_transaction" || journal.schema_version !== 1) {
+  if (journal.schema !== "octopus.client_authoring_transaction" || ![1, 2, 3, 4].includes(journal.schema_version)
+    || (journal.schema_version === 4) !== Object.hasOwn(journal, "condition")) {
     throw new Error("Client authoring transaction journal has an unsupported schema");
   }
-  if (!["staged", "committing", "published", "committed"].includes(journal.phase)
-    && !(Object.hasOwn(journal, "retirement") && ["rolling_back", "rolled_back", "cleaned"].includes(journal.phase))) {
+  if (!["staged", "committing", "published", "committed", "cleaned"].includes(journal.phase)
+    && !((Object.hasOwn(journal, "retirement") || Object.hasOwn(journal, "condition")) && ["rolling_back", "rolled_back", "cleaned"].includes(journal.phase))) {
     throw new Error("Client authoring transaction journal has an invalid phase");
   }
   if (!Array.isArray(journal.writes) || !journal.writes.length || !Array.isArray(journal.removals)) {
     throw new Error("Client authoring transaction journal has invalid writes or removals");
   }
-  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, true));
+  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, true, journal));
   if (writes.filter((write) => write.publish_barrier).length !== 1) {
     throw new Error("Client authoring transaction journal must have exactly one publish barrier");
   }
-  const removals = journal.removals.map((removal, index) => parseClientAuthoringJournalRemoval(removal, index));
+  const removals = journal.removals.map((removal, index) => parseClientAuthoringJournalRemoval(removal, index, journal));
+  const condition = Object.hasOwn(journal, "condition") ? parsePublicationCondition(journal.condition) : undefined;
+  if (condition && (removals.length || Object.hasOwn(journal, "retirement") || writes.some(write => write.before_digest === null
+    || write.after_digest === null || write.state === "unchanged" || !condition.preimages.some(pin => pin.path === write.destination && pin.sha256 === write.before_digest)))) {
+    throw new Error("Conditioned client journal requires existing-file updates and complete target preimages");
+  }
   const destinations = [...writes.map((write) => write.destination), ...removals.map((removal) => removal.destination)];
   if (new Set(destinations).size !== destinations.length) {
     throw new Error("Client authoring transaction journal repeats a destination");
   }
   return {
     schema: journal.schema,
-    schema_version: 1,
+    schema_version: journal.schema_version,
     operation_id: requiredOperationId(journal.operation_id),
     label: requiredHumanText(journal.label, "Client authoring transaction label", 240),
     phase: journal.phase,
     writes,
     removals,
+    ...(condition ? { condition } : {}),
     ...(Object.hasOwn(journal, "retirement") ? { retirement: parseRetirementJournal(journal.retirement, { ...journal, writes, removals }) } : {}),
   };
 }
 
-function parseClientAuthoringJournalRemoval(value, index) {
+function parseClientAuthoringJournalRemoval(value, index, journal) {
   const removal = exactObject(
     value,
     [
       "destination", "type", "expected_dev", "expected_ino", "tree_digest", "tree_entries",
-      "tombstone", "tag", "state",
+      "tombstone", "tag", "state", "publication",
     ],
     [
       "destination", "type", "expected_dev", "expected_ino", "tree_digest", "tree_entries",
-      "tombstone", "tag", "state",
+      "tombstone", "tag", "state", ...(journal.schema_version >= 3 ? ["publication"] : []),
     ],
     `Client authoring journal removal ${index + 1}`,
   );
-  if (removal.type !== "directory" || !["staged", "moved"].includes(removal.state)) {
+  if (removal.type !== "directory" || !["staged", "moved", "reclaimed"].includes(removal.state)) {
     throw new Error(`Client authoring journal removal ${index + 1} has an invalid type or state`);
   }
   if (!Array.isArray(removal.tree_entries)) {
@@ -3302,7 +3603,7 @@ function parseClientAuthoringJournalRemoval(value, index) {
   if (new Set(treeEntries.map((entry) => entry.relative_path)).size !== treeEntries.length) {
     throw new Error(`Client authoring journal removal ${index + 1} repeats a tree entry`);
   }
-  return {
+  const parsed = {
     destination: requiredAbsolutePath(removal.destination, `Client authoring journal removal ${index + 1} destination`),
     type: "directory",
     expected_dev: requiredFileIdentityNumber(removal.expected_dev, `Client authoring journal removal ${index + 1} device`),
@@ -3313,6 +3614,100 @@ function parseClientAuthoringJournalRemoval(value, index) {
     tag: requiredHumanText(removal.tag, `Client authoring journal removal ${index + 1} tag`, 240),
     state: removal.state,
   };
+  if (sha256(Buffer.from(stableJson(treeEntries))) !== parsed.tree_digest) throw new Error("Workspace directory tree digest differs from its staged entries");
+  if (Object.hasOwn(removal, "publication")) {
+    const publication = parsed.publication = parseDirectoryPlan(removal.publication);
+    if (!publication.operation_id.startsWith(`${journal.operation_id}:remove:`) || !publication.operation_id.endsWith(`:${index}`)
+      || publication.moves.length && publication.moves[0].source !== parsed.destination
+      || parsed.tombstone !== path.join("removed", String(index).padStart(4, "0"))
+      || parsed.state !== "staged" && publication.receipts[0]?.outcome !== "applied"
+      || publication.reclaimed !== (parsed.state === "reclaimed")) throw new Error("Workspace directory row differs from its exact native plan");
+    if (publication.moves.length) assertDirectoryTree(publication.moves[0].expected, parsed.expected_dev, parsed.expected_ino, treeEntries);
+  } else if (parsed.state === "reclaimed") throw new Error("Workspace reclaimed directory lacks its exact native proof");
+  return parsed;
+}
+
+function parseDirectoryPreimage(value) {
+  const fields = ["identity", "mode", "digest_algorithm", "entries"];
+  const preimage = exactObject(value, fields, fields, "Workspace directory preimage");
+  const identity = value => {
+    exactObject(value, ["device", "inode"], ["device", "inode"], "Workspace directory identity");
+    return { device: requiredFileIdentityNumber(value.device, "Directory device"), inode: requiredFileIdentityNumber(value.inode, "Directory inode") };
+  };
+  const mode = value => {
+    if (!Number.isInteger(value) || value < 0 || value > 0o7777) throw new Error("Workspace directory has an invalid mode");
+    return value;
+  };
+  if (preimage.digest_algorithm !== "sha256" || !Array.isArray(preimage.entries) || preimage.entries.length > 16384) {
+    throw new Error("Workspace directory requires a bounded SHA-256 manifest");
+  }
+  const parents = new Map();
+  let previous;
+  const entries = preimage.entries.map(value => {
+    const fields = ["relative_path", "kind", "identity", "mode", "bytes", "digest"];
+    const entry = exactObject(value, fields, fields, "Workspace directory member");
+    const relative = requiredPortableRelativePath(entry.relative_path, "Workspace directory member path");
+    if (relative.split("/").includes(".octopus-publication") || Buffer.from(relative).toString() !== relative
+      || previous !== undefined && compareDirectoryPaths(previous, relative) >= 0
+      || path.dirname(relative) !== "." && parents.get(path.dirname(relative)) !== "directory"
+      || !["directory", "file", "symlink"].includes(entry.kind)
+      || entry.kind === "directory" && (entry.digest !== null || entry.bytes !== 0)
+      || entry.kind !== "directory" && entry.digest === null) throw new Error("Workspace directory has invalid member order or content evidence");
+    parents.set(relative, entry.kind); previous = relative;
+    return { relative_path: relative, kind: entry.kind, identity: identity(entry.identity), mode: mode(entry.mode),
+      bytes: requiredFileIdentityNumber(entry.bytes, "Directory member bytes"), digest: optionalDigest(entry.digest, "Directory member digest") };
+  });
+  return { identity: identity(preimage.identity), mode: mode(preimage.mode), digest_algorithm: "sha256", entries };
+}
+
+function compareDirectoryPaths(left, right) {
+  const a = left.split("/"), b = right.split("/");
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const order = Buffer.compare(Buffer.from(a[index]), Buffer.from(b[index]));
+    if (order) return order;
+  }
+  return a.length - b.length;
+}
+
+function assertDirectoryTree(expected, device, inode, entries) {
+  const actual = expected.entries.map(entry => ({ relative_path: entry.relative_path, type: entry.kind, digest: entry.digest }));
+  const ordered = values => [...values].sort((a, b) => compareDirectoryPaths(a.relative_path, b.relative_path));
+  if (expected.identity.device !== device || expected.identity.inode !== inode || stableJson(ordered(actual)) !== stableJson(ordered(entries))) {
+    throw new Error("Workspace directory identity changed from its staged public tree");
+  }
+}
+
+function parseDirectoryPlan(value) {
+  const fields = ["operation_id", "moves", "receipts", "started", "reclaimed"];
+  const publication = exactObject(value, fields, fields, "Workspace directory publication");
+  if (typeof publication.operation_id !== "string" || !publication.operation_id || publication.operation_id.trim() !== publication.operation_id
+    || Buffer.byteLength(publication.operation_id) > 256 || /\p{Cc}/u.test(publication.operation_id)
+    || !Array.isArray(publication.moves) || publication.moves.length > 1 || !Array.isArray(publication.receipts)
+    || publication.receipts.length > publication.moves.length || typeof publication.started !== "boolean" || typeof publication.reclaimed !== "boolean"
+    || !publication.started && publication.receipts.length || publication.started && !publication.moves.length) throw new Error("Workspace directory publication has invalid immutable coordinates");
+  const moves = publication.moves.map(value => {
+    exactObject(value, ["source", "destination", "expected"], ["source", "destination", "expected"], "Workspace directory movement");
+    for (const target of [value.source, value.destination]) {
+      if (typeof target !== "string" || !path.isAbsolute(target) || target !== path.resolve(target) || target.includes("\0")
+        || target.split("/").includes(".octopus-publication")) throw new Error("Workspace directory movement requires an exact ordinary absolute path");
+    }
+    if (value.source === value.destination) throw new Error("Workspace directory movement repeats its endpoint");
+    return { source: value.source, destination: value.destination, expected: parseDirectoryPreimage(value.expected) };
+  });
+  const planHash = sha256(Buffer.from(JSON.stringify(moves)));
+  const receipts = publication.receipts.map((receipt, index) => {
+    const fields = ["schema_version", "operation_id", "index", "plan_hash", "movement", "outcome", "error"];
+    exactObject(receipt, fields, fields, "Workspace directory receipt");
+    if (receipt.schema_version !== 1 || receipt.operation_id !== publication.operation_id || receipt.index !== index
+      || receipt.plan_hash !== planHash || stableJson(receipt.movement) !== stableJson(moves[index])
+      || !["applied", "not_applied", "uncertain"].includes(receipt.outcome)
+      || (receipt.outcome === "applied" ? receipt.error !== null : typeof receipt.error !== "string" || !receipt.error)) {
+      throw new Error("Workspace directory receipt differs from its exact submitted movement");
+    }
+    return { ...receipt, movement: moves[index] };
+  });
+  if (publication.reclaimed && receipts[0]?.outcome !== "applied") throw new Error("Workspace directory reclaim lacks its original applied receipt");
+  return { operation_id: publication.operation_id, moves, receipts, started: publication.started, reclaimed: publication.reclaimed };
 }
 
 function parseSetupJournal(value) {
@@ -3322,13 +3717,13 @@ function parseSetupJournal(value) {
     ["schema", "schema_version", "operation_id", "request_digest", "phase", "receipt", "writes"],
     "Workspace transaction journal",
   );
-  if (journal.schema !== "octopus.workspace_setup_transaction" || journal.schema_version !== 1) {
+  if (journal.schema !== "octopus.workspace_setup_transaction" || ![1, 2].includes(journal.schema_version)) {
     throw new Error("Workspace transaction journal has an unsupported schema");
   }
   const phases = new Set(["staged", "committing", "published", "committed", "rolling_back"]);
   if (!phases.has(journal.phase)) throw new Error("Workspace transaction journal has an invalid phase");
   if (!Array.isArray(journal.writes) || !journal.writes.length) throw new Error("Workspace transaction journal has no writes");
-  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, false));
+  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, false, journal));
   if (writes.filter((write) => write.publish_barrier).length !== 1) {
     throw new Error("Workspace transaction journal must have exactly one publish barrier");
   }
@@ -3352,7 +3747,7 @@ function parseSetupJournal(value) {
   }
   return {
     schema: journal.schema,
-    schema_version: 1,
+    schema_version: journal.schema_version,
     operation_id: operationId,
     request_digest: requestDigest,
     phase: journal.phase,
@@ -3368,7 +3763,7 @@ function parseProjectJournal(value) {
     ["schema", "schema_version", "operation_id", "request_digest", "phase", "receipt", "writes"],
     "Workspace Project transaction journal",
   );
-  if (journal.schema !== "octopus.workspace_project_transaction" || journal.schema_version !== 1) {
+  if (journal.schema !== "octopus.workspace_project_transaction" || ![1, 2].includes(journal.schema_version)) {
     throw new Error("Workspace Project transaction journal has an unsupported schema");
   }
   const phases = new Set(["staged", "committing", "published", "committed", "rolling_back"]);
@@ -3376,7 +3771,7 @@ function parseProjectJournal(value) {
   if (!Array.isArray(journal.writes) || !journal.writes.length) {
     throw new Error("Workspace Project transaction journal has no writes");
   }
-  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, true));
+  const writes = journal.writes.map((write, index) => parseJournalWrite(write, index, true, journal));
   if (writes.filter((write) => write.publish_barrier).length !== 1) {
     throw new Error("Workspace Project transaction journal must have exactly one publish barrier");
   }
@@ -3400,7 +3795,7 @@ function parseProjectJournal(value) {
   }
   return {
     schema: journal.schema,
-    schema_version: 1,
+    schema_version: journal.schema_version,
     operation_id: operationId,
     request_digest: requestDigest,
     phase: journal.phase,
@@ -3409,16 +3804,17 @@ function parseProjectJournal(value) {
   };
 }
 
-function parseJournalWrite(value, index, allowDeletion) {
+function parseJournalWrite(value, index, allowDeletion, journal) {
   const write = exactObject(
     value,
     [
       "destination", "expected_before_digest", "before_digest", "after_digest", "after_file",
-      "before_file", "tag", "publish_barrier", "state",
+      "before_file", "tag", "publish_barrier", "state", "publication",
     ],
     [
       "destination", "expected_before_digest", "before_digest", "after_digest", "after_file",
       "before_file", "tag", "publish_barrier", "state",
+      ...(journal.schema_version >= 2 ? ["publication"] : []),
     ],
     `Workspace journal write ${index + 1}`,
   );
@@ -3436,7 +3832,7 @@ function parseJournalWrite(value, index, allowDeletion) {
   if (write.state !== "unchanged" && (afterDigest === null) !== (afterFile === "")) {
     throw new Error(`Workspace journal write ${index + 1} has inconsistent staged bytes`);
   }
-  return {
+  const parsed = {
     destination: requiredAbsolutePath(write.destination, `Workspace journal write ${index + 1} destination`),
     expected_before_digest: optionalDigest(write.expected_before_digest, `Workspace journal write ${index + 1} expected digest`),
     before_digest: optionalDigest(write.before_digest, `Workspace journal write ${index + 1} before digest`),
@@ -3447,6 +3843,51 @@ function parseJournalWrite(value, index, allowDeletion) {
     publish_barrier: write.publish_barrier,
     state: write.state,
   };
+  if (parsed.expected_before_digest !== parsed.before_digest) throw new Error("Workspace publication preimage differs from its staged request");
+  if (Object.hasOwn(write, "publication")) parsed.publication = parseJournalPublication(write.publication, parsed, index, journal);
+  return parsed;
+}
+
+function parsePublicationReceipt(value, operationId, destination, before, after, bytes) {
+  const receipt = exactObject(value, ["digest_algorithm", "operation_id", "path", "before_hash", "after_hash", "bytes", "outcome", "error"],
+    ["digest_algorithm", "operation_id", "path", "before_hash", "after_hash", "bytes", "outcome", "error"], "Workspace publication receipt");
+  if (receipt.digest_algorithm !== "sha256" || receipt.operation_id !== operationId || receipt.path !== destination
+    || receipt.before_hash !== before || receipt.after_hash !== after || receipt.bytes !== bytes
+    || !["applied", "not_applied", "uncertain"].includes(receipt.outcome)
+    || receipt.error !== null && (typeof receipt.error !== "string" || !receipt.error)
+    || receipt.outcome === "applied" && receipt.error !== null) {
+    throw new Error("Workspace publication receipt differs from its exact submitted operation");
+  }
+  return { ...receipt };
+}
+
+function parseJournalPublication(value, write, index, journal) {
+  const fields = ["attempt_id", "operation_id", "rollback_operation_id", "bytes", "rollback_bytes", "started", "rollback_started", "receipt", "rollback_receipt", "legacy_applied"];
+  const publication = exactObject(value, fields, fields, "Workspace journal publication");
+  const expected = journalPublication(journal.operation_id, index, publication.bytes, publication.rollback_bytes, false, publication.attempt_id);
+  if (typeof publication.attempt_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(publication.attempt_id)
+    || publication.operation_id !== expected.operation_id || publication.rollback_operation_id !== expected.rollback_operation_id
+    || typeof publication.started !== "boolean" || typeof publication.rollback_started !== "boolean" || typeof publication.legacy_applied !== "boolean"
+    || publication.legacy_applied && (journal.schema_version !== 1 || publication.started || publication.receipt !== null
+      || !["applied", "rolled_back"].includes(write.state))
+    || write.state === "unchanged" && (publication.started || publication.rollback_started || publication.legacy_applied)
+    || write.after_digest === null && publication.bytes !== 0 || write.before_digest === null && publication.rollback_bytes !== 0) {
+    throw new Error("Workspace journal publication has invalid immutable coordinates");
+  }
+  const bytes = requiredFileIdentityNumber(publication.bytes, "Workspace publication bytes");
+  const rollbackBytes = requiredFileIdentityNumber(publication.rollback_bytes, "Workspace rollback bytes");
+  const receipt = publication.receipt === null ? null : parsePublicationReceipt(publication.receipt,
+    publication.operation_id, write.destination, write.before_digest, write.after_digest, bytes);
+  const rollbackReceipt = publication.rollback_receipt === null ? null : parsePublicationReceipt(publication.rollback_receipt,
+    publication.rollback_operation_id, write.destination, write.after_digest, write.before_digest, rollbackBytes);
+  if (receipt && !publication.started || rollbackReceipt && !publication.rollback_started
+    || write.state === "applied" && !publication.legacy_applied && receipt?.outcome !== "applied"
+    || publication.rollback_started && !publication.legacy_applied && receipt?.outcome !== "applied"
+    || write.state === "rolled_back" && (publication.legacy_applied || receipt?.outcome === "applied") && rollbackReceipt?.outcome !== "applied"
+    || write.state === "rolled_back" && publication.started && !["applied", "not_applied"].includes(receipt?.outcome)) {
+    throw new Error("Workspace journal state lacks its exact publication evidence");
+  }
+  return { ...publication, receipt, rollback_receipt: rollbackReceipt };
 }
 
 function parseReceipt(value) {
@@ -3454,7 +3895,7 @@ function parseReceipt(value) {
     value,
     [
       "schema", "schema_version", "operation_id", "request_digest", "completed_at", "root_ee_id",
-      "home_run_id", "home_interface_id", "project_ee_ids", "writes", "existing_root",
+      "home_run_id", "home_interface_id", "project_ee_ids", "writes", "existing_root", "publication_evidence",
     ],
     [
       "schema", "schema_version", "operation_id", "request_digest", "completed_at", "root_ee_id",
@@ -3515,6 +3956,7 @@ function parseReceipt(value) {
     home_interface_id: requiredId(receipt.home_interface_id, "Workspace receipt Home interface"),
     project_ee_ids: projectEeIds,
     writes,
+    ...(Object.hasOwn(receipt, "publication_evidence") ? { publication_evidence: parsePublicationEvidence(receipt.publication_evidence, receipt.operation_id, writes) } : {}),
   };
 }
 
@@ -3523,7 +3965,7 @@ function parseProjectReceipt(value) {
     value,
     [
       "schema", "schema_version", "operation_id", "request_digest", "completed_at", "action",
-      "root_ee_id", "home_run_id", "home_interface_id", "outcome", "writes",
+      "root_ee_id", "home_run_id", "home_interface_id", "outcome", "writes", "publication_evidence",
     ],
     [
       "schema", "schema_version", "operation_id", "request_digest", "completed_at", "action",
@@ -3619,6 +4061,7 @@ function parseProjectReceipt(value) {
     home_interface_id: requiredId(receipt.home_interface_id, "Workspace Project receipt Home interface"),
     outcome,
     writes,
+    ...(Object.hasOwn(receipt, "publication_evidence") ? { publication_evidence: parsePublicationEvidence(receipt.publication_evidence, receipt.operation_id, writes) } : {}),
   };
 }
 
@@ -3632,6 +4075,8 @@ function clientAuthoringReceipt(journal) {
     schema_version: 1,
     operation_id: journal.operation_id,
     label: journal.label,
+    ...(journal.schema_version >= 2 || journal.writes.some((write) => write.publication)
+      ? { publication_evidence: journalPublicationEvidence(journal) } : {}),
     writes: journal.writes.map((write) => ({
       destination: write.destination,
       digest: write.after_digest,
@@ -3641,6 +4086,7 @@ function clientAuthoringReceipt(journal) {
       destination: removal.destination,
       tree_digest: removal.tree_digest,
       tag: removal.tag,
+      ...(removal.publication ? { publication: { ...removal.publication, reclaimed: false } } : {}),
     })),
   };
 }
@@ -3648,7 +4094,7 @@ function clientAuthoringReceipt(journal) {
 function parseClientAuthoringReceipt(value) {
   const receipt = exactObject(
     value,
-    ["schema", "schema_version", "operation_id", "label", "writes", "removals"],
+    ["schema", "schema_version", "operation_id", "label", "writes", "removals", "publication_evidence"],
     ["schema", "schema_version", "operation_id", "label", "writes", "removals"],
     "Client authoring receipt",
   );
@@ -3680,11 +4126,11 @@ function parseClientAuthoringReceipt(value) {
   const removals = receipt.removals.map((value, index) => {
     const removal = exactObject(
       value,
-      ["destination", "tree_digest", "tag"],
+      ["destination", "tree_digest", "tag", "publication"],
       ["destination", "tree_digest", "tag"],
       `Client authoring receipt removal ${index + 1}`,
     );
-    return {
+    const parsed = {
       destination: requiredAbsolutePath(
         removal.destination,
         `Client authoring receipt removal ${index + 1} destination`,
@@ -3698,7 +4144,14 @@ function parseClientAuthoringReceipt(value) {
         `Client authoring receipt removal ${index + 1} tag`,
         240,
       ),
+      ...(Object.hasOwn(removal, "publication") ? { publication: parseDirectoryPlan(removal.publication) } : {}),
     };
+    if (parsed.publication && (parsed.publication.moves.length !== 1 || parsed.publication.receipts.length !== 1
+      || parsed.publication.moves[0].source !== parsed.destination || !parsed.publication.operation_id.startsWith(`${receipt.operation_id}:remove:`)
+      || parsed.publication.receipts[0].outcome !== "applied" || parsed.publication.reclaimed)) {
+      throw new Error("Client authoring receipt lacks its exact original directory movement");
+    }
+    return parsed;
   });
   return {
     schema: receipt.schema,
@@ -3707,7 +4160,31 @@ function parseClientAuthoringReceipt(value) {
     label: requiredHumanText(receipt.label, "Client authoring receipt label", 240),
     writes,
     removals,
+    ...(Object.hasOwn(receipt, "publication_evidence") ? { publication_evidence: parsePublicationEvidence(receipt.publication_evidence, receipt.operation_id, writes) } : {}),
   };
+}
+
+function journalPublicationEvidence(journal) {
+  return { schema_version: journal.schema_version, ...(journal.condition ? { condition: journal.condition } : {}), writes: journal.writes.map((write) => ({
+    before_digest: write.before_digest, state: write.state, publication: write.publication ?? null })) };
+}
+
+function parsePublicationEvidence(value, operationId, writes) {
+  const evidence = exactObject(value, ["schema_version", "writes", "condition"], ["schema_version", "writes"], "Workspace publication evidence");
+  if (![1, 2, 3, 4].includes(evidence.schema_version) || !Array.isArray(evidence.writes) || evidence.writes.length !== writes.length
+    || (evidence.schema_version === 4) !== Object.hasOwn(evidence, "condition")) {
+    throw new Error("Workspace publication evidence differs from its write set");
+  }
+  return { schema_version: evidence.schema_version, ...(Object.hasOwn(evidence, "condition") ? { condition: parsePublicationCondition(evidence.condition) } : {}), writes: evidence.writes.map((value, index) => {
+    const entry = exactObject(value, ["before_digest", "state", "publication"], ["before_digest", "state", "publication"], "Workspace publication evidence write");
+    const before = optionalDigest(entry.before_digest, "Workspace publication evidence preimage");
+    const write = { destination: writes[index].path ?? writes[index].destination, before_digest: before,
+      after_digest: writes[index].digest, state: entry.state };
+    if (!["applied", "unchanged"].includes(entry.state) || entry.state === "unchanged" && before !== write.after_digest
+      || evidence.schema_version >= 2 && entry.publication === null) throw new Error("Workspace publication evidence lacks its exact applied write");
+    return { before_digest: before, state: entry.state, publication: entry.publication === null ? null
+      : parseJournalPublication(entry.publication, write, index, { operation_id: operationId, schema_version: evidence.schema_version }) };
+  }) };
 }
 
 async function readClientAuthoringReceipt(roots, operationId) {
@@ -3945,7 +4422,7 @@ async function assertWorkspaceAbsent(roots, existingEeId) {
 
 async function findWorkspaceTopology(roots) {
   const operatorSpaceEeIds = [];
-  for (const entry of await fs.readdir(roots.eeInstancesRoot, { withFileTypes: true })) {
+  for (const entry of await publicDirectoryEntries(roots.eeInstancesRoot)) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = path.join(roots.eeInstancesRoot, entry.name);
     const record = (await readJson(file, `EE instance ${entry.name}`)).value;
@@ -3956,7 +4433,7 @@ async function findWorkspaceTopology(roots) {
   }
 
   const homeRunIds = [];
-  for (const entry of await fs.readdir(roots.runsRoot, { withFileTypes: true })) {
+  for (const entry of await publicDirectoryEntries(roots.runsRoot)) {
     if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
     const file = path.join(roots.runsRoot, entry.name);
     const record = (await readJson(file, `Run record ${entry.name}`)).value;
@@ -3969,7 +4446,7 @@ async function findWorkspaceTopology(roots) {
     homeRunIds.push(runId);
   }
 
-  const interfaces = await fs.readdir(roots.interfaceRoot, { withFileTypes: true });
+  const interfaces = await publicDirectoryEntries(roots.interfaceRoot);
   const homeInterfaceIds = [];
   for (const entry of interfaces) {
     if (!entry.isDirectory()) continue;
@@ -4147,17 +4624,6 @@ async function inspectClientAuthoringRemoval(candidate, type) {
   };
 }
 
-function assertClientAuthoringRemovalIdentity(actual, removal, location, retiredState = false) {
-  if (
-    !actual.exists
-    || actual.dev !== removal.expected_dev
-    || actual.ino !== removal.expected_ino
-    || (!retiredState && actual.treeDigest !== removal.tree_digest)
-  ) {
-    throw new Error(`Client authoring removal '${removal.tag}' ${location} identity changed`);
-  }
-}
-
 async function clientAuthoringTreeSnapshot(candidate, type) {
   if (type === "file") {
     const digest = sha256(await readFileNoFollow(candidate));
@@ -4178,6 +4644,10 @@ async function collectClientAuthoringTree(root, relative, rows) {
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
     const child = path.join(root, childRelative);
+    if (entry.name === ".octopus-publication") {
+      await requirePublicationMetadata(child);
+      continue;
+    }
     const stat = await fs.lstat(child);
     if (stat.isSymbolicLink()) {
       rows.push({
@@ -4198,6 +4668,19 @@ async function collectClientAuthoringTree(root, relative, rows) {
       type: "file",
       digest: sha256(await readFileNoFollow(child)),
     });
+  }
+}
+
+async function publicDirectoryEntries(directory) {
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  if (entries.some(entry => entry.name === ".octopus-publication")) await requirePublicationMetadata(path.join(directory, ".octopus-publication"));
+  return entries.filter(entry => entry.name !== ".octopus-publication");
+}
+
+async function requirePublicationMetadata(directory) {
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || await fs.realpath(directory) !== directory) {
+    throw new Error("Workspace publication metadata must be a plain private directory");
   }
 }
 

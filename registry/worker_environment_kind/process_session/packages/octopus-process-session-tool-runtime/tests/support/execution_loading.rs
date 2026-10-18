@@ -188,7 +188,9 @@ require('readline').createInterface({input:process.stdin}).on('line', line => {
                 },
             };
             let body: serde_json::Value = serde_json::from_slice(&output.artifact.read_payload_bytes().unwrap()).unwrap();
-            output.verdict_tx.unwrap().send(DeliveryVerdict::Admitted {seq:sequence + 100}).unwrap();
+            output.retained.unwrap().reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete {
+                verdict: DeliveryVerdict::Admitted {seq:sequence + 100},
+            })).unwrap();
             (invoked.await, body)
         }).await.unwrap_or_else(|_| panic!("call {sequence} timed out\n{}", stderr(&ctx)));
         match result.0 {

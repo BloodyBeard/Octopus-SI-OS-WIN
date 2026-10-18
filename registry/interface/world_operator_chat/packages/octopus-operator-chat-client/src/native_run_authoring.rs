@@ -3,6 +3,8 @@ use octopus_ledger::{ArtifactRef, ContentHash};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod result_receiving;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Profile {
@@ -419,6 +421,14 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         status: NativeRunAdoptionStatus::Unchanged, run_id: request.run_id.clone(), provider_interface_id: provider.into(),
         source_movement_seq, reason: None, writes: Vec::new(), preimages: Vec::new(),
     };
+    result_receiving::pin_authority(request, &record, &provider_id, &config, &mut preimages)?;
+    let cutover = result_receiving::prepare(request, &config, &record, &current, client, &state, &mut preimages)?;
+    if let Some(reason) = cutover.deferred {
+        result.status = NativeRunAdoptionStatus::Deferred;
+        result.reason = Some(reason);
+        result.preimages = preimages;
+        return Ok(result);
+    }
     let catalog = plan_catalog_adoption(roots, &config, chat_id, source, private, &mut preimages)?;
     let mut writes = match plan_tool_contract_adoption(&roots.registry_root, client_config.get("tool_contract_updates"),
         &record, client, chat_id, adoption_field(&state, "client_surface_role")?, &mut preimages)? {
@@ -438,7 +448,7 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
             return Ok(result);
         }
     };
-    if writes.is_empty() && catalog.as_ref().is_none_or(|catalog| catalog.write.is_none()) {
+    if cutover.run.is_none() && writes.is_empty() && catalog.as_ref().is_none_or(|catalog| catalog.write.is_none()) {
         result.preimages = preimages;
         return Ok(result);
     }
@@ -468,12 +478,21 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         result.preimages = preimages;
         return Ok(result);
     }
-    if !writes.is_empty() {
+    let mut affected_tools = cutover.tools;
+    affected_tools.insert(writer.tool.clone(), writer.door.clone());
+    for write in &writes {
+        let descriptor: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
+        affected_tools.insert(descriptor.id.to_string(), descriptor.interface);
+    }
+    if !result_receiving::outputs_settled(request, &record, &provider_id, pending, &affected_tools,
+        process.io_limits.max_control_frame_bytes, &mut preimages)? {
+        result.status = NativeRunAdoptionStatus::Deferred;
+        result.reason = Some("pending outputs retain unresolved original fan-out or lack exact retained delivery proof".into());
+        result.preimages = preimages;
+        return Ok(result);
+    }
+    if !affected_tools.is_empty() {
         use octopus_process_session_tool_runtime::{InterfaceHostIoLimits, ToolContractUpdateRequest, tool_contract_update_quiescent};
-        let affected_tools = writes.iter().map(|write| {
-            let descriptor: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
-            Ok((descriptor.id.to_string(), descriptor.interface))
-        }).collect::<Result<BTreeMap<_, _>, String>>()?;
         let limits = InterfaceHostIoLimits {
             max_control_frame_bytes: process.io_limits.max_control_frame_bytes,
             max_stderr_bytes: process.io_limits.max_stderr_bytes,
@@ -494,6 +513,7 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         preimages.extend(proof.preimages.into_iter().map(|(path, sha256)| NativeRunAdoptionPreimage { path, sha256 }));
     }
     let chain = resolve_live_ee_policy_chain(&roots.ee_instances_root, &record.ee).map_err(|e|e.to_string())?;
+    result_receiving::pin_authority(request, &record, &provider_id, &config, &mut preimages)?;
     let formed = form_capability_topology(&roots.registry_root, &CapabilityFormationRequest::from_live_chain(record.worker.clone(), chain))
         .map_err(|e|e.to_string())?;
     for write in &writes {
@@ -501,6 +521,20 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
         if !formed.tool_bindings.get(&next.interface).is_some_and(|binding| binding.tools.iter().any(|entry| entry.tool.as_str() == next.id.as_str())) {
             return Err(format!("tool contract adoption '{}' is outside the actual formed grant", next.id));
         }
+    }
+    for (tool, door) in &affected_tools {
+        if !formed.tool_bindings.get(door).is_some_and(|binding| binding.tools.iter().any(|entry| entry.tool.as_str() == tool)) {
+            return Err(format!("native adoption tool '{tool}' is outside the actual formed grant"));
+        }
+    }
+    writes.extend(cutover.writes);
+    if let Some(next) = cutover.run {
+        let next_record = RunRecord::from_bytes(pretty_json(&next)?.as_bytes()).map_err(|e|e.to_string())?;
+        let profile = serde_json::from_value(private.get("run_authoring_profile").cloned().ok_or("native result adoption has no writer profile")?).map_err(|e|e.to_string())?;
+        if declared_provider_run_writer(&next_record, &provider_id, &profile)? != writer {
+            return Err("native result adoption changed the accepted writer contract".into());
+        }
+        writes.push(PlannedClientWrite { path: run_path, content: pretty_json(&next)?, tag: format!("run:{}", record.id), expected_before_hash: Some(request.expected_run_hash.clone()) });
     }
     if let Some(catalog) = catalog.filter(|catalog| catalog.write.is_some()) {
         if catalog.profile.read_root_slots.iter().any(|slot| !process.authority.read_root_slots.contains(slot)) {
@@ -527,6 +561,22 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
     }
     result.status = NativeRunAdoptionStatus::Planned;
     result.writes = writes;
+    let mut unique = BTreeMap::new();
+    for pin in preimages {
+        if unique.insert(pin.path.clone(), pin.sha256.clone()).is_some_and(|prior| prior != pin.sha256) {
+            return Err("native adoption dependency changed between proof reads".into());
+        }
+    }
+    let mut preimages = Vec::new();
+    for (path, expected) in unique {
+        let actual = match std::fs::read(&path) {
+            Ok(bytes) => Some(sha256_hex(&bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.to_string()),
+        };
+        if actual != expected { return Err(format!("native adoption dependency '{}' changed across inspection", path.display())); }
+        preimages.push(NativeRunAdoptionPreimage { path, sha256: expected });
+    }
     result.preimages = preimages;
     Ok(result)
 }
@@ -537,12 +587,17 @@ fn adoption_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> 
 }
 
 fn adoption_document(path: &Path, preimages: &mut Vec<NativeRunAdoptionPreimage>) -> Result<(Value, Vec<u8>), String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|e|format!("native adoption '{}': {e}", path.display()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() { return Err(format!("native adoption '{}' must be a regular file", path.display())); }
-    let bytes = std::fs::read(path).map_err(|e|e.to_string())?;
+    let bytes = adoption_bytes(path, preimages)?;
     let value = serde_json::from_slice(&bytes).map_err(|e|format!("native adoption '{}': {e}", path.display()))?;
-    preimages.push(NativeRunAdoptionPreimage { path: path.to_path_buf(), sha256: Some(sha256_hex(&bytes)) });
     Ok((value, bytes))
+}
+
+fn adoption_bytes(path: &Path, preimages: &mut Vec<NativeRunAdoptionPreimage>) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|e|format!("native adoption '{}': {e}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || path.canonicalize().map_err(|e|e.to_string())? != path { return Err(format!("native adoption '{}' must be an exact regular file", path.display())); }
+    let bytes = std::fs::read(path).map_err(|e|e.to_string())?;
+    preimages.push(NativeRunAdoptionPreimage { path: path.to_path_buf(), sha256: Some(sha256_hex(&bytes)) });
+    Ok(bytes)
 }
 
 fn retain_write(

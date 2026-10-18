@@ -121,6 +121,7 @@ async fn forward_interface_activation_arrivals(
                 interface: arrival.interface,
                 evidence: arrival.evidence,
                 verdict_tx: arrival.verdict_tx,
+                retained: arrival.retained,
             })
             .await
             .is_err()
@@ -298,7 +299,7 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
         ),
     );
     let durable_root = spine_durable_root();
-    std::fs::create_dir_all(&durable_root)?;
+    octopus_file_storage::publication::create_dir_all(&durable_root)?;
     let durable_root = std::fs::canonicalize(durable_root)?;
     std::fs::OpenOptions::new()
         .create(true)
@@ -324,7 +325,7 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
         .get("run_records_root")
         .ok_or("host.json resolved no run_records_root")?
         .to_path_buf();
-    std::fs::create_dir_all(&runs_dir)?;
+    octopus_file_storage::publication::create_dir_all(&runs_dir)?;
     let runs_dir = std::fs::canonicalize(runs_dir)?;
     let ee_instances_dir = host_roots
         .get("ee_instances_root")

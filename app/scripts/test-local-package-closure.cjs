@@ -40,10 +40,12 @@ async function assertPackMembers() {
     "mark/memory.capture.completed",
     "mark/memory.experience.admitted",
     "mark/tool.call.allowed",
+    "mark/tool.result.corresponds",
     "tool/file.write.memory_publication",
     "verifier/memory_capture_outcome",
     "verifier/memory_experience",
     "verifier/tool_call_allowed",
+    "verifier/tool_result_correspondence",
   ]);
   const pack = JSON.parse(await fs.readFile(path.join(libraryRoot, "packs", "codex.json"), "utf8"));
   assert.equal(pack.workspace_setup.home.provider_interface_id, "world_provider_codex");
@@ -61,7 +63,7 @@ async function copyBaseline(activeRegistryRoot) {
 }
 
 async function assertInterfaceImportClosure() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-interface-import-closure-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-interface-import-closure-")));
   try {
     const source = path.join(root, "source");
     const active = path.join(root, "active");
@@ -85,7 +87,7 @@ async function assertInterfaceImportClosure() {
         ...(includeOwner ? [{ registry_kind: "interface", owner: "world_code_owner" }] : []),
       ],
     });
-    const roots = { sourceRegistryRoot: source, activeRegistryRoot: active, libraryRoot: library, stateRoot: state };
+    const roots = { publication: require("./support/native-publication.cjs").nativePublication(), sourceRegistryRoot: source, activeRegistryRoot: active, libraryRoot: library, stateRoot: state };
     await writeJson(path.join(importer, "interface.json"), { id: "world_importer" });
     await writeJson(path.join(importer, "life.json"), { processes: [{ bin: "interface://world_code_owner/packages/bin/life" }] });
     await writeJson(path.join(owner, "interface.json"), { id: "world_code_owner" });
@@ -168,7 +170,7 @@ async function run(preparedExecutable) {
   await assertInterfaceImportClosure();
   if (!preparedExecutable) buildTopologyBinary();
   const executable = preparedExecutable ?? path.join(repoRoot, "target", "debug", "octopus-operator-chat-topology");
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-codex-pack-closure-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-codex-pack-closure-")));
   try {
     const binary = path.join(root, "target", "debug", "octopus-operator-chat-topology");
     await fs.mkdir(path.dirname(binary), { recursive: true });
@@ -209,6 +211,7 @@ async function run(preparedExecutable) {
     });
 
     const roots = {
+      publication: require("./support/native-publication.cjs").nativePublication(executable),
       sourceRegistryRoot,
       activeRegistryRoot,
       libraryRoot,
@@ -399,7 +402,7 @@ async function boundedAgentPresetFixture(executable) {
   const root = await fs.realpath(await fs.mkdtemp("/private/tmp/octopus-cu-preset-"));
   const home = path.join(root, "home");
   const active = path.join(home, "registry");
-  const roots = { sourceRegistryRoot, activeRegistryRoot: active, libraryRoot, stateRoot: path.join(home, "client", "package-state") };
+  const roots = { publication: require("./support/native-publication.cjs").nativePublication(executable), sourceRegistryRoot, activeRegistryRoot: active, libraryRoot, stateRoot: path.join(home, "client", "package-state") };
   const originalSpawn = childProcess.spawn;
   try {
     const catalog = await readLocalPackageCatalog(roots);
@@ -458,7 +461,7 @@ async function boundedAgentPresetFixture(executable) {
     const browserSetup = require(path.join(active, "worker_environment_kind", "browser_session", "packages", "octopus-browser-session-env", "native", "setup-host.cjs"));
     const desktopSetup = require(path.join(active, "worker_environment_kind", "desktop_session", "packages", "octopus-system-gui-env", "native", "setup-preferences.cjs"));
     let nativeHomePlan;
-    const workspace = await initializeWorkspace({ octopusHomeRoot: home, registryRoot: active, request, planOperatorSurface: async input => {
+    const workspace = await initializeWorkspace({ publication: roots.publication, octopusHomeRoot: home, registryRoot: active, request, planOperatorSurface: async input => {
       const plan = await planners.planWorkspaceHomeSurface(input);
       if (input.request.clientSurfaceRole === "home") nativeHomePlan = plan;
       return plan;
@@ -515,7 +518,7 @@ async function boundedAgentPresetFixture(executable) {
     delete add.projectKeys;
     const result = await mutateOctopusOsWorkspace(active, home, scope, add, {
       withAgentPreset: (input, operation) => planners.withWorkspaceAgentPreset(input, eeRoot, operation),
-      commitClientAuthoring: (plan) => commitClientAuthoringTransaction({ octopusHomeRoot: home, registryRoot: active, plan: { operationId: "cu_add_commit_001", label: plan.label, writes: plan.writes.map((write) => ({ destination: write.file, expectedBeforeDigest: write.beforeDigest, content: `${JSON.stringify(write.next, null, 2)}\n`, tag: write.file, publishBarrier: write.file === plan.publishBarrierPath })), removals: [] } }),
+      commitClientAuthoring: (plan) => commitClientAuthoringTransaction({ publication: roots.publication, octopusHomeRoot: home, registryRoot: active, plan: { operationId: "cu_add_commit_001", label: plan.label, writes: plan.writes.map((write) => ({ destination: write.file, expectedBeforeDigest: write.beforeDigest, content: `${JSON.stringify(write.next, null, 2)}\n`, tag: write.file, publishBarrier: write.file === plan.publishBarrierPath })), removals: [] } }),
     });
     assert.equal(result.action, "add_agent_preset");
     assert.equal((await readClientAgentCatalog(home)).document.agents.length, 2);

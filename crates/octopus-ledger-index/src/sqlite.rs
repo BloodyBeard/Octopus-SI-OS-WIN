@@ -1191,6 +1191,7 @@ mod tests {
                     run_epoch: 0,
                     class: octopus_ledger::MarkClass::Success,
                     evidence: None,
+                    arrival_seq: None,
                     verifier: octopus_descriptors::VerifierId::new("test"),
                     verifier_package: None,
                     details: serde_json::json!({}),

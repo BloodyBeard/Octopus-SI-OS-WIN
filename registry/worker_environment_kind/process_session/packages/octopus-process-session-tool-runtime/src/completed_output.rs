@@ -34,6 +34,8 @@ struct Output {
     admission: OutputAdmission,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dispatch: Option<OutputIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_id: Option<String>,
     #[serde(default)]
     callback_completed: bool,
 }
@@ -48,6 +50,18 @@ struct OutputIdentity {
 }
 
 impl OutputIdentity {
+    fn artifact(&self, ctx: &InterfaceLiftContext) -> Result<InterfaceArtifactFile, String> {
+        let artifact = capture_spawned_artifact(&self.manifest_path, &[ctx.interface_var_dir()], ctx.required_host_io_limits()?)?;
+        let (observed, artifact) = Self::capture(ctx, &artifact)?;
+        if observed != *self { return Err("retained dispatch changed its exact manifest or payload".into()); }
+        Ok(artifact)
+    }
+
+    fn delivery_id(&self, input: &InputIdentity) -> Result<String, String> {
+        let bytes = serde_json::to_vec(&("completed-output-delivery-v4", input, self)).map_err(|e| e.to_string())?;
+        Ok(ContentHash::of_bytes(&bytes).to_hex())
+    }
+
     fn capture(ctx: &InterfaceLiftContext, artifact: &InterfaceArtifactFile) -> Result<(Self, InterfaceArtifactFile), String> {
         let limits = ctx.required_host_io_limits()?;
         let artifact = capture_spawned_artifact(artifact.manifest_path(), &[ctx.interface_var_dir()], limits)?;
@@ -92,17 +106,8 @@ impl Output {
 enum OutputAdmission {
     Unattempted,
     AwaitingVerdict { ledger_offset: u64 },
+    Retained { scope_seq: Option<u64> },
     Settled { verdict: DeliveryVerdict },
-}
-
-fn retryable_admission(verdict: &DeliveryVerdict) -> bool {
-    match verdict {
-        DeliveryVerdict::Refused { reason: RefusedReason::RegistryUnstable, .. } => true,
-        DeliveryVerdict::Refused { reason: RefusedReason::StaleEpoch, detail } => {
-            detail.get("reason_detail").and_then(serde_json::Value::as_str) == Some("arrival_target_changed")
-        }
-        _ => false,
-    }
 }
 
 enum RecoveryProgress {
@@ -154,23 +159,39 @@ fn read_receipt(path: &Path, maximum: u64) -> Result<CompletedOutputs, String> {
     file.take(maximum.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() as u64 > maximum { return Err("completed-output receipt exceeds the host control-frame ceiling".into()); }
     let mut receipt: CompletedOutputs = serde_json::from_slice(&bytes).map_err(|e| format!("invalid completed-output receipt: {e}"))?;
-    if !matches!(receipt.schema_version, 2 | 3) || receipt.outputs.is_empty()
+    if !matches!(receipt.schema_version, 2 | 3 | 4) || receipt.outputs.is_empty()
         || receipt_name(&receipt)? != path.file_name().ok_or("receipt has no filename")?
     {
         return Err("completed-output receipt has an invalid version, source or output set".into());
     }
     for output in &mut receipt.outputs {
+        if receipt.schema_version < 4 && (output.delivery_id.is_some() || matches!(output.admission, OutputAdmission::Retained { .. })) {
+            return Err("legacy completed-output receipt carries retained delivery state from another schema".into());
+        }
         if receipt.schema_version == 2 {
             if output.dispatch.is_some() || output.callback_completed {
                 return Err("legacy completed-output receipt carries dispatch state from another schema".into());
             }
             output.callback_completed = matches!(output.admission, OutputAdmission::Settled { .. });
-        } else if matches!(output.admission, OutputAdmission::AwaitingVerdict { .. }) && output.dispatch.is_none()
+        } else if matches!(output.admission, OutputAdmission::AwaitingVerdict { .. } | OutputAdmission::Retained { .. }) && output.dispatch.is_none()
             || matches!(output.admission, OutputAdmission::Unattempted) && output.dispatch.is_some()
             || matches!(output.admission, OutputAdmission::Settled { .. }) && output.dispatch.is_none() && !output.callback_completed
             || output.callback_completed && !matches!(output.admission, OutputAdmission::Settled { .. })
         {
             return Err("completed-output receipt has inconsistent dispatch state".into());
+        }
+        if receipt.schema_version == 4 {
+            match &output.admission {
+                OutputAdmission::Unattempted if output.delivery_id.is_none() => {},
+                OutputAdmission::Retained { .. } | OutputAdmission::Settled { .. } if output.delivery_id.is_some() => {
+                    let identity = output.dispatch.as_ref().ok_or("retained delivery has no exact dispatch identity")?;
+                    if output.delivery_id.as_deref() != Some(identity.delivery_id(&receipt.input)?.as_str()) {
+                        return Err("completed-output retained delivery identity differs from its exact input and dispatch".into());
+                    }
+                }
+                OutputAdmission::Settled { verdict } if !verdict.awaits_current_source() => {},
+                _ => return Err("completed-output receipt has inconsistent retained delivery state".into()),
+            }
         }
     }
     Ok(receipt)
@@ -257,11 +278,11 @@ impl CompletedOutputs {
                 manifest_hash: ContentHash::of_bytes(&captured.manifest_bytes),
                 payload_hash: ContentHash::of_bytes(&captured.payload_bytes),
                 admission: OutputAdmission::Unattempted,
-                dispatch: None, callback_completed: false,
+                dispatch: None, delivery_id: None, callback_completed: false,
             });
         }
         let receipt = Self {
-            schema_version: 3, input: InputIdentity::capture(input),
+            schema_version: 4, input: InputIdentity::capture(input),
             formation: input.worker_environment.clone(), generation: completion.generation.clone(),
             invocation_manifest: completion.invocation_manifest.clone(), outputs,
         };
@@ -315,6 +336,10 @@ impl CompletedOutputs {
         if let Some(source) = source.as_mut() { source.formation = self.formation.clone(); }
         if recover {
             let source = source.as_ref().ok_or("completed-output recovery requires the original admitted source")?;
+            ctx.with_source_movement(source.movement.clone()).source_movement(&source.envelope)?;
+        }
+        if self.schema_version < 4 {
+            let source = source.as_ref().ok_or("legacy completed-output recovery requires the original admitted source")?;
             let mut watch = None;
             loop {
                 if ctx.cancel.is_cancelled() { return Err("completed-output ledger recovery was cancelled; receipt remains retained".into()); }
@@ -342,17 +367,31 @@ impl CompletedOutputs {
                     }
                 }
             }
-            self.schema_version = 3;
-            self.save(ctx)?;
+            if self.outputs.iter().any(|output| matches!(output.admission, OutputAdmission::Unattempted)) {
+                self.schema_version = 4;
+                self.save(ctx)?;
+            }
         }
         let mut refused = None;
         for index in 0..self.outputs.len() {
             loop {
                 match &self.outputs[index].admission {
+                    OutputAdmission::Settled { verdict } if verdict.awaits_current_source() => {
+                        if self.outputs[index].delivery_id.is_some() {
+                            self.outputs[index].admission = OutputAdmission::Retained { scope_seq: None };
+                            self.outputs[index].callback_completed = false;
+                            self.save(ctx)?;
+                        }
+                        return Err("completed output remains retained while its current source is unresolved".into());
+                    }
+                    OutputAdmission::Retained { .. } => {
+                        self.resume_retained(ctx, index).await?;
+                        continue;
+                    }
                     OutputAdmission::Settled { verdict: DeliveryVerdict::Admitted { .. } }
                         if callback.is_none() || self.outputs[index].callback_completed => break,
-                    OutputAdmission::Settled { verdict: verdict @ DeliveryVerdict::Refused { reason, detail } }
-                        if !retryable_admission(verdict) && (callback.is_none() || self.outputs[index].callback_completed) => {
+                    OutputAdmission::Settled { verdict: DeliveryVerdict::Refused { reason, detail } }
+                        if callback.is_none() || self.outputs[index].callback_completed => {
                         refused.get_or_insert((*reason, detail.clone()));
                         break;
                     }
@@ -369,15 +408,8 @@ impl CompletedOutputs {
                 if !matches!(&self.outputs[index].admission, OutputAdmission::Settled { verdict: saved } if *saved == verdict) {
                     return Err("completed-output callback returned without the exact tracked dispatch verdict".into());
                 }
-                let retry = retryable_admission(&verdict);
                 self.outputs[index].callback_completed = true;
                 self.save(ctx)?;
-                if retry {
-                    tokio::select! {
-                        _ = ctx.cancel.cancelled() => return Err("completed output remains retained while admission is unavailable".into()),
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
-                    }
-                }
             }
         }
         Ok(match refused {
@@ -402,39 +434,101 @@ impl CompletedOutputs {
                 }
                 match &output.admission {
                     OutputAdmission::AwaitingVerdict { .. } => return Err("completed output admission has no exact verdict; retained without retry".into()),
-                    OutputAdmission::Settled { verdict } if !retryable_admission(verdict) => return Ok(verdict.clone()),
+                    OutputAdmission::Settled { verdict } if verdict.awaits_current_source() => {
+                        return Err("completed output remains retained while its current source is unresolved".into());
+                    }
+                    OutputAdmission::Settled { verdict } => return Ok(verdict.clone()),
                     _ => {}
                 }
                 if owner_ctx.cancel.is_cancelled() { return Err("completed output remains retained while admission is cancelled".into()); }
                 identity.sync(&artifact, &owner_ctx)?;
-                let (_, ledger_offset) = ledger_snapshot(&owner_ctx)?;
-                receipt.schema_version = 3;
+                let delivery_id = identity.delivery_id(&receipt.input)?;
+                receipt.schema_version = 4;
                 let output = &mut receipt.outputs[index];
                 output.dispatch = Some(identity);
+                if output.delivery_id.as_ref().is_some_and(|saved| saved != &delivery_id) {
+                    return Err("completed-output dispatch changed its retained delivery identity".into());
+                }
+                output.delivery_id = Some(delivery_id.clone());
                 output.callback_completed = false;
-                output.admission = OutputAdmission::AwaitingVerdict { ledger_offset };
+                if matches!(output.admission, OutputAdmission::Unattempted) {
+                    output.admission = OutputAdmission::Retained { scope_seq: None };
+                }
                 receipt.save(&owner_ctx)?;
                 drop(receipt);
-                let verdict = tokio::select! {
+                let delivery = tokio::select! {
                     biased;
                     _ = owner_ctx.cancel.cancelled() => return Err("completed output remains retained while admission is cancelled".into()),
-                    verdict = ctx.hand_arrival(artifact, Vec::new()) => verdict?,
+                    delivery = ctx.hand_arrival_retained(artifact, Vec::new(), &delivery_id) => delivery?,
                 };
                 let mut receipt = retained.lock().await;
-                receipt.outputs[index].admission = OutputAdmission::Settled { verdict: verdict.clone() };
-                receipt.save(&owner_ctx)?;
-                Ok(verdict)
+                receipt.record_delivery(&owner_ctx, index, delivery)
             })
         })
     }
 
+    async fn resume_retained(&mut self, ctx: &InterfaceLiftContext, index: usize) -> Result<DeliveryVerdict, String> {
+        let output = &self.outputs[index];
+        let identity = output.dispatch.as_ref().ok_or("retained delivery has no exact dispatch identity")?;
+        let delivery_id = output.delivery_id.as_ref().ok_or("retained delivery has no retry identity")?;
+        if *delivery_id != identity.delivery_id(&self.input)? {
+            return Err("completed-output retained delivery identity changed".into());
+        }
+        let artifact = identity.artifact(ctx)?;
+        let delivery = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => return Err("completed output remains retained while admission is cancelled".into()),
+            delivery = ctx.hand_arrival_retained(artifact, Vec::new(), delivery_id) => delivery?,
+        };
+        self.record_delivery(ctx, index, delivery)
+    }
+
+    fn record_delivery(&mut self, ctx: &InterfaceLiftContext, index: usize, delivery: octopus_ledger::ArtifactDelivery) -> Result<DeliveryVerdict, String> {
+        if matches!(&delivery, octopus_ledger::ArtifactDelivery::Complete { verdict } if verdict.awaits_current_source()) {
+            return Err("completed output remains retained while its current source is unresolved".into());
+        }
+        let output = &mut self.outputs[index];
+        match (&output.admission, &delivery) {
+            (OutputAdmission::Retained { scope_seq: prior }, octopus_ledger::ArtifactDelivery::Pending { scope_seq }) => {
+                if prior.is_some_and(|prior| prior != *scope_seq) {
+                    return Err("completed-output retained delivery changed its original candidate scope".into());
+                }
+                output.admission = OutputAdmission::Retained { scope_seq: Some(*scope_seq) };
+            }
+            (OutputAdmission::Retained { .. }, octopus_ledger::ArtifactDelivery::Complete { verdict }) => {
+                output.admission = OutputAdmission::Settled { verdict: verdict.clone() };
+            }
+            (OutputAdmission::Settled { verdict: saved }, octopus_ledger::ArtifactDelivery::Complete { verdict }) if saved == verdict => {},
+            _ => return Err("completed-output retained delivery returned conflicting completion evidence".into()),
+        }
+        self.save(ctx)?;
+        match delivery {
+            octopus_ledger::ArtifactDelivery::Complete { verdict } => Ok(verdict),
+            octopus_ledger::ArtifactDelivery::Pending { scope_seq } => Err(format!(
+                "completed output remains retained while original delivery scope {scope_seq} has unresolved edges"
+            )),
+        }
+    }
+
     fn recover_admissions(&mut self, ctx: &InterfaceLiftContext, source: &ToolDoorOutputSource) -> Result<RecoveryProgress, String> {
-        let expected = ctx.with_source_movement(source.movement.clone());
-        expected.source_movement(&source.envelope)?;
-        let runtime = source.envelope.runtime().map_err(|e| e.to_string())?;
+        ctx.with_source_movement(source.movement.clone()).source_movement(&source.envelope)?;
+        if self.schema_version >= 4 { return Err("retained delivery must recover through its original runtime scope".into()); }
+        let mut indices = Vec::new();
+        for (index, output) in self.outputs.iter().enumerate() {
+            match &output.admission {
+                OutputAdmission::AwaitingVerdict { .. } if self.schema_version == 2 && output.dispatch.is_none() => indices.push(index),
+                OutputAdmission::AwaitingVerdict { .. } => return Err("legacy completed output has no exact verdict for its original fanout; retained without retry".into()),
+                OutputAdmission::Settled { verdict } if verdict.awaits_current_source() => {
+                    return Err("legacy completed output has no exact verdict for its original fanout; retained without retry".into());
+                }
+                OutputAdmission::Retained { .. } => return Err("legacy completed output carries a retained scope from another schema".into()),
+                _ => {},
+            }
+        }
+        if indices.is_empty() { return Ok(RecoveryProgress::Ready); }
         let limits = ctx.required_host_io_limits()?;
         let (mut reader, ledger_len) = ledger_snapshot(ctx)?;
-        if self.outputs.iter().any(|output| matches!(output.admission,
+        if indices.iter().any(|index| matches!(self.outputs[*index].admission,
             OutputAdmission::AwaitingVerdict { ledger_offset } if ledger_offset > ledger_len)) {
             return Err("completed-output ledger was truncated below an attempted admission".into());
         }
@@ -443,9 +537,6 @@ impl CompletedOutputs {
         let mut offset = 0;
         let mut partial_tail = false;
         let mut source_seen = false;
-        let mut unresolved = BTreeSet::new();
-        let mut admitted = BTreeMap::new();
-        let mut refused = BTreeMap::<usize, DeliveryVerdict>::new();
         while offset < ledger_len {
             let start = offset;
             let read = read_bounded_tool_door_ledger_line(&mut reader, &mut line, limits.max_control_frame_bytes)?;
@@ -463,93 +554,24 @@ impl CompletedOutputs {
             }
             if route.seq.0 <= self.input.sequence || route.from != Endpoint::Interface(ctx.interface.clone()) { continue; }
             let movement = decode_tool_door_recovery_movement(&ctx.movements_path, row, sequence - 1, limits.max_control_frame_bytes)?;
-            let Some(index) = self.outputs.iter().position(|output| {
+            if indices.iter().any(|index| {
+                let output = &self.outputs[*index];
                 let OutputAdmission::AwaitingVerdict { ledger_offset } = output.admission else { return false; };
-                if start < ledger_offset { return false; }
                 let identity = output.admission_identity();
-                movement.artifact.as_ref().is_some_and(|artifact| artifact.content == identity.manifest_hash
-                    && artifact.id.as_str() == format!("{}:{}", identity.label, identity.manifest_hash.to_hex()))
-            }) else { continue; };
-            if movement.kind == MovementKind::DeliveryRefused {
-                let OutputAdmission::AwaitingVerdict { ledger_offset } = self.outputs[index].admission else { continue; };
-                if start < ledger_offset { continue; }
-                let Some(octopus_ledger::MovementMetadata::Delivery(delivery)) = movement.invocation_metadata.as_ref() else {
-                    return Err("retained output refusal has no typed delivery verdict".into());
-                };
-                if delivery.runtime.as_ref().is_some_and(|observed| observed.run != runtime.run
-                    || observed.ee != runtime.ee || observed.worker != runtime.worker || observed.interface != ctx.interface)
-                    || delivery.source_movement_seq.is_some_and(|sequence| sequence != source.movement.seq.0)
-                { continue; }
-                let DeliveryVerdict::Refused { reason, .. } = &delivery.delivery_verdict else {
-                    return Err("retained output refusal carries an admitted verdict".into());
-                };
-                if refused.get(&index).is_some_and(|prior| !matches!(prior, DeliveryVerdict::Refused { reason: prior_reason, .. } if prior_reason == reason)
-                    || retryable_admission(prior) != retryable_admission(&delivery.delivery_verdict)) {
-                    return Err("retained output attempt has conflicting refused verdicts".into());
-                }
-                refused.entry(index).or_insert_with(|| delivery.delivery_verdict.clone());
-                continue;
-            }
-            let Some(invocation) = movement.invocation_metadata.as_ref().and_then(|m| m.invocation()) else { continue; };
-            let Some(observed) = invocation.runtime() else { return Err("retained output admission has no runtime coordinate".into()); };
-            if observed.run != runtime.run { continue; }
-            let interface_matches = match movement.kind {
-                MovementKind::InterfaceArrival => observed.interface == ctx.interface,
-                MovementKind::InterfaceOutbound => movement.to == Endpoint::Interface(observed.interface.clone()),
-                _ => true,
-            };
-            if observed.ee != runtime.ee || observed.worker != runtime.worker || !interface_matches {
-                return Err("retained output admission changed its original run/worker/door scope".into());
-            }
-            match movement.kind {
-                MovementKind::InterfaceOutbound => {
-                    admitted.insert(index, DeliveryVerdict::Admitted { seq: movement.seq.0 });
-                    unresolved.remove(&index);
-                }
-                MovementKind::InterfaceArrival => {
-                    if invocation.verification_failure.is_none() && invocation.required_verified_artifacts.is_empty()
-                        && invocation.checkpoint_admission.as_ref().is_some_and(|admission| admission.complete)
-                    {
-                        admitted.insert(index, DeliveryVerdict::Admitted { seq: movement.seq.0 });
-                    } else { unresolved.insert(index); }
-                }
-                _ => {}
+                start >= ledger_offset && movement.artifact.as_ref().is_some_and(|artifact| {
+                    artifact.content == identity.manifest_hash
+                        && artifact.id.as_str() == format!("{}:{}", identity.label, identity.manifest_hash.to_hex())
+                })
+            }) {
+                return Err("legacy submitted output has no retained original candidate scope; an aggregate edge verdict cannot complete its fanout".into());
             }
         }
         let observed_length = reader.get_ref().get_ref().metadata().map_err(|e| e.to_string())?.len();
-        if observed_length < ledger_len {
-            return Err("completed-output ledger was truncated during recovery".into());
-        }
+        if observed_length < ledger_len { return Err("completed-output ledger was truncated during recovery".into()); }
         if !source_seen { return Err("completed-output recovery has no exact admitted input".into()); }
-        let mut pending = false;
-        let mut legacy_unsubmitted = Vec::new();
-        for (index, output) in self.outputs.iter_mut().enumerate() {
-            if let Some(verdict) = admitted.remove(&index) {
-                output.dispatch = Some(output.admission_identity());
-                output.admission = OutputAdmission::Settled { verdict };
-            } else if unresolved.contains(&index) {
-                if !partial_tail { return Err("retained output has an arrival without proven completed admission".into()); }
-                pending = true;
-            } else if let Some(verdict) = refused.remove(&index) {
-                if partial_tail { pending = true; }
-                else {
-                    output.dispatch = Some(output.admission_identity());
-                    output.admission = OutputAdmission::Settled { verdict };
-                }
-            } else if matches!(output.admission, OutputAdmission::AwaitingVerdict { .. }) {
-                if partial_tail { pending = true; }
-                else if self.schema_version == 2 && output.dispatch.is_none() { legacy_unsubmitted.push(index); }
-                else { return Err("completed output admission has no exact verdict; retained without retry".into()); }
-            }
-        }
-        if pending { return Ok(RecoveryProgress::AwaitingLedgerTail); }
-        if !legacy_unsubmitted.is_empty() {
-            if partial_tail || observed_length != ledger_len {
-                return Err("legacy completed-output ledger is not a stable complete proof".into());
-            }
-            return Ok(RecoveryProgress::LegacyUnsubmitted { indices: legacy_unsubmitted, ledger_length: ledger_len });
-        }
-        Ok(RecoveryProgress::Ready)
+        if partial_tail { return Ok(RecoveryProgress::AwaitingLedgerTail); }
+        if observed_length != ledger_len { return Err("legacy completed-output ledger is not a stable complete proof".into()); }
+        Ok(RecoveryProgress::LegacyUnsubmitted { indices, ledger_length: ledger_len })
     }
 }
 
@@ -682,10 +704,11 @@ impl PreparedToolOutputRecovery {
             let mut planned = self.receipt.clone();
             let mut observed = existing;
             for receipt in [&mut planned, &mut observed] {
-                receipt.schema_version = 3;
+                receipt.schema_version = 4;
                 for output in &mut receipt.outputs {
                     output.admission = OutputAdmission::Unattempted;
                     output.dispatch = None;
+                    output.delivery_id = None;
                     output.callback_completed = false;
                 }
             }
@@ -766,11 +789,11 @@ pub fn prepare_tool_output_recovery(
         invocation_manifest_hash: ContentHash::of_bytes(&input_file.read_manifest_bounded(limits.max_manifest_bytes)
             .map_err(|e| e.to_string())?.manifest_bytes),
         receipt: CompletedOutputs {
-            schema_version: 3, input: InputIdentity::capture(&input), formation: Some(record.formation),
+            schema_version: 2, input: InputIdentity::capture(&input), formation: Some(record.formation),
             generation: generation.to_path_buf(), invocation_manifest: invocation_manifest.to_path_buf(),
             outputs: vec![Output { manifest_path: result_manifest.to_path_buf(), label: captured.manifest.label,
                 manifest_hash: ContentHash::of_bytes(&captured.manifest_bytes), payload_hash: ContentHash::of_bytes(&captured.payload_bytes),
-                admission: OutputAdmission::Unattempted, dispatch: None, callback_completed: false }],
+                admission: OutputAdmission::AwaitingVerdict { ledger_offset: 0 }, dispatch: None, delivery_id: None, callback_completed: false }],
         },
     })
 }

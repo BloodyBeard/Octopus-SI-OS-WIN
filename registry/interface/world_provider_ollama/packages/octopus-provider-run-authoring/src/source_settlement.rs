@@ -205,7 +205,7 @@ fn validate_input_rows(
             &initial_bindings
         },
     )?;
-    if publication {
+    if publication && !result_inputs::enabled(config) {
         replace_verified_input_checkpoints(root, config, config, &before.id, &prefix, &bindings)?;
     }
     let expected =
@@ -570,6 +570,7 @@ impl ProviderOutputHandoff {
         };
         let chain =
             stable_run_observation(&self.run_path, current, limits.max_payload_bytes, || {
+                if bytes == current { return Ok(Vec::new()); }
                 let start = concurrent_writer_evidence_start(
                     &evidence,
                     &self.run_path,
@@ -578,14 +579,12 @@ impl ProviderOutputHandoff {
                     self.source_movement_seq,
                     &writers,
                 )?;
-                checked_run_file_chain_state(
-                    &evidence,
-                    &self.run_path,
-                    &bytes,
-                    current,
-                    start,
-                    &writers,
-                )
+                let mut reader = FileCheckedRunReader::open(&evidence, Some(start))?
+                    .with_provider_context(&self.ctx);
+                let scan_start = reader.next_sequence();
+                checked_run_file_chain_with_reader(&mut reader, &self.run_path, &bytes,
+                    CheckedRunTarget::Snapshot(current), start, scan_start, None, &writers,
+                    &[], Some(&config), None)
             })
             .map_err(String::from)?;
         for transition in &chain {

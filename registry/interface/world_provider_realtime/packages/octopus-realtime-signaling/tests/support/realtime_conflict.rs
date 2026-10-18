@@ -270,6 +270,7 @@ fn admit_call(
             run_epoch: 0,
             class: MarkClass::Success,
             evidence: Some(reference.clone()),
+            arrival_seq: None,
             verifier: VerifierId::new(required["verifier"].as_str().unwrap()),
             verifier_package: Some(VerifierPackagePin {
                 descriptor_content: ContentHash::of_bytes(b"fixture"),

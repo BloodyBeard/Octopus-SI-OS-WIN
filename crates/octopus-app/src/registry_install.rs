@@ -3,6 +3,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
+use octopus_file_storage::publication::{
+    self, DigestAlgorithm, PublicationOutcome, PublicationReceipt, WriteGuard,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -91,6 +94,9 @@ pub enum RegistryInstallError {
     UnsupportedEntry {
         path: PathBuf,
     },
+    PublicationMetadata {
+        path: PathBuf,
+    },
     ReservedSourcePath {
         path: PathBuf,
     },
@@ -136,6 +142,9 @@ pub enum RegistryInstallError {
     RemoveFile {
         path: PathBuf,
         source: std::io::Error,
+    },
+    Publication {
+        receipt: PublicationReceipt,
     },
     EncodeManifest {
         path: PathBuf,
@@ -183,6 +192,11 @@ impl std::fmt::Display for RegistryInstallError {
             Self::UnsupportedEntry { path } => write!(
                 f,
                 "registry entry '{}' is neither a regular file nor a directory; links and special files are not installable",
+                path.display()
+            ),
+            Self::PublicationMetadata { path } => write!(
+                f,
+                "reserved publication metadata '{}' must be a real private directory",
                 path.display()
             ),
             Self::ReservedSourcePath { path } => write!(
@@ -259,6 +273,14 @@ impl std::fmt::Display for RegistryInstallError {
                 "registry installer cannot remove '{}': {source}",
                 path.display()
             ),
+            Self::Publication { receipt } => write!(
+                f,
+                "registry publication '{}' for '{}' is {:?}: {}",
+                receipt.operation_id,
+                receipt.path.display(),
+                receipt.outcome,
+                receipt.error.as_deref().unwrap_or("no final applied receipt")
+            ),
             Self::EncodeManifest { path, source } => write!(
                 f,
                 "registry install manifest '{}' cannot be encoded: {source}",
@@ -280,27 +302,41 @@ enum TargetEntry {
 
 #[derive(Debug)]
 enum InstallOperation {
-    Copy { relative: String, replacing: bool },
-    Remove { relative: String },
+    Copy {
+        relative: String,
+        previous: Option<InstalledFile>,
+    },
+    Remove {
+        relative: String,
+        previous: InstalledFile,
+    },
 }
 
 #[derive(Debug)]
 enum PreparedInstallOperation {
     Copy {
         relative: String,
-        replacing: bool,
-        staged: PathBuf,
+        previous: Option<InstalledFile>,
+        copy: PreparedCopy,
     },
     Remove {
         relative: String,
+        previous: InstalledFile,
+        operation_id: String,
     },
 }
 
-impl Drop for PreparedInstallOperation {
+#[derive(Debug)]
+struct PreparedCopy {
+    staged: PathBuf,
+    installed: InstalledFile,
+    bytes: u64,
+    operation_id: String,
+}
+
+impl Drop for PreparedCopy {
     fn drop(&mut self) {
-        if let Self::Copy { staged, .. } = self {
-            let _ = std::fs::remove_file(staged);
-        }
+        let _ = std::fs::remove_file(&self.staged);
     }
 }
 
@@ -327,13 +363,19 @@ pub fn install_registry_with_progress(
             path: source_registry,
         });
     }
-    std::fs::create_dir_all(active_registry).map_err(|source| {
+    let active_registry = std::path::absolute(active_registry).map_err(|source| {
         RegistryInstallError::ActiveRoot {
             path: active_registry.to_path_buf(),
             source,
         }
     })?;
-    let active_registry = std::fs::canonicalize(active_registry).map_err(|source| {
+    publication::create_dir_all(&active_registry).map_err(|source| {
+        RegistryInstallError::ActiveRoot {
+            path: active_registry.to_path_buf(),
+            source,
+        }
+    })?;
+    let active_registry = std::fs::canonicalize(&active_registry).map_err(|source| {
         RegistryInstallError::ActiveRoot {
             path: active_registry.to_path_buf(),
             source,
@@ -362,7 +404,7 @@ pub fn install_registry_with_progress(
     });
     let manifest_path = active_registry.join(INSTALL_MANIFEST_FILE);
     let previous = load_manifest(&manifest_path)?;
-    if let Some(previous) = &previous {
+    if let Some((previous, _)) = &previous {
         if !previous.source_id.is_empty() && previous.source_id != source_id {
             return Err(RegistryInstallError::SourceChanged {
                 manifest: manifest_path,
@@ -374,7 +416,7 @@ pub fn install_registry_with_progress(
 
     let previous_files = previous
         .as_ref()
-        .map(|manifest| &manifest.files)
+        .map(|(manifest, _)| &manifest.files)
         .cloned()
         .unwrap_or_default();
     for relative in previous_files.keys() {
@@ -390,7 +432,7 @@ pub fn install_registry_with_progress(
             None => match target_entry {
                 TargetEntry::Missing => operations.push(InstallOperation::Copy {
                     relative: relative.clone(),
-                    replacing: false,
+                    previous: None,
                 }),
                 TargetEntry::File(existing) if existing == *source_file => {}
                 TargetEntry::File(_) => {
@@ -423,7 +465,7 @@ pub fn install_registry_with_progress(
                     TargetEntry::File(existing) if existing == *previous_file => {
                         operations.push(InstallOperation::Copy {
                             relative: relative.clone(),
-                            replacing: true,
+                            previous: Some(existing),
                         });
                     }
                     TargetEntry::File(existing) if existing == *source_file => {}
@@ -462,6 +504,7 @@ pub fn install_registry_with_progress(
             TargetEntry::File(existing) if existing == *previous_file => {
                 operations.push(InstallOperation::Remove {
                     relative: relative.clone(),
+                    previous: existing,
                 });
             }
             TargetEntry::File(_) => {
@@ -485,10 +528,7 @@ pub fn install_registry_with_progress(
     let mut prepared = Vec::with_capacity(operations.len());
     for operation in operations {
         let result = match operation {
-            InstallOperation::Copy {
-                relative,
-                replacing,
-            } => {
+            InstallOperation::Copy { relative, previous } => {
                 let relative_path = safe_relative_path(&relative)?;
                 let expected =
                     source_files
@@ -503,14 +543,18 @@ pub fn install_registry_with_progress(
                     &active_registry.join(&relative_path),
                     expected,
                 )
-                .map(|staged| PreparedInstallOperation::Copy {
+                .map(|copy| PreparedInstallOperation::Copy {
                     relative,
-                    replacing,
-                    staged,
+                    previous,
+                    copy,
                 })
             }
-            InstallOperation::Remove { relative } => {
-                Ok(PreparedInstallOperation::Remove { relative })
+            InstallOperation::Remove { relative, previous } => {
+                Ok(PreparedInstallOperation::Remove {
+                    relative,
+                    previous,
+                    operation_id: format!("registry-install:{}", uuid::Uuid::new_v4().simple()),
+                })
             }
         };
         match result {
@@ -528,21 +572,25 @@ pub fn install_registry_with_progress(
         let relative = match operation {
             PreparedInstallOperation::Copy {
                 relative,
-                replacing,
-                staged,
+                previous,
+                copy,
             } => {
                 let target = active_registry.join(safe_relative_path(relative)?);
-                commit_prepared_copy(staged, &target)?;
-                if *replacing {
+                commit_prepared_copy(copy, &target, previous.as_ref())?;
+                if previous.is_some() {
                     updated += 1;
                 } else {
                     copied += 1;
                 }
                 relative
             }
-            PreparedInstallOperation::Remove { relative } => {
+            PreparedInstallOperation::Remove {
+                relative,
+                previous,
+                operation_id,
+            } => {
                 let target = active_registry.join(safe_relative_path(relative)?);
-                remove_installed_file(&target)?;
+                remove_installed_file(&target, previous, operation_id)?;
                 removed += 1;
                 relative
             }
@@ -560,7 +608,11 @@ pub fn install_registry_with_progress(
         source_registry,
         files: source_files,
     };
-    write_manifest(&manifest_path, &manifest)?;
+    write_manifest(
+        &manifest_path,
+        &manifest,
+        previous.as_ref().map(|(_, file)| file),
+    )?;
     Ok(InstalledRegistry {
         root: active_registry,
         copied,
@@ -585,6 +637,9 @@ fn collect_source_kind_roots(source_registry: &Path) -> Result<Vec<PathBuf>, Reg
     let mut roots = Vec::new();
     for entry in entries {
         let path = entry.path();
+        if is_publication_metadata(&path)? {
+            continue;
+        }
         if entry
             .file_type()
             .map_err(|source| RegistryInstallError::EntryType {
@@ -605,10 +660,30 @@ fn materialize_source_kind_roots(
 ) -> Result<(), RegistryInstallError> {
     for root in roots {
         let path = active_registry.join(root);
-        std::fs::create_dir_all(&path)
+        publication::create_dir_all(&path)
             .map_err(|source| RegistryInstallError::ActiveRoot { path, source })?;
     }
-    sync_directory(active_registry)
+    Ok(())
+}
+
+fn is_publication_metadata(path: &Path) -> Result<bool, RegistryInstallError> {
+    if path
+        .file_name()
+        .is_none_or(|name| name != publication::COORDINATION_DIRECTORY)
+    {
+        return Ok(false);
+    }
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|source| RegistryInstallError::EntryType {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !metadata.is_dir() || file_mode(&metadata).is_some_and(|mode| mode & 0o077 != 0) {
+        return Err(RegistryInstallError::PublicationMetadata {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(true)
 }
 
 fn collect_source_files(
@@ -637,6 +712,9 @@ fn collect_source_directory(
     entries.sort_by_key(std::fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
+        if is_publication_metadata(&path)? {
+            continue;
+        }
         let file_type = entry
             .file_type()
             .map_err(|source| RegistryInstallError::EntryType {
@@ -678,6 +756,9 @@ fn validate_tree_entries(
             source,
         })?;
         let path = entry.path();
+        if is_publication_metadata(&path)? {
+            continue;
+        }
         let file_type = entry
             .file_type()
             .map_err(|source| RegistryInstallError::EntryType {
@@ -740,6 +821,11 @@ fn safe_relative_path(relative: &str) -> Result<PathBuf, RegistryInstallError> {
                 path: relative.to_string(),
             });
         };
+        if part == publication::COORDINATION_DIRECTORY {
+            return Err(RegistryInstallError::UnsafeManifestPath {
+                path: relative.to_string(),
+            });
+        }
         output.push(part);
     }
     if output.as_os_str().is_empty() {
@@ -810,9 +896,11 @@ fn file_mode(_metadata: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-fn load_manifest(path: &Path) -> Result<Option<InstallManifest>, RegistryInstallError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+fn load_manifest(
+    path: &Path,
+) -> Result<Option<(InstallManifest, InstalledFile)>, RegistryInstallError> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(RegistryInstallError::ReadFile {
@@ -821,6 +909,19 @@ fn load_manifest(path: &Path) -> Result<Option<InstallManifest>, RegistryInstall
             });
         }
     };
+    let metadata = file
+        .metadata()
+        .map_err(|source| RegistryInstallError::EntryType {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|source| RegistryInstallError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let previous = installed_bytes(&bytes, &metadata);
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|source| RegistryInstallError::ManifestParse {
             path: path.to_path_buf(),
@@ -832,12 +933,12 @@ fn load_manifest(path: &Path) -> Result<Option<InstallManifest>, RegistryInstall
         .and_then(|value| u32::try_from(value).ok())
         .unwrap_or(0);
     match version {
-        INSTALL_MANIFEST_VERSION => serde_json::from_value(value).map(Some).map_err(|source| {
-            RegistryInstallError::ManifestParse {
+        INSTALL_MANIFEST_VERSION => serde_json::from_value(value)
+            .map(|manifest| Some((manifest, previous)))
+            .map_err(|source| RegistryInstallError::ManifestParse {
                 path: path.to_path_buf(),
                 source,
-            }
-        }),
+            }),
         1 => {
             let legacy: LegacyInstallManifest =
                 serde_json::from_value(value).map_err(|source| {
@@ -846,12 +947,15 @@ fn load_manifest(path: &Path) -> Result<Option<InstallManifest>, RegistryInstall
                         source,
                     }
                 })?;
-            Ok(Some(InstallManifest {
-                schema_version: INSTALL_MANIFEST_VERSION,
-                source_id: String::new(),
-                source_registry: legacy.source_registry,
-                files: legacy.files,
-            }))
+            Ok(Some((
+                InstallManifest {
+                    schema_version: INSTALL_MANIFEST_VERSION,
+                    source_id: String::new(),
+                    source_registry: legacy.source_registry,
+                    files: legacy.files,
+                },
+                previous,
+            )))
         }
         version => Err(RegistryInstallError::ManifestVersion {
             path: path.to_path_buf(),
@@ -899,16 +1003,7 @@ fn prepare_copy(
     source: &Path,
     target: &Path,
     expected: &InstalledFile,
-) -> Result<PathBuf, RegistryInstallError> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| RegistryInstallError::WriteFile {
-            path: target.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target has no parent directory",
-            ),
-        })?;
+) -> Result<PreparedCopy, RegistryInstallError> {
     let mut source_file =
         File::open(source).map_err(|source_error| RegistryInstallError::ReadFile {
             path: source.to_path_buf(),
@@ -938,32 +1033,70 @@ fn prepare_copy(
             actual_mode: actual.mode,
         });
     }
-    std::fs::create_dir_all(parent).map_err(|source| RegistryInstallError::WriteFile {
+    prepare_bytes(target, &bytes, Some(&source_metadata))
+}
+
+fn prepare_bytes(
+    target: &Path,
+    bytes: &[u8],
+    source_metadata: Option<&std::fs::Metadata>,
+) -> Result<PreparedCopy, RegistryInstallError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| RegistryInstallError::WriteFile {
+            path: target.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "target has no parent directory",
+            ),
+        })?;
+    publication::create_dir_all(parent).map_err(|source| RegistryInstallError::WriteFile {
         path: parent.to_path_buf(),
         source,
     })?;
-    let temp = temp_path(target);
+    let attempt = uuid::Uuid::new_v4().simple().to_string();
+    let temp = temp_path(target, &attempt);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|source| RegistryInstallError::WriteFile {
+            path: temp.clone(),
+            source,
+        })?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
+        file.write_all(bytes)
             .map_err(|source| RegistryInstallError::WriteFile {
                 path: temp.clone(),
                 source,
             })?;
-        file.write_all(&bytes)
-            .map_err(|source| RegistryInstallError::WriteFile {
-                path: temp.clone(),
-                source,
-            })?;
-        apply_source_permissions(&source_metadata, &temp)?;
+        if let Some(metadata) = source_metadata {
+            apply_source_permissions(metadata, &temp)?;
+        }
         file.sync_all()
             .map_err(|source| RegistryInstallError::WriteFile {
                 path: temp.clone(),
                 source,
             })?;
-        Ok(temp.clone())
+        let metadata = file
+            .metadata()
+            .map_err(|source| RegistryInstallError::EntryType {
+                path: temp.clone(),
+                source,
+            })?;
+        let installed = installed_bytes(bytes, &metadata);
+        if source_metadata.is_some_and(|source| file_mode(source) != installed.mode) {
+            return Err(RegistryInstallError::Conflict {
+                path: temp.clone(),
+                reason: "the prepared source permissions were not retained".to_string(),
+            });
+        }
+        Ok(PreparedCopy {
+            staged: temp.clone(),
+            installed,
+            bytes: bytes.len() as u64,
+            operation_id: format!("registry-install:{attempt}"),
+        })
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -1004,51 +1137,156 @@ fn installed_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> InstalledFile 
     }
 }
 
-fn commit_prepared_copy(staged: &Path, target: &Path) -> Result<(), RegistryInstallError> {
-    std::fs::rename(staged, target).map_err(|source| RegistryInstallError::WriteFile {
+fn commit_prepared_copy(
+    copy: &PreparedCopy,
+    target: &Path,
+    previous: Option<&InstalledFile>,
+) -> Result<PublicationReceipt, RegistryInstallError> {
+    let (guard, historical) =
+        guard_prepared_publication(target, &copy.operation_id, previous, previous.is_none())?;
+    let receipt = if let Some(receipt) = historical {
+        receipt
+    } else {
+        if !std::fs::symlink_metadata(&copy.staged)
+            .map_err(|source| RegistryInstallError::ReadFile {
+                path: copy.staged.clone(),
+                source,
+            })?
+            .is_file()
+        {
+            return Err(RegistryInstallError::UnsupportedEntry {
+                path: copy.staged.clone(),
+            });
+        }
+        let mut file =
+            File::open(&copy.staged).map_err(|source| RegistryInstallError::ReadFile {
+                path: copy.staged.clone(),
+                source,
+            })?;
+        let metadata = file
+            .metadata()
+            .map_err(|source| RegistryInstallError::EntryType {
+                path: copy.staged.clone(),
+                source,
+            })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|source| RegistryInstallError::ReadFile {
+                path: copy.staged.clone(),
+                source,
+            })?;
+        if installed_bytes(&bytes, &metadata) != copy.installed || bytes.len() as u64 != copy.bytes
+        {
+            return Err(RegistryInstallError::Conflict {
+                path: copy.staged.clone(),
+                reason: "the prepared source bytes or permissions changed before publication"
+                    .to_string(),
+            });
+        }
+        guard
+            .publish_retained(
+                &copy.operation_id,
+                previous.map(|file| file.sha256.as_str()),
+                &bytes,
+                DigestAlgorithm::Sha256,
+                &copy.staged,
+            )
+            .map_err(|source| RegistryInstallError::WriteFile {
+                path: target.to_path_buf(),
+                source,
+            })?
+    };
+    check_publication(
+        receipt,
+        target,
+        &copy.operation_id,
+        previous,
+        Some(&copy.installed),
+        copy.bytes,
+    )
+}
+
+fn remove_installed_file(
+    target: &Path,
+    previous: &InstalledFile,
+    operation_id: &str,
+) -> Result<PublicationReceipt, RegistryInstallError> {
+    let (guard, historical) =
+        guard_prepared_publication(target, operation_id, Some(previous), true)?;
+    let receipt = match historical {
+        Some(receipt) => receipt,
+        None => guard
+            .remove(operation_id, &previous.sha256, DigestAlgorithm::Sha256)
+            .map_err(|source| RegistryInstallError::RemoveFile {
+                path: target.to_path_buf(),
+                source,
+            })?,
+    };
+    check_publication(receipt, target, operation_id, Some(previous), None, 0)
+}
+
+fn guard_prepared_publication(
+    target: &Path,
+    operation_id: &str,
+    previous: Option<&InstalledFile>,
+    membership_change: bool,
+) -> Result<(WriteGuard, Option<PublicationReceipt>), RegistryInstallError> {
+    let write_error = |source| RegistryInstallError::WriteFile {
         path: target.to_path_buf(),
         source,
-    })?;
-    sync_parent(target)
+    };
+    let guard = WriteGuard::acquire_operation(target, membership_change, operation_id)
+        .map_err(write_error)?;
+    let historical = guard.reconcile_operation(operation_id).map_err(write_error)?;
+    if historical.is_none() {
+        let unchanged = match (inspect_target(target)?, previous) {
+            (TargetEntry::Missing, None) => true,
+            (TargetEntry::File(current), Some(previous)) => &current == previous,
+            _ => false,
+        };
+        if !unchanged {
+            return Err(RegistryInstallError::Conflict {
+                path: target.to_path_buf(),
+                reason: "the active file bytes, permissions or presence changed after preflight"
+                    .to_string(),
+            });
+        }
+    }
+    Ok((guard, historical))
 }
 
-fn remove_installed_file(target: &Path) -> Result<(), RegistryInstallError> {
-    std::fs::remove_file(target).map_err(|source| RegistryInstallError::RemoveFile {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    sync_parent(target)
+fn check_publication(
+    receipt: PublicationReceipt,
+    target: &Path,
+    operation_id: &str,
+    previous: Option<&InstalledFile>,
+    installed: Option<&InstalledFile>,
+    bytes: u64,
+) -> Result<PublicationReceipt, RegistryInstallError> {
+    if receipt.path != target
+        || receipt.operation_id != operation_id
+        || receipt.digest_algorithm != DigestAlgorithm::Sha256
+        || receipt.before_hash.as_deref() != previous.map(|file| file.sha256.as_str())
+        || receipt.after_hash.as_deref() != installed.map(|file| file.sha256.as_str())
+        || receipt.bytes != bytes
+    {
+        return Err(RegistryInstallError::Conflict {
+            path: target.to_path_buf(),
+            reason: "the native publication receipt differs from the exact prepared attempt"
+                .to_string(),
+        });
+    }
+    if receipt.outcome != PublicationOutcome::Applied || receipt.error.is_some() {
+        return Err(RegistryInstallError::Publication { receipt });
+    }
+    Ok(receipt)
 }
 
-fn sync_parent(path: &Path) -> Result<(), RegistryInstallError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| RegistryInstallError::WriteFile {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "path has no parent directory",
-            ),
-        })?;
-    sync_directory(parent)
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<(), RegistryInstallError> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| RegistryInstallError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<(), RegistryInstallError> {
-    Ok(())
-}
-
-fn write_manifest(path: &Path, manifest: &InstallManifest) -> Result<(), RegistryInstallError> {
+fn write_manifest(
+    path: &Path,
+    manifest: &InstallManifest,
+    previous: Option<&InstalledFile>,
+) -> Result<PublicationReceipt, RegistryInstallError> {
     let mut bytes = serde_json::to_vec_pretty(manifest).map_err(|source| {
         RegistryInstallError::EncodeManifest {
             path: path.to_path_buf(),
@@ -1056,44 +1294,16 @@ fn write_manifest(path: &Path, manifest: &InstallManifest) -> Result<(), Registr
         }
     })?;
     bytes.push(b'\n');
-    let temp = temp_path(path);
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|source| RegistryInstallError::WriteFile {
-                path: temp.clone(),
-                source,
-            })?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|source| RegistryInstallError::WriteFile {
-                path: temp.clone(),
-                source,
-            })?;
-        std::fs::rename(&temp, path).map_err(|source| RegistryInstallError::WriteFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
+    let copy = prepare_bytes(path, &bytes, None)?;
+    commit_prepared_copy(&copy, path, previous)
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+fn temp_path(path: &Path, attempt: &str) -> PathBuf {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("registry-install");
-    path.with_file_name(format!(
-        ".{name}.{}.{}.tmp",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ))
+    path.with_file_name(format!(".{name}.{}.{}.tmp", std::process::id(), attempt))
 }
 
 #[cfg(test)]
@@ -1137,20 +1347,62 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         let active = temp.path().join("home/registry");
+        let relative = Path::new("interface/base/interface.json");
         prepare_source(&source, "test-baseline");
-        write(&source.join("interface/base/interface.json"), "source-v1");
+        write(&source.join(relative), "source-v1");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                source.join(relative),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
 
         let first = install_registry(&source, &active).unwrap();
         assert_eq!(first.copied, 1);
+        assert_eq!(
+            digest_file(&active.join(relative)).unwrap(),
+            digest_file(&source.join(relative)).unwrap()
+        );
         write(&active.join("interface/private/interface.json"), "private");
-        write(&source.join("interface/base/interface.json"), "source-v2");
+        let before = digest_file(&source.join(relative)).unwrap();
+        publication::publish(
+            &source.join(relative),
+            "source-update",
+            Some(&before.sha256),
+            b"source-v2",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                source.join(relative),
+                std::fs::Permissions::from_mode(0o640),
+            )
+            .unwrap();
+        }
 
         let second = install_registry(&source, &active).unwrap();
         assert_eq!(second.updated, 1);
         assert_eq!(
+            digest_file(&active.join(relative)).unwrap(),
+            digest_file(&source.join(relative)).unwrap()
+        );
+        assert_eq!(
             std::fs::read_to_string(active.join("interface/base/interface.json")).unwrap(),
             "source-v2"
         );
+        assert_eq!(
+            std::fs::read_to_string(active.join("interface/private/interface.json")).unwrap(),
+            "private"
+        );
+        let before = digest_file(&source.join(relative)).unwrap();
+        publication::remove(&source.join(relative), "source-delete", &before.sha256).unwrap();
+        assert_eq!(install_registry(&source, &active).unwrap().removed, 1);
+        assert!(!active.join(relative).exists());
         assert_eq!(
             std::fs::read_to_string(active.join("interface/private/interface.json")).unwrap(),
             "private"
@@ -1203,6 +1455,52 @@ mod tests {
             std::fs::read_to_string(active.join("tool/a/tool.json")).unwrap(),
             "a1"
         );
+
+        write(&active.join("tool/z/tool.json"), "z1");
+        let target = active.canonicalize().unwrap().join("tool/z/tool.json");
+        let before = digest_file(&target).unwrap();
+        let manifest = active.canonicalize().unwrap().join(INSTALL_MANIFEST_FILE);
+        let manifest_bytes = std::fs::read(&manifest).unwrap();
+        let error = install_registry_with_progress(&source, &active, &mut |event| {
+            if matches!(
+                event,
+                RegistrySyncProgress::Applying {
+                    relative: "tool/a/tool.json",
+                    ..
+                }
+            ) {
+                publication::publish(
+                    &target,
+                    "preflight-race",
+                    Some(&before.sha256),
+                    b"concurrent-edit",
+                )
+                .unwrap();
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(error, RegistryInstallError::Conflict { path, .. } if path == target));
+        assert_eq!(std::fs::read(&target).unwrap(), b"concurrent-edit");
+        assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
+
+        write(&target, "z1");
+        let before = digest_file(&manifest).unwrap();
+        let mut edited_manifest = manifest_bytes;
+        edited_manifest.push(b'\n');
+        let error = install_registry_with_progress(&source, &active, &mut |event| {
+            if matches!(event, RegistrySyncProgress::Applying { .. }) {
+                publication::publish(
+                    &manifest,
+                    "manifest-race",
+                    Some(&before.sha256),
+                    &edited_manifest,
+                )
+                .unwrap();
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(error, RegistryInstallError::Conflict { path, .. } if path == manifest));
+        assert_eq!(std::fs::read(&manifest).unwrap(), edited_manifest);
     }
 
     #[test]
@@ -1252,6 +1550,82 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(target.parent().unwrap()).unwrap().count(),
             1
+        );
+    }
+
+    #[test]
+    fn prepared_publications_keep_exact_predecessors_and_original_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let target = root.join("active/file");
+        write(&source, "after");
+        let expected = digest_file(&source).unwrap();
+        let copy = prepare_copy(&source, &target, &expected).unwrap();
+        publication::publish(&target, "equal-concurrent-create", None, b"after").unwrap();
+        assert!(matches!(
+            commit_prepared_copy(&copy, &target, None),
+            Err(RegistryInstallError::Conflict { .. })
+        ));
+        assert!(publication::read_receipt(&target, &copy.operation_id)
+            .unwrap()
+            .is_none());
+
+        let previous = digest_file(&target).unwrap();
+        let copy = prepare_copy(&source, &target, &expected).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mode_change =
+                prepare_copy(&source, &target, &digest_file(&source).unwrap()).unwrap();
+            commit_prepared_copy(&mode_change, &target, Some(&previous)).unwrap();
+            assert!(matches!(
+                commit_prepared_copy(&copy, &target, Some(&previous)),
+                Err(RegistryInstallError::Conflict { .. })
+            ));
+            assert!(matches!(
+                remove_installed_file(&target, &previous, "stale-mode-delete"),
+                Err(RegistryInstallError::Conflict { .. })
+            ));
+        }
+        let previous = digest_file(&target).unwrap();
+        let previous_attempt = copy.operation_id.clone();
+        let copy = prepare_copy(&source, &target, &digest_file(&source).unwrap()).unwrap();
+        assert_ne!(copy.operation_id, previous_attempt);
+        let first = commit_prepared_copy(&copy, &target, Some(&previous)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&copy.staged).unwrap().ino(),
+                std::fs::metadata(&target).unwrap().ino()
+            );
+        }
+        publication::publish(
+            &target,
+            "later-write",
+            first.after_hash.as_deref(),
+            b"later",
+        )
+        .unwrap();
+        std::fs::remove_file(&copy.staged).unwrap();
+        assert_eq!(
+            commit_prepared_copy(&copy, &target, Some(&previous)).unwrap(),
+            first
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"later");
+        let previous = digest_file(&target).unwrap();
+        let removed = remove_installed_file(&target, &previous, "retained-delete").unwrap();
+        publication::publish(&target, "recreate", None, b"replacement").unwrap();
+        assert_eq!(
+            remove_installed_file(&target, &previous, "retained-delete").unwrap(),
+            removed
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+        assert_eq!(
+            publication::read_receipt(&target, &copy.operation_id).unwrap(),
+            Some(first)
         );
     }
 

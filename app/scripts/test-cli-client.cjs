@@ -11,6 +11,49 @@ const run = { run_id: "run_task", chat_interface_id: "chat_task", provider_inter
 const receipt = { runId: run.run_id, chatInterfaceId: run.chat_interface_id, modelInterfaceId: run.provider_bound_interface_id,
   messageId: "message", messageVerdict: { admitted: { seq: 100 } }, afterSeq: 100, cursor: { offset: 10, seq: 100 } };
 
+test("CLI projection readers recover native publication without the active client package", async () => {
+  const { createEnvironment, projectionStore } = require("../cli/environment.cjs");
+  const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
+  const root = await fs.realpath(await fs.mkdtemp("/tmp/oct-cli-readers-")), repo = path.resolve(__dirname, "../..");
+  const child = `const publication=require(process.argv[1]).nativePublication();const original=publication.publishFiles;const interrupted={...publication,publishFiles:async writes=>{await original(writes);process.exit(73)}};require(process.argv[2]).commitProjectionClientAuthoring(process.argv[3],process.argv[4],JSON.parse(process.argv[5]),{publication:interrupted}).catch(error=>{console.error(error);process.exit(74)});`;
+  try {
+    for (const kind of ["environment", "client"]) {
+      const environment = createEnvironment({ home: path.join(root, kind), userHome: root, repoRoot: repo, installationRoot: repo, env: {} });
+      const registry = environment.packageRoots.activeRegistryRoot, target = path.join(registry, "tool/fixture/settings.json"), content = '{"selected":"source"}\n';
+      for (const directory of ["registry/interface", "registry/tool", "state/runs", "state/ee_instances"]) await fs.mkdir(path.join(environment.home, directory), { recursive: true });
+      const request = { label: "CLI reader publication", removals: [], publishBarrierPath: target,
+        writes: [{ file: target, content, beforeDigest: null, label: "settings" }] };
+      const lost = require("node:child_process").spawnSync(process.execPath, ["-e", child,
+        path.resolve(__dirname, "support/native-publication.cjs"), path.resolve(__dirname, "../electron/clientWorkspaceAuthoring.cjs"),
+        environment.home, registry, JSON.stringify(request)], { encoding: "utf8", timeout: 20000 });
+      assert.equal(lost.status, 73, lost.stderr);
+      assert.equal(await fs.readFile(target, "utf8"), content);
+      await assert.rejects(fs.access(path.join(registry, "interface/world_operator_chat/client.cjs")), { code: "ENOENT" });
+      const transactions = path.join(environment.home, "client-state/workspace/transactions");
+      const pending = (await fs.readdir(transactions)).filter(name => name !== ".octopus-publication");
+      assert.equal(pending.length, 1);
+      const journal = JSON.parse(await fs.readFile(path.join(transactions, pending[0], "journal.json")));
+      const calls = [], source = environment.packageRoots.publication;
+      environment.packageRoots.publication = Object.fromEntries(Object.keys(source).map(method => [method, async (...args) => {
+        calls.push(method); return source[method](...args);
+      }]));
+      const reader = kind === "environment" ? projectionStore(environment) : createClient(environment);
+      try {
+        assert.equal(calls.length, 0);
+        const result = kind === "environment" ? await reader.read(projectionReadRequest("projection.operator.os.workspace_setup"))
+          : await reader.read("projection.operator.os.workspace_setup");
+        assert.equal(result.status, "not_configured", JSON.stringify(result));
+        const cleanup = JSON.parse(await fs.readFile(path.join(environment.home, "client-state/workspace/directory-cleanup", `${journal.operation_id}.json`)));
+        assert.equal(cleanup.publication.reclaimed, true);
+        assert.equal(cleanup.journal.writes[0].publication.receipt.operation_id, journal.writes[0].publication.operation_id);
+        assert.equal(cleanup.journal.writes[0].publication.receipt.before_hash, null);
+        assert.deepEqual((await fs.readdir(transactions)).filter(name => name !== ".octopus-publication"), []);
+        for (const method of ["publishFiles", "snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"]) assert.ok(calls.includes(method), `${kind} omitted ${method}`);
+      } finally { await reader.close(); environment.close(); }
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("Stop uses scoped exact Home and run identities without decoding any conversation", async () => {
   const scope = { status: "ready", home_run_id: "run_home", home_interface_id: "chat_home", client_runs: [
     { run_id: "run_home", interface_id: "chat_home", surface_role: "home", archived: false },

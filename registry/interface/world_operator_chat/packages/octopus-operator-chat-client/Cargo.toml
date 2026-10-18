@@ -19,9 +19,11 @@ octopus-context-collections = { path = "../../../system_context/packages/octopus
 octopus-context-projection = { path = "../../../system_context/packages/octopus-context-projection" }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ee = { path = "../../../../../crates/octopus-ee" }
+octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }
 octopus-interfaces = { path = "../../../../../crates/octopus-interfaces" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
 octopus-ledger-store = { path = "../../../../../crates/octopus-ledger-store" }
 octopus-marks = { path = "../../../../../crates/octopus-marks" }
 octopus-policy = { path = "../../../../../crates/octopus-policy" }

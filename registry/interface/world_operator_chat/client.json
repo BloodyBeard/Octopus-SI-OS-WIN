@@ -152,6 +152,11 @@
     "worker": "system_worker_operator_task",
     "tool_call_mark": "tool.call.allowed",
     "tool_call_verifier": "tool_call_allowed",
+    "tool_result_receiving": {
+      "mark": "tool.result.corresponds",
+      "verifier": "tool_result_correspondence",
+      "params": {}
+    },
     "listen_env": "OCTOPUS_CHAT_LISTEN",
     "maintenance_observer": {
       "template_interface_id": "system_worker_memory_observer",
@@ -176,6 +181,28 @@
     "provider_interface_id": "world_provider_realtime",
     "contract_file": "contract.json"
   },
+  "result_receiving_updates": [
+    {
+      "worker_template_interface": "system_worker_operator_home",
+      "mark_outcomes": ["operator.approval", "operator.input.provided", "tool.call.allowed", "task.summary.received"]
+    },
+    {
+      "worker_template_interface": "system_worker_operator_task",
+      "mark_outcomes": ["operator.approval", "operator.input.provided", "tool.call.allowed", "task.summary.received"]
+    },
+    {
+      "worker_template_interface": "system_worker_computer_use",
+      "mark_outcomes": ["ocr.text.contains", "tool.call.allowed", "task.summary.received", "operator.approval", "operator.input.provided"]
+    },
+    {
+      "worker_template_interface": "system_worker_coder_max",
+      "mark_outcomes": ["coder.build.ok", "ocr.text.contains", "operator.approval", "operator.input.provided", "emit.tool_call.present", "tool.call.allowed", "task.summary.received"]
+    },
+    {
+      "worker_template_interface": "system_worker_web",
+      "mark_outcomes": ["tool.call.allowed", "task.summary.received", "operator.approval", "operator.input.provided"]
+    }
+  ],
   "tool_contract_updates": [
     {
       "source_tool": "client.mcp",

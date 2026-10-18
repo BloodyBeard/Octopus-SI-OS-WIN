@@ -179,6 +179,43 @@ pub async fn admit_interface_artifact_arrival(
     arrival_artifact_file: &InterfaceArtifactFile,
     arriving_interface: &InterfaceId,
 ) -> Result<InterfaceArtifactArrivalAdmissionOutcome, InterfaceArtifactArrivalAdmissionError> {
+    let arrival_artifact_file = prepare_interface_artifact_arrival(embedded, log, arrival_artifact_file, arriving_interface)?;
+    let mut arrival = InterfaceArtifactArrivalFromInterface::new(
+        &embedded.runtime, log, blobs_arrival, embedded.arrival_dedup.clone(),
+        arrival_trace_id(arriving_interface), arriving_interface.clone(),
+    );
+    let dispatch = arrival.arrive_artifact_for_run(&arrival_artifact_file).await?;
+    if dispatch.records.is_empty() {
+        return Err(InterfaceArtifactArrivalAdmissionError::Arrival(
+            ArrivalError::Malformed("interface artifact arrival produced no arrival record".into()),
+        ));
+    }
+    Ok(InterfaceArtifactArrivalAdmissionOutcome {
+        admission: InterfaceArtifactArrivalAdmission { records: dispatch.records },
+    })
+}
+
+pub async fn admit_retained_interface_artifact_arrival(
+    embedded: &crate::EmbeddedRuntime,
+    log: &mut (dyn MovementLog + Send),
+    blobs_arrival: &mut dyn BlobStore,
+    arrival_artifact_file: &InterfaceArtifactFile,
+    arriving_interface: &InterfaceId,
+    identity: &str,
+) -> Result<octopus_ledger::ArtifactDelivery, InterfaceArtifactArrivalAdmissionError> {
+    let artifact = prepare_interface_artifact_arrival(embedded, log, arrival_artifact_file, arriving_interface)?;
+    InterfaceArtifactArrivalFromInterface::new(
+        &embedded.runtime, log, blobs_arrival, embedded.arrival_dedup.clone(),
+        arrival_trace_id(arriving_interface), arriving_interface.clone(),
+    ).arrive_retained_artifact(&artifact, identity).await.map_err(Into::into)
+}
+
+fn prepare_interface_artifact_arrival(
+    embedded: &crate::EmbeddedRuntime,
+    log: &mut (dyn MovementLog + Send),
+    arrival_artifact_file: &InterfaceArtifactFile,
+    arriving_interface: &InterfaceId,
+) -> Result<InterfaceArtifactFile, InterfaceArtifactArrivalAdmissionError> {
     embedded
         .reload_registry_snapshot_on_artifact_arrival()
         .map_err(|e| {
@@ -200,27 +237,7 @@ pub async fn admit_interface_artifact_arrival(
                 InterfaceArtifactArrivalAdmissionError::Arrival(e.into()),
             )
         })?;
-    let mut arrival = InterfaceArtifactArrivalFromInterface::new(
-        &embedded.runtime,
-        log,
-        blobs_arrival,
-        embedded.arrival_dedup.clone(),
-        arrival_trace_id(arriving_interface),
-        arriving_interface.clone(),
-    );
-    let dispatch = arrival
-        .arrive_artifact_for_run(&arrival_artifact_file)
-        .await?;
-    if dispatch.records.is_empty() {
-        return Err(InterfaceArtifactArrivalAdmissionError::Arrival(
-            ArrivalError::Malformed("interface artifact arrival produced no arrival record".into()),
-        ));
-    }
-    Ok(InterfaceArtifactArrivalAdmissionOutcome {
-        admission: InterfaceArtifactArrivalAdmission {
-            records: dispatch.records,
-        },
-    })
+    Ok(arrival_artifact_file)
 }
 
 #[allow(clippy::too_many_arguments)]

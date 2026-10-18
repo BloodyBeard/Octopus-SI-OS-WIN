@@ -6147,6 +6147,7 @@ dependencies = [
  "octopus-app-server",
  "octopus-descriptors",
  "octopus-ee",
+ "octopus-file-storage",
  "octopus-interface-projection",
  "octopus-interface-transport",
  "octopus-interfaces",
@@ -6157,6 +6158,7 @@ dependencies = [
  "octopus-policy",
  "octopus-runtime",
  "octopus-tool-registry",
+ "octopus-verifiers",
  "octopus-worker-env",
  "serde",
  "serde_json",
@@ -6173,6 +6175,7 @@ version = "0.1.0"
 dependencies = [
  "octopus-descriptors",
  "octopus-ee",
+ "octopus-file-storage",
  "octopus-interface-projection",
  "octopus-interfaces",
  "octopus-ledger",
@@ -6524,13 +6527,16 @@ dependencies = [
  "image",
  "json-patch",
  "libc",
+ "octopus-app-server",
  "octopus-code-mode-engine",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-file-write-contract",
  "octopus-interface-activation-app-server-transport",
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-ledger-index",
  "octopus-ledger-store",
  "octopus-marks",
  "octopus-policy",
@@ -6730,6 +6736,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-ledger",
  "serde",
  "serde_json",
@@ -6986,7 +6993,14 @@ dependencies = [
 name = "octopus-file-storage"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "fs2",
+ "libc",
  "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -7226,6 +7240,7 @@ name = "octopus-interface-transport"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "fs2",
  "libc",
  "notify",
  "object",
@@ -7492,9 +7507,11 @@ dependencies = [
  "octopus-context-projection",
  "octopus-descriptors",
  "octopus-ee",
+ "octopus-file-storage",
  "octopus-interface-transport",
  "octopus-interfaces",
  "octopus-ledger",
+ "octopus-ledger-index",
  "octopus-ledger-store",
  "octopus-marks",
  "octopus-policy",
@@ -7850,6 +7867,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-interfaces",
  "octopus-ledger",
  "octopus-marks",
@@ -8083,6 +8101,7 @@ dependencies = [
  "libc",
  "octopus-context-collections",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-file-write-contract",
  "octopus-interfaces",
  "octopus-ledger",
@@ -8093,6 +8112,7 @@ dependencies = [
  "octopus-worker-env",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -8393,6 +8413,7 @@ version = "0.1.0"
 dependencies = [
  "object",
  "octopus-descriptors",
+ "octopus-file-storage",
  "octopus-ledger",
  "octopus-marks",
  "schemars 0.8.22",
@@ -11220,6 +11241,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

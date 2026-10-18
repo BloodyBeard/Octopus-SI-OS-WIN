@@ -233,6 +233,15 @@ mod platform {
                 if name == b"." || name == b".." {
                     continue;
                 }
+                let coordination = octopus_file_storage::publication::COORDINATION_DIRECTORY;
+                if name == coordination.as_bytes() {
+                    let file = self.open_child(coordination, true).map_err(|e| io(&self.path.join(coordination), e))?;
+                    let metadata = file.metadata().map_err(|e| io(&self.path.join(coordination), e))?;
+                    if !metadata.is_dir() || metadata.mode() & 0o077 != 0 {
+                        return Err(CollectionError::UnsafePath(self.path.join(coordination)));
+                    }
+                    continue;
+                }
                 if names.len() >= limit as usize {
                     return Err(CollectionError::LimitExceeded("entry count"));
                 }

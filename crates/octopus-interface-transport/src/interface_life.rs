@@ -498,12 +498,43 @@ impl InterfaceLiftContext {
                 interface: self.interface.clone(),
                 evidence,
                 verdict_tx: Some(verdict_tx),
+                retained: None,
             })
             .await
             .map_err(|_| "arrival intake closed; the spine is shutting down".to_string())?;
         verdict_rx
             .await
             .map_err(|_| "arrival verdict channel dropped before admission".to_string())
+    }
+
+    pub async fn hand_arrival_retained(
+        &self,
+        artifact: InterfaceArtifactFile,
+        evidence: Vec<InterfaceActivationEvidence>,
+        delivery_id: &str,
+    ) -> Result<octopus_ledger::ArtifactDelivery, String> {
+        validate_retained_delivery_id(delivery_id)?;
+        let limits = self.required_host_io_limits()?;
+        let artifact = artifact
+            .capture_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|error| format!("interface output carrier capture failed: {error}"))?;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.arrivals
+            .send(InterfaceActivationArrival {
+                artifact,
+                interface: self.interface.clone(),
+                evidence,
+                verdict_tx: None,
+                retained: Some(crate::RetainedInterfaceArrival {
+                    id: delivery_id.to_string(),
+                    reply,
+                }),
+            })
+            .await
+            .map_err(|_| "arrival intake closed; the spine is shutting down".to_string())?;
+        result
+            .await
+            .map_err(|_| "retained arrival reply channel dropped before completion".to_string())?
     }
 
     pub async fn hand_admitted_arrival(
@@ -2359,6 +2390,12 @@ enum SpawnedLifeOutput {
         artifact_manifest_path: PathBuf,
         evidence: Vec<SpawnedEvidenceLine>,
     },
+    RetainedArrival {
+        request_id: u64,
+        delivery_id: String,
+        artifact_manifest_path: PathBuf,
+        evidence: Vec<SpawnedEvidenceLine>,
+    },
     SystemEmission {
         request_id: u64,
         artifact: SpawnedLifeEmissionArtifact,
@@ -2381,6 +2418,17 @@ enum SpawnedLifeInput {
         request_id: u64,
         verdict: DeliveryVerdict,
     },
+    RetainedDelivery {
+        request_id: u64,
+        delivery: Result<octopus_ledger::ArtifactDelivery, String>,
+    },
+}
+
+fn validate_retained_delivery_id(delivery_id: &str) -> Result<(), String> {
+    if delivery_id.is_empty() || delivery_id.len() > 256 {
+        return Err("retained delivery identity must contain 1 to 256 bytes".to_string());
+    }
+    Ok(())
 }
 
 pub fn spawn_process_life(
@@ -3061,6 +3109,7 @@ async fn handle_spawned_life_output(
                         interface: ctx.interface.clone(),
                         evidence,
                         verdict_tx: Some(verdict_tx),
+                        retained: None,
                     })
                     .await
                     .map_err(|_| "arrival intake closed".to_string())?;
@@ -3072,6 +3121,7 @@ async fn handle_spawned_life_output(
                         interface: ctx.interface.clone(),
                         evidence,
                         verdict_tx: None,
+                        retained: None,
                     })
                     .await
                     .map_err(|_| "arrival intake closed".to_string())?;
@@ -3091,6 +3141,58 @@ async fn handle_spawned_life_output(
                 )
                 .await?;
             }
+        }
+        SpawnedLifeOutput::RetainedArrival {
+            request_id,
+            delivery_id,
+            artifact_manifest_path,
+            evidence,
+        } => {
+            if request_id == 0 {
+                return Err("life retained-arrival request_id must be positive".to_string());
+            }
+            validate_retained_delivery_id(&delivery_id)?;
+            let artifact = capture_spawned_artifact(
+                &artifact_manifest_path,
+                &spawned_private_output_roots(ctx, var_dir),
+                host_io_limits,
+            )?;
+            let evidence = evidence
+                .into_iter()
+                .map(|item| InterfaceActivationEvidence {
+                    interface_id: InterfaceId::new(item.interface_id),
+                    artifact_id: ArtifactId::new(item.artifact_id),
+                    label: item.label,
+                    bytes: item.bytes,
+                })
+                .collect();
+            let (reply, result) = tokio::sync::oneshot::channel();
+            ctx.arrivals
+                .send(InterfaceActivationArrival {
+                    artifact,
+                    interface: ctx.interface.clone(),
+                    evidence,
+                    verdict_tx: None,
+                    retained: Some(crate::RetainedInterfaceArrival {
+                        id: delivery_id,
+                        reply,
+                    }),
+                })
+                .await
+                .map_err(|_| "arrival intake closed".to_string())?;
+            let delivery = tokio::select! {
+                _ = ctx.cancel.cancelled() => return Ok(()),
+                result = result => match result {
+                    Ok(delivery) => delivery,
+                    Err(_) => Err("retained arrival reply channel dropped".to_string()),
+                },
+            };
+            write_spawned_life_message(
+                stdin,
+                &SpawnedLifeInput::RetainedDelivery { request_id, delivery },
+                host_io_limits.max_control_frame_bytes,
+            )
+            .await?;
         }
         SpawnedLifeOutput::SystemEmission {
             request_id,
@@ -4044,6 +4146,41 @@ mod tests {
 
     #[test]
     fn spawned_life_protocol_accepts_host_attested_system_emission_shape_only() {
+        let retained = serde_json::json!({
+            "kind": "retained_arrival",
+            "request_id": 2,
+            "delivery_id": "opaque original delivery",
+            "artifact_manifest_path": "/tmp/emitted.artifact.json",
+            "evidence": []
+        });
+        assert!(matches!(
+            serde_json::from_value::<SpawnedLifeOutput>(retained.clone()).unwrap(),
+            SpawnedLifeOutput::RetainedArrival { .. }
+        ));
+        let mut spoofed_scope = retained;
+        spoofed_scope["delivery_scope_seq"] = serde_json::json!(7);
+        assert!(serde_json::from_value::<SpawnedLifeOutput>(spoofed_scope).is_err());
+        for identity in ["".to_string(), "é".repeat(129)] {
+            assert!(validate_retained_delivery_id(&identity).is_err());
+        }
+        assert!(validate_retained_delivery_id(&"é".repeat(128)).is_ok());
+        let reply = SpawnedLifeInput::RetainedDelivery {
+            request_id: 2,
+            delivery: Ok(octopus_ledger::ArtifactDelivery::Pending { scope_seq: 7 }),
+        };
+        let bytes = serialize_bounded_json_line(&reply, 1024, "retained response").unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<SpawnedLifeInput>(&bytes).unwrap(),
+            SpawnedLifeInput::RetainedDelivery {
+                request_id: 2,
+                delivery: Ok(octopus_ledger::ArtifactDelivery::Pending { scope_seq: 7 })
+            }
+        ));
+        let reply = SpawnedLifeInput::RetainedDelivery { request_id: 2, delivery: Err("scope corruption".into()) };
+        let bytes = serialize_bounded_json_line(&reply, 1024, "retained response").unwrap();
+        assert!(matches!(serde_json::from_slice::<SpawnedLifeInput>(&bytes).unwrap(),
+            SpawnedLifeInput::RetainedDelivery { delivery: Err(error), .. } if error == "scope corruption"));
+
         let emission = serde_json::from_value::<SpawnedLifeOutput>(serde_json::json!({
             "kind": "system_emission",
             "request_id": 1,

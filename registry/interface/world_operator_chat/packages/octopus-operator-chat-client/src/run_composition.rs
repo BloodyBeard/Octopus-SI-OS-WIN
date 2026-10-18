@@ -461,6 +461,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         config.run.run_prefix = client.run.run_prefix;
         config.run.listen_env = client.run.listen_env;
         config.run.context_artifact_bindings = client.run.context_artifact_bindings;
+        config.run.tool_result_receiving = client.run.tool_result_receiving;
         if let Some(observer) = client.run._rest.get("maintenance_observer") {
             config.run._rest.insert("maintenance_observer".into(), observer.clone());
         }
@@ -681,7 +682,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         .collect::<Vec<_>>();
     let interface_mapping = private_interface_mapping(&config, &identity);
     preserve_formed_private_policies(request, &topology, &interface_mapping, &mut writes)?;
-    validate_context_and_marks(request, &chain, &roles, &selected_context)?;
+    validate_context_and_marks(request, &chain, &roles, &selected_context, config.run.tool_result_receiving.as_ref())?;
     validate_new_descriptor_targets(&writes)?;
     let run_content = build_chat_run_record(
         &config,
@@ -886,6 +887,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
 fn composition_config(request: &RunCompositionRequest) -> ClientConfig {
     ClientConfig {
         home_voice: None,
+        result_receiving_updates: Vec::new(),
         schema_version: 2,
         interface: request
             .communication
@@ -912,6 +914,7 @@ fn composition_config(request: &RunCompositionRequest) -> ClientConfig {
             worker: request.worker_template_interface_id.clone(),
             tool_call_mark: request.authoring.tool_call_mark.clone(),
             tool_call_verifier: request.authoring.tool_call_verifier.clone(),
+            tool_result_receiving: None,
             listen_env: String::new(),
             context_artifact_bindings: Vec::new(),
             _rest: Default::default(),
@@ -1391,6 +1394,7 @@ fn validate_context_and_marks(
     chain: &[octopus_world_terminal_client::LiveEePolicyLayer],
     roles: &[String],
     context: &[ArtifactBindingSeed],
+    result_receiving: Option<&ToolResultReceiving>,
 ) -> Result<(), String> {
     let policy: WorkerInterfacePolicy = serde_json::from_slice(
         &std::fs::read(
@@ -1404,6 +1408,11 @@ fn validate_context_and_marks(
         .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    if let Some(result) = result_receiving {
+        if !result_receiving_authorized(&request.roots.registry_root, chain, &policy, result)? {
+            return Err("selected worker/EE policy does not admit the tool-result correspondence mark".into());
+        }
+    }
     let mut layers = Vec::new();
     for entry in chain {
         let template = parse_strict::<EeTemplateDescriptor>(

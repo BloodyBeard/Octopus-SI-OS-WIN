@@ -10,6 +10,7 @@ fn native_terminal_answer_and_closure_reach_the_real_authoring_gate() {
 }
 
 async fn native_terminal_handoff_cases() {
+    use octopus_interfaces::DeliveryVerdict;
     use octopus_provider_run_authoring::ProviderSourceRecovery;
     use octopus_runtime::run_record::RunRecord;
     fn edge(ctx: &InterfaceLiftContext, bytes: &[u8], checkpoint: &octopus_runtime::run_record::CheckpointRecord,
@@ -17,9 +18,13 @@ async fn native_terminal_handoff_cases() {
         let record = RunRecord::from_bytes(bytes).unwrap();
         let tool=&ctx.descriptor_snapshot.as_ref().unwrap().interface_driver_config.as_ref().unwrap().private_config["run_authoring_profile"]["file_write_tool"];
         let mut tools=vec![tool.clone()];
+        let mut marks=record.checkpoints.iter().flat_map(|cp|cp.required_verified_artifacts.iter().map(|r|r.mark.clone())).collect::<BTreeSet<_>>();
         for template in record.interface_state[&ctx.interface].get("run_authoring_binding").and_then(|binding|binding["checkpoints"].as_array()).into_iter().flatten() {
             if template["role"]=="provider_tool_output" {
                 tools.extend(template["required_verified_artifacts"][0]["params"]["tools"].as_array().unwrap().iter().cloned());
+                for requirement in template["result_receiving"].as_object().into_iter().flat_map(|receiving| receiving.values()) {
+                    marks.insert(serde_json::from_value(requirement["mark"].clone()).unwrap());
+                }
             }
         }
         let interfaces=record.checkpoints.iter().flat_map(|cp|cp.inbound_interface().into_iter().chain(cp.outbound_interfaces())).cloned().collect::<BTreeSet<_>>();
@@ -29,7 +34,7 @@ async fn native_terminal_handoff_cases() {
         let meta: InvocationMetadata = serde_json::from_value(json!({
             "runtime":{"run":record.id,"ee":record.ee,"worker":record.worker,"checkpoint":checkpoint.id,
                 "interface":if kind == MovementKind::InterfaceArrival { ctx.interface.clone() } else { target.clone() },"epoch":checkpoint.epoch.0,"run_record_hash":hash.to_hex()},
-            "grant":{"tools":tools,"interfaces":interfaces,"worker_environment_kinds":["system_room"],"mark_outcomes":record.checkpoints.iter().flat_map(|cp|cp.required_verified_artifacts.iter().map(|r|r.mark.clone())).collect::<BTreeSet<_>>(),
+            "grant":{"tools":tools,"interfaces":interfaces,"worker_environment_kinds":["system_room"],"mark_outcomes":marks,
                 "role_artifacts":checkpoint.artifact_bindings.iter().filter(|b|record.interface_state.get(&ctx.interface).and_then(|state|state.get("run_authoring_binding")).and_then(|binding|binding.get("checkpoints")).and_then(serde_json::Value::as_array).is_some_and(|templates|templates.iter().any(|template|template["static_artifact_bindings"].as_array().is_some_and(|ids|ids.contains(&json!(b.id))))) && !record.interface_state[&ctx.interface]["run_authoring_binding"]["payload_artifact_bindings"].as_array().is_some_and(|refs|refs.iter().any(|reference|reference["id"]==b.id.as_str()))).map(|b|b.id.clone()).collect::<Vec<_>>(),
                 "artifact_access":checkpoint.artifact_bindings.iter().map(|b|(b.id.to_string(),b.access.clone())).collect::<BTreeMap<_,_>>()},
             "artifact_binding_refs":checkpoint.artifact_bindings.iter().map(|b| { let content=b.id.as_str().rsplit(':').next().and_then(ContentHash::from_hex).filter(|h|ctx.blobs_dir.join(h.to_hex()).exists()).unwrap_or_else(|| { let payload=std::fs::read(ctx.interface_dir.parent().unwrap().parent().unwrap().join("artifact").join(b.id.as_str()).join("artifact.json")).unwrap(); let hash=ContentHash::of_bytes(&payload); std::fs::write(ctx.blobs_dir.join(hash.to_hex()),payload).unwrap(); hash }); ArtifactRef{id:b.id.clone(),content} }).collect::<Vec<_>>(),
@@ -38,7 +43,7 @@ async fn native_terminal_handoff_cases() {
             "outbound_interface_bindings":checkpoint.outbound_interfaces().cloned().collect::<Vec<_>>(),
             "checkpoint_admission":{"complete":true,"artifact_label":file.read_manifest().unwrap().label,"required_artifact_labels":checkpoint.required_verified_artifacts.iter().map(|requirement|requirement.artifact_label.clone()).collect::<Vec<_>>()}
         })).unwrap();
-        Movement { seq:Seq(0), lamport:Lamport(1), recorded_at_unix_ms:1, trace:record.trace, kind,
+        Movement { seq:Seq(0), lamport:Lamport(1), recorded_at_unix_ms:1, trace:checkpoint.trace.clone(), kind,
             from:Endpoint::Interface(checkpoint.inbound_interface().unwrap().clone()), to:Endpoint::Interface(target),
             artifact:Some(artifact), invocation_metadata:Some(meta.into()) }
     }
@@ -46,6 +51,20 @@ async fn native_terminal_handoff_cases() {
         let count=std::fs::read(&ctx.movements_path).unwrap().split(|b|*b==b'\n').filter(|r|!r.is_empty()).count() as u64;
         row.seq=Seq(count); row.lamport=Lamport(count+1); row.recorded_at_unix_ms=count+1;
         append_movement(&ctx.movements_path,&row); count
+    }
+    fn retain(ctx: &InterfaceLiftContext, incoming: &octopus_interface_transport::InterfaceActivationArrival, row: &Movement) -> Option<u64> {
+        let retained=incoming.retained.as_ref()?;
+        for line in std::fs::read_to_string(&ctx.movements_path).unwrap().lines() {
+            let scope:Movement=serde_json::from_str(line).unwrap();
+            if matches!(&scope.invocation_metadata,Some(octopus_ledger::MovementMetadata::ArrivalFanout(metadata)) if metadata.arrival_fanout.identity==retained.id) {
+                assert_eq!(scope.artifact,row.artifact);return Some(scope.seq.0);
+            }
+        }
+        let mut scope=row.clone();scope.kind=MovementKind::ArtifactMoved;scope.to=scope.from.clone();
+        scope.invocation_metadata=Some(octopus_ledger::MovementMetadata::ArrivalFanout(octopus_ledger::ArrivalFanoutMetadata {
+            arrival_fanout:octopus_ledger::ArrivalFanoutScope {identity:retained.id.clone(),targets:vec![row.invocation_metadata.as_ref().unwrap().invocation().unwrap().runtime.clone().unwrap()]},
+        }));
+        Some(append(ctx,scope))
     }
     async fn pump(gate_ctx: &InterfaceLiftContext, root: &Path, path: &Path, authoring_id: &InterfaceId,
         listener: &tokio::net::UnixListener, receiver: &mut tokio::sync::mpsc::Receiver<octopus_interface_transport::InterfaceActivationArrival>,
@@ -111,18 +130,20 @@ async fn native_terminal_handoff_cases() {
                     assert_eq!(items.len(),if ack_bootstrap || with_answer || count==2 || label==TURN_INTERRUPTED_RESULT_LABEL {1}else{2});
                     assert_eq!(pending["terminal"],ack_bootstrap || items.last().unwrap()["artifact_label"]==TURN_INTERRUPTED_RESULT_LABEL);
                     let item=items.iter().find(|item|item["artifact_label"]==label).unwrap();
-                    if phase==2 && label==TURN_INTERRUPTED_RESULT_LABEL {
-                        incoming.verdict_tx.unwrap().send(DeliveryVerdict::Refused{reason:octopus_ledger::RefusedReason::CheckpointSpent,detail:"fixture stop after settlement write".into()}).unwrap(); break;
-                    }
-                    if !ack_bootstrap && with_answer && phase==0 && label=="turn.completed" {
-                        incoming.verdict_tx.unwrap().send(DeliveryVerdict::Refused{reason:octopus_ledger::RefusedReason::CheckpointSpent,detail:"fixture cold boundary after admitted answer".into()}).unwrap(); break;
-                    }
                     let cp=current_record.checkpoint(&serde_json::from_value(item["checkpoint"]["id"].clone()).unwrap()).unwrap();
-                    let seq=append(&gate_ctx,edge(&gate_ctx,&current,cp,&incoming.artifact,MovementKind::InterfaceArrival,current_record.worker.clone()));
+                    let mut row=edge(&gate_ctx,&current,cp,&incoming.artifact,MovementKind::InterfaceArrival,current_record.worker.clone());
+                    let scope=retain(gate_ctx,&incoming,&row);
+                    if (phase==2 && label==TURN_INTERRUPTED_RESULT_LABEL) || (!ack_bootstrap && with_answer && phase==0 && label=="turn.completed") {
+                        incoming.retained.unwrap().reply.send(Ok(octopus_ledger::ArtifactDelivery::Pending {scope_seq:scope.unwrap()})).unwrap();break;
+                    }
+                    let mut metadata=row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();metadata.delivery_scope_seq=scope;row.invocation_metadata=Some(metadata.into());
+                    let seq=append(&gate_ctx,row);
                     let payload:serde_json::Value=serde_json::from_slice(&incoming.artifact.read_payload_bytes().unwrap()).unwrap_or(json!({}));
                     if let Some(continuity)=payload.get("codex_continuity") { assert_eq!(continuity["context_generation"],current_record.interface_state[&gate_ctx.interface]["context_generation"]); }
                     if label==TURN_INTERRUPTED_RESULT_LABEL { assert_eq!(payload["source_artifact"],json!(expected_source)); }
-                    delivered.push((label,cache_artifact(&gate_ctx,&incoming.artifact),seq)); incoming.verdict_tx.unwrap().send(DeliveryVerdict::Admitted{seq}).unwrap();
+                    delivered.push((label,cache_artifact(&gate_ctx,&incoming.artifact),seq));
+                    if let Some(retained)=incoming.retained {retained.reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete {verdict:DeliveryVerdict::Admitted{seq}})).unwrap();}
+                    else {incoming.verdict_tx.unwrap().send(DeliveryVerdict::Admitted{seq}).unwrap();}
                     if phase==3 || phase==22 { break; }
                 }
             }}
@@ -354,7 +375,9 @@ async fn native_terminal_handoff_cases() {
                     let mut task=tokio::spawn(control_reader_life(ctx.clone(),descriptor.clone(),session.clone(),controls,
                         gates.clone(),arbiter.clone(),progress_rx,fence_rx));
                     let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&envelope.artifact,0,2,true,0,true);
-                    let handling=async {tokio::select! {result=fence_control_reader(&fences,&run,Some(result_seq))=>result,
+                    let handling=async {tokio::select! {result=fence_control_reader(&fences,&run,Some(result_seq))=>match result {
+                            Ok(watermark)=>Ok(watermark),Err(error)=>Err(format!("{error}; restarted control reader: {:?}",(&mut task).await)),
+                        },
                         result=&mut task=>panic!("restarted withdrawal reader failed: {result:?}")}};
                     let (_,delivered)=tokio::time::timeout(std::time::Duration::from_secs(20),async{tokio::try_join!(handling,async {Ok::<_,String>(gate.await)})}).await.unwrap().unwrap();
                     task.abort();let _=task.await;
@@ -362,7 +385,9 @@ async fn native_terminal_handoff_cases() {
                 } else {
                     let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&envelope.artifact,0,2,true,0,true);
                     let handled=async {tokio::select! {
-                        result=fence_control_reader(&fences,&run,Some(result_seq))=>result,
+                        result=fence_control_reader(&fences,&run,Some(result_seq))=>match result {
+                            Ok(watermark)=>Ok(watermark),Err(error)=>Err(format!("{error}; cold control reader: {:?}",(&mut reader_task).await)),
+                        },
                         result=&mut reader_task=>panic!("cold control reader failed: {result:?}"),
                     }};
                     let completed=tokio::time::timeout(std::time::Duration::from_secs(20),async{tokio::try_join!(handled,async {Ok::<_,String>(gate.await)})}).await;
@@ -405,6 +430,9 @@ async fn native_terminal_handoff_cases() {
                     }
                 }
                 let current=RunRecord::from_bytes(&after).unwrap();
+                let seed_ref=serde_json::to_value(materialized_artifact_ref(&seed).unwrap()).unwrap();
+                assert!(!current.interface_state[&descriptor.id]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter()
+                    .any(|template|template["role"]=="result_input" && template["required_verified_artifacts"][0]["params"]["call_artifact"]==seed_ref));
                 let cp=current.checkpoints.iter().find(|cp|current.active_checkpoints.contains(&cp.id)
                     && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
                 let next=artifact(&root.join("next-user"),"operator.message",json!({"text":"continue with a different task"}));
@@ -520,7 +548,7 @@ async fn native_terminal_handoff_cases() {
                 let admit=Box::pin(admit_interrupted_result(&ctx,&handoff,&broker,Some(&arbiter),&run,result_seq,&closure_ref,emissions));
                 let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&envelope.artifact,0,count,false,1,false);
                 let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(admit,gate)}).await.unwrap();
-                assert_eq!(result.unwrap(),count);assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
+                assert_eq!(result.unwrap(),InterruptedResultAdmission::Admitted(count));assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
                 assert!(broker.is_finished());assert!(arbiter.reconciled(&run).await.unwrap());assert!(methods.try_recv().is_err());
                 server.abort();return;
             }
@@ -587,7 +615,7 @@ async fn native_terminal_handoff_cases() {
                 let count=emissions.len();let reference=materialized_artifact_ref(&emissions.last().unwrap().artifact).unwrap();let broker=CodexTurnControlBroker::new(Some(result_seq));
                 let admit=Box::pin(admit_interrupted_result(ctx,&failed,&broker,Some(&arbiter),run,result_seq,&reference,emissions));
                 let gate=pump(ctx,root,run_path,&authoring_id,listener,receiver,&envelope.artifact,0,count,false,1,false);
-                let (result,delivered)=tokio::join!(admit,gate);assert_eq!(result.unwrap(),count);assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
+                let (result,delivered)=tokio::join!(admit,gate);assert_eq!(result.unwrap(),InterruptedResultAdmission::Admitted(count));assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
                 assert!(arbiter.reconciled(run).await.unwrap());assert!(broker.is_finished());return;
             }
             state["context_generation"]=json!(before_context+3);
@@ -819,7 +847,7 @@ async fn native_terminal_handoff_cases() {
         let socket=octopus_app_server_interface::interface_control_socket_path_from_root(&root.join("control"),&authoring_id);
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap(); let listener=tokio::net::UnixListener::bind(socket).unwrap();
         let native=serde_json::to_value(octopus_appserver_proto::Turn { id:"turn-a".into(),items:if with_answer {vec![octopus_appserver_proto::ThreadItem::AgentMessage{id:"answer-a".into(),text:"Retained native answer".into(),phase:Some(octopus_protocol::models::MessagePhase::FinalAnswer)}]} else {vec![]},items_view:octopus_appserver_proto::TurnItemsView::Full,status:if with_answer {octopus_appserver_proto::TurnStatus::Completed} else if native_interrupted {octopus_appserver_proto::TurnStatus::Interrupted} else {octopus_appserver_proto::TurnStatus::Failed},error:None,started_at:Some(10),completed_at:Some(20),duration_ms:Some(10_000) }).unwrap();
-        let mut before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
+        let before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
         let mut state=serde_json::to_value(continuity(before_context,Some(if with_stop {"interrupted_pending"}else{"pending"}))).unwrap();
         state["provider_interface"]=json!(descriptor.id); state["run"]=json!(run);
         if settlement_phase==Some(22) {
@@ -963,7 +991,7 @@ async fn native_terminal_handoff_cases() {
         all_delivered.extend(delivered);
         if with_answer && phase==0 {
             assert!(!control.is_finished(),"a refused closure must retain its control owner");
-            assert!(result.unwrap_err().contains("refused")); assert_eq!(all_delivered.len(),2);
+            assert!(result.unwrap_err().contains("unfinished original edges")); assert_eq!(all_delivered.len(),2);
             let labels=codex_context_output_labels(&descriptor).unwrap(); let snapshots=codex_session_snapshot_labels(&descriptor).unwrap();
             assert_eq!(native_result_admitted_prefix(&ctx,&run,source_seq,&emissions,&snapshots,&labels).unwrap().len(),2);
             let mut shuffled=emissions.iter().map(|e|ProviderEmission{artifact:e.artifact.clone(),route:e.route.clone()}).collect::<Vec<_>>(); shuffled.swap(1,2);
@@ -973,7 +1001,7 @@ async fn native_terminal_handoff_cases() {
             assert!(native_result_admitted_prefix(&ctx,&run,source_seq,&shuffled,&snapshots,&labels).unwrap_err().contains("semantic payload"));
             drop(handoff); arbiter=InterruptedEffectArbiter::new(ctx.clone());
             handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation_when_ready(&ctx,&descriptor,&run,&envelope,source_seq,&initial).await.unwrap();
-        } else { assert_eq!(result.unwrap(),count); assert!(control.is_finished(),"an admitted closure must release the next operator input"); }
+        } else { assert_eq!(result.unwrap(),InterruptedResultAdmission::Admitted(count)); assert!(control.is_finished(),"an admitted closure must release the next operator input"); }
         }
         assert_eq!(all_delivered.len(),count); assert_eq!(all_delivered[count-1].0,TURN_INTERRUPTED_RESULT_LABEL); assert_ne!(all_delivered[count-1].1,source_closure);
         let current=RunRecord::from_bytes(&std::fs::read(&plan.run_write.path).unwrap()).unwrap();

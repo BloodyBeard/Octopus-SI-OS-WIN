@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use octopus_app_server::{
     EmbeddedRuntime, InterfaceArtifactArrivalAdmissionError, InterfaceArtifactFile,
     SharedBlobHandle, SharedBlobs, SpineRootConfig, admit_interface_artifact_arrival,
+    admit_retained_interface_artifact_arrival,
     admit_system_interface_emission, admit_system_interface_reference_emission,
     build_embedded_spine, recover_durable_checkpoint_outbound_tail,
 };
@@ -67,6 +68,7 @@ pub struct Arrival {
     pub interface: InterfaceId,
     pub evidence: Vec<ArrivalEvidence>,
     pub verdict_tx: Option<tokio::sync::oneshot::Sender<DeliveryVerdict>>,
+    pub retained: Option<octopus_interface_transport::RetainedInterfaceArrival>,
 }
 
 impl Arrival {
@@ -77,6 +79,7 @@ impl Arrival {
             interface: InterfaceId::new("world_terminal"),
             evidence: Vec::new(),
             verdict_tx: None,
+            retained: None,
         }
     }
 }
@@ -283,7 +286,7 @@ pub(crate) async fn run_daemon_on_dirs(
     ready: Option<tokio::sync::oneshot::Sender<()>>,
     boot_events: Option<tokio::sync::mpsc::UnboundedSender<DaemonBootEvent>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    std::fs::create_dir_all(durable_root)?;
+    octopus_file_storage::publication::create_dir_all(durable_root)?;
     let durable_root = std::fs::canonicalize(durable_root)?;
     let root = std::fs::canonicalize(registry_root)?;
 
@@ -305,12 +308,12 @@ pub(crate) async fn run_daemon_on_dirs(
             unique_grants: log.validated_grant_count()?,
         },
     );
-    std::fs::create_dir_all(&run_records_dir)?;
+    octopus_file_storage::publication::create_dir_all(&run_records_dir)?;
     let run_records_dir = std::fs::canonicalize(run_records_dir)?;
     crate::bootstrap_ees::ensure_bootstrap_ee_instances(&root, &ee_instances_dir)
         .map_err(std::io::Error::other)?;
     let ee_instances_dir = std::fs::canonicalize(ee_instances_dir)?;
-    std::fs::create_dir_all(&interface_artifact_root)?;
+    octopus_file_storage::publication::create_dir_all(&interface_artifact_root)?;
     let interface_artifact_root = std::fs::canonicalize(interface_artifact_root)?;
     publish_boot_event(&boot_events, DaemonBootEvent::SpineOpening);
     tokio::task::yield_now().await;
@@ -850,9 +853,20 @@ async fn admit_arrival_concurrently(
         interface: arriving_interface,
         evidence,
         verdict_tx,
+        retained,
     } = arrival;
     let mut arrival_blobs = SharedBlobHandle::new(embedded.blobs.clone());
-    let early_refusal = match durable_arrival_evidence_duplicate(
+    let retained_exists = retained.as_ref().map(|retained| {
+        let mut index = embedded.arrival_dedup.lock().map_err(|_| "arrival index is poisoned".to_string())?;
+        index.catch_up(&writer).map_err(|error| error.to_string())?;
+        index.retained_arrival_scope(&arriving_interface, &retained.id).map(|scope| scope.is_some()).map_err(|error| error.to_string())
+    }).transpose();
+    let early_refusal = match retained_exists {
+        Err(message) => Some(DeliveryVerdict::refused(RefusedReason::Malformed, serde_json::json!({"message":message}))),
+        Ok(_) if retained.is_some() && verdict_tx.is_some() => Some(DeliveryVerdict::refused(RefusedReason::Malformed,
+            serde_json::json!({"message":"arrival has two response owners"}))),
+        Ok(Some(true)) => None,
+        Ok(_) => match durable_arrival_evidence_duplicate(
         &embedded.arrival_dedup,
         &writer,
         &evidence,
@@ -866,6 +880,7 @@ async fn admit_arrival_concurrently(
             RefusedReason::Malformed,
             serde_json::json!({"message": error}),
         )),
+        },
     };
     if let Some(verdict) = early_refusal {
         writer.append(octopus_ledger::MovementDraft {
@@ -878,8 +893,19 @@ async fn admit_arrival_concurrently(
             causal_floor: None,
         });
         if let Some(tx) = verdict_tx {
-            let _ = tx.send(verdict);
+            let _ = tx.send(verdict.clone());
         }
+        if let Some(retained) = retained {
+            let _ = retained.reply.send(Err(format!("retained arrival intake refused: {}", serde_json::to_string(&verdict).unwrap_or_default())));
+        }
+        return;
+    }
+
+    if let Some(retained) = retained {
+        let outcome = admit_retained_interface_artifact_arrival(
+            &embedded, &mut writer, &mut arrival_blobs, &arrival_artifact, &arriving_interface, &retained.id,
+        ).await.map_err(|error| error.to_string());
+        let _ = retained.reply.send(outcome);
         return;
     }
 
@@ -943,10 +969,22 @@ mod tests {
     use octopus_ledger::{ContentHash, MovementLog};
     use std::sync::Arc;
 
-    fn test_verifier_package_pin() -> octopus_ledger::VerifierPackagePin {
+    fn test_verifier_package_pin(verifier: &octopus_descriptors::VerifierId) -> octopus_ledger::VerifierPackagePin {
+        let registry = repository_registry_root();
+        let package_dir = registry.join("verifier").join(verifier.as_str());
+        let descriptor: octopus_verifiers::VerifierDescriptor = octopus_descriptors::parse_strict(
+            &std::fs::read(package_dir.join("verifier.json")).unwrap(),
+        ).unwrap();
+        let descriptor_bytes = octopus_descriptors::canonical_bytes(&serde_json::to_value(&descriptor).unwrap());
+        let package = octopus_verifiers::pin_verifier_package(&octopus_verifiers::VerifierPackageContext {
+            descriptor,
+            package_dir: Some(package_dir),
+            repository_root: registry.parent().unwrap().to_path_buf(),
+            scratch_root: registry,
+        }).unwrap();
         octopus_ledger::VerifierPackagePin {
-            descriptor_content: octopus_ledger::ContentHash::of_bytes(b"test verifier descriptor"),
-            script_content: octopus_ledger::ContentHash::of_bytes(b"test verifier script"),
+            descriptor_content: ContentHash::of_bytes(&descriptor_bytes),
+            script_content: ContentHash::of_bytes(&package.closure_bytes()),
         }
     }
 
@@ -1954,6 +1992,7 @@ mod tests {
                 reached_tx,
                 release_rx,
                 verifier: required.verifier.clone(),
+                verifier_package: test_verifier_package_pin(&required.verifier),
                 input,
             }))
         }
@@ -1963,6 +2002,7 @@ mod tests {
         reached_tx: tokio::sync::oneshot::Sender<()>,
         release_rx: tokio::sync::oneshot::Receiver<()>,
         verifier: octopus_descriptors::VerifierId,
+        verifier_package: octopus_ledger::VerifierPackagePin,
         input: octopus_marks::VerificationInput,
     }
 
@@ -1979,7 +2019,7 @@ mod tests {
                 self.input.epoch,
                 self.input.artifact,
                 self.verifier,
-                test_verifier_package_pin(),
+                self.verifier_package,
                 serde_json::json!({ "barrier": true }),
             ))
         }

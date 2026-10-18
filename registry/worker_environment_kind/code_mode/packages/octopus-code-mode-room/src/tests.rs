@@ -12,7 +12,7 @@ use octopus_interfaces::{
     GrantProjection, InterfaceArtifactFile, InterfaceInvocationEnvelope, InterfaceToolAffordance,
     InvocationMetadata, RuntimeInvocationMetadata,
 };
-use octopus_ledger::{ArtifactRef, ContentHash};
+use octopus_ledger::{ArtifactDelivery, ArtifactRef, ContentHash, MovementLog};
 use octopus_tool_door_runtime::{
     DeliveryVerdict, SystemInterfaceEmissionArtifact, ToolProcessEnvironment, ToolProcessError,
     ToolProcessInvocation,
@@ -753,8 +753,19 @@ async fn owner_frontier(
         .map_err(|e| e.to_string())
 }
 
+async fn run_local_fixture(fixture: Pin<Box<dyn Future<Output = ()>>>) {
+    tokio::task::LocalSet::new().run_until(async move {
+        tokio::task::spawn_local(fixture).await.unwrap();
+    }).await;
+}
+
 #[tokio::test]
 async fn persistent_frontiers_use_admitted_owner_results_and_preserve_wait_output() {
+    run_local_fixture(persistent_frontiers_fixture()).await;
+}
+
+fn persistent_frontiers_fixture() -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(async move {
     use octopus_tool_door_runtime::{
         ToolDoorArtifactDecodePurpose as Purpose, owner_contract_tests::DoorFixture,
     };
@@ -1109,7 +1120,8 @@ async fn persistent_frontiers_use_admitted_owner_results_and_preserve_wait_outpu
             .correlation_id,
         original_resume_id
     );
-    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Full)).await.unwrap();
+    tokio::task::spawn_local(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Full)).await.unwrap();
+    })
 }
 #[path = "../../../../system_room/packages/octopus-system-room-env/src/file_write.rs"]
 mod actual_file_write;
@@ -1196,6 +1208,7 @@ struct FrontierAdmission {
     runtime: octopus_runtime::Runtime,
     provider: FrontierProvider,
     door: tokio::sync::Mutex<octopus_tool_door_runtime::owner_contract_tests::DoorFixture>,
+    retained_arrivals: std::sync::Arc<Mutex<octopus_ledger_index::ArrivalDedupIndex>>,
     deliveries: Mutex<Vec<AdmittedDelivery>>,
     changed: tokio::sync::Notify,
     root: PathBuf,
@@ -1265,7 +1278,7 @@ impl FrontierAdmission {
         for target in targets {
             let observation = match self
                 .runtime
-                .admit_resolved_interface_checkpoint(&target, artifact.clone(), label.clone())
+                .admit_resolved_interface_checkpoint(&target, artifact.clone(), label.clone(), None)
                 .await
             {
                 Ok(observation) => observation.commit(),
@@ -1307,6 +1320,45 @@ impl FrontierAdmission {
             }
         }
         final_seq.ok_or_else(|| format!("runtime admitted no output edge: {refusals:?}"))
+    }
+
+    async fn arrive_retained(
+        &self, from: &str, file: &InterfaceArtifactFile, identity: &str,
+    ) -> Result<ArtifactDelivery, String> {
+        let artifact = super::continuation::artifact_ref(file)?;
+        let (result, movements) = {
+            let mut door = self.door.lock().await;
+            let start = octopus_ledger::Seq(door.len() as u64);
+            let mut blobs = octopus_ledger_store::DurableBlobs::open(self.root.join("blobs"))
+                .map_err(|error| error.to_string())?;
+            let mut owner = octopus_app_server::InterfaceArtifactArrivalFromInterface::new(
+                &self.runtime, &mut *door, &mut blobs, self.retained_arrivals.clone(),
+                octopus_ledger::TraceId("trace:code-mode-owner-contract".into()), InterfaceId::new(from),
+            );
+            let result = octopus_app_server::owner_contract_tests::arrive_retained_artifact(
+                &mut owner, file, identity,
+            ).await.map_err(|error| error.to_string());
+            drop(owner);
+            (result, door.read_from(start))
+        };
+        for movement in movements {
+            if movement.kind != octopus_ledger::MovementKind::InterfaceOutbound { continue; }
+            if movement.artifact.as_ref() != Some(&artifact) {
+                return Err("retained owner emitted a different artifact".into());
+            }
+            let metadata = movement.invocation_metadata.as_ref()
+                .and_then(|metadata| metadata.invocation()).cloned()
+                .ok_or("retained owner outbound lost its exact invocation metadata")?;
+            let (octopus_ledger::Endpoint::Interface(from), octopus_ledger::Endpoint::Interface(to)) =
+                (movement.from, movement.to);
+            let delivery = AdmittedDelivery { seq: movement.seq.0, from, to, file: file.clone(), metadata };
+            self.deliveries.lock().unwrap().push(delivery.clone());
+            self.changed.notify_one();
+            if delivery.to.as_str() == "system_provider_file_test" {
+                self.execute_provider_file_write(&delivery).await?;
+            }
+        }
+        result
     }
 
     async fn transport(
@@ -1433,8 +1485,15 @@ impl FrontierAdmission {
                 let private = self.door.lock().await.context.interface_var_dir().canonicalize().unwrap();
                 assert!(output.artifact.manifest_path().starts_with(&private), "owner replay must cross the spawned private-output boundary");
                 assert!(output.artifact.read_manifest().unwrap().payload_path.starts_with(&private));
+                if output.retained_delivery_id.is_some() {
+                    return output.acknowledge_retained(Err("fixture interrupted after checked owner installation".into()));
+                }
                 return output.acknowledge(DeliveryVerdict::refused(octopus_interfaces::RefusedReason::Policy,
                     "fixture interrupted after checked owner installation".into()));
+            }
+            if let Some(identity) = output.retained_delivery_id.as_deref() {
+                let delivery = self.arrive_retained(DOOR, &output.artifact, identity).await;
+                return output.acknowledge_retained(delivery);
             }
             let seq = self.arrive(DOOR, &output.artifact).await?;
             if output.artifact.read_manifest().map_err(|e| e.to_string())?.label == "code_mode.owner_ready"
@@ -1582,7 +1641,7 @@ impl FrontierAdmission {
 fn downloaded_artifact_is_admitted_bound_and_read_in_the_same_cell() {
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(60),Box::pin(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Generated))).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(60),run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Generated))).await.unwrap();
         });
     }).unwrap().join().unwrap();
 }
@@ -1591,7 +1650,7 @@ fn downloaded_artifact_is_admitted_bound_and_read_in_the_same_cell() {
 fn application_approval_rearms_the_return_before_either_delivery_order() {
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            tokio::time::timeout(std::time::Duration::from_secs(120),Box::pin(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Application))).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(120),run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Application))).await.unwrap();
         });
     }).unwrap().join().unwrap();
 }
@@ -1778,33 +1837,34 @@ fn exact_install_does_not_claim_later_state(
 #[tokio::test]
 async fn completed_owner_write_survives_an_overlapping_provider_write() {
     tokio::time::timeout(std::time::Duration::from_secs(20),
-        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::InterleavedResult)))
-        .await.unwrap().unwrap();
+        run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::InterleavedResult)))
+        .await.unwrap();
 }
 
 #[tokio::test]
 async fn completed_error_waits_for_the_checked_provider_result_before_dispatch() {
     tokio::time::timeout(std::time::Duration::from_secs(20),
-        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::UnsubmittedResult)))
-        .await.unwrap().unwrap();
+        run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::UnsubmittedResult)))
+        .await.unwrap();
 }
 
 #[tokio::test]
 async fn detached_coauthor_result_recovers_target_bytes_from_checked_write() {
-    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedResult)).await.unwrap();
+    run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedResult)).await;
 }
 
 #[tokio::test]
 async fn admitted_owner_failure_returns_once_without_reexecuting_the_effect() {
-    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedFailure)).await.unwrap();
+    run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::DetachedFailure)).await;
 }
 
 #[tokio::test]
 async fn detached_coauthor_uses_its_exact_admitted_writer_declaration() {
-    tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Coauthor)).await.unwrap();
+    run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::Coauthor)).await;
 }
 
-async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) {
+fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin<Box<dyn Future<Output = ()>>> {
+    Box::pin(async move {
     let generated_only = matches!(case, FrontierCase::Generated);
     use octopus_policy::{ArtifactVerb, CapSet, ContextGrant};
     use octopus_runtime::{
@@ -2131,6 +2191,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         runtime,
         provider,
         door: tokio::sync::Mutex::new(door),
+        retained_arrivals: std::sync::Arc::new(Mutex::new(octopus_ledger_index::ArrivalDedupIndex::new())),
         deliveries: Mutex::new(vec![]),
         changed: tokio::sync::Notify::new(),
         root: root.clone(),
@@ -2154,7 +2215,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
         owner_write_completed: tokio::sync::Notify::new(),
     });
     let transport_owner = admission.clone();
-    let pump = tokio::spawn(async move {
+    let pump = tokio::task::spawn_local(async move {
         loop {
             transport_owner.transport(transport.next().await?).await?;
         }
@@ -2163,12 +2224,21 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     });
     let provider_socket = tokio::spawn(actual_provider_authoring_socket(admission.clone(),listener));
     let provider_sink = admission.clone();
-    let provider_pump = tokio::spawn(async move {
+    let provider_pump = tokio::task::spawn_local(async move {
         loop {
             let output = provider_transport.recv().await.ok_or("provider fixture arrival channel closed")?;
             if output.interface.as_str() != "world_provider_test" || !output.evidence.is_empty() { return Err("fixture provider attempted an unowned arrival".to_string()); }
-            let seq = provider_sink.arrive("world_provider_test",&output.artifact).await?;
-            output.verdict_tx.ok_or("provider fixture lost its actual hand-in receipt")?.send(DeliveryVerdict::Admitted{seq}).map_err(|_| "provider fixture dropped its hand-in receipt")?;
+            match (output.verdict_tx, output.retained) {
+                (None, Some(retained)) => {
+                    let delivery = provider_sink.arrive_retained("world_provider_test", &output.artifact, &retained.id).await;
+                    retained.reply.send(delivery).map_err(|_| "provider fixture dropped its retained hand-in receipt")?;
+                }
+                (Some(reply), None) => {
+                    let seq = provider_sink.arrive("world_provider_test", &output.artifact).await?;
+                    reply.send(DeliveryVerdict::Admitted { seq }).map_err(|_| "provider fixture dropped its hand-in receipt")?;
+                }
+                _ => return Err("provider fixture must select one hand-in receipt contract".into()),
+            }
         }
         #[allow(unreachable_code)] Ok::<(),String>(())
     });
@@ -2742,6 +2812,7 @@ async fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) 
     assert!(provider_socket.await.unwrap_err().is_cancelled());assert!(provider_pump.await.unwrap_err().is_cancelled());
     pump.abort();
     assert!(pump.await.unwrap_err().is_cancelled());
+    })
 }
 
 async fn actual_generated_artifact_read(admission: &std::sync::Arc<FrontierAdmission>, room:&CodeModeRoom, handoff:&std::sync::Arc<actual_owner_handoff::OwnerHandoff>, formation:&WorkerEnvironmentFormation, kind:&WorkerEnvKindSpec, root:&Path) {

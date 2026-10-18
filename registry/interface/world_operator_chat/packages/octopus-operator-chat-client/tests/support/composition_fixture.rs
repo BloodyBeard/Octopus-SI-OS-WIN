@@ -90,6 +90,8 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         "tool/artifact.read/tool.json",
         "tool/artifact.send/tool.json",
         "mark/tool.call.allowed/mark.json",
+        "mark/tool.result.corresponds/mark.json",
+        "verifier/tool_result_correspondence/verifier.json",
         "verifier/tool_call_allowed/verifier.json",
     ] {
         let value =
@@ -102,6 +104,8 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
         root.join("registry/verifier/tool_call_allowed/verify.py"),
     )
     .unwrap();
+    std::fs::copy(source.join("registry/verifier/tool_result_correspondence/verify.py"),
+        root.join("registry/verifier/tool_result_correspondence/verify.py")).unwrap();
     write(
         root,
         "registry/interface/world_provider_fixture/interface.json",
@@ -139,7 +143,7 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
             &format!("registry/interface/{id}/policy.json"),
             json!({"id":id,
             "ceiling":{"interfaces":["system_room","system_interface_authoring","world_provider_fixture","system_worker_parent","system_worker_unselected"],
-                "tools":["file.write","artifact.send"],"wek":["system_room"],"mark_outcomes":["tool.call.allowed"],
+                "tools":["file.write","artifact.send"],"wek":["system_room"],"mark_outcomes":["tool.call.allowed","tool.result.corresponds"],
                 "hard_blocked_tools":[],"interface_policy":{"world_provider_fixture":{"models":["fixture-a"]}}},
             "role_artifacts":[format!("role-{id}")]}),
         );

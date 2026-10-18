@@ -5,6 +5,8 @@ use std::path::Path;
 #[cfg(target_vendor = "apple")]
 mod compression;
 
+pub mod publication;
+
 pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<File> {
     #[cfg(target_vendor = "apple")]
     let prepared = compression::FileCompression::open(

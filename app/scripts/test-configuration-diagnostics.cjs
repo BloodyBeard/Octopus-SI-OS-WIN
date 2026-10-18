@@ -20,9 +20,10 @@ async function fingerprint(root) {
 }
 
 async function run() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-diagnostic-contract-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-diagnostic-contract-")));
   try {
     const roots = Object.fromEntries(["sourceRegistryRoot", "activeRegistryRoot", "libraryRoot", "stateRoot"].map((key) => [key, path.join(root, key)]));
+    roots.publication = require("./support/native-publication.cjs").nativePublication();
     await fs.mkdir(roots.activeRegistryRoot);
     const relative = "interface/world_fixture/interface.json";
     const sourceFile = path.join(roots.sourceRegistryRoot, relative), activeFile = path.join(roots.activeRegistryRoot, relative);
@@ -115,7 +116,8 @@ async function run() {
     await fs.writeFile(activeFile, `{"${secret}":`);
     assert.equal((await fileReport()).observation.active.state, "invalid_json_object");
     assert.equal((await fileReport("../escape.json")).status, "inspection_failed");
-    const cliArgs = [path.resolve(__dirname, "../electron/clientDoctor.cjs"), ...Object.values(roots), "--registry-file", relative];
+    const cliArgs = [path.resolve(__dirname, "../electron/clientDoctor.cjs"),
+      roots.sourceRegistryRoot, roots.activeRegistryRoot, roots.libraryRoot, roots.stateRoot, "--registry-file", relative];
     const snapshot = await fingerprint(root);
     const cli = spawnSync(process.execPath, cliArgs, { encoding: "utf8" });
     assert.equal(cli.status, 0, cli.stderr);

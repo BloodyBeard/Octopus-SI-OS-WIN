@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn exact_file_authoring_tools_apply_under_sandbox_and_refuse_sibling() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().prefix("file-authority.[x]+(y)$\"\\-").tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let probe = compile_probe(&root);
     let request = capture_fixture(&root);
@@ -134,7 +134,7 @@ async fn exact_file_authoring_tools_apply_under_sandbox_and_refuse_sibling() {
             .collect();
         assert!(!aliases.is_empty(), "no distinct supported parent alias");
         for parent in parents.iter().chain(aliases.iter()) {
-            let proof = raw_probe(&authority.authority, &probe, &interface_dir, parent);
+            let proof = raw_probe(&authority.authority, &probe, &interface_dir, parent, "unrelated.json".as_ref());
             assert_eq!(proof["directory_open"], 0, "{proof}");
             assert_eq!(proof["directory_fsync"], 0, "{proof}");
             assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "untouched");
@@ -173,6 +173,26 @@ async fn exact_file_authoring_tools_apply_under_sandbox_and_refuse_sibling() {
             assert_eq!(std::fs::read_to_string(&paths[i]).unwrap(), after[i]);
         }
         assert_eq!(result["body"]["writes"].as_array().unwrap().len(), 2);
+        use octopus_file_storage::publication::{COORDINATION_DIRECTORY, DigestAlgorithm, PublicationOutcome, PublicationReceipt, WriteGuard};
+        let sibling_receipt = WriteGuard::acquire_operation(&sibling, false, "sibling-authority-probe")
+            .unwrap().publish("sibling-authority-probe", Some(&ContentHash::of_bytes(b"untouched").to_hex()), b"untouched", DigestAlgorithm::Blake3).unwrap();
+        assert_eq!(sibling_receipt.outcome, PublicationOutcome::Applied);
+        let metadata_root = sibling.parent().unwrap().join(COORDINATION_DIRECTORY);
+        let receipt_path = std::fs::read_dir(&metadata_root).unwrap().map(|entry| entry.unwrap().path())
+            .find(|path| std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<PublicationReceipt>(&bytes).ok()).as_ref() == Some(&sibling_receipt)).unwrap();
+        let receipt_bytes = std::fs::read(&receipt_path).unwrap();
+        for parent in parents.iter().chain(aliases.iter()) {
+            let metadata = parent.join(COORDINATION_DIRECTORY);
+            let proof = raw_probe(&authority.authority, &probe, &interface_dir, &metadata, receipt_path.file_name().unwrap());
+            assert_eq!(proof["directory_open"], 0, "{proof}");
+            assert_eq!(proof["directory_fsync"], 0, "{proof}");
+            for operation in ["read", "write", "create", "delete", "readat", "writeat", "createat", "deleteat"] {
+                assert_eq!(proof[operation], 1, "sibling publication {operation}: {proof}");
+            }
+            assert!(!metadata.join("created.json").exists());
+            assert!(!metadata.join("created-at.json").exists());
+        }
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt_bytes);
         let refused = invoke(
             &root,
             &interface_dir,
@@ -382,8 +402,9 @@ fn raw_probe(
     binary: &Path,
     cwd: &Path,
     parent: &Path,
+    entry: &std::ffi::OsStr,
 ) -> Value {
-    let args = [parent.as_os_str().to_owned()];
+    let args = [parent.as_os_str().to_owned(), entry.to_owned()];
     let process = authority
         .prepare(binary.to_str().unwrap(), &args, cwd, None)
         .unwrap();
@@ -417,7 +438,7 @@ static int content(int fd) { if (fd < 0) return errno == EPERM || errno == EACCE
 static int deleted(int result) { return result == 0 ? 0 : errno == EPERM || errno == EACCES ? 1 : -errno; }
 int main(int argc, char **argv) {
     char existing[4096], create[4096];
-    snprintf(existing, sizeof existing, "%s/unrelated.json", argv[1]);
+    snprintf(existing, sizeof existing, "%s/%s", argv[1], argv[2]);
     snprintf(create, sizeof create, "%s/created.json", argv[1]);
     int parent = open(argv[1], O_RDONLY | O_DIRECTORY);
     int opening = parent < 0 ? errno : 0;
@@ -426,10 +447,10 @@ int main(int argc, char **argv) {
     int writing = refused(open(existing, O_WRONLY | O_TRUNC));
     int creating = refused(open(create, O_WRONLY | O_CREAT | O_EXCL, 0600));
     int deleting = deleted(unlink(existing));
-    int readat = parent < 0 ? -1 : content(openat(parent, "unrelated.json", O_RDONLY));
-    int writeat = parent < 0 ? -1 : refused(openat(parent, "unrelated.json", O_WRONLY | O_TRUNC));
+    int readat = parent < 0 ? -1 : content(openat(parent, argv[2], O_RDONLY));
+    int writeat = parent < 0 ? -1 : refused(openat(parent, argv[2], O_WRONLY | O_TRUNC));
     int createat = parent < 0 ? -1 : refused(openat(parent, "created-at.json", O_WRONLY | O_CREAT | O_EXCL, 0600));
-    int deleteat = parent < 0 ? -1 : deleted(unlinkat(parent, "unrelated.json", 0));
+    int deleteat = parent < 0 ? -1 : deleted(unlinkat(parent, argv[2], 0));
     printf("{\"directory_open\":%d,\"directory_fsync\":%d,\"read\":%d,\"write\":%d,\"create\":%d,\"delete\":%d,\"readat\":%d,\"writeat\":%d,\"createat\":%d,\"deleteat\":%d}\n", opening, syncing, reading, writing, creating, deleting, readat, writeat, createat, deleteat);
     if (parent >= 0) close(parent);
     return 0;

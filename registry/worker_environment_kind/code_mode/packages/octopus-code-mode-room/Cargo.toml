@@ -29,6 +29,9 @@ octopus-provider-run-authoring = { path = "../../../../interface/world_provider_
 
 
 [dev-dependencies]
+octopus-app-server = { path = "../../../../../crates/octopus-app-server", features = ["owner-contract-tests"] }
+octopus-ledger-index = { path = "../../../../../crates/octopus-ledger-index" }
+octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }
 octopus-file-write-contract = { path = "../../../system_room/packages/octopus-file-write-contract" }
 octopus-interface-activation-app-server-transport = { path = "../../../../interface/world_operator_chat/packages/octopus-interface-activation-app-server-transport" }
 octopus-interface-transport = { path = "../../../../../crates/octopus-interface-transport" }

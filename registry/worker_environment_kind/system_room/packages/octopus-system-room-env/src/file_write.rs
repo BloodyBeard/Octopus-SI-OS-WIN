@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
+use octopus_file_storage::publication::{self, DigestAlgorithm, PublicationOutcome, PublicationReceipt, WriteGuard};
 use octopus_file_write_contract::{DecodeBudget, JsonFormat, Preimage};
 use octopus_interfaces::InterfaceInvocationEnvelope;
-use octopus_ledger::ContentHash;
+use octopus_ledger::{ArtifactRef, ContentHash};
 use octopus_worker_env::AbsPath;
 
 #[path = "file_write/ordered.rs"]
@@ -39,271 +40,108 @@ pub fn execute_file_write(
 ) -> Result<serde_json::Value, String> {
     ensure_room_kind_granted(input, room_kinds)?;
     let roots = configured_write_roots(&root_slots.values().cloned().collect::<Vec<_>>())?;
-    let mut requests = parse_write_requests(arguments, &roots, max_payload_bytes)?;
-    bind_effect_record(input, effect_root, &mut requests)?;
-    retain_write_inputs(effect_root, &requests)?;
-    let staging_root = effect_root.join("staging");
-    std::fs::create_dir_all(&staging_root).map_err(|error| {
-        format!(
-            "file.write staging root '{}' cannot be created: {error}",
-            staging_root.display()
-        )
-    })?;
-    let mut staged: Vec<PreparedWrite> = Vec::with_capacity(requests.len());
-    for request in requests {
-        let parent = request.target.parent().ok_or_else(|| {
-            format!(
-                "file.write path '{}' has no parent directory",
-                request.target.display()
-            )
-        })?;
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("file.write could not create '{}': {e}", parent.display()))?;
-        let staged_path = if request.already_applied {
-            None
-        } else {
-            match stage_write(&staging_root, &request.target, request.content.as_bytes()) {
-                Ok(path) => Some(path),
-                Err(error) => {
-                    for prepared in &staged {
-                        if let Some(path) = prepared.staged_path.as_ref() {
-                            let _ = std::fs::remove_file(path);
-                        }
-                    }
-                    return Err(error);
-                }
-            }
-        };
-        staged.push(PreparedWrite {
-            target: request.target,
-            staged_path,
-            content: request.content,
-            before_hash: request.before_hash,
-        });
+    if !effect_root.is_absolute() {
+        return Err("file.write effect root must be absolute".into());
     }
-
-    let mut evidence = Vec::with_capacity(staged.len());
-    let mut committed = Vec::new();
-    for (index, prepared) in staged.iter().enumerate() {
-        let mut lock = TargetWriteLock::acquire(&prepared.target)?;
-        let after_hash = ContentHash::of_bytes(prepared.content.as_bytes()).to_hex();
-        let current_hash = match lock.as_mut() {
-            Some(lock) => Some(lock.current_hash()?),
-            None => None,
+    let directory = effect_root.join("ordinary").join(input.artifact.content.to_hex());
+    let _invocation_lock = lock_invocation(&directory)?;
+    let effect_path = effect_root.join(format!("{}.json", input.artifact.content.to_hex()));
+    let recorded = read_effect_record(&effect_path)?;
+    if let Some(record) = &recorded {
+        if record.schema_version == 1 {
+            return Err("file.write retained legacy intent has no attributable publication receipt; its effect is uncertain and cannot be replayed".into());
+        }
+        if record.schema_version != 2 {
+            return Err(format!("file.write effect record has unsupported schema_version {}", record.schema_version));
+        }
+        if record.artifact.as_ref() != Some(&input.artifact)
+            || record.artifact_id != input.artifact.id.as_str()
+        {
+            return Err("file.write effect record differs from its original source artifact".into());
+        }
+    }
+    let requests = parse_write_requests(arguments, &roots, max_payload_bytes, recorded.as_ref(), effect_root)?;
+    retain_write_inputs(effect_root, &requests)?;
+    bind_effect_record(input, arguments, effect_root, &requests)?;
+    let mut evidence = Vec::with_capacity(requests.len());
+    for (index, request) in requests.iter().enumerate() {
+        let operation = publication_operation_id(input, false, index)?;
+        let publication = {
+            let guard = acquire_publication(&request.target, request.before_hash.as_deref(), &roots, &operation)?;
+            guard.publish(&operation, request.before_hash.as_deref(), request.content.as_bytes(), DigestAlgorithm::Blake3)
+                .map_err(|error| format!("file.write publication at '{}' requires reconciliation: {error}", request.target.display()))?
         };
-        let expected_hash = if prepared.staged_path.is_some() {
-            prepared.before_hash.as_deref()
-        } else {
-            Some(after_hash.as_str())
-        };
-        if current_hash.as_deref() != expected_hash {
-            return Err(format!(
-                "file.write optimistic hash changed before commit for '{}': expected {}, observed {}",
-                prepared.target.display(),
-                expected_hash.unwrap_or("<absent>"),
-                current_hash.as_deref().unwrap_or("<absent>")
-            ));
-        }
-        if let Some(staged_path) = prepared.staged_path.as_ref() {
-            let installed = if prepared.before_hash.is_none() {
-                std::fs::hard_link(staged_path, &prepared.target)
-                    .and_then(|()| std::fs::remove_file(staged_path))
-            } else {
-                if lock.is_none() {
-                    return Err(format!(
-                        "file.write target '{}' disappeared after optimistic validation",
-                        prepared.target.display()
-                    ));
-                }
-                std::fs::rename(staged_path, &prepared.target)
-            };
-            if let Err(error) = installed {
-                if prepared.before_hash.is_none()
-                    && error.kind() == std::io::ErrorKind::AlreadyExists
-                {
-                    let observed = optional_hash(&prepared.target)?;
-                    if observed.as_deref() == Some(after_hash.as_str()) {
-                        let _ = std::fs::remove_file(staged_path);
-                        committed.push(prepared.target.display().to_string());
-                        if let Some(lock) = lock.take() {
-                            lock.release()?;
-                        }
-                        evidence.push(serde_json::json!({
-                            "path": prepared.target.display().to_string(),
-                            "before_hash": prepared.before_hash,
-                            "after_hash": after_hash,
-                            "bytes": prepared.content.len(),
-                        }));
-                        continue;
-                    }
-                }
-                for pending in staged.iter().skip(index) {
-                    if let Some(path) = pending.staged_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-                return Err(format!(
-                    "file.write could not move the staged bytes into '{}': {error}; already replaced [{}]",
-                    prepared.target.display(),
-                    committed.join(", ")
-                ));
-            }
-            committed.push(prepared.target.display().to_string());
-            if let Err(error) = sync_parent(&prepared.target) {
-                for pending in staged.iter().skip(index + 1) {
-                    if let Some(path) = pending.staged_path.as_ref() {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-                return Err(format!(
-                    "{error}; already replaced [{}]",
-                    committed.join(", ")
-                ));
-            }
-        }
-        let installed_hash = optional_hash(&prepared.target)?;
-        if installed_hash.as_deref() != Some(after_hash.as_str()) {
-            return Err(format!(
-                "file.write installed unexpected bytes at '{}': expected {}, observed {}",
-                prepared.target.display(),
-                after_hash,
-                installed_hash.as_deref().unwrap_or("<absent>")
-            ));
-        }
-        if let Some(lock) = lock {
-            lock.release()?;
+        let after_hash = ContentHash::of_bytes(request.content.as_bytes()).to_hex();
+        check_publication(&publication, &operation, &request.target, request.before_hash.as_deref(), &after_hash, request.content.len() as u64)?;
+        if publication.outcome != PublicationOutcome::Applied {
+            return Err(format!("file.write publication at '{}' is {:?}: {}", request.target.display(), publication.outcome,
+                publication.error.as_deref().unwrap_or("durable publication could not be established")));
         }
         evidence.push(serde_json::json!({
-            "path": prepared.target.display().to_string(),
-            "before_hash": prepared.before_hash,
+            "path": request.target,
+            "before_hash": request.before_hash,
             "after_hash": after_hash,
-            "bytes": prepared.content.len(),
+            "bytes": request.content.len(),
         }));
     }
-
-    Ok(serde_json::json!({
-        "result": "files_written",
-        "writes": evidence,
-    }))
+    Ok(serde_json::json!({"result": "files_written", "writes": evidence}))
 }
 
 struct WriteRequest {
     target: PathBuf,
     content: String,
     before_hash: Option<String>,
-    observed_hash: Option<String>,
-    observed_bytes: Option<Vec<u8>>,
-    already_applied: bool,
+    preimage_bytes: Option<Vec<u8>>,
 }
 
-struct PreparedWrite {
-    target: PathBuf,
-    staged_path: Option<PathBuf>,
-    content: String,
-    before_hash: Option<String>,
-}
-
-struct TargetWriteLock {
-    file: std::fs::File,
-}
-
-impl TargetWriteLock {
-    fn acquire(target: &Path) -> Result<Option<Self>, String> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let file = match OpenOptions::new().read(true).write(true).open(target) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(format!(
-                        "file.write target '{}' cannot be opened for locking: {error}",
-                        target.display()
-                    ));
-                }
-            };
-            match file.try_lock_exclusive() {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(format!(
-                            "file.write timed out waiting for target lock '{}'",
-                            target.display()
-                        ));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "file.write target '{}' cannot be locked: {error}",
-                        target.display()
-                    ));
-                }
-            }
-            let locked = file.metadata().map_err(|error| {
-                format!(
-                    "file.write locked target '{}' cannot be inspected: {error}",
-                    target.display()
-                )
-            })?;
-            let current = match std::fs::metadata(target) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    FileExt::unlock(&file).map_err(|unlock_error| {
-                        format!(
-                            "file.write vanished target '{}' cannot be unlocked: {unlock_error}",
-                            target.display()
-                        )
-                    })?;
-                    continue;
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "file.write target '{}' cannot be reinspected after locking: {error}",
-                        target.display()
-                    ));
-                }
-            };
-            if !same_file_identity(&locked, &current) {
-                FileExt::unlock(&file).map_err(|error| {
-                    format!(
-                        "file.write replaced target '{}' cannot be unlocked: {error}",
-                        target.display()
-                    )
-                })?;
-                continue;
-            }
-            return Ok(Some(Self { file }));
-        }
+fn lock_invocation(directory: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-
-    fn current_hash(&mut self) -> Result<String, String> {
-        self.file
-            .seek(std::io::SeekFrom::Start(0))
-            .map_err(|error| format!("file.write locked target cannot seek: {error}"))?;
-        let mut bytes = Vec::new();
-        self.file
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("file.write locked target cannot be read: {error}"))?;
-        Ok(ContentHash::of_bytes(&bytes).to_hex())
+    let lock = options.open(directory.join("lock")).map_err(|error| error.to_string())?;
+    if !lock.metadata().map_err(|error| error.to_string())?.is_file() {
+        return Err("file.write invocation lock is not a regular file".into());
     }
-
-    fn release(self) -> Result<(), String> {
-        FileExt::unlock(&self.file)
-            .map_err(|error| format!("file.write target lock cannot be released: {error}"))
-    }
+    lock.try_lock_exclusive()
+        .map_err(|error| format!("file.write exact artifact is already executing: {error}"))?;
+    Ok(lock)
 }
 
-#[cfg(unix)]
-fn same_file_identity(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
+fn publication_operation_id(input: &InterfaceInvocationEnvelope, ordered: bool, index: usize) -> Result<String, String> {
+    let artifact = serde_json::to_value(&input.artifact).map_err(|error| error.to_string())?;
+    let identity = ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&artifact)).to_hex();
+    Ok(format!("file.write:{identity}:{}:{index}", if ordered { "ordered" } else { "ordinary" }))
 }
 
-#[cfg(not(unix))]
-fn same_file_identity(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
-    true
+fn acquire_publication(target: &Path, before_hash: Option<&str>, roots: &[AbsPath], operation: &str) -> Result<WriteGuard, String> {
+    let guard = if before_hash.is_none() {
+        WriteGuard::acquire_creating_operation(target, operation)
+    } else {
+        WriteGuard::acquire_operation(target, false, operation)
+    }.map_err(|error| {
+        format!("file.write publication ownership at '{}' failed: {error}", target.display())
+    })?;
+    let path = canonicalize_declared_path(target)?;
+    if path.as_path() != target || !roots.iter().any(|root| path.is_within(root)) {
+        return Err(format!("file.write target '{}' changed its granted root before publication", target.display()));
+    }
+    Ok(guard)
+}
+
+fn check_publication(receipt: &PublicationReceipt, operation: &str, path: &Path, before: Option<&str>, after: &str, bytes: u64) -> Result<(), String> {
+    if receipt.digest_algorithm != DigestAlgorithm::Blake3
+        || receipt.operation_id != operation || receipt.path != path
+        || receipt.before_hash.as_deref() != before || receipt.after_hash.as_deref() != Some(after)
+        || receipt.bytes != bytes || (receipt.outcome == PublicationOutcome::Applied && receipt.error.is_some())
+    {
+        return Err("file.write publication receipt differs from its immutable BLAKE3 operation".into());
+    }
+    Ok(())
 }
 
 fn optional_hash(path: &Path) -> Result<Option<String>, String> {
@@ -323,6 +161,10 @@ struct FileWriteEffectRecord {
     schema_version: u32,
     artifact_id: String,
     writes: Vec<FileWriteEffectEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arguments_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -337,6 +179,8 @@ fn parse_write_requests(
     arguments: &serde_json::Value,
     roots: &[AbsPath],
     max_payload_bytes: u64,
+    recorded: Option<&FileWriteEffectRecord>,
+    effect_root: &Path,
 ) -> Result<Vec<WriteRequest>, String> {
     let mut budget = DecodeBudget::new(max_payload_bytes)?;
     let values = match arguments.get("writes") {
@@ -349,7 +193,10 @@ fn parse_write_requests(
     };
     let mut seen = BTreeSet::new();
     let mut requests = Vec::with_capacity(values.len());
-    for value in values {
+    if recorded.is_some_and(|record| record.writes.len() != values.len()) {
+        return Err("file.write retained write count differs from its immutable invocation".into());
+    }
+    for (index, value) in values.into_iter().enumerate() {
         let path = value
             .get("path")
             .and_then(serde_json::Value::as_str)
@@ -384,20 +231,23 @@ fn parse_write_requests(
                 target.display()
             ));
         }
-        let observed_before_bytes = match std::fs::File::open(&target) {
-            Ok(file) => {
-                let mut bytes = Vec::new();
-                file.take(max_payload_bytes.checked_add(1).ok_or("file.write read limit overflow")?)
-                    .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
-                if bytes.len() as u64 > max_payload_bytes { return Err("file.write target exceeds host payload limit".into()); }
-                Some(bytes)
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(format!(
-                    "file.write could not read existing target '{}': {error}",
-                    target.display()
-                ));
+        let pinned = recorded.map(|record| &record.writes[index]);
+        let observed_before_bytes = if let Some(pinned) = pinned {
+            if pinned.path != target {
+                return Err("file.write retained path differs from its immutable invocation".into());
+            }
+            pinned.before_hash.as_deref().map(|hash| read_preimage(effect_root, hash, max_payload_bytes)).transpose()?
+        } else {
+            match std::fs::File::open(&target) {
+                Ok(file) => {
+                    let mut bytes = Vec::new();
+                    file.take(max_payload_bytes.checked_add(1).ok_or("file.write read limit overflow")?)
+                        .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+                    if bytes.len() as u64 > max_payload_bytes { return Err("file.write target exceeds host payload limit".into()); }
+                    Some(bytes)
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(format!("file.write could not read existing target '{}': {error}", target.display())),
             }
         };
         if let Some(before) = &observed_before_bytes { budget.charge(before.len() as u64)?; }
@@ -410,7 +260,7 @@ fn parse_write_requests(
             .as_deref()
             .map(ContentHash::of_bytes)
             .map(|hash| hash.to_hex());
-        let (content, evidence_before_hash, already_applied) = match (
+        let (content, evidence_before_hash) = match (
             value.get("content"),
             value.get("patch"),
         ) {
@@ -430,7 +280,6 @@ fn parse_write_requests(
                         "file.write expected_after_hash belongs only to patch writes".to_string(),
                     );
                 }
-                let desired_after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
                 let expected_before = match (
                     value.get("expected_before_hash"),
                     value.get("expected_before_content"),
@@ -473,10 +322,7 @@ fn parse_write_requests(
                         );
                     }
                 };
-                let already_applied =
-                    observed_before_hash.as_deref() == Some(desired_after_hash.as_str());
                 let evidence_before_hash = match expected_before.as_ref() {
-                    Some((false, expected)) if already_applied => expected.clone(),
                     Some((false, expected)) => {
                         return Err(format!(
                             "file.write optimistic hash mismatch for '{}': expected {}, observed {}",
@@ -488,7 +334,7 @@ fn parse_write_requests(
                     Some((true, expected)) => expected.clone(),
                     None => observed_before_hash.clone(),
                 };
-                (content.clone(), evidence_before_hash, already_applied)
+                (content.clone(), evidence_before_hash)
             }
             (Some(_), None) => {
                 return Err("file.write entry 'content' must be a string".to_string());
@@ -520,41 +366,17 @@ fn parse_write_requests(
                 if patch.is_empty() {
                     return Err("file.write patch must not be empty".to_string());
                 }
-                if observed_before_hash.as_deref() == Some(expected_after.as_str()) {
-                    let bytes = observed_before_bytes.as_ref().ok_or_else(|| {
-                        "file.write patch observed an after hash without target bytes".to_string()
-                    })?;
-                    serde_json::from_slice::<serde_json::Value>(bytes).map_err(|error| {
-                        format!(
-                            "file.write already-applied patch target '{}' is not JSON: {error}",
-                            target.display()
-                        )
-                    })?;
-                    let content = String::from_utf8(bytes.clone()).map_err(|error| {
-                        format!(
-                            "file.write already-applied patch target '{}' is not UTF-8: {error}",
-                            target.display()
-                        )
-                    })?;
-                    (content, Some(expected_before), true)
-                } else {
-                    if observed_before_hash.as_deref() != Some(expected_before.as_str()) {
-                        return Err(format!(
-                            "file.write patch optimistic hash mismatch for '{}': expected {}, observed {}",
-                            target.display(),
-                            expected_before,
-                            observed_before_hash.as_deref().unwrap_or("<absent>")
-                        ));
-                    }
-                    let before = observed_before_bytes.as_ref().ok_or_else(|| {
-                        format!(
-                            "file.write patch target '{}' does not exist",
-                            target.display()
-                        )
-                    })?;
-                    let content = apply_checked_json_patch(&target, before, &patch, &expected_after, format.unwrap_or_default())?;
-                    (content, Some(expected_before), false)
+                if observed_before_hash.as_deref() != Some(expected_before.as_str()) {
+                    return Err(format!(
+                        "file.write patch optimistic hash mismatch for '{}': expected {}, observed {}",
+                        target.display(), expected_before, observed_before_hash.as_deref().unwrap_or("<absent>")
+                    ));
                 }
+                let before = observed_before_bytes.as_ref().ok_or_else(|| {
+                    format!("file.write patch target '{}' does not exist", target.display())
+                })?;
+                let content = apply_checked_json_patch(&target, before, &patch, &expected_after, format.unwrap_or_default())?;
+                (content, Some(expected_before))
             }
         };
         budget.charge(content.len() as u64)?;
@@ -562,9 +384,7 @@ fn parse_write_requests(
             target,
             content,
             before_hash: evidence_before_hash,
-            observed_hash: observed_before_hash,
-            observed_bytes: observed_before_bytes,
-            already_applied,
+            preimage_bytes: observed_before_bytes,
         });
     }
     Ok(requests)
@@ -610,99 +430,44 @@ fn parse_content_hash<'a>(value: &'a str, field: &str) -> Result<&'a str, String
 
 fn bind_effect_record(
     input: &InterfaceInvocationEnvelope,
+    arguments: &serde_json::Value,
     effect_root: &Path,
-    requests: &mut [WriteRequest],
+    requests: &[WriteRequest],
 ) -> Result<(), String> {
-    if !effect_root.is_absolute() {
-        return Err(format!(
-            "file.write effect root must be absolute: {}",
-            effect_root.display()
-        ));
-    }
-    std::fs::create_dir_all(effect_root).map_err(|error| {
-        format!(
-            "file.write effect root '{}' cannot be created: {error}",
-            effect_root.display()
-        )
-    })?;
     let effect_path = effect_root.join(format!("{}.json", input.artifact.content.to_hex()));
-    let record = match read_effect_record(&effect_path)? {
-        Some(record) => record,
-        None => {
-            let record = FileWriteEffectRecord {
-                schema_version: 1,
-                artifact_id: input.artifact.id.as_str().to_string(),
-                writes: requests
-                    .iter()
-                    .map(|request| FileWriteEffectEntry {
-                        path: request.target.clone(),
-                        before_hash: request.before_hash.clone(),
-                        after_hash: ContentHash::of_bytes(request.content.as_bytes()).to_hex(),
-                    })
-                    .collect(),
-            };
-            let mut bytes = serde_json::to_vec(&record)
-                .map_err(|error| format!("file.write effect record did not encode: {error}"))?;
-            bytes.push(b'\n');
-            install_effect_record(&effect_path, &bytes)?;
-            read_effect_record(&effect_path)?.ok_or_else(|| {
-                format!(
-                    "file.write effect record '{}' disappeared after installation",
-                    effect_path.display()
-                )
-            })?
-        }
+    let record = FileWriteEffectRecord {
+        schema_version: 2,
+        artifact_id: input.artifact.id.as_str().to_string(),
+        artifact: Some(input.artifact.clone()),
+        arguments_hash: Some(ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(arguments)).to_hex()),
+        writes: requests.iter().map(|request| FileWriteEffectEntry {
+            path: request.target.clone(), before_hash: request.before_hash.clone(),
+            after_hash: ContentHash::of_bytes(request.content.as_bytes()).to_hex(),
+        }).collect(),
     };
-    if record.schema_version != 1 {
-        return Err(format!(
-            "file.write effect record '{}' has schema_version {}, expected 1",
-            effect_path.display(),
-            record.schema_version
-        ));
-    }
-    if record.artifact_id != input.artifact.id.as_str() {
-        return Err(format!(
-            "file.write effect record '{}' belongs to artifact '{}', not '{}'",
-            effect_path.display(),
-            record.artifact_id,
-            input.artifact.id.as_str()
-        ));
-    }
-    if record.writes.len() != requests.len() {
-        return Err(format!(
-            "file.write effect record '{}' contains {} writes, request contains {}",
-            effect_path.display(),
-            record.writes.len(),
-            requests.len()
-        ));
-    }
-    for (index, (request, recorded)) in requests.iter_mut().zip(record.writes.iter()).enumerate() {
-        let desired_after = ContentHash::of_bytes(request.content.as_bytes()).to_hex();
-        if recorded.path != request.target || recorded.after_hash != desired_after {
-            return Err(format!(
-                "file.write effect record '{}' row {} does not match the retried request",
-                effect_path.display(),
-                index
-            ));
+    if let Some(retained) = read_effect_record(&effect_path)? {
+        if retained != record {
+            return Err("file.write effect record differs from its immutable invocation".into());
         }
-        let observed = request.observed_hash.as_deref();
-        if observed == Some(recorded.after_hash.as_str()) {
-            request.already_applied = true;
-        } else if observed == recorded.before_hash.as_deref() {
-            request.already_applied = false;
-        } else {
-            return Err(format!(
-                "file.write effect record '{}' row {} expects materialized hash {} or {}, observed {}",
-                effect_path.display(),
-                index,
-                recorded.before_hash.as_deref().unwrap_or("<absent>"),
-                recorded.after_hash,
-                observed.unwrap_or("<absent>")
-            ));
-        }
-        request.before_hash = recorded.before_hash.clone();
+    } else {
+        let mut bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        install_effect_record(&effect_path, &bytes)?;
     }
     Ok(())
+}
+
+fn read_preimage(effect_root: &Path, hash: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    parse_content_hash(hash, "recorded before_hash")?;
+    let path = effect_root.join("blobs").join(hash);
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path).map_err(|error| format!("file.write preimage '{}' is unavailable: {error}", path.display()))?
+        .take(max_bytes.checked_add(1).ok_or("file.write read limit overflow")?)
+        .read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > max_bytes || ContentHash::of_bytes(&bytes).to_hex() != hash {
+        return Err(format!("file.write preimage '{}' differs from its pinned hash or exceeds the payload limit", path.display()));
+    }
+    Ok(bytes)
 }
 
 fn read_effect_record(path: &Path) -> Result<Option<FileWriteEffectRecord>, String> {
@@ -749,7 +514,9 @@ fn install_effect_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
                     path.display()
                 ));
             }
-            Ok(())
+            std::fs::File::open(path).and_then(|file| file.sync_all())
+                .map_err(|error| format!("file.write existing effect record '{}' cannot be synchronized: {error}", path.display()))?;
+            sync_parent(path)
         }
         Err(error) => Err(format!(
             "file.write effect record '{}' cannot be installed: {error}",
@@ -827,7 +594,7 @@ fn retain_write_inputs(effect_root: &Path, requests: &[WriteRequest]) -> Result<
     })?;
     for request in requests {
         for bytes in request
-            .observed_bytes
+            .preimage_bytes
             .as_deref()
             .into_iter()
             .chain(std::iter::once(request.content.as_bytes()))
@@ -878,6 +645,9 @@ fn canonicalize_declared_path(path: &Path) -> Result<AbsPath, String> {
             Ok(mut canonical) => {
                 for component in suffix.iter().rev() {
                     canonical.push(component);
+                }
+                if canonical.components().any(|component| component.as_os_str() == publication::COORDINATION_DIRECTORY) {
+                    return Err("file.write publication metadata is not an ordinary file target".into());
                 }
                 return AbsPath::new(&canonical).map_err(|error| {
                     format!(

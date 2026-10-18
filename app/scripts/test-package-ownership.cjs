@@ -1,3 +1,4 @@
+const { nativePublication, transactionEntries: retainedTransactionEntries } = require("./support/native-publication.cjs");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -12,7 +13,7 @@ const { assertDeclaredGeneratedOutput, isGeneratedSourcePath, readGeneratedSourc
 const { validatePublicPayload } = require("./publication-lib.cjs");
 
 function rootsFor(root) {
-  return { sourceRegistryRoot: path.join(root, "source"), activeRegistryRoot: path.join(root, "active"),
+  return { publication: nativePublication(), sourceRegistryRoot: path.join(root, "source"), activeRegistryRoot: path.join(root, "active"),
     libraryRoot: path.join(root, "library"), stateRoot: path.join(root, "state") };
 }
 function ownerFile(roots, active, file) {
@@ -82,7 +83,7 @@ async function conflictFixture(root) {
     }
   };
   const unchanged = async () => { await assertBytes(false); assert.deepEqual(await fs.readFile(receiptPath), prior);
-    assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+    assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
     assert.equal(fsSync.existsSync(path.join(roots.activeRegistryRoot, "tool", "fixture.added")), false); };
   return { roots, rows, adopt, prior, receiptPath, assertBytes, unchanged, chosen };
 }
@@ -125,28 +126,28 @@ async function conflictResolutionFixtures(root) {
   const racedFile = ownerFile(race.roots, true, "life-bin");
   await assert.rejects(race.adopt(race.rows, { onProgress(progress) { if (!injected && progress.phase === "copying") {
     injected = true; fsSync.chmodSync(racedFile, 0o600);
-  } } }), /changed during repair/);
+  } } }), /changed before native publication/);
   assert.equal(injected, true); assert.deepEqual(await fs.readFile(race.receiptPath), race.prior);
   assert.equal((await fs.stat(racedFile)).mode & 0o777, 0o600);
-  assert.equal((await fs.readdir(path.join(race.roots.stateRoot, "transactions"))).length, 1);
-  await assert.rejects(recoverLocalPackageTransactions(race.roots), /foreign owner state/);
+  assert.deepEqual(await retainedTransactionEntries(path.join(race.roots.stateRoot, "transactions")), []);
+  await recoverLocalPackageTransactions(race.roots);
   assert.equal((await fs.stat(racedFile)).mode & 0o777, 0o600);
   assert.deepEqual(await fs.readFile(race.receiptPath), race.prior);
   await fs.chmod(racedFile, race.rows[1].active.mode); await recoverLocalPackageTransactions(race.roots);
   await race.unchanged();
-  assert.deepEqual(await fs.readdir(path.join(race.roots.stateRoot, "transactions")), []);
-  for (const phase of ["backing_up", "finalizing"]) {
+  assert.deepEqual(await retainedTransactionEntries(path.join(race.roots.stateRoot, "transactions")), []);
+  for (const phase of ["materializing", "finalizing"]) {
     const directory = path.join(root, `crash-${phase}`), interrupted = await conflictFixture(directory);
     await json(path.join(directory, "resolution.json"), interrupted.rows); child(`resolve-${phase}`, directory);
-    const transactions = path.join(interrupted.roots.stateRoot, "transactions"), names = await fs.readdir(transactions);
+    const transactions = path.join(interrupted.roots.stateRoot, "transactions"), names = await retainedTransactionEntries(transactions);
     assert.equal(names.length, 1);
     const journal = JSON.parse(await fs.readFile(path.join(transactions, names[0], "journal.json")));
     assert.equal(journal.operation_id, receipt.operation_id); assert.equal(journal.operation, "repair");
     await recoverLocalPackageTransactions(interrupted.roots); await interrupted.assertBytes(phase === "finalizing");
-    if (phase === "backing_up") { await interrupted.unchanged(); await interrupted.adopt(); }
+    if (phase === "materializing") { await interrupted.unchanged(); await interrupted.adopt(); }
     else assert.deepEqual(JSON.parse(await fs.readFile(interrupted.receiptPath)), journal.receipts[0]);
     await interrupted.assertBytes(true); assert.equal((await adoptLocalPackageUpdates(interrupted.roots)).changed, false);
-    assert.deepEqual(await fs.readdir(transactions), []);
+    assert.deepEqual(await retainedTransactionEntries(transactions), []);
   }
   process.stdout.write("explicit package conflict resolution pins, identity, races and crash recovery passed\n");
 }
@@ -215,7 +216,7 @@ async function configurationEvolutionFixture(root) {
     await assert.rejects(adoptLocalPackageUpdates(test.roots), name === "deep-array-baseline"
       ? /parent is missing at '\/config\/observer\/policy\/enabled'/ : /predecessor|unchanged|overlapping source-owned|package configuration/);
     assert.deepEqual(await fs.readFile(test.activePath), active); assert.deepEqual(await fs.readFile(test.receiptPath), receipt);
-    assert.deepEqual(await fs.readdir(path.join(test.roots.stateRoot, "transactions")), []);
+    assert.deepEqual(await retainedTransactionEntries(path.join(test.roots.stateRoot, "transactions")), []);
   }
   const interrupted = await make("recovery", { legacy: true });
   child("update-finalizing", path.join(root, "recovery")); await recoverLocalPackageTransactions(interrupted.roots);
@@ -301,7 +302,7 @@ async function dataDirectoryFixture(root) {
   await assert.rejects(adoptLocalPackageUpdates(roots), /excluded data entry/);
   assert.deepEqual(await fs.readFile(receiptPath), updatedReceipt);
   await fs.rm(ownerFile(roots, true, "entries/target"), { recursive: true });
-  assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+  assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
 }
 async function additionFixture(root) {
   const roots = await fixture(root), manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json");
@@ -369,7 +370,7 @@ async function ownerAdditionFixtures(root) {
     await assert.rejects(adoptLocalPackageUpdates(roots), pattern); assert.deepEqual(await fs.readFile(receiptPath), reviewed);
     assert.equal(await fs.readFile(ownerFile(roots, true, "entries/local.bin"), "utf8"), "local data\n");
     if (refusal === "foreign") assert.equal(JSON.parse(await fs.readFile(path.join(added, "tool.json"))).retained, true);
-    assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+    assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
   }
   const pin = await additionFixture(path.join(root, "old-data-race")), beforePin = await record(pin.roots);
   await assert.rejects(adoptLocalPackageUpdates({ ...pin.roots, onProgress(progress) {
@@ -379,10 +380,10 @@ async function ownerAdditionFixtures(root) {
   const race = await additionFixture(path.join(root, "new-target-race")), raceReceipt = await fs.readFile(race.receiptPath);
   let injected = false;
   await assert.rejects(adoptLocalPackageUpdates({ ...race.roots, onProgress(progress) {
-    if (progress.phase === "backing_up" && !injected) {
+    if (progress.phase === "materializing" && !injected) {
       injected = true; fsSync.mkdirSync(race.added); fsSync.writeFileSync(path.join(race.added, "foreign.txt"), "keep foreign\n");
     }
-  } }), /target appeared during update.*new-owner rollback found foreign owner state/);
+  } }), error => error.publicationReceipts?.some(receipt => receipt.movement.destination === race.added && receipt.outcome === "not_applied"));
   assert.equal(await fs.readFile(path.join(race.added, "foreign.txt"), "utf8"), "keep foreign\n");
   assert.deepEqual(await fs.readFile(race.receiptPath), raceReceipt); await fs.rm(race.added, { recursive: true });
   await recoverLocalPackageTransactions(race.roots); await assertAdditionState(race, false);
@@ -391,25 +392,25 @@ async function ownerAdditionFixtures(root) {
   await assert.rejects(adoptLocalPackageUpdates({ ...late.roots, onProgress(progress) {
     if (progress.phase === "finalizing") {
       const transactions = path.join(late.roots.stateRoot, "transactions");
-      lateJournal = path.join(transactions, fsSync.readdirSync(transactions)[0], "journal.json");
+      lateJournal = path.join(transactions, fsSync.readdirSync(transactions).filter(name => name !== ".octopus-publication")[0], "journal.json");
       const move = JSON.parse(fsSync.readFileSync(lateJournal)).moves.find(move => move.owner === "world_fixture");
       authored = path.join(late.roots.activeRegistryRoot, move.backup, "entries", "target", "authored.json");
       fsSync.mkdirSync(path.dirname(authored), { recursive: true }); fsSync.writeFileSync(authored, retained);
     }
-  } }), /excluded active entries without receipt ownership proof/);
+  } }), /reclamation tombstone differs from the exact published tree/);
   const receiptAfterRefusal = await fs.readFile(late.receiptPath);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     assert.equal(await fs.readFile(authored, "utf8"), retained);
     assert.equal(JSON.parse(await fs.readFile(lateJournal)).phase, "receipts_written");
-    await assert.rejects(recoverLocalPackageTransactions(late.roots), /excluded active entries without receipt ownership proof/);
+    await assert.rejects(recoverLocalPackageTransactions(late.roots), /reclamation tombstone differs from the exact published tree/);
     assert.equal(await fs.readFile(authored, "utf8"), retained); assert.deepEqual(await fs.readFile(late.receiptPath), receiptAfterRefusal);
   }
   await fs.rm(path.dirname(authored), { recursive: true }); await recoverLocalPackageTransactions(late.roots);
-  await assertAdditionState(late, true); assert.deepEqual(await fs.readdir(path.join(late.roots.stateRoot, "transactions")), []);
-  for (const mode of ["update-backing_up", "update-new-rename", "update-finalizing", "update-receipting"]) {
+  await assertAdditionState(late, true); assert.deepEqual(await retainedTransactionEntries(path.join(late.roots.stateRoot, "transactions")), []);
+  for (const mode of ["update-materializing", "update-new-rename", "update-finalizing", "update-receipting"]) {
     const directory = path.join(root, mode), test = await additionFixture(directory), prior = await fs.readFile(test.receiptPath);
     child(mode, directory);
-    const transactions = path.join(test.roots.stateRoot, "transactions"), journalPath = path.join(transactions, (await fs.readdir(transactions))[0], "journal.json");
+    const transactions = path.join(test.roots.stateRoot, "transactions"), journalPath = path.join(transactions, (await retainedTransactionEntries(transactions))[0], "journal.json");
     const journal = JSON.parse(await fs.readFile(journalPath));
     assert.equal(journal.moves.filter(move => move.previous_digest === null).length, 2);
     if (mode === "update-new-rename") {
@@ -429,28 +430,23 @@ async function ownerAdditionFixtures(root) {
     const committed = mode === "update-finalizing" || mode === "update-receipting";
     await assertAdditionState(test, committed);
     if (!committed) assert.deepEqual(await fs.readFile(test.receiptPath), prior);
-    assert.deepEqual(await fs.readdir(transactions), []);
+    assert.deepEqual(await retainedTransactionEntries(transactions), []);
     await adoptLocalPackageUpdates(test.roots); await assertAdditionState(test, true);
     assert.equal((await adoptLocalPackageUpdates(test.roots)).changed, false);
   }
 }
 async function absentOwnerRenameRaceFixture(root) {
-  const test = await additionFixture(root), rename = nativeFiles.renameDirectoryExclusive, receipt = await fs.readFile(test.receiptPath);
+  const test = await additionFixture(root), native = test.roots.publication, receipt = await fs.readFile(test.receiptPath);
   let injected = false, foreignInode;
-  nativeFiles.renameDirectoryExclusive = (sourceDescriptor, from, destinationDescriptor, to) => {
-    if (!injected && from.endsWith(".stage") && to === path.basename(test.added)) {
-      injected = true; fsSync.mkdirSync(test.added); foreignInode = fsSync.statSync(test.added).ino;
+  test.roots.publication = { ...native, async publishDirectoryMoves(operation, moves) {
+    if (!injected && moves.some(move => move.destination === test.added && move.source.endsWith(".stage"))) {
+      injected = true; await fs.mkdir(test.added); foreignInode = (await fs.stat(test.added)).ino;
     }
-    return rename(sourceDescriptor, from, destinationDescriptor, to);
-  };
-  try {
-    await assert.rejects(adoptLocalPackageUpdates(test.roots), error => {
-      assert.match(error.message, /File exists/); assert.equal(error.cause.errno, os.constants.errno.EEXIST);
-      assert.equal(error.cause.code, "ERR_PACKAGE_RENAME"); return true;
-    });
-    assert.equal(injected, true); assert.deepEqual(await fs.readdir(test.added), []);
-    assert.equal((await fs.stat(test.added)).ino, foreignInode); assert.deepEqual(await fs.readFile(test.receiptPath), receipt);
-  } finally { nativeFiles.renameDirectoryExclusive = rename; }
+    return native.publishDirectoryMoves(operation, moves);
+  } };
+  await assert.rejects(adoptLocalPackageUpdates(test.roots), error => error.publicationReceipts?.some(receipt => receipt.movement.destination === test.added && receipt.outcome === "not_applied"));
+  assert.equal(injected, true); assert.deepEqual(await fs.readdir(test.added), []);
+  assert.equal((await fs.stat(test.added)).ino, foreignInode); assert.deepEqual(await fs.readFile(test.receiptPath), receipt);
   await fs.rm(test.added, { recursive: true }); await recoverLocalPackageTransactions(test.roots); await assertAdditionState(test, false);
   await adoptLocalPackageUpdates(test.roots); await assertAdditionState(test, true);
 }
@@ -482,20 +478,71 @@ async function nativeRenameFixture(root) {
     assert.equal(await fs.readFile(path.join(root, "file"), "utf8"), "unowned bytes\n");
   } finally { await parent.close(); }
 }
+
+async function publicationRecoveryFixture(root) {
+  for (const mode of ["prepare-verdict", "cleanup-move", "cleanup-reclaim", "legacy-prepared", "legacy-committing"]) {
+    const directory = path.join(root, mode), roots = await fixture(directory);
+    child(mode, directory);
+    if (mode.startsWith("legacy-")) {
+      const journalPath = path.join(roots.stateRoot, "transactions", "fixture_install_001", "journal.json");
+      const journal = JSON.parse(await fs.readFile(journalPath));
+      journal.schema_version = 1;
+      delete journal.publication_id; delete journal.publications; delete journal.file_publications;
+      await json(journalPath, journal);
+      if (mode === "legacy-committing") {
+        const original = await fs.readFile(journalPath);
+        await assert.rejects(recoverLocalPackageTransactions(roots), /effects remain uncertain/);
+        assert.deepEqual(await fs.readFile(journalPath), original);
+        continue;
+      }
+    }
+    await recoverLocalPackageTransactions(roots);
+    assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
+    await install(roots);
+    assert.equal((await record(roots)).receipt_state, "valid");
+    const temp = path.join(roots.stateRoot, "transactions", "..cleanup.abandoned_001.json.123.abcdef012345.tmp");
+    await fs.writeFile(temp, "uncommitted", { mode: 0o600 });
+    await recoverLocalPackageTransactions(roots);
+    assert.equal(fsSync.existsSync(temp), false);
+  }
+  const roots = await fixture(path.join(root, "prepare-not-applied")), native = roots.publication;
+  let destination;
+  roots.publication = { ...native, async publishDirectoryMoves(operation, moves) {
+    if (!destination && operation.includes(":prepare:")) {
+      destination = moves[0].destination; await fs.mkdir(destination, { mode: 0o700 });
+    }
+    return native.publishDirectoryMoves(operation, moves);
+  } };
+  await assert.rejects(install(roots), error => error.publicationReceipts?.[0]?.outcome === "not_applied");
+  assert.deepEqual(await fs.readdir(destination), []);
+  await fs.rmdir(destination);
+  await recoverLocalPackageTransactions(roots);
+  await install(roots);
+  assert.equal((await record(roots)).receipt_state, "valid");
+}
+
 async function crash(mode, root) {
-  const roots = rootsFor(root), rename = nativeFiles.renameDirectoryExclusive, remove = fs.rm;
-  nativeFiles.renameDirectoryExclusive = (sourceDescriptor, from, destinationDescriptor, to) => {
-    rename(sourceDescriptor, from, destinationDescriptor, to);
-    if (mode === "install-rename" && from.endsWith(".stage") && !path.basename(to).startsWith(".")
+  const roots = rootsFor(root), native = roots.publication;
+  roots.publication = { ...native, async publishDirectoryMoves(operation, moves) {
+    const result = await native.publishDirectoryMoves(operation, moves);
+    if (moves.some(({ source: from, destination: to }) =>
+      ["install-rename", "legacy-committing"].includes(mode) && from.endsWith(".stage") && !path.basename(to).startsWith(".")
       || mode === "update-new-rename" && from.endsWith(".stage") && path.basename(to) === "fixture.zzadded"
       || mode === "remove-rename" && to.endsWith(".backup")
-      || mode === "remove-restore" && from.endsWith(".backup")) process.kill(process.pid, "SIGKILL");
-  };
-  fs.rm = async (file, options) => {
-    await remove(file, options);
-    if (mode === "repair-cleanup" && file.endsWith(".backup")) process.kill(process.pid, "SIGKILL");
-  };
-  if (mode === "install-rename") await install(roots);
+      || mode === "remove-restore" && from.endsWith(".backup")
+      || mode === "prepare-verdict" && path.basename(from).startsWith(".prepare.")
+      || mode === "cleanup-move" && path.basename(to).startsWith(".cleanup."))) process.kill(process.pid, "SIGKILL");
+    return result;
+  }, async reclaimDirectory(file, receipt, expected) {
+    await native.reclaimDirectory(file, receipt, expected);
+    if (mode === "repair-cleanup" && file.endsWith(".backup")
+      || mode === "cleanup-reclaim" && path.basename(file).startsWith(".cleanup.")) process.kill(process.pid, "SIGKILL");
+  } };
+  if (mode === "legacy-prepared") await installLocalPackages({ ...roots, operationId: "fixture_install_001", packageIds: ["fixture"],
+    expectedSourceDigests: { fixture: (await record(roots)).source_digest }, onProgress(progress) {
+      if (progress.phase === "copying") process.kill(process.pid, "SIGKILL");
+    } });
+  else if (["install-rename", "legacy-committing", "prepare-verdict", "cleanup-move", "cleanup-reclaim"].includes(mode)) await install(roots);
   else if (mode === "remove-restore" || mode === "repair-cleanup") await recoverLocalPackageTransactions(roots);
   else if (mode === "remove-rename") await removeLocalPackages({ ...roots, operationId: "fixture_remove_001", packageIds: ["fixture"], expectedInstalledDigests: { fixture: (await record(roots)).installed_digest } });
   else if (mode === "repair-copy") await repair(roots, "fixture_partial_001", (progress) => {
@@ -531,6 +578,9 @@ async function releaseUpdateFixture(root) {
     runtimeInitializationComplete: false, runtimeInitializationPromise: null, nativeBrowserHost: null,
     ensureRuntimeHost: () => ({ probe: async () => ({ phase: live ? "ready" : "unmanaged", ready: live, ownership: live ? "external" : "none", pid: live ? 42 : null, error: null }) }),
     resolveOctopusHome: () => root, clientSetupPackageRoots: () => roots, path, fs: fsSync,
+    workspaceStorage: () => roots.publication,
+    taskRetirementBarrier: async () => assert.fail("Package fixture must not retire tasks"),
+    readWorkspaceSetupState: async () => assert.fail("Package fixture must not inspect workspace topology"),
     resolveRepoRoot: () => root, resolveSourceRegistry: () => roots.sourceRegistryRoot,
     resolveLocalPackageRegistry: () => roots.sourceRegistryRoot, resolveLocalPackageLibrary: () => roots.libraryRoot,
     projectEePolicies: () => assert.fail("Package fixture must not project client policies"),
@@ -590,7 +640,7 @@ async function releaseUpdateFixture(root) {
   await context.initializeRuntimeHost();
   assert.equal(JSON.parse(await fs.readFile(ownerFile(roots, true, "interface.json"))).contract, 999);
   assert.equal(await fs.readFile(ownerFile(roots, true, "life-bin"), "utf8"), "version five\n");
-  assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+  assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
   await fs.writeFile(ownerFile(roots, true, "local-notes.txt"), "keep me\n");
   await fs.writeFile(ownerFile(roots, false, "life-bin"), "version six\n");
   assert.equal((await adoptLocalPackageUpdates(roots)).changed, true);
@@ -662,15 +712,16 @@ async function packageExportFixture(root, repoRoot) {
   assert.deepEqual(await fs.readdir(out), [path.basename(output)]);
 }
 async function run() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-ownership-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-ownership-")));
   try {
+    await publicationRecoveryFixture(path.join(root, "publication-recovery"));
     await configurationEvolutionFixture(path.join(root, "configuration-evolution"));
     await conflictResolutionFixtures(path.join(root, "conflict-resolutions"));
     await dataDirectoryFixture(path.join(root, "data-directories"));
     await nativeRenameFixture(path.join(root, "native-rename"));
     await ownerAdditionFixtures(path.join(root, "owner-additions"));
     await releaseUpdateFixture(path.join(root, "release-update"));
-    for (const mode of ["update-backing_up", "update-finalizing"]) {
+    for (const mode of ["update-materializing", "update-finalizing"]) {
       const directory = path.join(root, mode), roots = await fixture(directory);
       await install(roots);
       await fs.writeFile(ownerFile(roots, false, "new-module.cjs"), "module.exports = 2;\n");
@@ -678,7 +729,7 @@ async function run() {
       await adoptLocalPackageUpdates(roots);
       assert.equal((await record(roots)).receipt_state, "valid");
       assert.equal(await fs.readFile(ownerFile(roots, true, "new-module.cjs"), "utf8"), "module.exports = 2;\n");
-      assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+      assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
       assert.equal((await adoptLocalPackageUpdates(roots)).changed, false);
     }
     const roots = await fixture(path.join(root, "configuration"));
@@ -738,19 +789,26 @@ async function run() {
       const recovered = await record(roots);
       assert.equal(recovered.materialized, mode !== "install-rename");
       assert.equal(recovered.receipt_state, mode === "install-rename" ? "missing" : mode === "repair-copy" ? "stale" : "valid");
-      assert.deepEqual(await fs.readdir(path.join(roots.stateRoot, "transactions")), []);
+      assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
     }
     const collision = await fixture(path.join(root, "foreign-target"));
     child("install-rename", path.join(root, "foreign-target"));
     const pending = JSON.parse(await fs.readFile(path.join(collision.stateRoot, "transactions", "fixture_install_001", "journal.json")));
     const foreignFile = path.join(collision.activeRegistryRoot, pending.moves[0].target, "tool.json");
     await fs.writeFile(foreignFile, "foreign bytes\n");
-    await assert.rejects(recoverLocalPackageTransactions(collision), /unowned target or stage/);
+    await assert.rejects(recoverLocalPackageTransactions(collision), error => {
+      assert.equal(error.code, "client_publication_failed");
+      assert.match(error.message, /predecessor or destination differs from the exact requested manifest/);
+      assert.equal(error.publicationReceipts.length, 1);
+      assert.equal(error.publicationReceipts[0].outcome, "not_applied");
+      assert.equal(error.publicationReceipts[0].movement.source, path.dirname(foreignFile));
+      return true;
+    });
     assert.equal(await fs.readFile(foreignFile, "utf8"), "foreign bytes\n");
     const staging = await fixture(path.join(root, "foreign-stage"));
     const foreignStage = path.join(staging.activeRegistryRoot, "tool", ".fixture.tool.fixture_install_001.stage", "foreign.json");
     await json(foreignStage, { retained: true });
-    await assert.rejects(install(staging), /install stage/);
+    await assert.rejects(install(staging), /package target or transaction path already exists/);
     assert.deepEqual(JSON.parse(await fs.readFile(foreignStage)), { retained: true });
     const metadata = await fixture(path.join(root, "metadata"));
     const manifestPath = path.join(metadata.libraryRoot, "packages", "fixture.json");
@@ -784,7 +842,7 @@ async function run() {
     let changed = false;
     await assert.rejects(installLocalPackages({ ...metadata, operationId: "manifest_race_001", packageIds: ["fixture"], expectedSourceDigests: { fixture: (await record(metadata)).source_digest },
       onProgress(progress) { if (progress.phase === "copying" && !changed) { changed = true; fsSync.writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "2.0.0" })); } } }), /definition changed/);
-    assert.deepEqual(await fs.readdir(path.join(metadata.stateRoot, "transactions")), []);
+    assert.deepEqual(await retainedTransactionEntries(path.join(metadata.stateRoot, "transactions")), []);
     const alias = await fixture(path.join(root, "alias")), outside = path.join(root, "outside");
     await fs.mkdir(alias.activeRegistryRoot, { recursive: true }); await fs.mkdir(outside);
     await fs.symlink(outside, path.join(alias.activeRegistryRoot, "tool"));
@@ -810,11 +868,12 @@ async function run() {
 }
 if (require.main === module) {
   const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures,
+    "--publication-recovery": publicationRecoveryFixture,
     "--configuration-evolution": configurationEvolutionFixture,
     "--absent-owner-race": absentOwnerRenameRaceFixture, "--conflict-resolutions": conflictResolutionFixtures }[process.argv[2]];
   const action = process.argv[2] === "--crash" ? crash(process.argv[3], process.argv[4])
     : focused ? (async () => {
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-contract-"));
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-package-contract-")));
       try { await focused(root); }
       finally { await fs.rm(root, { recursive: true, force: true }); }
     })() : run();

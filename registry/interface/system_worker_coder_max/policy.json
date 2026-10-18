@@ -300,6 +300,7 @@
       "operator.input.provided",
       "emit.tool_call.present",
       "tool.call.allowed",
+      "tool.result.corresponds",
       "task.summary.received"
     ],
     "hard_blocked_tools": [],

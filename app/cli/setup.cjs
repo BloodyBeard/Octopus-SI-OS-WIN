@@ -22,7 +22,8 @@ async function setupEnvironment(environment, options = {}) {
   await environment.start({ onProgress: progress, timeoutMs: options.timeoutMs, signal: options.signal });
   requireDistribution(environment);
   const registryRoot = environment.packageRoots.activeRegistryRoot;
-  const roots = { octopusHomeRoot: environment.home, registryRoot, retirementBarrier: taskRetirementBarrier(environment) };
+  const roots = { octopusHomeRoot: environment.home, registryRoot,
+    publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) };
   const owners = createSetupOwners(environment, options);
   const store = createClientSetupStore({ root: path.join(environment.home, "client", "setup-state"), owners });
   try {
@@ -63,7 +64,8 @@ async function setupEnvironment(environment, options = {}) {
 
 async function finishSetup(environment, store, operationId, options) {
   const setup = await store.read(operationId);
-  const workspace = await readWorkspaceSetupState({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot, retirementBarrier: taskRetirementBarrier(environment) });
+  const workspace = await readWorkspaceSetupState({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot,
+    publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) });
   if (setup?.status !== "complete" || workspace.status !== "configured"
     || workspace.receipt.operation_id !== operationId || workspace.receipt.request_digest !== setup.plan.workspace.request_digest) {
     throw new Error("Setup did not produce matching client and workspace receipts.");
@@ -75,7 +77,8 @@ async function finishSetup(environment, store, operationId, options) {
 
 function createSetupOwners(environment, options = {}) {
   const registryRoot = environment.packageRoots.activeRegistryRoot;
-  const roots = { octopusHomeRoot: environment.home, registryRoot, retirementBarrier: taskRetirementBarrier(environment) };
+  const roots = { octopusHomeRoot: environment.home, registryRoot,
+    publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) };
   const loader = createOperatorChatClientLoader({
     packageRoots: () => environment.packageRoots,
     clientPath: () => path.join(registryRoot, "interface", "world_operator_chat", "client.cjs"),
@@ -212,7 +215,7 @@ function createSetupOwners(environment, options = {}) {
                   available: true, selectedByDefault: entry.default_for_new_tasks, hostSlots: row.hostSlots })) };
             await mutateOctopusOsWorkspace(registryRoot, environment.home, target.scope, request, {
               commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, registryRoot, request,
-                { retirementBarrier: taskRetirementBarrier(environment) }),
+                { publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
             });
             getProjection().invalidate();
           }

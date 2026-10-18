@@ -83,6 +83,14 @@ fn extends<T: PartialEq>(before: &[T], after: &[T]) -> bool {
     before.iter().all(|value| after.contains(value))
 }
 
+fn same_future_contract(before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology) -> bool {
+    let mut before = before.clone();
+    let mut after = after.clone();
+    before.checkpoints.retain(|cp| cp.role != RunAuthoringCheckpointRole::ResultInput);
+    after.checkpoints.retain(|cp| cp.role != RunAuthoringCheckpointRole::ResultInput);
+    before == after
+}
+
 fn validate_templates(before: &BoundRunAuthoringTopology, after: &BoundRunAuthoringTopology) -> Result<(), String> {
     let mut old_header = before.clone();
     let mut new_header = after.clone();
@@ -120,16 +128,23 @@ fn validate_templates(before: &BoundRunAuthoringTopology, after: &BoundRunAuthor
             }
             old.required_verified_artifacts[0].params["tools"] = json!([]);
             new.required_verified_artifacts[0].params["tools"] = json!([]);
+            if old.result_receiving.is_empty() != new.result_receiving.is_empty()
+                || old.result_receiving.iter().any(|(tool, required)| new.result_receiving.get(tool) != Some(required)) {
+                return Err("capability amendment changes retained result receiving requirements".into());
+            }
+            old.result_receiving.clear();
+            new.result_receiving.clear();
             new.name = old.name.clone();
         }
-        if old != new || (prior.role == RunAuthoringCheckpointRole::OwnerInput && prior != next) {
+        if old != new || (matches!(prior.role, RunAuthoringCheckpointRole::OwnerInput
+            | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput) && prior != next) {
             return Err(format!("capability amendment changes a retained return, writer or verification contract '{}'", prior.name));
         }
     }
     for added in after.checkpoints.iter().filter(|next| !before.checkpoints.iter().any(|old| old.name == next.name)) {
         if matches!(added.role, RunAuthoringCheckpointRole::AuthoringCall | RunAuthoringCheckpointRole::AuthoringResult
             | RunAuthoringCheckpointRole::ProviderTransportDispatch | RunAuthoringCheckpointRole::ProviderHandoffCompletion
-            | RunAuthoringCheckpointRole::VerifiedInput) {
+            | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput) {
             return Err("capability amendment cannot introduce another writer or replace a verified-input obligation".into());
         }
     }
@@ -141,6 +156,7 @@ fn provider_owned(record: &RunRecord, topology: &BoundRunAuthoringTopology, cp: 
         .and_then(|state| state.get(FRONTIER_CHECKPOINT_IDS)).and_then(Value::as_array)
         .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(cp.id.as_str())))
         || topology.checkpoints.iter().any(|template| template.owner_authoring.is_none()
+            && !matches!(template.role, RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput)
             && checkpoint_record_matches_template(cp, template, &record.id))
 }
 
@@ -173,7 +189,7 @@ fn validate_bridge(bridge: &ProviderCapabilityBridge) -> Result<(), String> {
 
 fn validate_delta(before: &RunRecord, delta: &CapabilityDelta, profile: &RunAuthoringProfile) -> Result<(), String> {
     let provider = &delta.before.provider_interface;
-    if topology(before, provider)? != delta.before { return Err("capability amendment has stale baseline topology".into()); }
+    if !same_future_contract(&topology(before, provider)?, &delta.before) { return Err("capability amendment has stale baseline topology".into()); }
     delta.after.validate_identity(before, provider)?;
     validate_templates(&delta.before, &delta.after)?;
     for topology in [&delta.before, &delta.after] { topology.config(profile).validate(provider, &before.id)?; }
@@ -320,13 +336,29 @@ pub fn validate_tool_continuation(record: &RunRecord, provider: &InterfaceId, to
     let outputs = topology.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::ProviderToolOutput)
         .map(|cp| checkpoint_tool_ids(cp).map(|tools| (cp, tools))).collect::<Result<Vec<_>, _>>()?;
     let outputs = outputs.iter().filter(|(_, tools)| tools.contains(tool)).collect::<Vec<_>>();
-    let [(output, _)] = outputs.as_slice() else { return Err(format!("capability bridge tool '{tool}' has no unique output contract")); };
+    let [(output, tools)] = outputs.as_slice() else { return Err(format!("capability bridge tool '{tool}' has no unique output contract")); };
     if output.outbound_interface_bindings.len() != 1 || output.outbound_interface_bindings[0].interface != *door {
         return Err("capability bridge tool changed its exact door".into());
     }
-    let returns = topology.checkpoints.iter().filter(|cp| cp.role.is_provider_input() && cp.interface() == door
+    let returns = topology.checkpoints.iter().filter(|cp| cp.role.is_provider_input()
+        && cp.role != RunAuthoringCheckpointRole::ResultInput && cp.interface() == door
         && cp.outbound_interfaces().any(|target| target == provider)).count();
-    if returns != 1 { return Err("capability bridge has no unique retained return contract".into()); }
+    if output.result_receiving.is_empty() {
+        if returns != 1 || topology.checkpoints.iter().any(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput
+            && cp.interface() == door && cp.outbound_interfaces().any(|target| target == provider)) {
+            return Err("capability bridge has no unique retained return contract".into());
+        }
+    } else {
+        if returns != 0 || output.result_receiving.keys().ne(tools.iter()) {
+            return Err("capability bridge result receiving conflicts with its exact tool or return contract".into());
+        }
+        for (tool, required) in &output.result_receiving {
+            required.validate("capability result receiving")?;
+            if required.artifact_label != format!("{tool}.result") || !required.params.is_object() {
+                return Err("capability bridge requires exact native result labels and object params".into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -369,10 +401,23 @@ fn validate_effect(record: &RunRecord, bridge: &ProviderCapabilityBridge, effect
     validate_effect_payload(bridge, effect.payload.as_bytes())
 }
 
+fn with_ordinary_results(planned: &BoundRunAuthoringTopology, ordinary: &RunRecord) -> Result<BoundRunAuthoringTopology, String> {
+    let mut topology = planned.clone();
+    topology.checkpoints.retain(|cp| cp.role != RunAuthoringCheckpointRole::ResultInput);
+    topology.checkpoints.extend(self::topology(ordinary, &planned.provider_interface)?.checkpoints.into_iter()
+        .filter(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput));
+    Ok(topology)
+}
+
 fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelta, config: &RunAuthoringConfig, key: &str) -> Result<(), String> {
     let provider = &config.provider_interface;
-    if topology(current, provider)? != delta.before { return Err("capability amendment baseline topology changed before its checked write".into()); }
+    if !same_future_contract(&topology(current, provider)?, &delta.before) { return Err("capability amendment baseline topology changed before its checked write".into()); }
     let initial = record(ordinary)?;
+    let amended = with_ordinary_results(&delta.after, &initial)?;
+    let mut amended_config = config.clone();
+    amended_config.checkpoints = amended.checkpoints.clone();
+    amended_config.payload_artifact_bindings = amended.payload_artifact_bindings.clone();
+    amended_config.validate(provider, &initial.id)?;
     let mut live_context = current_context_artifacts(&initial, config)?;
     for id in &delta.static_artifact_additions { append_artifact(&mut live_context, id.clone()); }
     let roles = current_mandatory_role_artifacts(&initial, config)?;
@@ -399,7 +444,7 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
             RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput => {
                 rows.push(materialize_checkpoint(template, &id, &initial.id, if template.include_context { &bindings } else { &role_bindings }));
             }
-            RunAuthoringCheckpointRole::ProviderInterfaceOutput => {
+            _ if retains_future_output(template) => {
                 rows.push(materialize_checkpoint(template, &id, &initial.id, &role_bindings));
                 frontier.push(id);
             }
@@ -423,7 +468,7 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
         states.insert(owner.to_string(), json!(value));
     }
     let state = states.get_mut(provider.as_str()).and_then(Value::as_object_mut).ok_or("capability provider state absent")?;
-    state.insert(RUN_AUTHORING_BINDING.into(), json!(delta.after));
+    state.insert(RUN_AUTHORING_BINDING.into(), json!(amended));
     state.insert(FRONTIER_CHECKPOINT_IDS.into(), json!(frontier));
     if !delta.static_artifact_additions.is_empty() {
         let before_generation = optional_u64(current.interface_state.get(provider).ok_or("current provider state absent")?, "context_generation")?;
@@ -433,7 +478,7 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
         }
     }
     let after = record(ordinary)?;
-    validate_checkpoint_topology(&after, provider, &delta.after.checkpoints, None)?;
+    validate_checkpoint_topology(&after, provider, &amended.checkpoints, None)?;
     if let Some(pending) = pending_handoff(&after, provider)? { validate_pending_handoff_delivery_isolation(&after, &pending)?; }
     Ok(())
 }
@@ -468,19 +513,21 @@ pub(super) fn apply_to_authored_run(current: &[u8], authored: &mut AuthoredRun, 
     authored.after_hash = ContentHash::of_bytes(authored.content.as_bytes()).to_hex();
     authored.patch = json_patch::diff(&serde_json::from_slice(current).map_err(|e| e.to_string())?, &after);
     authored.pending_handoff = pending;
-    Ok(delta.after)
+    topology(&record(&after)?, &config.provider_interface)
 }
 
 pub fn validate_installed(record: &RunRecord, amendment: &ProviderCapabilityAmendment) -> Result<(), String> {
     let expected = delta(amendment)?;
     let proof: AppliedAmendment = serde_json::from_value(record.interface_state.get(&amendment.provider_interface)
         .and_then(|state| state.get(AMENDMENT)).cloned().ok_or("capability amendment has no installed checked transition")?).map_err(|e| e.to_string())?;
+    let installed = topology(record, &amendment.provider_interface)?;
     if proof.amendment_key != amendment.amendment_key || proof.bridge != amendment.bridge || proof.delta != expected
-        || topology(record, &amendment.provider_interface)? != expected.after {
+        || !same_future_contract(&installed, &expected.after) {
         return Err("capability readback differs from its exact planned transition".into());
     }
-    validate_checkpoint_topology(record, &amendment.provider_interface, &expected.after.checkpoints, None)?;
-    if !extends(&expected.static_artifact_additions, &context(record,&expected.after)?) {
+    installed.config(&amendment.authoring_profile).validate(&amendment.provider_interface, &record.id)?;
+    validate_checkpoint_topology(record, &amendment.provider_interface, &installed.checkpoints, None)?;
+    if !extends(&expected.static_artifact_additions, &context(record,&installed)?) {
         return Err("capability readback lost its declared static context additions".into());
     }
     Ok(())
@@ -500,6 +547,12 @@ pub(super) fn checked_topology_advance(
         if topology(&before, provider)? != expected { return Ok(false); }
         let next = topology(&after, provider)?;
         if next == expected { continue; }
+        if same_future_contract(&expected, &next) {
+            if transition.writer.owner != *provider { return Ok(false); }
+            validate_checked_provider_transition(transition)?;
+            expected = next;
+            continue;
+        }
         if transition.writer.owner != *provider || !validate_transition(transition)? { return Ok(false); }
         expected = next;
         amended = true;
@@ -522,7 +575,8 @@ pub(super) fn validate_transition(transition: &CheckedRunTransition) -> Result<b
     };
     validate_delta(&before, &proof.delta, &profile)?;
     validate_effect(&after, &proof.bridge, &proof.effect, provider)?;
-    if topology(&before, provider)? != proof.delta.before || topology(&after, provider)? != proof.delta.after {
+    if !same_future_contract(&topology(&before, provider)?, &proof.delta.before)
+        || !same_future_contract(&topology(&after, provider)?, &proof.delta.after) {
         return Err("checked capability transition has stale topology evidence".into());
     }
     let mut ordinary: Value = serde_json::from_slice(&transition.before).map_err(|e| e.to_string())?;

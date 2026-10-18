@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-ledger = { path = "../../../../../crates/octopus-ledger" }
+octopus-file-storage = { path = "../../../../../crates/octopus-file-storage" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

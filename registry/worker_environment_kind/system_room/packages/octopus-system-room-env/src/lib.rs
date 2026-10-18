@@ -360,6 +360,13 @@ mod tests {
             .map(|kind| kind.as_str().to_string())
             .collect::<Vec<_>>();
         let root_slots = BTreeMap::from([("test_root".to_string(), root.path().to_path_buf())]);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "{\"exact\":true}\n").unwrap();
+        assert!(file_write::execute_file_write(
+            &envelope, &call.arguments, &room_kinds, &root_slots,
+            &root.path().join("effects"), 8 * 1024 * 1024,
+        ).unwrap_err().contains("optimistic hash mismatch"));
+        std::fs::remove_file(&target).unwrap();
         let body = file_write::execute_file_write(
             &envelope,
             &call.arguments,
@@ -488,6 +495,17 @@ mod tests {
             narrowed.as_bytes()
         );
         assert_eq!(apply(&arguments).unwrap(), receipt);
+        let later = octopus_file_storage::publication::WriteGuard::acquire(&target, false).unwrap()
+            .publish("client-after-native", Some(&ContentHash::of_bytes(narrowed.as_bytes()).to_hex()), b"later client edit",
+                octopus_file_storage::publication::DigestAlgorithm::Blake3).unwrap();
+        assert_eq!(later.outcome, octopus_file_storage::publication::PublicationOutcome::Applied);
+        assert_eq!(apply(&arguments).unwrap(), receipt);
+        assert_eq!(std::fs::read(&target).unwrap(), b"later client edit");
+        assert_eq!(file_write::execute_file_write(
+            &patch_envelope, &patch_call.arguments, &patch_room_kinds, &root_slots,
+            &root.path().join("effects"), 8 * 1024 * 1024,
+        ).unwrap(), patch_body);
+        assert_eq!(std::fs::read(&target).unwrap(), b"later client edit");
         let outside = tempfile::tempdir().unwrap();
         let denied =
             serde_json::json!({"path": outside.path().join("ungranted.json"), "content": "denied"});

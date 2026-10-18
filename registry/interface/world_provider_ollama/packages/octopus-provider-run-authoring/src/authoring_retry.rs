@@ -838,6 +838,11 @@ pub(super) fn rebase_authored_run(
         planned.as_object().unwrap(),
         merged.as_object_mut().unwrap(),
     )?;
+    let mut declared_config = if extension.is_some() {
+        attempt_config(&observed, config)?
+    } else {
+        config.clone()
+    };
     if let Some(extension) = extension {
         extension.restore(&mut merged, &config.provider_interface)?;
     }
@@ -849,12 +854,13 @@ pub(super) fn rebase_authored_run(
         &config.provider_interface,
         &authored.pending_handoff,
     )?;
-    let mut effective_config = config.clone();
     if revision.is_some() {
         let topology: BoundRunAuthoringTopology = serde_json::from_value(merged["interface_state"][config.provider_interface.as_str()][RUN_AUTHORING_BINDING].clone()).map_err(|error| error.to_string())?;
-        effective_config.checkpoints = topology.checkpoints;
+        declared_config.checkpoints = topology.checkpoints;
     }
+    let effective_config = result_inputs::saved_attempt_config(&candidate, &declared_config)?;
     validate_bound_run_authoring_topology(&candidate, &effective_config, None)?;
+    result_inputs::validate_transition(&actual, &candidate, &effective_config)?;
     let mut rebased = authored.clone();
     if let Some(generation) = revised_generation { rebased.correlation_id = format!("provider-run-authoring:{}:{generation}", config.run); }
     rebased.before_hash = ContentHash::of_bytes(current).to_hex();

@@ -355,11 +355,9 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
     let candidate_topology = &mut candidate["interface_state"][provider.as_str()]["run_authoring_binding"];
     let templates = candidate_topology["checkpoints"].as_array_mut().ok_or("planned provider topology has no templates")?;
     for template in current_topology["checkpoints"].as_array().ok_or("current topology has no templates")? {
-        if template["role"] == "verified_input" && !templates.contains(template) { templates.push(template.clone()); }
+        if matches!(template["role"].as_str(), Some("verified_input" | "result_input")) && !templates.contains(template) { templates.push(template.clone()); }
     }
-    let current_context = current.checkpoints.iter().filter(|cp| current.active_checkpoints.contains(&cp.id))
-        .filter(|cp| cp.outbound_interfaces().any(|target| target == provider))
-        .flat_map(|cp| cp.artifact_bindings.iter().cloned()).filter(|binding| binding.access.read).collect::<Vec<_>>();
+    let current_context = octopus_provider_run_authoring::provider_context_bindings(current, provider)?;
     let future_templates = candidate["interface_state"][provider.as_str()]["run_authoring_binding"]["checkpoints"].as_array().ok_or("planned templates absent")?.clone();
     for cp in candidate["checkpoints"].as_array_mut().ok_or("planned checkpoints absent")? {
         if future_templates.iter().any(|template| template["role"] == "stable" && template["include_context"] == true
@@ -383,7 +381,10 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
         let owned = old_frontier.contains(&json!(cp.id)) || old_templates.iter().any(|template| template.get("owner_authoring").is_none_or(Value::is_null)
             && template["interface_binding"] == value["interface_binding"] && template["outbound_interface_bindings"] == value["outbound_interface_bindings"]
             && template["required_verified_artifacts"] == value["required_verified_artifacts"]);
-        if !owned {
+        let admitted_input = old_templates.iter().any(|template| matches!(template["role"].as_str(), Some("verified_input" | "result_input"))
+            && template["interface_binding"] == value["interface_binding"] && template["outbound_interface_bindings"] == value["outbound_interface_bindings"]
+            && template["required_verified_artifacts"] == value["required_verified_artifacts"]);
+        if !owned || admitted_input {
             let rows = candidate["checkpoints"].as_array_mut().ok_or("candidate checkpoints absent")?;
             rows.retain(|row| row["id"] != value["id"]);
             rows.push(value);
@@ -427,6 +428,37 @@ pub fn plan_current_run_amendment_for_native(roots: &CompositionRoots, current: 
     plan_current_run_amendment_with_source(roots, current, provider, request, bridge, retained_tools, Some(metadata))
 }
 
+fn prospective_bridge_inputs(record: &RunRecord, provider: &InterfaceId, tool: &str, door: &InterfaceId)
+    -> Result<(Vec<octopus_descriptors::CheckpointId>, Option<RequiredVerifiedArtifact>), String> {
+    validate_tool_continuation(record, provider, tool, door)?;
+    octopus_provider_run_authoring::provider_context_bindings(record, provider)?;
+    let topology: BoundRunAuthoringTopology = parse(record.interface_state.get(provider)
+        .and_then(|state|state.get("run_authoring_binding")).ok_or("prospective bridge has no declared topology")?)?;
+    let output = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput
+        && cp.required_verified_artifacts.iter().any(|required|required.params.get("tools").and_then(Value::as_array)
+            .is_some_and(|tools|tools.iter().any(|id|id.as_str()==Some(tool)))))
+        .ok_or("prospective bridge has no exact output contract")?;
+    let result = output.result_receiving.get(tool).cloned();
+    let mut inputs = Vec::new();
+    for template in topology.checkpoints.iter().filter(|cp| cp.outbound_interface_bindings.iter().any(|binding|&binding.interface == provider)
+        && if result.is_some() {
+            (cp.role == BoundCheckpointRole::Stable && cp.include_context)
+                || (cp.role == BoundCheckpointRole::ResultInput && &cp.interface_binding.interface == door)
+        } else {
+            matches!(cp.role, BoundCheckpointRole::Stable | BoundCheckpointRole::IndependentInput | BoundCheckpointRole::OwnerInput | BoundCheckpointRole::VerifiedInput)
+                && &cp.interface_binding.interface == door
+        }) {
+        let rows = record.checkpoints.iter().filter(|cp| record.active_checkpoints.contains(&cp.id)
+            && cp.run == record.id && cp.interface_binding.as_ref() == Some(&template.interface_binding)
+            && cp.outbound_interface_bindings == template.outbound_interface_bindings
+            && cp.required_verified_artifacts == template.required_verified_artifacts).collect::<Vec<_>>();
+        let [input] = rows.as_slice() else { return Err(format!("prospective bridge input '{}' has no unique active checkpoint", template.name)); };
+        inputs.push(input.id.clone());
+    }
+    if inputs.is_empty() { return Err("prospective bridge has no active declared input context".into()); }
+    Ok((inputs, result))
+}
+
 fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, request: CurrentRunRequest,
     bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)], native_metadata: Option<&InvocationMetadata>) -> Result<CurrentRunPlan, String> {
     safe_segment(&request.amendment_key, "amendment_key")?;
@@ -446,10 +478,10 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
     let amendment = ProviderCapabilityAmendment { amendment_key: request.amendment_key, provider_interface: provider.clone(), before:authored.expected_before, after:authored.run_record, bridge, authoring_profile };
     let amendment = if exact_authored { rebase_plan(current,amendment)? } else { prepare_plan(amendment)? };
     let future = RunRecord::from_bytes(&serde_json::to_vec(&amendment.after).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    for (tool, door) in retained_tools {
-        validate_tool_continuation(current, provider, tool, door)?;
-        validate_tool_continuation(&future, provider, tool, door)?;
-    }
+    let bridge_inputs = retained_tools.iter().map(|(tool, door)| Ok((
+        prospective_bridge_inputs(current, provider, tool, door)?,
+        prospective_bridge_inputs(&future, provider, tool, door)?,
+    ))).collect::<Result<Vec<_>, String>>()?;
     let run_path = roots.run_records_root.join(format!("{}.json", current.id));
     let mut dependency_writes = Vec::new();
     let mut activation_writes = Vec::new();
@@ -485,24 +517,29 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
         }).collect::<Result<Vec<_>,_>>()?.into_iter().flatten().collect::<BTreeSet<_>>();
     let mut validation = octopus_app_server::validate_registry_candidate_with_inspector(&validation_roots(roots), &writes, |index, view| {
         let selected = if index < publication_index {current} else {&future};
-        for (tool, door) in retained_tools {
-            let input = selected.checkpoints.iter().find(|cp| selected.active_checkpoints.contains(&cp.id)
-                && cp.inbound_interface() == Some(door) && cp.outbound_interfaces().any(|target|target == provider))
-                .ok_or("prospective bridge lost its active return checkpoint")?;
-            let grant = octopus_app_server::spine_root::inspect_registry_run_grant(&view.registry_root, &view.ee_instances_root, selected, &input.id)?;
-            if !grant.tools.iter().any(|id|id==tool) || grant.hard_blocked_tools.iter().any(|id|id==tool) {
-                return Err(format!("publication step {index} removes the actual formed bridge tool '{tool}'"));
-            }
-            if index == 0 && baseline_roots.is_none() { baseline_roots = Some(grant.ee_root_slot_allowance.clone()); }
-            if let Some(old) = &baseline_roots {
-                let retained = match (old,&grant.ee_root_slot_allowance) {
-                    (_,None)=>true,(Some(old),Some(new))=>old.iter().all(|slot|new.contains(slot)),(None,Some(_))=>false,
-                };
-                if !retained { return Err(format!("publication step {index} narrows the accepted bridge's root-slot allowance")); }
-            }
-            if index == writes.len() {
-                let missing = target_tools.iter().filter(|id|!grant.tools.contains(id)).collect::<Vec<_>>();
-                if !missing.is_empty() { return Err(format!("complete capability candidate has ungranted exact tools: {missing:?}")); }
+        for ((tool, _), (current_inputs, future_inputs)) in retained_tools.iter().zip(&bridge_inputs) {
+            let (inputs, result) = if index < publication_index {current_inputs} else {future_inputs};
+            for input in inputs {
+                let grant = octopus_app_server::spine_root::inspect_registry_run_grant(&view.registry_root, &view.ee_instances_root, selected, input)?;
+                if !grant.tools.iter().any(|id|id==tool) || grant.hard_blocked_tools.iter().any(|id|id==tool) {
+                    return Err(format!("publication step {index} removes the actual formed bridge tool '{tool}'"));
+                }
+                if let Some(required) = result {
+                    if !grant.mark_outcomes.iter().any(|id|id == required.mark.as_str()) {
+                        return Err(format!("publication step {index} removes the bridge result mark '{}'", required.mark));
+                    }
+                }
+                if index == 0 && baseline_roots.is_none() { baseline_roots = Some(grant.ee_root_slot_allowance.clone()); }
+                if let Some(old) = &baseline_roots {
+                    let retained = match (old,&grant.ee_root_slot_allowance) {
+                        (_,None)=>true,(Some(old),Some(new))=>old.iter().all(|slot|new.contains(slot)),(None,Some(_))=>false,
+                    };
+                    if !retained { return Err(format!("publication step {index} narrows the accepted bridge's root-slot allowance")); }
+                }
+                if index == writes.len() {
+                    let missing = target_tools.iter().filter(|id|!grant.tools.contains(id)).collect::<Vec<_>>();
+                    if !missing.is_empty() { return Err(format!("complete capability candidate has ungranted exact tools: {missing:?}")); }
+                }
             }
         }
         Ok(())

@@ -1,5 +1,8 @@
 use std::io::Read;
 
+#[path = "octopus-operator-chat-topology/publication.rs"]
+mod file_publication;
+
 use octopus_operator_chat_client::{
     plan_operator_chat_topology, plan_operator_writer_runs, OperatorChatPlanRequest,
     OperatorWriterRunPlanRequest,
@@ -13,6 +16,32 @@ use octopus_operator_chat_client::native_run_authoring::{NativeRunAdoptionReques
 
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1 && arguments[0] == "--publish-files" {
+        match read_publication_request().and_then(file_publication::publish_files) {
+            Ok(result) => match serde_json::to_string(&result) {
+                Ok(encoded) => println!("{encoded}"),
+                Err(error) => {
+                    eprintln!("file publication result did not encode: {error}");
+                    std::process::exit(1);
+                }
+            },
+            Err(error) => {
+                eprintln!("file publication request failed closed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if arguments.len() == 1 && matches!(arguments[0].to_str(), Some("--snapshot-directory" | "--publish-directory-moves" | "--reclaim-directory")) {
+        let result = directory_publication(arguments[0].to_str().unwrap())
+            .and_then(|result| serde_json::to_string(&result).map_err(|error| error.to_string()));
+        match result {
+            Ok(encoded) if encoded.len() as u64 <= PUBLICATION_MAX_BYTES => println!("{encoded}"),
+            Ok(_) => { eprintln!("directory publication response exceeds its byte bound"); std::process::exit(1); }
+            Err(error) => { eprintln!("directory publication failed closed: {error}"); std::process::exit(1); }
+        }
+        return;
+    }
     if arguments.len() == 1 && arguments[0] == "--hold-task-retirement" {
         if let Err(error) = octopus_operator_chat_client::task_retirement::serve_task_retirement() {
             eprintln!("operator task retirement failed closed: {error}");
@@ -107,5 +136,89 @@ fn main() {
             eprintln!("operator chat topology planning failed closed: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+const PUBLICATION_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const PUBLICATION_MAX_WRITES: usize = 1024;
+
+fn read_publication_request<T: serde::de::DeserializeOwned>() -> Result<T, String> {
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .lock()
+        .take(PUBLICATION_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > PUBLICATION_MAX_BYTES {
+        return Err("publication request exceeds its byte bound".into());
+    }
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectorySnapshotRequest {
+    path: std::path::PathBuf,
+    digest_algorithm: octopus_file_storage::publication::DigestAlgorithm,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryMovesRequest {
+    operation_id: String,
+    moves: Vec<octopus_file_storage::publication::DirectoryMove>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryReclaimRequest {
+    tombstone: std::path::PathBuf,
+    publication: octopus_file_storage::publication::DirectoryMoveReceipt,
+    expected: octopus_file_storage::publication::DirectoryPreimage,
+}
+
+fn directory_publication(mode: &str) -> Result<serde_json::Value, String> {
+    use octopus_file_storage::publication::{self, DigestAlgorithm};
+
+    match mode {
+        "--snapshot-directory" => {
+            let request: DirectorySnapshotRequest = read_publication_request()?;
+            if request.digest_algorithm != DigestAlgorithm::Sha256 {
+                return Err("client directory publication requires SHA-256".into());
+            }
+            let preimage = publication::snapshot_directory(&request.path, request.digest_algorithm)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({"path": request.path, "preimage": preimage}))
+        }
+        "--publish-directory-moves" => {
+            let request: DirectoryMovesRequest = read_publication_request()?;
+            if request
+                .moves
+                .iter()
+                .any(|movement| movement.expected.digest_algorithm != DigestAlgorithm::Sha256)
+            {
+                return Err("client directory publication requires SHA-256".into());
+            }
+            let result =
+                publication::publish_directory_moves(&request.operation_id, &request.moves)
+                    .map_err(|error| error.to_string())?;
+            serde_json::to_value(result).map_err(|error| error.to_string())
+        }
+        "--reclaim-directory" => {
+            let request: DirectoryReclaimRequest = read_publication_request()?;
+            if request.expected.digest_algorithm != DigestAlgorithm::Sha256 {
+                return Err("client directory publication requires SHA-256".into());
+            }
+            publication::reclaim_directory(
+                &request.tombstone,
+                &request.publication,
+                &request.expected,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(
+                serde_json::json!({"tombstone": request.tombstone, "publication": request.publication, "reclaimed": true}),
+            )
+        }
+        _ => Err("unknown directory publication operation".into()),
     }
 }

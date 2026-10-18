@@ -696,12 +696,37 @@ impl InterfaceLiftContext {
                 artifact,
                 evidence,
                 verdict_tx: Some(verdict_tx),
+                retained: None,
             })
             .await
             .map_err(|_| "arrival intake closed; the spine is shutting down".to_string())?;
         verdict_rx
             .await
             .map_err(|_| "arrival verdict channel dropped before admission".to_string())
+    }
+
+    pub(crate) async fn hand_arrival_retained(
+        &self,
+        artifact: InterfaceArtifactFile,
+        evidence: Vec<InterfaceActivationEvidence>,
+        delivery_id: &str,
+    ) -> Result<octopus_ledger::ArtifactDelivery, String> {
+        validate_retained_delivery_id(delivery_id)?;
+        let limits = self.required_host_io_limits()?;
+        let artifact = artifact
+            .capture_bounded(limits.max_manifest_bytes, limits.max_payload_bytes)
+            .map_err(|error| format!("interface output carrier capture failed: {error}"))?;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.arrivals
+            .send(InterfaceActivationArrival {
+                artifact,
+                evidence,
+                verdict_tx: None,
+                retained: Some(crate::RetainedInterfaceArrival { id: delivery_id.to_string(), reply }),
+            })
+            .await
+            .map_err(|_| "arrival intake closed; the spine is shutting down".to_string())?;
+        result.await.map_err(|_| "retained arrival reply channel dropped before completion".to_string())?
     }
 
     pub(crate) fn failure_artifact(
@@ -1081,6 +1106,12 @@ enum SpawnedLifeOutput {
         artifact_manifest_path: PathBuf,
         evidence: Vec<SpawnedEvidenceLine>,
     },
+    RetainedArrival {
+        request_id: u64,
+        delivery_id: String,
+        artifact_manifest_path: PathBuf,
+        evidence: Vec<SpawnedEvidenceLine>,
+    },
     SystemEmission {
         request_id: u64,
         artifact: SpawnedLifeEmissionArtifact,
@@ -1096,6 +1127,17 @@ enum SpawnedLifeInput {
         request_id: u64,
         verdict: crate::DeliveryVerdict,
     },
+    RetainedDelivery {
+        request_id: u64,
+        delivery: Result<octopus_ledger::ArtifactDelivery, String>,
+    },
+}
+
+fn validate_retained_delivery_id(delivery_id: &str) -> Result<(), String> {
+    if delivery_id.is_empty() || delivery_id.len() > 256 {
+        return Err("retained delivery identity must contain 1 to 256 bytes".into());
+    }
+    Ok(())
 }
 
 pub fn capture_spawned_artifact(
@@ -1402,8 +1444,12 @@ fn spawned_context_from_env(
     })
 }
 
-type PendingVerdicts =
-    Arc<tokio::sync::Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<crate::DeliveryVerdict>>>>;
+enum SpawnedReply {
+    Ordinary(tokio::sync::oneshot::Sender<crate::DeliveryVerdict>),
+    Retained(tokio::sync::oneshot::Sender<Result<octopus_ledger::ArtifactDelivery, String>>),
+}
+
+type PendingVerdicts = Arc<tokio::sync::Mutex<BTreeMap<u64, SpawnedReply>>>;
 
 async fn pump_spawned_life_outputs(
     mut arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
@@ -1433,26 +1479,7 @@ async fn pump_spawned_life_outputs(
             arrival = arrivals.recv() => {
                 let arrival = arrival
                     .ok_or_else(|| "spawned life arrival channel closed".to_string())?;
-                let request_id = register_spawned_verdict(
-                    &pending,
-                    &mut next_request_id,
-                    arrival.verdict_tx,
-                )
-                .await?;
-                SpawnedLifeOutput::Arrival {
-                    request_id,
-                    artifact_manifest_path: arrival.artifact.manifest_path().to_path_buf(),
-                    evidence: arrival
-                        .evidence
-                        .into_iter()
-                        .map(|item| SpawnedEvidenceLine {
-                            interface_id: item.interface_id.as_str().to_string(),
-                            artifact_id: item.artifact_id.as_str().to_string(),
-                            label: item.label,
-                            bytes: item.bytes,
-                        })
-                        .collect(),
-                }
+                spawned_arrival_output(arrival, &pending, &mut next_request_id).await?
             }
             emission = emissions.recv() => {
                 let emission = emission
@@ -1466,6 +1493,32 @@ async fn pump_spawned_life_outputs(
             .write_all(&bytes)
             .and_then(|()| stdout.flush())
             .map_err(|error| format!("spawned life output write failed: {error}"))?;
+    }
+}
+
+async fn spawned_arrival_output(
+    arrival: InterfaceActivationArrival,
+    pending: &PendingVerdicts,
+    next_request_id: &mut u64,
+) -> Result<SpawnedLifeOutput, String> {
+    let artifact_manifest_path = arrival.artifact.manifest_path().to_path_buf();
+    let evidence = arrival.evidence.into_iter().map(|item| SpawnedEvidenceLine {
+        interface_id: item.interface_id.as_str().to_string(),
+        artifact_id: item.artifact_id.as_str().to_string(),
+        label: item.label,
+        bytes: item.bytes,
+    }).collect();
+    match (arrival.verdict_tx, arrival.retained) {
+        (None, Some(retained)) => {
+            validate_retained_delivery_id(&retained.id)?;
+            let request_id = register_spawned_reply(pending, next_request_id, SpawnedReply::Retained(retained.reply)).await?;
+            Ok(SpawnedLifeOutput::RetainedArrival { request_id, delivery_id: retained.id, artifact_manifest_path, evidence })
+        }
+        (verdict_tx, None) => {
+            let request_id = register_spawned_verdict(pending, next_request_id, verdict_tx).await?;
+            Ok(SpawnedLifeOutput::Arrival { request_id, artifact_manifest_path, evidence })
+        }
+        _ => Err("spawned arrival must select one acknowledgement contract".into()),
     }
 }
 
@@ -1503,12 +1556,23 @@ async fn register_spawned_verdict(
     let Some(verdict_tx) = verdict_tx else {
         return Ok(None);
     };
+    register_spawned_reply(pending, next_request_id, SpawnedReply::Ordinary(verdict_tx)).await.map(Some)
+}
+
+async fn register_spawned_reply(
+    pending: &PendingVerdicts,
+    next_request_id: &mut u64,
+    reply: SpawnedReply,
+) -> Result<u64, String> {
     let request_id = *next_request_id;
     *next_request_id = next_request_id
         .checked_add(1)
         .ok_or_else(|| "spawned life request id overflow".to_string())?;
-    pending.lock().await.insert(request_id, verdict_tx);
-    Ok(Some(request_id))
+    match pending.lock().await.entry(request_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(reply); }
+        std::collections::btree_map::Entry::Occupied(_) => return Err("spawned life request id already has a reply contract".into()),
+    }
+    Ok(request_id)
 }
 
 async fn pump_spawned_life_inputs(
@@ -1519,18 +1583,23 @@ async fn pump_spawned_life_inputs(
     while let Some(line) = lines.next_line().await? {
         let input: SpawnedLifeInput = serde_json::from_str(&line)
             .map_err(|error| format!("spawned life input is malformed: {error}"))?;
-        let SpawnedLifeInput::DeliveryVerdict {
-            request_id,
-            verdict,
-        } = input;
-        let sender = pending
-            .lock()
-            .await
-            .remove(&request_id)
-            .ok_or_else(|| format!("spawned life received unknown request id {request_id}"))?;
-        let _ = sender.send(verdict);
+        accept_spawned_life_input(&pending, input).await?;
     }
     Err("spawned life input closed".to_string())
+}
+
+async fn accept_spawned_life_input(pending: &PendingVerdicts, input: SpawnedLifeInput) -> Result<(), String> {
+    let request_id = match &input {
+        SpawnedLifeInput::DeliveryVerdict { request_id, .. } | SpawnedLifeInput::RetainedDelivery { request_id, .. } => *request_id,
+    };
+    let reply = pending.lock().await.remove(&request_id)
+        .ok_or_else(|| format!("spawned life received unknown request id {request_id}"))?;
+    match (reply, input) {
+        (SpawnedReply::Ordinary(sender), SpawnedLifeInput::DeliveryVerdict { verdict, .. }) => { let _ = sender.send(verdict); }
+        (SpawnedReply::Retained(sender), SpawnedLifeInput::RetainedDelivery { delivery, .. }) => { let _ = sender.send(delivery); }
+        _ => return Err("spawned life reply changed its request acknowledgement contract".into()),
+    }
+    Ok(())
 }
 
 pub struct OwnOutboundMovement {
@@ -2622,6 +2691,7 @@ mod tests {
     use super::{
         AUTHORITATIVE_LEDGER_SCAN_MOVEMENT_BUDGET, DurableMovementDecoder, InterfaceHostIoLimits,
         InterfaceLiftContext, LedgerSqliteReader, LedgerTailReader, PendingVerdicts, TailCursor,
+        SpawnedLifeInput, SpawnedLifeOutput, accept_spawned_life_input, spawned_arrival_output,
         spawned_system_emission_output,
     };
     use crate::{DeliveryVerdict, SystemInterfaceEmission, SystemInterfaceEmissionArtifact};
@@ -3216,16 +3286,33 @@ mod tests {
         assert!(encoded.get("from_interface").is_none());
         assert!(encoded.get("emitter_run").is_none());
         assert!(encoded.get("emitter_checkpoint").is_none());
-        pending
-            .lock()
-            .await
-            .remove(&1)
-            .unwrap()
-            .send(DeliveryVerdict::Admitted { seq: 44 })
-            .unwrap();
+        accept_spawned_life_input(&pending, SpawnedLifeInput::DeliveryVerdict {
+            request_id: 1, verdict: DeliveryVerdict::Admitted { seq: 44 },
+        }).await.unwrap();
         assert!(matches!(
             verdict_rx.await.unwrap(),
             DeliveryVerdict::Admitted { seq: 44 }
         ));
+        let (arrivals, mut arrivals_rx) = tokio::sync::mpsc::channel(1);
+        let mut ctx = InterfaceLiftContext::unprivileged(InterfaceId::new("door"), root.path().join("interface"), None,
+            root.path().to_path_buf(), root.path().join("movements.jsonl"), root.path().join("blobs"),
+            root.path().join("ledger-index.sqlite"), BTreeMap::new(), arrivals, CancellationToken::new());
+        ctx.host_io_limits = Some(InterfaceHostIoLimits {
+            max_control_frame_bytes: 65536, max_stderr_bytes: 65536, max_manifest_bytes: 65536, max_payload_bytes: 65536,
+        });
+        let artifact = InterfaceArtifactFile::write(root.path(), "retained.output", b"payload").unwrap();
+        for expected in [Ok(octopus_ledger::ArtifactDelivery::Pending { scope_seq: 5 }), Err("exact scope corruption".to_string())] {
+            let handoff = ctx.hand_arrival_retained(artifact.clone(), Vec::new(), "opaque retry identity");
+            let host = async {
+                let arrival = arrivals_rx.recv().await.unwrap();
+                let output = spawned_arrival_output(arrival, &pending, &mut next_request_id).await.unwrap();
+                let SpawnedLifeOutput::RetainedArrival { request_id, delivery_id, .. } = output else { panic!("missing retained frame") };
+                assert_eq!(delivery_id, "opaque retry identity");
+                let frame = serde_json::to_vec(&SpawnedLifeInput::RetainedDelivery { request_id, delivery: expected.clone() }).unwrap();
+                accept_spawned_life_input(&pending, serde_json::from_slice(&frame).unwrap()).await.unwrap();
+            };
+            let (actual, ()) = tokio::join!(handoff, host);
+            assert_eq!(actual, expected);
+        }
     }
 }

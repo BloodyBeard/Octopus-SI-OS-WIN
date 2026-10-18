@@ -1,5 +1,98 @@
 use super::*;
 
+#[tokio::test]
+async fn pending_output_retains_original_fanout_across_restart_and_refuses_legacy_ambiguity() {
+    use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, ArtifactDelivery, DeliveryMetadata, MovementMetadata};
+    let mut fixture = CompletedInputReplayFixture::new();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    fixture.handoff.ctx.arrivals = tx;
+    let before = std::fs::read(&fixture.handoff.run_path).unwrap();
+    let file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("outputs"), "answer", br#"{"text":"saved output"}"#).unwrap();
+    let identity = artifact_identity(&file, &fixture.handoff.var_dir).unwrap();
+    let authored = fixture.handoff.author_run(&before, &[], &[PreparedHandoff {
+        identity:identity.clone(), output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+        verified_inputs:Vec::new(),
+    }], false, None, false, true).unwrap();
+    fixture.install(&authored);
+    let pending = authored.pending_handoff.clone();
+    let item = pending.items[0].clone();
+    let record = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+    let target = octopus_ledger::RuntimeInvocationMetadata {
+        run:record.id.clone(), ee:record.ee.clone(), worker:record.worker.clone(), checkpoint:item.checkpoint.id.clone(),
+        interface:fixture.handoff.ctx.interface.clone(), epoch:item.checkpoint.epoch, run_record_hash:Some(authored.after_hash.clone()),
+    };
+    let mut sibling = target.clone(); sibling.run = "sibling-run".into(); sibling.worker = "peer".into(); sibling.checkpoint = "sibling".into();
+    let scope_seq = fixture.rows.len() as u64;
+    let own_seq = scope_seq + 1;
+    let handoff = fixture.handoff.clone();
+    let sending = handoff.hand_pending_items(&pending, authored.content.as_bytes());
+    let receive = async {
+        let arrival = rx.recv().await.unwrap();
+        assert_eq!(artifact_identity(&arrival.artifact, arrival.artifact.manifest_path().parent().unwrap()).unwrap().artifact, identity.artifact);
+        let retained = arrival.retained.unwrap();
+        let delivery_id = retained.id.clone();
+        let mut scope = fixture.rows[0].clone(); scope.seq.0 = scope_seq; scope.lamport.0 = scope_seq;
+        scope.kind = MovementKind::ArtifactMoved; scope.from = Endpoint::Interface("provider".into()); scope.to = scope.from.clone();
+        scope.artifact = Some(identity.artifact.clone());
+        scope.invocation_metadata = Some(MovementMetadata::ArrivalFanout(ArrivalFanoutMetadata {
+            arrival_fanout:ArrivalFanoutScope {identity:delivery_id.clone(), targets:vec![target.clone(), sibling.clone()]},
+        }));
+        fixture.rows.push(scope);
+        fixture.edge(authored.content.as_bytes(), &item.checkpoint.id, &file, "worker".into(), MovementKind::InterfaceArrival);
+        let own = fixture.rows.last_mut().unwrap();
+        let mut metadata = own.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+        metadata.delivery_scope_seq = Some(scope_seq); own.invocation_metadata = Some(metadata.into()); fixture.save();
+        retained.reply.send(Ok(ArtifactDelivery::Pending {scope_seq})).unwrap();
+        delivery_id
+    };
+    let (result, delivery_id) = tokio::join!(sending, receive);
+    assert!(result.unwrap_err().contains("unfinished original edges"));
+    assert_eq!(handoff.pending_handoff_evidence(&pending).unwrap(), vec![None]);
+    assert_eq!(std::fs::read(&handoff.run_path).unwrap(), authored.content.as_bytes());
+    let mut cold = handoff.clone(); cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
+    let retry = cold.hand_pending_items(&pending, authored.content.as_bytes());
+    let complete = async {
+        let arrival = rx.recv().await.unwrap(); let retained = arrival.retained.unwrap();
+        assert_eq!(retained.id, delivery_id);
+        assert_eq!(artifact_identity(&arrival.artifact, arrival.artifact.manifest_path().parent().unwrap()).unwrap().artifact, identity.artifact);
+        let mut refused = fixture.rows[scope_seq as usize].clone(); refused.seq.0 = fixture.rows.len() as u64; refused.lamport.0 = refused.seq.0;
+        refused.kind = MovementKind::DeliveryRefused; refused.to = Endpoint::Interface(sibling.worker.clone());
+        refused.invocation_metadata = Some(MovementMetadata::Delivery(DeliveryMetadata {
+            delivery_verdict:DeliveryVerdict::refused(octopus_ledger::RefusedReason::Policy, serde_json::json!({"message":"revoked peer permission"})),
+            runtime:Some(sibling), source_movement_seq:None, delivery_scope_seq:Some(scope_seq),
+        }));
+        fixture.rows.push(refused); fixture.save();
+        retained.reply.send(Ok(ArtifactDelivery::Complete {verdict:DeliveryVerdict::Admitted {seq:own_seq}})).unwrap();
+    };
+    let (result, ()) = tokio::join!(retry, complete);
+    assert_eq!(result.unwrap(), vec![ProviderHandoffOutcome::Admitted {seq:own_seq, artifact:identity.artifact.clone()}]);
+    assert_eq!(cold.pending_handoff_evidence(&pending).unwrap(), vec![Some(own_seq)]);
+    assert_eq!(fixture.rows.iter().filter(|row| row.kind == MovementKind::InterfaceArrival && row.artifact.as_ref() == Some(&identity.artifact)).count(), 1);
+    assert!(rx.try_recv().is_err());
+    let receipt = std::fs::read_dir(cold.ctx.interface_var_dir().join("handoff-delivery")).unwrap().next().unwrap().unwrap().path();
+    let saved = std::fs::read(&receipt).unwrap();
+    let mut corrupt:serde_json::Value = serde_json::from_slice(&saved).unwrap(); corrupt["source_movement_seq"] = serde_json::json!(99);
+    std::fs::write(&receipt, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+    assert!(cold.pending_handoff_evidence(&pending).unwrap_err().contains("exact pending contract"));
+    std::fs::remove_file(&receipt).unwrap();
+    assert!(cold.pending_handoff_evidence(&pending).unwrap_err().contains("saved dispatch identity"));
+
+    let mut legacy = CompletedInputReplayFixture::new();
+    let authored = legacy.output(false, false, false);
+    let pending = authored.pending_handoff.clone();
+    let ownership = legacy.handoff.dispatch_ownership().await.unwrap();
+    legacy.handoff.record_pending_dispatch(&pending, &pending.items[0]).unwrap(); drop(ownership);
+    assert!(legacy.handoff.hand_pending_items(&pending, authored.content.as_bytes()).await.unwrap_err().contains("dispatched without a retained identity"));
+    assert!(!legacy.handoff.ctx.interface_var_dir().join("handoff-delivery").exists());
+    assert_eq!(std::fs::read(&legacy.handoff.run_path).unwrap(), authored.content.as_bytes());
+    let mut legacy_record:serde_json::Value = serde_json::from_str(&authored.content).unwrap();
+    legacy_record["interface_state"]["provider"]["pending_handoff"].as_object_mut().unwrap().remove("dispatch_fenced");
+    let bytes = serde_json::to_vec(&legacy_record).unwrap(); std::fs::write(&legacy.handoff.run_path, &bytes).unwrap();
+    let record = RunRecord::from_bytes(&bytes).unwrap(); let pending = persisted_pending_handoff(&record, &"provider".into()).unwrap().unwrap();
+    assert!(legacy.handoff.hand_pending_items(&pending, &bytes).await.unwrap_err().contains("durable unsubmitted proof"));
+    assert!(!legacy.handoff.ctx.interface_var_dir().join("handoff-delivery").exists());
+}
+
 #[test]
 fn materialized_checkpoints_preserve_static_role_overlap_access() {
     let fixture = CompletedInputReplayFixture::new();
@@ -46,7 +139,11 @@ fn failed_owner_input_static_revision_requires_checked_terminal_source() {
         fixture.handoff.source_movement_seq = fixture.rows.len() as u64 - 1;
         for row in &mut fixture.rows {
             let mut metadata = row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
-            if mode != "denied_read" { for id in &static_ids { metadata.grant.artifact_access.insert(id.to_string(), octopus_runtime::ArtifactAccess::read_only()); } }
+            if mode == "denied_read" {
+                metadata.grant.artifact_access.clear();
+            } else {
+                for id in &static_ids { metadata.grant.artifact_access.insert(id.to_string(), octopus_runtime::ArtifactAccess::read_only()); }
+            }
             row.invocation_metadata = Some(metadata.into());
         }
         fixture.save();
@@ -87,6 +184,9 @@ fn failed_owner_input_static_revision_requires_checked_terminal_source() {
         assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), before);
         if mode == "ordinary_active" {
             assert!(matches!(prepared.unwrap(), ProviderInputRevision::Deferred { .. })); continue;
+        }
+        if mode == "denied_read" {
+            assert!(prepared.as_ref().err().unwrap().to_string().contains("static correction was not readable in the exact failed input"));
         }
         if mode != "valid" { assert!(prepared.is_err(), "{mode}: {prepared:?}"); continue; }
         let mut prepared = prepared.unwrap();
@@ -233,7 +333,9 @@ impl CompletedInputReplayFixture {
         std::fs::write(h.ctx.blobs_dir.join(artifact.content.to_hex()),std::fs::read(file.manifest_path()).unwrap()).unwrap();
         std::fs::write(h.ctx.blobs_dir.join(manifest.payload_content_hash.unwrap()),file.read_payload_bytes().unwrap()).unwrap();
         let mut metadata = InvocationMetadata::new(GrantProjection {
-            tools:vec![h.config.file_write_tool.clone()],interfaces:vec![target.to_string()],..Default::default()
+            tools:h.granted_tools.iter().cloned().collect(),interfaces:vec![target.to_string()],
+            artifact_access:cp.artifact_bindings.iter().map(|binding|(binding.id.to_string(),binding.access.clone())).collect(),
+            mark_outcomes:h.granted_mark_outcomes.iter().cloned().collect(),..Default::default()
         }).with_runtime(RuntimeInvocationMetadata {
             run:record.id.clone(),ee:record.ee.clone(),worker:record.worker.clone(),checkpoint:checkpoint.clone(),
             interface:if kind == MovementKind::InterfaceArrival {h.ctx.interface.clone()} else {target.clone()},
@@ -247,7 +349,7 @@ impl CompletedInputReplayFixture {
             content:ContentHash::from_hex(b.id.as_str().rsplit(':').next().unwrap()).unwrap()}).collect();
         let seq = self.rows.len() as u64;
         self.rows.push(Movement {seq:octopus_ledger::Seq(seq),lamport:octopus_ledger::Lamport(seq),recorded_at_unix_ms:seq,
-            trace:octopus_ledger::TraceId("run".into()),kind,from:Endpoint::Interface(cp.interface_binding.as_ref().unwrap().interface.clone()),
+            trace:cp.trace.clone(),kind,from:Endpoint::Interface(cp.interface_binding.as_ref().unwrap().interface.clone()),
             to:Endpoint::Interface(target),artifact:Some(artifact),invocation_metadata:Some(metadata.into())});
         self.save();
     }
@@ -288,6 +390,8 @@ impl CompletedInputReplayFixture {
 
     fn mark(&mut self, authored: &AuthoredRun) {
         let item = &authored.pending_handoff.items[0];
+        let record = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+        let trace = record.checkpoint(&item.checkpoint.id).unwrap().trace.clone();
         let (_, artifact) = load_pending_artifact(&self.handoff.var_dir,item).unwrap();
         let requirement = &item.checkpoint.required_verified_artifacts[0];
         let seq = self.rows.len() as u64;
@@ -296,7 +400,7 @@ impl CompletedInputReplayFixture {
                 descriptor_content:ContentHash::of_bytes(b"descriptor"),script_content:ContentHash::of_bytes(b"script"),
             },serde_json::json!({}));
         self.rows.push(Movement {seq:octopus_ledger::Seq(seq),lamport:octopus_ledger::Lamport(seq),recorded_at_unix_ms:seq,
-            trace:octopus_ledger::TraceId("run".into()),kind:MovementKind::MarkOutcomeAdmitted(requirement.mark.clone()),
+            trace,kind:MovementKind::MarkOutcomeAdmitted(requirement.mark.clone()),
             from:Endpoint::Interface("provider".into()),to:Endpoint::Interface("worker".into()),artifact:Some(artifact),invocation_metadata:Some(mark.into())});
         self.save();
     }
@@ -305,6 +409,397 @@ impl CompletedInputReplayFixture {
         let publication = self.handoff.author_context_publication(authored.content.as_bytes(),&authored.pending_handoff).unwrap();
         self.install(&publication);
     }
+
+    fn reload_definition(&mut self) -> RunRecord {
+        let record = RunRecord::from_bytes(&std::fs::read(&self.handoff.run_path).unwrap()).unwrap();
+        self.handoff.config = attempt_config(&record, &self.handoff.config).unwrap();
+        self.handoff.bound_topology.checkpoints = self.handoff.config.checkpoints.clone();
+        record
+    }
+}
+
+#[tokio::test]
+async fn outstanding_results_preserve_context_and_require_exact_consumption() {
+    let mut fixture = CompletedInputReplayFixture::new();
+    let h = &mut fixture.handoff;
+    h.run_path = h.run_path.canonicalize().unwrap();
+    h.ctx.root_slots.insert("run_records_root".into(), h.run_path.parent().unwrap().to_path_buf());
+    h.granted_mark_outcomes.insert("tool.result.received".into());
+    let catalogue_file = InterfaceArtifactFile::write(h.var_dir.join("catalogue"), "context.collection",
+        br#"{"label":"context.collection","directory":"entries"}"#).unwrap();
+    let catalogue = artifact_identity(&catalogue_file, &h.var_dir).unwrap().artifact;
+    let manifest = catalogue_file.read_manifest().unwrap();
+    std::fs::write(h.ctx.blobs_dir.join(catalogue.content.to_hex()), std::fs::read(catalogue_file.manifest_path()).unwrap()).unwrap();
+    std::fs::write(h.ctx.blobs_dir.join(manifest.payload_content_hash.unwrap()), catalogue_file.read_payload_bytes().unwrap()).unwrap();
+    for template in h.config.checkpoints.iter_mut().filter(|template|template.role == RunAuthoringCheckpointRole::Stable && template.include_context) {
+        template.static_artifact_bindings.push(catalogue.id.clone());
+    }
+    h.state.try_lock().unwrap().static_context_artifacts.push(catalogue.id.clone());
+    let door = vec![AuthoredInterfaceBinding::all("result_room".into())];
+    {
+        let tool = h.config.checkpoints.iter_mut().find(|cp| cp.role == RunAuthoringCheckpointRole::ProviderToolOutput).unwrap();
+        tool.outbound_interface_bindings = door.clone();
+        tool.result_receiving.insert("read".into(), serde_json::from_value(serde_json::json!({
+            "mark":"tool.result.received","artifact_label":"read.result","verifier":"result_correspondence","params":{}
+        })).unwrap());
+    }
+    h.bound_topology.checkpoints = h.config.checkpoints.clone();
+    h.config.validate(&h.ctx.interface, &h.config.run).unwrap();
+    let mut duplicate = h.config.clone();
+    duplicate.checkpoints[0].interface_binding = AuthoredInterfaceBinding::all("result_room".into());
+    assert!(duplicate.validate(&h.ctx.interface, &h.config.run).is_err());
+    let mut seed: serde_json::Value = serde_json::from_slice(&std::fs::read(&h.run_path).unwrap()).unwrap();
+    seed["interface_state"]["provider"][RUN_AUTHORING_BINDING] = serde_json::to_value(&h.bound_topology).unwrap();
+    seed["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "tool").unwrap()["outbound_interface_bindings"] =
+        serde_json::to_value(door).unwrap();
+    let mut binding = ArtifactBinding { id:fixture.input.id.clone(), access:Default::default() };
+    binding.access.change = true;
+    for cp in seed["checkpoints"].as_array_mut().unwrap().iter_mut().filter(|cp| cp["id"] == "input" || cp["id"] == "alternate") {
+        cp["artifact_bindings"] = serde_json::json!([binding, ArtifactBinding {id:catalogue.id.clone(), access:Default::default()}]);
+    }
+    let initial = serde_json::to_vec(&seed).unwrap();
+    std::fs::write(&h.run_path, &initial).unwrap();
+    h.state.try_lock().unwrap().run_record_bytes = initial.clone();
+    fixture.rows.clear();
+    let input_file = fixture.input_file.clone();
+    fixture.edge(&initial, &"input".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.edge(&initial, &"alternate".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+    {
+        let mut cold = fixture.handoff.clone();
+        let mut detached = seed.clone();
+        let writer_run = RunId::new("result_saved_writer");
+        let writer = separate_writer_run(&mut detached, &cold.ctx.interface, &writer_run).unwrap();
+        std::fs::write(cold.run_path.parent().unwrap().join(format!("{writer_run}.json")), JsonFormat::Compact.encode(&writer).unwrap()).unwrap();
+        let detached = JsonFormat::Compact.encode(&detached).unwrap();
+        std::fs::write(&cold.run_path, &detached).unwrap();
+        let record = RunRecord::from_bytes(&detached).unwrap();
+        cold.config = attempt_config(&record, &cold.config).unwrap();
+        cold.bound_topology = serde_json::from_value(record.interface_state[&cold.ctx.interface][RUN_AUTHORING_BINDING].clone()).unwrap();
+        cold.ctx.movements_path = cold.var_dir.join("result-saved.jsonl");
+        cold.ctx.ledger_index_path = cold.var_dir.join("result-saved.sqlite");
+        cold.hand_in_root = cold.var_dir.join("result-saved-calls");
+        let mut source = fixture.rows[0].clone();
+        let mut metadata = source.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+        let hash = ContentHash::of_bytes(&detached);
+        metadata.runtime.as_mut().unwrap().run_record_hash = Some(hash.to_hex());
+        source.invocation_metadata = Some(metadata.clone().into());
+        std::fs::write(cold.ctx.blobs_dir.join(hash.to_hex()), &detached).unwrap();
+        std::fs::write(&cold.ctx.movements_path, format!("{}\n", serde_json::to_string(&source).unwrap())).unwrap();
+        cold.invocation_metadata = metadata;
+        cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
+        let call = InterfaceArtifactFile::write(cold.var_dir.join("detached-tool"), "tool.call",
+            br#"{"tool":"read","arguments":{},"correlation_id":"detached-result"}"#).unwrap();
+        let identity = artifact_identity(&call, &cold.var_dir).unwrap();
+        let saved = cold.author_run_with_bindings(&detached, &[fixture.input.id.clone(), catalogue.id.clone(), identity.artifact.id.clone()], &[PreparedHandoff {
+            identity, output_checkpoint:cold.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderToolOutput).unwrap().clone(),
+            verified_inputs:Vec::new(),
+        }], true, None, false, false, &[]).unwrap();
+        let edit = CheckedRunEdit { path:cold.run_path.clone(), json_format:saved.json_format, before_hash:saved.before_hash.clone(),
+            after_hash:saved.after_hash.clone(), content:saved.content.clone(), patch:saved.patch.clone(),
+            correlation_id:"provider-writer-run:run:1:1".into() };
+        let writer = declared_provider_run_writer(&record, &cold.ctx.interface, &RunAuthoringProfile {
+            file_write_tool:"write".into(), file_write_label:"tool.call".into(), file_write_result_label:"write.result".into(), result_timeout_ms:1000,
+        }).unwrap();
+        OwnerWriterEdit::prepare(&detached, &edit, &writer, 1<<26).unwrap().unwrap().materialize(&cold.hand_in_root).unwrap();
+        let AuthoringAttemptRecovery::InFlight(recovered) = cold.recover_authoring_attempt(&record, &detached).unwrap() else { panic!("lost detached result receiver"); };
+        assert_eq!(recovered.authored.pending_handoff, saved.pending_handoff);
+        assert_eq!(recovered.authored.content, saved.content);
+        assert_eq!(std::fs::read(&cold.run_path).unwrap(), detached);
+        std::fs::write(&fixture.handoff.run_path, &initial).unwrap();
+    }
+    let first = fixture.output(false, true, true);
+    let before = RunRecord::from_bytes(&initial).unwrap();
+    let record = fixture.reload_definition();
+    result_inputs::validate_saved(&fixture.handoff.ctx, &before, &record, &fixture.handoff.config).unwrap();
+    let call_file = fixture.handoff.materialize_file_write_call(&first).unwrap();
+    validate_authoring_attempt_source(AuthoringAttemptSourceValidation {
+        ctx:&fixture.handoff.ctx, record:&before, record_bytes:&initial, config:&fixture.handoff.config,
+        call:serde_json::from_slice(&call_file.read_payload_bytes().unwrap()).unwrap(),
+        manifest_path:call_file.manifest_path().to_path_buf(),
+    }).unwrap();
+    let profile = RunAuthoringProfile { file_write_tool:"write".into(), file_write_label:"tool.call".into(),
+        file_write_result_label:"write.result".into(), result_timeout_ms:1000 };
+    let mut created = CheckedRunTransition { writer:declared_provider_run_writer(&before, &"provider".into(), &profile).unwrap(),
+        before:initial.clone(), after:first.content.as_bytes().to_vec(), call:fixture.rows[2].clone(), result:fixture.rows[3].clone() };
+    let mut metadata = created.call.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    metadata.grant.mark_outcomes.clear();
+    created.call.invocation_metadata = Some(metadata.into());
+    {
+        let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
+            blobs_dir:&fixture.handoff.ctx.blobs_dir, max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+        let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+        result_inputs::validate_checked(&mut reader, &created).unwrap();
+    }
+    let receipt = fixture.handoff.config.checkpoints.iter().find(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput).unwrap().clone();
+    assert_eq!(receipt.static_artifact_bindings, [catalogue.id.clone(), first.pending_handoff.items[0].artifact_id.clone()]);
+    let pinned = record.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &receipt, &record.id)).unwrap().clone();
+    assert_eq!(pinned.artifact_bindings[0], binding);
+    assert_eq!(pinned.artifact_bindings[1], ArtifactBinding {id:catalogue.id.clone(), access:Default::default()});
+    assert_eq!(pinned.artifact_bindings[2].id, first.pending_handoff.items[0].artifact_id);
+    assert!(!provider_context_bindings(&record, &"provider".into()).unwrap().iter()
+        .any(|binding| binding.id == first.pending_handoff.items[0].artifact_id));
+    fixture.publish(&first);
+    let published = fixture.reload_definition();
+    assert_eq!(published.checkpoint(&pinned.id), Some(&pinned));
+    assert_eq!(provider_context_bindings(&published, &"provider".into()).unwrap()[0], binding);
+    let alternate = fixture.handoff.config.checkpoints.iter().find(|cp| cp.name == "alternate").unwrap();
+    let next_input = published.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, alternate, &published.id)).unwrap();
+    let published_bytes = std::fs::read(&fixture.handoff.run_path).unwrap();
+    let writer = declared_provider_run_writer(&published, &"provider".into(), &profile).unwrap();
+    let retirement = prepare_provider_result_input_retirement(fixture.handoff.run_path.clone(), &published_bytes, &writer, &[pinned.id.clone()]).unwrap();
+    let retired = RunRecord::from_bytes(retirement.content.as_bytes()).unwrap();
+    assert!(retired.checkpoint(&pinned.id).is_none());
+    assert_eq!(provider_context_bindings(&retired, &"provider".into()).unwrap(), provider_context_bindings(&published, &"provider".into()).unwrap());
+    assert_eq!(persisted_pending_handoff(&retired, &"provider".into()).unwrap(), persisted_pending_handoff(&published, &"provider".into()).unwrap());
+    result_inputs::validate_saved(&fixture.handoff.ctx, &published, &retired, &fixture.handoff.config).unwrap();
+    let future = provider_context_bindings(&published, &"provider".into()).unwrap();
+    let revision = prepare_provider_result_input_revision(fixture.handoff.run_path.clone(), &published_bytes, &writer,
+        &[pinned.id.clone()], &future).unwrap();
+    let revised = RunRecord::from_bytes(revision.content.as_bytes()).unwrap();
+    let revised_config = attempt_config(&revised, &fixture.handoff.config).unwrap();
+    assert_eq!(revised_config.checkpoints.iter().find(|cp|cp.name == receipt.name).unwrap().static_artifact_bindings, [catalogue.id.clone()]);
+    assert!(revised.checkpoint(&pinned.id).is_none());
+    let receiver = revised.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &receipt, &revised.id)).unwrap();
+    assert_eq!(receiver.artifact_bindings, future);
+    assert_eq!(revised.checkpoint(&"control".into()), published.checkpoint(&"control".into()));
+    result_inputs::validate_saved(&fixture.handoff.ctx, &published, &revised, &fixture.handoff.config).unwrap();
+    let mut wrong_rights = future.clone();
+    wrong_rights[0].access.delete = true;
+    assert!(prepare_provider_result_input_revision(fixture.handoff.run_path.clone(), &published_bytes, &writer,
+        &[pinned.id.clone()], &wrong_rights).is_err());
+    assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), published_bytes);
+    fixture.edge(&published_bytes, &next_input.id, &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = fixture.rows.len() as u64 - 1;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    let second = fixture.output(false, true, true);
+    let record = fixture.reload_definition();
+    assert_eq!(record.checkpoint(&pinned.id), Some(&pinned));
+    let receipts = fixture.handoff.config.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput).collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[0].interface(), receipts[1].interface());
+    let received = receipts.iter().find(|cp| **cp != &receipt).unwrap();
+    let received = (**received).clone();
+    let receiving = record.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &received, &record.id)).unwrap().clone();
+    assert!(!provider_context_bindings(&record, &"provider".into()).unwrap().iter()
+        .any(|binding| binding.id == second.pending_handoff.items[0].artifact_id));
+    let call = load_pending_artifact(&fixture.handoff.var_dir, &second.pending_handoff.items[0]).unwrap();
+    let correlation = received.required_verified_artifacts[0].params["correlation_id"].as_str().unwrap();
+    let result = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("received"), "read.result",
+        &serde_json::to_vec(&serde_json::json!({"label":"read.result","tool":"read","correlation_id":correlation,"ok":true,"body":{}})).unwrap()).unwrap();
+    let envelope = InterfaceInvocationEnvelope { artifact:artifact_identity(&result, &fixture.handoff.var_dir).unwrap().artifact,
+        artifact_file:result.clone(), artifact_binding_payloads:vec![octopus_interfaces::ArtifactBindingPayload::new(
+            call.1, call.0.read_payload_bytes().unwrap())], metadata:None };
+    result_inputs::validate_invocation(&envelope, &received).unwrap();
+    assert!(result_inputs::validate_invocation(&envelope, &receipt).is_err());
+    let mut wrong = envelope.clone();
+    wrong.artifact_file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("wrong-result"), "read.result",
+        br#"{"label":"read.result","tool":"read","correlation_id":"other-call","ok":true,"body":{}}"#).unwrap();
+    assert!(result_inputs::validate_invocation(&wrong, &received).is_err());
+    wrong.artifact_file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("failed-result"), "read.result",
+        &serde_json::to_vec(&serde_json::json!({"label":"read.result","tool":"read","correlation_id":correlation,"ok":false,
+            "error":{"code":"read_failed","message":"read failed"}})).unwrap()).unwrap();
+    result_inputs::validate_invocation(&wrong, &received).unwrap();
+    fixture.publish(&second);
+    let published = fixture.reload_definition();
+    let prior = std::fs::read(&fixture.handoff.run_path).unwrap();
+    let input_b = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("independent-b"), "operator.input",
+        br#"{"text":"independent future B"}"#).unwrap();
+    let alternate = fixture.handoff.config.checkpoints.iter().find(|cp| cp.name == "alternate").unwrap();
+    let input_cp = published.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, alternate, &published.id)).unwrap();
+    fixture.edge(&prior, &input_cp.id, &input_b, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = fixture.rows.len() as u64 - 1;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    let b = artifact_identity(&input_b, &fixture.handoff.var_dir).unwrap().artifact;
+    let reply_b = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("reply-b"), "reply", br#"{"text":"B received"}"#).unwrap();
+    let mut future = current_context_artifacts(&published, &fixture.handoff.config).unwrap();
+    append_artifact(&mut future, b.id.clone());
+    let authored_b = fixture.handoff.author_run_with_bindings(&prior, &future, &[PreparedHandoff {
+        identity:artifact_identity(&reply_b, &fixture.handoff.var_dir).unwrap(),
+        output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+        verified_inputs:Vec::new(),
+    }], true, None, false, true, &[]).unwrap();
+    fixture.install(&authored_b);
+    fixture.edge(authored_b.content.as_bytes(), &authored_b.pending_handoff.items[0].checkpoint.id, &reply_b,
+        "worker".into(), MovementKind::InterfaceArrival);
+    assert!(authored_b.pending_handoff.context_publication.is_none());
+    let record = fixture.reload_definition();
+    let current = std::fs::read(&fixture.handoff.run_path).unwrap();
+    assert_eq!(record.checkpoint(&receiving.id), Some(&receiving));
+    assert!(!receiving.artifact_bindings.iter().any(|binding| binding.id == b.id));
+    assert!(provider_context_bindings(&record, &"provider".into()).unwrap().iter().any(|binding| binding.id == b.id));
+    let source = fixture.rows.len() as u64;
+    fixture.edge(&current, &receiving.id, &result, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = source;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    {
+        let payloads = fixture.handoff.invocation_metadata.artifact_binding_refs.iter().map(|reference| {
+            let (_, payload) = read_pinned_artifact_from_cache(&fixture.handoff.ctx.blobs_dir, fixture.handoff.ctx.required_host_io_limits().unwrap(), reference).unwrap();
+            octopus_interfaces::ArtifactBindingPayload::new(reference.clone(), payload)
+        }).collect::<Vec<_>>();
+        let projected = context_artifact_payloads(&record, &fixture.handoff.invocation_metadata, &payloads).unwrap();
+        assert!(!projected.iter().any(|bound|bound.artifact.id == second.pending_handoff.items[0].artifact_id));
+        let mut denied = fixture.handoff.invocation_metadata.clone();
+        denied.grant.artifact_access.get_mut(second.pending_handoff.items[0].artifact_id.as_str()).unwrap().change = true;
+        assert!(context_artifact_payloads(&record, &denied, &payloads).unwrap_err().contains("read-only call evidence"));
+        let mut state = fixture.handoff.state.try_lock().unwrap().clone();
+        append_session_payload(&mut state.session_context, "read.result", &result.read_payload_bytes().unwrap(),
+            &envelope.artifact, Some(source), "exact result input").unwrap();
+        let captured_provider = state.session_context.provider_interface.clone();
+        let captured_artifacts = serde_json::to_value(&state.session_context.artifacts).unwrap();
+        fixture.handoff.restore_checked_context(&mut state, &record, &[]).unwrap();
+        assert_eq!(state.session_context.provider_interface, captured_provider);
+        assert_eq!(serde_json::to_value(&state.session_context.artifacts).unwrap(), captured_artifacts);
+        let mut expected = current_context_artifacts(&record, &fixture.handoff.config).unwrap();
+        append_artifact(&mut expected, envelope.artifact.id.clone());
+        assert_eq!(state.context_artifacts, expected);
+        fixture.handoff.restore_pending_context(&mut state, &record, &second.pending_handoff).unwrap();
+        assert_eq!(state.context_artifacts, expected);
+        assert_eq!(state.session_context.provider_interface, captured_provider);
+        assert_eq!(serde_json::to_value(&state.session_context.artifacts).unwrap(), captured_artifacts);
+        assert!(result_inputs::validate_snapshot_context(&fixture.handoff.config, &state.context_artifacts, &[], &state.session_context).is_err());
+        let future = state.context_artifacts.clone();
+        assert!(result_inputs::validate_snapshot_context(&fixture.handoff.config, &future, &future, &state.session_context).is_ok());
+    }
+    let answer = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("answer"), "reply", br#"{"text":"done"}"#).unwrap();
+    let captured = fixture.handoff.state.try_lock().unwrap().session_context.clone();
+    let fork = materialize_session_snapshot(&answer, &captured, None).unwrap();
+    let fork_identity = artifact_identity(&fork, &fixture.handoff.var_dir).unwrap();
+    let forked = fixture.handoff.author_run_with_bindings(&current, &[fork_identity.artifact.id.clone()], &[PreparedHandoff {
+        identity:fork_identity,
+        output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+        verified_inputs:Vec::new(),
+    }], true, None, false, true, &[]).unwrap();
+    assert!(result_inputs::validate_saved(&fixture.handoff.ctx, &record,
+        &RunRecord::from_bytes(forked.content.as_bytes()).unwrap(), &fixture.handoff.config).is_err());
+    let bridge = fixture.handoff.author_result_invocation(&current).unwrap();
+    let raw_handoff = fixture.handoff.clone();
+    let bridged = RunRecord::from_bytes(bridge.content.as_bytes()).unwrap();
+    assert!(bridged.checkpoint(&receiving.id).is_none());
+    assert_eq!(bridged.checkpoint(&pinned.id), Some(&pinned));
+    assert_eq!(bridged.checkpoint(&"control".into()), record.checkpoint(&"control".into()));
+    assert_eq!(provider_context_bindings(&bridged, &"provider".into()).unwrap(), provider_context_bindings(&record, &"provider".into()).unwrap());
+    assert_eq!(persisted_pending_handoff(&bridged, &"provider".into()).unwrap(), persisted_pending_handoff(&record, &"provider".into()).unwrap());
+    fixture.handoff.materialize_file_write_call(&bridge).unwrap();
+    let AuthoringAttemptRecovery::InFlight(saved) = fixture.handoff.recover_authoring_attempt(&record, &current).unwrap()
+        else { panic!("lost exact result invocation attempt"); };
+    assert_eq!(saved.provider_source_movement_seq, source);
+    assert_eq!(saved.authored, bridge);
+    assert_eq!(result_inputs::definition_source(&record, &bridged, &fixture.handoff.config).unwrap(), Some(source));
+    {
+        let mut cold = fixture.handoff.clone();
+        let mut detached:serde_json::Value = serde_json::from_slice(&current).unwrap();
+        let writer_run = RunId::new("result_bridge_writer");
+        let writer = separate_writer_run(&mut detached, &cold.ctx.interface, &writer_run).unwrap();
+        let cold_root = cold.var_dir.join("bridge-saved-target");
+        std::fs::create_dir_all(&cold_root).unwrap();
+        cold.run_path = cold_root.join("run.json");
+        let detached = JsonFormat::Compact.encode(&detached).unwrap();
+        std::fs::write(&cold.run_path, &detached).unwrap();
+        std::fs::write(cold_root.join(format!("{writer_run}.json")), JsonFormat::Compact.encode(&writer).unwrap()).unwrap();
+        let target = RunRecord::from_bytes(&detached).unwrap();
+        cold.config = attempt_config(&target, &cold.config).unwrap();
+        cold.bound_topology = serde_json::from_value(target.interface_state[&cold.ctx.interface][RUN_AUTHORING_BINDING].clone()).unwrap();
+        cold.hand_in_root = cold.var_dir.join("bridge-saved-calls");
+        cold.ctx.root_slots.insert("run_records_root".into(), cold_root);
+        cold.ctx.ledger_index_path = cold.var_dir.join("bridge-saved.sqlite");
+        cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
+        let ordered = cold.author_result_invocation(&detached).unwrap();
+        let generation = correlation_generation(&target.id, &ordered.correlation_id).unwrap();
+        let edit = CheckedRunEdit { path:cold.run_path.clone(), json_format:ordered.json_format,
+            before_hash:ordered.before_hash.clone(), after_hash:ordered.after_hash.clone(), content:ordered.content.clone(),
+            patch:ordered.patch.clone(), correlation_id:format!("provider-writer-run:run:{generation}:1") };
+        let writer = declared_provider_run_writer(&target, &cold.ctx.interface, &profile).unwrap();
+        OwnerWriterEdit::prepare(&detached, &edit, &writer, 1<<26).unwrap().unwrap().materialize(&cold.hand_in_root).unwrap();
+        let AuthoringAttemptRecovery::InFlight(saved) = cold.recover_authoring_attempt(&target, &detached).unwrap()
+            else { panic!("lost detached bridge source"); };
+        assert_eq!(saved.provider_source_movement_seq, source);
+        assert_eq!(saved.authored.content, ordered.content);
+        assert_eq!(std::fs::read(&cold.run_path).unwrap(), detached);
+    }
+    let bridge_cutoff = fixture.rows.len();
+    fixture.install(&bridge);
+    let transition = CheckedRunTransition { writer:declared_provider_run_writer(&record, &"provider".into(), &profile).unwrap(),
+        before:current.clone(), after:bridge.content.as_bytes().to_vec(), call:fixture.rows[bridge_cutoff].clone(), result:fixture.rows[bridge_cutoff+1].clone() };
+    validate_checked_provider_transition(&transition).unwrap();
+    {
+        let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
+            blobs_dir:&fixture.handoff.ctx.blobs_dir, max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+        result_inputs::validate_checked(&mut FileCheckedRunReader::open(&evidence, None).unwrap().with_provider_context(&fixture.handoff.ctx), &transition).unwrap();
+    }
+    let record = fixture.reload_definition();
+    let next = fixture.handoff.config.checkpoints.iter().find(|template| template.role == RunAuthoringCheckpointRole::ResultInput
+        && template.required_verified_artifacts[0].params.get("invocation").is_some()).unwrap().clone();
+    let next_cp = record.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &next, &record.id)).unwrap().clone();
+    let path = next.required_verified_artifacts[0].params["invocation"]["manifest_relative_path"].as_str().unwrap();
+    let copied = InterfaceArtifactFile::new(fixture.handoff.var_dir.join(path)).unwrap();
+    assert_eq!(copied.read_payload_bytes().unwrap(), result.read_payload_bytes().unwrap());
+    let source = fixture.rows.len() as u64;
+    fixture.edge(bridge.content.as_bytes(), &next_cp.id, &copied, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = source;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    let bindings = fixture.handoff.invocation_metadata.artifact_binding_refs.iter().map(|reference| {
+        let (_, payload) = read_pinned_artifact_from_cache(&fixture.handoff.ctx.blobs_dir, fixture.handoff.ctx.required_host_io_limits().unwrap(), reference).unwrap();
+        octopus_interfaces::ArtifactBindingPayload::new(reference.clone(), payload)
+    }).collect::<Vec<_>>();
+    let envelope = InterfaceInvocationEnvelope { artifact:artifact_identity(&copied, &fixture.handoff.var_dir).unwrap().artifact,
+        artifact_file:copied, artifact_binding_payloads:bindings, metadata:Some(fixture.handoff.invocation_metadata.clone()) };
+    result_inputs::validate_invocation(&envelope, &next).unwrap();
+    let bridged_recovery = raw_handoff.recover_source_with_outcomes().await.unwrap();
+    assert_eq!(bridged_recovery, (ProviderSourceRecovery::Bridged { invocation_movement_seq:source },
+        vec![ProviderHandoffOutcome::Admitted { seq:source, artifact:envelope.artifact.clone() }]));
+    assert_eq!(fixture.handoff.recover_source().await.unwrap(), ProviderSourceRecovery::Process);
+    let model = context_artifact_payloads(&record, &fixture.handoff.invocation_metadata, &envelope.artifact_binding_payloads).unwrap();
+    assert_eq!(next.static_artifact_bindings, [catalogue.id.clone()]);
+    assert!(model.iter().any(|bound|bound.artifact.id == second.pending_handoff.items[0].artifact_id));
+    assert!(model.iter().any(|bound| bound.artifact == b));
+    assert!(!model.iter().any(|bound| bound.artifact == wrong.artifact));
+    assert_eq!(next_cp.artifact_bindings.iter().filter(|binding| binding.id == wrong.artifact.id).count(), 1);
+    let mut wrong_envelope = envelope.clone();
+    wrong_envelope.artifact = wrong.artifact;
+    assert!(result_inputs::validate_invocation(&wrong_envelope, &next).is_err());
+    let payload = envelope.artifact_file.read_manifest().unwrap().payload_path;
+    std::fs::remove_file(envelope.artifact_file.manifest_path()).unwrap();
+    std::fs::remove_file(payload).unwrap();
+    let answer = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("answer-without-fork"), "reply", br#"{"text":"done"}"#).unwrap();
+    let mut context = provider_context_bindings(&record, &"provider".into()).unwrap().into_iter().map(|binding| binding.id).collect::<Vec<_>>();
+    context.push(envelope.artifact.id.clone());
+    let authored = fixture.handoff.author_run_with_bindings(bridge.content.as_bytes(), &context, &[PreparedHandoff {
+        identity:artifact_identity(&answer, &fixture.handoff.var_dir).unwrap(),
+        output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+        verified_inputs:Vec::new(),
+    }], true, None, false, true, &[]).unwrap();
+    let after = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+    result_inputs::validate_saved(&fixture.handoff.ctx, &record, &after, &fixture.handoff.config).unwrap();
+    let tool = fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderToolOutput).unwrap();
+    let retained = after.checkpoints.iter().filter(|row| after.active_checkpoints.contains(&row.id)
+        && checkpoint_record_matches_template(row, tool, &after.id)).collect::<Vec<_>>();
+    assert_eq!(retained.len(), 1);
+    let mut lost_route = after.clone();
+    lost_route.checkpoints.iter_mut().find(|row| row.id == retained[0].id).unwrap().required_verified_artifacts[0].params =
+        serde_json::json!({"tools":["ungranted"]});
+    assert!(validate_bound_run_authoring_topology(&lost_route, &fixture.handoff.config, None).is_err());
+    assert_eq!(after.checkpoint(&pinned.id), Some(&pinned));
+    assert!(after.checkpoint(&next_cp.id).is_none());
+    let mut forged = after.clone();
+    forged.interface_state.get_mut(&InterfaceId::new("provider")).unwrap().get_mut("pending_handoff").unwrap()["source_movement_seq"] = 0.into();
+    assert!(result_inputs::validate_saved(&fixture.handoff.ctx, &record, &forged, &fixture.handoff.config).is_err());
+    forged = record.clone();
+    forged.checkpoints.iter_mut().find(|cp| cp.id == pinned.id).unwrap().artifact_bindings[0].access.delete = true;
+    assert!(result_inputs::validate_transition(&record, &forged, &fixture.handoff.config).is_err());
+    let cutoff = fixture.rows.len() as u64;
+    fixture.install(&authored);
+    let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
+        blobs_dir:&fixture.handoff.ctx.blobs_dir, max_control_frame_bytes:1<<20, max_manifest_bytes:1<<20, max_payload_bytes:1<<26 };
+    let writer = declared_provider_run_writer(&record, &"provider".into(), &RunAuthoringProfile {
+        file_write_tool:"write".into(),file_write_label:"tool.call".into(),file_write_result_label:"write.result".into(),result_timeout_ms:1000,
+    }).unwrap();
+    let transition = checked_declared_run_install(&evidence, &fixture.handoff.run_path, bridge.content.as_bytes(), &CheckedRunInstall {
+        call:ConsentEvidenceRef { artifact:fixture.rows[cutoff as usize].artifact.clone().unwrap(), movement_seq:cutoff },
+        result:ConsentEvidenceRef { artifact:fixture.rows[cutoff as usize + 1].artifact.clone().unwrap(), movement_seq:cutoff + 1 },
+    }, vec![writer]).unwrap();
+    let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+    result_inputs::validate_checked(&mut reader, &transition).unwrap();
+    assert_eq!(raw_handoff.recover_source_with_outcomes().await.unwrap(), bridged_recovery);
 }
 
 #[tokio::test]

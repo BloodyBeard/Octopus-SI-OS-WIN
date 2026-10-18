@@ -5759,7 +5759,14 @@ impl CodexAppServerInterfaceDriver {
         Ok(resolved)
     }
 
-    pub(crate) async fn receive_artifact_and_stream_outputs(
+    pub(crate) fn receive_artifact_and_stream_outputs<'a>(
+        &'a self,
+        invocation: CodexProviderInvocation<'a>,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(), InterfaceDriverError>> + 'a>> {
+        Box::pin(self.receive_artifact_and_stream_outputs_inner(invocation))
+    }
+
+    async fn receive_artifact_and_stream_outputs_inner(
         &self,
         invocation: CodexProviderInvocation<'_>,
     ) -> Result<(), InterfaceDriverError> {

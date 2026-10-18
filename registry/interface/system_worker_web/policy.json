@@ -156,6 +156,7 @@
     ],
     "mark_outcomes": [
       "tool.call.allowed",
+      "tool.result.corresponds",
       "task.summary.received",
       "operator.approval",
       "operator.input.provided"

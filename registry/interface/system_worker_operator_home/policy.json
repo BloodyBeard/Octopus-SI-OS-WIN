@@ -115,6 +115,7 @@
       "operator.approval",
       "operator.input.provided",
       "tool.call.allowed",
+      "tool.result.corresponds",
       "task.summary.received"
     ],
     "hard_blocked_tools": []

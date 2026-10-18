@@ -308,7 +308,7 @@ async fn admitted_publication_seed(
         verdict
     }
     let root = request.roots.registry_root.parent().unwrap();
-    for edit in plan.descriptor_writes.iter().chain(plan.required_policy_updates.iter().map(|update| &update.write)).chain(std::iter::once(&plan.run_write)) {
+    for edit in plan.descriptor_writes.iter().chain(&plan.run_writes).chain(plan.required_policy_updates.iter().map(|update| &update.write)).chain(std::iter::once(&plan.run_write)) {
         std::fs::create_dir_all(edit.path.parent().unwrap()).unwrap(); std::fs::write(&edit.path, &edit.content).unwrap();
     }
     if legacy {
@@ -396,8 +396,13 @@ async fn admitted_publication_seed(
                 let verdict = write(&runtime,&mut log,&mut handle,&ctx,&call,&writer).await;
                 ws.send(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&verdict).unwrap().into())).await.unwrap();
                 let arrival = receiver.recv().await.unwrap();
-                let outcome = admit_interface_artifact_arrival(&runtime,&mut log,&mut handle,&arrival.artifact.capture_bounded(1<<20,1<<26).unwrap(),&config.provider_interface).await.unwrap();
-                arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted {seq:outcome.admission.records[0].arrival_movement.seq.0}).unwrap();
+                if let Some(retained) = arrival.retained {
+                    let delivery = octopus_app_server::admit_retained_interface_artifact_arrival(&runtime,&mut log,&mut handle,&arrival.artifact,&config.provider_interface,&retained.id).await.unwrap();
+                    retained.reply.send(Ok(delivery)).unwrap();
+                } else {
+                    let outcome = admit_interface_artifact_arrival(&runtime,&mut log,&mut handle,&arrival.artifact.capture_bounded(1<<20,1<<26).unwrap(),&config.provider_interface).await.unwrap();
+                    arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted {seq:outcome.admission.records[0].arrival_movement.seq.0}).unwrap();
+                }
             }
         )}).await.unwrap();
         let before = std::fs::read_to_string(&plan.run_write.path).unwrap();
@@ -405,7 +410,7 @@ async fn admitted_publication_seed(
         let client = before_record["interface_state"].as_object().unwrap().iter().find(|(_,state)|state["provider_runtime_interface"] == config.provider_interface.as_str()).unwrap().0;
         let corrected: Value = serde_json::from_str(&plan.run_write.content).unwrap();
         let desired = corrected["interface_state"][config.provider_interface.as_str()]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter().filter(|row|row["role"] == "owner_input").cloned().collect::<Vec<_>>();
-        let scope = json!({"registry_root":request.roots.registry_root,"run_path":plan.run_write.path,"ledger_root":root.join("ledger"),"artifact_root":root.join("client"),"provider":config.provider_interface,"source":client,"key":"old-child-static"});
+        let scope = json!({"registry_root":request.roots.registry_root,"run_path":plan.run_write.path,"ledger_root":root.join("ledger"),"artifact_root":root.join("client"),"interface_hand_in_root":root.join("hand-in"),"provider":config.provider_interface,"source":client,"key":"old-child-static"});
         let mut revision = scope.clone(); revision["operation"] = json!({"kind":"owner_inputs","desired_inputs":desired}); revision["expected_before_content"] = json!(before);
         assert_eq!(prepare_run_revision(serde_json::from_value(revision.clone()).unwrap()).unwrap()["status"],"prepared");
         assert_eq!(prepare_run_revision(serde_json::from_value(revision).unwrap()).unwrap()["status"],"prepared");

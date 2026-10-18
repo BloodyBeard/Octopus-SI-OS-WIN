@@ -393,18 +393,48 @@ impl Fixture {
             value["interface_state"][self.ctx.interface.as_str()]["pending_handoff"]["items"][0]["artifact_id"],
             json!(identity.id)
         );
+        let mut admitted = metadata(checkpoint, &bytes, self.ctx.interface.as_str());
+        if let Some(retained) = &output.retained {
+            let scope = std::fs::read_to_string(&self.ctx.movements_path).unwrap().lines()
+                .map(|line| serde_json::from_str::<Movement>(line).unwrap())
+                .find(|row| matches!(&row.invocation_metadata,
+                    Some(octopus_ledger::MovementMetadata::ArrivalFanout(scope))
+                        if scope.arrival_fanout.identity == retained.id));
+            let scope_seq = match scope {
+                Some(scope) => { assert_eq!(scope.artifact.as_ref(), Some(&identity)); scope.seq.0 }
+                None => {
+                    let seq = std::fs::read_to_string(&self.ctx.movements_path).unwrap().lines().count() as u64;
+                    let scope = Movement {
+                        seq: Seq(seq), lamport: Lamport(seq + 1), recorded_at_unix_ms: seq + 1,
+                        trace: TraceId("trace:run".into()), kind: MovementKind::ArtifactMoved,
+                        from: Endpoint::Interface(self.ctx.interface.clone()),
+                        to: Endpoint::Interface(self.ctx.interface.clone()), artifact: Some(identity.clone()),
+                        invocation_metadata: Some(octopus_ledger::MovementMetadata::ArrivalFanout(octopus_ledger::ArrivalFanoutMetadata {
+                            arrival_fanout: octopus_ledger::ArrivalFanoutScope {
+                                identity: retained.id.clone(), targets: vec![admitted.runtime.clone().unwrap()],
+                            },
+                        })),
+                    };
+                    let mut file = std::fs::OpenOptions::new().append(true).open(&self.ctx.movements_path).unwrap();
+                    writeln!(file, "{}", serde_json::to_string(&scope).unwrap()).unwrap(); file.sync_all().unwrap();
+                    seq
+                }
+            };
+            admitted.delivery_scope_seq = Some(scope_seq);
+        }
         let seq = self.append(
             MovementKind::InterfaceArrival,
             self.ctx.interface.as_str(),
             "worker",
             identity.clone(),
-            Some(metadata(checkpoint, &bytes, self.ctx.interface.as_str())),
+            Some(admitted),
         );
-        output
-            .verdict_tx
-            .unwrap()
-            .send(DeliveryVerdict::Admitted { seq })
-            .unwrap();
+        let verdict = DeliveryVerdict::Admitted { seq };
+        if let Some(retained) = output.retained {
+            retained.reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete { verdict })).unwrap();
+        } else {
+            output.verdict_tx.unwrap().send(verdict).unwrap();
+        }
         identity
     }
     fn store(&self) -> Store {

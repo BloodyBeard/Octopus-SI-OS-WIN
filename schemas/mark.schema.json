@@ -11,6 +11,14 @@
     "verifier"
   ],
   "properties": {
+    "arrival_seq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "class": {
       "$ref": "#/definitions/MarkClass"
     },

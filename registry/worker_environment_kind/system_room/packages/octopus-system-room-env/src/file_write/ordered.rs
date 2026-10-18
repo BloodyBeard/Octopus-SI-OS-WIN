@@ -86,6 +86,8 @@ struct Receipt {
     outcome: Outcome,
     observed_hash: Option<String>,
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    publication: Option<PublicationReceipt>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -109,7 +111,15 @@ pub(super) fn execute(
         .map_err(|error| ToolResultError::new("file_write_evidence_failed", error))?;
     let body = serde_json::json!({
         "result": "ordered_file_writes",
-        "writes": receipts,
+        "writes": receipts.iter().map(|receipt| serde_json::json!({
+            "path": receipt.path,
+            "before_hash": receipt.before_hash,
+            "after_hash": receipt.after_hash,
+            "bytes": receipt.bytes,
+            "outcome": receipt.outcome,
+            "observed_hash": receipt.observed_hash,
+            "error": receipt.error,
+        })).collect::<Vec<_>>(),
     });
     if let Some(error) = retirement_error {
         return Err(ToolResultError::new("file_write_evidence_failed", error)
@@ -168,18 +178,32 @@ fn execute_batch(
     let directory = effect_root
         .join("ordered")
         .join(input.artifact.content.to_hex());
-    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(directory.join("lock"))
-        .map_err(|error| error.to_string())?;
-    lock.try_lock_exclusive()
-        .map_err(|error| format!("file.write exact artifact is already executing: {error}"))?;
+    let lock = lock_invocation(&directory)?;
+    let schema = match open_receipt(&directory.join("intent.json")) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take(max_payload_bytes.saturating_add(64 * 1024)).read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            match serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|error| error.to_string())?
+                .get("schema_version").and_then(serde_json::Value::as_u64)
+            {
+                Some(2) => 2,
+                Some(3) => 3,
+                _ => return Err("file.write ordered intent has an unsupported retained format".into()),
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::read_dir(&directory).map_err(|error| error.to_string())?
+                .any(|entry| entry.map_or(true, |entry| entry.file_name() != "lock"))
+            {
+                return Err("file.write ordered evidence exists without its original intent".into());
+            }
+            3
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let intent = serde_json::to_vec(&serde_json::json!({
-        "schema_version": 2,
+        "schema_version": schema,
         "artifact": input.artifact,
         "batch_content_hash": ContentHash::of_bytes(
             &octopus_descriptors::canonical_bytes(
@@ -207,6 +231,7 @@ fn execute_batch(
             outcome: Outcome::NotAttempted,
             observed_hash: None,
             error: None,
+            publication: None,
         };
         let receipt = match open_receipt(&receipt_path).and_then(|mut file| {
             let mut bytes = Vec::new();
@@ -227,13 +252,14 @@ fn execute_batch(
                 {
                     return Err("file.write ordered receipt differs from its immutable invocation or preceding outcome".into());
                 }
+                validate_receipt_publication(&receipt, input, index, schema)?;
                 receipt
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let receipt = if stopped {
                     expected
                 } else {
-                    match commit_entry(entry, expected.clone(), &directory, index) {
+                    match commit_entry(entry, expected.clone(), &directory, index, input, schema, &roots) {
                         Ok(receipt) => receipt,
                         Err(error) => Receipt {
                             outcome: Outcome::Uncertain,
@@ -252,7 +278,7 @@ fn execute_batch(
         receipts.push(receipt);
     }
     let retirement = receipts.iter().enumerate()
-        .filter(|(_, receipt)| receipt.outcome == Outcome::Applied)
+        .filter(|(_, receipt)| schema == 2 && receipt.outcome == Outcome::Applied)
         .try_for_each(|(index, receipt)| retire_stage(&directory, index, receipt));
     let unlocked = FileExt::unlock(&lock).map_err(|error| error.to_string());
     Ok((receipts, retirement.and(unlocked).err()))
@@ -307,7 +333,7 @@ fn retire_stage(directory: &Path, index: usize, receipt: &Receipt) -> Result<(),
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Interruption { Prepared, DurableTarget }
+enum Interruption { Published }
 
 #[cfg(test)]
 thread_local! {
@@ -328,134 +354,81 @@ fn interrupt_at(point: Interruption) {
 #[path = "../../tests/support/ordered_stage.rs"]
 mod stage_tests;
 
+fn validate_receipt_publication(receipt: &Receipt, input: &InterfaceInvocationEnvelope, index: usize, schema: u32) -> Result<(), String> {
+    if schema == 2 {
+        if receipt.publication.is_some() {
+            return Err("file.write retained schema-2 receipt contains schema-3 publication evidence".into());
+        }
+        return Ok(());
+    }
+    match &receipt.publication {
+        Some(publication) => {
+            let operation = publication_operation_id(input, true, index)?;
+            check_publication(publication, &operation, &receipt.path, receipt.before_hash.as_deref(), &receipt.after_hash, receipt.bytes)?;
+            let outcome = match publication.outcome {
+                PublicationOutcome::Applied => Outcome::Applied,
+                PublicationOutcome::NotApplied => Outcome::Refused,
+                PublicationOutcome::Uncertain => Outcome::Uncertain,
+            };
+            if receipt.outcome != outcome || receipt.error != publication.error {
+                return Err("file.write native outcome differs from its publication receipt".into());
+            }
+        }
+        None if matches!(receipt.outcome, Outcome::Applied | Outcome::Refused) => {
+            return Err("file.write schema-3 outcome has no attributable publication receipt".into());
+        }
+        None => (),
+    }
+    Ok(())
+}
+
 fn commit_entry(
     entry: &PreparedEntry,
     mut receipt: Receipt,
     directory: &Path,
     index: usize,
+    input: &InterfaceInvocationEnvelope,
+    schema: u32,
+    roots: &[AbsPath],
 ) -> Result<Receipt, String> {
-    let parent = entry
-        .path
-        .parent()
-        .ok_or("file.write target has no parent")?;
-    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let stage = directory.join(format!("{index}.bytes"));
+    let operation = publication_operation_id(input, true, index)?;
+    let guard = acquire_publication(&entry.path, receipt.before_hash.as_deref(), roots, &operation)?;
     let prepared = directory.join(format!("{index}.prepared.json"));
-    let resuming = prepared.try_exists().map_err(|error| error.to_string())?;
-    let mut lock = TargetWriteLock::acquire(&entry.path)?;
-    let observed = match lock.as_mut() {
-        Some(lock) => Some(lock.current_hash()?),
-        None => None,
-    };
-    if resuming {
-        let saved: Receipt =
-            serde_json::from_slice(&std::fs::read(&prepared).map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())?;
-        if saved != receipt || optional_hash(&stage)?.as_ref() != Some(&receipt.after_hash) {
-            return Err("file.write prepared entry has inconsistent pinned evidence".into());
-        }
-        if observed.as_ref() == Some(&receipt.after_hash)
-            && same_file_identity(
-                &std::fs::metadata(&stage).map_err(|error| error.to_string())?,
-                &std::fs::metadata(&entry.path).map_err(|error| error.to_string())?,
-            )
-        {
-            sync_parent(&entry.path)?;
-            receipt.outcome = Outcome::Applied;
-            receipt.observed_hash = observed;
-            return save_receipt(receipt, directory, index);
-        }
-    }
-    if observed != receipt.before_hash {
-        receipt.outcome = if resuming {
-            Outcome::Uncertain
-        } else {
-            Outcome::Refused
-        };
-        receipt.error = Some(format!(
-            "file.write ordered preimage differs at '{}': expected {}, observed {}{}",
-            entry.path.display(),
-            receipt.before_hash.as_deref().unwrap_or("<absent>"),
-            observed.as_deref().unwrap_or("<absent>"),
-            if resuming {
-                "; interrupted effect cannot be attributed"
-            } else {
-                ""
-            }
-        ));
-        receipt.observed_hash = observed;
-        return save_receipt(receipt, directory, index);
-    }
-    install_effect_record(&stage, entry.content.as_bytes())?;
-    let staged_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&stage)
-        .map_err(|error| error.to_string())?;
-    staged_file
-        .lock_exclusive()
-        .map_err(|error| error.to_string())?;
-    if let Some(lock) = &lock {
-        staged_file
-            .set_permissions(
-                lock.file
-                    .metadata()
-                    .map_err(|error| error.to_string())?
-                    .permissions(),
-            )
-            .map_err(|error| error.to_string())?;
-        staged_file.sync_all().map_err(|error| error.to_string())?;
-    }
-    install_effect_record(
-        &prepared,
-        &serde_json::to_vec(&receipt).map_err(|error| error.to_string())?,
-    )?;
-    #[cfg(test)]
-    interrupt_at(Interruption::Prepared);
-    let link = directory.join(format!("{index}.install"));
-    let installed = if receipt.before_hash.is_none() {
-        std::fs::hard_link(&stage, &entry.path)
-    } else {
-        match std::fs::hard_link(&stage, &link) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !same_file_identity(
-                    &std::fs::metadata(&stage).map_err(|error| error.to_string())?,
-                    &std::fs::metadata(&link).map_err(|error| error.to_string())?,
-                ) {
-                    return Err("file.write pending install link has foreign identity".into());
+    let publication = if schema == 2 {
+        match open_receipt(&prepared) {
+            Ok(file) => {
+                let expected = serde_json::to_vec(&receipt).map_err(|error| error.to_string())?;
+                let mut bytes = Vec::new();
+                file.take(expected.len() as u64 + 1).read_to_end(&mut bytes).map_err(|error| error.to_string())?;
+                if bytes != expected {
+                    return Err("file.write retained prepared entry differs from its original invocation".into());
                 }
+                guard.publish_retained(&operation, receipt.before_hash.as_deref(), entry.content.as_bytes(), DigestAlgorithm::Blake3,
+                    &directory.join(format!("{index}.bytes")))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                guard.publish(&operation, receipt.before_hash.as_deref(), entry.content.as_bytes(), DigestAlgorithm::Blake3)
             }
             Err(error) => return Err(error.to_string()),
         }
-        std::fs::rename(&link, &entry.path)
+    } else {
+        guard.publish(&operation, receipt.before_hash.as_deref(), entry.content.as_bytes(), DigestAlgorithm::Blake3)
+    }.map_err(|error| format!("file.write ordered publication at '{}' requires reconciliation: {error}", entry.path.display()))?;
+    check_publication(&publication, &operation, &entry.path, receipt.before_hash.as_deref(), &receipt.after_hash, receipt.bytes)?;
+    receipt.outcome = match publication.outcome {
+        PublicationOutcome::Applied => Outcome::Applied,
+        PublicationOutcome::NotApplied => Outcome::Refused,
+        PublicationOutcome::Uncertain => Outcome::Uncertain,
     };
-    if let Err(error) = installed {
-        receipt.outcome = Outcome::Refused;
-        receipt.observed_hash = optional_hash(&entry.path)?;
-        receipt.error = Some(format!(
-            "file.write ordered replacement failed at '{}': {error}",
-            entry.path.display()
-        ));
-        return save_receipt(receipt, directory, index);
-    }
-    receipt.observed_hash = optional_hash(&entry.path)?;
-    match sync_parent(&entry.path) {
-        Ok(()) if receipt.observed_hash.as_ref() == Some(&receipt.after_hash) => {
-            receipt.outcome = Outcome::Applied
-        }
-        outcome => {
-            receipt.outcome = Outcome::Uncertain;
-            receipt.error = Some(format!(
-                "file.write ordered replacement at '{}' could not prove durable readback: {outcome:?}",
-                entry.path.display()
-            ));
-        }
-    }
+    receipt.observed_hash = if receipt.outcome == Outcome::Applied {
+        Some(receipt.after_hash.clone())
+    } else {
+        optional_hash(&entry.path)?
+    };
+    receipt.error = publication.error.clone();
+    if schema == 3 { receipt.publication = Some(publication); }
     #[cfg(test)]
-    if receipt.outcome == Outcome::Applied {
-        interrupt_at(Interruption::DurableTarget);
-    }
+    interrupt_at(Interruption::Published);
     save_receipt(receipt, directory, index)
 }
 

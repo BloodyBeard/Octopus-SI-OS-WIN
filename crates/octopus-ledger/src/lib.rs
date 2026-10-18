@@ -35,6 +35,8 @@ pub enum LedgerError {
         "exact mark proof is ambiguous between pending InterfaceArrival rows at seq {first:?} and {second:?}"
     )]
     AmbiguousInterfaceArrivalMarkProof { first: Seq, second: Seq },
+    #[error("arrival {sequence:?} does not replace an exact unfinished required arrival")]
+    InvalidInterfaceArrivalReplacement { sequence: Seq },
     #[error("durable ledger io error at {path}: {message}")]
     Io { path: String, message: String },
 }
@@ -146,6 +148,32 @@ impl DeliveryVerdict {
     pub fn refused(reason: RefusedReason, detail: serde_json::Value) -> Self {
         DeliveryVerdict::Refused { reason, detail }
     }
+
+    pub fn awaits_current_source(&self) -> bool {
+        matches!(self, Self::Refused { reason: RefusedReason::RegistryUnstable, .. })
+            || matches!(self, Self::Refused { reason: RefusedReason::StaleEpoch, detail }
+                if detail.get("reason_detail").and_then(serde_json::Value::as_str) == Some("arrival_target_changed"))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ArtifactDelivery {
+    Complete { verdict: DeliveryVerdict },
+    Pending { scope_seq: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArrivalFanoutScope {
+    pub identity: String,
+    pub targets: Vec<RuntimeInvocationMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArrivalFanoutMetadata {
+    pub arrival_fanout: ArrivalFanoutScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -156,6 +184,8 @@ pub struct DeliveryMetadata {
     pub runtime: Option<RuntimeInvocationMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_movement_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_scope_seq: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -173,6 +203,8 @@ pub struct Mark {
     pub run_epoch: u64,
     pub class: MarkClass,
     pub evidence: Option<ArtifactRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival_seq: Option<u64>,
     pub verifier: VerifierId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier_package: Option<VerifierPackagePin>,
@@ -229,6 +261,7 @@ impl Mark {
             run_epoch: epoch,
             class,
             evidence: Some(artifact),
+            arrival_seq: None,
             verifier,
             verifier_package: Some(verifier_package),
             details,
@@ -304,6 +337,17 @@ pub struct RuntimeInvocationMetadata {
     pub epoch: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_record_hash: Option<String>,
+}
+
+impl RuntimeInvocationMetadata {
+    pub fn same_checkpoint_coordinates(&self, other: &Self) -> bool {
+        self.run == other.run
+            && self.ee == other.ee
+            && self.worker == other.worker
+            && self.checkpoint == other.checkpoint
+            && self.interface == other.interface
+            && self.epoch == other.epoch
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -487,6 +531,10 @@ pub struct InvocationMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_movement_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_scope_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces_arrival_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeInvocationMetadata>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outbound_interface_bindings: Vec<InterfaceId>,
@@ -508,6 +556,8 @@ impl InvocationMetadata {
     pub fn new(grant: GrantProjection) -> Self {
         Self {
             source_movement_seq: None,
+            delivery_scope_seq: None,
+            replaces_arrival_seq: None,
             runtime: None,
             outbound_interface_bindings: Vec::new(),
             checkpoint_binding_policy: None,
@@ -522,6 +572,25 @@ impl InvocationMetadata {
     pub fn with_runtime(mut self, runtime: RuntimeInvocationMetadata) -> Self {
         self.runtime = Some(runtime);
         self
+    }
+
+    pub fn retains_required_admission_contract(&self, prior: &Self) -> bool {
+        let (Some(current_runtime), Some(prior_runtime), Some(current), Some(previous)) = (
+            self.runtime.as_ref(), prior.runtime.as_ref(),
+            self.checkpoint_admission.as_ref(), prior.checkpoint_admission.as_ref(),
+        ) else { return false; };
+        if !current_runtime.same_checkpoint_coordinates(prior_runtime)
+            || [current_runtime, prior_runtime].iter().any(|runtime|
+                runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex).is_none())
+            || current.required_artifact_labels.is_empty()
+            || (previous.complete && !current.complete)
+            || self.verification_failure.is_some() || prior.verification_failure.is_some()
+        { return false; }
+        let mut normalized = prior.clone();
+        normalized.runtime = self.runtime.clone();
+        normalized.checkpoint_admission.as_mut().unwrap().complete = current.complete;
+        normalized.replaces_arrival_seq = self.replaces_arrival_seq;
+        normalized == *self
     }
 
     pub fn with_outbound_interface_bindings(mut self, bindings: Vec<InterfaceId>) -> Self {
@@ -605,6 +674,7 @@ impl InvocationMetadata {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum MovementMetadata {
+    ArrivalFanout(ArrivalFanoutMetadata),
     Delivery(DeliveryMetadata),
     MarkOutcome(Mark),
     Invocation(InvocationMetadata),
@@ -639,6 +709,7 @@ impl Movement {
             MovementMetadata::Invocation(metadata) => metadata.runtime.as_ref(),
             MovementMetadata::Delivery(metadata) => metadata.runtime.as_ref(),
             MovementMetadata::MarkOutcome(_) => None,
+            MovementMetadata::ArrivalFanout(_) => None,
         }
     }
 
@@ -647,6 +718,7 @@ impl Movement {
             MovementMetadata::Invocation(metadata) => metadata.runtime.as_ref().map(|r| &r.run),
             MovementMetadata::Delivery(metadata) => metadata.runtime.as_ref().map(|r| &r.run),
             MovementMetadata::MarkOutcome(mark) => Some(&mark.run),
+            MovementMetadata::ArrivalFanout(_) => None,
         }
     }
 }
@@ -663,6 +735,7 @@ impl From<DeliveryVerdict> for MovementMetadata {
             delivery_verdict,
             runtime: None,
             source_movement_seq: None,
+            delivery_scope_seq: None,
         })
     }
 }
@@ -995,13 +1068,22 @@ impl InterfaceArrivalMarkProofIndex {
         let mut pending: HashMap<InterfaceArrivalMarkProofKey, &Movement> = HashMap::new();
         let mut index = Self::default();
         for movement in movements {
+            let replacement = movement.invocation_metadata.as_ref()
+                .and_then(MovementMetadata::invocation).and_then(|metadata| metadata.replaces_arrival_seq);
             if let Some(key) = interface_arrival_mark_proof_key(movement) {
-                if let Some(prior) = pending.insert(key, movement) {
+                if replacement.is_some() && !pending.get(&key)
+                    .is_some_and(|prior| replaces_pending_interface_arrival(prior, movement))
+                {
+                    return Err(LedgerError::InvalidInterfaceArrivalReplacement { sequence: movement.seq });
+                }
+                if let Some(prior) = pending.insert(key, movement).filter(|_| replacement.is_none()) {
                     return Err(LedgerError::AmbiguousInterfaceArrivalMarkProof {
                         first: prior.seq,
                         second: movement.seq,
                     });
                 }
+            } else if movement.kind == MovementKind::InterfaceArrival && replacement.is_some() {
+                return Err(LedgerError::InvalidInterfaceArrivalReplacement { sequence: movement.seq });
             }
             let Some(key) = admitted_mark_outcome_proof_key(movement) else {
                 continue;
@@ -1031,6 +1113,12 @@ pub fn mark_outcome_proves_interface_arrival(arrival: &Movement, mark_movement: 
     {
         return false;
     }
+    let Some(mark) = mark_movement.invocation_metadata.as_ref().and_then(MovementMetadata::mark_outcome)
+        else { return false; };
+    if mark.arrival_seq.is_some_and(|seq| seq != arrival.seq.0)
+        || (arrival.invocation_metadata.as_ref().and_then(MovementMetadata::invocation)
+            .is_some_and(|metadata| metadata.replaces_arrival_seq.is_some()) && mark.arrival_seq.is_none())
+    { return false; }
     matches!(
         (
             interface_arrival_mark_proof_key(arrival),
@@ -1038,6 +1126,21 @@ pub fn mark_outcome_proves_interface_arrival(arrival: &Movement, mark_movement: 
         ),
         (Some(arrival), Some(mark)) if arrival == mark
     )
+}
+
+pub fn replaces_pending_interface_arrival(prior: &Movement, current: &Movement) -> bool {
+    let (Some(old), Some(new)) = (
+        prior.invocation_metadata.as_ref().and_then(MovementMetadata::invocation),
+        current.invocation_metadata.as_ref().and_then(MovementMetadata::invocation),
+    ) else { return false; };
+    prior.kind == MovementKind::InterfaceArrival && current.kind == MovementKind::InterfaceArrival
+        && current.seq > prior.seq && current.lamport > prior.lamport
+        && new.replaces_arrival_seq == Some(prior.seq.0)
+        && prior.trace == current.trace && prior.from == current.from && prior.to == current.to
+        && prior.artifact.is_some() && prior.artifact == current.artifact
+        && interface_arrival_mark_proof_key(prior).is_some()
+        && interface_arrival_mark_proof_key(prior) == interface_arrival_mark_proof_key(current)
+        && new.retains_required_admission_contract(old)
 }
 
 pub fn movement_recorded_at_unix_ms_now() -> u64 {

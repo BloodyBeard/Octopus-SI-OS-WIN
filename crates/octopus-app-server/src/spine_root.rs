@@ -39,6 +39,9 @@ use crate::registry_reference_graph::{
     ActivationReferenceSet, RegistryNode, RegistryPackages, RegistryReferenceGraph,
 };
 
+#[path = "spine_root/commit.rs"]
+mod commit;
+
 #[derive(Clone, Debug)]
 struct LoadedRegistrySnapshot {
     interfaces_loaded: Vec<(DescriptorName, InterfaceDescriptor)>,
@@ -186,6 +189,9 @@ fn registry_descriptor_fingerprint(
         };
         for package in packages {
             let package = package?;
+            if package.file_name() == octopus_file_storage::publication::COORDINATION_DIRECTORY {
+                continue;
+            }
             if !package.file_type()?.is_dir() {
                 continue;
             }
@@ -303,6 +309,9 @@ fn load_persisted_ee_instances(ee_instances_dir: &Path) -> Result<PersistedEeIns
 struct RegistryRunGrantResolver {
     live_registry: Arc<RwLock<LoadedRegistrySnapshot>>,
     blobs: SharedBlobs,
+    registry_root: PathBuf,
+    ee_instances_root: PathBuf,
+    fingerprint: Arc<Mutex<Option<RegistryDescriptorFingerprint>>>,
 }
 
 /// The prospective run uses the same descriptor snapshot and policy formation
@@ -542,6 +551,10 @@ fn insert_formation_source(
 }
 
 impl RunGrantResolver for RegistryRunGrantResolver {
+    fn acquire_commit_guard(&self, record: &octopus_runtime::run_record::RunRecord, marks: &[Mark]) -> Result<Option<Box<dyn octopus_runtime::AdmissionSourceGuard>>, String> {
+        commit::acquire(self, record, marks).map(|guard| Some(Box::new(guard) as Box<dyn octopus_runtime::AdmissionSourceGuard>))
+    }
+
     fn resolve_run_grant(&self, query: RunGrantQuery<'_>) -> Result<RunGrantResolution, String> {
         let snapshot = self
             .live_registry
@@ -1425,7 +1438,7 @@ pub struct EmbeddedRuntime {
     pub ee_templates_loaded: Vec<(octopus_descriptors::DescriptorName, EeTemplateDescriptor)>,
     pub tool_descriptors_loaded: Vec<(octopus_descriptors::DescriptorName, ToolDescriptor)>,
     live_registry: Arc<RwLock<LoadedRegistrySnapshot>>,
-    registry_fingerprint: Mutex<Option<RegistryDescriptorFingerprint>>,
+    registry_fingerprint: Arc<Mutex<Option<RegistryDescriptorFingerprint>>>,
     pub ee_tree: EeTree,
     pub existence_ee_id: EeId,
     pub formation_source_hashes: BTreeMap<DescriptorName, DescriptorHash>,
@@ -1717,8 +1730,9 @@ impl PreparedVerification for PreparedRegistryVerification {
 }
 
 pub async fn build_embedded_spine(
-    config: SpineRootConfig,
+    mut config: SpineRootConfig,
 ) -> Result<EmbeddedRuntime, Box<dyn std::error::Error>> {
+    config.registry_root = std::fs::canonicalize(&config.registry_root)?;
     let root = &config.registry_root;
     let packages = RegistryPackages::load(root)
         .map_err(|error| format!("loading registry packages failed: {error}"))?;
@@ -1800,9 +1814,13 @@ pub async fn build_embedded_spine(
     let services = RuntimeServices { interface_catalog };
 
     let runtime = Runtime::open(services)?;
+    let registry_fingerprint = Arc::new(Mutex::new(boot_fingerprint));
     runtime.set_run_grant_resolver(Arc::new(RegistryRunGrantResolver {
         live_registry: live_registry.clone(),
         blobs: config.blobs.clone(),
+        registry_root: config.registry_root.clone(),
+        ee_instances_root: config.ee_instances_root.clone(),
+        fingerprint: registry_fingerprint.clone(),
     }));
     let repository_root = config
         .registry_root
@@ -1843,7 +1861,7 @@ pub async fn build_embedded_spine(
         ee_templates_loaded: ee_templates_loaded.clone(),
         tool_descriptors_loaded,
         live_registry,
-        registry_fingerprint: Mutex::new(boot_fingerprint),
+        registry_fingerprint,
         ee_tree,
         existence_ee_id: bootstrap_ee,
         formation_source_hashes,

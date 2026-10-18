@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_operator_chat",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "product_kind": "application",
   "product_id": "world_operator_chat",
   "release_status": "optional",
@@ -37,6 +37,15 @@
     {
       "registry_kind": "mark",
       "owner": "tool.call.allowed"
+    },
+    {
+      "registry_kind": "mark",
+      "owner": "tool.result.corresponds"
+    },
+    {
+      "registry_kind": "verifier",
+      "owner": "tool_result_correspondence",
+      "configuration": [{"path":"verifier.json","fields":[{"pointer":"/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
     },
     {
       "registry_kind": "verifier",

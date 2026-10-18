@@ -363,8 +363,13 @@ async fn provider_turn(
                 _ = &mut done => break,
                 arrival = arrivals.recv() => {
                     let arrival = arrival.unwrap();
-                    let outcome = admit_interface_artifact_arrival(&runtime,&mut log,&mut shared,&arrival.artifact.clone().capture_bounded(1<<20,1<<20).unwrap(),&provider).await.unwrap();
-                    arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted {seq:outcome.admission.records.first().unwrap().arrival_movement.seq.0}).unwrap();
+                    if let Some(retained) = arrival.retained {
+                        let delivery = octopus_app_server::admit_retained_interface_artifact_arrival(&runtime,&mut log,&mut shared,&arrival.artifact,&provider,&retained.id).await.unwrap();
+                        retained.reply.send(Ok(delivery)).unwrap();
+                    } else {
+                        let outcome = admit_interface_artifact_arrival(&runtime,&mut log,&mut shared,&arrival.artifact.clone().capture_bounded(1<<20,1<<20).unwrap(),&provider).await.unwrap();
+                        arrival.verdict_tx.unwrap().send(DeliveryVerdict::Admitted {seq:outcome.admission.records.first().unwrap().arrival_movement.seq.0}).unwrap();
+                    }
                 }
                 accepted = socket.accept() => {
                     let mut wire = tokio_tungstenite::accept_async(accepted.unwrap().0).await.unwrap();

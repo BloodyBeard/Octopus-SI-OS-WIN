@@ -388,6 +388,7 @@ mod movement_gate {
     };
     use octopus_ledger_store::{DurableBlobs, DurableLog};
     use octopus_provider_run_authoring::{
+        declared_provider_run_writer, RunAuthoringProfile,
         ProviderEmission, ProviderEmissionRoute, ProviderHandoffOutcome, ProviderHandoffSession,
         ProviderSourceRecovery,
     };
@@ -404,7 +405,7 @@ mod movement_gate {
         blobs: SharedBlobHandle,
         sender: tokio::sync::mpsc::Sender<InterfaceActivationArrival>,
         arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
-        sockets: Vec<(InterfaceId, tokio::net::UnixListener)>,
+        sockets: Vec<(InterfaceId, InterfaceId, tokio::net::UnixListener)>,
         writes: usize,
     }
     impl Boundary {
@@ -473,14 +474,17 @@ mod movement_gate {
                 .iter()
                 .chain(std::iter::once(&plan.run_write))
             {
-                let value: Value = serde_json::from_str(&write.content).unwrap();
-                for state in value["interface_state"].as_object().unwrap().values() {
-                    if let Some(author) = state
-                        .pointer("/run_authoring_binding/authoring_source_interface")
-                        .and_then(Value::as_str)
-                    {
-                        let author: InterfaceId = author.into();
-                        if sockets.iter().any(|(id, _)| id == &author) {
+                let record = RunRecord::from_bytes(write.content.as_bytes()).unwrap();
+                for (provider, state) in &record.interface_state {
+                    if state.get("run_authoring_binding").is_some() {
+                        let descriptor = read(&root.join("registry/interface").join(provider.as_str()).join("interface.json"));
+                        let profile: RunAuthoringProfile = serde_json::from_value(
+                            descriptor["interface_driver_config"]["private_config"]["run_authoring_profile"].clone(),
+                        ).unwrap();
+                        let writer = declared_provider_run_writer(&record, provider, &profile).unwrap();
+                        let author = writer.source;
+                        if let Some((_, door, _)) = sockets.iter().find(|(id, _, _)| id == &author) {
+                            assert_eq!(door, &writer.door);
                             continue;
                         }
                         let path =
@@ -489,7 +493,7 @@ mod movement_gate {
                                 &author,
                             );
                         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                        sockets.push((author, tokio::net::UnixListener::bind(path).unwrap()));
+                        sockets.push((author, writer.door, tokio::net::UnixListener::bind(path).unwrap()));
                     }
                 }
             }
@@ -703,20 +707,84 @@ mod movement_gate {
             id: &str,
             run: &str,
         ) -> octopus_provider_run_authoring::ProviderOutputHandoff {
+            let (row, _) = self.input_in_run(file, id, Some(run));
+            self.handoff_at(id, run, row.seq.0).0
+        }
+        fn handoff_at(
+            &self,
+            id: &str,
+            run: &str,
+            source: u64,
+        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, octopus_ledger::ArtifactRef) {
             let ctx = self.context(id);
-            let (row, input) = self.input_in_run(file, id, Some(run));
+            let mut reader = LedgerReplayReader::open(&ctx).unwrap();
+            let row = loop {
+                let rows = reader.read_batch(16).unwrap().expect("admitted provider movement absent");
+                if let Some(row) = rows.into_iter().find(|row| row.movement.seq.0 == source) {
+                    break row;
+                }
+            };
+            assert_eq!(row.movement.to, Endpoint::Interface(id.into()));
+            let input = reader.envelope(&row).unwrap();
             let pinned = ctx.pinned_run_record_bytes(&input).unwrap();
-            ProviderHandoffSession::new(&ctx)
+            let handoff = ProviderHandoffSession::new(&ctx)
                 .unwrap()
                 .from_invocation(
                     &ctx,
                     &ctx.resolved_interface_descriptor().unwrap(),
                     &run.into(),
                     &input,
-                    row.seq.0,
+                    source,
                     &pinned,
                 )
-                .unwrap()
+                .unwrap_or_else(|error| panic!("handoff {id}/{run}, source {}, label {}, checkpoint {:?}: {error}",
+                    source, input.artifact_file.read_manifest().unwrap().label, input.metadata().unwrap().runtime));
+            (handoff, input.artifact)
+        }
+        async fn result_handoff(
+            &mut self,
+            file: &InterfaceArtifactFile,
+            id: &str,
+            run: &str,
+        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, u64) {
+            let receipt = self.handoff(file, id, run);
+            let (recovery, outcomes) = self.drive(receipt.recover_source_with_outcomes()).await;
+            let ProviderSourceRecovery::Bridged { invocation_movement_seq } = recovery else {
+                panic!("raw result did not create its checked invocation: {recovery:?}");
+            };
+            let [ProviderHandoffOutcome::Admitted { seq, artifact }] = outcomes.as_slice() else {
+                panic!("result bridge has no exact admitted invocation: {outcomes:?}");
+            };
+            assert_eq!(*seq, invocation_movement_seq);
+            let (next, admitted) = self.handoff_at(id, run, *seq);
+            assert_eq!(&admitted, artifact);
+            assert_eq!(self.drive(next.recover_source_with_outcomes()).await,
+                (ProviderSourceRecovery::Process, Vec::new()));
+            (next, *seq)
+        }
+        async fn stable_result_handoff(
+            &mut self,
+            previous: &octopus_provider_run_authoring::ProviderOutputHandoff,
+            file: &InterfaceArtifactFile,
+            id: &str,
+            run: &str,
+        ) -> (octopus_provider_run_authoring::ProviderOutputHandoff, u64) {
+            let record: Value = serde_json::from_slice(&previous.current_run_record_bytes().await).unwrap();
+            assert_eq!(record["id"], run);
+            let pending = &record["interface_state"][id]["pending_handoff"];
+            assert_eq!(pending["terminal"], true);
+            let prior = pending["source_movement_seq"].as_u64().unwrap();
+            let (movement, _) = self.input_in_run(file, id, Some(run));
+            let source = movement.seq.0;
+            assert!(source > prior);
+            let next = self.handoff_at(id, run, source).0;
+            let label = file.read_manifest().unwrap().label;
+            let recovery = async {
+                next.recover_source_with_outcomes().await.map_err(|error|
+                    format!("Stable result {id}/{run}, source={source}, prior={prior}, label={label}: {error}"))
+            };
+            assert_eq!(self.drive(recovery).await, (ProviderSourceRecovery::Process, Vec::new()));
+            (next, source)
         }
         async fn effect(
             &mut self,
@@ -804,7 +872,7 @@ mod movement_gate {
                         loop {
                             let event = {
                                 let connections =
-                                    self.sockets.iter().enumerate().map(|(i, (_, socket))| {
+                                    self.sockets.iter().enumerate().map(|(i, (_, _, socket))| {
                                         Box::pin(async move { (i, socket.accept().await) })
                                     });
                                 tokio::select! {
@@ -819,24 +887,45 @@ mod movement_gate {
                             match event {
                                 Event::Finished => break,
                                 Event::Arrival(arrival) => {
-                                    let verdict =
-                                        self.admit(&arrival.artifact, &arrival.interface).await;
-                                    arrival.verdict_tx.unwrap().send(verdict).unwrap();
+                                    if let Some(retained) = arrival.retained {
+                                        let captured = arrival.artifact.capture_bounded(1<<20, 1<<26).unwrap();
+                                        let delivery = Box::pin(octopus_app_server::admit_retained_interface_artifact_arrival(
+                                            &self.runtime, &mut self.log, &mut self.blobs, &captured, &arrival.interface, &retained.id,
+                                        )).await.map_err(|error| error.to_string());
+                                        retained.reply.send(delivery).unwrap();
+                                    } else {
+                                        let verdict = self.admit(&arrival.artifact, &arrival.interface).await;
+                                        arrival.verdict_tx.unwrap().send(verdict).unwrap();
+                                    }
                                 }
                                 Event::Writer(i, connection) => {
                                     let author = self.sockets[i].0.clone();
+                                    let door = self.sockets[i].1.clone();
                                     let mut ws =
                                         tokio_tungstenite::accept_async(connection).await.unwrap();
                                     let bytes = ws.next().await.unwrap().unwrap().into_data();
-                                    let path = self.root.join("incoming.json");
-                                    std::fs::write(&path, bytes).unwrap();
-                                    let (verdict, result, door) = self
-                                        .effect(&InterfaceArtifactFile::new(path).unwrap(), &author)
-                                        .await;
-                                    assert!(matches!(
-                                        self.admit(&result, &door).await,
-                                        DeliveryVerdict::Admitted { .. }
-                                    ));
+                                    let file = InterfaceArtifactFile::store_manifest_bounded(
+                                        self.root.join("incoming"), &bytes, 1 << 20, 1 << 26,
+                                    ).unwrap();
+                                    let first = Seq(self.log.len() as u64);
+                                    let verdict = self.admit(&file, &author).await;
+                                    let effects = self.log.read_from(first).into_iter().filter(|row|
+                                        row.kind == MovementKind::InterfaceOutbound
+                                            && row.from == Endpoint::Interface(author.clone())
+                                            && row.to == Endpoint::Interface(door.clone())
+                                    ).collect::<Vec<_>>();
+                                    match effects.as_slice() {
+                                        [] => {}
+                                        [edge] => {
+                                            let captured = file.capture_bounded(1 << 20, 1 << 26).unwrap();
+                                            let artifact = captured.load_into_blob(&mut self.blobs).unwrap().artifact;
+                                            assert_eq!(edge.artifact.as_ref(), Some(&artifact));
+                                            let (result, actual_door) = self.execute_admitted_effect(&captured);
+                                            assert_eq!(actual_door, door);
+                                            assert!(matches!(self.admit(&result, &door).await, DeliveryVerdict::Admitted { .. }));
+                                        }
+                                        _ => panic!("authoring hand-in admitted multiple file-tool edges"),
+                                    }
                                     ws.send(tokio_tungstenite::tungstenite::Message::Text(
                                         serde_json::to_string(&verdict).unwrap().into(),
                                     ))
@@ -1226,11 +1315,12 @@ mod movement_gate {
                 boundary.admit(&input, &intake.writer.owner).await,
                 DeliveryVerdict::Admitted { .. }
             ));
+            let (wrapped, _) = boundary.input(&input, source_provider);
+            let wrapped_ref = wrapped.artifact.unwrap();
             if turn == 1 {
-                let (wrapped, _) = boundary.input(&input, source_provider);
                 let selected = SessionContextArtifact {
                     label: intake.input_label.clone(), payload: serde_json::from_slice(&input.read_payload_bytes().unwrap()).unwrap(),
-                    source_artifact: wrapped.artifact.unwrap(), source_movement_seq: Some(wrapped.seq.0),
+                    source_artifact: wrapped_ref.clone(), source_movement_seq: Some(wrapped.seq.0),
                 };
                 let scope = SnapshotSourceScope {
                     run: plan.run_id.clone(), ee: config.source_ee.clone(), worker: plan.worker_interface_id.clone(),
@@ -1313,7 +1403,10 @@ mod movement_gate {
                     boundary.admit(&result, &door).await,
                     DeliveryVerdict::Admitted { .. }
                 ));
-                handoff = boundary.handoff(&result, source_provider, &plan.run_id);
+                handoff = boundary.result_handoff(&result, source_provider, &plan.run_id).await.0;
+                let context = handoff.current_session_context_artifacts().await;
+                assert!(context.iter().any(|entry| entry.source_artifact == wrapped_ref));
+                assert!(!context.iter().any(|entry| entry.source_artifact == *original_ref));
             }
             let telemetry = boundary.file(source_provider, "turn.completed", &json!({"turn":turn}));
             assert!(matches!(
@@ -1428,9 +1521,9 @@ mod movement_gate {
                     .unwrap()
                     .contains(&json!("/body/exit_code"))
             );
-            let mut observer_source = projected.clone();
+            let mut observer_source = boundary.input(&projected, observer).0.seq.0;
             let mut model = boundary.handoff(&projected, observer, observer_run);
-            let receipts = if turn == 1 {
+            let (receipts, preparation_outcome) = if turn == 1 {
                 let prepare_tool = plan
                     .descriptor_writes
                     .iter()
@@ -1453,17 +1546,15 @@ mod movement_gate {
                     content: ContentHash::of_canonical_json(&descriptor),
                 };
                 let call=boundary.file(observer,"tool.call",&json!({"tool":prepare_id,"correlation_id":"prepare-1","arguments":{"source":source,"entry":entry,"expected_revision":null}}));
-                assert!(matches!(
-                    boundary
-                        .drive(model.hand(ProviderEmission {
+                let preparation_outcome = boundary
+                        .drive(model.hand_final(ProviderEmission {
                             artifact: call,
                             route: ProviderEmissionRoute::Tool {
                                 tool: prepare_id.into()
                             }
                         }))
-                        .await,
-                    ProviderHandoffOutcome::Admitted { .. }
-                ));
+                        .await;
+                assert!(matches!(preparation_outcome, ProviderHandoffOutcome::Admitted { .. }));
                 let collection = octopus_context_collections::BoundCollection::open(
                     &root.join("registry/artifact"),
                     &source,
@@ -1491,7 +1582,7 @@ mod movement_gate {
                     boundary.admit(&result, &reader_door.into()).await,
                     DeliveryVerdict::Admitted { .. }
                 ));
-                model = boundary.handoff(&result, observer, observer_run);
+                model = boundary.stable_result_handoff(&model, &result, observer, observer_run).await.0;
                 let update = boundary.file(
                     observer,
                     "interface.context.updated",
@@ -1516,7 +1607,7 @@ mod movement_gate {
                 );
                 assert!(matches!(
                     boundary
-                        .drive(model.hand(ProviderEmission {
+                        .drive(model.hand_final(ProviderEmission {
                             artifact: call.clone(),
                             route: ProviderEmissionRoute::Tool {
                                 tool: writer.into()
@@ -1555,11 +1646,10 @@ mod movement_gate {
                     boundary.admit(&result, &door.into()).await,
                     DeliveryVerdict::Admitted { .. }
                 ));
-                model = boundary.handoff(&result, observer, observer_run);
-                observer_source = result;
-                json!([{"tool":writer,"correlation_id":"publication-1"}])
+                (model, observer_source) = boundary.stable_result_handoff(&model, &result, observer, observer_run).await;
+                (json!([{"tool":writer,"correlation_id":"publication-1"}]), Some(preparation_outcome))
             } else {
-                json!([])
+                (json!([]), None)
             };
             let final_file=boundary.file(observer,"interface.artifact.output",&json!({"text":json!({"schema_version":1,"status":if turn==1 {"published"}else{"noop"},"source_run":plan.run_id,"reason":"Current experience outcome.","receipts":receipts}).to_string()}));
             assert!(matches!(
@@ -1612,14 +1702,15 @@ mod movement_gate {
                     &final_row,
                 ))
                 .await;
-            let restarted = boundary.handoff(&observer_source, observer, observer_run);
+            let restarted = boundary.handoff_at(observer, observer_run, observer_source).0;
             assert_eq!(
                 restarted.recover_source().await.unwrap(),
                 ProviderSourceRecovery::Completed
             );
             if turn == 1 {
-                let retired = boundary.handoff(&projected, observer, observer_run);
-                assert!(retired.recover_source().await.is_err());
+                let original = boundary.handoff(&projected, observer, observer_run);
+                assert_eq!(original.recover_source_with_outcomes().await.unwrap(),
+                    (ProviderSourceRecovery::Completed, vec![preparation_outcome.unwrap()]));
             }
             assert_eq!(boundary.writes, writes);
             assert_eq!(

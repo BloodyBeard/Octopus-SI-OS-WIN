@@ -1446,7 +1446,7 @@ pub fn prepare_provider_input_rearm(
     Ok(edit)
 }
 
-fn rename_checkpoint(
+pub(super) fn rename_checkpoint(
     value: &mut serde_json::Value,
     provider: &InterfaceId,
     old: &CheckpointId,

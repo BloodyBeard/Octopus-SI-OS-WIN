@@ -209,6 +209,13 @@ pub(crate) struct InterfaceActivationArrival {
     pub artifact: InterfaceArtifactFile,
     pub evidence: Vec<InterfaceActivationEvidence>,
     pub verdict_tx: Option<tokio::sync::oneshot::Sender<DeliveryVerdict>>,
+    pub retained: Option<RetainedInterfaceArrival>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RetainedInterfaceArrival {
+    pub id: String,
+    pub reply: tokio::sync::oneshot::Sender<Result<octopus_ledger::ArtifactDelivery, String>>,
 }
 
 #[derive(Debug)]
@@ -8964,6 +8971,50 @@ mod tool_process_private_boundary_tests {
         include!("../tests/support/completed_output.rs");
 
         #[tokio::test]
+        async fn retained_pending_rehands_selected_output_before_resuming_owner_callback() {
+            let root = tempfile::tempdir().unwrap(); let root = root.path().canonicalize().unwrap();
+            let (ctx, input, completion, mut arrivals, _) = completed_fixture(&root, 1).await;
+            let original = completion.artifacts[0].manifest_path().to_path_buf();
+            let calls = Arc::new(AtomicU64::new(0));
+            let callback: ToolDoorOutputCallback = Arc::new(CompletedOutputOwner {
+                mode: "selected", calls: Arc::clone(&calls), proofs: Arc::new(AtomicU64::new(0)), unsubmitted: false,
+            });
+            let mut receipt = completed_output::CompletedOutputs::retain(&ctx, &input, &completion).unwrap();
+            let mut pinned = None;
+            for attempt in 0..5 {
+                {
+                let delivery = receipt.deliver(&ctx, &input, Some(&callback), attempt != 0); tokio::pin!(delivery);
+                let arrival = tokio::select! { arrival = arrivals.recv() => arrival.unwrap(), result = &mut delivery => panic!("missing retained handoff: {result:?}") };
+                assert!(arrival.verdict_tx.is_none());
+                let retained = arrival.retained.unwrap();
+                let identity = (retained.id.clone(), arrival.artifact.manifest_path().to_path_buf());
+                assert_ne!(identity.1, original);
+                assert_eq!(arrival.artifact.read_payload_bytes().unwrap(), b"transformed result");
+                if let Some(prior) = &pinned { assert_eq!(prior, &identity); } else { pinned = Some(identity); }
+                retained.reply.send(match attempt {
+                    1 => Err("scope corruption after partial admission".into()),
+                    2 => Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: DeliveryVerdict::refused(RefusedReason::RegistryUnstable, serde_json::json!({})) }),
+                    4 => Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq: 9 } }),
+                    _ => Ok(octopus_ledger::ArtifactDelivery::Pending { scope_seq: 7 }),
+                }).unwrap();
+                if attempt < 4 {
+                    let error = delivery.await.unwrap_err();
+                    assert!(error.contains(match attempt { 1 => "scope corruption after partial admission", 2 => "current source is unresolved", _ => "unresolved edges" }));
+                    assert_eq!(calls.load(Ordering::SeqCst), 1);
+                    let saved = serde_json::to_value(completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap()).unwrap();
+                    assert_eq!(saved["schema_version"], 4);
+                    assert_eq!(saved["outputs"][0]["admission"], serde_json::json!({"state":"retained", "scope_seq":7}));
+                    assert_eq!(saved["outputs"][0]["callback_completed"], false);
+                } else { assert!(matches!(delivery.await.unwrap(), ToolProcessBrokerResult::Completed)); }
+                }
+                receipt = completed_output::CompletedOutputs::load(&ctx, 0).unwrap().unwrap();
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert!(arrivals.try_recv().is_err());
+            assert_eq!(std::fs::read(root.join("effects")).unwrap(), b"effect");
+        }
+
+        #[tokio::test]
         async fn deferred_decode_preserves_prepared_sources_across_wake_cancel_and_refusal() {
             use std::io::Write;
             use ToolDoorArtifactDecodeError as DecodeError;
@@ -11026,6 +11077,38 @@ pub mod owner_contract_tests {
         sources: BTreeMap<u64, Movement>,
     }
 
+    impl octopus_ledger::MovementLog for DoorFixture {
+        fn append(&mut self, draft: octopus_ledger::MovementDraft) -> Movement {
+            draft.validate().expect("fixture movement trace must be non-empty");
+            let clock = self.sources.last_key_value().map(|(_, row)| row.lamport.0).unwrap_or(0);
+            let movement = Movement {
+                seq: octopus_ledger::Seq(self.next_seq),
+                lamport: octopus_ledger::Lamport(clock.max(draft.causal_floor.map(|floor| floor.0).unwrap_or(0)) + 1),
+                recorded_at_unix_ms: self.next_seq + 1,
+                trace: draft.trace,
+                kind: draft.kind,
+                from: draft.from,
+                to: draft.to,
+                artifact: draft.artifact,
+                invocation_metadata: draft.invocation_metadata,
+            };
+            self.append_movement(movement.clone()).expect("fixture movement append failed");
+            movement
+        }
+
+        fn read_from(&self, from: octopus_ledger::Seq) -> Vec<Movement> {
+            self.sources.range(from.0..).map(|(_, row)| row.clone()).collect()
+        }
+
+        fn read_at(&self, seq: octopus_ledger::Seq) -> Option<Movement> {
+            self.sources.get(&seq.0).cloned()
+        }
+
+        fn len(&self) -> usize {
+            self.sources.len()
+        }
+    }
+
     impl DoorFixture {
         pub fn new(
             root: &Path,
@@ -11252,7 +11335,7 @@ pub mod owner_contract_tests {
                 trace:octopus_ledger::TraceId("trace:code-mode-owner-contract".into()),kind:MovementKind::DeliveryRefused,
                 from:Endpoint::Interface(runtime.interface.clone()),to:Endpoint::Interface(runtime.worker.clone()),artifact:Some(artifact),
                 invocation_metadata:Some(octopus_ledger::MovementMetadata::Delivery(octopus_ledger::DeliveryMetadata {
-                    delivery_verdict:verdict,runtime:Some(runtime),source_movement_seq:None,
+                    delivery_verdict:verdict,runtime:Some(runtime),source_movement_seq:None,delivery_scope_seq:None,
                 })),
             })
         }
@@ -11372,14 +11455,29 @@ pub mod owner_contract_tests {
     pub struct OwnerTransportOutput {
         pub artifact: InterfaceArtifactFile,
         pub directed: Option<(u64, InterfaceId)>,
-        verdict: tokio::sync::oneshot::Sender<DeliveryVerdict>,
+        pub retained_delivery_id: Option<String>,
+        reply: OwnerTransportReply,
+    }
+
+    enum OwnerTransportReply {
+        Ordinary(tokio::sync::oneshot::Sender<DeliveryVerdict>),
+        Retained(tokio::sync::oneshot::Sender<Result<octopus_ledger::ArtifactDelivery, String>>),
     }
 
     impl OwnerTransportOutput {
         pub fn acknowledge(self, verdict: DeliveryVerdict) -> Result<(), String> {
-            self.verdict
-                .send(verdict)
-                .map_err(|_| "fixture output acknowledgement receiver closed".into())
+            match self.reply {
+                OwnerTransportReply::Ordinary(reply) => reply.send(verdict).map_err(|_| "fixture output acknowledgement receiver closed".into()),
+                OwnerTransportReply::Retained(reply) => reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete { verdict }))
+                    .map_err(|_| "fixture retained completion receiver closed".into()),
+            }
+        }
+
+        pub fn acknowledge_retained(self, delivery: Result<octopus_ledger::ArtifactDelivery, String>) -> Result<(), String> {
+            match self.reply {
+                OwnerTransportReply::Retained(reply) => reply.send(delivery).map_err(|_| "fixture retained completion receiver closed".into()),
+                OwnerTransportReply::Ordinary(_) => Err("ordinary fixture output has no retained scope".into()),
+            }
         }
     }
 
@@ -11388,13 +11486,18 @@ pub mod owner_contract_tests {
             tokio::select! {
                 arrival = self.arrivals.recv() => {
                     let arrival = arrival.ok_or("fixture arrivals closed")?;
-                    Ok(OwnerTransportOutput {artifact:arrival.artifact,directed:None,verdict:arrival.verdict_tx.ok_or("fixture arrival has no acknowledgement")?})
+                    let (retained_delivery_id, reply) = match (arrival.verdict_tx, arrival.retained) {
+                        (None, Some(retained)) => (Some(retained.id), OwnerTransportReply::Retained(retained.reply)),
+                        (Some(verdict), None) => (None, OwnerTransportReply::Ordinary(verdict)),
+                        _ => return Err("fixture arrival must select one acknowledgement contract".into()),
+                    };
+                    Ok(OwnerTransportOutput {artifact:arrival.artifact,directed:None,retained_delivery_id,reply})
                 },
                 emission = self.emissions.recv() => {
                     let emission = emission.ok_or("fixture emissions closed")?;
                     let (artifact,seq,to,verdict) = emission.into_parts();
                     let SystemInterfaceEmissionArtifact::Materialized(artifact) = artifact else {return Err("fixture received an unmaterialized artifact reference".into());};
-                    Ok(OwnerTransportOutput {artifact,directed:Some((seq,to)),verdict})
+                    Ok(OwnerTransportOutput {artifact,directed:Some((seq,to)),retained_delivery_id:None,reply:OwnerTransportReply::Ordinary(verdict)})
                 },
             }
         }

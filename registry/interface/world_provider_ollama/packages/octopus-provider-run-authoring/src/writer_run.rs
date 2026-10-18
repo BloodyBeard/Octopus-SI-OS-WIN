@@ -1380,6 +1380,7 @@ struct Attempt {
     args: OrderedArguments,
     authored: AuthoredRun,
     generation: u64,
+    source_movement_seq: u64,
 }
 
 impl ProviderOutputHandoff {
@@ -1465,9 +1466,15 @@ impl ProviderOutputHandoff {
             }
             let original = RunRecord::from_bytes(&before).map_err(|error| error.to_string())?;
             let original_config = attempt_config(&original, &self.config)?;
-            source_settlement::validate_transition(&original, &record, &original_config)?;
-            source_withdrawal::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
-            validate_bound_run_authoring_topology(&record, &original_config, None)?;
+            if !result_inputs::saved_definition_transition(&original, &record, &original_config)? {
+                source_settlement::validate_transition(&original, &record, &original_config)?;
+                source_withdrawal::validate_saved_attempt(&self.ctx, &before, prospective.as_bytes(), &original_config)?;
+            }
+            let candidate_config = result_inputs::saved_attempt_config(&record, &original_config)?;
+            validate_bound_run_authoring_topology(&record, &candidate_config, None)?;
+            result_inputs::validate_saved(&self.ctx, &original, &record, &original_config)?;
+            let source_movement_seq = result_inputs::definition_source(&original, &record, &original_config)?
+                .unwrap_or(pending.source_movement_seq);
             let result_template = original_config
                 .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
             let result = writer_record
@@ -1493,6 +1500,7 @@ impl ProviderOutputHandoff {
                 args: call.arguments,
                 authored,
                 generation: writer_generation,
+                source_movement_seq,
             });
         }
         attempts.sort_by_key(|a| a.generation);
@@ -1542,7 +1550,7 @@ impl ProviderOutputHandoff {
                     .map_err(|e| e.to_string())?;
             if generation != expected {
                 validate_revision_attempt_predecessor(&self.ctx, before_bytes.as_bytes(), record_bytes,
-                    attempt.authored.pending_handoff.source_movement_seq, &attempt_config(&before, &self.config)?)?;
+                    attempt.source_movement_seq, &attempt_config(&before, &self.config)?)?;
             } else if before.interface_state.get(&self.config.provider_interface)
                 != record.interface_state.get(&self.config.provider_interface)
             {
@@ -1580,11 +1588,11 @@ impl ProviderOutputHandoff {
         match selected {
             None => Ok(AuthoringAttemptRecovery::None),
             Some(attempt)
-                if attempt.authored.pending_handoff.source_movement_seq
+                if attempt.source_movement_seq
                     != self.source_movement_seq =>
             {
                 Ok(AuthoringAttemptRecovery::OtherSource(
-                    attempt.authored.pending_handoff.source_movement_seq,
+                    attempt.source_movement_seq,
                 ))
             }
             Some(attempt) => Ok(AuthoringAttemptRecovery::InFlight(

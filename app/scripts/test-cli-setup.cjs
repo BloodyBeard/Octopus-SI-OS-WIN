@@ -82,9 +82,13 @@ async function nativeAdoptionContract(root) {
   const catalogPath = path.join(registry, "artifact/artifact-run-affordances-home_fixture/artifact.json");
   await fs.mkdir(path.join(home, "state/ee_instances"), { recursive: true });
   await fs.mkdir(path.join(registry, "tool"), { recursive: true });
-  const run = { id: runId, interface_state: { [clientId]: { client_surface_role: "home", provider_runtime_interface: provider } } };
+  const run = { id: runId, worker: "worker_private", ee: "ee_private",
+    interface_state: { [clientId]: { client_surface_role: "home", provider_runtime_interface: provider } } };
+  const eePath = path.join(home, "state/ee_instances/ee_private.json");
+  await json(eePath, { ee_id: run.ee, parent_ee_id: null });
   await json(runPath, run); await json(providerPath, { id: provider, declaration: 1 }); await json(catalogPath, { text: "prior catalog" });
-  const runBytes = await fs.readFile(runPath), providerBytes = await fs.readFile(providerPath), catalogBytes = await fs.readFile(catalogPath);
+  let runBytes = await fs.readFile(runPath);
+  const providerBytes = await fs.readFile(providerPath), catalogBytes = await fs.readFile(catalogPath);
   const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
   const replyPath = path.join(root, "native-plan.json"), planner = path.join(owner, "packages/bin/topology");
   const clientSource = path.resolve(__dirname, "../../registry/interface/world_operator_chat/client.cjs");
@@ -99,10 +103,12 @@ async function nativeAdoptionContract(root) {
   const planned = { status: "planned", run_id: runId, provider_interface_id: provider, source_movement_seq: 8240, reason: null,
     writes: [{path:catalogPath,content:nextCatalog,expected_before_hash:hash(catalogBytes),tag:"catalog"},
       {path:providerPath,content:nextProvider,expected_before_hash:hash(providerBytes),tag:"provider"}],
-    preimages: [{path:runPath,sha256:hash(runBytes)},{path:providerPath,sha256:hash(providerBytes)},{path:catalogPath,sha256:hash(catalogBytes)}] };
+    preimages: [{path:runPath,sha256:hash(runBytes)},{path:providerPath,sha256:hash(providerBytes)},{path:catalogPath,sha256:hash(catalogBytes)},
+      {path:eePath,sha256:hash(await fs.readFile(eePath))}] };
   const source = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const initialization = source.match(/async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/)[0];
-  let packagePasses = 0, stopped = true;
+  const publication = require("./support/native-publication.cjs").nativePublication();
+  let packagePasses = 0, stopped = true, clientCommits = 0;
   const results = [];
   const boot = () => {
     const context = { path, fs:require("node:fs"), runtimeInitializationComplete:false, runtimeInitializationPromise:null, nativeBrowserHost:null,
@@ -114,7 +120,14 @@ async function nativeAdoptionContract(root) {
       resolveRepoRoot:() => root, resolveSourceRegistry:() => registry, resolveLocalPackageRegistry:() => registry,
       resolveLocalPackageLibrary:() => root, projectEePolicies:async () => ({}), projectionReadRequest:() => ({}),
       getOperatorChatClientLoader:() => ({load:async () => client}), resolveInstallationRoot:() => root,
-      commitProjectionClientAuthoring, appendClientLog:async (_level,_event,result) => {results.push(result);},
+      workspaceStorage:() => publication,
+      readWorkspaceSetupState:(options) => readWorkspaceSetupState({...options,publication}),
+      commitProjectionClientAuthoring:async (home,registry,request) => {
+        clientCommits++;
+        assert.deepEqual(request.condition, {octopus_home:home,preimages:JSON.parse(await fs.readFile(replyPath)).preimages});
+        return commitProjectionClientAuthoring(home,registry,request,{publication});
+      },
+      appendClientLog:async (_level,_event,result) => {results.push(result);},
       startNativeBrowserEngine:async () => {}, projectionStores:new Map(),
     };
     return vm.runInNewContext(`${initialization}\ninitializeRuntimeHost()`, context);
@@ -125,7 +138,7 @@ async function nativeAdoptionContract(root) {
   assert.deepEqual(await fs.readFile(providerPath),providerBytes); assert.deepEqual(await fs.readFile(catalogPath),catalogBytes);
   await json(replyPath,planned); await boot(); assert.equal(packagePasses,2); assert.equal(results.at(-1).status,"adopted");
   assert.equal(await fs.readFile(providerPath,"utf8"),nextProvider); assert.equal(await fs.readFile(catalogPath,"utf8"),nextCatalog);
-  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:[]}); await boot();
+  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:planned.preimages.filter(pin=>pin.path===runPath||pin.path===eePath)}); await boot();
   assert.equal(packagePasses,3); assert.equal(results.at(-1).status,"unchanged"); assert.deepEqual(await fs.readFile(runPath),runBytes);
   await json(replyPath,planned); await assert.rejects(boot(),/preimage changed/);
   stopped=false; await boot(); assert.equal(results.at(-1).reason,"runtime is already running"); stopped=true;
@@ -134,10 +147,11 @@ async function nativeAdoptionContract(root) {
     writes:[{file:catalogPath,content:thirdCatalog,beforeDigest:hash(nextCatalog),label:"catalog"},
       {file:providerPath,content:thirdProvider,beforeDigest:hash(nextProvider),label:"provider"}]};
   const transactionPath = path.join(root,"native-transaction.json"); await json(transactionPath,transaction);
-  const script = `const fs=require('node:fs/promises');const rename=fs.rename;fs.rename=async(a,b)=>{if(b===process.argv[4])process.exit(73);return rename(a,b)};require(process.argv[1]).commitProjectionClientAuthoring(process.argv[2],process.argv[3],JSON.parse(require('node:fs').readFileSync(process.argv[5]))).catch(e=>{console.error(e);process.exit(74)});`;
-  await assert.rejects(execute(process.execPath,["-e",script,path.resolve(__dirname,"../electron/clientWorkspaceAuthoring.cjs"),home,registry,providerPath,transactionPath]),error=>error.code===73);
+  const script = `const source=require(process.argv[6]).nativePublication();const publication={...source,publishFiles:async writes=>{if(writes.some(write=>write.filePath===process.argv[4]))process.exit(73);return source.publishFiles(writes)}};require(process.argv[1]).commitProjectionClientAuthoring(process.argv[2],process.argv[3],JSON.parse(require('node:fs').readFileSync(process.argv[5])),{publication}).catch(e=>{console.error(e);process.exit(74)});`;
+  await assert.rejects(execute(process.execPath,["-e",script,path.resolve(__dirname,"../electron/clientWorkspaceAuthoring.cjs"),home,registry,providerPath,transactionPath,
+    path.resolve(__dirname,"support/native-publication.cjs")]),error=>error.code===73);
   assert.equal(await fs.readFile(catalogPath,"utf8"),thirdCatalog); assert.equal(await fs.readFile(providerPath,"utf8"),nextProvider);
-  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:[]}); await boot();
+  await json(replyPath,{...planned,status:"unchanged",writes:[],preimages:planned.preimages.filter(pin=>pin.path===runPath||pin.path===eePath)}); await boot();
   assert.equal(await fs.readFile(providerPath,"utf8"),thirdProvider); assert.equal(await fs.readFile(catalogPath,"utf8"),thirdCatalog);
   assert.deepEqual(await fs.readFile(runPath),runBytes);
   const toolId = "client.mcp__home_fixture", toolPath = path.join(registry, "tool", toolId, "tool.json");
@@ -148,9 +162,9 @@ async function nativeAdoptionContract(root) {
   await fs.mkdir(path.dirname(ledgerPath),{recursive:true}); await fs.writeFile(ledgerPath,"settled fixture evidence\n");
   const ledgerBytes = await fs.readFile(ledgerPath);
   const toolPlan = { ...planned, writes: [{ path: toolPath, content: nextTool, expected_before_hash: hash(toolBytes), tag: `tool:${toolId}` }],
-    preimages: [{path:runPath,sha256:hash(runBytes)},{path:toolPath,sha256:hash(toolBytes)},
+    preimages: [{path:runPath,sha256:hash(runBytes)},{path:eePath,sha256:hash(await fs.readFile(eePath))},{path:toolPath,sha256:hash(toolBytes)},
       {path:ledgerPath,sha256:hash(ledgerBytes)},{path:journalPath,sha256:null}] };
-  await json(replyPath, { ...toolPlan, status: "deferred", reason: "accepted tool result is pending", writes: [], preimages: planned.preimages.filter(preimage=>preimage.path===runPath) });
+  await json(replyPath, { ...toolPlan, status: "deferred", reason: "accepted tool result is pending", writes: [], preimages: planned.preimages.filter(preimage=>preimage.path===runPath||preimage.path===eePath) });
   await boot(); assert.equal(results.at(-1).status, "deferred"); assert.deepEqual(await fs.readFile(toolPath), toolBytes);
   const unchangedCatalog = await fs.readFile(catalogPath), unchangedProvider = await fs.readFile(providerPath);
   await json(replyPath, toolPlan);
@@ -161,13 +175,64 @@ async function nativeAdoptionContract(root) {
   assert.equal(await fs.readFile(toolPath, "utf8"), nextTool);
   assert.deepEqual(await fs.readFile(providerPath), unchangedProvider); assert.deepEqual(await fs.readFile(catalogPath), unchangedCatalog);
   assert.deepEqual(await fs.readFile(runPath), runBytes);
-  await json(replyPath, { ...toolPlan, status: "unchanged", writes: [], preimages: [] });
+  await json(replyPath, { ...toolPlan, status: "unchanged", writes: [], preimages: toolPlan.preimages.filter(pin=>pin.path===runPath||pin.path===eePath) });
   await boot(); assert.equal(results.at(-1).status, "unchanged");
   await json(replyPath, { ...toolPlan, writes: [{ ...toolPlan.writes[0], path: path.join(registry,"tool/foreign/tool.json") }] });
   await assert.rejects(boot(), /only declared private tools/);
   await json(replyPath, toolPlan); await assert.rejects(boot(), /preimage changed/);
   assert.equal(await fs.readFile(toolPath, "utf8"), nextTool);
 
+  const worker = "worker_private", door = "tool_door_private", ee = "ee_private";
+  const policyPath = path.join(registry,"interface",worker,"policy.json"), ownershipPath = path.join(registry,"interface",worker,"octopus_os.json");
+  const cursorPath = path.join(home,"interfaces",door,"ledger-cursor.tool-door.json");
+  const resultJournal = path.join(home,"interfaces",door,"tool-door-effect-frontier.jsonl");
+  const deliveryPath = path.join(home,"interfaces",provider,"handoff-delivery",`${"a".repeat(64)}.json`);
+  const originalRun = {...run,worker,ee,interface_state:{...run.interface_state,[provider]:{run_authoring_binding:{checkpoints:[
+    {role:"provider_tool_output",outbound_interface_bindings:[{interface:door}]},
+    {role:"authoring_result",interface_binding:{interface:door}},
+  ]}}}};
+  const originalPolicy = {id:worker,ceiling:{mark_outcomes:["tool.call.allowed"]}};
+  await json(runPath,originalRun); runBytes=await fs.readFile(runPath);
+  await json(policyPath,originalPolicy);
+  await json(ownershipPath,{schema_version:1,workspace:"octopus_os",interface:worker,owner_interface:clientId,component:"worker",surface_role:"home"});
+  await json(eePath,{ee_id:ee,parent_ee_id:null}); await json(cursorPath,{seq:0,offset:0}); await json(deliveryPath,{original:true});
+  const nextPolicy = `${JSON.stringify({...originalPolicy,ceiling:{mark_outcomes:["tool.call.allowed","tool.result.corresponds"]}})}\n`;
+  const nextRun = `${JSON.stringify({...originalRun,active_checkpoints:[]})}\n`;
+  const dependencies = [runPath,policyPath,ownershipPath,eePath,cursorPath,deliveryPath,ledgerPath];
+  const preimages = await Promise.all(dependencies.map(async file=>({path:file,sha256:hash(await fs.readFile(file))})));
+  preimages.push({path:resultJournal,sha256:null});
+  const resultPlan = {...planned,writes:[{path:policyPath,tag:`policy:${worker}`,content:nextPolicy,expected_before_hash:preimages[1].sha256},
+    {path:runPath,tag:`run:${runId}`,content:nextRun,expected_before_hash:hash(runBytes)}],preimages};
+  const beforeCommits=clientCommits;
+  await json(replyPath,{...resultPlan,status:"deferred",reason:"original fanout remains unfinished",writes:[]});
+  await boot(); assert.equal(results.at(-1).status,"deferred"); assert.equal(clientCommits,beforeCommits);
+  for (const change of [
+    {writes:[{...resultPlan.writes[0],path:path.join(registry,"interface/source_worker/policy.json")},resultPlan.writes[1]]},
+    {writes:[resultPlan.writes[1],resultPlan.writes[0]]},
+    {writes:[{...resultPlan.writes[0],tag:"policy:other"},resultPlan.writes[1]]},
+    {writes:[resultPlan.writes[0],{...resultPlan.writes[1],tag:"run:other"}]},
+    {writes:[resultPlan.writes[0],{...resultPlan.writes[1],path:path.join(home,"state/runs/other.json")}]},
+    {writes:[resultPlan.writes[0],{...resultPlan.writes[1],expected_before_hash:hash("other Run")}]},
+    {writes:[resultPlan.writes[0],{...resultPlan.writes[1],content:JSON.stringify({...originalRun,worker:"other"})}]},
+    {preimages:preimages.filter(pin=>pin.path!==policyPath)},
+  ]) {await json(replyPath,{...resultPlan,...change});await assert.rejects(boot(),/only declared private tools|exact client worker|target Run|exact dependency preimage/);}
+  await json(replyPath,resultPlan);
+  for (const file of [eePath,cursorPath,deliveryPath,resultJournal]) {
+    const before=await fs.readFile(file).catch(error=>{if(error.code!=="ENOENT")throw error;return null;});
+    await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,file===eePath?JSON.stringify({ee_id:ee,parent_ee_id:null,changed:true}):"changed evidence");
+    await assert.rejects(boot(),/preimage changed/);
+    if(before===null)await fs.unlink(file);else await fs.writeFile(file,before);
+  }
+  assert.equal(clientCommits,beforeCommits); assert.deepEqual(await fs.readFile(runPath),runBytes);
+  assert.deepEqual(JSON.parse(await fs.readFile(policyPath)),originalPolicy);
+  await boot(); assert.equal(results.at(-1).status,"adopted"); assert.equal(clientCommits,beforeCommits+1);
+  assert.equal(await fs.readFile(policyPath,"utf8"),nextPolicy);assert.equal(await fs.readFile(runPath,"utf8"),nextRun);
+  const cleanups=await fs.readdir(path.join(home,"client-state/workspace/directory-cleanup"));
+  const cutover=(await Promise.all(cleanups.map(file=>fs.readFile(path.join(home,"client-state/workspace/directory-cleanup",file),"utf8").then(JSON.parse))))
+    .find(cleanup=>cleanup.journal.writes.some(write=>write.destination===policyPath));
+  assert.equal(cutover.publication.reclaimed,true);
+  assert.deepEqual(cutover.journal.writes.map(write=>[write.destination,write.publication.receipt.before_hash]),
+    resultPlan.writes.map(write=>[write.path,write.expected_before_hash]));
 }
 
 async function fixtureRuntime(root) {
@@ -215,6 +280,7 @@ process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force
   });
   const packageState = () => inspectLocalPackageInstallation({ ...first.packageRoots, packageId: "cli.fixture" });
   await fs.mkdir(first.packageRoots.activeRegistryRoot, { recursive: true });
+  first.packageRoots.publication = require("./support/native-publication.cjs").nativePublication();
   await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_install_001", packageIds: ["cli.fixture"], expectedSourceDigests: { "cli.fixture": (await packageState()).source_digest } });
   await json(active, { ...original, config: { model: "selected" } });
   await json(source, { ...original, contract: 2 });

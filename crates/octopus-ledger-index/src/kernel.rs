@@ -8,6 +8,9 @@ use octopus_ledger::{
     interface_arrival_mark_proof_key, mark_outcome_proves_interface_arrival,
 };
 
+mod fanout;
+pub use fanout::RetainedArrivalState;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerIndexError {
     #[error(
@@ -27,6 +30,8 @@ pub enum LedgerIndexError {
         "relay source {source_seq} has an unfinished arrival against an older run record for '{run}'"
     )]
     StaleRelayArrival { source_seq: u64, run: String },
+    #[error("retained arrival scope is invalid: {0}")]
+    InvalidArrivalScope(String),
 }
 
 #[derive(Debug, Default)]
@@ -46,6 +51,7 @@ pub struct ArrivalDedupIndex {
     relay_receipts:
         BTreeMap<(u64, RunId), BTreeMap<CheckpointIdentity, (Option<String>, RelayArrivalState)>>,
     unattributed_arrivals: BTreeMap<(RunId, InterfaceId, ArtifactId), Seq>,
+    fanout: fanout::FanoutIndex,
 }
 
 #[derive(Clone, Debug)]
@@ -130,6 +136,10 @@ impl ArrivalDedupIndex {
     }
 
     fn note(&mut self, movement: &Movement) {
+        if matches!(movement.invocation_metadata, Some(MovementMetadata::ArrivalFanout(_))) {
+            self.fanout.note_scope(movement);
+            return;
+        }
         if movement.kind == MovementKind::DeliveryRefused {
             if let Some(MovementMetadata::Delivery(metadata)) =
                 movement.invocation_metadata.as_ref()
@@ -275,26 +285,30 @@ impl ArrivalDedupIndex {
                         self.malformed_runs.insert(run.clone());
                         return;
                     };
+                    let requirement = (generation, admission.artifact_label.clone());
+                    let previous = self.pending_required_arrivals.get(&proof_key);
+                    let previous_sequence = self.pending_requirement_sequences.get(&requirement);
+                    let valid = match metadata.replaces_arrival_seq {
+                        Some(sequence) => previous_sequence == Some(&Seq(sequence))
+                            && previous.is_some_and(|prior| octopus_ledger::replaces_pending_interface_arrival(prior, movement)),
+                        None => previous.is_none() && previous_sequence.is_none(),
+                    };
+                    if !valid {
+                        self.malformed_runs.insert(run.clone());
+                        return;
+                    }
                     self.note_relay_receipt(
                         movement,
                         runtime,
                         metadata.source_movement_seq,
                         RelayArrivalState::Pending(movement.clone()),
                     );
-                    if self
-                        .pending_requirement_sequences
-                        .insert((generation, admission.artifact_label.clone()), movement.seq)
-                        .is_some()
-                    {
-                        self.malformed_runs.insert(run.clone());
-                    }
-                    if self
-                        .pending_required_arrivals
-                        .insert(proof_key, movement.clone())
-                        .is_some()
-                    {
-                        self.malformed_runs.insert(run.clone());
-                    }
+                    self.pending_requirement_sequences.insert(requirement, movement.seq);
+                    self.pending_required_arrivals.insert(proof_key, movement.clone());
+                    return;
+                }
+                if metadata.replaces_arrival_seq.is_some() {
+                    self.malformed_runs.insert(run.clone());
                     return;
                 }
                 self.note_relay_receipt(
@@ -387,6 +401,7 @@ impl ArrivalDedupIndex {
         source_movement_seq: Option<u64>,
         state: RelayArrivalState,
     ) {
+        self.fanout.note_edge(movement, runtime, &state);
         let Some(source_seq) = source_movement_seq else {
             return;
         };
@@ -410,6 +425,34 @@ impl ArrivalDedupIndex {
             .entry((source_seq, runtime.run.clone()))
             .or_default()
             .insert(generation, (runtime.run_record_hash.clone(), state));
+    }
+
+    pub fn retained_arrival_scope(&self, interface: &InterfaceId, identity: &str) -> Result<Option<Movement>, LedgerIndexError> {
+        let scope = self.fanout.scope(interface, identity)?;
+        let targets = scope.as_ref().and_then(|movement| match &movement.invocation_metadata {
+            Some(MovementMetadata::ArrivalFanout(metadata)) => Some(&metadata.arrival_fanout.targets),
+            _ => None,
+        });
+        self.ensure_retained_arrival_metadata(targets.into_iter().flatten().map(|target| &target.run))?;
+        Ok(scope)
+    }
+
+    pub fn retained_arrival_edges(&self, scope_seq: u64) -> Result<Vec<(RuntimeInvocationMetadata, RetainedArrivalState)>, LedgerIndexError> {
+        let edges = self.fanout.edges(scope_seq)?;
+        self.ensure_retained_arrival_metadata(edges.iter().map(|(target, _)| &target.run))?;
+        Ok(edges)
+    }
+
+    fn ensure_retained_arrival_metadata<'a>(&self, runs: impl Iterator<Item = &'a RunId>) -> Result<(), LedgerIndexError> {
+        if self.malformed_arrival {
+            return Err(LedgerIndexError::InvalidArrivalScope("arrival evidence has no run provenance".into()));
+        }
+        for run in runs {
+            if self.malformed_runs.contains(run) {
+                return Err(LedgerIndexError::MalformedArrivalMetadata { run: run.to_string() });
+            }
+        }
+        Ok(())
     }
 
     pub fn relay_source_sequences(&self, interfaces: &BTreeSet<InterfaceId>) -> Vec<u64> {
@@ -681,6 +724,7 @@ mod tests {
             run_epoch: runtime.epoch,
             class: MarkClass::Success,
             evidence: Some(evidence.clone()),
+            arrival_seq: None,
             verifier: VerifierId::new(verifier),
             verifier_package: Some(VerifierPackagePin {
                 descriptor_content: ContentHash::of_bytes(b"descriptor"),

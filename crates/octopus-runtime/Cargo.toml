@@ -15,6 +15,7 @@ octopus-ledger = { path = "../octopus-ledger" }
 octopus-marks = { path = "../octopus-marks" }
 octopus-policy = { path = "../octopus-policy" }
 octopus-interfaces = { path = "../octopus-interfaces" }
+octopus-file-storage = { path = "../octopus-file-storage" }
 # runtime IS the mechanism plane — it is the body, so tokio/async are allowed here
 # (the purity fence lives in octopus-policy (L3), which this crate calls but never
 # re-implements). spec_octopus-runtime.md §1.

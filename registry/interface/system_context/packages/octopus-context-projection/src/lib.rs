@@ -501,6 +501,7 @@ pub async fn process_admitted_input(
         .await
         .map_err(|e| e.to_string())?;
     match handoff.recover_source().await? {
+        ProviderSourceRecovery::Bridged { .. } => return Ok(()),
         ProviderSourceRecovery::Completed => {
             return Ok(());
         }

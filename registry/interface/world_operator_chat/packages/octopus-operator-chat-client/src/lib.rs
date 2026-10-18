@@ -247,6 +247,15 @@ struct ClientConfig {
     run: ClientRunConfig,
     #[serde(default)]
     home_voice: Option<home_voice::HomeVoiceConfig>,
+    #[serde(default)]
+    result_receiving_updates: Vec<ResultReceivingCeilingPredecessor>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResultReceivingCeilingPredecessor {
+    worker_template_interface: String,
+    mark_outcomes: Vec<octopus_descriptors::MarkId>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -276,10 +285,33 @@ struct ClientRunConfig {
     worker: String,
     tool_call_mark: String,
     tool_call_verifier: String,
+    #[serde(default)]
+    tool_result_receiving: Option<ToolResultReceiving>,
     listen_env: String,
     context_artifact_bindings: Vec<ArtifactBindingSeed>,
     #[serde(flatten)]
     _rest: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolResultReceiving {
+    mark: octopus_descriptors::MarkId,
+    verifier: octopus_descriptors::VerifierId,
+    params: serde_json::Value,
+}
+
+impl ToolResultReceiving {
+    fn requirement(&self, tool: &str) -> Result<RequiredVerifiedArtifact, String> {
+        if self.mark.as_str().is_empty() || self.mark.as_str().trim() != self.mark.as_str()
+            || self.verifier.as_str().is_empty() || self.verifier.as_str().trim() != self.verifier.as_str()
+            || !self.params.is_object()
+        {
+            return Err("tool_result_receiving requires exact mark/verifier ids and object params".into());
+        }
+        Ok(RequiredVerifiedArtifact { mark: self.mark.clone(), artifact_label: format!("{tool}.result"),
+            verifier: self.verifier.clone(), params: self.params.clone() })
+    }
 }
 
 struct PlannedIdentity {
@@ -405,6 +437,8 @@ enum BoundCheckpointRole {
     Stable,
     IndependentInput,
     OwnerInput,
+    VerifiedInput,
+    ResultInput,
     ProviderArtifactOutput,
     ProviderInterfaceOutput,
     ProviderToolOutput,
@@ -430,6 +464,8 @@ struct BoundAuthoringWriter {
 struct BoundCheckpointTemplate {
     name: String,
     role: BoundCheckpointRole,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    result_receiving: BTreeMap<String, RequiredVerifiedArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     static_artifact_bindings: Vec<octopus_descriptors::ArtifactId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -527,6 +563,13 @@ fn plan_operator_chat_topology_files_for_source(
         ),
     )
     .map_err(|error| error.to_string())? };
+    if let Some(result) = &config.run.tool_result_receiving {
+        let worker = current_worker.as_ref().map(|current| current.topology.worker.as_str()).unwrap_or(&selection.worker_choice_interface);
+        let policy: WorkerInterfacePolicy = serde_json::from_slice(&std::fs::read(interface_root.join(worker).join("policy.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        if !result_receiving_authorized(registry_root, &chain, &policy, result)? {
+            return Err("selected worker/EE policy does not admit the tool-result correspondence mark".into());
+        }
+    }
     ensure_external_interfaces_admitted_by_ee(&topology, &external_interfaces)?;
     let initial_topology = select_capability_topology(
         topology.clone(),
@@ -1020,6 +1063,22 @@ fn load_named_client_config(interface_root: &Path, source: &str) -> Result<Clien
     }
     if config.authoring.result_timeout_ms == 0 {
         return Err("client config authoring.result_timeout_ms must be positive".to_string());
+    }
+    if let Some(result) = &config.run.tool_result_receiving { result.requirement(&config.authoring.tool)?; }
+    let mut predecessors = BTreeSet::new();
+    for prior in &config.result_receiving_updates {
+        if safe_segment(&prior.worker_template_interface, "result receiving predecessor worker")? != prior.worker_template_interface {
+            return Err("result receiving predecessor worker must be exact and trimmed".into());
+        }
+        for mark in &prior.mark_outcomes {
+            if safe_policy_axis_value(mark.as_str(), "result receiving predecessor mark")? != mark.as_str()
+                || matches!(mark.as_str(), "." | "..") { return Err("result receiving predecessor mark must name an exact registry folder".into()); }
+        }
+        if !predecessors.insert(&prior.worker_template_interface)
+            || prior.mark_outcomes.iter().collect::<BTreeSet<_>>().len() != prior.mark_outcomes.len()
+            || config.run.tool_result_receiving.as_ref().is_some_and(|result| prior.mark_outcomes.contains(&result.mark)) {
+            return Err("result receiving predecessors require unique exact worker/mark lists without the new correspondence mark".into());
+        }
     }
     Ok(config)
 }
@@ -4634,7 +4693,7 @@ fn build_chat_run_record(
         let mut artifacts = mandatory_role_artifacts.clone();
         if let Some(owner) = owner {
             artifacts.extend([serde_json::json!({"id":owner.prelude.id}),serde_json::json!({"id":owner.topology.id})]);
-        } else {
+        } else if config.run.tool_result_receiving.is_none() {
             cycle_checkpoints.push(checkpoint(capability_input_id,Some(door_id),vec![&identity.model_interface_id],&context_artifacts,Vec::new()));
         }
         artifacts.extend(payload_artifact_bindings.iter().map(|reference| serde_json::json!({"id":reference.id})));
@@ -4867,6 +4926,26 @@ fn build_chat_run_record(
     }
     let mut previous_provider_context = BTreeSet::new();
     let previous_binding = existing_bound_run_authoring_topology(existing, identity)?;
+    let mut admitted_inputs = Vec::new();
+    let mut admitted_input_ids = BTreeSet::new();
+    if let Some(binding) = &previous_binding {
+        if config.run.tool_result_receiving.is_some() && binding.checkpoints.iter().any(|output| {
+            output.role == BoundCheckpointRole::ProviderToolOutput && output.result_receiving.is_empty()
+                && output.outbound_interface_bindings.iter().any(|door| binding.checkpoints.iter().any(|input|
+                    input.role == BoundCheckpointRole::Stable && input.interface_binding.interface == door.interface))
+        }) {
+            return Err("existing tool returns require checked native result-receiving adoption before task recomposition".into());
+        }
+        for template in binding.checkpoints.iter().filter(|template| matches!(template.role, BoundCheckpointRole::VerifiedInput | BoundCheckpointRole::ResultInput)) {
+            let rows = previous_checkpoints.iter().filter(|cp| cp.get("id").and_then(serde_json::Value::as_str).is_some_and(|id| previous_active.contains(id)))
+                .filter_map(|cp| match checkpoint_matches_bound_template(cp, template, &identity.run_id) { Ok(true) => Some(Ok(cp)), Ok(false) => None, Err(error) => Some(Err(error)) })
+                .collect::<Result<Vec<_>, String>>()?;
+            let [row] = rows.as_slice() else { return Err("retained admitted input is absent or ambiguous".into()); };
+            let id = row["id"].as_str().ok_or("retained input id is malformed")?.to_string();
+            if !admitted_input_ids.insert(id) { return Err("retained admitted input is claimed twice".into()); }
+            admitted_inputs.push(template.clone());
+        }
+    }
     if let Some(binding) = previous_binding.as_ref() {
         previous_provider_context = bound_context_checkpoint_ids(
             &previous_checkpoints,
@@ -4893,6 +4972,9 @@ fn build_chat_run_record(
         .collect::<BTreeSet<_>>()
         .union(&previous_external_routes)
         .cloned()
+        .collect::<BTreeSet<_>>()
+        .difference(&admitted_input_ids)
+        .cloned()
         .collect::<BTreeSet<_>>();
     let mut retained = Vec::new();
     let mut observed_active = BTreeSet::new();
@@ -4907,8 +4989,8 @@ fn build_chat_run_record(
             continue;
         }
         if previous_active.contains(&id) {
+            if !admitted_input_ids.contains(&id) { merge_mandatory_role_bindings(&mut candidate, &mandatory_role_artifacts)?; }
             observed_active.insert(id);
-            merge_mandatory_role_bindings(&mut candidate, &mandatory_role_artifacts)?;
             retained.push(candidate);
         }
     }
@@ -4943,7 +5025,12 @@ fn build_chat_run_record(
         &external_checkpoints,
         &next_frontier,
         &config.artifact_labels.message,
+        &config.run.tool_call_verifier,
     )?;
+    for template in admitted_inputs {
+        if next_binding.checkpoints.iter().any(|next| next.name == template.name) { return Err("retained admitted input collides with a new template".into()); }
+        next_binding.checkpoints.push(template);
+    }
 
     for connection in retained_connections {
         let template = connection.template;
@@ -4970,6 +5057,13 @@ fn build_chat_run_record(
     }
 
     next_binding.payload_artifact_bindings = payload_artifact_bindings.to_vec();
+    if let Some(result) = &config.run.tool_result_receiving {
+        for output in next_binding.checkpoints.iter_mut().filter(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput) {
+            let [door] = output.outbound_interface_bindings.as_slice() else { return Err("tool output requires one exact result door".into()); };
+            if identity.code_mode_owners.keys().any(|source| identity.capability_doors.get(source).is_some_and(|id| id == door.interface.as_str())) { continue; }
+            output.result_receiving = tool_result_requirements(output, result)?;
+        }
+    }
     for output in next_binding.checkpoints.iter_mut().filter(|cp| cp.role == BoundCheckpointRole::ProviderToolOutput) {
         output.static_artifact_bindings.extend(payload_artifact_bindings.iter().map(|reference| reference.id.clone()));
     }
@@ -5348,6 +5442,7 @@ fn derive_bound_run_authoring_topology(
     external_checkpoints: &[serde_json::Value],
     frontier: &[serde_json::Value],
     message_artifact_label: &str,
+    tool_call_verifier: &str,
 ) -> Result<BoundRunAuthoringTopology, String> {
     let frontier = frontier
         .iter()
@@ -5413,7 +5508,7 @@ fn derive_bound_run_authoring_topology(
                 {
                     BoundCheckpointRole::ProviderTransportDispatch
                 }
-                [requirement] if requirement.verifier.as_str() == "tool_call_allowed" => {
+                [requirement] if requirement.verifier.as_str() == tool_call_verifier => {
                     BoundCheckpointRole::ProviderToolOutput
                 }
                 [] | [_] => BoundCheckpointRole::ProviderArtifactOutput,
@@ -5489,6 +5584,37 @@ fn binding_admits_only(binding: &AuthoredInterfaceBinding, artifact_label: &str)
     )
 }
 
+fn tool_result_requirements(output: &BoundCheckpointTemplate, result: &ToolResultReceiving) -> Result<BTreeMap<String, RequiredVerifiedArtifact>, String> {
+    let [required] = output.required_verified_artifacts.as_slice() else { return Err("tool output requires one call contract".into()); };
+    let tools = required.params.get("tools").and_then(serde_json::Value::as_array).ok_or("tool output has no explicit tools")?;
+    let mut receiving = BTreeMap::new();
+    for tool in tools {
+        let tool = tool.as_str().filter(|tool| !tool.is_empty() && tool.trim() == *tool).ok_or("tool output has an invalid tool id")?;
+        if receiving.insert(tool.to_string(), result.requirement(tool)?).is_some() { return Err("tool output repeats a tool".into()); }
+    }
+    if receiving.is_empty() { return Err("tool output has no result obligations".into()); }
+    Ok(receiving)
+}
+
+fn result_receiving_authorized(
+    registry: &Path, chain: &[octopus_world_terminal_client::LiveEePolicyLayer],
+    policy: &WorkerInterfacePolicy, result: &ToolResultReceiving,
+) -> Result<bool, String> {
+    result.requirement("declared")?;
+    safe_policy_axis_value(result.mark.as_str(), "result mark")?;
+    if matches!(result.mark.as_str(), "." | "..") { return Err("result mark must name an exact registry folder".into()); }
+    safe_segment(result.verifier.as_str(), "result verifier")?;
+    let mark: octopus_marks::MarkDescriptor = parse_strict(&std::fs::read(registry.join("mark").join(result.mark.as_str()).join("mark.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    let verifier: octopus_verifiers::VerifierDescriptor = parse_strict(&std::fs::read(registry.join("verifier").join(result.verifier.as_str()).join("verifier.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    if mark.id != result.mark || verifier.id != result.verifier { return Err("result correspondence descriptor identity differs from its exact folder".into()); }
+    let mut layers = Vec::new();
+    for entry in chain {
+        let template: EeTemplateDescriptor = parse_strict(&std::fs::read(registry.join("ee_template").join(entry.template.as_str()).join("ee_template.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+        layers.extend([template.as_policy_layer(), entry.policy_narrowing.as_policy_layer()]);
+    }
+    Ok(octopus_policy::form_policy(policy.ceiling_grant(), &layers, &[], Default::default()).context.mark_outcomes.contains(&result.mark))
+}
+
 fn bound_checkpoint_template(
     role: BoundCheckpointRole,
     interface_binding: AuthoredInterfaceBinding,
@@ -5508,6 +5634,7 @@ fn bound_checkpoint_template(
     Ok(BoundCheckpointTemplate {
         name: format!("derived_{}", &digest[..20]),
         role,
+        result_receiving: BTreeMap::new(),
         static_artifact_bindings: Vec::new(),
         owner_authoring: None,
         interface_binding,
@@ -6466,6 +6593,7 @@ mod tests {
             &[],
             &[serde_json::json!("cp_provider_output")],
             "operator.message",
+            "tool_call_allowed",
         )
         .unwrap();
 
@@ -7507,8 +7635,23 @@ mod tests {
         assert_eq!(current_selection(&roots,&current,&provider).unwrap().unwrap().selected_tools,first.selected_tools);
         let door = InterfaceId::new(&changed.capability_doors["system_room"]);
         let bridge = ProviderCapabilityBridge {tool:changed.capability_tools["file.read"].clone(),correlation_id:"nested-read".into(),arguments_hash:octopus_ledger::ContentHash::of_bytes(b"{}").to_hex(),return_interface:door.clone()};
-        let amendment = plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-retain".into(),selection:Some(first.clone()),authored:None,publications:vec![]},bridge,&[(changed.capability_tools["file.read"].clone(),door)]).unwrap();
+        let retained = [(changed.capability_tools["file.read"].clone(),door)];
+        let amendment = plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-retain".into(),selection:Some(first.clone()),authored:None,publications:vec![]},bridge.clone(),&retained).unwrap();
         assert!(amendment.validation.safe_to_apply,"{:?}",amendment.validation.regressions);
+        let result_mark = current.interface_state[&provider]["run_authoring_binding"]["checkpoints"].as_array().unwrap().iter()
+            .find_map(|cp|cp["result_receiving"][&bridge.tool]["mark"].as_str()).unwrap();
+        let policy_path = registry.join("interface").join(current.worker.as_str()).join("policy.json");
+        let policy_bytes = std::fs::read(&policy_path).unwrap();
+        let mut narrowed:serde_json::Value = serde_json::from_slice(&policy_bytes).unwrap();
+        narrowed["ceiling"]["mark_outcomes"].as_array_mut().unwrap().retain(|mark|mark.as_str()!=Some(result_mark));
+        let current_bytes = std::fs::read(roots.run_records_root.join(format!("{}.json",current.id))).unwrap();
+        let authored = AuthoredCurrentRun {expected_before_hash:octopus_ledger::ContentHash::of_bytes(&current_bytes).to_hex(),
+            expected_before:serde_json::json!(current),run_record:serde_json::json!(current),writes:vec![crate::run_composition::RegistryCandidateWrite {
+                path:policy_path.clone(),content:narrowed.to_string(),expected_before_hash:Some(octopus_ledger::ContentHash::of_bytes(&policy_bytes).to_hex()),
+            }]};
+        assert!(plan_current_run_amendment(&roots,&current,&provider,CurrentRunRequest {amendment_key:"nested-mark-denied".into(),selection:None,authored:Some(authored),publications:vec![]},bridge,&retained)
+            .unwrap_err().contains("removes the bridge result mark"));
+        assert_eq!(std::fs::read(policy_path).unwrap(),policy_bytes);
         let after = RunRecord::from_bytes(&serde_json::to_vec(&amendment.amendment.after).unwrap()).unwrap();
         assert_eq!(current_selection(&roots,&after,&provider).unwrap().unwrap().selected_tools,first.selected_tools);
         let owner = &changed.capability_doors["system_code_mode"];

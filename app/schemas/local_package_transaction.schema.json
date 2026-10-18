@@ -13,11 +13,29 @@
     "moves"
   ],
   "properties": {
-    "schema": { "const": "octopus.local_package_transaction" },
-    "schema_version": { "enum": [1, 2] },
-    "operation": { "enum": ["install", "remove", "repair"] },
-    "operation_id": { "$ref": "#/$defs/operationId" },
-    "pack_id": { "$ref": "#/$defs/id" },
+    "schema": {
+      "const": "octopus.local_package_transaction"
+    },
+    "schema_version": {
+      "enum": [
+        1,
+        2,
+        3
+      ]
+    },
+    "operation": {
+      "enum": [
+        "install",
+        "remove",
+        "repair"
+      ]
+    },
+    "operation_id": {
+      "$ref": "#/$defs/operationId"
+    },
+    "pack_id": {
+      "$ref": "#/$defs/id"
+    },
     "phase": {
       "enum": [
         "prepared",
@@ -33,12 +51,16 @@
       "type": "array",
       "minItems": 1,
       "maxItems": 128,
-      "items": { "$ref": "https://octopus.local/schemas/local_package_receipt.schema.json" }
+      "items": {
+        "$ref": "https://octopus.local/schemas/local_package_receipt.schema.json"
+      }
     },
     "previous_receipts": {
       "type": "array",
       "maxItems": 128,
-      "items": { "$ref": "https://octopus.local/schemas/local_package_receipt.schema.json" }
+      "items": {
+        "$ref": "https://octopus.local/schemas/local_package_receipt.schema.json"
+      }
     },
     "moves": {
       "type": "array",
@@ -57,50 +79,450 @@
           "state"
         ],
         "properties": {
-          "package_id": { "$ref": "#/$defs/id" },
-          "registry_kind": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "owner": { "$ref": "#/$defs/id" },
-          "target": { "$ref": "#/$defs/relativePath" },
-          "stage": { "$ref": "#/$defs/relativePath" },
-          "backup": { "$ref": "#/$defs/relativePath" },
-          "digest": { "$ref": "#/$defs/digest" },
-          "previous_digest": { "anyOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] },
-          "state": { "enum": ["planned", "staged", "materialized", "backed_up"] }
+          "package_id": {
+            "$ref": "#/$defs/id"
+          },
+          "registry_kind": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "owner": {
+            "$ref": "#/$defs/id"
+          },
+          "target": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "stage": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "backup": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "previous_digest": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "planned",
+              "staged",
+              "materialized",
+              "backed_up"
+            ]
+          }
         },
         "additionalProperties": false
       }
+    },
+    "publications": {
+      "type": "object",
+      "maxProperties": 24576,
+      "propertyNames": {
+        "pattern": "^(stage|commit|undo|discard_stage|discard_target):[0-9]+$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/directoryPublication"
+      }
+    },
+    "file_publications": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/id"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "filePath",
+          "operationId",
+          "expectedBeforeHash",
+          "content"
+        ],
+        "properties": {
+          "filePath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "expectedBeforeHash": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/digest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "publication_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{32}$"
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "schema_version": { "const": 1 } }, "required": ["schema_version"] },
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 1
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
       "then": {
         "properties": {
-          "operation": { "enum": ["install", "remove"] },
-          "moves": { "minItems": 1, "items": { "properties": { "previous_digest": { "$ref": "#/$defs/digest" } } } }
+          "operation": {
+            "enum": [
+              "install",
+              "remove"
+            ]
+          },
+          "moves": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "previous_digest": {
+                  "$ref": "#/$defs/digest"
+                }
+              }
+            }
+          }
         },
-        "not": { "required": ["previous_receipts"] }
+        "not": {
+          "required": [
+            "previous_receipts"
+          ]
+        }
       }
     },
     {
-      "if": { "properties": { "schema_version": { "const": 2 } }, "required": ["schema_version"] },
-      "then": {
-        "required": ["previous_receipts"],
+      "if": {
         "properties": {
-          "operation": { "const": "repair" },
-          "moves": { "items": { "required": ["previous_digest"] } }
+          "schema_version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "required": [
+          "previous_receipts"
+        ],
+        "properties": {
+          "operation": {
+            "const": "repair"
+          },
+          "moves": {
+            "items": {
+              "required": [
+                "previous_digest"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schema_version": {
+            "const": 3
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      },
+      "then": {
+        "required": [
+          "publications",
+          "file_publications",
+          "publication_id"
+        ]
+      },
+      "else": {
+        "allOf": [
+          {
+            "not": {
+              "required": [
+                "publications"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "file_publications"
+              ]
+            }
+          },
+          {
+            "not": {
+              "required": [
+                "publication_id"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "repair"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "required": [
+          "previous_receipts"
+        ],
+        "properties": {
+          "moves": {
+            "items": {
+              "required": [
+                "previous_digest"
+              ]
+            }
+          }
         }
       }
     }
   ],
   "additionalProperties": false,
   "$defs": {
-    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
-    "operationId": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,96}$" },
-    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "operationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{8,96}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
     "relativePath": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._-]+/(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|\\.[A-Za-z0-9._-]{3,320})$"
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "device",
+        "inode"
+      ],
+      "properties": {
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "directoryPreimage": {
+      "type": "object",
+      "required": [
+        "identity",
+        "mode",
+        "digest_algorithm",
+        "entries"
+      ],
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "mode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "digest_algorithm": {
+          "const": "sha256"
+        },
+        "entries": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": {
+            "type": "object",
+            "required": [
+              "relative_path",
+              "kind",
+              "identity",
+              "mode",
+              "bytes",
+              "digest"
+            ],
+            "properties": {
+              "relative_path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "enum": [
+                  "directory",
+                  "file"
+                ]
+              },
+              "identity": {
+                "$ref": "#/$defs/identity"
+              },
+              "mode": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4095
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "digest": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/digest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "directoryMove": {
+      "type": "object",
+      "required": [
+        "source",
+        "destination",
+        "expected"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "destination": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected": {
+          "$ref": "#/$defs/directoryPreimage"
+        }
+      },
+      "additionalProperties": false
+    },
+    "directoryReceipt": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "operation_id",
+        "index",
+        "plan_hash",
+        "movement",
+        "outcome",
+        "error"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 127
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/digest"
+        },
+        "movement": {
+          "$ref": "#/$defs/directoryMove"
+        },
+        "outcome": {
+          "enum": [
+            "applied",
+            "not_applied",
+            "uncertain"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "directoryPublication": {
+      "type": "object",
+      "required": [
+        "moves",
+        "receipts"
+      ],
+      "properties": {
+        "moves": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/directoryMove"
+          }
+        },
+        "receipts": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/directoryReceipt"
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

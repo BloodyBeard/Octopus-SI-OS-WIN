@@ -11,7 +11,7 @@ pub struct PendingSourceIntent {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Withdrawal {
-    predecessor: PendingHandoff,
+    pub(super) predecessor: PendingHandoff,
     predecessor_record: String,
     source: ArtifactRef,
     control: ArtifactRef,
@@ -75,7 +75,9 @@ fn validate_transition(before: &RunRecord, after: &RunRecord, config: &RunAuthor
     let publication = context_publication::is_publication_completion(&prior, &next);
     let previous = &before.interface_state[provider];
     let current = &after.interface_state[provider];
-    if previous.get(RUN_AUTHORING_BINDING) != current.get(RUN_AUTHORING_BINDING)
+    let mut expected = serde_json::to_value(before).map_err(|error| error.to_string())?;
+    result_inputs::cancel_pending_inputs(&mut expected, config, &proof.predecessor)?;
+    if expected["interface_state"][provider.as_str()].get(RUN_AUTHORING_BINDING) != current.get(RUN_AUTHORING_BINDING)
         || !next.terminal || next.source_without_context || next.settlement_of.is_some()
         || !next.dispatch_fenced || next.items.len() != 1
     { return Err("source withdrawal changed its source, topology or terminal closure contract".into()); }
@@ -92,10 +94,9 @@ fn validate_transition(before: &RunRecord, after: &RunRecord, config: &RunAuthor
     let prior_bindings = provider_context_bindings(before, provider)?.iter().map(serde_json::to_value)
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     let prefix = checkpoint_prefix(&before.id, &next.items[0].artifact_id, optional_u64(current, "authoring_generation")?);
-    let mut expected = serde_json::to_value(before).map_err(|error| error.to_string())?;
     let root = expected.as_object_mut().ok_or("withdrawal is not an object")?;
     replace_context_checkpoints(root, config, &before.id, &prefix, if publication { &bindings } else { &prior_bindings })?;
-    if publication { replace_verified_input_checkpoints(root, config, config, &before.id, &prefix, &bindings)?; }
+    if publication && !result_inputs::enabled(config) { replace_verified_input_checkpoints(root, config, config, &before.id, &prefix, &bindings)?; }
     let expected = RunRecord::from_bytes(&serde_json::to_vec(&expected).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     for template in config.checkpoints.iter().filter(|template| template.role.is_provider_input()) {
         let rows = |record: &RunRecord| record.checkpoints.iter().filter(|checkpoint|
@@ -103,9 +104,11 @@ fn validate_transition(before: &RunRecord, after: &RunRecord, config: &RunAuthor
         ).cloned().collect::<Vec<_>>();
         if rows(&expected) != rows(after) { return Err("source withdrawal changed canonical input rows or artifact rights".into()); }
     }
+    let future_outputs = validate_pending_output_frontier(after, provider, &next)?;
     for item in &proof.predecessor.items {
         if after.active_checkpoints.contains(&item.checkpoint.id) || after.checkpoints.iter().any(|checkpoint|
-            after.active_checkpoints.contains(&checkpoint.id) && checkpoint.interface_binding.as_ref().is_some_and(|binding|
+            after.active_checkpoints.contains(&checkpoint.id) && !future_outputs.contains(&checkpoint.id)
+                && checkpoint.interface_binding.as_ref().is_some_and(|binding|
                 binding.interface == *provider && binding.admits(&item.artifact_label))) {
             return Err("withdrawal left an active admission path for its old output".into());
         }
@@ -267,6 +270,7 @@ fn validate_snapshot_evidence(reader: &mut impl CheckedRunEvidenceReader, record
 }
 
 pub(super) fn validate_evidence(reader: &mut impl CheckedRunEvidenceReader, transition: &CheckedRunTransition) -> Result<(), String> {
+    if result_inputs::definition_transition(transition)? { return Ok(()); }
     let after = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
     let Some(next) = proof(&after, &transition.writer.owner)? else { return Ok(()); };
     let before = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
@@ -298,13 +302,14 @@ pub(super) fn validate_saved_attempt(ctx: &InterfaceLiftContext, before: &[u8], 
     let record = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let candidate = RunRecord::from_bytes(after).map_err(|error| error.to_string())?;
     let Some(next) = proof(&candidate, &config.provider_interface)? else { return Ok(()); };
-    validate_transition(&record, &candidate, config)?;
+    let config = attempt_config(&record, config)?;
+    validate_transition(&record, &candidate, &config)?;
     let prior = persisted_pending_handoff(&record, &config.provider_interface)?.ok_or("withdrawal predecessor missing")?;
     let limits = ctx.required_host_io_limits()?;
     let evidence = CheckedRunEvidence { movements_path: &ctx.movements_path, ledger_index_path: &ctx.ledger_index_path, blobs_dir: &ctx.blobs_dir,
         max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes };
     let mut reader = FileCheckedRunReader::open(&evidence, None)?.with_provider_context(ctx);
-    validate_snapshot_evidence(&mut reader, &record, config, &next)?;
+    validate_snapshot_evidence(&mut reader, &record, &config, &next)?;
     if context_publication::is_publication_completion(&prior, &next) { return Ok(()); }
     let proof = next.withdrawal.as_ref().expect("selected proof");
     if proof.predecessor_record != ContentHash::of_bytes(before).to_hex() { return Err("withdrawal private attempt changed its preimage".into()); }
@@ -341,7 +346,7 @@ fn validate_absence(ctx: &InterfaceLiftContext, record: &RunRecord, proof: &With
     Ok(())
 }
 
-fn dispatch_path(ctx: &InterfaceLiftContext, record: &RunRecord, item: &PendingHandoffItem) -> PathBuf {
+pub(super) fn dispatch_path(ctx: &InterfaceLiftContext, record: &RunRecord, item: &PendingHandoffItem) -> PathBuf {
     let key = serde_json::to_vec(&(record.id.clone(), item)).expect("serializable pending coordinate");
     ctx.interface_var_dir().join("handoff-dispatch").join(format!("{}.json", ContentHash::of_bytes(&key).to_hex()))
 }
@@ -474,6 +479,7 @@ impl ProviderOutputHandoff {
         authored.pending_handoff.withdrawal = Some(Box::new(proof.clone()));
         let mut value: serde_json::Value = serde_json::from_str(&authored.content).map_err(|error| error.to_string())?;
         value["interface_state"][self.config.provider_interface.as_str()]["pending_handoff"] = serde_json::to_value(&authored.pending_handoff).map_err(|error| error.to_string())?;
+        result_inputs::cancel_pending_inputs(&mut value, &self.config, &proof.predecessor)?;
         let prefix = checkpoint_prefix(&record.id, &authored.pending_handoff.items[0].artifact_id, correlation_generation(&record.id, &authored.correlation_id)?);
         let bindings = provider_context_bindings(&record, &self.config.provider_interface)?.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         replace_context_checkpoints(value.as_object_mut().ok_or("withdrawal is not an object")?, &self.config, &record.id, &prefix, &bindings)?;

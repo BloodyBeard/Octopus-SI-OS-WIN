@@ -1,5 +1,6 @@
 mod interface_life;
 mod life_ownership;
+pub mod runtime_instance;
 
 pub use life_ownership::InterfaceLifeOwnership;
 
@@ -17,7 +18,7 @@ pub use interface_life::{
 use notify::{RecursiveMode, Watcher};
 use octopus_descriptors::{ArtifactId, InterfaceId};
 use octopus_interfaces::{DeliveryVerdict, Direction, InterfaceArtifactFile, InterfaceDescriptor};
-use octopus_ledger::ArtifactRef;
+use octopus_ledger::{ArtifactDelivery, ArtifactRef};
 use octopus_runtime::ContentHash;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -44,6 +45,13 @@ pub struct InterfaceActivationArrival {
     pub interface: InterfaceId,
     pub evidence: Vec<InterfaceActivationEvidence>,
     pub verdict_tx: Option<tokio::sync::oneshot::Sender<DeliveryVerdict>>,
+    pub retained: Option<RetainedInterfaceArrival>,
+}
+
+#[derive(Debug)]
+pub struct RetainedInterfaceArrival {
+    pub id: String,
+    pub reply: tokio::sync::oneshot::Sender<Result<ArtifactDelivery, String>>,
 }
 
 #[derive(Debug)]
@@ -121,6 +129,7 @@ pub async fn send_arrival(
         interface: interface.clone(),
         evidence,
         verdict_tx,
+        retained: None,
     })
     .await
     .map_err(|_| SendArrivalError)

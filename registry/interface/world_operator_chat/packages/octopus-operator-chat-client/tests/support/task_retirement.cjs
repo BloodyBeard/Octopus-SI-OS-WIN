@@ -10,6 +10,14 @@ const present = async (file) => fs.lstat(file).then(() => true, (error) => {
   if (error.code === "ENOENT") return false;
   throw error;
 });
+const transactions = async directory => {
+  const entries = await fs.readdir(directory);
+  if (entries.includes(".octopus-publication")) {
+    const stat = await fs.lstat(path.join(directory, ".octopus-publication"));
+    assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && !(stat.mode & 0o077));
+  }
+  return entries.filter(name => name !== ".octopus-publication");
+};
 
 async function runFixture(input) {
   const { mode, home, repository, binary, selection, removals, preserved, provider_directory: providerDirectory } = input;
@@ -19,6 +27,10 @@ async function runFixture(input) {
   const { commitProjectionClientAuthoring } = require(path.join(repository, "app/electron/clientWorkspaceAuthoring.cjs"));
   const { recoverWorkspaceTransactions } = require(path.join(repository, "app/electron/workspaceSetup.cjs"));
   const { createTaskRetirementBarrier } = require(path.join(repository, "registry/interface/world_operator_chat/task-retirement.cjs"));
+  const { createStoragePublisher } = require(path.join(repository, "registry/interface/world_operator_chat/publication.cjs"));
+  const publication = createStoragePublisher(binary, (executable, flag, request, maxBuffer) => JSON.parse(execFileSync(executable, [flag], {
+    input: JSON.stringify(request), encoding: "utf8", timeout: 30000, maxBuffer,
+  })));
   const before = new Map(await Promise.all(preserved.map(async (file) => [file, await fs.readFile(file)])));
   const ledger = before.get(path.join(home, "ledger/movements.jsonl"));
   assert.ok(ledger);
@@ -48,6 +60,7 @@ async function runFixture(input) {
         assert.equal(await present(providerDirectory), false, "provider was tombstoned before the caller died");
       }
       return native.withHeldProof(context, async (guard) => operation({
+        ...guard,
         async verify() {
           const proof = await guard.verify();
           heldVerifications += 1;
@@ -58,7 +71,7 @@ async function runFixture(input) {
           assert.equal(proof.ledger_boundary.sha256, digest(ledger));
           for (const row of selection.records) assert.equal(await present(row.file), false);
           if (mode === "interrupt" && !await present(providerDirectory)) {
-            const entries = await fs.readdir(transactionRoot);
+            const entries = await transactions(transactionRoot);
             assert.equal(entries.length, 1);
             const journal = JSON.parse(await fs.readFile(path.join(transactionRoot, entries[0], "journal.json"), "utf8"));
             assert.equal(journal.phase, "published");
@@ -77,7 +90,7 @@ async function runFixture(input) {
     },
   };
   if (mode === "recover") {
-    const result = await recoverWorkspaceTransactions({ octopusHomeRoot: home, registryRoot: registry, retirementBarrier });
+    const result = await recoverWorkspaceTransactions({ octopusHomeRoot: home, registryRoot: registry, publication, retirementBarrier });
     assert.equal(result.recovered, 1);
   } else {
     const plannedRemovals = await Promise.all(removals.map(async (directory) => {
@@ -91,13 +104,13 @@ async function runFixture(input) {
       removals: plannedRemovals,
       publishBarrierPath: selection.records.find((row) => row.run === selection.source_run).file,
       retirement: selection,
-    }, { retirementBarrier });
+    }, { publication, retirementBarrier });
   }
   for (const row of selection.records) assert.equal(await present(row.file), false);
   for (const directory of removals) assert.equal(await present(directory), false);
   for (const [file, bytes] of before) assert.deepEqual(await fs.readFile(file), bytes);
   assert.ok(heldVerifications > 1, "commit/recovery must recheck the real holder during cleanup");
-  const remainingTransactions = (await fs.readdir(transactionRoot)).length;
+  const remainingTransactions = (await transactions(transactionRoot)).length;
   assert.equal(remainingTransactions, 0);
   const receiptRoot = path.join(home, "client-state/workspace/client-authoring-receipts");
   const receipts = await fs.readdir(receiptRoot);

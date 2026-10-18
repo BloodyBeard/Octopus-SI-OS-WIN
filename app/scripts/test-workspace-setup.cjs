@@ -5,19 +5,250 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createProjectionStore, mutateOctopusOsWorkspace } = require("../electron/projection.cjs");
-const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
-const {
-  initializeWorkspace,
-  mutateWorkspaceProject,
-  readWorkspaceSetupState,
-  recoverWorkspaceTransactions,
-  commitClientAuthoringTransaction,
-} = require("../electron/workspaceSetup.cjs");
+const workspaceSetup = require("../electron/workspaceSetup.cjs");
+const projectionAuthoring = require("../electron/clientWorkspaceAuthoring.cjs");
+const { publishFiles, createStoragePublisher } = require("../../registry/interface/world_operator_chat/publication.cjs");
+const withFixturePublisher = options => ({ ...options,
+  publication: Object.hasOwn(options, "publication") ? options.publication : fixtureDirectoryPublisher(options.octopusHomeRoot),
+  publishFiles: Object.hasOwn(options, "publishFiles") ? options.publishFiles : fixtureFilePublisher(options.octopusHomeRoot) });
+const initializeWorkspace = options => workspaceSetup.initializeWorkspace(withFixturePublisher(options));
+const mutateWorkspaceProject = options => workspaceSetup.mutateWorkspaceProject(withFixturePublisher(options));
+const readWorkspaceSetupState = options => workspaceSetup.readWorkspaceSetupState(withFixturePublisher(options));
+const recoverWorkspaceTransactions = options => workspaceSetup.recoverWorkspaceTransactions(withFixturePublisher(options));
+const commitClientAuthoringTransaction = options => workspaceSetup.commitClientAuthoringTransaction(withFixturePublisher(options));
+const commitProjectionClientAuthoring = (home, registry, request, options = {}) =>
+  projectionAuthoring.commitProjectionClientAuthoring(home, registry, request, withFixturePublisher({ octopusHomeRoot: home, ...options }));
+
+function fixtureFilePublisher(home) {
+  return (writes, condition) => publishFiles(writes, async request => {
+    const receipts = [], root = path.join(home, "client-state", "fixture-file-publications");
+    let checked = false;
+    await fs.mkdir(root, { recursive: true });
+    for (const write of request.writes) {
+      const file = path.join(root, crypto.createHash("sha256").update(write.operation_id).digest("hex") + ".json");
+      const prior = await fs.readFile(file, "utf8").then(JSON.parse, error => { if (error.code !== "ENOENT") throw error; return null; });
+      if (prior) {
+        if (JSON.stringify(prior.request) !== JSON.stringify(write)) return { receipts, error: "fixture operation request changed" };
+        receipts.push(prior.receipt);
+        if (prior.receipt.outcome !== "applied") break;
+        continue;
+      }
+      if (request.condition && !checked) {
+        assert.equal(request.condition.octopus_home, await fs.realpath(home));
+        if (await fs.stat(path.join(home, "state/fixture-runtime-owned")).then(() => true, error => { if (error.code !== "ENOENT") throw error; return false; })) {
+          return { receipts, error: "fixture stopped ownership is busy" };
+        }
+        for (const pin of request.condition.preimages.filter(pin => !request.writes.some(write => write.path === pin.path))) {
+          const current = await fs.readFile(pin.path).catch(error => { if (error.code !== "ENOENT") throw error; return null; });
+          if ((current === null ? null : crypto.createHash("sha256").update(current).digest("hex")) !== pin.sha256) {
+            return { receipts, error: "fixture publication dependency changed" };
+          }
+        }
+        checked = true;
+      }
+      const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+      const receipt = { digest_algorithm: "sha256", operation_id: write.operation_id, path: write.path,
+        before_hash: write.expected_before_hash, after_hash: write.content === null ? null : hash(write.content),
+        bytes: write.content === null ? 0 : Buffer.byteLength(write.content), outcome: "applied", error: null };
+      let opened = false;
+      try {
+        const before = await fs.readFile(write.path).catch(error => { if (error.code !== "ENOENT") throw error; return null; });
+        if ((before === null ? null : hash(before)) !== write.expected_before_hash) throw new Error("fixture preimage changed");
+        if (write.content === null) await fs.unlink(write.path);
+        else {
+          await fs.mkdir(path.dirname(write.path), { recursive: true });
+          const handle = await fs.open(write.path, before === null ? "wx" : "w", 0o600);
+          opened = true;
+          try { await handle.writeFile(write.content); await handle.sync(); } finally { await handle.close(); }
+        }
+      } catch (error) { receipt.outcome = opened ? "uncertain" : "not_applied"; receipt.error = error.message; }
+      await fs.writeFile(file, JSON.stringify({ request: write, receipt }));
+      receipts.push(receipt);
+      if (receipt.outcome !== "applied") break;
+    }
+    return { receipts, error: null };
+  }, condition);
+}
+
+function fixtureDirectoryPublisher(home) {
+  const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+  const snapshot = async directory => {
+    const root = await fs.lstat(directory), entries = [];
+    assert.ok(root.isDirectory() && !root.isSymbolicLink());
+    const collect = async relative => {
+      const current = path.join(directory, relative);
+      for (const name of (await fs.readdir(current)).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
+        const child = path.join(current, name), stat = await fs.lstat(child);
+        if (name === ".octopus-publication") { assert.ok(stat.isDirectory() && !stat.isSymbolicLink() && !(stat.mode & 0o077)); continue; }
+        const member = relative ? `${relative}/${name}` : name;
+        const kind = stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : "file";
+        const bytes = kind === "directory" ? null : kind === "symlink" ? await fs.readlink(child, { encoding: "buffer" }) : await fs.readFile(child);
+        entries.push({ relative_path: member, kind, identity: { device: stat.dev, inode: stat.ino }, mode: stat.mode & 0o7777,
+          bytes: bytes === null ? 0 : bytes.length, digest: bytes === null ? null : hash(bytes) });
+        if (kind === "directory") await collect(member);
+      }
+    };
+    await collect("");
+    return { identity: { device: root.dev, inode: root.ino }, mode: root.mode & 0o7777, digest_algorithm: "sha256", entries };
+  };
+  return createStoragePublisher(path.join(home, "fixture-native-publication"), async (_, mode, request) => {
+    if (mode === "--snapshot-directory") return { path: request.path, preimage: await snapshot(request.path) };
+    const root = path.join(home, "client-state/fixture-directory-publications");
+    await fs.mkdir(root, { recursive: true });
+    const operation = mode === "--reclaim-directory" ? request.publication.operation_id : request.operation_id;
+    const file = path.join(root, hash(operation) + ".json");
+    const prior = await fs.readFile(file, "utf8").then(JSON.parse, error => { if (error.code !== "ENOENT") throw error; return null; });
+    if (mode === "--publish-directory-moves") {
+      if (prior) { assert.deepEqual(prior.request, request, "fixture retained directory request changed"); return { receipts: prior.receipts, error: null }; }
+      const receipts = [];
+      for (const [index, movement] of request.moves.entries()) {
+        assert.deepEqual(await snapshot(movement.source), movement.expected, "fixture directory identity changed");
+        await assert.rejects(fs.lstat(movement.destination), { code: "ENOENT" });
+        await fs.rename(movement.source, movement.destination);
+        receipts.push({ schema_version: 1, operation_id: operation, index, plan_hash: hash(JSON.stringify(request.moves)),
+          movement, outcome: "applied", error: null });
+      }
+      await fs.writeFile(file, JSON.stringify({ request, receipts, reclaimed: false }));
+      return { receipts, error: null };
+    }
+    assert.equal(mode, "--reclaim-directory");
+    assert.deepEqual(prior.receipts[request.publication.index], request.publication);
+    if (!prior.reclaimed) {
+      assert.deepEqual(await snapshot(request.tombstone), request.expected, "fixture reclaim identity changed");
+      await fs.rm(request.tombstone, { recursive: true }); prior.reclaimed = true;
+      await fs.writeFile(file, JSON.stringify(prior));
+    } else await assert.rejects(fs.lstat(request.tombstone), { code: "ENOENT" });
+    return { tombstone: request.tombstone, publication: request.publication, reclaimed: true };
+  });
+}
+
+function fixtureCanonical(value) {
+  if (Array.isArray(value)) return `[${value.map(fixtureCanonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${fixtureCanonical(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function fixtureRetirementBarrier(publication) {
+  let active = false;
+  return { async verifyBefore() {}, async withHeldProof(context, operation) {
+    assert.equal(active, false); active = true;
+    const verify = async () => {
+      assert.equal(active, true);
+      return { schema_version: 2, phase: "held", operation_id: context.operation_id, selection_digest: context.selection_digest,
+        directory_inventory_digest: crypto.createHash("sha256").update(fixtureCanonical(context.directory_inventory)).digest("hex"),
+        interface_ids: context.selection.interface_ids, originals: context.originals.map(({ file, expected_digest }) => ({ file, expected_digest })),
+        retired: context.retired, ledger_boundary: context.prior_proof?.ledger_boundary ?? { complete_offset: 0, sequence: 0,
+          sha256: crypto.createHash("sha256").update("").digest("hex") } };
+    };
+    const guard = { verify, ...Object.fromEntries(["snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"].map(method =>
+      [method, async (...args) => { assert.equal(active, true); return publication[method](...args); }])) };
+    try { return await operation(guard); } finally { active = false; }
+  } };
+}
+
+function retirementFixtureOptions(home, publication = fixtureDirectoryPublisher(home)) {
+  return { octopusHomeRoot: home, registryRoot: path.join(home, "registry"),
+    publishFiles: fixtureFilePublisher(home), retirementBarrier: fixtureRetirementBarrier(publication),
+    publication: Object.fromEntries(["snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"].map(method =>
+      [method, () => assert.fail(`retirement escaped its held child through ${method}`)])) };
+}
+
+async function verifyDirectoryPublicationRecovery(temporary) {
+  for (const fault of ["move", "tombstone_gc", "root_move", "root_gc", "foreign", "legacy", "legacy_hold", "inventory_missing", "inventory_refused"]) {
+    const home = path.join(temporary, `directory-${fault}`), registry = path.join(home, "registry");
+    await createFixture(home, registry);
+    const run = path.join(home, "state/runs/task.json"), provider = path.join(registry, "interface/provider");
+    const content = JSON.stringify({ id: "task", worker: "worker", ee: "ee", interface_state: { provider: {}, client: { provider_runtime_interface: "provider" } } });
+    const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+    await fs.mkdir(path.dirname(run), { recursive: true }); await fs.writeFile(run, content);
+    const directories = [provider, path.join(home, "interfaces/provider"), path.join(registry, "tool/owned"), path.join(registry, "artifact/owned")];
+    for (const directory of directories) { await fs.mkdir(directory, { recursive: true }); await fs.writeFile(path.join(directory, "owned.json"), "{}\n"); }
+    await fs.writeFile(path.join(registry, "tool/owned/tool.json"), JSON.stringify({ id: "owned", interface: "provider" }));
+    await fs.writeFile(path.join(registry, "artifact/owned/artifact.json"), JSON.stringify({ id: "owned", run: "task", owner_interface: "provider" }));
+    await fs.writeFile(path.join(provider, "octopus_os.json"), JSON.stringify({ schema_version: 1, workspace: "octopus_os", interface: "provider", owner_interface: "client" }));
+    await fs.writeFile(path.join(provider, "code_mode.json"), JSON.stringify({ context: { mode: "persistent" } }));
+    await fs.mkdir(path.join(provider, ".octopus-publication"), { mode: 0o700 });
+    const operationId = `directory_${fault}_12345678`, publication = fixtureDirectoryPublisher(home), events = [];
+    const interrupted = { ...publication,
+      async publishDirectoryMoves(id, moves) {
+        const receipts = await publication.publishDirectoryMoves(id, moves); events.push({ id, moves });
+        if (["move", "foreign", "legacy", "legacy_hold"].includes(fault) && id.includes(":remove:") || fault === "root_move" && id.includes(":cleanup:")) {
+          throw new Error("fixture lost directory movement verdict");
+        }
+        return receipts;
+      },
+      async reclaimDirectory(target, receipt, expected) {
+        await publication.reclaimDirectory(target, receipt, expected);
+        if (fault === "tombstone_gc" && receipt.operation_id.includes(":remove:") || fault === "root_gc" && receipt.operation_id.includes(":cleanup:")) {
+          throw new Error("fixture lost directory reclaim verdict");
+        }
+      } };
+    const options = retirementFixtureOptions(home, interrupted);
+    let fileEffects = 0;
+    if (fault.startsWith("inventory_")) {
+      options.publishFiles = async writes => { fileEffects += writes.length; return fixtureFilePublisher(home)(writes); };
+      if (fault === "inventory_missing") await fs.unlink(path.join(provider, "code_mode.json"));
+      else options.retirementBarrier.verifyBefore = async context => {
+        assert.equal(context.directory_inventory.removals.length, 2);
+        assert.ok(context.directory_inventory.originals.some(original => original.file.endsWith("code_mode.json")));
+        throw new Error("fixture native inventory refused before Run writes");
+      };
+    }
+    const removals = await Promise.all(directories.map(async destination => {
+      const stat = await fs.lstat(destination);
+      return { destination, type: "directory", expectedDev: stat.dev, expectedIno: stat.ino, tag: destination };
+    }));
+    const selection = { schema_version: 1, source_run: "task", interface_ids: ["provider", "worker"], records: [{ run: "task", file: run,
+      expected_digest: hash(content), worker: "worker", ee: "ee", role: "source", provider_interface: "provider", target_run: "task" }] };
+    const commit = workspaceSetup.commitClientAuthoringTransaction({ ...options, plan: { operationId, label: "retirement directory recovery",
+      writes: [{ destination: run, expectedBeforeDigest: hash(content), content: null, tag: "task", publishBarrier: true }], removals, retirement: selection } });
+    if (fault.startsWith("inventory_")) {
+      await assert.rejects(commit, fault === "inventory_missing" ? /ENOENT/ : /inventory refused before Run writes/);
+      assert.equal(fileEffects, 0); assert.equal(await fs.readFile(run, "utf8"), content);
+      for (const directory of directories) assert.ok(await fs.lstat(directory));
+      continue;
+    }
+    await assert.rejects(commit, /lost directory/);
+    const transaction = path.join(home, "client-state/workspace/transactions", operationId), journalFile = path.join(transaction, "journal.json");
+    if (["foreign", "legacy", "legacy_hold"].includes(fault)) {
+      const journal = JSON.parse(await fs.readFile(journalFile)), tombstone = path.join(transaction, journal.removals[0].tombstone);
+      if (fault === "foreign") {
+        await fs.writeFile(path.join(tombstone, "foreign"), "retain foreign data");
+        await assert.rejects(recoverWorkspaceTransactions(retirementFixtureOptions(home)), /identity changed/);
+        assert.equal(await fs.readFile(path.join(tombstone, "foreign"), "utf8"), "retain foreign data");
+      } else {
+        if (fault === "legacy") { journal.schema_version = 2; for (const removal of journal.removals) delete removal.publication; }
+        else { journal.retirement.schema_version = 1; delete journal.retirement.directory_inventory;
+          journal.retirement.proof.schema_version = 1; delete journal.retirement.proof.directory_inventory_digest; }
+        await fs.writeFile(journalFile, JSON.stringify(journal));
+        await assert.rejects(recoverWorkspaceTransactions(retirementFixtureOptions(home)), error => error.code === "workspace_directory_publication_uncertain");
+        assert.ok(await fs.lstat(tombstone));
+      }
+      continue;
+    }
+    const child = childProcess.spawnSync(process.execPath, [__filename, "directory-recover", home], { encoding: "utf8", timeout: 20000 });
+    assert.equal(child.status, 0, child.stderr);
+    for (const directory of directories) await assert.rejects(fs.lstat(directory), { code: "ENOENT" });
+    const cleanup = JSON.parse(await fs.readFile(path.join(home, "client-state/workspace/directory-cleanup", `${operationId}.json`)));
+    assert.equal(cleanup.schema_version, 4); assert.equal(cleanup.publication.reclaimed, true);
+    assert.equal(cleanup.journal.retirement.proof.schema_version, 2);
+    assert.deepEqual(cleanup.retirement_context.directory_inventory, cleanup.journal.retirement.directory_inventory);
+    assert.equal(cleanup.retirement_context.directory_inventory.removals.length, 2);
+    assert.deepEqual(cleanup.journal.removals[0].publication.moves, events[0].moves);
+    assert.ok(cleanup.journal.removals.every(removal => removal.publication.reclaimed));
+    assert.equal(cleanup.publication.receipts[0].movement.source, transaction);
+    assert.equal((await fs.readdir(path.dirname(transaction))).length, 0);
+  }
+  console.log("workspace directories: same held owner, durable plans, cold receipt/reclaim replay, foreign-data and legacy-proof refusal passed");
+}
 
 async function main() {
   await verifyTerminalBootstrapBoundary();
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-workspace-test-"));
   try {
+    await verifyPublicationRecovery(temporary);
+    await verifyConditionedPublicationRecovery(await fs.realpath(temporary));
+    await verifyDirectoryPublicationRecovery(await fs.realpath(temporary));
     await verifyLiveWorkspaceLock(await fs.realpath(temporary));
     await verifyLinkedTaskRemoval(await fs.realpath(temporary));
     await verifyExistingRootAttachment(temporary);
@@ -735,6 +966,120 @@ async function main() {
   }
 }
 
+async function verifyPublicationRecovery(temporary) {
+  const fixture = path.join(temporary, "publication-recovery");
+  await createFixture(fixture, path.join(fixture, "registry"));
+  const home = await fs.realpath(fixture), registry = path.join(home, "registry"), target = path.join(home, "state/runs/publication.json");
+  const before = '{"before":true}\n', after = '{"after":"café"}\n', hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+  await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, before);
+  const options = { octopusHomeRoot: home, registryRoot: registry, plan: { operationId: "publication_recovery_12345678", label: "publication recovery",
+    removals: [], writes: [{ destination: target, expectedBeforeDigest: hash(before), content: after, tag: "publication", publishBarrier: true }] } };
+  assert.equal((await workspaceSetup.readWorkspaceSetupState({ octopusHomeRoot: home, registryRoot: registry,
+    publishFiles: () => assert.fail("read without a transaction invoked native publication") })).status, "not_configured");
+  await assert.rejects(workspaceSetup.commitClientAuthoringTransaction(options), /native file publisher/);
+  assert.equal(await fs.readFile(target, "utf8"), before);
+  const publisher = fixtureFilePublisher(home), operations = [];
+  const loseReceipt = async writes => { operations.push(writes[0].operationId); await publisher(writes); throw new Error("fixture lost native receipt"); };
+  await assert.rejects(commitClientAuthoringTransaction({ ...options, publishFiles: loseReceipt }), /lost native receipt/);
+  const transaction = path.join(home, "client-state/workspace/transactions", options.plan.operationId), journalPath = path.join(transaction, "journal.json");
+  const retained = await fs.readFile(journalPath, "utf8"), journal = JSON.parse(retained);
+  assert.equal(journal.schema_version, 3); assert.equal(journal.writes[0].publication.receipt, null);
+  assert.equal(new Set(operations).size, 1); assert.equal(await fs.readFile(target, "utf8"), after);
+  const snapshots = await Promise.all([journal.writes[0].before_file, journal.writes[0].after_file].map(file => fs.readFile(path.join(transaction, file))));
+  const legacy = structuredClone(journal); legacy.schema_version = 1; delete legacy.writes[0].publication;
+  await fs.writeFile(journalPath, JSON.stringify(legacy));
+  await assert.rejects(recoverWorkspaceTransactions({ ...options, publishFiles: () => assert.fail("legacy postimage invoked publication") }),
+    error => error.code === "workspace_publication_uncertain");
+  assert.equal(await fs.readFile(target, "utf8"), after);
+  await fs.writeFile(journalPath, retained); await recoverWorkspaceTransactions({ ...options, publishFiles: publisher });
+  const receipt = JSON.parse(await fs.readFile(path.join(home, "client-state/workspace/client-authoring-receipts", options.plan.operationId + ".json")));
+  assert.equal(receipt.publication_evidence.writes[0].publication.receipt.operation_id, operations[0]);
+  assert.equal(receipt.publication_evidence.writes[0].publication.receipt.outcome, "applied");
+  legacy.operation_id = "publication_legacy_12345678"; legacy.writes[0].state = "applied";
+  const legacyRoot = path.join(path.dirname(transaction), legacy.operation_id);
+  for (const [index, file] of [legacy.writes[0].before_file, legacy.writes[0].after_file].entries()) {
+    await fs.mkdir(path.dirname(path.join(legacyRoot, file)), { recursive: true }); await fs.writeFile(path.join(legacyRoot, file), snapshots[index]);
+  }
+  await fs.writeFile(path.join(legacyRoot, "journal.json"), JSON.stringify(legacy));
+  await recoverWorkspaceTransactions({ ...options, publishFiles: () => assert.fail("durable legacy applied write invoked publication") });
+  assert.equal(await fs.readFile(target, "utf8"), after);
+
+  const rollbackFixture = path.join(temporary, "publication-rollback");
+  await createFixture(rollbackFixture, path.join(rollbackFixture, "registry"));
+  const rollbackHome = await fs.realpath(rollbackFixture), rollbackRegistry = path.join(rollbackHome, "registry");
+  const rollbackPublisher = fixtureFilePublisher(rollbackHome), calls = [];
+  await assert.rejects(initializeWorkspace({ octopusHomeRoot: rollbackHome, registryRoot: rollbackRegistry,
+    request: setupRequest("publication_rollback_12345678"), planOperatorSurface: input => fixturePlan(rollbackHome, rollbackRegistry, input),
+    publishFiles: async writes => {
+      calls.push(writes[0]);
+      if (calls.length !== 2) return rollbackPublisher(writes);
+      return publishFiles(writes, async ({ writes: requests }) => ({ receipts: requests.map(write => ({ digest_algorithm: "sha256",
+        operation_id: write.operation_id, path: write.path, before_hash: write.expected_before_hash, after_hash: hash(write.content),
+        bytes: Buffer.byteLength(write.content), outcome: "not_applied", error: "fixture publication refusal" })), error: null }));
+    } }), /fixture publication refusal/);
+  assert.equal(calls.length, 3); assert.notEqual(calls[2].operationId, calls[0].operationId);
+  assert.equal(calls[2].expectedBeforeHash, hash(calls[0].content)); assert.equal(hash(calls[2].content), calls[0].expectedBeforeHash);
+  const rollbackFile = (await fs.readdir(path.join(rollbackHome, "client-state/workspace"))).find(file => file.startsWith("rollback-publication_rollback_"));
+  const rollback = JSON.parse(await fs.readFile(path.join(rollbackHome, "client-state/workspace", rollbackFile)));
+  assert.equal(rollback.writes[0].publication.rollback_receipt.operation_id, calls[2].operationId);
+  assert.equal(rollback.writes[0].publication.rollback_receipt.outcome, "applied");
+  console.log("workspace publication: mandatory lazy publisher, exact retained recovery, legacy uncertainty/applied contract and checked rollback passed");
+}
+
+async function verifyConditionedPublicationRecovery(temporary) {
+  const root = path.join(temporary, "conditioned");
+  await createFixture(root, path.join(root, "registry"));
+  const home = await fs.realpath(root), registry = path.join(home, "registry"), dependency = path.join(home, "state/ee_instances/authority.json");
+  const files = ["first", "second"].map(name => path.join(home, "state/runs", name + ".json"));
+  const before = "original\n", after = "updated\n", hash = text => crypto.createHash("sha256").update(text).digest("hex");
+  await fs.mkdir(path.dirname(files[0]), { recursive: true });
+  await fs.writeFile(dependency, "allowed"); for (const file of files) await fs.writeFile(file, before);
+  const condition = { octopus_home: home, preimages: [{ path: dependency, sha256: hash("allowed") }, ...files.map(path => ({ path, sha256: hash(before) }))] };
+  const request = { label: "conditioned adoption", condition, removals: [], publishBarrierPath: files[1],
+    writes: files.map(file => ({ file, content: after, beforeDigest: hash(before), label: file })) };
+  const publisher = fixtureFilePublisher(home), submissions = [];
+  await assert.rejects(commitProjectionClientAuthoring(home, registry, request, {
+    publishFiles: async (writes, saved) => {
+      assert.deepEqual(saved, condition); submissions.push(writes.map(write => write.operationId));
+      assert.equal(writes.length, 2); await fs.writeFile(dependency, "narrowed"); return publisher(writes, saved);
+    },
+  }), /dependency changed/);
+  assert.deepEqual(await Promise.all(files.map(file => fs.readFile(file, "utf8"))), [before, before]);
+  const transactions = path.join(home, "client-state/workspace/transactions"), [id] = await fs.readdir(transactions);
+  const journalPath = path.join(transactions, id, "journal.json"), journal = JSON.parse(await fs.readFile(journalPath));
+  assert.equal(journal.schema_version, 4); assert.deepEqual(journal.condition, condition);
+  assert.equal(journal.writes.every(write => write.publication.receipt === null), true);
+  await fs.writeFile(dependency, "allowed");
+  await assert.rejects(recoverWorkspaceTransactions({ octopusHomeRoot: home, registryRoot: registry,
+    publishFiles: async (writes, saved) => {
+      submissions.push(writes.map(write => write.operationId)); await publisher(writes, saved);
+      await fs.writeFile(dependency, "changed after original effects"); throw new Error("lost conditioned native verdict");
+    },
+  }), /lost conditioned native verdict/);
+  await fs.writeFile(path.join(home, "state/fixture-runtime-owned"), "held");
+  const child = childProcess.spawn(process.execPath, [__filename, "conditioned-recover", home], { stdio: ["ignore", "pipe", "pipe"] });
+  let output = ""; child.stderr.on("data", bytes => { output += bytes; });
+  const exit = await new Promise(resolve => child.once("exit", resolve)); assert.equal(exit, 0, output);
+  const receipt = JSON.parse(await fs.readFile(path.join(home, "client-state/workspace/client-authoring-receipts", id + ".json")));
+  assert.deepEqual(receipt.publication_evidence.condition, condition);
+  assert.deepEqual(receipt.publication_evidence.writes.map(write => write.publication.receipt.operation_id), submissions[0]);
+  assert.ok(submissions.every(ids => JSON.stringify(ids) === JSON.stringify(submissions[0])));
+  assert.deepEqual(await Promise.all(files.map(file => fs.readFile(file, "utf8"))), [after, after]);
+  await fs.unlink(path.join(home, "state/fixture-runtime-owned"));
+  await fs.writeFile(dependency, "allowed"); for (const file of files) await fs.writeFile(file, before);
+  let rollback = 0;
+  await assert.rejects(commitProjectionClientAuthoring(home, registry, request, { publishFiles: async (writes, saved) => {
+    if (writes.length === 1) { assert.deepEqual(saved, { octopus_home: home, preimages: [] }); rollback++; return publisher(writes, saved); }
+    const [applied] = await publisher([writes[0]], saved);
+    const refused = { digest_algorithm: "sha256", operation_id: writes[1].operationId, path: files[1], before_hash: hash(before),
+      after_hash: hash(after), bytes: Buffer.byteLength(after), outcome: "not_applied", error: "fixture native refusal" };
+    await fs.writeFile(dependency, "narrowed before undo");
+    const failure = new Error(refused.error); failure.publicationReceipts = [applied, refused]; throw failure;
+  } }), /fixture native refusal/);
+  assert.equal(rollback, 1); assert.deepEqual(await Promise.all(files.map(file => fs.readFile(file, "utf8"))), [before, before]);
+  console.log("conditioned publication: zero-effect dependency refusal, durable full batch, cold original receipt replay and stopped checked undo passed");
+}
+
 async function verifyPreludeSnapshotSetup(temporary) {
   const home = path.join(await fs.realpath(temporary), "prelude-snapshot-setup"), registry = path.join(home, "registry");
   await createFixture(home, registry);
@@ -811,7 +1156,7 @@ async function verifyLinkedTaskRemoval(temporary) {
   await assert.rejects(fs.lstat(run), /ENOENT/);
   await assert.rejects(fs.lstat(owned), /ENOENT/);
   assert.equal(await fs.readFile(target, "utf8"), content);
-  for (const mode of ["retired", "unpaired", "referenced", "replaced", "descriptor_changed"]) {
+  for (const mode of ["retired", "unpaired", "referenced", "replaced", "descriptor_changed", "metadata_alias"]) {
     const currentHome = path.join(temporary, `task-removal-${mode}`), currentRegistry = path.join(currentHome, "registry");
     await createFixture(currentHome, currentRegistry);
     const runPath = path.join(currentHome, "state/runs/task.json");
@@ -823,6 +1168,7 @@ async function verifyLinkedTaskRemoval(temporary) {
     await fs.writeFile(path.join(descriptor, "interface.json"), '{"id":"provider"}\n');
     await fs.writeFile(path.join(state, "ledger-cursor.json"), '{"seq":1}\n');
     await fs.symlink(target, path.join(state, "auth.json"));
+    if (mode === "metadata_alias") await fs.symlink(target, path.join(state, ".octopus-publication"));
     if (mode === "referenced") await fs.writeFile(path.join(currentHome, "state/runs/other.json"), '{"interface_state":{"provider":{}}}\n');
     const removal = async (destination) => {
       const identity = await fs.lstat(destination);
@@ -843,11 +1189,7 @@ async function verifyLinkedTaskRemoval(temporary) {
     };
     try {
       const commit = commitClientAuthoringTransaction({ octopusHomeRoot: currentHome, registryRoot: currentRegistry, plan });
-      if (mode === "retired") {
-        await commit;
-        await recoverWorkspaceTransactions({ octopusHomeRoot: currentHome, registryRoot: currentRegistry });
-        await assert.rejects(fs.lstat(state), /ENOENT/);
-      } else await assert.rejects(commit, /identity changed|still referenced/);
+      await assert.rejects(commit, /identity changed|still referenced|publication metadata/);
       assert.equal(await fs.readFile(target, "utf8"), content);
     } finally { fs.unlink = unlink; }
   }
@@ -1660,6 +2002,7 @@ function armProjectCrash(octopusHomeRoot, operationId, publishBarrierPath) {
   );
   const originalRename = fs.rename;
   const originalOpen = fs.open;
+  const originalUnlink = fs.unlink;
   let armed = false;
   fs.rename = async (source, destination) => {
     if (destination === journalPath) {
@@ -1674,6 +2017,10 @@ function armProjectCrash(octopusHomeRoot, operationId, publishBarrierPath) {
   fs.open = async (file, ...args) => {
     if (armed && file === publishBarrierPath) process.exit(73);
     return originalOpen(file, ...args);
+  };
+  fs.unlink = async (file) => {
+    if (armed && file === publishBarrierPath) process.exit(73);
+    return originalUnlink(file);
   };
 }
 
@@ -1691,13 +2038,21 @@ async function verifyProjectionReadinessBarrier(temporary) {
   let mode = "pass";
   let releaseRecovery;
   let beforeReadCalls = 0;
+  let workspaceReadCalls = 0;
   let policyProjectionCalls = 0;
   const recovery = new Promise((resolve) => { releaseRecovery = resolve; });
   let store;
+  await readWorkspaceSetupState({ octopusHomeRoot, registryRoot });
   store = createProjectionStore({
     resolveRepoRoot: () => path.resolve(__dirname, "../.."),
     sourceRegistry: () => registryRoot,
     octopusHome: () => octopusHomeRoot,
+    readWorkspaceSetupState: async options => {
+      workspaceReadCalls += 1;
+      assert.equal(options.octopusHomeRoot, octopusHomeRoot);
+      assert.equal(options.registryRoot, registryRoot);
+      return readWorkspaceSetupState(options);
+    },
     projectEePolicies: async () => {
       policyProjectionCalls += 1;
       return { environments: [], issues: [] };
@@ -1712,6 +2067,7 @@ async function verifyProjectionReadinessBarrier(temporary) {
   const request = { contract_version: 1, method: "projection.ee_instances.list", params: { include_ledger: false } };
   try {
     const initial = await store.read(request);
+    assert.ok(workspaceReadCalls > 0, "projection must use the injected workspace recovery owner");
     assert.equal(initial.ee_instances.some((entry) => entry.ee_id === "ee_after_recovery"), false);
     assert.equal(policyProjectionCalls, 1);
     store.invalidate(false);
@@ -1815,6 +2171,10 @@ async function verifyRetiredConsentSetup() {
     await createFixture(home, registry);
     const request = setupRequest("consent_setup_12345678");
     request.projects = [];
+    const workerId = request.task.workerInterfaceId, workerRoot = path.join(registry, "interface", workerId);
+    await fs.mkdir(workerRoot);
+    await fs.writeFile(path.join(workerRoot, "interface.json"), JSON.stringify({ id: workerId, interface_type: "system", role: "worker", direction: "bidirectional", source_names: ["fixture"] }));
+    await fs.writeFile(path.join(workerRoot, "policy.json"), JSON.stringify({ id: workerId, role_artifacts: [], ceiling: { interfaces: [], tools: [], wek: [], mark_outcomes: [], hard_blocked_tools: [] } }));
     let plannerCalls = 0;
     const options = { octopusHomeRoot: home, registryRoot: registry, request,
       planOperatorSurface: async (input) => { plannerCalls += 1; return fixturePlan(home, registry, input); } };
@@ -1823,7 +2183,7 @@ async function verifyRetiredConsentSetup() {
     assert.equal(plannerCalls, 0);
     await assert.rejects(fs.access(path.join(home, "state", "runs")), { code: "ENOENT" });
     const outcome = await initializeWorkspace(options);
-    assert.equal(plannerCalls, 1);
+    assert.equal(plannerCalls, 2, "Home and root Task surfaces both require preflight");
     const descriptorFile = path.join(registry, "interface", outcome.homeInterfaceId, "interface.json");
     const descriptor = JSON.parse(await fs.readFile(descriptorFile, "utf8"));
     assert.equal(descriptor.interface_driver_config?.private_config?.application_consent_authority, undefined);
@@ -1831,7 +2191,8 @@ async function verifyRetiredConsentSetup() {
     await fs.mkdir(path.join(home, "ledger")); await fs.writeFile(path.join(home, "ledger", "movements.jsonl"), "");
     store = createProjectionStore({ resolveRepoRoot: () => path.resolve(__dirname, "../.."), sourceRegistry: () => registry, octopusHome: () => home, projectEePolicies: () => fixturePolicyProjection(home) });
     const readScope = () => store.read({ contract_version: 1, method: "projection.operator.os.scope" });
-    assert.equal((await readScope()).status, "ready");
+    const initialScope = await readScope();
+    assert.equal(initialScope.status, "ready", JSON.stringify(initialScope));
     const rootFile = path.join(home, "state", "ee_instances", `${outcome.rootEeId}.json`);
     const child = { ...JSON.parse(await fs.readFile(rootFile, "utf8")), ee_id: "ee_model_created", parent_ee_id: outcome.rootEeId, goal: "Model-authored goal" };
     await fs.writeFile(path.join(home, "state", "ee_instances", `${child.ee_id}.json`), JSON.stringify(child));
@@ -1859,6 +2220,7 @@ async function verifyRetiredConsentSetup() {
     await fs.writeFile(descriptorFile, descriptorBytes);
     const receiptFile = path.join(home, "client-state", "workspace", "receipts", `${request.operationId}.json`);
     const receipt = JSON.parse(await fs.readFile(receiptFile, "utf8"));
+    delete receipt.publication_evidence;
     const transaction = path.join(home, "client-state", "workspace", "transactions", request.operationId);
     await fs.mkdir(path.join(transaction, "after"), { recursive: true });
     await fs.mkdir(path.join(transaction, "before"));
@@ -2397,6 +2759,7 @@ async function verifyProjectPolicies() {
     await createFixture(home, registry);
     const planOperatorSurface = (input) => fixturePlan(home, registry, input);
     const workspace = await initializeWorkspace({ octopusHomeRoot: home, registryRoot: registry, request: setupRequest("policy_setup_12345678"), planOperatorSurface });
+    await fs.mkdir(path.join(home, "state/ee_instances/.octopus-publication"), { mode: 0o700 });
     await writeTemplate(registry, "existence", ["project", "operator_space", "existence"]);
     const scope = await fixtureProjectScope(home, registry, workspace);
     const request = { action: "create_project", operationId: "policy_create_12345678", workspace: fixtureWorkspaceIdentity(scope), parentEeId: workspace.rootEeId,
@@ -2428,7 +2791,16 @@ async function verifyProjectPolicies() {
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 }
 
-const execution = process.argv[2] === "task-removal"
+const execution = process.argv[2] === "conditioned-recover"
+  ? recoverWorkspaceTransactions({ octopusHomeRoot: process.argv[3], registryRoot: path.join(process.argv[3], "registry") })
+  : process.argv[2] === "conditioned-publication"
+  ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-conditioned-test-")).then(async temporary => {
+    try { await verifyConditionedPublicationRecovery(await fs.realpath(temporary)); }
+    finally { await fs.rm(temporary, { recursive: true, force: true }); }
+  })
+  : process.argv[2] === "directory-recover"
+  ? recoverWorkspaceTransactions(retirementFixtureOptions(process.argv[3]))
+  : process.argv[2] === "task-removal"
   ? fs.mkdtemp(path.join(os.tmpdir(), "octopus-task-removal-test-")).then(async (temporary) => {
     try { await verifyLinkedTaskRemoval(await fs.realpath(temporary)); }
     finally { await fs.rm(temporary, { recursive: true, force: true }); }

@@ -447,6 +447,7 @@ function getProjectionStore(profile) {
       localPackageLibrary: resolveLocalPackageLibrary,
       octopusHome: resolveOctopusHome,
       beforeRead: profile === "live" ? prepareLiveProjectionRead : undefined,
+      readWorkspaceSetupState: profile === "live" ? readWorkspaceSetupState : undefined,
       nativeBrowserTargetsForProjection: profile === "live" ? nativeBrowserTargetsForProjection : undefined,
       nativeBrowserDownloadsForProjection: profile === "live" ? nativeBrowserDownloadsForProjection : undefined,
       nativeDesktopPresentationsForProjection: profile === "live" ? id => (nativeDesktopPresentations?.snapshot() ?? []).filter(value => value.worker_environment_id === id) : undefined,
@@ -478,6 +479,7 @@ async function prepareLiveProjectionRead() {
   await recoverWorkspaceTransactions({
     octopusHomeRoot: octopusHome,
     registryRoot: path.join(octopusHome, "registry"),
+    publication: workspaceStorage(octopusHome),
     retirementBarrier: {
       verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
       withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
@@ -488,7 +490,7 @@ async function prepareLiveProjectionRead() {
 
 async function taskRetirementBarrier(octopusHome) {
   if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during task retirement");
-  const client = await loadOperatorChatClient();
+  const client = await getOperatorChatClientLoader().load();
   return (await client.loadOperatorTaskLifecycle({
     registryRoot: () => path.join(octopusHome, "registry"), installationRoot: resolveInstallationRoot,
   })).retirementBarrier;
@@ -496,7 +498,8 @@ async function taskRetirementBarrier(octopusHome) {
 
 function readWorkspaceSetupState(options) {
   const octopusHome = options.octopusHomeRoot;
-  return readWorkspaceSetupStateTransaction({ ...options, retirementBarrier: {
+  return readWorkspaceSetupStateTransaction({ ...options,
+    publication: workspaceStorage(octopusHome), retirementBarrier: {
     verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
     withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
   } });
@@ -504,11 +507,21 @@ function readWorkspaceSetupState(options) {
 
 function commitProjectionClientAuthoring(octopusHome, registryRoot, request) {
   return commitProjectionClientAuthoringTransaction(octopusHome, registryRoot, request, {
+    publication: workspaceStorage(octopusHome),
     retirementBarrier: {
       verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
       withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
     },
   });
+}
+
+function workspaceStorage(octopusHome) {
+  const publisher = require("./packageStorage.cjs").createPackageStoragePublisher(resolveLocalPackageRegistry(), resolveInstallationRoot());
+  return Object.freeze(Object.fromEntries(["publishFiles", "snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"].map(method =>
+    [method, async (...args) => {
+      if (resolveOctopusHome() !== octopusHome) throw new Error("Home changed during workspace publication");
+      return publisher[method](...args);
+    }])));
 }
 
 function getCdpViewerManager() {
@@ -1221,6 +1234,7 @@ function createClientSetupOwners() {
             await initializeWorkspace({
               octopusHomeRoot: octopusHome,
               registryRoot,
+              publication: workspaceStorage(octopusHome),
               retirementBarrier: {
                 verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
                 withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
@@ -1246,8 +1260,10 @@ function createClientSetupOwners() {
 
 function clientSetupPackageRoots() {
   const octopusHome = resolveOctopusHome();
+  const sourceRegistryRoot = resolveLocalPackageRegistry();
   return {
-    sourceRegistryRoot: resolveLocalPackageRegistry(),
+    sourceRegistryRoot,
+    publication: require("./packageStorage.cjs").createPackageStoragePublisher(sourceRegistryRoot, resolveInstallationRoot()),
     activeRegistryRoot: path.join(octopusHome, "registry"),
     libraryRoot: resolveLocalPackageLibrary(),
     stateRoot: path.join(octopusHome, "client", "package-state"),
@@ -2621,6 +2637,7 @@ async function initializeRuntimeHost() {
           await assertStopped();
           const registryRoot = path.join(octopusHome, "registry");
           await recoverWorkspaceTransactions({ octopusHomeRoot: octopusHome, registryRoot,
+            publication: workspaceStorage(octopusHome),
             retirementBarrier: {
               verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
               withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
@@ -2631,7 +2648,7 @@ async function initializeRuntimeHost() {
             if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
             const store = createClientProjectionStore("live", { resolveRepoRoot, sourceRegistry: resolveSourceRegistry,
               localPackageRegistry: resolveLocalPackageRegistry, localPackageLibrary: resolveLocalPackageLibrary,
-              octopusHome: () => octopusHome, projectEePolicies });
+              octopusHome: () => octopusHome, projectEePolicies, readWorkspaceSetupState });
             try {
               const scope = await store.read(projectionReadRequest("projection.operator.os.scope"));
               if (scope.status === "invalid") throw new Error(`Native package adoption scope is invalid: ${scope.errors.join("; ")}`);
@@ -3781,6 +3798,7 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
     outcome = await withOperatorWorkspaceTopologyLock(octopusHome, () => initializeWorkspace({
         octopusHomeRoot: octopusHome,
         registryRoot,
+        publication: workspaceStorage(octopusHome),
         retirementBarrier: {
           verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
           withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),
@@ -3817,6 +3835,7 @@ ipcMain.handle("octopus:os-workspace-mutate", async (event, token, request) => {
           return withOperatorWorkspaceTopologyLock(octopusHome, () => mutateWorkspaceProject({
             octopusHomeRoot: octopusHome,
             registryRoot,
+            publication: workspaceStorage(octopusHome),
             retirementBarrier: {
               verifyBefore: (context) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.verifyBefore(context)),
               withHeldProof: (context, operation) => taskRetirementBarrier(octopusHome).then((barrier) => barrier.withHeldProof(context, operation)),

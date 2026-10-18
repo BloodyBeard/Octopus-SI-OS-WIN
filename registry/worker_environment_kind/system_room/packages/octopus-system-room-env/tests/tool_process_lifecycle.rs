@@ -112,16 +112,16 @@ fn ordered_patch_journal_preserves_replay_and_bounds_storage() {
         let dir = effects.join("ordered").join(envelope.artifact.content.to_hex());
         let intent = std::fs::read(dir.join("intent.json")).unwrap();
         let record: Value = serde_json::from_slice(&intent).unwrap();
-        assert_eq!(record["schema_version"], 2);
+        assert_eq!(record["schema_version"], 3);
         assert_eq!(record["batch_content_hash"], ContentHash::of_bytes(&octopus_descriptors::canonical_bytes(&args)).to_hex());
         assert_eq!(record["artifact"], serde_json::to_value(&envelope.artifact).unwrap());
         assert!(record.get("batch").is_none());
         assert!(!dir.join("0.before").exists());
         assert!(!dir.join("0.bytes").exists());
         if generation <= 2 {
-            let retained = ["intent.json", "0.prepared.json", "0.receipt.json"].map(|name| std::fs::read(dir.join(name)).unwrap());
+            let retained = ["intent.json", "0.receipt.json"].map(|name| std::fs::read(dir.join(name)).unwrap());
             assert_eq!(apply(&envelope, &args).unwrap(), receipt);
-            assert_eq!(["intent.json", "0.prepared.json", "0.receipt.json"].map(|name| std::fs::read(dir.join(name)).unwrap()), retained);
+            assert_eq!(["intent.json", "0.receipt.json"].map(|name| std::fs::read(dir.join(name)).unwrap()), retained);
         }
         payload_bytes += serde_json::to_vec(&args).unwrap().len();
         let mut full = args.clone();
@@ -357,8 +357,10 @@ async fn file_write_process_case(ordered: bool) {
     if ordered {
         assert_eq!(std::fs::read_to_string(&peer).unwrap(), "peer generation 2");
         let effects = durable_var_dir.join("file-write-effects/ordered").join(content.to_hex());
-        let applied: Value = serde_json::from_slice(&std::fs::read(effects.join("0.receipt.json")).unwrap()).unwrap();
-        let refused: Value = serde_json::from_slice(&std::fs::read(effects.join("1.receipt.json")).unwrap()).unwrap();
+        let mut applied: Value = serde_json::from_slice(&std::fs::read(effects.join("0.receipt.json")).unwrap()).unwrap();
+        let mut refused: Value = serde_json::from_slice(&std::fs::read(effects.join("1.receipt.json")).unwrap()).unwrap();
+        assert_eq!(applied.as_object_mut().unwrap().remove("publication").unwrap()["digest_algorithm"], "blake3");
+        assert_eq!(refused.as_object_mut().unwrap().remove("publication").unwrap()["outcome"], "not_applied");
         assert_eq!(applied["outcome"], "applied");
         assert_eq!(refused["outcome"], "refused");
         assert_eq!(refused["observed_hash"], ContentHash::of_bytes(b"peer generation 2").to_hex());

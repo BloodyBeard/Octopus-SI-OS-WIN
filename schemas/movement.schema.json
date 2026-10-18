@@ -57,6 +57,37 @@
     }
   },
   "definitions": {
+    "ArrivalFanoutMetadata": {
+      "type": "object",
+      "required": [
+        "arrival_fanout"
+      ],
+      "properties": {
+        "arrival_fanout": {
+          "$ref": "#/definitions/ArrivalFanoutScope"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ArrivalFanoutScope": {
+      "type": "object",
+      "required": [
+        "identity",
+        "targets"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string"
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RuntimeInvocationMetadata"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ArtifactAccess": {
       "type": "object",
       "properties": {
@@ -230,6 +261,14 @@
         "delivery_verdict"
       ],
       "properties": {
+        "delivery_scope_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "delivery_verdict": {
           "$ref": "#/definitions/DeliveryVerdict"
         },
@@ -517,6 +556,14 @@
             }
           ]
         },
+        "delivery_scope_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "grant": {
           "default": {
             "artifact_access": {},
@@ -546,6 +593,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "replaces_arrival_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
         },
         "required_verified_artifacts": {
           "type": "array",
@@ -600,6 +655,14 @@
         "verifier"
       ],
       "properties": {
+        "arrival_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "class": {
           "$ref": "#/definitions/MarkClass"
         },
@@ -680,6 +743,9 @@
     },
     "MovementMetadata": {
       "anyOf": [
+        {
+          "$ref": "#/definitions/ArrivalFanoutMetadata"
+        },
         {
           "$ref": "#/definitions/DeliveryMetadata"
         },

@@ -135,7 +135,7 @@ fn validate_source(reader: &mut impl CheckedRunEvidenceReader, transition: &Chec
     Ok(())
 }
 
-pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId, admitted: &[ArtifactRef]) -> Result<Vec<ArtifactRef>, String> {
+pub(super) fn owner_sources(record: &RunRecord, provider: &InterfaceId) -> Result<Vec<ArtifactRef>, String> {
     let Some(value) = record.interface_state.get(provider).and_then(|state| state.get(RUN_AUTHORING_BINDING)) else { return Ok(Vec::new()); };
     let topology: BoundRunAuthoringTopology = serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
     let mut sources = Vec::new();
@@ -145,6 +145,17 @@ pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &Ch
                 if !sources.contains(&source.artifact) { sources.push(source.artifact); }
             }
         }
+    }
+    Ok(sources)
+}
+
+pub fn bound_sources(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId, admitted: &[ArtifactRef]) -> Result<Vec<ArtifactRef>, String> {
+    let mut sources = Vec::new();
+    if let Some(source) = result_inputs::bound_source(record, provider, checkpoint)? {
+        sources.push(source);
+    }
+    for source in owner_sources(record, provider)? {
+        if !sources.contains(&source) { sources.push(source); }
     }
     if sources.is_empty() { return Ok(sources); }
     let checkpoint = record.checkpoint(checkpoint).ok_or("input source selection has no pinned invocation checkpoint")?;

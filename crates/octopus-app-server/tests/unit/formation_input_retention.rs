@@ -18,12 +18,17 @@ fn blob(blobs: &SharedBlobs, hash: &DescriptorHash) -> Vec<u8> {
 }
 
 fn resolve(
+    registry_root: &Path,
+    ee_instances_root: &Path,
     snapshot: LoadedRegistrySnapshot,
     blobs: SharedBlobs,
 ) -> Result<RunGrantResolution, String> {
     RegistryRunGrantResolver {
         live_registry: Arc::new(RwLock::new(snapshot)),
         blobs,
+        registry_root: registry_root.to_path_buf(),
+        ee_instances_root: ee_instances_root.to_path_buf(),
+        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(registry_root, ee_instances_root).unwrap()))),
     }
     .resolve_run_grant(RunGrantQuery {
         run: &RunId::new("run"),
@@ -75,6 +80,8 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
     );
     let blobs: SharedBlobs = Arc::new(Mutex::new(InMemoryBlobs::new()));
     let first = resolve(
+        &registry,
+        &instances,
         LoadedRegistrySnapshot::load(&registry, &instances).unwrap(),
         blobs.clone(),
     )
@@ -106,6 +113,8 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
         "bootstrap_root":true, "allowed_interfaces":["system_worker_test"]}),
     );
     let current = resolve(
+        &registry,
+        &instances,
         LoadedRegistrySnapshot::load(&registry, &instances).unwrap(),
         blobs.clone(),
     )
@@ -126,7 +135,7 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
         std::fs::write(path, bytes).unwrap();
     }
     let mut historical = LoadedRegistrySnapshot::load(&registry, &instances).unwrap();
-    let replayed = resolve(historical.clone(), blobs.clone()).unwrap();
+    let replayed = resolve(&registry, &instances, historical.clone(), blobs.clone()).unwrap();
     assert_eq!(replayed.grant(), first.grant());
     assert_eq!(replayed.metadata_projection(), first.metadata_projection());
     historical
@@ -135,7 +144,7 @@ fn normalized_formation_inputs_rebuild_the_historical_grant_after_source_changes
         .unwrap()
         .push(b' ');
     assert!(
-        resolve(historical, blobs)
+        resolve(&registry, &instances, historical, blobs)
             .unwrap_err()
             .contains("differs from its pinned hash")
     );
@@ -189,4 +198,53 @@ fn registry_observation_requires_stability_and_propagates_read_failures() {
             Ok(None) => false,
         });
     }
+}
+
+#[test]
+fn admission_guards_only_the_selected_ee_dependency_closure() {
+    use octopus_file_storage::publication::{DigestAlgorithm, PublicationOutcome, WriteGuard};
+    use octopus_runtime::AdmissionSourceGuard;
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("registry");
+    let instances = root.path().join("instances");
+    for kind in REGISTRY_DESCRIPTOR_KINDS {
+        std::fs::create_dir_all(registry.join(kind)).unwrap();
+    }
+    write(&registry.join("interface/worker/interface.json"), json!({
+        "id":"worker", "interface_type":"system", "role":"worker", "direction":"bidirectional", "source_names":["test"]
+    }));
+    write(&registry.join("interface/worker/policy.json"), json!({"id":"worker", "ceiling":{"interfaces":["worker"]}}));
+    write(&registry.join("ee_template/root/ee_template.json"), json!({"id":"root", "goal_class":"root", "bootstrap_root":true, "allowed_interfaces":["worker"], "allowed_child_ee_templates":["root"]}));
+    write(&instances.join("ee_root.json"), json!({"ee_id":"ee_root", "template_name":"root", "parent_ee_id":null, "goal":"root"}));
+    for id in 0..1000 {
+        write(&instances.join(format!("ee_{id}.json")), json!({"ee_id":format!("ee_{id}"), "template_name":"root", "parent_ee_id":"ee_root", "goal":"test"}));
+    }
+    let owner = RegistryRunGrantResolver {
+        live_registry: Arc::new(RwLock::new(LoadedRegistrySnapshot::load(&registry, &instances).unwrap())),
+        blobs: Arc::new(Mutex::new(InMemoryBlobs::new())),
+        fingerprint: Arc::new(Mutex::new(Some(registry_descriptor_fingerprint(&registry, &instances).unwrap()))),
+        registry_root: registry, ee_instances_root: instances.clone(),
+    };
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&serde_json::to_vec(&json!({
+        "id":"run", "ee":"ee_0", "worker":"worker", "trace":"guard", "status":"running", "interface_state":{},
+        "active_checkpoints":["input"], "checkpoints":[{"id":"input", "run":"run", "trace":"guard", "epoch":0,
+        "interface_binding":octopus_policy::AuthoredInterfaceBinding::all(InterfaceId::new("worker")), "artifact_bindings":[], "outbound_interface_bindings":[]}]
+    })).unwrap()).unwrap();
+    let guard = commit::acquire(&owner, &record, &[]).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let publisher = std::thread::spawn(move || {
+        let path = instances.join("ee_999.json");
+        let before = std::fs::read(&path).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        value["goal"] = json!("independent update");
+        let result = WriteGuard::acquire(&path, false).and_then(|guard| {
+            guard.publish("unrelated-ee", Some(&ContentHash::of_bytes(&before).to_hex()), &serde_json::to_vec(&value).unwrap(), DigestAlgorithm::Blake3)
+        });
+        tx.send(result).unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+    guard.validate().unwrap();
+    drop(guard);
+    publisher.join().unwrap();
+    assert_eq!(result.unwrap().unwrap().outcome, PublicationOutcome::Applied);
 }

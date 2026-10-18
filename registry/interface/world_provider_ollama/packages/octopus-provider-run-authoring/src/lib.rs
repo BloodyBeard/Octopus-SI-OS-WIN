@@ -104,6 +104,7 @@ impl From<ProviderEmission> for ProviderHandoffEmission {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderSourceRecovery {
     Process,
+    Bridged { invocation_movement_seq: u64 },
     Completed,
     Interrupted { last_artifact_label: String },
 }
@@ -246,10 +247,12 @@ struct ProviderLedgerEvidenceIndex {
     session_provider_arrivals: HashMap<(String, String, String), BTreeSet<u64>>,
     session_provider_inputs: HashMap<(String, String), BTreeMap<u64, String>>,
     coordinate_arrivals: HashMap<(String, RuntimeCoordinateKey), UniqueEvidence>,
+    pending_arrival_proofs: HashMap<(String, RuntimeCoordinateKey), Movement>,
     mark_arrival_coordinates: HashMap<(String, String, String, u64), UniqueArrivalCoordinate>,
     coordinate_artifacts: HashMap<RuntimeCoordinateKey, Vec<(ArtifactRef, u64)>>,
     coordinate_outbounds: HashMap<RuntimeCoordinateKey, Vec<IndexedOutboundArtifact>>,
     coordinate_marks: HashMap<(String, RuntimeCoordinateKey, String, String), UniqueEvidence>,
+    retained_delivery: pending_delivery::Ledger,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -404,6 +407,9 @@ struct PendingHandoff {
 }
 
 mod context_publication;
+mod pending_delivery;
+mod result_inputs;
+pub use result_inputs::{prepare_provider_result_input_retirement, prepare_provider_result_input_revision};
 mod output_connections;
 mod input_revision;
 pub use input_revision::{declared_owner_input_bindings, prepare_provider_input_revision, prepare_provider_input_rearm, prepare_provider_input_payloads, provider_input_rearm_ready, provider_input_payloads_ready, ProviderInputRevision};
@@ -446,7 +452,7 @@ struct PendingHandoffCheckpoint {
     required_verified_artifacts: Vec<RequiredVerifiedArtifact>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct HandoffArtifactIdentity {
     artifact: ArtifactRef,
     label: String,
@@ -550,6 +556,8 @@ struct BoundRunAuthoringTopology {
 struct RunAuthoringCheckpoint {
     name: String,
     role: RunAuthoringCheckpointRole,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    result_receiving: BTreeMap<String, RequiredVerifiedArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     static_artifact_bindings: Vec<ArtifactId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -569,6 +577,7 @@ enum RunAuthoringCheckpointRole {
     IndependentInput,
     OwnerInput,
     VerifiedInput,
+    ResultInput,
     ProviderArtifactOutput,
     ProviderInterfaceOutput,
     ProviderToolOutput,
@@ -582,7 +591,7 @@ impl RunAuthoringCheckpointRole {
     fn is_provider_input(self) -> bool {
         matches!(
             self,
-            Self::Stable | Self::IndependentInput | Self::OwnerInput | Self::VerifiedInput
+            Self::Stable | Self::IndependentInput | Self::OwnerInput | Self::VerifiedInput | Self::ResultInput
         )
     }
 }
@@ -1002,6 +1011,9 @@ impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
         source_withdrawal::source_snapshot_from_evidence(self.evidence, self.provider_context.as_ref(), record, config, source)
     }
     fn pending_output_payload(&mut self, provider: &InterfaceId, reference: &ArtifactRef, relative: &Path) -> Result<Vec<u8>, String> {
+        if self.evidence.blobs_dir.join(reference.content.to_hex()).try_exists().map_err(|error| error.to_string())? {
+            return self.artifact(reference).map(|(_, payload)| payload);
+        }
         if let Some(ctx) = self.provider_context.as_ref().filter(|ctx| ctx.interface == *provider) {
             if relative.as_os_str().is_empty() || relative.is_absolute() || relative.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
                 return Err("withdrawal closure has an unsafe private artifact path".into());
@@ -1671,7 +1683,7 @@ fn checked_selected_run_advance_state(
     let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let current = RunRecord::from_bytes(after).map_err(|error| error.to_string())?;
     let payload_revision = input_revision::is_payload_revision(&original, &current, &config.provider_interface)?;
-    if writers.is_empty() && !payload_revision
+    if writers.is_empty() && !payload_revision && !result_inputs::enabled(config)
         && payload_artifact_bindings(&original, &config.provider_interface)?.is_empty()
         && payload_artifact_bindings(&current, &config.provider_interface)?.is_empty() {
         if let Some(protected) = output_connections::protected_record(before, after, config)? {
@@ -1775,8 +1787,12 @@ pub fn provider_context_bindings(record: &RunRecord, provider: &InterfaceId) -> 
         .map_err(|error| error.to_string())?;
     topology.validate_identity(record, provider)?;
     validate_checkpoint_topology(record, provider, &topology.checkpoints, None)?;
+    current_context_bindings(record, &topology.checkpoints)
+}
+
+fn current_context_bindings(record: &RunRecord, templates: &[RunAuthoringCheckpoint]) -> Result<Vec<ArtifactBinding>, String> {
     let mut context = None;
-    for template in topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::Stable && template.include_context) {
+    for template in templates.iter().filter(|template| template.role == RunAuthoringCheckpointRole::Stable && template.include_context) {
         let candidates = record.checkpoints.iter().filter(|cp| record.active_checkpoints.contains(&cp.id)
             && checkpoint_record_matches_template(cp, template, &record.id)).collect::<Vec<_>>();
         let [checkpoint] = candidates.as_slice() else { return Err("provider context has no unique stable input".into()); };
@@ -1829,6 +1845,7 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
     let provider = &transition.writer.owner;
+    if result_inputs::definition_transition(transition)? { return Ok(()); }
     source_settlement::validate_checked_transition(&before, &after, &transition.writer)?;
     source_withdrawal::validate_checked_transition(&before, &after, &transition.writer)?;
     if capability_amendment::validate_transition(transition)? { return Ok(()); }
@@ -1874,7 +1891,8 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     };
     let mut expected_roles = roles(&before)?;
     if topology.writer_run.is_none() {
-        for checkpoint in next_topology.checkpoints.iter().filter(|cp| !topology.checkpoints.contains(cp) && cp.role != RunAuthoringCheckpointRole::VerifiedInput) {
+        for checkpoint in next_topology.checkpoints.iter().filter(|cp| !topology.checkpoints.contains(cp)
+            && !matches!(cp.role, RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput)) {
             for id in &checkpoint.static_artifact_bindings {
                 let binding: ArtifactBinding = serde_json::from_value(serde_json::json!({"id": id})).map_err(|error| error.to_string())?;
                 if !expected_roles.contains(&binding) { expected_roles.push(binding); }
@@ -1892,10 +1910,12 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     if new_context != old_context && Some(new_context) != old_context.checked_add(1) { return Err("checked provider context generation skipped".into()); }
     let pending = persisted_pending_handoff(&after,provider)?.ok_or("checked provider write has no pending handoff")?;
     validate_verified_input_change(&topology, &next_topology, &pending)?;
-    next_topology.config(&RunAuthoringProfile {
+    let next_config = next_topology.config(&RunAuthoringProfile {
         file_write_tool: transition.writer.tool.clone(), file_write_label: transition.writer.call_label.clone(),
         file_write_result_label: transition.writer.result_label.clone(), result_timeout_ms: 1,
-    }).validate(provider, &after.id)?;
+    });
+    next_config.validate(provider, &after.id)?;
+    result_inputs::validate_transition(&before, &after, &next_config)?;
     if pending.source_movement_seq >= transition.call.seq.0 || after.status != serde_json::json!(if pending.terminal { "idle" } else { "running" }) {
         return Err("checked provider write has invalid source timing or status".into());
     }
@@ -1909,7 +1929,7 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
         let topology = read(record)?;
         let mut ids = raw_frontier_checkpoint_ids(record.interface_state.get(provider).ok_or("provider state absent")?)?.into_iter().collect::<BTreeSet<_>>();
         for cp in &record.checkpoints {
-            if topology.checkpoints.iter().any(|template| matches!(template.role,RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::VerifiedInput) && checkpoint_record_matches_template(cp,template,&record.id)) {
+            if topology.checkpoints.iter().any(|template| matches!(template.role,RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput) && checkpoint_record_matches_template(cp,template,&record.id)) {
                 ids.insert(cp.id.to_string());
             }
         }
@@ -1923,8 +1943,8 @@ fn preserves_provider_topology(before: &BoundRunAuthoringTopology, after: &Bound
     let mut next = after.clone();
     prior.checkpoints.clear();
     next.checkpoints.clear();
-    let old = before.checkpoints.iter().filter(|cp| cp.role != RunAuthoringCheckpointRole::VerifiedInput).collect::<Vec<_>>();
-    let new = after.checkpoints.iter().filter(|cp| cp.role != RunAuthoringCheckpointRole::VerifiedInput).collect::<Vec<_>>();
+    let old = before.checkpoints.iter().filter(|cp| !matches!(cp.role, RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput)).collect::<Vec<_>>();
+    let new = after.checkpoints.iter().filter(|cp| !matches!(cp.role, RunAuthoringCheckpointRole::VerifiedInput | RunAuthoringCheckpointRole::ResultInput)).collect::<Vec<_>>();
     prior == next && new.starts_with(&old) && new[old.len()..].iter().all(|checkpoint| {
         checkpoint.role == RunAuthoringCheckpointRole::ProviderInterfaceOutput && checkpoint.owner_authoring.is_none()
     })
@@ -2013,6 +2033,7 @@ fn validate_verified_input_change(before: &BoundRunAuthoringTopology, after: &Bo
 }
 
 fn validate_verified_input_transition(reader: &mut impl CheckedRunEvidenceReader, transition: &CheckedRunTransition) -> Result<(), String> {
+    result_inputs::validate_checked(reader, transition)?;
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
     let read = |record: &RunRecord| -> Result<Option<BoundRunAuthoringTopology>, String> {
@@ -2850,8 +2871,10 @@ fn validate_authoring_attempt_source(
     let candidate = RunRecord::from_bytes(content.as_bytes()).map_err(|error| {
         format!("provider authoring failure source call carries a malformed run: {error}")
     })?;
-    source_settlement::validate_transition(record, &candidate, config)?;
-    source_withdrawal::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
+    if !result_inputs::saved_definition_transition(record, &candidate, config)? {
+        source_settlement::validate_transition(record, &candidate, config)?;
+        source_withdrawal::validate_saved_attempt(ctx, record_bytes, content.as_bytes(), config)?;
+    }
     if candidate.id != record.id || candidate.worker != record.worker {
         return Err(
             "provider authoring failure source call carries the wrong run topology".to_string(),
@@ -2878,10 +2901,12 @@ fn validate_authoring_attempt_source(
         return Err("provider authoring source candidate has invalid pending evidence".to_string());
     }
     validate_pending_items_are_active(&candidate, &config.provider_interface, &pending)?;
-    validate_bound_run_authoring_topology(&candidate, config, None)?;
+    let candidate_config = result_inputs::saved_attempt_config(&candidate, config)?;
+    validate_bound_run_authoring_topology(&candidate, &candidate_config, None)?;
+    result_inputs::validate_saved(ctx, record, &candidate, config)?;
     let authoring_result_checkpoint = active_checkpoint_for_role(
         &candidate,
-        config,
+        &candidate_config,
         RunAuthoringCheckpointRole::AuthoringResult,
     )?
     .id
@@ -2889,7 +2914,8 @@ fn validate_authoring_attempt_source(
     let after_hash = ContentHash::of_bytes(content.as_bytes()).to_hex();
     Ok(ValidatedAuthoringAttempt {
         manifest_path,
-        provider_source_movement_seq: pending.source_movement_seq,
+        provider_source_movement_seq: result_inputs::definition_source(record, &candidate, config)?
+            .unwrap_or(pending.source_movement_seq),
         authored: AuthoredRun {
             json_format: call.arguments.json_format,
             content,
@@ -3238,7 +3264,6 @@ impl From<BrowserHistoryOperatorRequest> for OwnerOperatorRequest {
 
 impl serde::Serialize for OwnerOperatorRequest {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::Serialize;
         match &self.subject {
             OwnerApprovalSubject::Application(application) => ApplicationOperatorRequest { schema_version: self.schema_version,
                 request_id: self.request_id.clone(), call_id: self.call_id.clone(), original: self.original.clone(), scope: self.scope.clone(),
@@ -3256,7 +3281,6 @@ impl serde::Serialize for OwnerOperatorRequest {
 
 impl<'de> serde::Deserialize<'de> for OwnerOperatorRequest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::Deserialize;
         let value = serde_json::Value::deserialize(deserializer)?;
         if value.get("consent_offer").is_some() {
             return Err(serde::de::Error::custom("retired Home consent_offer cannot use ordinary permissions"));
@@ -4291,13 +4315,18 @@ fn source_context_payloads_from_cache(
     checkpoint: &octopus_runtime::run_record::CheckpointRecord, template: &RunAuthoringCheckpoint, source: &IndexedOutboundArtifact,
 ) -> Result<(Vec<octopus_interfaces::ArtifactBindingPayload>, BTreeSet<ArtifactId>), String> {
     let mut selected = payload_artifact_bindings(pinned, &config.provider_interface)?;
+    let call_evidence = result_inputs::bound_call_evidence(pinned, &config.provider_interface, &checkpoint.id)?;
+    if let Some(reference) = &call_evidence {
+        if !selected.contains(reference) { selected.push(reference.clone()); }
+    }
     for reference in input_artifacts::bound_sources(pinned, &config.provider_interface, &checkpoint.id, &source.artifact_binding_refs)? {
         if !selected.contains(&reference) { selected.push(reference); }
     }
     validate_payload_read_bindings(&selected, checkpoint, &source.artifact_binding_refs, &source.readable_artifacts, &source.role_artifacts)?;
-    let payloads = source.artifact_binding_refs.iter().map(|artifact| {
+    let mut payloads = source.artifact_binding_refs.iter().map(|artifact| {
         Ok(octopus_interfaces::ArtifactBindingPayload::new(artifact.clone(), read_artifact_ref_payload_from_cache(blobs_dir, limits, artifact)?))
     }).collect::<Result<Vec<_>, String>>()?;
+    payloads.retain(|bound|call_evidence.as_ref() != Some(&bound.artifact));
     let mut static_ids = bound_instruction_sources(&payloads, &selected)?;
     static_ids.extend(selected.iter().map(|reference| reference.id.clone()));
     static_ids.extend(template.static_artifact_bindings.iter().cloned());
@@ -4581,6 +4610,7 @@ impl ProviderHandoffSession {
 
 impl ProviderLedgerEvidenceIndex {
     fn new(interface: InterfaceId, movements_path: PathBuf, max_row_bytes: u64) -> Self {
+        let retained_delivery = pending_delivery::Ledger::new(interface.clone(), movements_path.clone(), max_row_bytes);
         Self {
             interface,
             decoder: DurableMovementDecoder::for_log(&movements_path),
@@ -4601,10 +4631,12 @@ impl ProviderLedgerEvidenceIndex {
             session_provider_arrivals: HashMap::new(),
             session_provider_inputs: HashMap::new(),
             coordinate_arrivals: HashMap::new(),
+            pending_arrival_proofs: HashMap::new(),
             mark_arrival_coordinates: HashMap::new(),
             coordinate_artifacts: HashMap::new(),
             coordinate_outbounds: HashMap::new(),
             coordinate_marks: HashMap::new(),
+            retained_delivery,
         }
     }
 
@@ -4797,6 +4829,13 @@ impl ProviderLedgerEvidenceIndex {
 
     fn note(&mut self, movement: &Movement) -> Result<(), String> {
         let Some(artifact) = movement.artifact.as_ref() else {
+            if movement.kind == MovementKind::InterfaceArrival
+                && movement.from == Endpoint::Interface(self.interface.clone())
+                && movement.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                    .is_some_and(|metadata| metadata.replaces_arrival_seq.is_some())
+            {
+                return Err("provider replacement arrival has no exact artifact".into());
+            }
             return Ok(());
         };
         let artifact_key = artifact_ref_key(artifact);
@@ -4860,11 +4899,48 @@ impl ProviderLedgerEvidenceIndex {
             .insert(movement.seq.0);
         let coordinate = RuntimeCoordinateKey::from_runtime(runtime);
         if movement.kind == MovementKind::InterfaceArrival {
+            let coordinate_key = (artifact_key.clone(), coordinate.clone());
+            let replaced = match metadata.replaces_arrival_seq {
+                Some(sequence) => {
+                    let prior = self.pending_arrival_proofs.get(&coordinate_key)
+                        .filter(|prior| prior.seq.0 == sequence)
+                        .filter(|prior| matches!(self.coordinate_arrivals.get(&coordinate_key),
+                            Some(UniqueEvidence::One(seq)) if *seq == prior.seq.0))
+                        .filter(|prior| octopus_ledger::replaces_pending_interface_arrival(prior, movement))
+                        .ok_or("provider replacement arrival has no unique exact unmarked predecessor")?;
+                    let label = &metadata.checkpoint_admission.as_ref().unwrap().artifact_label;
+                    let candidates = self.coordinate_artifacts.get(&coordinate).into_iter().flatten()
+                        .filter_map(|(artifact, _)| self.pending_arrival_proofs.get(&(artifact_ref_key(artifact), coordinate.clone())))
+                        .filter(|arrival| arrival.invocation_metadata.as_ref().and_then(|metadata| metadata.invocation())
+                            .and_then(|metadata| metadata.checkpoint_admission.as_ref())
+                            .is_some_and(|admission| &admission.artifact_label == label)).count();
+                    if candidates != 1 || !matches!(self.mark_arrival_coordinates.get(&(
+                        artifact_key.clone(), run_key.clone(), coordinate.checkpoint.clone(), coordinate.epoch)),
+                        Some(UniqueArrivalCoordinate::One(existing)) if existing == &coordinate)
+                    {
+                        return Err("provider replacement arrival has ambiguous pending requirement evidence".into());
+                    }
+                    Some(prior.seq.0)
+                }
+                None => None,
+            };
             let context_key = (
                 artifact_key.clone(),
                 run_key.clone(),
                 runtime.interface.as_str().to_string(),
             );
+            if let Some(sequence) = replaced {
+                for sequences in [self.provider_run_arrivals.get_mut(&context_key),
+                    self.session_provider_arrivals.get_mut(&context_key),
+                    self.session_run_movements.get_mut(&(artifact_key.clone(), run_key.clone()))]
+                    .into_iter().flatten()
+                {
+                    sequences.remove(&sequence);
+                }
+                if let Some(artifacts) = self.coordinate_artifacts.get_mut(&coordinate) {
+                    artifacts.retain(|(_, seq)| *seq != sequence);
+                }
+            }
             self.provider_run_arrivals
                 .entry(context_key.clone())
                 .or_default()
@@ -4873,14 +4949,22 @@ impl ProviderLedgerEvidenceIndex {
                 .entry(context_key)
                 .or_default()
                 .insert(movement.seq.0);
-            let coordinate_key = (artifact_key.clone(), coordinate.clone());
-            match self.coordinate_arrivals.entry(coordinate_key) {
+            match self.coordinate_arrivals.entry(coordinate_key.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(UniqueEvidence::One(movement.seq.0));
                 }
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.insert(UniqueEvidence::Repeated);
+                    entry.insert(if replaced.is_some() { UniqueEvidence::One(movement.seq.0) }
+                        else { UniqueEvidence::Repeated });
                 }
+            }
+            if octopus_ledger::interface_arrival_mark_proof_key(movement).is_some()
+                && matches!(self.coordinate_arrivals.get(&coordinate_key),
+                    Some(UniqueEvidence::One(seq)) if *seq == movement.seq.0)
+            {
+                self.pending_arrival_proofs.insert(coordinate_key, movement.clone());
+            } else {
+                self.pending_arrival_proofs.remove(&coordinate_key);
             }
             let mark_coordinate_key = (
                 artifact_key.clone(),
@@ -5052,6 +5136,12 @@ impl ProviderLedgerEvidenceIndex {
             let verifier = mark.verifier.as_str().to_string();
             match arrival {
                 UniqueEvidence::One(seq) if *seq < movement.seq.0 => {
+                    let pending = self.pending_arrival_proofs.get(&(artifact_key.clone(), coordinate.clone()));
+                    if mark.arrival_seq.is_some() || pending.is_some() {
+                        if !pending.is_some_and(|arrival| octopus_ledger::mark_outcome_proves_interface_arrival(arrival, movement)) {
+                            return Err("provider recovery mark does not prove the exact current arrival prefix".into());
+                        }
+                    }
                     Ok((coordinate.clone(), verifier))
                 }
                 UniqueEvidence::One(_) => Err(format!(
@@ -5075,6 +5165,7 @@ impl ProviderLedgerEvidenceIndex {
                 return;
             }
         };
+        self.pending_arrival_proofs.remove(&(artifact_key.clone(), coordinate.clone()));
         let mark_key = (
             artifact_key,
             coordinate,
@@ -5686,6 +5777,7 @@ impl ProviderOutputHandoff {
                 runtime.checkpoint.as_str()
             ).into());
         }
+        result_inputs::validate_invocation(input, &consumed_templates[0])?;
         let consumed_context_free_independent_input = (consumed_templates[0].role
             == RunAuthoringCheckpointRole::IndependentInput
             && !consumed_templates[0].include_context)
@@ -5757,7 +5849,9 @@ impl ProviderOutputHandoff {
             && bound_topology.payload_artifact_bindings == current_topology.payload_artifact_bindings
             && !input_revision::is_payload_revision(&initial_record, &current_record, &config.provider_interface)?
             && bound_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput)
-                .eq(current_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput));
+                .eq(current_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::OwnerInput))
+            && bound_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::ResultInput)
+                .eq(current_topology.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::ResultInput));
         let (coauthor_chain, run_record_evidence_seq) = stable_run_observation(
             &run_path, &current_run_record, ctx.required_host_io_limits()?.max_payload_bytes, || {
                 if independent_input_unchanged {
@@ -5806,7 +5900,11 @@ impl ProviderOutputHandoff {
         let amended_capabilities = capability_amendment::checked_topology_advance(
             &config.provider_interface, &bound_topology, &current_topology, &coauthor_chain,
         )?;
-        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads && !amended_capabilities
+        let advanced_result_inputs = result_inputs::checked_topology_advance(
+            &initial_record, &current_record, &bound_topology, &current_topology,
+            &consumed_templates[0], &runtime.checkpoint, source_movement_seq, &coauthor_chain,
+        )?;
+        let retired_verified_input = !independent_input_unchanged && !added_outputs && !revised_inputs && !revised_payloads && !amended_capabilities && !advanced_result_inputs
             && (current_config != config || current_topology != bound_topology);
         if retired_verified_input {
             validate_retired_verified_input(
@@ -5862,7 +5960,7 @@ impl ProviderOutputHandoff {
                 .iter()
                 .map(|bound| &bound.artifact),
         )?;
-        let input_sources = input_artifacts::bound_sources(&initial_record, &config.provider_interface, &runtime.checkpoint, &input.metadata().map_err(|error| error.to_string())?.artifact_binding_refs)?;
+        let input_sources = input_artifacts::owner_sources(&initial_record, &config.provider_interface)?;
         for bound in &input.artifact_binding_payloads {
             if input_sources.contains(&bound.artifact) && consumes_context {
                 append_artifact(&mut context_artifacts, bound.artifact.id.clone());
@@ -5872,7 +5970,7 @@ impl ProviderOutputHandoff {
         let context_payloads = context_artifact_payloads(&initial_record, input.metadata().map_err(|error| error.to_string())?, &input.artifact_binding_payloads)?;
         let instruction_sources = bound_instruction_sources(&context_payloads, &[])?;
         for bound in &context_payloads {
-            if consumes_context {
+            if consumes_context && consumed_templates[0].role != RunAuthoringCheckpointRole::ResultInput {
                 append_artifact(&mut context_artifacts, bound.artifact.id.clone());
             }
             if instruction_sources.contains(&bound.artifact.id)
@@ -5948,6 +6046,11 @@ impl ProviderOutputHandoff {
             &runtime.checkpoint,
             &granted_tools,
         )?;
+        if consumed_templates[0].role == RunAuthoringCheckpointRole::ResultInput
+            && !matches!(delivery_mode, HandoffDeliveryMode::Rearm)
+        {
+            return Err("result input has no current authority for its checked invocation transition".into());
+        }
         if consumed_context_free_independent_input.is_some()
             && !matches!(delivery_mode, HandoffDeliveryMode::Rearm)
         {
@@ -5991,7 +6094,7 @@ impl ProviderOutputHandoff {
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
-        if !coauthor_chain.is_empty() {
+        if !coauthor_chain.is_empty() && consumed_templates[0].role != RunAuthoringCheckpointRole::ResultInput {
             let mut state = handoff.state.try_lock()
                 .map_err(|_| "new handoff state is already borrowed".to_string())?;
             let publications = handoff.checked_context_publications(&coauthor_chain, &state.run_record_bytes)?;
@@ -6026,7 +6129,7 @@ impl ProviderOutputHandoff {
                 append_artifact(&mut state.context_artifacts, input.artifact.id.clone());
             }
         }
-        {
+        if consumed_templates[0].role != RunAuthoringCheckpointRole::ResultInput {
             let mut state = handoff.state.try_lock()
                 .map_err(|_| "new handoff state is already borrowed".to_string())?;
             handoff.restore_failed_context(&mut state, &coauthor_chain)?;
@@ -6441,6 +6544,7 @@ impl ProviderOutputHandoff {
                 None
             };
             if snapshot_output {
+                result_inputs::validate_snapshot_context(&active.config, &next_context, &next_static_context, &next_session_context)?;
                 artifact = materialize_session_snapshot(
                     &artifact,
                     &next_session_context,
@@ -6564,7 +6668,7 @@ impl ProviderOutputHandoff {
             .checkpoints
             .iter()
             .any(|cp| cp.owner_authoring.is_some());
-        if !has_owner && self.config.payload_artifact_bindings.is_empty() {
+        if !has_owner && self.config.payload_artifact_bindings.is_empty() && !result_inputs::enabled(&self.config) {
             let current = octopus_interfaces::read_artifact_carrier_file_bounded(
                 &self.run_path, self.ctx.required_host_io_limits()?.max_payload_bytes,
             ).map_err(|error| error.to_string())?;
@@ -6592,6 +6696,7 @@ impl ProviderOutputHandoff {
                 let record = RunRecord::from_bytes(&current).map_err(|error| error.to_string())?;
                 let mut advanced = state.clone();
                 let before = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+                result_inputs::validate_source_advance(self, &before, &record, &current)?;
                 let selected = payload_artifact_bindings(&record, &self.config.provider_interface)?;
                 let classified = payload_artifact_bindings(&before, &self.config.provider_interface)?.into_iter()
                     .chain(selected.iter().cloned())
@@ -7094,7 +7199,13 @@ impl ProviderOutputHandoff {
             .map(|(recovery, _)| recovery)
     }
 
-    pub async fn recover_source_with_outcomes(
+    pub fn recover_source_with_outcomes(
+        &self,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<(ProviderSourceRecovery, Vec<ProviderHandoffOutcome>), String>> + '_>> {
+        Box::pin(self.recover_source_with_outcomes_inner())
+    }
+
+    async fn recover_source_with_outcomes_inner(
         &self,
     ) -> Result<(ProviderSourceRecovery, Vec<ProviderHandoffOutcome>), String> {
         if let HandoffDeliveryMode::OneShot(plan) = &self.delivery_mode {
@@ -7105,6 +7216,9 @@ impl ProviderOutputHandoff {
                 .map(|recovery| (recovery, Vec::new()));
         }
         let mut state = self.state.lock().await;
+        if let Some(bridged) = self.bridge_result_input(&mut state).await? {
+            return Ok(bridged);
+        }
         let mut record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| {
             format!(
                 "provider run '{}' current recovery record is malformed: {error}",
@@ -7482,6 +7596,12 @@ impl ProviderOutputHandoff {
     fn restore_checked_context(
         &self, state: &mut HandoffState, current: &RunRecord, chain: &[CheckedRunTransition],
     ) -> Result<(), String> {
+        if self.result_input_template()?.is_some() {
+            let inputs = take_unpublished_context_inputs(state, self.source_movement_seq)?;
+            state.context_artifacts = current_context_artifacts(current, &self.config)?;
+            restore_consumed_context_inputs(state, inputs)?;
+            return Ok(());
+        }
         let mut next = state.clone();
         self.restore_replayed_context(&mut next, current, chain)?;
         self.restore_failed_context(&mut next, chain)?;
@@ -7643,6 +7763,12 @@ impl ProviderOutputHandoff {
         pending: &PendingHandoff,
         publications: &BTreeMap<String, u64>,
     ) -> Result<(), String> {
+        if pending.source_movement_seq != self.source_movement_seq && self.result_input_template()?.is_some() {
+            let inputs = take_unpublished_context_inputs(state, self.source_movement_seq)?;
+            state.context_artifacts = current_context_artifacts(record, &self.config)?;
+            restore_consumed_context_inputs(state, inputs)?;
+            return Ok(());
+        }
         let mut context = state.session_context.clone();
         let mut snapshot_head = state.session_snapshot_head.clone();
         let visible = current_context_artifacts(record, &self.config)?
@@ -8034,8 +8160,16 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         authored: &AuthoredRun,
     ) -> Result<AuthoredRunInstallOutcome, String> {
-        self.require_settlement_output_pin(&authored.pending_handoff)?;
-        source_withdrawal::require_validated_output(state, &authored.pending_handoff)?;
+        let before = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+        let after = RunRecord::from_bytes(authored.content.as_bytes()).map_err(|error| error.to_string())?;
+        let retained_publication = persisted_pending_handoff(&before, &self.config.provider_interface)?
+            .filter(|prior| context_publication::is_publication_completion(prior, &authored.pending_handoff))
+            .map(|prior| self.pending_handoff_evidence(&prior).map(|evidence| evidence.iter().all(Option::is_some)))
+            .transpose()?.unwrap_or(false);
+        if !retained_publication && !result_inputs::saved_definition_transition(&before, &after, &self.config)? {
+            self.require_settlement_output_pin(&authored.pending_handoff)?;
+            source_withdrawal::require_validated_output(state, &authored.pending_handoff)?;
+        }
         if self.config.writer_run.is_some() { return self.install_with_writer_run(state, authored).await; }
         let deadline = Instant::now()
             .checked_add(Duration::from_millis(self.config.result_timeout_ms))
@@ -8058,7 +8192,7 @@ impl ProviderOutputHandoff {
                     ));
                 }
                 if self.authoring_success_evidence(authored, None)?.is_some() {
-                    if self
+                    if result_inputs::enabled(&self.config) || self
                         .config
                         .checkpoints
                         .iter()
@@ -8130,7 +8264,7 @@ impl ProviderOutputHandoff {
             };
             match outcome {
                 AuthoringWriteOutcome::Written => {
-                    if self
+                    if result_inputs::enabled(&self.config) || self
                         .config
                         .checkpoints
                         .iter()
@@ -8227,7 +8361,7 @@ impl ProviderOutputHandoff {
         let mut missing = false;
         for item in &pending.items {
             let (_, expected_ref) = load_pending_artifact(&self.var_dir, item)?;
-            let admitted =
+            let mut admitted =
                 self.session
                     .index()?
                     .admitted_handoff_seq(PendingHandoffLedgerCoordinate {
@@ -8239,6 +8373,9 @@ impl ProviderOutputHandoff {
                         checkpoint: &item.checkpoint.id,
                         epoch: item.checkpoint.epoch,
                     })?;
+            if admitted.is_some() && !self.pending_delivery_complete(pending, item)? {
+                admitted = None;
+            }
             if admitted.is_none() {
                 missing = true;
             } else if missing {
@@ -8272,8 +8409,7 @@ impl ProviderOutputHandoff {
                 });
                 continue;
             }
-            self.record_pending_dispatch(pending, item)?;
-            let verdict = self.ctx.hand_arrival(artifact, Vec::new()).await?;
+            let verdict = self.hand_retained_pending(pending, item, artifact).await?;
             let admitted =
                 self.session
                     .index()?
@@ -8468,6 +8604,7 @@ impl ProviderOutputHandoff {
             next_topology.checkpoints.push(RunAuthoringCheckpoint {
                 name: format!("outgoing_{}", ContentHash::of_bytes(&identity).to_hex()),
                 role: RunAuthoringCheckpointRole::ProviderInterfaceOutput,
+                result_receiving: BTreeMap::new(),
                 static_artifact_bindings: binding.artifact_bindings.clone(), owner_authoring: None,
                 interface_binding: AuthoredInterfaceBinding {
                     interface: self.config.provider_interface.clone(),
@@ -8497,6 +8634,7 @@ impl ProviderOutputHandoff {
                 .checkpoints
                 .extend(carrier.verified_inputs.iter().cloned());
         }
+        let consumed_result_input = result_inputs::prepare(self, &record, outputs, &mut next_topology)?;
         let mut next_config = self.config.clone();
         next_config.checkpoints = next_topology.checkpoints.clone();
         next_config.validate(&self.config.provider_interface, &self.config.run)?;
@@ -8550,14 +8688,14 @@ impl ProviderOutputHandoff {
                 append_artifact(&mut live_context, artifact.clone());
             }
         }
-        let artifact_bindings = live_context
-            .iter()
-            .map(|artifact| serde_json::json!({ "id": artifact }))
-            .collect::<Vec<_>>();
-        let mandatory_role_bindings = mandatory_role_artifacts
-            .iter()
-            .map(|artifact| serde_json::json!({ "id": artifact }))
-            .collect::<Vec<_>>();
+        let existing_bindings = current_context_bindings(&record, &self.config.checkpoints)?;
+        let bind = |ids: &[ArtifactId]| ids.iter().map(|id| {
+            serde_json::to_value(existing_bindings.iter().find(|binding| &binding.id == id).cloned()
+                .unwrap_or_else(|| ArtifactBinding { id: id.clone(), access: Default::default() }))
+                .map_err(|error| error.to_string())
+        }).collect::<Result<Vec<_>, _>>();
+        let artifact_bindings = bind(&live_context)?;
+        let mandatory_role_bindings = bind(&mandatory_role_artifacts)?;
         let authoring_call = self
             .config
             .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringCall)?;
@@ -8590,9 +8728,8 @@ impl ProviderOutputHandoff {
                 checkpoint,
             });
         }
-        for template in next_config.checkpoints.iter().filter(|template| template.role == RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
-            if !pending_items.iter().any(|item| item.checkpoint.interface_binding == template.interface_binding
-                && item.checkpoint.outbound_interface_bindings == template.outbound_interface_bindings) {
+        for template in next_config.checkpoints.iter().filter(|template| retains_future_output(template)) {
+            if !pending_items.iter().any(|item| pending_output_matches_template(item, template)) {
                 let id = format!("{batch_prefix}_{}",template.name);
                 next_frontier_ids.push(id.clone());
                 next_frontier.push(materialize_checkpoint(template,&id,&record.id,&mandatory_role_bindings));
@@ -8655,6 +8792,7 @@ impl ProviderOutputHandoff {
                 &artifact_bindings,
             )?;
         }
+        result_inputs::materialize(root, &record, &self.config, &next_config, &batch_prefix, consumed_result_input.as_ref())?;
         let interface_state = root
             .get_mut("interface_state")
             .and_then(serde_json::Value::as_object_mut)
@@ -9136,6 +9274,8 @@ async fn send_authoring_manifest(
     if !payload.is_object() {
         return Err("interface authoring manifest must be a JSON object".to_string());
     }
+    let text = std::str::from_utf8(manifest_bytes)
+        .map_err(|error| format!("interface authoring manifest is not UTF-8: {error}"))?.to_owned();
     let timeout = Duration::from_millis(config.result_timeout_ms);
     let control_root = ctx.root_slot("app_server_control_root")?;
     let socket =
@@ -9155,8 +9295,6 @@ async fn send_authoring_manifest(
         let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/rpc", stream)
             .await
             .map_err(|error| format!("interface authoring websocket upgrade failed: {error}"))?;
-        let text = serde_json::to_string(&payload)
-            .map_err(|error| format!("interface authoring manifest did not encode: {error}"))?;
         ws.send(WsMessage::Text(text.into()))
             .await
             .map_err(|error| format!("interface authoring send failed: {error}"))?;
@@ -9919,6 +10057,7 @@ fn derived_checkpoint_template(
     Ok(RunAuthoringCheckpoint {
         name,
         role,
+        result_receiving: BTreeMap::new(),
         interface_binding,
         outbound_interface_bindings: checkpoint.outbound_interface_bindings.clone(),
         include_context,
@@ -10069,8 +10208,9 @@ fn validate_checkpoint_topology(
                 checkpoint_id.as_str()
             )
         })?;
-        if checkpoint.inbound_interface() == Some(authoring_call.interface())
+        if (checkpoint.inbound_interface() == Some(authoring_call.interface())
             || checkpoint.inbound_interface() == Some(authoring_result.interface())
+        ) && result_inputs::bound_source(record, provider, &checkpoint.id)?.is_none()
         {
             return Err(format!(
                 "provider run '{}' active checkpoint '{}' shares a provider-owned authoring interface outside the frontier",
@@ -10707,7 +10847,7 @@ impl RunAuthoringConfig {
                 for value in [writer.owner.as_str(),writer.source.as_str(),writer.door.as_str(),&writer.tool,&writer.call_label,&writer.result_label] { non_empty_string(value,"external owner writer")?; }
             }
             if !checkpoint.static_artifact_bindings.is_empty() {
-                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
+                if (checkpoint.include_context && !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::ProviderToolOutput)) || !matches!(checkpoint.role, RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput | RunAuthoringCheckpointRole::OwnerInput | RunAuthoringCheckpointRole::ResultInput | RunAuthoringCheckpointRole::ProviderToolOutput | RunAuthoringCheckpointRole::ProviderInterfaceOutput) {
                     return Err(format!("run_authoring {owner} static artifacts require a declared input or tool/interface output"));
                 }
                 let mut ids = BTreeSet::new();
@@ -10747,6 +10887,7 @@ impl RunAuthoringConfig {
                         return Err(format!("run_authoring {owner} owner input must name an exact provider edge with its declared writer or tool door"));
                     }
                 }
+                RunAuthoringCheckpointRole::ResultInput => {}
                 RunAuthoringCheckpointRole::VerifiedInput => {
                     let [required] = checkpoint.required_verified_artifacts.as_slice() else {
                         return Err(format!(
@@ -10873,6 +11014,7 @@ impl RunAuthoringConfig {
                     }
                 }
             }
+            result_inputs::validate_template(checkpoint, self)?;
         }
         let authoring_call = self.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringCall)?;
         let authoring_result =
@@ -11108,6 +11250,7 @@ impl RunAuthoringConfig {
                 Ok(RunAuthoringCheckpoint {
                     name: format!("transport_dispatch_{attempt}"),
                     role: RunAuthoringCheckpointRole::ProviderTransportDispatch,
+                    result_receiving: BTreeMap::new(),
                     interface_binding: AuthoredInterfaceBinding::all(
                         self.provider_interface.clone(),
                     ),
@@ -11222,6 +11365,7 @@ impl RunAuthoringConfig {
                     &required_verified_artifacts,
                 )?,
                 role: RunAuthoringCheckpointRole::VerifiedInput,
+                result_receiving: BTreeMap::new(),
                 interface_binding,
                 outbound_interface_bindings,
                 include_context: true,
@@ -11320,6 +11464,22 @@ fn pending_output_checkpoint(
     }
 }
 
+fn retains_future_output(template: &RunAuthoringCheckpoint) -> bool {
+    template.role == RunAuthoringCheckpointRole::ProviderInterfaceOutput
+        || (template.role == RunAuthoringCheckpointRole::ProviderToolOutput && !template.result_receiving.is_empty())
+}
+
+fn pending_output_matches_template(item: &PendingHandoffItem, template: &RunAuthoringCheckpoint) -> bool {
+    let mut binding = template.interface_binding.clone();
+    binding.config.artifact_policy = BindingArtifactPolicy::Allow {
+        names: vec![item.artifact_label.clone()], namespaces: Vec::new(),
+    };
+    template.interface_binding.admits(&item.artifact_label)
+        && item.checkpoint.interface_binding == binding
+        && item.checkpoint.outbound_interface_bindings == template.outbound_interface_bindings
+        && item.checkpoint.required_verified_artifacts == template.required_verified_artifacts
+}
+
 fn materialize_pending_checkpoint(
     checkpoint: &PendingHandoffCheckpoint,
     run: &RunId,
@@ -11385,6 +11545,14 @@ fn validate_pending_items_are_active(
     provider: &InterfaceId,
     pending: &PendingHandoff,
 ) -> Result<usize, String> {
+    Ok(validate_pending_output_frontier(record, provider, pending)?.len())
+}
+
+fn validate_pending_output_frontier(
+    record: &RunRecord,
+    provider: &InterfaceId,
+    pending: &PendingHandoff,
+) -> Result<BTreeSet<CheckpointId>, String> {
     let provider_state = record.interface_state.get(provider).ok_or_else(|| {
         format!(
             "provider run '{}' has no interface_state for '{}'",
@@ -11426,9 +11594,8 @@ fn validate_pending_items_are_active(
     let topology: Option<BoundRunAuthoringTopology> = provider_state.get(RUN_AUTHORING_BINDING).cloned()
         .map(serde_json::from_value).transpose().map_err(|e|e.to_string())?;
     if let Some(topology) = &topology { topology.validate_identity(record,provider)?; }
-    let retained = topology.iter().flat_map(|topology| &topology.checkpoints).filter(|template| template.role == RunAuthoringCheckpointRole::ProviderInterfaceOutput
-        && !pending.items.iter().any(|item| item.checkpoint.interface_binding == template.interface_binding
-            && item.checkpoint.outbound_interface_bindings == template.outbound_interface_bindings)).collect::<Vec<_>>();
+    let retained = topology.iter().flat_map(|topology| &topology.checkpoints).filter(|template| retains_future_output(template)
+        && !pending.items.iter().any(|item| pending_output_matches_template(item, template))).collect::<Vec<_>>();
     let mut retained_ids = BTreeSet::new();
     if !retained.is_empty() {
         let topology = topology.as_ref().ok_or("retained output has no immutable topology")?;
@@ -11444,8 +11611,8 @@ fn validate_pending_items_are_active(
         for template in &retained {
             let matches = provider_bound.iter().filter(|checkpoint| checkpoint_record_matches_template(checkpoint,template,&record.id)
                 && checkpoint_role_bindings_match(checkpoint,&roles,template)).collect::<Vec<_>>();
-            let [checkpoint] = matches.as_slice() else { return Err("pending provider lost or duplicated its exact retained interface output/read bindings".into()); };
-            if !retained_ids.insert(checkpoint.id.clone()) { return Err("retained interface outputs overlap one checkpoint".into()); }
+            let [checkpoint] = matches.as_slice() else { return Err("pending provider lost or duplicated its exact retained output/read bindings".into()); };
+            if !retained_ids.insert(checkpoint.id.clone()) { return Err("retained outputs overlap one checkpoint".into()); }
         }
     }
     if provider_bound.len() != pending.items.len() + retained.len() {
@@ -11479,7 +11646,7 @@ fn validate_pending_items_are_active(
             ));
         }
     }
-    Ok(retained.len())
+    Ok(retained_ids)
 }
 fn frontier_checkpoint_ids(
     values: &std::collections::BTreeMap<String, serde_json::Value>,
@@ -12083,49 +12250,8 @@ fn current_context_artifacts(
     record: &RunRecord,
     config: &RunAuthoringConfig,
 ) -> Result<Vec<ArtifactId>, String> {
-    let active = record.active_checkpoints.iter().collect::<BTreeSet<_>>();
-    let mut canonical: Option<Vec<ArtifactId>> = None;
-    for template in config.checkpoints.iter().filter(|template| {
-        template.role == RunAuthoringCheckpointRole::Stable && template.include_context
-    }) {
-        let matches = record
-            .checkpoints
-            .iter()
-            .filter(|checkpoint| active.contains(&checkpoint.id))
-            .filter(|checkpoint| {
-                checkpoint.interface_binding.as_ref() == Some(&template.interface_binding)
-                    && checkpoint.outbound_interface_bindings
-                        == template.outbound_interface_bindings
-                    && checkpoint.required_verified_artifacts
-                        == template.required_verified_artifacts
-            })
-            .collect::<Vec<_>>();
-        if matches.len() != 1 {
-            return Err(format!(
-                "provider context template '{}' matches {} active checkpoints in current run",
-                template.name,
-                matches.len()
-            ));
-        }
-        let artifacts = matches[0]
-            .artifact_bindings
-            .iter()
-            .map(|binding| binding.id.clone())
-            .collect::<Vec<_>>();
-        if let Some(expected) = canonical.as_ref() {
-            if expected != &artifacts {
-                return Err(format!(
-                    "provider context template '{}' carries artifact bindings different from the other provider inputs",
-                    template.name
-                ));
-            }
-        } else {
-            canonical = Some(artifacts);
-        }
-    }
-    canonical.ok_or_else(|| {
-        "run_authoring has no context-bearing stable checkpoints in current run".to_string()
-    })
+    Ok(current_context_bindings(record, &config.checkpoints)?
+        .into_iter().map(|binding| binding.id).collect())
 }
 
 fn current_mandatory_role_artifacts(
@@ -13195,6 +13321,12 @@ pub fn context_artifact_payloads(
 ) -> Result<Vec<octopus_interfaces::ArtifactBindingPayload>, String> {
     let runtime = metadata.runtime.as_ref().ok_or("context projection has no admitted runtime coordinate")?;
     let mut selected = payload_artifact_bindings(record, &runtime.interface)?;
+    if let Some(reference) = result_inputs::bound_call_evidence(record, &runtime.interface, &runtime.checkpoint)? {
+        if metadata.grant.artifact_access.get(reference.id.as_str()) != Some(&octopus_runtime::ArtifactAccess::read_only()) {
+            return Err("result context lost its exact read-only call evidence grant".into());
+        }
+        if !selected.contains(&reference) { selected.push(reference); }
+    }
     for reference in input_artifacts::bound_sources(record, &runtime.interface, &runtime.checkpoint, &metadata.artifact_binding_refs)? {
         if !selected.contains(&reference) { selected.push(reference); }
     }
@@ -14415,6 +14547,90 @@ mod tests {
         assert_eq!(evidence.get(&key).unwrap().movements, BTreeSet::from([2]));
         assert_eq!(scoped.next_seq, 3);
         assert_eq!(scoped.byte_offset, ledger.len() as u64);
+
+        let provider = InterfaceId::new("world_provider_test");
+        let run = RunId::new("run_test");
+        let worker = InterfaceId::new("system_worker_test");
+        let checkpoint = CheckpointId::new("replacement");
+        let mark_id = "provider.output.admitted";
+        let mut prefix = one_shot_movement(0, &artifact, checkpoint.as_str(), MovementKind::InterfaceArrival);
+        let mut metadata = prefix.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+        metadata.runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(b"original snapshot").to_hex());
+        metadata.required_verified_artifacts = vec![serde_json::from_value(serde_json::json!({
+            "mark":mark_id,"artifact_label":"provider.output","verifier":"artifact_exists","params":{}
+        })).unwrap()];
+        metadata.checkpoint_admission = Some(octopus_ledger::CheckpointAdmissionMetadata {
+            artifact_label:"provider.output".into(), required_artifact_labels:vec!["provider.output".into()], complete:false,
+        });
+        prefix.invocation_metadata = Some(metadata.clone().into());
+        let query = |index: &mut ProviderLedgerEvidenceIndex| index.admitted_handoff_seq(PendingHandoffLedgerCoordinate {
+            interface:&provider, run:&run, worker:&worker, artifact:&artifact, required_evidence:Some((mark_id,"artifact_exists")),
+            checkpoint:&checkpoint, epoch:0,
+        });
+        let mark = |sequence: u64, pin: Option<u64>| {
+            let mut movement = one_shot_movement(sequence, &artifact, checkpoint.as_str(),
+                MovementKind::MarkOutcomeAdmitted(mark_id.into()));
+            movement.trace = prefix.trace.clone();
+            let mut proof = movement.invocation_metadata.as_ref().unwrap().mark_outcome().unwrap().clone();
+            proof.arrival_seq = pin;
+            movement.invocation_metadata = Some(proof.into());
+            movement
+        };
+        for mode in ["replacement", "chain", "unmarked", "legacy", "old_pin", "missing_pin", "grant", "bindings",
+            "requirements", "artifact", "predecessor", "repeat", "marked_prior", "ambiguous"] {
+            let path = dir.path().join(format!("{mode}.jsonl"));
+            std::fs::write(&path, format!("{}\n", serde_json::to_string(&prefix).unwrap())).unwrap();
+            let mut index = ProviderLedgerEvidenceIndex::new(provider.clone(), path.clone(), 1_048_576);
+            assert_eq!(query(&mut index).unwrap(), None);
+            let mut rows = vec![prefix.clone()];
+            if mode == "marked_prior" { rows.push(mark(1, Some(0))); }
+            if mode == "ambiguous" {
+                let mut competing = prefix.clone(); competing.seq.0 = 1; competing.lamport.0 = 2;
+                competing.artifact.as_mut().unwrap().content = ContentHash::of_bytes(b"competing candidate");
+                rows.push(competing);
+            }
+            let expected = if mode == "legacy" {
+                rows.push(mark(1, None)); Some(0)
+            } else {
+                let mut replacement = prefix.clone(); replacement.seq.0 = rows.len() as u64; replacement.lamport.0 = replacement.seq.0 + 1;
+                let mut revised = metadata.clone(); revised.replaces_arrival_seq = Some(0);
+                revised.runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(b"current snapshot").to_hex());
+                revised.checkpoint_admission.as_mut().unwrap().complete = true;
+                match mode {
+                    "grant" => revised.grant.interfaces.push("ungranted".into()),
+                    "bindings" => revised.artifact_binding_refs.push(artifact.clone()),
+                    "requirements" => revised.required_verified_artifacts[0].params = serde_json::json!({"changed":true}),
+                    "artifact" => replacement.artifact.as_mut().unwrap().content = ContentHash::of_bytes(b"different candidate"),
+                    "predecessor" => revised.replaces_arrival_seq = Some(99),
+                    "repeat" => revised.replaces_arrival_seq = None,
+                    _ => (),
+                }
+                replacement.invocation_metadata = Some(revised.clone().into()); rows.push(replacement.clone());
+                if mode == "chain" {
+                    revised.replaces_arrival_seq = Some(1);
+                    revised.runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(b"next snapshot").to_hex());
+                    replacement.seq.0 = 2; replacement.lamport.0 = 3; replacement.invocation_metadata = Some(revised.into()); rows.push(replacement);
+                }
+                let current = rows.len() as u64 - 1;
+                if mode != "unmarked" {
+                    rows.push(mark(current + 1, if mode == "old_pin" {Some(0)} else if mode == "missing_pin" {None} else {Some(current)}));
+                }
+                (mode != "unmarked").then_some(current)
+            };
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            for movement in &rows[1..] { writeln!(file, "{}", serde_json::to_string(movement).unwrap()).unwrap(); }
+            file.sync_all().unwrap();
+            let actual = query(&mut index);
+            if !matches!(mode, "replacement" | "chain" | "unmarked" | "legacy") { assert!(actual.is_err(), "{mode}: {actual:?}"); continue; }
+            assert_eq!(actual.unwrap(), expected, "{mode}");
+            let mut cold = ProviderLedgerEvidenceIndex::new(provider.clone(), path, 1_048_576);
+            assert_eq!(query(&mut cold).unwrap(), expected, "cold {mode}");
+            let evidence = index.session_evidence(&run, &provider, std::iter::once(key.clone())).unwrap();
+            assert_eq!(evidence[&key].provider_arrivals, BTreeSet::from([if mode == "chain" {2} else if mode == "legacy" {0} else {1}]));
+            let proved = index.admitted_slot_artifacts(&RuntimeCoordinateKey::new(&run, &worker, &provider, &checkpoint, 0), mark_id, "artifact_exists").unwrap();
+            assert_eq!(proved.iter().map(|proof| proof.arrival_seq).collect::<Vec<_>>(), expected.into_iter().collect::<Vec<_>>());
+        }
     }
 
     fn one_shot_movement(
@@ -16175,6 +16391,26 @@ mod tests {
         }
     }
 
+    fn retained_pending_movements(delivery: &octopus_interface_transport::InterfaceActivationArrival,
+        mut arrival: Movement, snapshot: &str) -> [Movement; 2] {
+        let scope_seq = arrival.seq.0;
+        let mut metadata = arrival.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+        metadata.runtime.as_mut().unwrap().run_record_hash = Some(snapshot.to_string());
+        metadata.delivery_scope_seq = Some(scope_seq);
+        let mut scope = arrival.clone();
+        scope.kind = MovementKind::ArtifactMoved;
+        scope.to = scope.from.clone();
+        scope.invocation_metadata = Some(octopus_ledger::MovementMetadata::ArrivalFanout(octopus_ledger::ArrivalFanoutMetadata {
+            arrival_fanout: octopus_ledger::ArrivalFanoutScope {
+                identity: delivery.retained.as_ref().unwrap().id.clone(), targets: vec![metadata.runtime.clone().unwrap()],
+            },
+        }));
+        arrival.seq.0 += 1;
+        arrival.lamport.0 += 1;
+        arrival.invocation_metadata = Some(metadata.into());
+        [scope, arrival]
+    }
+
     #[test]
     fn run_authoring_result_identity_requires_the_private_correlation_shape() {
         let descriptor = local_profile_descriptor();
@@ -16775,7 +17011,7 @@ mod tests {
                     run: run.clone(), ee: tool_record.ee.clone(), worker: tool_record.worker.clone(),
                     checkpoint: tool.pending_handoff.items[0].checkpoint.id.clone(), interface: provider.clone(),
                     epoch: tool.pending_handoff.items[0].checkpoint.epoch, run_record_hash: Some(hash.to_hex()),
-                }), source_movement_seq: None,
+                }), source_movement_seq: None, delivery_scope_seq: None,
             }));
             rows.push(refusal.clone()); save(&rows);
             recovery.validate_refused_source_handoff(&tool_record, &tool.pending_handoff).unwrap();
@@ -16897,6 +17133,7 @@ mod tests {
                     _ => invalid["interface_state"][provider.as_str()]["pending_handoff"]["items"][0]["checkpoint"]["id"] = serde_json::json!(id),
                 }
                 assert!(output_connections::protected_record(authored.content.as_bytes(), &encode(&invalid), &handoff.config).is_err(), "invalid outgoing mutation {mutation}");
+                assert!(authoring_retry::rebase_authored_run(authored.content.as_bytes(), &encode(&invalid), &publication, &handoff.config, Some(JsonFormat::Compact)).is_err(), "invalid outgoing retry {mutation}");
             }
             let mut input_change = observed;
             input_change["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING]["checkpoints"][0]["include_context"] = serde_json::json!(false);
@@ -17061,7 +17298,7 @@ mod tests {
             runtime.run_record_hash = Some(hash.to_hex());
             refused.invocation_metadata = Some(octopus_ledger::MovementMetadata::Delivery(octopus_ledger::DeliveryMetadata {
                 delivery_verdict: DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::CheckpointSpent, detail: serde_json::json!({}) },
-                runtime: Some(runtime), source_movement_seq: None,
+                runtime: Some(runtime), source_movement_seq: None, delivery_scope_seq: None,
             }));
             let mut refused_rows = rows.clone();
             let save = |rows: &[Movement]| std::fs::write(&rejection_ctx.movements_path,
@@ -17324,6 +17561,15 @@ mod tests {
         profile: &RunAuthoringProfile,
     ) {
         let provider = handoff.config.provider_interface.clone();
+        let context_bindings = provider_context_bindings(
+            &RunRecord::from_bytes(initial).unwrap(),
+            &provider,
+        )
+        .unwrap();
+        let context = context_bindings
+            .iter()
+            .map(|binding| serde_json::to_value(binding).unwrap())
+            .collect::<Vec<_>>();
         let tool_door = InterfaceId::new("system_tool_profile_test");
         let mut consumed = handoff
             .config
@@ -17343,7 +17589,7 @@ mod tests {
                 &consumed,
                 &consumed.name,
                 &handoff.config.run,
-                &[],
+                &context,
             ));
         initial["active_checkpoints"]
             .as_array_mut()
@@ -17352,6 +17598,10 @@ mod tests {
         initial["interface_state"][provider.as_str()][RUN_AUTHORING_BINDING] =
             serde_json::to_value(&handoff.bound_topology).unwrap();
         let initial = serde_json::to_vec(&initial).unwrap();
+        assert_eq!(
+            provider_context_bindings(&RunRecord::from_bytes(&initial).unwrap(), &provider).unwrap(),
+            context_bindings,
+        );
         let output = handoff
             .config
             .checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput)
@@ -18072,6 +18322,7 @@ mod tests {
         config.checkpoints.push(RunAuthoringCheckpoint {
             name: "operation_output".to_string(),
             role: RunAuthoringCheckpointRole::ProviderArtifactOutput,
+            result_receiving: BTreeMap::new(),
             interface_binding: all_binding("world_provider_test"),
             outbound_interface_bindings: vec![names_binding(
                 interface.as_str(),
@@ -18512,14 +18763,29 @@ mod tests {
         .unwrap();
         let result_reader = LedgerTailReader::open_named(&ctx, "run-authoring").unwrap();
         let session = ProviderHandoffSession::new(&ctx).unwrap();
+        let input = InterfaceArtifactFile::write(&emitted, "operator.input", br#"{"text":"produce a batch"}"#).unwrap();
+        std::fs::create_dir_all(&ctx.blobs_dir).unwrap();
+        let source_hash = ContentHash::of_bytes(&run_bytes);
+        std::fs::write(ctx.blobs_dir.join(source_hash.to_hex()), &run_bytes).unwrap();
+        let mut metadata = typed_invocation_metadata(&RunId::new("run_test"), "terminal_input", &ctx.interface, 0);
+        metadata.runtime.as_mut().unwrap().run_record_hash = Some(source_hash.to_hex());
+        let source = Movement {
+            trace: octopus_ledger::TraceId("trace:run_test:terminal_input".into()),
+            kind: MovementKind::InterfaceOutbound,
+            from: Endpoint::Interface("world_input_test".into()),
+            to: Endpoint::Interface(ctx.interface.clone()),
+            artifact: Some(pin_artifact(&input, &ctx.blobs_dir)),
+            invocation_metadata: Some(metadata.clone().into()),
+            ..ledger_row(0)
+        };
         let handoff = ProviderOutputHandoff {
-            invocation_metadata: InvocationMetadata::new(Default::default()),
+            invocation_metadata: metadata,
             ctx,
             config,
             run_path: run_path.clone(),
             hand_in_root: dir.path().join("hand-in"),
             var_dir: var_dir.clone(),
-            source_movement_seq: 17,
+            source_movement_seq: 0,
             source_carries_context: true,
             failed_source: false,
             checked_settlement_output: None,
@@ -18576,10 +18842,10 @@ mod tests {
             &pending,
         )
         .unwrap();
-        let first_movement = pending_movement(0, &pending.items[0], &first_identity.artifact);
+        let first_movement = pending_movement(1, &pending.items[0], &first_identity.artifact);
         std::fs::write(
             &movements_path,
-            format!("{}\n", serde_json::to_string(&first_movement).unwrap()),
+            format!("{}\n{}\n", serde_json::to_string(&source).unwrap(), serde_json::to_string(&first_movement).unwrap()),
         )
         .unwrap();
         std::fs::write(&run_path, initial.content.as_bytes()).unwrap();
@@ -18588,24 +18854,26 @@ mod tests {
         let movements_for_arrival = movements_path.clone();
         let expected_label = second_identity.label.clone();
         let expected_ref = second_identity.artifact.clone();
+        let pending_snapshot = initial.after_hash.clone();
         let arrival = tokio::spawn(async move {
             let output = arrival_rx.recv().await.unwrap();
             assert_eq!(
                 output.artifact.read_manifest().unwrap().label,
                 expected_label
             );
-            let movement = pending_movement(1, &pending_for_arrival.items[1], &expected_ref);
+            let movements = retained_pending_movements(&output,
+                pending_movement(2, &pending_for_arrival.items[1], &expected_ref), &pending_snapshot);
             use std::io::Write as _;
             let mut ledger = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&movements_for_arrival)
                 .unwrap();
-            writeln!(ledger, "{}", serde_json::to_string(&movement).unwrap()).unwrap();
+            for movement in movements { writeln!(ledger, "{}", serde_json::to_string(&movement).unwrap()).unwrap(); }
             ledger.sync_all().unwrap();
             output
-                .verdict_tx
+                .retained
                 .unwrap()
-                .send(DeliveryVerdict::Admitted { seq: 1 })
+                .reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq: 3 } }))
                 .unwrap();
             tokio::time::timeout(Duration::from_millis(25), arrival_rx.recv())
                 .await
@@ -19174,7 +19442,8 @@ mod tests {
                 .unwrap()
                 .clone();
             let writes_for_host = [(next.clone(), call_file, call_bytes, call_seq),
-                (publication.clone(), publication_file, publication_bytes, call_seq + 3)];
+                (publication.clone(), publication_file, publication_bytes, call_seq + 4)];
+            let config_for_host = handoff.config.clone();
             let blobs = blobs_dir.clone();
             let journal = movements_path.clone();
             let path = handoff.run_path.clone();
@@ -19207,6 +19476,25 @@ mod tests {
                 arrival.from =
                     Endpoint::Interface(InterfaceId::new("system_interface_authoring_test"));
                 arrival.artifact = Some(call_ref);
+                let current_record = RunRecord::from_bytes(&current).unwrap();
+                let checkpoint = active_checkpoint_for_role(&current_record, &config_for_host,
+                    RunAuthoringCheckpointRole::AuthoringCall).unwrap();
+                let snapshot = ContentHash::of_bytes(&current);
+                std::fs::write(blobs.join(snapshot.to_hex()), &current).unwrap();
+                let mut metadata = typed_invocation_metadata(&current_record.id, checkpoint.id.as_str(),
+                    checkpoint.inbound_interface().unwrap(), checkpoint.epoch.0);
+                let runtime = metadata.runtime.as_mut().unwrap();
+                runtime.run_record_hash = Some(snapshot.to_hex());
+                runtime.worker = current_record.worker.clone();
+                runtime.ee = current_record.ee.clone();
+                metadata.checkpoint_binding_policy = Some(CheckpointBindingPolicySnapshot {
+                    inbound: checkpoint.interface_binding.clone().unwrap(),
+                    outbound: checkpoint.outbound_interface_bindings.clone(),
+                });
+                metadata.outbound_interface_bindings = checkpoint.outbound_interfaces().cloned().collect();
+                arrival.to = Endpoint::Interface(current_record.worker.clone());
+                arrival.trace = checkpoint.trace.clone();
+                arrival.invocation_metadata = Some(metadata.into());
                 let mut journal = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&journal)
@@ -19260,21 +19548,21 @@ mod tests {
                     pin_artifact(&output.artifact, &blobs_dir),
                     next_identity.artifact
                 );
-                let movement = pending_movement(
+                let movements = retained_pending_movements(&output, pending_movement(
                     call_seq + 2,
                     &next.pending_handoff.items[0],
                     &next_identity.artifact,
-                );
+                ), &next.after_hash);
                 let mut journal = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&movements_path)
                     .unwrap();
-                writeln!(journal, "{}", serde_json::to_string(&movement).unwrap()).unwrap();
+                for movement in movements { writeln!(journal, "{}", serde_json::to_string(&movement).unwrap()).unwrap(); }
                 journal.sync_all().unwrap();
                 output
-                    .verdict_tx
+                    .retained
                     .unwrap()
-                    .send(DeliveryVerdict::Admitted { seq: call_seq + 2 })
+                    .reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq: call_seq + 3 } }))
                     .unwrap();
             };
             let expected_recovery = if terminal {
@@ -19311,7 +19599,7 @@ mod tests {
             assert_eq!(
                 outcomes,
                 vec![ProviderHandoffOutcome::Admitted {
-                    seq: call_seq + 2,
+                    seq: call_seq + 3,
                     artifact: next_identity.artifact.clone()
                 }]
             );
@@ -19332,7 +19620,7 @@ mod tests {
                     .last()
                     .unwrap()
                     .source_movement_seq,
-                Some(call_seq + 2)
+                Some(call_seq + 3)
             );
             if !terminal {
                 assert_eq!(
@@ -19346,7 +19634,7 @@ mod tests {
             assert_eq!(std::fs::read(&movements_path).unwrap(), settled_journal);
             if terminal {
                 let mut next_source = handoff.clone();
-                next_source.source_movement_seq = (call_seq + 5).max(handoff.source_movement_seq + 1);
+                next_source.source_movement_seq = (call_seq + 6).max(handoff.source_movement_seq + 1);
                 let mut early_context = handoff.state.lock().await.clone();
                 let selected = ArtifactId::new("admitted.read");
                 early_context.static_context_artifacts.push(selected.clone());

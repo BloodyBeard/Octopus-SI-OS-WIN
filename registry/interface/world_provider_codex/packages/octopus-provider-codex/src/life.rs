@@ -5,7 +5,7 @@ use std::sync::Arc;
 use octopus_descriptors::{ArtifactId, InterfaceId, RunId};
 use octopus_interface_transport::{InterfaceLifeFuture, InterfaceLiftContext, InterfaceLiftFn};
 use octopus_interfaces::{
-    DeliveryVerdict, InterfaceBoundaryError, InterfaceDescriptor, InterfaceInvocationEnvelope,
+    InterfaceBoundaryError, InterfaceDescriptor, InterfaceInvocationEnvelope,
 };
 use octopus_ledger::{ArtifactRef, ContentHash, Endpoint, MovementKind};
 use octopus_ledger_store::DurableMovementDecoder;
@@ -190,6 +190,13 @@ struct CodexTurnScope<'a> {
 struct ForwardedProviderEmissions {
     outputs: usize,
     dispatches: usize,
+    bridged: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InterruptedResultAdmission {
+    Bridged,
+    Admitted(usize),
 }
 
 type PendingProviderEmission = (
@@ -4895,6 +4902,7 @@ async fn hand_control_result(
             &pinned_run_record,
         ).await?;
         match handoff.recover_source().await? {
+            ProviderSourceRecovery::Bridged { .. } => return Ok(true),
             ProviderSourceRecovery::Completed => {}
             ProviderSourceRecovery::Interrupted {
                 last_artifact_label,
@@ -5171,11 +5179,15 @@ async fn drive_turn_with_retries_inner(
         }
     };
     validate_saved_source_withdrawal(ctx, descriptor, run, &turn, &handoff).await?;
+    let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
+    if matches!(source_recovery, ProviderSourceRecovery::Bridged { .. }) {
+        control.finish();
+        return Ok(());
+    }
     if try_settle_completed_interrupted_result(ctx, descriptor, run, &turn, &handoff, interrupted_effects).await? {
         control.finish();
         return Ok(());
     }
-    let (source_recovery, recovered_outcomes) = handoff.recover_source_with_outcomes().await?;
     // Classify exact, completed duplicate results before interruption arbitration:
     // an older result must neither resolve nor cancel its successor's pending effect.
     if crate::handler::correlated_tool_result(&turn.envelope).map_err(|error| error.to_string())?.is_some()
@@ -5205,6 +5217,10 @@ async fn drive_turn_with_retries_inner(
         .begin_result(run, turn.seq, &turn.envelope)
         .await?;
     let (mut interrupted_after_artifact, mut recovered_handoff_artifacts) = match source_recovery {
+        ProviderSourceRecovery::Bridged { .. } => {
+            control.finish();
+            return Ok(());
+        }
         ProviderSourceRecovery::Process => {
             if !recovered_outcomes.is_empty() {
                 return Err(format!(
@@ -5666,10 +5682,16 @@ async fn drive_turn_with_retries_inner(
                             }
                             emissions.extend(retained_outputs);
                             emissions.push(closure);
-                            forwarded.outputs += admit_interrupted_result(
+                            match admit_interrupted_result(
                                 &ctx, &handoff, control, resolving_interrupted_result.then_some(&interrupted_effects), &run, result_source_movement_seq,
                                 &closure_ref, emissions,
-                            ).await?;
+                            ).await? {
+                                InterruptedResultAdmission::Admitted(count) => forwarded.outputs += count,
+                                InterruptedResultAdmission::Bridged => {
+                                    forwarded.bridged = true;
+                                    return Ok(forwarded);
+                                }
+                            }
                             interrupted_closure = Some(closure_ref);
                             terminal_group_handed = true;
                         }
@@ -5868,6 +5890,7 @@ async fn drive_turn_with_retries_inner(
                 result = &mut receive => (result, forwarder.await),
                 forwarded = &mut forwarder => {
                     match forwarded {
+                        Ok(forwarded) if forwarded.bridged => (Ok(()), Ok(forwarded)),
                         Ok(forwarded) => (receive.await, Ok(forwarded)),
                         Err(error) => {
                             handoff_barrier.finish(Err(error.clone()));
@@ -5880,6 +5903,7 @@ async fn drive_turn_with_retries_inner(
         handoff_barrier.finish(forwarded.as_ref().map(|_| ()).map_err(Clone::clone));
         let forwarded = forwarded?;
         drop(live);
+        if forwarded.bridged { return Ok(()); }
 
         if resolving_interrupted_result {
             if interrupted_effects.reconciled_source(run, turn.seq).await? {
@@ -5935,6 +5959,10 @@ async fn drive_turn_with_retries_inner(
                 let (source_recovery, recovered_outcomes) =
                     handoff.recover_source_with_outcomes().await?;
                 (interrupted_after_artifact, recovered_handoff_artifacts) = match source_recovery {
+                    ProviderSourceRecovery::Bridged { .. } => {
+                        control.finish();
+                        return Ok(());
+                    }
                     ProviderSourceRecovery::Process => {
                         if !recovered_outcomes.is_empty() {
                             return Err(format!(
@@ -6220,8 +6248,9 @@ async fn restore_completed_provider_sources(
             continue;
         }
         if source >= committed_before { continue; }
-        if try_settle_completed_interrupted_result(ctx, descriptor, &run, &turn, &handoff, interrupted).await? { continue; }
         let (recovery, outcomes) = handoff.recover_completed_source_with_outcomes().await?;
+        if matches!(recovery, ProviderSourceRecovery::Bridged { .. }) { continue; }
+        if try_settle_completed_interrupted_result(ctx, descriptor, &run, &turn, &handoff, interrupted).await? { continue; }
         if recovery != ProviderSourceRecovery::Completed { continue; }
         let record = handoff.current_run_record_bytes().await;
         let context = handoff.current_session_context_artifacts().await;
@@ -6308,6 +6337,7 @@ async fn settle_completed_interrupted_result(
         candidate.as_object_mut().ok_or("saved interrupted settlement is not an object")?.remove("session_context");
         if candidate != original { return Err("saved interrupted settlement changed its exact Closing closure".into()); }
         let (recovery, outcomes) = handoff.recover_completed_source_settlement(&proof.predecessor, &materialized_artifact_ref(&closure)?).await?;
+        if matches!(recovery, ProviderSourceRecovery::Bridged { .. }) { return Ok(()); }
         if recovery != ProviderSourceRecovery::Completed { return Err("saved interrupted settlement did not complete its checked source".into()); }
         let admission = interrupted_result_admission(&outcomes)?.ok_or("saved interrupted settlement has no admitted closure")?;
         let (_, bytes) = read_pinned_provider_artifact(ctx, &admission.artifact, "recovered interrupted settlement")?;
@@ -6781,7 +6811,7 @@ async fn admit_interrupted_result(
     source_movement_seq: u64,
     closure: &ArtifactRef,
     emissions: Vec<ProviderEmission>,
-) -> Result<usize, String> {
+) -> Result<InterruptedResultAdmission, String> {
     let terminal = emissions.last().ok_or("interrupted-result group has no terminal closure")?;
     if materialized_artifact_ref(&terminal.artifact)? != *closure {
         return Err("interrupted-result terminal differs from its exact closure".into());
@@ -6789,17 +6819,25 @@ async fn admit_interrupted_result(
     let expected_payload: serde_json::Value = serde_json::from_slice(
         &terminal.artifact.read_payload_bytes().map_err(|error| error.to_string())?,
     ).map_err(|error| error.to_string())?;
+    let native = expected_payload.get("native_terminal_status").is_some();
+    let native_recovery = if native {
+        let recovered = handoff.recover_source_with_outcomes().await?;
+        if matches!(recovered.0, ProviderSourceRecovery::Bridged { .. }) {
+            control.finish();
+            return Ok(InterruptedResultAdmission::Bridged);
+        }
+        Some(recovered)
+    } else { None };
     if let Some(interrupted_effects) = interrupted_effects {
         interrupted_effects.begin_closing(run, source_movement_seq, closure.clone()).await?;
     }
     let expected = emissions.len();
-    let native = expected_payload.get("native_terminal_status").is_some();
     let mut outcomes = Vec::new();
     if native {
         let descriptor = ctx.descriptor_snapshot.as_ref().ok_or("native result admission has no declared provider")?;
         let labels = codex_context_output_labels(descriptor).map_err(|error| error.to_string())?;
         let snapshots = codex_session_snapshot_labels(descriptor).map_err(|error| error.to_string())?;
-        let (recovery, recovered) = handoff.recover_source_with_outcomes().await?;
+        let (recovery, recovered) = native_recovery.ok_or("native result has no source recovery")?;
         outcomes = native_result_admitted_prefix(ctx, run, source_movement_seq, &emissions, &snapshots, &labels)?;
         for outcome in &recovered {
             if !outcomes.iter().any(|admitted| matches!((admitted, outcome),
@@ -6876,7 +6914,7 @@ async fn admit_interrupted_result(
         }
     }
     control.finish();
-    Ok(outcomes.len())
+    Ok(InterruptedResultAdmission::Admitted(outcomes.len()))
 }
 
 fn required_policy_u32(envelope: &InterfaceInvocationEnvelope, name: &str) -> Result<u32, String> {

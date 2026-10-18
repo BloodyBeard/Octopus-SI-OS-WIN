@@ -58,23 +58,23 @@ pub(super) fn rejected_write_waits_for_the_earlier_peer(
 async fn refused_failure_returns_exactly_once_from_the_retained_install() {
     for case in [FrontierCase::RefusedFailurePretty, FrontierCase::RefusedFailure] {
     tokio::time::timeout(std::time::Duration::from_secs(30),
-        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(case)))
-        .await.unwrap().unwrap();
+        run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(case)))
+        .await.unwrap();
     }
 }
 
 #[tokio::test]
 async fn nested_failure_retains_its_admitted_carrier_across_cold_and_delivered_replay() {
     tokio::time::timeout(std::time::Duration::from_secs(75),
-        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::NestedFailure)))
-        .await.unwrap().unwrap();
+        run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::NestedFailure)))
+        .await.unwrap();
 }
 
 #[tokio::test]
 async fn readiness_failure_survives_its_consumed_checkpoint_without_reexecution() {
     tokio::time::timeout(std::time::Duration::from_secs(45),
-        tokio::spawn(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::ReadinessFailure)))
-        .await.unwrap().unwrap();
+        run_local_fixture(routed_frontiers_use_actual_runtime_and_file_write(FrontierCase::ReadinessFailure)))
+        .await.unwrap();
 }
 
 pub(super) async fn actual_readiness_failure_return(

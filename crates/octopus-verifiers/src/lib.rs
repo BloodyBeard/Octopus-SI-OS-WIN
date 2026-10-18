@@ -273,6 +273,9 @@ fn collect_package_files(
                 "source": error.to_string()
             })
         })?;
+        if entry.file_name() == octopus_file_storage::publication::COORDINATION_DIRECTORY {
+            continue;
+        }
         paths.push(entry.path());
     }
     paths.sort();

@@ -66,8 +66,10 @@ impl ProviderOutputHandoff {
         };
         stable_run_observation(&self.run_path, current_bytes, limits.max_payload_bytes, || {
             let start = concurrent_writer_evidence_start(&evidence, &self.run_path, &original, &before, sequence, &writers)?;
-            let chain = checked_run_file_chain_state(&evidence, &self.run_path, &before,
-                current_bytes, start, &writers)?;
+            let mut reader = FileCheckedRunReader::open(&evidence, Some(start))?.with_provider_context(&self.ctx);
+            let scan_start = reader.next_sequence();
+            let chain = checked_run_file_chain_with_reader(&mut reader, &self.run_path, &before,
+                CheckedRunTarget::Snapshot(current_bytes), start, scan_start, None, &writers, &[], None, None)?;
             let mut previous = persisted_pending_handoff(&original, &self.config.provider_interface)?;
             let mut sources = BTreeMap::new();
             if let Some(prior) = &previous {
@@ -200,7 +202,10 @@ impl ProviderOutputHandoff {
         };
         let chain = stable_run_observation(&self.run_path, current, limits.max_payload_bytes, || {
             let start = concurrent_writer_evidence_start(&evidence, &self.run_path, &original, &before, self.source_movement_seq, &writers)?;
-            checked_run_file_chain_state(&evidence, &self.run_path, &before, current, start, &writers)
+            let mut reader = FileCheckedRunReader::open(&evidence, Some(start))?.with_provider_context(&self.ctx);
+            let scan_start = reader.next_sequence();
+            checked_run_file_chain_with_reader(&mut reader, &self.run_path, &before,
+                CheckedRunTarget::Snapshot(current), start, scan_start, None, &writers, &[], None, None)
         }).map_err(String::from)?;
         if chain.is_empty() {
             return Err("overtaken provider source has no checked authoring chain".into());

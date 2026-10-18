@@ -18,6 +18,9 @@ const validatePackageTransaction = validators.compile(packageTransactionSchema);
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const PREPARED_TRANSACTION_ROOT = /^\.prepare\.([A-Za-z0-9_-]{8,96})\.[a-f0-9]{12}$/;
+const PREPARATION_PUBLICATION_FILE = /^\.prepare\.([A-Za-z0-9_-]{8,96})\.([a-f0-9]{32})\.json$/;
+const TRANSACTION_PUBLICATION_TEMP = /^\.\.(?:cleanup\.[A-Za-z0-9_-]{8,96}|prepare\.[A-Za-z0-9_-]{8,96}\.[a-f0-9]{32})\.json\.[0-9]+\.[a-f0-9]{12}\.tmp$/;
+const CLEANUP_PUBLICATION_FILE = /^\.cleanup\.([A-Za-z0-9_-]{8,96})\.json$/;
 const CLEANUP_TRANSACTION_ROOT = /^\.cleanup\.([A-Za-z0-9_-]{8,96})\.[a-f0-9]{12}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
 const MAX_CONFIGURATION_BYTES = 2 * 1024 * 1024;
@@ -918,6 +921,7 @@ function normalizeRoots(options) {
     stateRoot: path.resolve(stateRoot),
     receiptsRoot: path.join(path.resolve(stateRoot), "receipts"),
     transactionsRoot: path.join(path.resolve(stateRoot), "transactions"),
+    publication: options?.publication,
   };
 }
 
@@ -1960,6 +1964,10 @@ async function snapshotDirectory(rootValue, options = {}) {
       const relative = path.join(relativeDirectory, entry.name);
       if (SOURCE_EXCLUDES.has(entry.name)) { excludedEntries.push(absolute); continue; }
       const stat = await fs.lstat(absolute);
+      if (entry.name === ".octopus-publication") {
+        if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error(`Invalid private publication directory: ${absolute}`);
+        continue;
+      }
       if (stat.isSymbolicLink()) throw new Error(`local package contains a symbolic link: ${absolute}`);
       if (stat.isDirectory()) {
         directories.push(relative);
@@ -2059,7 +2067,10 @@ async function installResolvedPackages(roots, entries, operation) {
   })));
   let journal = {
     schema: "octopus.local_package_transaction",
-    schema_version: 1,
+    schema_version: 3,
+    publication_id: crypto.randomBytes(16).toString("hex"),
+    publications: {},
+    file_publications: {},
     operation: "install",
     operation_id: operation.operationId,
     ...(operation.packId ? { pack_id: operation.packId } : {}),
@@ -2094,7 +2105,7 @@ async function installResolvedPackages(roots, entries, operation) {
           phase: "copying",
           percent: totalFiles ? Math.round(copiedFiles / totalFiles * 70) : 70,
         });
-      });
+      }, roots, journalPath, journal);
       const staged = await snapshotDirectory(stage);
       if (staged.digest !== move.digest) throw new Error(`staged owner '${move.target}' does not match its source`);
       journal.moves[index].state = "staged";
@@ -2112,9 +2123,7 @@ async function installResolvedPackages(roots, entries, operation) {
     for (const [index, move] of journal.moves.entries()) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
-      if (await pathExists(target)) throw new Error(`package owner target appeared during commit: ${move.target}`);
-      await renameDirectoryExclusive(stage, target);
-      await syncDirectory(path.dirname(target));
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
       journal.moves[index].state = "materialized";
       await writeJournal(journalPath, journal);
       reportProgress(operation.onProgress, {
@@ -2138,12 +2147,12 @@ async function installResolvedPackages(roots, entries, operation) {
       });
     }
     await verifyMaterializedMoves(roots, journal.moves);
-    await writeReceipts(roots, journal.receipts);
+    await publishPackageReceipts(roots, journalPath, journal);
     journal.phase = "receipts_written";
     await writeJournal(journalPath, journal);
     journal.phase = "committed";
     await writeJournal(journalPath, journal);
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
+    await removeTransactionRoot(transactionRoot, roots);
   } catch (error) {
     let recovery;
     try {
@@ -2262,7 +2271,10 @@ async function repairResolvedPackages(roots, entries, operation) {
   }));
   let journal = {
     schema: "octopus.local_package_transaction",
-    schema_version: 2,
+    schema_version: 3,
+    publication_id: crypto.randomBytes(16).toString("hex"),
+    publications: {},
+    file_publications: {},
     operation: "repair",
     operation_id: operation.operationId,
     phase: "prepared",
@@ -2297,7 +2309,7 @@ async function repairResolvedPackages(roots, entries, operation) {
           phase: "copying",
           percent: totalFiles ? Math.round(copiedFiles / totalFiles * 55) : 55,
         });
-      });
+      }, roots, journalPath, journal);
       const staged = await snapshotDirectory(stage);
       if (staged.digest !== move.digest) throw new Error(`staged repair owner '${move.target}' does not match its authored content`);
       journal.moves[index].state = "staged";
@@ -2317,29 +2329,7 @@ async function repairResolvedPackages(roots, entries, operation) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
       const backup = resolveTransactionPath(roots, move.backup);
-      if (await pathExists(backup)) throw new Error(`package repair backup appeared during update: ${move.backup}`);
-      if (move.previous_digest === null) {
-        if (await pathExists(target)) throw new Error(`package owner target appeared during update: ${move.target}`);
-      } else {
-        const current = await snapshotDirectory(target);
-        if (current.digest !== move.previous_digest) {
-          throw new Error(`package owner '${move.target}' changed during repair`);
-        }
-        assertNoExcludedActiveEntries(current);
-        await renameDirectoryExclusive(target, backup);
-        await syncDirectory(path.dirname(target));
-        reportProgress(operation.onProgress, {
-          operationId: operation.operationId,
-          packageId: move.package_id,
-          operation: "repair",
-          phase: "backing_up",
-          percent: Math.round(56 + index / journal.moves.length * 34),
-        });
-        journal.moves[index].state = "backed_up";
-        await writeJournal(journalPath, journal);
-      }
-      await renameDirectoryExclusive(stage, target);
-      await syncDirectory(path.dirname(target));
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
         packageId: move.package_id,
@@ -2370,7 +2360,7 @@ async function repairResolvedPackages(roots, entries, operation) {
         percent: 96,
       });
     }
-    await reconcileRepairReceipts(roots, journal);
+    await publishPackageReceipts(roots, journalPath, journal);
     for (const candidate of pending) {
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
@@ -2382,10 +2372,10 @@ async function repairResolvedPackages(roots, entries, operation) {
     }
     journal.phase = "receipts_written";
     await writeJournal(journalPath, journal);
-    await removeRepairBackups(roots, journal.moves);
+    await removeRepairBackups(roots, journal);
     journal.phase = "committed";
     await writeJournal(journalPath, journal);
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
+    await removeTransactionRoot(transactionRoot, roots);
   } catch (error) {
     let recovery;
     try {
@@ -2542,7 +2532,10 @@ async function removeResolvedPackages(roots, entries, operation) {
   })));
   let journal = {
     schema: "octopus.local_package_transaction",
-    schema_version: 1,
+    schema_version: 3,
+    publication_id: crypto.randomBytes(16).toString("hex"),
+    publications: {},
+    file_publications: {},
     operation: "remove",
     operation_id: operation.operationId,
     phase: "prepared",
@@ -2557,12 +2550,7 @@ async function removeResolvedPackages(roots, entries, operation) {
     for (const [index, move] of journal.moves.entries()) {
       const target = resolveTransactionPath(roots, move.target);
       const backup = resolveTransactionPath(roots, move.backup);
-      if (await pathExists(backup)) throw new Error(`package removal backup already exists: ${move.backup}`);
-      const current = await snapshotDirectory(target);
-      if (current.digest !== move.digest) throw new Error(`package owner '${move.target}' changed during removal`);
-      assertNoExcludedActiveEntries(current);
-      await renameDirectoryExclusive(target, backup);
-      await syncDirectory(path.dirname(target));
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
       journal.moves[index].state = "backed_up";
       await writeJournal(journalPath, journal);
       reportProgress(operation.onProgress, {
@@ -2586,19 +2574,17 @@ async function removeResolvedPackages(roots, entries, operation) {
     }
     for (const move of journal.moves) {
       if (await pathExists(resolveTransactionPath(roots, move.target))
-        || await directoryDigestIfPresent(resolveTransactionPath(roots, move.backup)) !== move.digest) {
+        || (await snapshotDirectory(resolveTransactionPath(roots, move.backup))).digest !== move.digest) {
         throw new Error(`package owner '${move.target}' changed before removal commit`);
       }
     }
-    await removeReceipts(roots, journal.receipts);
+    await publishPackageReceipts(roots, journalPath, journal);
     journal.phase = "receipts_written";
     await writeJournal(journalPath, journal);
-    for (const move of journal.moves) {
-      await removeMatchingDirectory(resolveTransactionPath(roots, move.backup), move.digest, "removal backup");
-    }
+    for (const index of journal.moves.keys()) await reclaimPackagePublication(roots, journal.publications[`commit:${index}`], 0);
     journal.phase = "committed";
     await writeJournal(journalPath, journal);
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
+    await removeTransactionRoot(transactionRoot, roots);
   } catch (error) {
     let recovery;
     try {
@@ -2625,122 +2611,155 @@ async function removeResolvedPackages(roots, entries, operation) {
   };
 }
 
-async function recoverLocalPackageTransactionsUnlocked(roots) {
+async function packageTransactionEntries(roots) {
   const entries = await fs.readdir(roots.transactionsRoot, { withFileTypes: true });
+  if (entries.some(entry => entry.name === ".octopus-publication")) {
+    const stat = await fs.lstat(path.join(roots.transactionsRoot, ".octopus-publication"));
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("Invalid package publication metadata directory");
+  }
+  return entries.filter(entry => entry.name !== ".octopus-publication");
+}
+
+async function recoverLocalPackageTransactionsUnlocked(roots) {
+  const entries = await packageTransactionEntries(roots);
   const recovered = [];
+  for (const entry of entries.filter(entry => TRANSACTION_PUBLICATION_TEMP.test(entry.name))) {
+    const file = path.join(roots.transactionsRoot, entry.name), stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw new Error("Invalid uncommitted package publication file");
+    await fs.unlink(file);
+    await syncDirectory(roots.transactionsRoot);
+  }
+  for (const entry of entries.filter(entry => CLEANUP_PUBLICATION_FILE.test(entry.name))) {
+    await finishPackageCleanup(roots, path.join(roots.transactionsRoot, entry.name));
+  }
+  for (const entry of entries.filter(entry => PREPARATION_PUBLICATION_FILE.test(entry.name))) {
+    const published = await finishPackagePreparation(roots, path.join(roots.transactionsRoot, entry.name));
+    await recoverTransaction(roots, published, path.join(published, "journal.json"));
+    recovered.push(path.basename(published));
+  }
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (!entry.isDirectory()) {
-      throw new Error(`local package transaction root contains an invalid entry '${entry.name}'`);
-    }
-    if (PREPARED_TRANSACTION_ROOT.test(entry.name) || CLEANUP_TRANSACTION_ROOT.test(entry.name)) {
-      await removeUnpublishedTransactionRoot(path.join(roots.transactionsRoot, entry.name), roots.transactionsRoot);
+    const original = path.join(roots.transactionsRoot, entry.name);
+    if (CLEANUP_PUBLICATION_FILE.test(entry.name) || PREPARATION_PUBLICATION_FILE.test(entry.name) || !await pathExists(original)) continue;
+    if (!entry.isDirectory()) throw new Error(`local package transaction root contains an invalid entry '${entry.name}'`);
+    if (PREPARED_TRANSACTION_ROOT.test(entry.name)) {
+      if (!await pathExists(path.join(original, "journal.json"))) {
+        await discardUnpublishedPreparation(roots, original);
+        recovered.push(entry.name);
+        continue;
+      }
+      const published = await publishPreparedTransaction(roots, original);
+      await recoverTransaction(roots, published, path.join(published, "journal.json"));
+      recovered.push(entry.name);
       continue;
     }
-    if (!SAFE_OPERATION_ID.test(entry.name)) {
-      throw new Error(`local package transaction root contains an invalid entry '${entry.name}'`);
-    }
-    const transactionRoot = path.join(roots.transactionsRoot, entry.name);
-    const journalPath = path.join(transactionRoot, "journal.json");
-    await recoverTransaction(roots, transactionRoot, journalPath);
+    if (!SAFE_OPERATION_ID.test(entry.name)) throw new Error(`Package cleanup '${entry.name}' has no retained native publication proof`);
+    await recoverTransaction(roots, original, path.join(original, "journal.json"));
     recovered.push(entry.name);
   }
   return { recovered };
 }
 
 async function recoverTransaction(roots, transactionRoot, journalPath) {
-  const document = await readJsonDocument(journalPath, `local package transaction ${journalPath}`);
-  const journal = parseTransaction(document.value, journalPath);
-  if (path.basename(transactionRoot) !== journal.operation_id) {
-    throw new Error(`local package transaction directory disagrees with operation '${journal.operation_id}'`);
-  }
+  const document = await readJsonDocument(journalPath, `local package transaction ${journalPath}`, 64 * 1024 * 1024);
+  let journal = parseTransaction(document.value, journalPath);
+  if (path.basename(transactionRoot) !== journal.operation_id) throw new Error("Package transaction directory disagrees with its operation");
   for (const move of journal.moves) validateMovePaths(roots, move, journal.operation_id);
   await assertRegisteredPackageMutationAllowed(roots, transactionPackageIds(journal));
-  if (journal.operation === "repair") {
-    if (["owners_materialized", "receipts_written", "committed"].includes(journal.phase)) {
-      await reconcileRepairOwnersForward(roots, journal);
-      await verifyRepairReceiptOwners(roots, journal.receipts);
-      await reconcileRepairReceipts(roots, journal);
-      if (journal.phase === "owners_materialized") {
-        journal.phase = "receipts_written";
-        await writeJournal(journalPath, journal);
-      }
-      await removeRepairBackups(roots, journal.moves);
-      await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
-      return "committed";
-    }
-    const rolling = { ...journal, phase: "rolling_back" };
-    await writeJournal(journalPath, rolling);
-    const refusals = [];
-    for (const move of [...journal.moves].reverse()) {
-      try { await rollbackRepairOwner(roots, move); }
-      catch (error) { refusals.push(errorMessage(error)); }
-    }
-    if (refusals.length) throw new Error(refusals.join("; "));
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
-    return "rolled_back";
+  if (journal.schema_version !== 3) {
+    journal = await retireUncommittedPackageTransaction(roots, journalPath, journal);
   }
-  if (journal.operation === "install") {
-    if (["owners_materialized", "receipts_written", "committed"].includes(journal.phase)) {
-      await verifyMaterializedMoves(roots, journal.moves);
-      await writeReceipts(roots, journal.receipts);
+  validatePackagePublications(roots, journal);
+  const complete = ["owners_materialized", "owners_removed", "receipts_written", "committed"].includes(journal.phase);
+  if (complete) {
+    for (const index of journal.moves.keys()) {
+      if (!journal.publications[`commit:${index}`]) throw new Error("Committed package owner has no saved publication");
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
+    }
+    if (journal.operation === "remove") {
       for (const move of journal.moves) {
-        await removeInstallStage(resolveTransactionPath(roots, move.stage), move.digest, move.state);
+        if (await pathExists(resolveTransactionPath(roots, move.target))) throw new Error("Removed package owner was recreated before transaction recovery");
       }
-      await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
-      return "committed";
+    } else {
+      await verifyMaterializedMoves(roots, journal.moves);
+      if (journal.operation === "repair") await verifyRepairReceiptOwners(roots, journal.receipts);
     }
-    const rolling = { ...journal, phase: "rolling_back" };
-    await writeJournal(journalPath, rolling);
-    for (const move of [...journal.moves].reverse()) {
-      const target = resolveTransactionPath(roots, move.target);
-      const stage = resolveTransactionPath(roots, move.stage);
-      const observed = await repairOwnerDigests({ target, stage, backup: resolveTransactionPath(roots, move.backup) });
-      if (observed.backup !== null || observed.target !== null && (
-        observed.target !== move.digest || observed.stage !== null || !["staged", "materialized"].includes(move.state)
-      )) {
-        throw new Error(`install rollback found an unowned target or stage '${move.target}'`);
-      }
-      if (observed.target !== null) await removeMatchingDirectory(target, move.digest, "materialized install owner");
-      await removeInstallStage(stage, move.digest, move.state);
-    }
-    await removeOperationReceipts(roots, journal.receipts, journal.operation_id);
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
-    return "rolled_back";
-  }
-  if (["owners_removed", "receipts_written", "committed"].includes(journal.phase)) {
-    for (const move of journal.moves) {
-      if (await pathExists(resolveTransactionPath(roots, move.target))) {
-        throw new Error(`remove recovery found materialized target '${move.target}' after owners_removed`);
-      }
-    }
-    await removeReceipts(roots, journal.receipts);
-    for (const move of journal.moves) {
-      await removeMatchingDirectory(
-        resolveTransactionPath(roots, move.backup),
-        move.digest,
-        "removal backup",
-        true,
-      );
-    }
-    await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
+    await publishPackageReceipts(roots, journalPath, journal);
+    journal.phase = "receipts_written";
+    await writeJournal(journalPath, journal);
+    if (journal.operation === "remove") {
+      for (const index of journal.moves.keys()) await reclaimPackagePublication(roots, journal.publications[`commit:${index}`], 0);
+    } else if (journal.operation === "repair") await removeRepairBackups(roots, journal);
+    journal.phase = "committed";
+    await writeJournal(journalPath, journal);
+    await removeTransactionRoot(transactionRoot, roots);
     return "committed";
   }
-  const rolling = { ...journal, phase: "rolling_back" };
-  await writeJournal(journalPath, rolling);
-  for (const move of [...journal.moves].reverse()) {
-    const target = resolveTransactionPath(roots, move.target);
-    const backup = resolveTransactionPath(roots, move.backup);
-    const observed = await repairOwnerDigests({ target, stage: resolveTransactionPath(roots, move.stage), backup });
-    if (observed.stage !== null) throw new Error(`remove rollback found an unowned stage '${move.stage}'`);
-    if (observed.target === null && observed.backup === move.digest) {
-      await restoreRepairBackup(target, backup, move.digest);
-    } else if (observed.target !== move.digest || observed.backup !== null) {
-      throw new Error(`remove rollback found foreign owner state '${move.target}'`);
+  journal.phase = "rolling_back";
+  await writeJournal(journalPath, journal);
+  for (const index of [...journal.moves.keys()].reverse()) {
+    const move = journal.moves[index], key = `commit:${index}`;
+    if (journal.publications[key]) {
+      try { await publishPackageMoves(roots, journalPath, journal, key); }
+      catch (error) {
+        if (journal.publications[key].receipts.length !== journal.publications[key].moves.length
+          || journal.publications[key].receipts.some(receipt => receipt.outcome === "uncertain")) throw error;
+      }
+    }
+    const commit = journal.publications[key], receipts = commit?.receipts ?? [];
+    const installed = journal.operation !== "remove" && receipts.length === commit?.moves.length
+      && receipts.at(-1)?.outcome === "applied";
+    const backedUp = journal.operation !== "install" && (journal.operation !== "repair" || move.previous_digest !== null)
+      && receipts[0]?.outcome === "applied";
+    if (installed) await discardPackageDirectory(roots, journalPath, journal, `discard_target:${index}`, receipts.at(-1).movement.expected);
+    if (backedUp) await publishPackageMoves(roots, journalPath, journal, `undo:${index}`, [receipts[0].movement.expected]);
+    if (!installed && journal.publications[`discard_stage:${index}`]) {
+      await publishPackageMoves(roots, journalPath, journal, `discard_stage:${index}`);
+      await reclaimPackagePublication(roots, journal.publications[`discard_stage:${index}`], 0);
+    } else if (!installed && journal.publications[`stage:${index}`]) {
+      try { await publishPackageMoves(roots, journalPath, journal, `stage:${index}`); }
+      catch (error) { if (journal.publications[`stage:${index}`].receipts[0]?.outcome !== "not_applied") throw error; }
+      if (journal.publications[`stage:${index}`].receipts[0]?.outcome === "applied") {
+        await discardPackageDirectory(roots, journalPath, journal, `discard_stage:${index}`, journal.publications[`stage:${index}`].moves[0].expected);
+      }
     }
   }
-  await restoreReceipts(roots, journal.receipts);
-  await removeTransactionRoot(transactionRoot, roots.transactionsRoot);
+  await removeTransactionRoot(transactionRoot, roots);
   return "rolled_back";
+}
+
+async function retireUncommittedPackageTransaction(roots, journalPath, original) {
+  if (original.phase !== "prepared" || original.moves.some(move => !["planned", "staged"].includes(move.state))) {
+    throw new Error("Retained package transaction has no original directory identity or native publication proof; its interrupted effects remain uncertain");
+  }
+  const journal = { ...original, schema_version: 3, publication_id: crypto.randomBytes(16).toString("hex"),
+    phase: "rolling_back", publications: {}, file_publications: {} };
+  const publisher = packagePublisher(roots);
+  for (const receipt of original.receipts) {
+    const previous = original.operation === "install" ? null : original.operation === "remove" ? receipt
+      : original.previous_receipts.find(candidate => candidate.package_id === receipt.package_id) ?? null;
+    if (stableJson(await readReceipt(roots, receipt.package_id)) !== stableJson(previous)) {
+      throw new Error("Retained uncommitted package transaction has changed receipt ownership");
+    }
+  }
+  for (const [index, move] of original.moves.entries()) {
+    const target = resolveTransactionPath(roots, move.target), backup = resolveTransactionPath(roots, move.backup);
+    const previous = original.operation === "install" ? null : original.operation === "repair" ? move.previous_digest : move.digest;
+    if (await pathExists(backup) || (previous === null ? await pathExists(target)
+      : !await pathExists(target) || (await snapshotDirectory(target)).digest !== previous)) {
+      throw new Error("Retained uncommitted package transaction has uncertain owner effects");
+    }
+    const stage = resolveTransactionPath(roots, move.stage);
+    if (await pathExists(stage)) {
+      if (original.operation === "remove") throw new Error("Retained package removal contains an unexpected stage");
+      const expected = await publisher.snapshotDirectory(stage);
+      if (packageDirectoryDigest(expected) !== move.digest) throw new Error("Retained package stage has foreign contents");
+      const [source, destination] = packageMoveCoordinates(roots, journal, `discard_stage:${index}`)[0];
+      journal.publications[`discard_stage:${index}`] = { moves: [{ source, destination, expected }], receipts: [] };
+    }
+  }
+  validatePackagePublications(roots, journal);
+  await writeJournal(journalPath, journal);
+  return journal;
 }
 
 function parseTransaction(value, file) {
@@ -3024,33 +3043,27 @@ async function readReceipt(roots, packageId) {
   return receipt;
 }
 
-async function writeReceipts(roots, receipts) {
-  for (const receipt of receipts) {
-    const file = receiptPath(roots, receipt.package_id);
-    const existing = await readReceipt(roots, receipt.package_id);
-    if (existing && stableJson(existing) !== stableJson(receipt)) {
-      throw new Error(`local package receipt '${receipt.package_id}' belongs to another operation`);
-    }
-    if (!existing) await writeJsonAtomic(file, receipt, 0o600);
-  }
-}
-
-async function reconcileRepairReceipts(roots, journal) {
-  const previousByPackage = new Map(journal.previous_receipts.map((receipt) => [receipt.package_id, receipt]));
-  const nextIds = new Set(journal.receipts.map((receipt) => receipt.package_id));
-  if ([...previousByPackage.keys()].some((packageId) => !nextIds.has(packageId))) {
-    throw new Error("repair journal contains a previous receipt without a replacement");
-  }
+async function publishPackageReceipts(roots, journalPath, journal) {
+  const publisher = packagePublisher(roots), previous = new Map((journal.previous_receipts ?? []).map(receipt => [receipt.package_id, receipt]));
   for (const receipt of journal.receipts) {
-    const current = await readReceipt(roots, receipt.package_id);
-    if (current && stableJson(current) === stableJson(receipt)) continue;
-    const previous = previousByPackage.get(receipt.package_id) ?? null;
-    if (
-      previous === null ? current !== null : current === null || stableJson(current) !== stableJson(previous)
-    ) {
-      throw new Error(`local package receipt '${receipt.package_id}' changed during repair`);
+    const file = receiptPath(roots, receipt.package_id);
+    let publication = journal.file_publications[receipt.package_id];
+    if (!publication) {
+      const document = await pathExists(file) ? await readJsonDocument(file, "package receipt predecessor") : null;
+      const current = document ? parseReceipt(document.value, file) : null;
+      const prior = journal.operation === "remove" ? receipt : journal.operation === "repair" ? previous.get(receipt.package_id) ?? null : null;
+      if (stableJson(current) !== stableJson(prior)) throw new Error(`Package receipt changed before publication: ${receipt.package_id}`);
+      publication = {
+        filePath: file, operationId: `${packagePublicationId(journal, "receipt")}:${receipt.package_id}`,
+        expectedBeforeHash: document?.digest ?? null,
+        content: journal.operation === "remove" ? null : `${JSON.stringify(receipt, null, 2)}\n`,
+      };
+      journal.file_publications[receipt.package_id] = publication;
+      await writeJournal(journalPath, journal);
     }
-    await writeJsonAtomic(receiptPath(roots, receipt.package_id), receipt, 0o600);
+    await publisher.publishFiles([publication]);
+    const current = await readReceipt(roots, receipt.package_id);
+    if (stableJson(current) !== stableJson(journal.operation === "remove" ? null : receipt)) throw new Error("Package receipt changed after native publication");
   }
 }
 
@@ -3063,38 +3076,6 @@ async function verifyRepairReceiptOwners(roots, receipts) {
         throw new Error(`repair receipt owner '${member.target}' changed before commit`);
       }
     }
-  }
-}
-
-async function restoreReceipts(roots, receipts) {
-  for (const receipt of receipts) {
-    const existing = await readReceipt(roots, receipt.package_id);
-    if (existing && stableJson(existing) !== stableJson(receipt)) {
-      throw new Error(`cannot restore changed receipt '${receipt.package_id}'`);
-    }
-    if (!existing) await writeJsonAtomic(receiptPath(roots, receipt.package_id), receipt, 0o600);
-  }
-}
-
-async function removeReceipts(roots, receipts) {
-  for (const receipt of receipts) {
-    const existing = await readReceipt(roots, receipt.package_id);
-    if (!existing) continue;
-    if (stableJson(existing) !== stableJson(receipt)) throw new Error(`receipt '${receipt.package_id}' changed before removal`);
-    await fs.unlink(receiptPath(roots, receipt.package_id));
-    await syncDirectory(roots.receiptsRoot);
-  }
-}
-
-async function removeOperationReceipts(roots, receipts, operationId) {
-  for (const receipt of receipts) {
-    const existing = await readReceipt(roots, receipt.package_id);
-    if (!existing) continue;
-    if (existing.operation_id !== operationId || stableJson(existing) !== stableJson(receipt)) {
-      throw new Error(`install rollback found a foreign receipt '${receipt.package_id}'`);
-    }
-    await fs.unlink(receiptPath(roots, receipt.package_id));
-    await syncDirectory(roots.receiptsRoot);
   }
 }
 
@@ -3164,14 +3145,129 @@ async function hashFileHandle(handle) {
   }
 }
 
-async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onFile) {
+function packagePublisher(roots) {
+  const publisher = roots.publication;
+  if (!publisher || ["snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory", "publishFiles"].some(key => typeof publisher[key] !== "function")) {
+    throw new Error("Package mutation requires its native publication boundary");
+  }
+  return publisher;
+}
+
+function packageDirectoryDigest(preimage) {
+  const files = preimage.entries.filter(entry => entry.kind === "file").map(entry => ({
+    relative_path: entry.relative_path, size: entry.bytes, mode: entry.mode & 0o777, sha256: entry.digest,
+  }));
+  files.sort((left, right) => {
+    const a = left.relative_path.split("/"), b = right.relative_path.split("/");
+    for (let i = 0; i < Math.min(a.length, b.length); i += 1) {
+      const order = a[i].localeCompare(b[i]); if (order) return order;
+    }
+    return a.length - b.length;
+  });
+  return snapshotDigest(files);
+}
+
+function packagePublicationId(journal, key) { return `package:${journal.operation_id}:${journal.publication_id}:${key}`; }
+
+function packageMoveCoordinates(roots, journal, key) {
+  const [kind, number] = key.split(":"), index = Number(number), move = journal.moves[index];
+  if (!move || String(index) !== number) throw new Error("Package publication has no exact owner index");
+  const target = resolveTransactionPath(roots, move.target), stage = resolveTransactionPath(roots, move.stage), backup = resolveTransactionPath(roots, move.backup);
+  const tx = path.join(roots.transactionsRoot, journal.operation_id);
+  const next = move.digest, previous = journal.operation === "repair" ? move.previous_digest : move.digest;
+  if (kind === "stage" && journal.operation !== "remove") return [[path.join(tx, `owner-${index}`), stage, next]];
+  if (kind === "commit") return journal.operation === "install" ? [[stage, target, next]]
+    : journal.operation === "remove" ? [[target, backup, previous]]
+    : [...(previous === null ? [] : [[target, backup, previous]]), [stage, target, next]];
+  if (kind === "undo" && journal.operation !== "install" && previous !== null) return [[backup, target, previous]];
+  if (kind === "discard_stage" && journal.operation !== "remove") return [[stage, path.join(tx, `discard-stage-${index}`), next]];
+  if (kind === "discard_target" && journal.operation !== "remove") return [[target, path.join(tx, `discard-target-${index}`), next]];
+  throw new Error("Package publication has an invalid owner step");
+}
+
+function validatePackagePublications(roots, journal) {
+  if (journal.schema_version !== 3) return;
+  for (const [id, publication] of Object.entries(journal.file_publications)) {
+    const receipt = journal.receipts.find(receipt => receipt.package_id === id);
+    if (!receipt || publication.filePath !== receiptPath(roots, id)
+      || publication.operationId !== `${packagePublicationId(journal, "receipt")}:${id}`
+      || publication.content !== (journal.operation === "remove" ? null : `${JSON.stringify(receipt, null, 2)}\n`)
+      || journal.operation === "remove" && publication.expectedBeforeHash === null) {
+      throw new Error("Package receipt publication differs from its saved transaction");
+    }
+  }
+  for (const [key, publication] of Object.entries(journal.publications)) {
+    const coordinates = packageMoveCoordinates(roots, journal, key);
+    if (publication.moves.length !== coordinates.length) throw new Error("Package publication has a different owner movement set");
+    for (const [index, movement] of publication.moves.entries()) {
+      const [source, destination, digest] = coordinates[index];
+      if (movement.source !== source || movement.destination !== destination || movement.expected.digest_algorithm !== "sha256"
+        || packageDirectoryDigest(movement.expected) !== digest) throw new Error("Package publication differs from its exact owner paths or content");
+      const names = new Set();
+      for (const entry of movement.expected.entries) {
+        const parts = entry.relative_path.split("/");
+        if (parts.some(part => !part || part === "." || part === ".." || part.includes("\\") || part.includes("\0") || part === ".octopus-publication" || SOURCE_EXCLUDES.has(part))
+          || path.isAbsolute(entry.relative_path) || names.has(entry.relative_path)
+          || !Number.isSafeInteger(entry.identity.device) || !Number.isSafeInteger(entry.identity.inode)
+          || !Number.isSafeInteger(entry.bytes)) throw new Error("Package publication has an invalid exact directory manifest");
+        names.add(entry.relative_path);
+      }
+    }
+    for (const [index, receipt] of publication.receipts.entries()) {
+      if (receipt.index !== index || receipt.operation_id !== packagePublicationId(journal, key)
+        || stableJson(receipt.movement) !== stableJson(publication.moves[index])
+        || receipt.outcome === "applied" && receipt.error !== null
+        || index && receipt.plan_hash !== publication.receipts[0].plan_hash) throw new Error("Package publication receipt differs from its original owner movement");
+    }
+  }
+}
+
+async function publishPackageMoves(roots, journalPath, journal, key, retained) {
+  const publisher = packagePublisher(roots);
+  if (!journal.publications[key]) {
+    const moves = [];
+    for (const [index, [source, destination, digest]] of packageMoveCoordinates(roots, journal, key).entries()) {
+      const expected = retained?.[index] ?? await publisher.snapshotDirectory(source);
+      if (packageDirectoryDigest(expected) !== digest) throw new Error(`Package owner changed before native publication: ${source}`);
+      moves.push({ source, destination, expected });
+    }
+    journal.publications[key] = { moves, receipts: [] };
+    validatePackagePublications(roots, journal);
+    await writeJournal(journalPath, journal);
+  }
+  validatePackagePublications(roots, journal);
+  const publication = journal.publications[key];
+  try {
+    publication.receipts = await publisher.publishDirectoryMoves(packagePublicationId(journal, key), publication.moves);
+    await writeJournal(journalPath, journal);
+    return publication.receipts;
+  } catch (error) {
+    if (Array.isArray(error.publicationReceipts)) {
+      publication.receipts = error.publicationReceipts;
+      validatePackagePublications(roots, journal);
+      await writeJournal(journalPath, journal);
+    }
+    throw error;
+  }
+}
+
+async function reclaimPackagePublication(roots, publication, index) {
+  const receipt = publication?.receipts[index];
+  if (!receipt || receipt.outcome !== "applied") throw new Error("Package cleanup has no attributable directory publication");
+  await packagePublisher(roots).reclaimDirectory(receipt.movement.destination, receipt, receipt.movement.expected);
+}
+
+async function discardPackageDirectory(roots, journalPath, journal, key, expected) {
+  await publishPackageMoves(roots, journalPath, journal, key, [expected]);
+  await reclaimPackagePublication(roots, journal.publications[key], 0);
+}
+
+async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onFile, roots, journalPath, journal) {
   const preparation = path.join(transactionRoot, `owner-${index}`);
   await copySnapshot(snapshot, preparation, onFile);
   if ((await snapshotDirectory(preparation)).digest !== snapshot.digest) throw new Error(`package preparation changed before staging '${stage}'`);
   if (await pathExists(stage)) throw new Error(`package stage appeared during preparation '${stage}'`);
-  await renameDirectoryExclusive(preparation, stage);
-  await syncDirectory(transactionRoot);
-  await syncDirectory(path.dirname(stage));
+  await publishPackageMoves(roots, journalPath, journal, `stage:${index}`);
 }
 
 async function verifyMaterializedMoves(roots, moves) {
@@ -3182,190 +3278,114 @@ async function verifyMaterializedMoves(roots, moves) {
   }
 }
 
-async function removeMatchingDirectory(directory, digest, label, optional = false) {
-  if (!await pathExists(directory)) {
-    if (optional) return;
-    throw new Error(`${label} is missing: ${directory}`);
+async function removeRepairBackups(roots, journal) {
+  for (const [index, move] of journal.moves.entries()) {
+    if (move.previous_digest !== null) await reclaimPackagePublication(roots, journal.publications[`commit:${index}`], 0);
   }
-  const snapshot = await snapshotDirectory(directory);
-  if (snapshot.digest !== digest) throw new Error(`${label} changed before cleanup: ${directory}`);
-  assertNoExcludedActiveEntries(snapshot);
-  await fs.rm(directory, { recursive: true, force: false });
-  await syncDirectory(path.dirname(directory));
-}
-
-async function removeInstallStage(directory, digest, state) {
-  if (!await pathExists(directory)) return;
-  if (state === "staged" || state === "planned") {
-    await removeMatchingDirectory(directory, digest, "install stage");
-    return;
-  }
-  throw new Error(`install stage remains after transaction state '${state}': ${directory}`);
-}
-
-async function removeRepairBackups(roots, moves) {
-  for (const move of moves) {
-    await removeMatchingDirectory(
-      resolveTransactionPath(roots, move.backup),
-      move.previous_digest,
-      "repair backup",
-      true,
-    );
-  }
-}
-
-async function reconcileRepairOwnersForward(roots, journal) {
-  for (const move of journal.moves) {
-    const target = resolveTransactionPath(roots, move.target);
-    const stage = resolveTransactionPath(roots, move.stage);
-    const backup = resolveTransactionPath(roots, move.backup);
-    const observed = await repairOwnerDigests({ target, stage, backup });
-    const backupAllowedAbsent = ["receipts_written", "committed"].includes(journal.phase);
-    if (
-      observed.target !== move.digest
-      || ![null, move.digest].includes(observed.stage)
-      || !(
-        observed.backup === move.previous_digest
-        || backupAllowedAbsent && observed.backup === null
-      )
-    ) {
-      throw repairOwnerStateError(move, observed, "forward recovery");
-    }
-    if (observed.stage === move.digest) {
-      await removeMatchingDirectory(stage, move.digest, "repair stage");
-    }
-  }
-}
-
-async function rollbackRepairOwner(roots, move) {
-  const target = resolveTransactionPath(roots, move.target);
-  const stage = resolveTransactionPath(roots, move.stage);
-  const backup = resolveTransactionPath(roots, move.backup);
-  const observed = await repairOwnerDigests({ target, stage, backup });
-  if (move.previous_digest === null) {
-    if (observed.backup !== null) throw repairOwnerStateError(move, observed, "new-owner rollback");
-    if (observed.target === null && [null, move.digest].includes(observed.stage)) {
-      if (observed.stage === move.digest) await removeMatchingDirectory(stage, move.digest, "new-owner stage");
-      return;
-    }
-    if (observed.target === move.digest && observed.stage === null && ["staged", "materialized"].includes(move.state)) {
-      await removeMatchingDirectory(target, move.digest, "materialized new owner");
-      return;
-    }
-    throw repairOwnerStateError(move, observed, "new-owner rollback");
-  }
-  if (move.state === "planned" && observed.target === move.previous_digest && observed.backup === null) {
-    await removeInstallStage(stage, move.digest, "planned");
-    return;
-  }
-  if (
-    observed.target === move.previous_digest
-    && [null, move.digest].includes(observed.stage)
-    && observed.backup === null
-  ) {
-    if (observed.stage === move.digest) {
-      await removeMatchingDirectory(stage, move.digest, "repair stage");
-    }
-    return;
-  }
-  if (
-    observed.target === null
-    && [null, move.digest].includes(observed.stage)
-    && observed.backup === move.previous_digest
-  ) {
-    await restoreRepairBackup(target, backup, move.previous_digest);
-    if (observed.stage === move.digest) {
-      await removeMatchingDirectory(stage, move.digest, "repair stage");
-    }
-    return;
-  }
-  if (
-    observed.target === move.digest
-    && observed.stage === null
-    && observed.backup === move.previous_digest
-  ) {
-    await removeMatchingDirectory(target, move.digest, "materialized repair owner");
-    await restoreRepairBackup(target, backup, move.previous_digest);
-    return;
-  }
-  throw repairOwnerStateError(move, observed, "rollback recovery");
-}
-
-async function repairOwnerDigests(paths) {
-  return {
-    target: await directoryDigestIfPresent(paths.target),
-    stage: await directoryDigestIfPresent(paths.stage),
-    backup: await directoryDigestIfPresent(paths.backup),
-  };
-}
-
-async function directoryDigestIfPresent(directory) {
-  return await pathExists(directory) ? (await snapshotDirectory(directory)).digest : null;
-}
-
-function repairOwnerStateError(move, observed, phase) {
-  return new Error(
-    `repair ${phase} found foreign owner state '${move.target}' `
-    + `(target=${observed.target ?? "missing"}, stage=${observed.stage ?? "missing"}, backup=${observed.backup ?? "missing"})`,
-  );
-}
-
-async function restoreRepairBackup(target, backup, digest) {
-  const snapshot = await snapshotDirectory(backup);
-  if (snapshot.digest !== digest) throw new Error(`repair backup changed before rollback: ${backup}`);
-  await renameDirectoryExclusive(backup, target);
-  await syncDirectory(path.dirname(target));
 }
 
 async function createTransactionRoot(roots, operationId, journal) {
   const transactionRoot = path.join(roots.transactionsRoot, operationId);
-  if (!isPathInside(roots.transactionsRoot, transactionRoot)) throw new Error("package operation path escapes transaction root");
-  if (journal?.operation_id !== operationId) throw new Error("package transaction journal disagrees with operation");
-  const preparationRoot = path.join(
-    roots.transactionsRoot,
-    `.prepare.${operationId}.${crypto.randomBytes(6).toString("hex")}`,
-  );
-  let published = false;
+  if (!isPathInside(roots.transactionsRoot, transactionRoot) || journal.operation_id !== operationId) throw new Error("Invalid package operation root");
+  if (await pathExists(transactionRoot)) throw new Error(`package transaction '${operationId}' already exists`);
+  const preparationRoot = path.join(roots.transactionsRoot, `.prepare.${operationId}.${crypto.randomBytes(6).toString("hex")}`);
   await fs.mkdir(preparationRoot, { recursive: false, mode: 0o700 });
-  try {
-    await writeJournal(path.join(preparationRoot, "journal.json"), journal);
-    if (await pathExists(transactionRoot)) throw new Error(`package transaction '${operationId}' already exists`);
-    await renameDirectoryExclusive(preparationRoot, transactionRoot);
-    published = true;
-    await syncDirectory(roots.transactionsRoot);
-    return transactionRoot;
-  } catch (error) {
-    if (!published && await pathExists(preparationRoot)) {
-      await removeUnpublishedTransactionRoot(preparationRoot, roots.transactionsRoot);
-    }
-    throw error;
-  }
+  await writeJournal(path.join(preparationRoot, "journal.json"), journal);
+  return publishPreparedTransaction(roots, preparationRoot);
 }
 
-async function removeTransactionRoot(transactionRoot, transactionsRoot) {
+async function publishPreparedTransaction(roots, preparationRoot) {
+  const match = PREPARED_TRANSACTION_ROOT.exec(path.basename(preparationRoot));
+  if (!match || path.dirname(preparationRoot) !== roots.transactionsRoot) throw new Error("Invalid prepared package root");
+  const journal = parseTransaction((await readJsonDocument(path.join(preparationRoot, "journal.json"), "prepared package transaction", 64 * 1024 * 1024)).value, preparationRoot);
+  if (journal.schema_version !== 3 || journal.operation_id !== match[1] || journal.phase !== "prepared"
+    || journal.moves.some(move => move.state !== "planned") || Object.keys(journal.publications).length || Object.keys(journal.file_publications).length) {
+    throw new Error("Prepared package root has an uncertain or already-started publication");
+  }
+  const destination = path.join(roots.transactionsRoot, journal.operation_id);
+  const file = path.join(roots.transactionsRoot, `.prepare.${journal.operation_id}.${journal.publication_id}.json`);
+  if (!await pathExists(file)) {
+    const expected = await packagePublisher(roots).snapshotDirectory(preparationRoot);
+    await writeJsonAtomic(file, { schema_version: 1, operation_id: journal.operation_id, publication_id: journal.publication_id,
+      attempt: 0, movement: { source: preparationRoot, destination, expected } }, 0o600);
+  }
+  return finishPackagePreparation(roots, file);
+}
+
+async function finishPackagePreparation(roots, file) {
+  const match = PREPARATION_PUBLICATION_FILE.exec(path.basename(file));
+  const record = (await readJsonDocument(file, "package preparation publication", 64 * 1024 * 1024)).value;
+  if (!match || path.dirname(file) !== roots.transactionsRoot || record.schema_version !== 1
+    || record.operation_id !== match[1] || record.publication_id !== match[2] || Object.keys(record).length !== 5
+    || !Number.isSafeInteger(record.attempt) || record.attempt < 0
+    || !PREPARED_TRANSACTION_ROOT.test(path.basename(record.movement?.source ?? ""))
+    || PREPARED_TRANSACTION_ROOT.exec(path.basename(record.movement.source))[1] !== record.operation_id
+    || path.dirname(record.movement.source) !== roots.transactionsRoot
+    || record.movement.destination !== path.join(roots.transactionsRoot, record.operation_id)
+    || record.movement.expected?.entries?.length !== 1 || record.movement.expected.entries[0].relative_path !== "journal.json"
+    || record.movement.expected.entries[0].kind !== "file") throw new Error("Invalid exact package preparation plan");
+  const publisher = packagePublisher(roots), operation = () => `${packagePublicationId(record, "prepare")}:${record.attempt}`;
+  try { await publisher.publishDirectoryMoves(operation(), [record.movement]); }
+  catch (error) {
+    if (error.publicationReceipts?.length !== 1 || error.publicationReceipts[0].outcome !== "not_applied"
+      || await pathExists(record.movement.destination)
+      || stableJson(await publisher.snapshotDirectory(record.movement.source)) !== stableJson(record.movement.expected)) throw error;
+    record.attempt += 1;
+    await writeJsonAtomic(file, record, 0o600);
+    await publisher.publishDirectoryMoves(operation(), [record.movement]);
+  }
+  await fs.unlink(file);
+  await syncDirectory(roots.transactionsRoot);
+  const destination = record.movement.destination;
+  return destination;
+}
+
+async function removeTransactionRoot(transactionRoot, roots) {
   const operationId = path.basename(transactionRoot);
-  if (!SAFE_OPERATION_ID.test(operationId) || path.dirname(transactionRoot) !== transactionsRoot) {
-    throw new Error(`invalid transaction root removal target '${transactionRoot}'`);
+  if (!SAFE_OPERATION_ID.test(operationId) || path.dirname(transactionRoot) !== roots.transactionsRoot) throw new Error("Invalid package transaction cleanup root");
+  const file = path.join(roots.transactionsRoot, `.cleanup.${operationId}.json`);
+  if (!await pathExists(file)) {
+    const expected = await packagePublisher(roots).snapshotDirectory(transactionRoot);
+    const destination = path.join(roots.transactionsRoot, `.cleanup.${operationId}.${sha256Bytes(Buffer.from(operationId)).slice(0, 12)}`);
+    const journal = parseTransaction((await readJsonDocument(path.join(transactionRoot, "journal.json"), "package cleanup transaction", 64 * 1024 * 1024)).value, transactionRoot);
+    await writeJsonAtomic(file, { schema_version: 1, operation_id: operationId, publication_id: journal.publication_id, movement: { source: transactionRoot, destination, expected } }, 0o600);
   }
-  const cleanupRoot = path.join(
-    transactionsRoot,
-    `.cleanup.${operationId}.${crypto.randomBytes(6).toString("hex")}`,
-  );
-  await renameDirectoryExclusive(transactionRoot, cleanupRoot);
-  await syncDirectory(transactionsRoot);
-  await removeUnpublishedTransactionRoot(cleanupRoot, transactionsRoot);
+  await finishPackageCleanup(roots, file);
 }
 
-async function removeUnpublishedTransactionRoot(transactionRoot, transactionsRoot) {
-  if (path.dirname(transactionRoot) !== transactionsRoot) {
-    throw new Error(`invalid unpublished transaction root '${transactionRoot}'`);
+async function discardUnpublishedPreparation(roots, source) {
+  const match = PREPARED_TRANSACTION_ROOT.exec(path.basename(source));
+  if (!match || path.dirname(source) !== roots.transactionsRoot || await pathExists(path.join(roots.transactionsRoot, match[1]))) {
+    throw new Error("Unpublished package preparation has conflicting ownership");
   }
-  const name = path.basename(transactionRoot);
-  if (!PREPARED_TRANSACTION_ROOT.test(name) && !CLEANUP_TRANSACTION_ROOT.test(name)) {
-    throw new Error(`invalid unpublished transaction root '${name}'`);
+  const publisher = packagePublisher(roots), expected = await publisher.snapshotDirectory(source);
+  if ((expected.mode & 0o077) !== 0 || expected.entries.length > 1 || expected.entries.some(entry =>
+    entry.kind !== "file" || !/^\.journal\.json\.[0-9]+\.[a-f0-9]{12}\.tmp$/.test(entry.relative_path) || (entry.mode & 0o077) !== 0)) {
+    throw new Error("Unpublished package preparation contains foreign entries");
   }
-  await fs.rm(transactionRoot, { recursive: true, force: false });
-  await syncDirectory(transactionsRoot);
+  const operationId = match[1], file = path.join(roots.transactionsRoot, `.cleanup.${operationId}.json`);
+  const destination = path.join(roots.transactionsRoot, `.cleanup.${operationId}.${sha256Bytes(Buffer.from(operationId)).slice(0, 12)}`);
+  await writeJsonAtomic(file, { schema_version: 1, operation_id: operationId,
+    publication_id: sha256Bytes(Buffer.from(path.basename(source))).slice(0, 32), movement: { source, destination, expected } }, 0o600);
+  await finishPackageCleanup(roots, file);
+}
+
+async function finishPackageCleanup(roots, file) {
+  const match = CLEANUP_PUBLICATION_FILE.exec(path.basename(file));
+  if (!match || path.dirname(file) !== roots.transactionsRoot) throw new Error("Invalid package cleanup proof path");
+  const record = (await readJsonDocument(file, "package cleanup publication", 64 * 1024 * 1024)).value;
+  const operationId = match[1], source = record.movement?.source;
+  const preparation = typeof source === "string" ? PREPARED_TRANSACTION_ROOT.exec(path.basename(source)) : null;
+  const destination = path.join(roots.transactionsRoot, `.cleanup.${operationId}.${sha256Bytes(Buffer.from(operationId)).slice(0, 12)}`);
+  if (record.schema_version !== 1 || record.operation_id !== operationId || !/^[a-f0-9]{32}$/.test(record.publication_id) || Object.keys(record).length !== 4
+    || typeof source !== "string" || path.dirname(source) !== roots.transactionsRoot
+    || !(source === path.join(roots.transactionsRoot, operationId) || preparation?.[1] === operationId)
+    || record.movement?.destination !== destination) throw new Error("Package cleanup proof differs from its original transaction");
+  const publisher = packagePublisher(roots);
+  const receipts = await publisher.publishDirectoryMoves(`package:${operationId}:${record.publication_id}:cleanup`, [record.movement]);
+  await publisher.reclaimDirectory(destination, receipts[0], record.movement.expected);
+  await fs.unlink(file);
+  await syncDirectory(roots.transactionsRoot);
 }
 
 async function writeJournal(file, journal) {
@@ -3400,18 +3420,6 @@ async function syncDirectory(directory) {
   }
 }
 
-async function renameDirectoryExclusive(source, destination) {
-  const flags = fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW;
-  const sourceParent = await fs.open(path.dirname(source), flags);
-  try {
-    const destinationParent = await fs.open(path.dirname(destination), flags);
-    try {
-      require("./nativeFiles.cjs").renameDirectoryExclusive(
-        sourceParent.fd, path.basename(source), destinationParent.fd, path.basename(destination),
-      );
-    } finally { await destinationParent.close(); }
-  } finally { await sourceParent.close(); }
-}
 
 function validateMovePaths(roots, move, operationId) {
   const member = { registry_kind: move.registry_kind, owner: move.owner };
@@ -3594,10 +3602,10 @@ function schemaError(label, errors) {
   return new Error(`${label} is invalid${detail ? `: ${detail}` : ""}`);
 }
 
-async function readJsonDocument(file, label) {
+async function readJsonDocument(file, label, maximum = 4 * 1024 * 1024) {
   const stat = await fs.lstat(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} is not a regular file: ${file}`);
-  if (stat.size <= 0 || stat.size > 4 * 1024 * 1024) throw new Error(`${label} size is invalid: ${file}`);
+  if (stat.size <= 0 || stat.size > maximum) throw new Error(`${label} size is invalid: ${file}`);
   const body = await fs.readFile(file);
   if (body.byteLength !== stat.size) throw new Error(`${label} changed while reading: ${file}`);
   let value;
@@ -3701,7 +3709,7 @@ function transactionPackageIds(journal) {
 async function withPackageStateRead(roots, operation) {
   return withPackageStateLock(roots.stateRoot, async (acquireExclusive) => {
     await ensurePackageState(roots);
-    if ((await fs.readdir(roots.transactionsRoot)).length) {
+    if ((await packageTransactionEntries(roots)).length) {
       await acquireExclusive();
       await recoverLocalPackageTransactionsUnlocked(roots);
     }

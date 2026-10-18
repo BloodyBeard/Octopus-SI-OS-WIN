@@ -17,6 +17,7 @@ serde_json.workspace = true
 octopus-descriptors = { path = "../octopus-descriptors" }
 octopus-ledger = { path = "../octopus-ledger" }
 octopus-marks = { path = "../octopus-marks" }
+octopus-file-storage = { path = "../octopus-file-storage" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 object = { version = "0.37.3", default-features = false, features = ["read", "std"] }

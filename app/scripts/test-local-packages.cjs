@@ -1,3 +1,4 @@
+const { nativePublication, transactionEntries: retainedTransactionEntries } = require("./support/native-publication.cjs");
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -22,6 +23,7 @@ const { createProjectionStore, mutateOctopusOsWorkspace } = require("../electron
 function rootsFor(root) {
   const octopusHomeRoot = path.join(root, "octopus-home");
   return {
+    publication: nativePublication(),
     sourceRegistryRoot: path.join(root, "source-registry"),
     activeRegistryRoot: path.join(octopusHomeRoot, "registry"),
     libraryRoot: path.join(root, "local-library"),
@@ -103,7 +105,7 @@ function packRecord(catalog) {
 }
 
 async function transactionEntries(roots) {
-  return fs.readdir(path.join(roots.stateRoot, "transactions"));
+  return retainedTransactionEntries(path.join(roots.stateRoot, "transactions"));
 }
 
 function runCrashChild(mode, root) {
@@ -119,6 +121,14 @@ async function crashChild(mode, root) {
   const catalog = await readLocalPackageCatalog(roots);
   const currentPackage = packageRecord(catalog);
   assert.ok(currentPackage);
+  if (mode === "rollback-repair-published") {
+    const native = roots.publication;
+    roots.publication = { ...native, async publishDirectoryMoves(operation, moves) {
+      const result = await native.publishDirectoryMoves(operation, moves);
+      if (moves.some(move => move.destination.endsWith(".backup"))) process.kill(process.pid, "SIGKILL");
+      return result;
+    } };
+  }
   if (mode === "hold-read") {
     await withLocalPackageInstallation({ ...roots, packageId: "application.test_provider" }, () => {
       require("node:fs").writeSync(1, "paused\n"); process.kill(process.pid, "SIGSTOP");
@@ -185,7 +195,7 @@ async function crashChild(mode, root) {
   }
   if ([
     "rollback-repair",
-    "rollback-repair-backup",
+    "rollback-repair-published",
     "rollback-repair-materialize",
     "forward-repair",
     "receipt-only-forward",
@@ -197,7 +207,6 @@ async function crashChild(mode, root) {
       expectedRepairs: { "application.test_provider": repairExpectation(currentPackage) },
       onProgress(progress) {
         if (mode === "rollback-repair" && progress.phase === "installing") process.kill(process.pid, "SIGKILL");
-        if (mode === "rollback-repair-backup" && progress.phase === "backing_up") process.kill(process.pid, "SIGKILL");
         if (mode === "rollback-repair-materialize" && progress.phase === "materializing") process.kill(process.pid, "SIGKILL");
         if (mode === "forward-repair" && progress.phase === "finalizing") process.kill(process.pid, "SIGKILL");
         if (mode === "receipt-only-forward" && progress.phase === "receipting") process.kill(process.pid, "SIGKILL");
@@ -349,7 +358,7 @@ async function concurrentUpdateFixture() {
 }
 
 async function run() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-local-packages-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-local-packages-")));
   try {
     const roots = await createFixture(root);
     await fs.mkdir(roots.activeRegistryRoot, { recursive: true });
@@ -499,14 +508,17 @@ async function run() {
     assert.equal(packageRecord(catalog)?.available, true);
     assert.equal(packageRecord(catalog)?.installed, false);
     assert.equal(packRecord(catalog)?.required_components_materialized, false);
-    await fs.mkdir(path.join(roots.stateRoot, "transactions", ".prepare.abandoned_001.0123456789ab"));
+    await fs.mkdir(path.join(roots.stateRoot, "transactions", ".prepare.abandoned_001.0123456789ab"), { mode: 0o700 });
     await fs.writeFile(path.join(
       roots.stateRoot,
       "transactions",
       ".prepare.abandoned_001.0123456789ab",
-      ".journal.json.partial.tmp",
-    ), "partial", "utf8");
+      ".journal.json.123.abcdef012345.tmp",
+    ), "partial", { encoding: "utf8", mode: 0o600 });
     await fs.mkdir(path.join(roots.stateRoot, "transactions", ".cleanup.abandoned_002.abcdef012345"));
+    await assert.rejects(readLocalPackageCatalog(roots), /no retained native publication proof/);
+    assert.equal((await fs.stat(path.join(roots.stateRoot, "transactions", ".cleanup.abandoned_002.abcdef012345"))).isDirectory(), true);
+    await fs.rmdir(path.join(roots.stateRoot, "transactions", ".cleanup.abandoned_002.abcdef012345"));
     catalog = await readLocalPackageCatalog(roots);
     assert.deepEqual(await transactionEntries(roots), []);
 
@@ -700,7 +712,7 @@ async function run() {
       JSON.parse(await fs.readFile(path.join(roots.activeRegistryRoot, "interface", "world_test_provider", "interface.json"), "utf8")).source_names,
       ["test_provider"],
     );
-    runCrashChild("rollback-repair-backup", root);
+    runCrashChild("rollback-repair-published", root);
     currentInstallation = await readLocalPackageInstallation({
       ...roots,
       packageId: "application.test_provider",
@@ -775,7 +787,7 @@ async function run() {
 }
 
 async function updateBaselineFixture() {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-update-baseline-"));
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-update-baseline-")));
   try {
     const roots = await createFixture(root), id = "application.test_provider";
     const sourceOwner = path.join(roots.sourceRegistryRoot, "interface", "world_test_provider");
@@ -841,7 +853,7 @@ async function updateBaselineFixture() {
     assert.deepEqual(await fs.readFile(excluded), excludedBytes); assert.deepEqual(await fs.readFile(runPath), runBytes);
     assert.equal(await fs.readFile(path.join(activeOwner, "driver"), "utf8"), "source binary\n");
     await fs.rm(path.dirname(excluded), { recursive: true });
-    for (const phase of ["backing_up", "receipting"]) {
+    for (const phase of ["materializing", "receipting"]) {
       await fs.writeFile(path.join(sourceOwner, "driver"), `updated ${phase}\n`);
       await fs.chmod(path.join(sourceOwner, "driver"), 0o750);
       runCrashChild(`update-${phase}`, root);

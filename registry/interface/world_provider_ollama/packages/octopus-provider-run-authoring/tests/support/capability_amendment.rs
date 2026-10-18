@@ -233,4 +233,65 @@ fn capability_plan_rejects_bridge_narrowing_and_private_or_accepted_contract_cha
         }
         assert!(validate_plan(&invalid).is_err(),"mutation {mutation}");
     }
+    let (mut config, mut before)=fixture();
+    config.checkpoints[0].interface_binding=AuthoredInterfaceBinding::all("client_input".into());
+    for tool in ["read","write"] {
+        config.checkpoints[1].result_receiving.insert(tool.into(),serde_json::from_value(json!({
+            "mark":"tool.result.corresponds","artifact_label":format!("{tool}.result"),"verifier":"tool_result_correspondence","params":{}
+        })).unwrap());
+    }
+    before["checkpoints"][0]["interface_binding"]=json!(config.checkpoints[0].interface_binding);
+    before["interface_state"]["provider"][RUN_AUTHORING_BINDING]["checkpoints"]=json!(config.checkpoints);
+    let mut amendment=proposal(&config,&before);
+    let templates=amendment.after["interface_state"]["provider"][RUN_AUTHORING_BINDING]["checkpoints"].as_array_mut().unwrap();
+    templates[5]["interface_binding"]["interface"]=json!("new_context_input");
+    templates[6]["result_receiving"]=json!({"new_tool":{"mark":"tool.result.corresponds","artifact_label":"new_tool.result","verifier":"tool_result_correspondence","params":{}}});
+    amendment.after["checkpoints"][6]["interface_binding"]["interface"]=json!("new_context_input");
+    validate_plan(&amendment).unwrap();
+    let temp=tempfile::tempdir().unwrap();
+    let mut authored=ordinary_effect(&config,&before,temp.path(),None,false);
+    let mut ordinary:Value=serde_json::from_str(&authored.content).unwrap();
+    let item=&authored.pending_handoff.items[0];
+    let mut result=config.checkpoints[0].clone();
+    result.role=RunAuthoringCheckpointRole::ResultInput;
+    result.static_artifact_bindings=vec![item.artifact_id.clone()];
+    result.interface_binding=AuthoredInterfaceBinding { interface:"room".into(),config:InterfaceBindingConfig {
+        artifact_policy:BindingArtifactPolicy::Allow {names:vec!["read.result".into()],namespaces:Vec::new()}
+    }};
+    result.outbound_interface_bindings=vec![AuthoredInterfaceBinding {interface:"provider".into(),config:result.interface_binding.config.clone()}];
+    let mut required=config.checkpoints[1].result_receiving["read"].clone();
+    required.params=json!({"call_artifact":ArtifactRef {id:item.artifact_id.clone(),content:ContentHash::from_hex(&item.artifact_content_hash).unwrap()},
+        "tool":"read","correlation_id":"bridge-call","params":{}});
+    result.required_verified_artifacts=vec![required];
+    result.name=derived_checkpoint_name(result.role,&result.interface_binding,&result.outbound_interface_bindings,true,&result.required_verified_artifacts).unwrap();
+    let mut captured=provider_context_bindings(&record(&ordinary).unwrap(),&config.provider_interface).unwrap().into_iter().map(|binding|json!(binding)).collect::<Vec<_>>();
+    captured.push(json!(ArtifactBinding {id:item.artifact_id.clone(),access:Default::default()}));
+    let receipt=materialize_checkpoint(&result,"bridge_result",&config.run,&captured);
+    ordinary["checkpoints"].as_array_mut().unwrap().push(receipt.clone());
+    ordinary["active_checkpoints"].as_array_mut().unwrap().push(json!("bridge_result"));
+    ordinary["interface_state"]["provider"][RUN_AUTHORING_BINDING]["checkpoints"].as_array_mut().unwrap().push(json!(result));
+    authored.patch=json_patch::diff(&before,&ordinary);authored.content=ordinary.to_string();
+    authored.after_hash=ContentHash::of_bytes(authored.content.as_bytes()).to_hex();
+    validate_checked_provider_transition(&transition(&before,&authored)).unwrap();
+    let rebased=rebase_plan(&record(&ordinary).unwrap(),amendment.clone()).unwrap();
+    assert_eq!(rebased.after["checkpoints"].as_array().unwrap().iter().find(|cp|cp["id"]=="bridge_result"),Some(&receipt));
+    let mut rewritten=rebased.clone();
+    rewritten.after["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp|cp["id"]=="bridge_result").unwrap()["artifact_bindings"][0]["id"]=json!("unadmitted_context");
+    assert!(validate_plan(&rewritten).is_err());
+    apply_to_authored_run(&serde_json::to_vec(&before).unwrap(),&mut authored,&amendment,&config,temp.path()).unwrap();
+    let installed=record(&serde_json::from_str(&authored.content).unwrap()).unwrap();
+    assert_eq!(json!(installed.checkpoint(&"bridge_result".into()).unwrap()),receipt);
+    let future=topology(&installed,&config.provider_interface).unwrap().checkpoints.into_iter().find(|cp|cp.name=="new_output").unwrap();
+    assert_eq!(installed.active_checkpoints.iter().filter_map(|id|installed.checkpoint(id))
+        .filter(|cp|checkpoint_record_matches_template(cp,&future,&config.run)).count(),1);
+    assert!(current_context_artifacts(&installed,&config).unwrap().contains(&"new_context".into()));
+    assert!(!captured.iter().any(|binding|binding["id"]=="new_context"));
+    validate_installed(&installed,&amendment).unwrap();
+    validate_checked_provider_transition(&transition(&before,&authored)).unwrap();
+    let mut widened=amendment.clone();
+    widened.after["interface_state"]["provider"][RUN_AUTHORING_BINDING]["checkpoints"][1]["result_receiving"]["read"]["params"]=json!({"changed":true});
+    assert!(validate_plan(&widened).is_err());
+    let mut ambiguous=before.clone();
+    ambiguous["interface_state"]["provider"][RUN_AUTHORING_BINDING]["checkpoints"][0]["interface_binding"]["interface"]=json!("room");
+    assert!(validate_tool_continuation(&record(&ambiguous).unwrap(),&config.provider_interface,"read",&"room".into()).is_err());
 }

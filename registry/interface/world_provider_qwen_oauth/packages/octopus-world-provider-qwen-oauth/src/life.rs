@@ -143,6 +143,7 @@ async fn drive_with_retries(
     )?;
     match handoff.recover_source().await? {
         ProviderSourceRecovery::Process => {}
+        ProviderSourceRecovery::Bridged { .. } => return Ok(()),
         ProviderSourceRecovery::Completed => return Ok(()),
         ProviderSourceRecovery::Interrupted {
             last_artifact_label,

@@ -12,7 +12,7 @@ const { createChatgptSignIn } = require("../electron/chatgptSignIn.cjs");
 const { createProjectionStore } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
 const { adoptLocalPackageUpdates, recoverLocalPackageTransactions, registerLocalPackageMutationGuard } = require("../electron/localPackages.cjs");
-const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
+const { recoverWorkspaceTransactions, readWorkspaceSetupState } = require("../electron/workspaceSetup.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
 
@@ -70,6 +70,7 @@ function resolveEnvironment(options = {}) {
       ?? (repoInstallation ? path.join(repoRoot, "app", "distribution", "local-packages") : path.join(installationRoot, "local-packages")), "local package library"),
     stateRoot: path.join(home, "client", "package-state"),
   };
+  packageRoots.publication = require("../electron/packageStorage.cjs").createPackageStoragePublisher(packageRoots.sourceRegistryRoot, installationRoot);
   const launchEnv = {
     OCTOPUS_HOME: home,
     OCTOPUS_SOURCE_REGISTRY: sourceRegistry,
@@ -235,7 +236,7 @@ async function launchRuntime(environment, options) {
       });
       await assertStopped();
       await recoverWorkspaceTransactions({ octopusHomeRoot: environment.home, registryRoot: environment.packageRoots.activeRegistryRoot,
-        retirementBarrier: taskRetirementBarrier(environment) });
+        publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) });
       const interfaceRoot = fs.lstatSync(path.join(environment.packageRoots.activeRegistryRoot, "interface"), { throwIfNoEntry: false });
       if (interfaceRoot) {
         if (!interfaceRoot.isDirectory() || interfaceRoot.isSymbolicLink()) throw new Error("Installed interface Registry must be a regular directory.");
@@ -250,7 +251,7 @@ async function launchRuntime(environment, options) {
             await client.adoptOperatorChatPackageUpdates({ octopusHome: () => environment.home,
               registryRoot: () => environment.packageRoots.activeRegistryRoot, installationRoot: () => environment.installationRoot,
               assertStopped, commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, environment.packageRoots.activeRegistryRoot, request,
-                { retirementBarrier: taskRetirementBarrier(environment) }),
+                { publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
               onResult: (result) => options.onProgress({ phase: `client_package_${result.status}`, home: environment.home, ...result }),
             }, { clientRuns: scope.client_runs });
           }
@@ -338,6 +339,8 @@ function projectionStore(environment) {
     localPackageRegistry: () => environment.packageRoots.sourceRegistryRoot,
     localPackageLibrary: () => environment.packageRoots.libraryRoot,
     octopusHome: () => environment.home, runtimeLaunchEnvironment: () => environment.launchEnv,
+    readWorkspaceSetupState: (options) => readWorkspaceSetupState({ ...options,
+      publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
     projectEePolicies: async () => {
       const { stdout } = await execute(environment.runtimeBinary, ["project-ee-policies"], {
         cwd: environment.installationRoot,

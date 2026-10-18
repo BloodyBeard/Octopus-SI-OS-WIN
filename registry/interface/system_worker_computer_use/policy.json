@@ -195,6 +195,7 @@
     "mark_outcomes": [
       "ocr.text.contains",
       "tool.call.allowed",
+      "tool.result.corresponds",
       "task.summary.received",
       "operator.approval",
       "operator.input.provided"

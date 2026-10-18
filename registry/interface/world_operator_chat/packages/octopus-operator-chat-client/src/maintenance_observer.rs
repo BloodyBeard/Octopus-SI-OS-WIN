@@ -320,6 +320,7 @@ pub fn plan_maintenance_observer(
         schema_version: 2,
         interface: outcome_id.clone(),
         home_voice: None,
+        result_receiving_updates: Vec::new(),
         artifact_labels: ClientArtifactLabels {
             message: OUTPUT_LABEL.into(),
             turn_control: OUTPUT_LABEL.into(),
@@ -340,6 +341,7 @@ pub fn plan_maintenance_observer(
             worker: cfg.worker_template_interface_id.clone(),
             tool_call_mark: cfg.authoring.tool_call_mark.clone(),
             tool_call_verifier: cfg.authoring.tool_call_verifier.clone(),
+            tool_result_receiving: None,
             listen_env: String::new(),
             context_artifact_bindings: Vec::new(),
             _rest: Default::default(),
@@ -834,7 +836,8 @@ fn projection_contracts(
                             "source tool descriptor differs from its exact output door".into()
                         );
                     }
-                    if inputs.iter().any(|input| {
+                    if template.result_receiving.get(&tool).is_some_and(|receiving| receiving.artifact_label == label)
+                        || inputs.iter().any(|input| {
                         input.interface_binding.interface == descriptor.interface
                             && input.interface_binding.admits(&label)
                     }) {
@@ -1233,6 +1236,7 @@ fn plan_projection_run(
             schema_version: 2,
             interface: experience.into(),
             home_voice: None,
+            result_receiving_updates: Vec::new(),
             artifact_labels: ClientArtifactLabels {
                 message: request.config.terminal_label.clone(),
                 turn_control: request.config.terminal_label.clone(),
@@ -1253,6 +1257,7 @@ fn plan_projection_run(
                 worker: worker.into(),
                 tool_call_mark: request.config.authoring.tool_call_mark.clone(),
                 tool_call_verifier: request.config.authoring.tool_call_verifier.clone(),
+                tool_result_receiving: None,
                 listen_env: String::new(),
                 context_artifact_bindings: Vec::new(),
                 _rest: Default::default(),

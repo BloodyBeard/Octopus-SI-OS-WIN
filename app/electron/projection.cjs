@@ -2403,7 +2403,7 @@ function createProjectionStore(options) {
     const runRecordProjection = await readRunRecords(configuration.runRecordsRoot, warnings);
     let workspaceSetup;
     try {
-      workspaceSetup = await readWorkspaceSetupState({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
+      workspaceSetup = await (options.readWorkspaceSetupState ?? readWorkspaceSetupState)({ octopusHomeRoot: configuration.octopusHome, registryRoot: configuration.registryRoot });
       warnings.push(...arrayValue(workspaceSetup.errors));
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -11723,6 +11723,7 @@ async function plannedTaskApplicationRemovals(value) {
     if (!expectedFiles.size) throw new Error(`task application planner removal ${index} has no files`);
     const actual = new Map();
     for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+      if (entry.name === ".octopus-publication") { await requirePrivatePublicationDirectory(path.join(directory, entry.name)); continue; }
       if (!entry.isFile() || entry.isSymbolicLink()) {
         throw new Error(`task application removal '${directory}' contains a non-file entry`);
       }
@@ -13833,6 +13834,7 @@ async function requireUnchangedRemoval(removal) {
   if (removal.directFileDigests) {
     const current = new Map();
     for (const entry of await fs.readdir(removal.path, { withFileTypes: true })) {
+      if (entry.name === ".octopus-publication") { await requirePrivatePublicationDirectory(path.join(removal.path, entry.name)); continue; }
       if (!entry.isFile() || entry.isSymbolicLink()) {
         throw new Error(`${removal.label} contains a non-file entry before deletion`);
       }
@@ -13845,6 +13847,13 @@ async function requireUnchangedRemoval(removal) {
     ) {
       throw new Error(`${removal.label} files changed before deletion`);
     }
+  }
+}
+
+async function requirePrivatePublicationDirectory(directory) {
+  const stat = await fs.lstat(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || await fs.realpath(directory) !== directory) {
+    throw new Error("Publication metadata must be a plain private directory");
   }
 }
 

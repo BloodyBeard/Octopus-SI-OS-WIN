@@ -53,14 +53,21 @@ impl ProviderOutputHandoff {
             source_withdrawal::publication_bindings(&record, &config, pending)?
         } else if pending.settlement_of.is_some() {
             source_settlement::publication_bindings(&record, &config, pending)?
-        } else { target.iter().map(|id| serde_json::json!({"id":id})).collect::<Vec<_>>() };
+        } else {
+            let previous = current_context_bindings(&record, &config.checkpoints)?;
+            target.iter().map(|id| serde_json::to_value(previous.iter().find(|binding| &binding.id == id).cloned()
+                .unwrap_or_else(|| ArtifactBinding { id: id.clone(), access: Default::default() }))
+                .map_err(|error| error.to_string())).collect::<Result<Vec<_>, _>>()?
+        };
         let roles = current_mandatory_role_bindings(&record, &config)?;
         let roles = roles.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         let mut value: serde_json::Value = serde_json::from_slice(current).map_err(|error| error.to_string())?;
         let before = value.clone();
         let root = value.as_object_mut().ok_or("provider publication record is not an object")?;
         replace_context_checkpoints(root, &config, &record.id, &prefix, &bindings)?;
-        replace_verified_input_checkpoints(root, &config, &config, &record.id, &prefix, &bindings)?;
+        if !result_inputs::enabled(&config) {
+            replace_verified_input_checkpoints(root, &config, &config, &record.id, &prefix, &bindings)?;
+        }
         let mut frontier = frontier_checkpoint_ids(state)?.into_iter().collect::<Vec<_>>();
         let mut replaced = BTreeSet::new();
         let mut replacements = Vec::new();

@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use fs2::FileExt;
+use octopus_interface_transport::runtime_instance::RuntimeInstanceLock;
 use serde::{Deserialize, Serialize};
 
 const SCHEMA_VERSION: u32 = 3;
@@ -21,21 +21,15 @@ pub struct RuntimeInstance {
     root: PathBuf,
     state_path: PathBuf,
     record: RuntimeInstanceRecord,
-    _lock: std::fs::File,
+    _lock: RuntimeInstanceLock,
 }
 
 impl RuntimeInstance {
     pub fn acquire(octopus_home: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let state_root = octopus_home.join("state");
-        std::fs::create_dir_all(&state_root)?;
         let lock_path = state_root.join("runtime-instance.lock");
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&lock_path)?;
-        match lock.try_lock_exclusive() {
-            Ok(()) => {}
+        let lock = match RuntimeInstanceLock::try_acquire(octopus_home) {
+            Ok(lock) => lock,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let state_path = state_root.join("runtime-instance").join("state.json");
                 let detail = read_record(&state_path)
@@ -50,7 +44,8 @@ impl RuntimeInstance {
                 )
                 .into());
             }
-        }
+        };
+        lock.verify()?;
         let root = state_root.join("runtime-instance");
         let state_path = root.join("state.json");
         if root.exists() {
@@ -90,6 +85,7 @@ impl RuntimeInstance {
     }
 
     fn persist(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self._lock.verify()?;
         let mut bytes = serde_json::to_vec_pretty(&self.record)?;
         bytes.push(b'\n');
         let staged = self.root.join(format!(
@@ -105,14 +101,15 @@ impl RuntimeInstance {
         file.sync_all()?;
         std::fs::rename(&staged, &self.state_path)?;
         std::fs::File::open(&self.root)?.sync_all()?;
+        self._lock.verify()?;
         Ok(())
     }
 }
 
 impl Drop for RuntimeInstance {
     fn drop(&mut self) {
-        let owned =
-            read_record(&self.state_path).is_ok_and(|record| record.pid == std::process::id());
+        let owned = self._lock.verify().is_ok()
+            && read_record(&self.state_path).is_ok_and(|record| record.pid == std::process::id());
         if owned {
             let _ = std::fs::remove_dir_all(&self.root);
             if let Some(parent) = self.root.parent() {
@@ -126,16 +123,10 @@ pub fn observe(
     octopus_home: &Path,
 ) -> Result<Option<RuntimeInstanceRecord>, Box<dyn std::error::Error>> {
     let state_root = octopus_home.join("state");
-    std::fs::create_dir_all(&state_root)?;
     let lock_path = state_root.join("runtime-instance.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-    match lock.try_lock_exclusive() {
-        Ok(()) => {
-            FileExt::unlock(&lock)?;
+    match RuntimeInstanceLock::try_acquire(octopus_home) {
+        Ok(lock) => {
+            lock.verify()?;
             return Ok(None);
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -265,5 +256,47 @@ mod tests {
         let mut encoded = serde_json::to_value(record()).unwrap();
         encoded["foreign"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RuntimeInstanceRecord>(encoded).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_runtime_lock_excludes_startup_without_touching_state_records() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temporary.path()).unwrap();
+        let state = home.join("state/runtime-instance/state.json");
+        std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+        std::fs::write(&state, b"retained state").unwrap();
+        let lock_path = home.join("state/runtime-instance.lock");
+        std::fs::write(&lock_path, b"retained lock").unwrap();
+        let maintenance = RuntimeInstanceLock::try_acquire(&home).unwrap();
+        assert_eq!(std::fs::read(&state).unwrap(), b"retained state");
+        assert!(RuntimeInstance::acquire(&home).is_err());
+        maintenance.verify().unwrap();
+        drop(maintenance);
+        let runtime = RuntimeInstance::acquire(&home).unwrap();
+        assert_eq!(RuntimeInstanceLock::try_acquire(&home).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(observe(&home).unwrap().unwrap().phase, "starting");
+        drop(runtime);
+        assert!(observe(&home).unwrap().is_none());
+        assert_eq!(std::fs::read(&lock_path).unwrap(), b"retained lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_lock_rejects_replaced_files_and_parents_without_following_aliases() {
+        for parent in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let home = std::fs::canonicalize(temporary.path()).unwrap();
+            let held = RuntimeInstanceLock::try_acquire(&home).unwrap();
+            let path = home.join(if parent { "state" } else { "state/runtime-instance.lock" });
+            let retained = path.with_extension("retained");
+            std::fs::rename(&path, &retained).unwrap();
+            if parent { std::fs::create_dir(&path).unwrap(); } else { std::fs::write(&path, b"foreign").unwrap(); }
+            assert!(held.verify().is_err());
+            if parent { std::fs::remove_dir(&path).unwrap(); } else { std::fs::remove_file(&path).unwrap(); }
+            std::os::unix::fs::symlink(&retained, &path).unwrap();
+            assert!(held.verify().is_err());
+            assert!(RuntimeInstanceLock::try_acquire(&home).is_err());
+        }
     }
 }

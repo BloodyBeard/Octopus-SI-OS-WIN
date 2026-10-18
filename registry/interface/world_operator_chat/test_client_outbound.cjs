@@ -654,21 +654,61 @@ function authoredBinding(interfaceId) {
   };
 }
 
+async function installFakeTopologyTransport(installationRoot, handler = 'throw new Error("unsupported fake topology mode");') {
+  const executable = path.join(installationRoot, "target", "debug", "octopus-operator-chat-topology");
+  await fs.promises.mkdir(path.dirname(executable), { recursive: true });
+  await fs.promises.writeFile(executable, `#!/usr/bin/env node
+const assert = require("node:assert/strict"), crypto = require("node:crypto");
+const fs = require("node:fs"), path = require("node:path");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  const request = JSON.parse(input);
+  if (process.argv[2] === "--publish-files") {
+    assert.deepEqual(Object.keys(request), ["writes"]);
+    assert.ok(Array.isArray(request.writes) && request.writes.length <= 1024 && Buffer.byteLength(input) <= 64 * 1024 * 1024);
+    for (const write of request.writes) {
+      assert.deepEqual(Object.keys(write).sort(), ["content", "expected_before_hash", "operation_id", "path"]);
+      assert.ok(typeof write.path === "string" && path.isAbsolute(write.path));
+      assert.ok(typeof write.operation_id === "string" && write.operation_id.length > 0);
+      assert.equal(typeof write.content, "string");
+      assert.ok(write.expected_before_hash === null || (typeof write.expected_before_hash === "string" && /^[0-9a-f]{64}$/.test(write.expected_before_hash)));
+    }
+    const hash = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+    const result = { receipts: [], error: null };
+    for (const write of request.writes) {
+      const receipt = { digest_algorithm: "sha256", operation_id: write.operation_id, path: write.path,
+        before_hash: write.expected_before_hash, after_hash: hash(write.content),
+        bytes: Buffer.byteLength(write.content), outcome: "applied", error: null };
+      try {
+        const before = fs.existsSync(write.path) ? hash(fs.readFileSync(write.path)) : null;
+        if (before !== write.expected_before_hash) {
+          result.receipts.push({ ...receipt, outcome: "not_applied", error: "fixture preimage changed" });
+          break;
+        }
+        fs.mkdirSync(path.dirname(write.path), { recursive: true });
+        fs.writeFileSync(write.path, write.content);
+        result.receipts.push(receipt);
+      } catch (error) { result.error = error.message; break; }
+    }
+    process.stdout.write(JSON.stringify(result)); return;
+  }
+  ${handler}
+});
+`);
+  await fs.promises.chmod(executable, 0o755);
+  return executable;
+}
+
 async function createAuthoringFixture(root, eeId = "ee_operator_space") {
   const installationRoot = path.join(root, "installation");
-  const plannerPath = path.join(
-    installationRoot,
-    "target",
-    "debug",
-    "octopus-operator-chat-topology",
-  );
   const registryRoot = path.join(root, "registry");
   const runsRoot = path.join(root, "runs");
   const eeInstancesRoot = path.join(root, "ee-overlay");
   const ledgerRoot = path.join(root, "ledger");
   const capturePath = path.join(root, "planner-request.json");
   await Promise.all([
-    fs.promises.mkdir(path.dirname(plannerPath), { recursive: true }),
     fs.promises.mkdir(path.join(registryRoot, "interface"), { recursive: true }),
     fs.promises.mkdir(path.join(registryRoot, "tool"), { recursive: true }),
     fs.promises.mkdir(runsRoot, { recursive: true }),
@@ -688,14 +728,7 @@ async function createAuthoringFixture(root, eeId = "ee_operator_space") {
   }, null, 2)}\n`);
   const ledgerBytes = "{}\n";
   await fs.promises.writeFile(path.join(ledgerRoot, "movements.jsonl"), ledgerBytes);
-  await fs.promises.writeFile(plannerPath, `#!/usr/bin/env node
-const fs = require("node:fs");
-const path = require("node:path");
-let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { input += chunk; });
-process.stdin.on("end", () => {
-  const request = JSON.parse(input);
+  await installFakeTopologyTransport(installationRoot, `
   if (!fs.existsSync(path.join(request.ee_policy_root, \`\${request.ee_id}.json\`))) {
     process.stderr.write(\`planner missing EE '\${request.ee_id}'\`);
     process.exit(2);
@@ -769,9 +802,7 @@ process.stdin.on("end", () => {
     run_writes: [],
     run_record_content: JSON.stringify(run, null, 2) + "\\n",
   }));
-});
 `);
-  await fs.promises.chmod(plannerPath, 0o755);
   return {
     capturePath,
     eeId,
@@ -1985,6 +2016,7 @@ test("ordinary existing submission hands into its active client without topology
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
+  await installFakeTopologyTransport(root);
   const runsRoot = path.join(root, "runs");
   const registryRoot = path.join(root, "registry");
   const controlRoot = path.join(root, "app-server-control");
@@ -2079,14 +2111,8 @@ test("ordinary existing submission hands into its active client without topology
       ee_id: ordinary.ee, worker_choice_interface: "system_worker_coder_max", door_host_slots: {},
     },
   }));
-  const plannerPath = path.join(root, "target", "debug", "octopus-operator-chat-topology");
-  await fs.promises.mkdir(path.dirname(plannerPath), { recursive: true });
-  await fs.promises.writeFile(plannerPath, `#!/usr/bin/env node
-const fs = require("node:fs"), path = require("node:path");
-let data = "";
-process.stdin.on("data", chunk => { data += chunk; });
-process.stdin.on("end", () => {
-  const request = JSON.parse(data);
+  const plannerPath = await installFakeTopologyTransport(root, `
+  const data = input;
   fs.appendFileSync(path.join(path.dirname(__filename), "revision-requests.jsonl"), data + "\\n");
   if (process.argv[2] === "--inspect-input-payloads") {
     process.stdout.write(JSON.stringify({ selected_payloads: [] })); return;
@@ -2135,9 +2161,7 @@ process.stdin.on("end", () => {
   run.interface_state[provider].unselected_new_default = "must-not-replace-retained-state";
   const profile = { ee_id: request.ee_id, worker_choice_interface: request.worker_interface_id, door_host_slots: request.door_host_slots };
   process.stdout.write(JSON.stringify({ run_id: run.id, chat_interface_id: client, model_interface_id: provider, worker_interface_id: run.worker, client_surface_role: "task", model: request.model, reasoning_effort: "high", expected_before_hash_algorithm: "sha256", authoring_profile: profile, required_interface_ids: [client, provider], required_tool_ids: ["file.write"], interface_writes: [], run_writes: [], removals: [], run_record_content: JSON.stringify(run, null, 2) + "\\n" }));
-});
 `);
-  await fs.promises.chmod(plannerPath, 0o755);
   const initialRun = activeRun(); initialRun.status = "idle";
   const initialBytes = `${JSON.stringify(initialRun, null, 2)}\n`;
   await fs.promises.writeFile(runPath, initialBytes);
@@ -2240,6 +2264,7 @@ test("attachment crash before admission resumes only from an exact reattachment"
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
+  await installFakeTopologyTransport(root);
   const runsRoot = path.join(root, "runs");
   const registryRoot = path.join(root, "registry");
   const controlRoot = path.join(root, "app-server-control");
@@ -2354,6 +2379,7 @@ test("operator message admission recovers an accepted turn after the delivery ve
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
+  await installFakeTopologyTransport(root);
   const runsRoot = path.join(root, "runs");
   const registryRoot = path.join(root, "registry");
   const controlRoot = path.join(root, "app-server-control");
@@ -2584,6 +2610,7 @@ test("task deletion releases its exact worker environment through an allow-only 
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
+  await installFakeTopologyTransport(root);
   await fs.promises.writeFile(path.join(root, "host.json"), JSON.stringify({
     host_manifest_version: 1,
     root_refs: { run_records_root: runsRoot },
@@ -2688,6 +2715,7 @@ test("task deletion releases its exact worker environment through an allow-only 
   const outcome = await releaseOperatorTaskWorkerEnvironments({
     clientArtifactsRoot: (interfaceId) => path.join(root, "hand-in", interfaceId, "client"),
     octopusHome: () => root,
+    installationRoot: () => root,
     handInArtifact: async (input) => {
       assert.equal(input.interfaceId, ACTIVE_CLIENT);
       assert.equal(input.manifest.label, "worker_environment.release");

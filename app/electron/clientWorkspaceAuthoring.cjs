@@ -12,10 +12,13 @@ function commitProjectionClientAuthoring(octopusHome, registryRoot, request, opt
   return commitClientAuthoringTransaction({
     octopusHomeRoot: octopusHome,
     registryRoot,
+    publishFiles: options.publishFiles,
+    publication: options.publication,
     retirementBarrier: options.retirementBarrier,
     plan: {
       operationId: randomUUID(),
       label: String(request?.label ?? ""),
+      ...(Object.hasOwn(request, "condition") ? { condition: request.condition } : {}),
       writes: writes.map((write) => ({
         destination: path.resolve(write?.file ?? ""),
         expectedBeforeDigest: write?.beforeDigest ?? null,

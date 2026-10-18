@@ -14,6 +14,8 @@ use octopus_runtime::{
     GrantEpoch, InterfaceArrivalTarget, InterfaceOutboundArtifactTransfer, RunId, RuntimeError,
 };
 
+mod retained;
+
 #[derive(Clone, Debug)]
 pub struct InterfaceArrivalRecord {
     pub run: RunId,
@@ -401,16 +403,19 @@ fn record_runtime_admitted_mark_outcomes(
     from: &Endpoint,
     to: &Endpoint,
     causal_floor: Lamport,
+    arrival_seq: octopus_ledger::Seq,
 ) -> Vec<Movement> {
     let mut movements = Vec::with_capacity(marks.len());
     for mark in marks {
+        let mut mark = mark.clone();
+        mark.arrival_seq = Some(arrival_seq.0);
         movements.push(log.append(MovementDraft {
             trace: trace.clone(),
             kind: MovementKind::MarkOutcomeAdmitted(mark.name.clone()),
             from: from.clone(),
             to: to.clone(),
             artifact: mark.evidence.clone(),
-            invocation_metadata: Some(mark.clone().into()),
+            invocation_metadata: Some(mark.into()),
             causal_floor: Some(causal_floor),
         }));
     }
@@ -924,6 +929,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                     delivery_verdict: error.verdict(),
                     runtime: Some(Self::target_runtime_metadata(target, arriving_interface)),
                     source_movement_seq: source.map(|movement| movement.seq.0),
+                    delivery_scope_seq: target.delivery_scope_seq,
                 },
             )),
             causal_floor: source.map(|movement| movement.lamport),
@@ -970,23 +976,11 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             target.epoch.0,
             artifact_label,
         ) {
-            return Err(self.record_target_refusal(
-                error,
-                arriving_interface,
-                artifact,
-                &target,
-                source,
-            ));
+            return Err(if matches!(error, ArrivalError::CheckpointSpent(_)) {
+                self.record_target_refusal(error, arriving_interface, artifact, target, source)
+            } else { error });
         }
-        if let Err(error) = pin_run_record_snapshot(self.blobs, &target.run, &target.run_record) {
-            return Err(self.record_target_refusal(
-                error,
-                arriving_interface,
-                artifact,
-                &target,
-                source,
-            ));
-        }
+        pin_run_record_snapshot(self.blobs, &target.run, &target.run_record)?;
         Ok(())
     }
 
@@ -1088,29 +1082,36 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                 ));
             }
         };
+        if let Err(error) = prepared.validate_commit() {
+            return Err(self.record_target_refusal(ArrivalError::Gate(error), arriving_interface, artifact, &target, source));
+        }
         let arrival_metadata = admitted_invocation_metadata(prepared.observation());
+        let draft = MovementDraft {
+            trace: target_trace.clone(), kind: MovementKind::InterfaceArrival,
+            from: Endpoint::Interface(arriving_interface.clone()),
+            to: Endpoint::Interface(target.worker.clone()), artifact: Some(artifact.clone()),
+            invocation_metadata: Some(arrival_metadata.clone().into()),
+            causal_floor: pending.as_ref().map(|movement| movement.lamport)
+                .or_else(|| source.map(|movement| movement.lamport)),
+        };
         let arrival_movement = if let Some(pending) = pending {
             if pending.trace != target_trace
                 || pending.artifact.as_ref() != Some(artifact)
-                || pending
-                    .invocation_metadata
-                    .as_ref()
-                    .and_then(MovementMetadata::invocation)
-                    != Some(&arrival_metadata)
+                || pending.kind != MovementKind::InterfaceArrival
+                || pending.from != draft.from || pending.to != draft.to
             {
-                return Err(self.record_target_refusal(ArrivalError::Malformed("pending admission differs from its freshly verified checkpoint snapshot".into()), arriving_interface, artifact, &target, source));
+                return Err(self.record_target_refusal(ArrivalError::Malformed("pending admission changed its exact arrival identity".into()), arriving_interface, artifact, &target, source));
             }
-            pending
+            let prior = pending.invocation_metadata.as_ref().and_then(MovementMetadata::invocation);
+            if prior == Some(&arrival_metadata) { pending }
+            else if arrival_metadata.replaces_arrival_seq == Some(pending.seq.0)
+                && prior.is_some_and(|prior| arrival_metadata.retains_required_admission_contract(prior))
+            { self.log.append(draft) }
+            else {
+                return Err(self.record_target_refusal(ArrivalError::Malformed("pending admission has no checked replacement proof".into()), arriving_interface, artifact, &target, source));
+            }
         } else {
-            self.log.append(MovementDraft {
-                trace: target_trace.clone(),
-                kind: MovementKind::InterfaceArrival,
-                from: Endpoint::Interface(arriving_interface.clone()),
-                to: Endpoint::Interface(target.worker.clone()),
-                artifact: Some(artifact.clone()),
-                invocation_metadata: Some(arrival_metadata.into()),
-                causal_floor: source.map(|movement| movement.lamport),
-            })
+            self.log.append(draft)
         };
         let admitted_mark_outcome_movements = record_runtime_admitted_mark_outcomes(
             self.log,
@@ -1119,6 +1120,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             &arrival_movement.from,
             &arrival_movement.to,
             arrival_movement.lamport,
+            arrival_movement.seq,
         );
         let completion_floor = admitted_mark_outcome_movements
             .iter()
@@ -1232,22 +1234,14 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                     &edge.target,
                     edge.source.as_ref(),
                 ) {
+                    if !matches!(error, ArrivalError::CheckpointSpent(_)) { return Err(error); }
                     first_refusal.get_or_insert(error);
                     continue;
                 }
                 if edge.pending.is_none() {
                     match self.pending_required_arrival(&edge.target, &edge.artifact_label) {
                         Ok(pending) => edge.pending = pending,
-                        Err(error) => {
-                            first_refusal.get_or_insert(self.record_target_refusal(
-                                error,
-                                &edge.interface,
-                                &edge.artifact,
-                                &edge.target,
-                                edge.source.as_ref(),
-                            ));
-                            continue;
-                        }
+                        Err(error) => return Err(error),
                     }
                 }
                 let runtime = self.runtime.clone();
@@ -1257,6 +1251,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                             &edge.target,
                             edge.artifact.clone(),
                             edge.artifact_label.clone(),
+                            edge.pending.as_ref(),
                         )
                         .await;
                     (edge, result)
@@ -1761,6 +1756,7 @@ mod tests {
             run_epoch: 0,
             class: MarkClass::Success,
             evidence: Some(artifact.clone()),
+            arrival_seq: None,
             verifier: required.verifier.clone(),
             verifier_package: Some(octopus_ledger::VerifierPackagePin {
                 descriptor_content: ContentHash::of_bytes(b"descriptor"),
