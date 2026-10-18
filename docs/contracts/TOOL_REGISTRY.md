@@ -104,7 +104,7 @@ the runtime never installs a placeholder success.
 
 ## What ships
 
-The registry carries 188 tool descriptors over kind-owned executables:
+The registry carries about 190 tool descriptors over kind-owned executables:
 
 | Family | Room | Examples |
 | --- | --- | --- |

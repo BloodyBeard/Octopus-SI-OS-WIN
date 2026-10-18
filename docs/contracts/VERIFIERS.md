@@ -174,9 +174,11 @@ not suffer.
 
 ## 6. Coordination between runs
 
-A checkpoint that depends on another run's work is waiting on a mark. The
-producer's result artifact arrives on the waiter's binding, the verifier runs
-on that edge, and the admitted tick wakes the waiting run.
+A checkpoint that depends on another run's work and must be proven waits on
+a mark. The producer's result artifact arrives on the waiter's binding, the
+verifier runs on that edge, and the admitted tick wakes the waiting run. Use
+this where proof makes the result better; an ordinary dependency is simply an
+awaited artifact.
 
 Nothing coordinates on failures. Runs wait only on admitted ticks; a
 `VerificationFailed` row is diagnostic evidence, not a wait key.

@@ -20,10 +20,10 @@ registry/interface/<id>/<package code or scripts>
 an executable life. A driver-less System worker pin legitimately consists of
 its descriptor and `policy.json` alone.
 
-A new instance of an existing family may declare a `reference` to a root
-interface folder. If the instance has no `life.json` of its own, the resolver
-takes exactly one `life.json` from that explicit reference. Chains,
-self-reference, and cycles are refused. Identity is still the new folder.
+A new instance of an existing family is its own complete folder with its own
+`life.json`. It reuses another interface's executable by explicit import
+(`interface://<source-interface-id>/packages/...`) and inherits nothing else.
+A `reference` field on `interface.json` is rejected by the loader.
 
 ## interface.json
 
@@ -131,7 +131,8 @@ recovery.
 - the process receives its descriptor and config, read-only handles, the
   intake, and only explicitly declared roots;
 - the artifact payload stays opaque to the kernel;
-- `reference` reuses a life but creates no second identity mechanism.
+- code is reused by explicit import; no folder inherits another's identity,
+  life, or configuration.
 
 ## A working example
 

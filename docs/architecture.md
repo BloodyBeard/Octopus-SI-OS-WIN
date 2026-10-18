@@ -392,14 +392,15 @@ verifier checked.
 
 ## Coordination between runs
 
-Marks are also how runs coordinate. Two runs work at the same time, each parked
-on a checkpoint that requires something the other has not produced yet. When
-the producer's artifact arrives on the waiter's binding and passes its
-verifier, that admitted mark wakes it.
+Runs coordinate through artifacts arriving on checkpoint bindings. Two runs
+work at the same time, each parked on a checkpoint awaiting something the other
+has not produced yet; the producer's artifact arriving on the waiter's binding
+is the wake. When that arrival must be proven, the checkpoint requires a
+verified artifact, and the admitted mark is what wakes it.
 
 Artifacts travel in any direction - worker to worker, interface to worker,
-bottom-up, sideways - because runs coordinate only through marks and declared
-waits, never through a fixed parent-to-child order. There is no execution queue
+bottom-up, sideways - because runs coordinate only through artifacts and
+declared waits, never through a fixed parent-to-child order. There is no execution queue
 to schedule, because interfaces execute themselves.
 
 Nothing blocks. A waiting run holds nothing. Two runs each waiting on the

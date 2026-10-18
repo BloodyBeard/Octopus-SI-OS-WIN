@@ -138,13 +138,15 @@ provider interface never names workers.
 Any run whose grant lets it author run records can hand work to another
 worker. Planning is model work expressed through those records.
 
-A plan is the set of run and checkpoint contracts that run authors: for each step, a run for some worker pin with a concrete task,
-the `required_verified_artifacts` that run must close, and the marks it waits
-on before it starts. The dependency graph is those awaited marks.
+A plan is the set of run and checkpoint contracts that run authors: for each
+step, a run for some worker pin with a concrete task, the artifacts it waits on
+before it starts, and - where proof is worth it - the
+`required_verified_artifacts` it must close. The dependency graph is those
+awaited artifacts.
 
-Steps whose awaited marks are already admitted run in parallel. A dependent
-step waits as checkpoint data until its predecessors' artifacts arrive and
-their marks are admitted.
+Steps with nothing left to await run in parallel. A dependent step waits as
+checkpoint data until its predecessors' artifacts arrive, and their marks are
+admitted where they are required.
 
 ## In the app
 

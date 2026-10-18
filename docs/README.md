@@ -15,6 +15,8 @@
 
 ## Understanding Octopus
 
+- [UX](UX.md) - what the experience is built around, and where each part of
+  it is served.
 - [Architecture](architecture.md) - System and World, the primitives, one turn
   end to end, why there is no agent loop at the center.
 - [Glossary](glossary.md) - every term, and what the app's words mean

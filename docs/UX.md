@@ -1,0 +1,149 @@
+# UX
+
+Octopus has to feel native - like an operating system, not like a research
+harness with a chat window attached. That is the main difference from other
+self-improving agent projects: the architecture exists so that the experience
+can be simple. Roughly three quarters of the experience follows Codex; one
+quarter is the operating system.
+
+This page records the decisions behind that experience. The screens themselves
+are described in the [desktop client guide](client.md).
+
+## The client sets the UX
+
+The client decides what the experience is. Each piece of it is then served
+where it belongs:
+
+| Where | What it carries | Example |
+| --- | --- | --- |
+| The client | Presentation, local input, setup actions, the client's own composition. | Windows and panes, dictation, gestures, onboarding. |
+| JSON | Everything prepared in advance. | A setup preset, an Agent template, the bindings of a new task. |
+| The provider | How a turn is steered and handled inside the Codex provider. | Steering a running turn, approvals, the model catalog. |
+| The architecture | Only what cannot be correct anywhere else. | Several writers re-arming one run at once. |
+
+The last row is the rarest. When concurrent writes to one run record broke
+tasks, the fix was architectural: checkpoint generations and ordered writes
+under exact path authority. That is the kind of UX problem that belongs in the
+kernel. Almost everything else does not.
+
+A useful test: does this action reach a model, a run, or a world another
+interface owns? Then it crosses an interface under policy. If it is the
+client's own presentation or preparation, it stays in the client and is not
+routed through runtime policy for the sake of consistency.
+
+## Built around a ChatGPT subscription
+
+Octopus is universal, but its experience is built on a ChatGPT subscription and
+on Codex. The Codex provider is the main provider. It keeps its place in the
+hierarchy - one interface, never the kernel - but the product is shaped around
+it.
+
+Other models enter as models inside the Codex provider, not as separate agent
+products. [OpenCodex](https://github.com/lidge-jun/opencodex) is the example:
+it lets Codex run models from many providers. In the registry each such
+provider is its own interface folder that reuses the Codex provider's OpenCodex
+driver. This is a quiet center of the UX: Codex stays the way you work, and the
+set of models behind it can grow.
+
+Earlier integrations borrowed from other agent projects are kept where they
+are cheap to maintain and dropped where they are not.
+
+## Where to go
+
+**Home is the main screen.** It is the cheapest way into the system: the last
+reply, a composer, voice mode, and widgets. Think of it as the user's control
+panel. Home has no model picker and asks nothing technical of you. It hands
+out the work: when something needs doing, Home creates the runs that appear as
+Tasks.
+
+The nearest parallel is ChatGPT's Dots - always-on agents you simply talk to,
+which start other agents for you. Home is what Dots would be for Codex.
+
+**Tasks come second.** The Tasks destination is as close to Codex chats as
+possible, but it holds only work - runs, grouped into Projects and Agents. Most
+people will rarely need it, because Home hands the tasks out.
+
+**Dashboard** is the least necessary destination for an ordinary user and a
+convenient one for everyone else: Topology, Registry, Worker Environments, and
+Movements.
+
+**Inbox** is literally an inbox. Messages from applications, requests that
+need an answer, and notifications from the system - including marks and
+verifier results - all arrive there. Home and Inbox are most of what a user
+needs.
+
+**Applications** are the nearest thing to Codex plugins: providers,
+connectors, plugins, and knowledge packages.
+
+**Drivers** are heavier: the rooms where tools act - a folder, a worktree, a
+browser, a desktop, a container. Codex has no parallel; this is a capability of
+the architecture.
+
+**Extensions** belong to the client alone: widgets, workspace tabs, and guided
+repairs. Codex has no equivalent. The closest relative is DeepSeek Harness and
+its everything-is-a-plugin design; in Octopus it is a whole category of the
+client.
+
+Everything else follows Codex: a sidebar, a working pane opened beside the
+conversation, split panes.
+
+## Transparency
+
+A lot looks hidden and is not. In Home, **Activity** shows what is happening:
+the conversation and the full trace of its work. Nothing about that has to be
+in the way. You can just talk; when you want to see, you look.
+
+## It feels like an operating system
+
+**The system is started, not just opened.** The client is separate from the
+system. When you open it, the system is not running yet: the embedded terminal
+prepares `octopus up`, and you start it yourself. The client never starts the
+system on its own. A local password guards the client. This is deliberate - it
+is the moment you feel that this is an operating system.
+
+**Onboarding sets up an environment, not a project.** A short welcome, then you
+choose a setup - Life, Work, Founder, or Custom - name your areas and projects,
+and pick capabilities. Creating projects at onboarding would make no sense in
+Codex; here you are defining the operating environment the system will live
+in - its goals. A preset materializes into ordinary execution environments and
+bindings; there is no preset template in the runtime. Apply is a resumable
+client transaction, repeating it creates no duplicates, and your first real
+message stays the first message in Home.
+
+**States stay honest.** Available, installed, configured, available in a
+project, connected to a task, and live are separate facts. No earlier one is
+presented as proof of the next.
+
+## Where the interface is heading
+
+Codex is a workbench. Claude Code is a coder's environment. Octopus is an
+operating system you should not need to leave: make a widget to watch
+notifications, set up an automation, give the system an interface through
+which it tells you when something needs you.
+
+The camera and gestures are part of that direction - an interface for
+communicating, not only for pointing. A gesture can open a second window, move
+it, or send a recorded voice prompt. Gestures that only arrange the client stay
+client input; a gesture that sends something to a model enters the ordinary
+chat or voice path.
+
+## Triggers instead of schedules
+
+Elsewhere, a schedule runs something at a time, and Codex hooks react to its
+own session lifecycle - session start, a submitted prompt, before and after a
+tool call, stop. In Octopus a trigger is an interface with its own rules. An
+interface can check anything and send anything whenever its conditions hold,
+so a trigger is simply a run with such an interface attached in JSON: at this
+time, or after this event, check this and change that.
+
+## Self-improvement
+
+Self-improvement has to feel as native as everything else, and it is
+configured through JSON rather than added as a feature. A trigger interface
+that, after a run goes quiet, sends a prompt to a run that looks for ways the
+system could improve - a widget, a skill, a new interface - is ordinary
+configuration over the existing primitives. The platform makes this possible;
+finding what is worth building on it takes creativity.
+
+See [Architecture](architecture.md#autonomy-and-attention) for the attention
+question behind it.

@@ -69,9 +69,9 @@ If you are looking for a familiar concept, this is where it lives in Octopus.
 | Agent | A worker: the same role, kept as a descriptor a run wears. |
 | Session or conversation | An exact interface folder. A session is private vocabulary of the interface that owns it. |
 | Heartbeat, tick, scheduler | Time arrives as an artifact through an interface such as a cron. |
-| Supervisor, orchestrator | Marks and checkpoint waits. |
+| Supervisor, orchestrator | Checkpoint waits and the artifacts that arrive on them. |
 | Skill store, memory store | Artifacts bound to runs, edited by ordinary runs under policy. |
-| Workflow, pipeline, chain | Runs in an EE, coordinated by marks. |
+| Workflow, pipeline, chain | Runs in an EE exchanging artifacts through bindings. |
 
 The parallel is direct: a browser agent is a web worker, a coding agent is a
 coder worker. The word changes because the thing does. An agent is usually a
