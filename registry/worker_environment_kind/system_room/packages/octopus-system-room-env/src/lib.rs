@@ -26,6 +26,7 @@ mod skill_bound;
 pub use artifact_bound_process::run_artifact_bound_tool_process;
 pub use file_read::run_file_read_tool_process;
 pub use file_write::execute_file_write_result;
+pub use memory_bound::{MemoryHost, execute as execute_memory_tool};
 
 const TOOL_CALL_LABEL: &str = "tool.call";
 

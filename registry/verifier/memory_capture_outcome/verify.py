@@ -43,21 +43,15 @@ def verify(request):
         key = reference_key(entry["source_artifact"])
         assert key not in by_ref and isinstance(entry["source_movement_seq"], int) and experience["source_movement_seq"] < entry["source_movement_seq"] < source["terminal_source_movement_seq"], "duplicate or evidence outside current experience"
         by_ref[key] = entry
-    prepared = []
     calls = {}
     results = {}
     applied = set()
     writer = params["publication_tool"]
-    prepare = params["prepare_tool"]
     for key, entry in by_ref.items():
         value = entry["payload"]
         is_result = entry["label"] == writer + ".result"
         assert not is_result or isinstance(value, dict), "publication receipt malformed"
-        if not isinstance(value, dict):
-            continue
-        if entry["label"] == prepare + ".result" and value.get("label") == entry["label"] and value.get("tool") == prepare and value.get("ok") is True and value.get("error") is None and isinstance(value.get("body"), dict) and value["body"].get("status") == "prepared":
-            prepared.append((entry["source_movement_seq"], value["body"]))
-        if value.get("tool") != writer and not is_result:
+        if not isinstance(value, dict) or (value.get("tool") != writer and not is_result):
             continue
         assert value.get("tool") == writer, "publication receipt tool mismatch"
         correlation = value["correlation_id"]
@@ -68,14 +62,16 @@ def verify(request):
         else:
             assert is_result and value.get("label") == entry["label"], "publication receipt label mismatch"
             assert correlation not in results, "duplicate publication result"
-            assert value.get("ok") is True and value.get("error") is None and isinstance(value.get("body"), dict) and value["body"].get("result") == "ordered_file_writes", "publication failed or has an uncertain effect"
+            body = value.get("body")
+            assert value.get("ok") is True and value.get("error") is None and isinstance(body, dict) and body.get("result") in ("memory_saved", "memory_already_saved"), "publication failed or has an uncertain effect"
             results[correlation] = key
-            applied.add(key)
+            if body["result"] == "memory_saved":
+                applied.add(key)
     assert calls.keys() == results.keys(), "publication call has no exact result or result has no call"
     for correlation, key in results.items():
         assert calls[correlation][0] < by_ref[key]["source_movement_seq"], "publication result precedes its call"
     if outcome["status"] == "noop":
-        assert not receipts and not calls, "no-op has publication evidence"
+        assert not receipts and not applied, "no-op has publication evidence"
         return
     selected = []
     for receipt in receipts:
@@ -87,23 +83,16 @@ def verify(request):
     root = params["entries_root"]
     assert isinstance(root, str) and os.path.isabs(root) and os.path.normpath(root) == root, "publication root malformed"
     for key in selected:
-        result = by_ref[key]["payload"]
-        assert result.get("error") is None and result["tool"] == writer and result["label"] == writer + ".result", "publication receipt malformed"
-        call_seq, arguments = calls[result["correlation_id"]]
-        assert any(seq < call_seq and plan["file_write"] == arguments for seq, plan in prepared), "writer call differs from prior exact prepared bytes"
-        assert arguments["ordered"] is True and isinstance(arguments["writes"], list) and arguments["writes"], "publication batch malformed"
-        writes = result["body"]["writes"]
-        assert len(writes) == len(arguments["writes"]), "publication receipt count mismatch"
-        for receipt, planned in zip(writes, arguments["writes"]):
+        body = by_ref[key]["payload"]["body"]
+        memory, withdrawn, writes = body["memory"], body["withdrawn"], body["writes"]
+        assert isinstance(memory, dict) and memory["scope_ee_ids"] == [params["source_ee"]], "publication broadened source EE scope"
+        assert isinstance(withdrawn, list) and isinstance(writes, list) and len(writes) == 1 + len(withdrawn), "publication receipt count mismatch"
+        assert os.path.basename(writes[0]["path"]) == memory["id"] + ".json", "publication receipt names another entry"
+        for receipt in writes:
             path = receipt["path"]
-            assert path == planned["path"] and os.path.dirname(path) == root and os.path.basename(path).endswith(".json"), "publication path escaped selected entries"
+            assert isinstance(path, str) and os.path.dirname(path) == root and path.endswith(".json"), "publication path escaped selected entries"
             assert receipt["outcome"] == "applied" and receipt["error"] is None and receipt["after_hash"] == receipt["observed_hash"], "publication was not applied"
-            assert receipt["before_hash"] == planned["expected_before_hash"] and isinstance(receipt["after_hash"], str) and re.fullmatch(r"[0-9a-f]{64}", receipt["after_hash"]), "publication receipt hash mismatch"
-            assert receipt["bytes"] == len(planned["content"].encode("utf-8")), "publication byte receipt mismatch"
-            entry = json.loads(planned["content"])
-            assert entry["scope"]["ee_ids"] == [params["source_ee"]], "publication broadened source EE scope"
-            assert entry["selection"] == {} and entry.get("requires", []) == [], "capture cannot install capability selections"
-
+            assert isinstance(receipt["after_hash"], str) and re.fullmatch(r"[0-9a-f]{64}", receipt["after_hash"]), "publication receipt hash mismatch"
 
 if __name__ == "__main__":
     try:

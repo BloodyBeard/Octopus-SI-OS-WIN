@@ -62,8 +62,9 @@ async function readMaintenanceTaskTopology(options) {
     || d.collection_entries_root !== entriesRoot) fail("publication collection root changed");
   await plainRoot(entriesRoot, "publication collection entries");
   const publication = (await descriptorJson(registry, "interface", d.publication_door_interface)).document;
-  if (publication.interface_driver_config?.host_slots?.registry_artifact_root?.path !== entriesRoot) {
-    fail("publication door escapes its declared collection entries");
+  if (publication.interface_driver_config?.private_config?.memory_collection !== d.collection_source
+    || publication.interface_driver_config?.host_slots?.registry_artifact_root?.path !== path.join(registry, "artifact")) {
+    fail("publication door escapes its declared collection");
   }
   if (typeof options.readWriterRuns !== "function") fail("exact writer reader is unavailable");
   for (const target of targets.values()) {

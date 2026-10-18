@@ -9,7 +9,7 @@ import unittest
 
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "verify.py"
-WRITER = "file.write.selected_publication"
+WRITER = "memory.save.selected_observer"
 
 
 def reference(identity):
@@ -22,21 +22,21 @@ def evidence(seq, label, payload):
 
 
 class CaptureOutcomeVerifierTests(unittest.TestCase):
-    def test_exact_publication_settlement_is_required_for_every_success(self):
+    def test_every_memory_save_receipt_is_required_for_a_publication(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
-            content = json.dumps({"scope": {"ee_ids": ["selected-ee"]}, "selection": {}, "requires": []})
-            digest = hashlib.sha256(content.encode()).hexdigest()
-            path = str(root / "entry.json")
-            arguments = {"ordered": True, "writes": [{"path": path, "content": content, "expected_before_hash": None}]}
-            prepared = evidence(2, "prepare.result", {"tool": "prepare", "label": "prepare.result", "ok": True, "error": None,
-                "body": {"status": "prepared", "file_write": arguments}})
-            call = evidence(3, "tool.call", {"tool": WRITER, "correlation_id": "write-1", "arguments": arguments})
+            digest = hashlib.sha256(b"entry").hexdigest()
+            path = str(root / "memory-note.json")
+            call = evidence(3, "tool.call", {"tool": WRITER, "correlation_id": "save-1", "arguments": {"note": "Prefers pnpm."}})
             result = evidence(4, WRITER + ".result", {"label": WRITER + ".result", "tool": WRITER,
-                "correlation_id": "write-1", "ok": True, "error": None,
-                "body": {"result": "ordered_file_writes", "writes": [{"path": path,
-                    "outcome": "applied", "error": None, "before_hash": None,
-                    "after_hash": digest, "observed_hash": digest, "bytes": len(content.encode())}]}})
+                "correlation_id": "save-1", "ok": True, "error": None,
+                "body": {"result": "memory_saved", "memory": {"id": "memory-note", "scope_ee_ids": ["selected-ee"]},
+                    "withdrawn": [], "writes": [{"path": path, "outcome": "applied", "error": None,
+                        "before_hash": None, "after_hash": digest, "observed_hash": digest, "bytes": 5}]}})
+            repeat = evidence(5, "tool.call", {"tool": WRITER, "correlation_id": "save-2", "arguments": {"note": "Prefers pnpm."}})
+            deduped = evidence(6, WRITER + ".result", {"label": WRITER + ".result", "tool": WRITER,
+                "correlation_id": "save-2", "ok": True, "error": None,
+                "body": {"result": "memory_already_saved", "memory": {"id": "memory-note"}}})
             payload = {"schema_version": 1, "label": "memory.capture.outcome",
                 "source": {"run": "source", "ee": "selected-ee", "provider_interface": "provider",
                     "terminal_artifact": reference("terminal"), "terminal_source_movement_seq": 20},
@@ -45,15 +45,15 @@ class CaptureOutcomeVerifierTests(unittest.TestCase):
                 "outcome": {"schema_version": 1, "status": "noop", "source_run": "source",
                     "reason": "No additional reusable knowledge.", "receipts": []}, "evidence": []}
             request = {"params": {"max_bytes": 65536, "source_run": "source", "source_ee": "selected-ee",
-                "provider_interface": "provider", "publication_tool": WRITER, "prepare_tool": "prepare",
-                "entries_root": str(root)}, "artifact_label": "memory.capture.outcome", "payload_path": str(root / "outcome.json")}
+                "provider_interface": "provider", "publication_tool": WRITER, "entries_root": str(root)},
+                "artifact_label": "memory.capture.outcome", "payload_path": str(root / "outcome.json")}
 
-            def check(entries, status, passed):
+            def check(entries, status, passed, receipts=("save-1",)):
                 candidate = copy.deepcopy(payload)
                 candidate["evidence"] = entries
                 candidate["outcome"]["status"] = status
                 if status == "published":
-                    candidate["outcome"]["receipts"] = [{"tool": WRITER, "correlation_id": "write-1"}]
+                    candidate["outcome"]["receipts"] = [{"tool": WRITER, "correlation_id": item} for item in receipts]
                 pathlib.Path(request["payload_path"]).write_text(json.dumps(candidate))
                 completed = subprocess.run([sys.executable, str(SCRIPT)], input=json.dumps(request),
                     text=True, capture_output=True, check=True, timeout=10)
@@ -61,52 +61,33 @@ class CaptureOutcomeVerifierTests(unittest.TestCase):
                 self.assertEqual(verdict["passed"], passed, verdict)
 
             check([], "noop", True)
-            check([prepared], "noop", True)
-            check([prepared, call, result], "published", True)
-            for status in ("noop", "published"):
-                for entries in ([call], [result], [prepared, result], [prepared, call]):
-                    with self.subTest(status=status, entries=[item["label"] for item in entries]):
-                        check(entries, status, False)
-                for code in ("tool_effect_indeterminate", "file_write_conflict"):
-                    failed = copy.deepcopy(result)
-                    failed["payload"].update(ok=False, body=None, error={"code": code})
-                    with self.subTest(status=status, error=code):
-                        check([prepared, call, failed], status, False)
-                        failed["source_artifact"] = reference("second-result")
-                        failed["source_movement_seq"] = 6
-                        failed["payload"]["correlation_id"] = "write-2"
-                        second_call = evidence(5, "tool.call", {**call["payload"], "correlation_id": "write-2"})
-                        check([prepared, call, result, second_call, failed], status, False)
-            check([prepared, call, result], "noop", False)
-            for change in ("call", "late", "label", "error", "body"):
-                changed = copy.deepcopy(prepared)
-                if change == "call":
-                    changed["label"] = "tool.call"
-                    changed["payload"].update(arguments={}, correlation_id="prepare-call")
-                elif change == "late":
-                    changed["source_movement_seq"] = 5
-                elif change == "label":
-                    changed["payload"]["label"] = "unrelated.result"
-                elif change == "error":
-                    changed["payload"]["error"] = {"code": "invalid_preparation"}
-                else:
-                    changed["payload"]["body"] = None
-                with self.subTest(preparation=change):
-                    check([changed, call, result], "published", False)
-            for change in ("correlation", "duplicate", "order", "partial"):
+            check([repeat, deduped], "noop", True)
+            check([call, result], "published", True)
+            check([call, result, repeat, deduped], "published", True)
+            check([call, result, repeat, deduped], "published", False, ("save-1", "save-2"))
+            check([call, result], "noop", False)
+            for entries in ([call], [result], [repeat]):
+                with self.subTest(entries=[item["label"] for item in entries]):
+                    check(entries, "published", False)
+            for change in ("failed", "correlation", "order", "partial", "scope", "escape", "other"):
                 changed = copy.deepcopy(result)
-                entries = [prepared, call, changed]
-                if change == "correlation":
+                body = changed["payload"]["body"]
+                if change == "failed":
+                    changed["payload"].update(ok=False, body=None, error={"code": "tool_execution_failed"})
+                elif change == "correlation":
                     changed["payload"]["correlation_id"] = "unmatched"
-                elif change == "duplicate":
-                    entries.append(evidence(5, result["label"], result["payload"]))
                 elif change == "order":
                     changed["source_movement_seq"] = 2
+                elif change == "partial":
+                    body["writes"][0]["outcome"] = "uncertain"
+                elif change == "scope":
+                    body["memory"]["scope_ee_ids"] = ["wider-ee"]
+                elif change == "escape":
+                    body["writes"][0]["path"] = str(root.parent / "memory-note.json")
                 else:
-                    changed["payload"]["body"]["writes"][0]["outcome"] = "indeterminate"
+                    body["memory"]["id"] = "another"
                 with self.subTest(change=change):
-                    check(entries, "published", False)
-
+                    check([call, changed], "published", False)
 
 if __name__ == "__main__":
     unittest.main()

@@ -20,9 +20,12 @@ Memory is written in two ways:
 1. **Directly, during work.** When the user says "remember this", corrects the
    model, or a procedure is proven, the run makes one `memory.save` call.
 2. **In the background, after work.** When a run settles, an observer run reads
-   a bounded projection of what happened and maintains the same collection;
-   periodically a consolidation run merges and prunes it. Both are ordinary
-   runs started by interfaces.
+   a bounded projection of what happened and maintains the same collection
+   through the same tools: it searches first and saves one note per fact,
+   superseding what a correction replaces. A verifier admits its outcome only
+   when every save it names is scoped to the observed environment and landed
+   in the collection. Periodically a consolidation run merges and prunes the
+   collection. Both are ordinary runs started by interfaces.
 
 The resulting entries become visible only to runs whose bindings and formed
 policy admit them.

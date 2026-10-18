@@ -39,7 +39,7 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
         ),
         (
             "interface",
-            "system_context_memory_publication",
+            "system_memory",
             vec!["interface.json", "life.json"],
         ),
         (
@@ -58,10 +58,10 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
             "artifact-context-collection-guide",
             vec!["artifact.json"],
         ),
-        ("tool", "file.write.memory_publication", vec!["tool.json"]),
-        ("tool", "context.discover", vec!["tool.json"]),
-        ("tool", "context.read", vec!["tool.json"]),
-        ("tool", "context.prepare_publication", vec!["tool.json"]),
+        ("tool", "memory.save", vec!["tool.json"]),
+        ("tool", "memory.search", vec!["tool.json"]),
+        ("tool", "memory.read", vec!["tool.json"]),
+        ("tool", "memory.list", vec!["tool.json"]),
         ("mark", "memory.experience.admitted", vec!["mark.json"]),
         ("mark", "memory.capture.completed", vec!["mark.json"]),
         (
@@ -89,8 +89,7 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
     worker["ceiling"]["interfaces"] = json!([
         "world_provider_fixture",
         "system_worker_memory_observer",
-        "system_context",
-        "system_context_memory_publication",
+        "system_memory",
         "system_interface_authoring",
         "system_room"
     ]);
@@ -115,8 +114,7 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
             .unwrap()
             .extend([
                 json!("system_worker_memory_observer"),
-                json!("system_context"),
-                json!("system_context_memory_publication"),
+                json!("system_memory"),
                 json!("system_context_memory_projection"),
             ]);
         value
@@ -125,10 +123,10 @@ fn capture_fixture(root: &Path) -> RunCompositionRequest {
             .as_array_mut()
             .unwrap()
             .extend([
-                json!("context.discover"),
-                json!("context.read"),
-                json!("context.prepare_publication"),
-                json!("file.write.memory_publication"),
+                json!("memory.save"),
+                json!("memory.search"),
+                json!("memory.read"),
+                json!("memory.list"),
             ]);
         support::write(root, file, value);
     }
@@ -1553,122 +1551,49 @@ mod movement_gate {
             let mut observer_source = boundary.input(&projected, observer).0.seq.0;
             let mut model = boundary.handoff(&projected, observer, observer_run);
             let (receipts, preparation_outcome) = if turn == 1 {
-                let prepare_tool = plan
-                    .descriptor_writes
-                    .iter()
-                    .filter(|write| write.path.ends_with("tool.json"))
-                    .map(|write| serde_json::from_str::<Value>(&write.content).unwrap())
-                    .find(|tool| {
-                        tool["id"]
-                            .as_str()
-                            .is_some_and(|id| id.starts_with("context.prepare_publication__"))
-                    })
-                    .unwrap();
-                let prepare_id = prepare_tool["id"].as_str().unwrap();
-                let reader_door = prepare_tool["interface"].as_str().unwrap();
-                let entry = json!({"schema_version":1,"id":"verified-receipts","title":"Use applied receipts","description":"Report writes only after applied receipts.",
-                    "applicability":"When reporting a write","state":"active","scope":{"ee_ids":[request.ee_id]},"content":{"text":"Verify the exact applied file receipt before reporting a write."},"selection":{},"requires":[]});
-                let descriptor =
-                    read(&root.join("registry/artifact/artifact-system-library/artifact.json"));
-                let source = octopus_ledger::ArtifactRef {
-                    id: "artifact-system-library".into(),
-                    content: ContentHash::of_canonical_json(&descriptor),
-                };
-                let call=boundary.file(observer,"tool.call",&json!({"tool":prepare_id,"correlation_id":"prepare-1","arguments":{"source":source,"entry":entry,"expected_revision":null}}));
-                let preparation_outcome = boundary
-                        .drive(model.hand_final(ProviderEmission {
-                            artifact: call,
-                            route: ProviderEmissionRoute::Tool {
-                                tool: prepare_id.into()
-                            }
-                        }))
-                        .await;
-                assert!(matches!(preparation_outcome, ProviderHandoffOutcome::Admitted { .. }));
-                let collection = octopus_context_collections::BoundCollection::open(
-                    &root.join("registry/artifact"),
-                    &source,
-                    &descriptor,
-                )
-                .unwrap();
-                let entry = serde_json::from_value(entry).unwrap();
-                let publication = collection
-                    .prepare_publication(
-                        &entry,
-                        None,
-                        &octopus_context_collections::ScopeContext {
-                            ee_id: request.ee_id.clone(),
-                            worker_interface: d["worker_interface"].as_str().unwrap().into(),
-                        },
-                    )
-                    .unwrap();
-                let prepared = octopus_tool_handlers::ToolResultArtifact::success(
-                    prepare_id,
-                    Some("prepare-1".into()),
-                    json!({"status":"prepared","publication":publication.pin,"file_write":publication.file_write}),
-                );
-                let result = boundary.file(reader_door, &prepared.label, &json!(prepared));
-                assert!(matches!(
-                    boundary.admit(&result, &reader_door.into()).await,
-                    DeliveryVerdict::Admitted { .. }
-                ));
-                model = boundary.stable_result_handoff(&model, &result, observer, observer_run).await.0;
-                let update = boundary.file(
-                    observer,
-                    "interface.context.updated",
-                    &json!({"text":"Preparation received."}),
-                );
-                assert!(matches!(
-                    boundary
-                        .drive(model.hand(ProviderEmission {
-                            artifact: update,
-                            route: ProviderEmissionRoute::ClientProjection
-                        }))
-                        .await,
-                    ProviderHandoffOutcome::Admitted { .. }
-                ));
                 let writer = d["publication_tool"].as_str().unwrap();
                 let door = d["publication_door_interface"].as_str().unwrap();
-                let arguments = serde_json::to_value(&publication.file_write).unwrap();
+                let arguments = json!({"note":"Verify the exact applied file receipt before reporting a write.","title":"Use applied receipts"});
                 let call = boundary.file(
                     observer,
                     "tool.call",
                     &json!({"tool":writer,"correlation_id":"publication-1","arguments":arguments}),
                 );
-                assert!(matches!(
-                    boundary
-                        .drive(model.hand_final(ProviderEmission {
-                            artifact: call.clone(),
-                            route: ProviderEmissionRoute::Tool {
-                                tool: writer.into()
-                            }
-                        }))
-                        .await,
-                    ProviderHandoffOutcome::Admitted { .. }
-                ));
-                let (_, write_input) = boundary.input(&call, door);
-                let body = octopus_system_room_env::execute_file_write_result(
-                    &write_input,
-                    &arguments,
-                    &["system_room".into()],
-                    &BTreeMap::from([(
-                        "registry_artifact_root".into(),
-                        PathBuf::from(d["collection_entries_root"].as_str().unwrap()),
-                    )]),
-                    &root.join("publication-effects"),
-                    1 << 26,
+                let saved_outcome = boundary
+                    .drive(model.hand_final(ProviderEmission {
+                        artifact: call.clone(),
+                        route: ProviderEmissionRoute::Tool {
+                            tool: writer.into()
+                        }
+                    }))
+                    .await;
+                assert!(matches!(saved_outcome, ProviderHandoffOutcome::Admitted { .. }));
+                let (_, save_input) = boundary.input(&call, door);
+                let tool = read(&root.join("registry/tool").join(writer).join("tool.json"));
+                let saved = octopus_system_room_env::execute_memory_tool(
+                    &save_input,
+                    &octopus_tool_handlers::ToolCall {
+                        tool_id: writer.into(),
+                        arguments: arguments.clone(),
+                        handler_config: tool["handler_config"].clone(),
+                    },
+                    &octopus_system_room_env::MemoryHost {
+                        collection: d["collection_source"].as_str().unwrap(),
+                        artifact_root: &root.join("registry/artifact"),
+                        ee_instances_root: &root.join("ee"),
+                        effect_root: Some(&root.join("memory-effects")),
+                        room_kinds: &["system_room".to_string()],
+                        maximum_bytes: 1 << 26,
+                    },
                 )
-                .unwrap();
-                assert!(
-                    body["writes"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .all(|receipt| receipt["outcome"] == "applied")
-                );
+                .unwrap()
+                .body;
+                assert_eq!(saved["result"], "memory_saved");
+                assert_eq!(saved["memory"]["scope_ee_ids"], json!([request.ee_id]));
                 let applied = octopus_tool_handlers::ToolResultArtifact::success(
                     writer,
                     Some("publication-1".into()),
-                    body,
+                    saved,
                 );
                 let result = boundary.file(door, &applied.label, &json!(applied));
                 assert!(matches!(
@@ -1676,7 +1601,7 @@ mod movement_gate {
                     DeliveryVerdict::Admitted { .. }
                 ));
                 (model, observer_source) = boundary.stable_result_handoff(&model, &result, observer, observer_run).await;
-                (json!([{"tool":writer,"correlation_id":"publication-1"}]), Some(preparation_outcome))
+                (json!([{"tool":writer,"correlation_id":"publication-1"}]), Some(saved_outcome))
             } else {
                 (json!([]), None)
             };
@@ -1705,7 +1630,7 @@ mod movement_gate {
                 if turn == 1 { "published" } else { "noop" }
             );
             if turn == 1 {
-                assert!(outcome["evidence"].as_array().unwrap().len() >= 4);
+                assert!(outcome["evidence"].as_array().unwrap().len() >= 2);
             } else {
                 assert!(outcome["evidence"].as_array().unwrap().is_empty());
             }

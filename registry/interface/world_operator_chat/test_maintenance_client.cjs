@@ -38,7 +38,7 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
     source_relay_interface: "terminal_relay", projection_interface: "projector", experience_interface: "experience_relay",
     terminal_label: terminal, provider_output_labels: [terminal, "turn.completed"], input_label: input, outcome_interface: "observer_outcome", capture_interface: "capture_relay", outcome_label: outcome,
     collection_source: library, collection_entries_root: path.join(registryRoot, "artifact", library, "entries"),
-    publication_door_interface: "publication_door", publication_tool: "file.write.publication" };
+    publication_door_interface: "publication_door", publication_tool: "memory.save.publication" };
   const sourceParams = { source_run: source.id, source_ee: source.ee, source_worker_interface: source.worker, source_provider_interface: provider, source_client_interface: client };
   const projected = requirement(input, { stage: "projection", ...sourceParams });
   const observerTemplates = [template("stable", d.experience_interface, d.provider_interface, projected),
@@ -89,9 +89,10 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
   Object.assign(providerDescriptor.interface_driver_config.private_config, { client_projection_output_labels: d.provider_output_labels, session_snapshot_labels: [terminal] });
   stage("interface", provider, providerDescriptor);
   stage("artifact", library, { id: library, label: "context.collection", schema_version: 1, directory: "entries" });
-  stage("interface", d.publication_door_interface, { id: d.publication_door_interface, interface_driver_config: { host_slots: { registry_artifact_root: { path: d.collection_entries_root } } } });
+  stage("interface", d.publication_door_interface, { id: d.publication_door_interface, interface_driver_config: { private_config: { memory_collection: library },
+    host_slots: { registry_artifact_root: { path: path.join(registryRoot, "artifact") } } } });
   stage("tool", d.publication_tool, { id: d.publication_tool, interface: d.publication_door_interface, process: { authority: {
-    write_argument_paths: [{ pointer: "/writes/*/path", within_root_slots: ["registry_artifact_root"] }] } } });
+    write_root_slots: ["registry_artifact_root"] } } });
   stage("interface", d.projection_interface, { id: d.projection_interface, interface_type: "system", interface_driver_ref: "bound_context_projection",
     interface_driver_config: { private_config: { client_projection_output_labels: [input, outcome], context_projection: { schema_version: 1, ...sourceParams, projection_run: projection.id,
       observer_run: d.run, source_relay_interface: d.source_relay_interface, terminal_label: terminal, collection_source: library, publication_tool: d.publication_tool,
@@ -212,7 +213,8 @@ if (require.main === module) {
       (p) => { const write = p.interface_writes.find((w) => w.tag === "interface:projector"), value = JSON.parse(write.content);
         value.interface_driver_config.private_config.context_projection.outcome.provider_interface = "foreign_observer"; write.content = JSON.stringify(value); },
       (p) => { const write = p.interface_writes.find((w) => w.tag === "interface:capture_relay"); write.content = JSON.stringify({ id: "capture_relay", interface_type: "world", role: "worker" }); },
-      (p) => { const write = p.interface_writes.find((w) => w.tag === "tool:file.write.publication"), value = JSON.parse(write.content); value.process.authority.optional_write_root_slots = ["repo_root"]; write.content = JSON.stringify(value); },
+      (p) => { const write = p.interface_writes.find((w) => w.tag === "tool:memory.save.publication"), value = JSON.parse(write.content); value.process.authority.optional_write_root_slots = ["repo_root"]; write.content = JSON.stringify(value); },
+      (p) => { const write = p.interface_writes.find((w) => w.tag === "interface:publication_door"), value = JSON.parse(write.content); value.interface_driver_config.private_config.memory_collection = "another"; write.content = JSON.stringify(value); },
       (p) => { p.run_writes[2].content = JSON.stringify(JSON.parse(p.run_writes[2].content)); },
       (p) => { p.run_writes[0].path = path.join(runs, "escaped.json"); },
       (p) => { p.run_writes[0].expected_before_hash = "a".repeat(64); },

@@ -254,13 +254,13 @@ pub fn plan_maintenance_observer(
         .reader_tools
         .iter()
         .any(|tool| tool.interface != *reader_interface)
-        || cfg.publication_writer.interface == *reader_interface
+        || cfg.publication_writer.interface != *reader_interface
         || cfg.publication_writer.interface == cfg.authoring.room_interface_id
         || cfg.publication_writer.tool == cfg.authoring.tool_id
     {
-        return Err("reader, publication writer and hidden run-authoring writer must be separate exact doors/tools".into());
+        return Err("collection readers and writer must share one door apart from the hidden run-authoring writer".into());
     }
-    validate_publication_writer(registry, &cfg.publication_writer)?;
+    validate_collection_writer(registry, &cfg.publication_writer, &cfg.collection_source)?;
     let identity_hash = blake3::hash(
         &serde_json::to_vec(&json!([
             "octopus.maintenance.observer.v1",
@@ -379,16 +379,10 @@ pub fn plan_maintenance_observer(
         }),
     });
     let mut writes = Vec::new();
-    let slots = BTreeMap::from([
-        (
-            reader_interface.clone(),
-            BTreeMap::from([("registry_artifact_root".into(), registry.join("artifact"))]),
-        ),
-        (
-            cfg.publication_writer.interface.clone(),
-            BTreeMap::from([("registry_artifact_root".into(), entries_root.clone())]),
-        ),
-    ]);
+    let slots = BTreeMap::from([(
+        reader_interface.clone(),
+        BTreeMap::from([("registry_artifact_root".into(), registry.join("artifact"))]),
+    )]);
     plan_capability_doors(
         registry,
         &interface_root,
@@ -414,14 +408,9 @@ pub fn plan_maintenance_observer(
     let selected_context = context_bindings::with_instruction_source_bindings(
         registry,
         roles.iter().cloned(),
-        &[
-            ArtifactBindingSeed {
-                id: cfg.collection_source.clone(),
-            },
-            ArtifactBindingSeed {
-                id: "artifact-context-collection-guide".into(),
-            },
-        ],
+        &[ArtifactBindingSeed {
+            id: cfg.collection_source.clone(),
+        }],
     )?;
     plan_provider_interface(
         &interface_root,
@@ -865,7 +854,11 @@ fn planned_bytes(writes: &[PlannedClientWrite], path: &Path) -> Result<Vec<u8>, 
     }
 }
 
-fn validate_publication_writer(registry: &Path, seed: &SelectedToolSeed) -> Result<(), String> {
+fn validate_collection_writer(
+    registry: &Path,
+    seed: &SelectedToolSeed,
+    collection: &str,
+) -> Result<(), String> {
     let tool = load_tool_descriptor_from_dir(&registry.join("tool"), &seed.tool)
         .map_err(|e| e.to_string())?
         .ok_or("declared publication writer is absent")?;
@@ -875,20 +868,34 @@ fn validate_publication_writer(registry: &Path, seed: &SelectedToolSeed) -> Resu
             .supported_worker_environment_kinds
             .iter()
             .all(|kind| kind.as_str() != seed.worker_environment_kind)
-        || a.write_argument_paths.is_empty()
-        || !a.write_root_slots.is_empty()
+        || a.write_root_slots != BTreeSet::from(["registry_artifact_root".into()])
+        || !a.write_argument_paths.is_empty()
+        || !a.optional_write_root_slots.is_empty()
         || !a.write_paths.is_empty()
         || !a.write_env_paths.is_empty()
         || !a.optional_write_env_paths.is_empty()
         || !a.write_env_subpaths.is_empty()
-        || a.write_argument_paths
-            .iter()
-            .any(|path| path.within_root_slots != BTreeSet::from(["registry_artifact_root".into()]))
     {
         return Err(
-            "publication tool must grant only argument-scoped writes within registry_artifact_root"
+            "publication tool must write only through its door's collection backend under registry_artifact_root"
                 .into(),
         );
+    }
+    let path = registry
+        .join("interface")
+        .join(safe_segment(&seed.interface, "publication door")?)
+        .join("interface.json");
+    let door: InterfaceDescriptor = parse_strict(
+        &std::fs::read(&path).map_err(|e| format!("publication door cannot be read: {e}"))?,
+    )
+    .map_err(|e| e.to_string())?;
+    let named = door
+        .interface_driver_config
+        .as_ref()
+        .and_then(|config| config.private_config.get("memory_collection"))
+        .and_then(Value::as_str);
+    if door.id.as_str() != seed.interface || named != Some(collection) {
+        return Err("publication door must name the declared collection as its memory_collection".into());
     }
     Ok(())
 }
@@ -1299,7 +1306,6 @@ fn plan_projection_run(
         verifier: octopus_descriptors::VerifierId::new(&request.config.outcome_verifier),
         params: json!({"source_run":projection.source_run,"source_ee":projection.source_ee,"provider_interface":observer.model_interface_id,
             "publication_tool":projection.publication_tool,"entries_root":request.roots.registry_root.join("artifact").join(&request.config.collection_source).join("entries"),
-            "prepare_tool":observer.capability_tools.get("context.prepare_publication").ok_or("observer requires publication preparation")?,
             "max_bytes":request.config.bounds.max_output_bytes}),
     };
     let templates = vec![

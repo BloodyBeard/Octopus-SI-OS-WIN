@@ -26,13 +26,13 @@ const MAX_USAGE_DAYS: usize = 4096;
 const PREVIEW_CHARS: usize = 320;
 const APPLICABILITY: &str = "Use when the current work relates to this remembered note.";
 
-pub(crate) struct MemoryHost<'a> {
-    pub(crate) collection: &'a str,
-    pub(crate) artifact_root: &'a Path,
-    pub(crate) ee_instances_root: &'a Path,
-    pub(crate) effect_root: Option<&'a Path>,
-    pub(crate) room_kinds: &'a [String],
-    pub(crate) maximum_bytes: u64,
+pub struct MemoryHost<'a> {
+    pub collection: &'a str,
+    pub artifact_root: &'a Path,
+    pub ee_instances_root: &'a Path,
+    pub effect_root: Option<&'a Path>,
+    pub room_kinds: &'a [String],
+    pub maximum_bytes: u64,
 }
 
 #[derive(Deserialize)]
@@ -81,7 +81,7 @@ struct Memory<'a> {
     lineage: Vec<String>,
 }
 
-pub(crate) fn execute(
+pub fn execute(
     input: &InterfaceInvocationEnvelope,
     call: &ToolCall,
     host: &MemoryHost<'_>,

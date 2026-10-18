@@ -71,16 +71,15 @@
       "world_provider_xiaomi",
       "world_provider_zai",
       "system_worker_memory_observer",
-      "system_context",
-      "system_context_memory_publication",
+      "system_memory",
       "system_interface_authoring",
       "system_room"
     ],
     "tools": [
-      "context.discover",
-      "context.read",
-      "context.prepare_publication",
-      "file.write.memory_publication",
+      "memory.search",
+      "memory.read",
+      "memory.list",
+      "memory.save",
       "file.write"
     ],
     "wek": [
@@ -94,7 +93,8 @@
     "hard_blocked_tools": [],
     "artifact_verbs": [
       "read",
-      "create"
+      "create",
+      "change"
     ]
   },
   "role_artifacts": [

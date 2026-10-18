@@ -864,13 +864,6 @@
     ],
     "query_arguments": []
   },
-  "file.write.memory_publication": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Memory publication",
-    "target_arguments": [],
-    "query_arguments": []
-  },
   "file.write.slack_gateway": {
     "kind": "tool",
     "conversation_visible": false,

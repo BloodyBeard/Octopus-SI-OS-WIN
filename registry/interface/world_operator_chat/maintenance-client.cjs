@@ -135,17 +135,16 @@ function plannedMaintenanceRuns(plan, target, registryRoot, createsCompanions) {
     }
   }
   const publication = descriptors("interface", d.publication_door_interface);
-  if (publication.interface_driver_config?.host_slots?.registry_artifact_root?.path !== entriesRoot) {
-    fail("publication door differs from the declared collection entries root");
+  if (publication.interface_driver_config?.private_config?.memory_collection !== collectionId
+    || publication.interface_driver_config?.host_slots?.registry_artifact_root?.path !== path.join(registryRoot, "artifact")) {
+    fail("publication door differs from its declared collection");
   }
   const tool = descriptors("tool", component(d.publication_tool, "publication tool"));
   const authority = object(tool.process?.authority, "publication authority");
-  if (tool.interface !== d.publication_door_interface || !Array.isArray(authority.write_argument_paths)
-    || !authority.write_argument_paths.length || authority.write_argument_paths.some((entry) =>
-      !same(entry.within_root_slots, ["registry_artifact_root"]))
-    || ["write_root_slots", "optional_write_root_slots", "write_paths", "write_env_paths", "optional_write_env_paths", "write_env_subpaths"]
+  if (tool.interface !== d.publication_door_interface || !same(authority.write_root_slots, ["registry_artifact_root"])
+    || ["write_argument_paths", "optional_write_root_slots", "write_paths", "write_env_paths", "optional_write_env_paths", "write_env_subpaths"]
       .some((key) => authority[key] !== undefined && (!Array.isArray(authority[key]) || authority[key].length))) {
-    fail("publication tool must write only argument paths under its exact collection root");
+    fail("publication tool must write only through its door's collection backend");
   }
   const projector = descriptors("interface", d.projection_interface);
   if (projector.interface_type !== "system" || projector.interface_driver_ref !== "bound_context_projection") {
