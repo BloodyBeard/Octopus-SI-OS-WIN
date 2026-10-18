@@ -2501,7 +2501,7 @@ pub async fn observe_application_consent(ctx: InterfaceLiftContext, reference: A
             }
             tail.commit_through(&row)?;
         }
-        tail.commit()?;
+        tail.advance_settled_scan()?;
         if let Some(owner) = &mut owner {
             owner.reconcile_cold_flight(&ctx, &root, tail.next_seq())?;
             owner.reconcile_publication(&ctx, &root, tail.next_seq(), &mut admissions)?;
