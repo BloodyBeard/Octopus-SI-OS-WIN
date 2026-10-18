@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { readProjection, submitInterfaceArtifact } from "../projectionClient";
-import { parseClientAction, type WidgetAction } from "../../electron/clientActionSemantics.mjs";
+import { parseClientAction, type InspectClientAction, type WidgetAction } from "../../electron/clientActionSemantics.mjs";
 import { useProjectionGeneration } from "../projectionLive";
 import type { ClientSurfaceDescriptor } from "./surfaceTypes";
 
@@ -17,6 +17,7 @@ type ClientActionOptions = ActionScope & {
   surfaces: readonly ClientSurfaceDescriptor[];
   openSurface: (surface: ClientSurfaceDescriptor) => void;
   widgets?: (action: WidgetAction, operationId: string) => Promise<unknown>;
+  inspect?: (action: InspectClientAction) => Promise<Record<string, unknown>>;
   onRefusal: (reason: string) => void;
 };
 
@@ -26,6 +27,10 @@ const CURSOR_PREFIX = "octopus.client-actions.cursor.v1:";
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Malformed client action evidence.");
   return value as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function interfaceEndpoint(value: unknown): { Interface: string } {
@@ -126,7 +131,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                   || typeof receipt.observed_at !== "string" || !Number.isFinite(Date.parse(receipt.observed_at))
                   || !["prepared", "completed"].includes(String(receipt.phase))
                   || receipt.phase === "completed" && (typeof receipt.ok !== "boolean"
-                    || (receipt.ok ? !Array.isArray(receipt.widgets) : typeof receipt.error !== "string"))) {
+                    || (receipt.ok ? !Array.isArray(receipt.widgets) && !isRecord(receipt.client) : typeof receipt.error !== "string"))) {
                   throw new Error("Saved widget action result is malformed.");
                 }
                 if (receipt.request_artifact !== identity.artifact_id || receipt.request_seq !== identity.seq
@@ -146,9 +151,14 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                 storage.setItem(pendingKey, prepared);
                 if (storage.getItem(pendingKey) !== prepared) throw new Error("Widget action preparation could not be saved.");
                 try {
-                  if (!latest.current.widgets) throw new Error("Home widget controls are unavailable.");
-                  const widgets = await latest.current.widgets(action, `widget_${identity.artifact_id.split(":")[1]}`);
-                  receipt = { ...base, phase: "completed", ok: true, widgets };
+                  if (action.action === "inspect_client") {
+                    if (!latest.current.inspect) throw new Error("Client inspection is unavailable.");
+                    receipt = { ...base, phase: "completed", ok: true, client: await latest.current.inspect(action) };
+                  } else {
+                    if (!latest.current.widgets) throw new Error("Home widget controls are unavailable.");
+                    const widgets = await latest.current.widgets(action, `widget_${identity.artifact_id.split(":")[1]}`);
+                    receipt = { ...base, phase: "completed", ok: true, widgets };
+                  }
                 } catch (error) {
                   receipt = { ...base, phase: "completed", ok: false, error: error instanceof Error ? error.message : String(error) };
                 }

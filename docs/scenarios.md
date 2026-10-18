@@ -1,9 +1,10 @@
 # Scenarios
 
-Two design examples show how Octopus can acquire a capability and change what
-it listens for. They describe the intended use of the architecture, rather
-than tested, ready-to-use features. Each depends on a model doing the work,
-the necessary permissions, and checks of the resulting behavior.
+Three design examples show how Octopus can acquire a capability, change what
+it listens for, and change its own client. They describe the intended use of
+the architecture, rather than tested, ready-to-use features. Each depends on a
+model doing the work, the necessary permissions, and checks of the resulting
+behavior.
 
 Read [Architecture](architecture.md) first.
 
@@ -57,6 +58,32 @@ behind them; it needs no camera-specific branch in the kernel.
 Here the model chooses what should wake the run and expresses that choice
 through interface configuration. Whether it chooses a useful trigger and
 implements it reliably must be established by running and testing it.
+
+## 3. Changing its own client
+
+1. You tell Home: "show me the free disk space on Home and keep it updated."
+2. Home asks the running client what it can host. The answer is the client's
+   own description: the Extensions folder in this Home, the exact schemas this
+   build accepts, the targets and components a widget can use, the data a
+   widget may read, and every Extension with its review state.
+3. Nothing projects disk space yet, so Home builds the system side first: a
+   feed - an interface folder with no process, only an address - and a small
+   run that measures the disk and sends one artifact into the feed whenever a
+   trigger wakes it.
+4. Home writes the widget as an Extension package: a manifest and a surface
+   document whose data source is "the newest artifact in that feed". The
+   widget only reads; it never calls a model or a tool.
+5. The client sees the new package, validates it, and asks you to review it.
+   Home tells you the same thing; it does not claim the widget is installed.
+6. You install it. The widget appears without a restart, and every admitted
+   emission into the feed updates it, because client sources re-read when the
+   ledger changes.
+7. If the package was refused, setup is missing, or the view fails while
+   rendering, Home sees the exact issue the next time it inspects the client,
+   writes a new revision, and you review that one.
+
+The client stays a projection: presentation and the owner's consent belong to
+the client, while the data crosses an interface as artifacts under policy.
 
 For the package structure behind these examples, see
 [Extending Octopus](contracts/EXTENSION_SURFACES.md).

@@ -94,9 +94,15 @@ export type ClientExtensionLifecycleReceipt = {
   receiptDigest: string;
 };
 
+export type ClientExtensionContractFiles = {
+  root: string;
+  files: { manifest: string; document: string; projection: string };
+};
+
 export type ClientExtensionStoreSnapshot = {
   generation: number;
   root: string;
+  contract?: ClientExtensionContractFiles;
   manifests: ClientExtensionManifestSource[];
   state: Record<string, ClientExtensionStateRecord>;
   stateStatus: "valid" | "invalid" | "missing";

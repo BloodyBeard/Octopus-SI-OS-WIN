@@ -20,6 +20,11 @@ const OPERATION_ID = /^[A-Za-z0-9_-]{8,96}$/;
 const REVISION_DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RAW_DIGEST = /^[a-f0-9]{64}$/;
 const BUILTIN_CATALOG_PATH = path.resolve(__dirname, "../distribution/client-extensions/builtin-manifests.json");
+const CONTRACT_FILES = Object.freeze({
+  manifest: "client_extension_manifest.schema.json",
+  document: "client_surface_document.schema.json",
+  projection: "projection_read_contract.schema.json",
+});
 const CLIENT_SURFACE_READ_METHODS = Object.freeze([
   ...(projectionReadContractSchema.$defs?.clientSurfaceProjectionReadMethod?.enum ?? []),
 ]);
@@ -38,6 +43,12 @@ function createClientExtensionStore(options) {
   const receiptsRoot = path.join(root, "lifecycle-receipts");
   const operationsRoot = path.join(root, "lifecycle-operations");
   const statePath = path.join(root, "state.json");
+  const contractRoot = path.join(root, "contract");
+  const contract = {
+    root: contractRoot,
+    files: Object.fromEntries(Object.entries(CONTRACT_FILES).map(([key, name]) => [key, path.join(contractRoot, name)])),
+  };
+  let contractPublished = false;
   const onChange = typeof options?.onChange === "function" ? options.onChange : () => {};
   const builtinCatalog = normalizeBuiltinCatalog(
     options?.builtinCatalog ?? readJsonSync(BUILTIN_CATALOG_PATH, "built-in client extension catalog"),
@@ -56,6 +67,25 @@ function createClientExtensionStore(options) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         throw new Error(`client extension path must be a real directory: ${candidate}`);
       }
+    }
+    if (!contractPublished) {
+      await publishContract();
+      contractPublished = true;
+    }
+  }
+
+  async function publishContract() {
+    await fsPromises.mkdir(contractRoot, { recursive: true, mode: 0o700 });
+    const stat = await fsPromises.lstat(contractRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`client extension contract path must be a real directory: ${contractRoot}`);
+    for (const name of Object.values(CONTRACT_FILES)) {
+      const bytes = await fsPromises.readFile(path.resolve(__dirname, "../schemas", name));
+      const destination = path.join(contractRoot, name);
+      const current = await fsPromises.readFile(destination).catch((error) => {
+        if (error?.code === "ENOENT") return null;
+        throw error;
+      });
+      if (!current || !current.equals(bytes)) await writeBytesAtomic(destination, bytes);
     }
   }
 
@@ -77,6 +107,7 @@ function createClientExtensionStore(options) {
     return {
       generation,
       root,
+      contract: { root: contract.root, files: { ...contract.files } },
       ...data,
     };
   }
@@ -1013,7 +1044,11 @@ async function clientSurfaceDocumentSemanticInspection(document, options) {
 
 async function validateDownloadedManifest(manifest, packageId, digest) {
   if (!validateClientExtensionManifest(manifest)) {
-    throw new Error("Client extension manifest does not satisfy the client extension contract.");
+    const detail = [...new Set((validateClientExtensionManifest.errors ?? [])
+      .map((error) => `${error.instancePath || "/"} ${error.message || "is invalid"}`))]
+      .sort((left, right) => right.split(" ")[0].split("/").length - left.split(" ")[0].split("/").length)
+      .slice(0, 8).join("; ");
+    throw new Error(`Client extension manifest does not satisfy the client extension contract: ${detail}`);
   }
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest) || manifest.id !== packageId) {
     throw new Error("Client extension manifest identity does not match its package directory.");

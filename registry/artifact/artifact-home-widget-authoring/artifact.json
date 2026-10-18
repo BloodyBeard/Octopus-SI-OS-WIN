@@ -1,8 +1,8 @@
 {
   "label": "context.reference",
   "id": "artifact-home-widget-authoring",
-  "description": "Manage existing Home widgets with list_widgets/set_widget; create or revise documents with publish_widget.",
-  "text": "To manage existing widgets, use MCP list_widgets and set_widget. These controls do not require reading the full document-authoring contract or editing source files. Copy client_action.interface from the bound Home delivery artifact. list_widgets requests the actual ready-made/published widget inventory. The client returns client.action.result with the same request_id, exact widget_id/source_digest and state. set_widget sets visible, hidden or removed using those exact values. Await the client result before a dependent operation. The immediate MCP verdict proves admission only; the later result proves saved presentation state, not screen pixels. A configured built-in can be enabled directly; custom extensions still require their existing review/source configuration. To change a document body, publish a higher revision as described below.\n\nCreate Home widgets with the actual client.mcp tool granted to this invocation. Use {method:\"tools/list\"} to discover schemas and {method:\"tools/call\",params:{name,arguments}} to call an operation; the adapter supplies MCP initialization and JSON-RPC fields.\n\nBefore authoring a document, read this bound artifact in full with artifact.read or MCP read_artifact using its listed readable id and max_bytes:65536. If truncated, continue at next_offset_bytes. The contract field contains the detailed publisher instructions, design code, a Live context layout example and complete call arguments. Read the design code before composing the widget. tools/list supplies publish_widget's validated document schema; use its supported glyphs, targets and render nodes.\n\nFor delivery, list and read the bound artifact-home-delivery context and copy widget.interface. The address must also be an exact permitted System binding with an authored route to Home. If a Task lacks that route, return the document or readable ArtifactRef through its declared return interface and label/payload contract for Home to publish. State missing delivery or return bindings rather than guessing addresses. Granted file tools may author a relay using readable descriptors, the current run schema and required role bindings, within the worker ceiling and EE chain.\n\npublish_widget takes {interface,document} and emits client.surface.document. Inspect error, result.isError and result.structuredContent for failure or admission. Admission does not establish rendering; do not resend an admitted artifact or automatically retry an uncertain effect. Displaying a document does not install an extension. Follow contract.instructions for revisions, lifetimes, sandbox limits, actions, navigation and extension consent.",
+  "description": "Home widgets and client Extensions: inspect the client with inspect_client, manage widgets with list_widgets/set_widget, publish documents with publish_widget, or write installed Extensions with their data feeds.",
+  "text": "To change the client itself, call MCP inspect_client first: it reports the Extensions folder, the contracts the running client accepts, what it can host and every Extension's review and runtime state. Installed widgets and tabs are Extensions, written as files into that folder and reviewed by the owner; read contract.extensions in this artifact for when to use them, how to write them, their data feeds and three complete examples.\n\nTo manage existing widgets, use MCP list_widgets and set_widget. These controls do not require reading the full document-authoring contract or editing source files. Copy client_action.interface from the bound Home delivery artifact. list_widgets requests the actual ready-made/published widget inventory. The client returns client.action.result with the same request_id, exact widget_id/source_digest and state. set_widget sets visible, hidden or removed using those exact values. Await the client result before a dependent operation. The immediate MCP verdict proves admission only; the later result proves saved presentation state, not screen pixels. A configured built-in can be enabled directly; custom extensions still require their existing review/source configuration. To change a document body, publish a higher revision as described below.\n\nCreate Home widgets with the actual client.mcp tool granted to this invocation. Use {method:\"tools/list\"} to discover schemas and {method:\"tools/call\",params:{name,arguments}} to call an operation; the adapter supplies MCP initialization and JSON-RPC fields.\n\nBefore authoring a document, read this bound artifact in full with artifact.read or MCP read_artifact using its listed readable id and max_bytes:65536. If truncated, continue at next_offset_bytes. The contract field contains the detailed publisher instructions, design code, a Live context layout example and complete call arguments. Read the design code before composing the widget. tools/list supplies publish_widget's validated document schema; use its supported glyphs, targets and render nodes.\n\nFor delivery, list and read the bound artifact-home-delivery context and copy widget.interface. The address must also be an exact permitted System binding with an authored route to Home. If a Task lacks that route, return the document or readable ArtifactRef through its declared return interface and label/payload contract for Home to publish. State missing delivery or return bindings rather than guessing addresses. Granted file tools may author a relay using readable descriptors, the current run schema and required role bindings, within the worker ceiling and EE chain.\n\npublish_widget takes {interface,document} and emits client.surface.document. Inspect error, result.isError and result.structuredContent for failure or admission. Admission does not establish rendering; do not resend an admitted artifact or automatically retry an uncertain effect. Displaying a document does not install an extension. Follow contract.instructions for revisions, lifetimes, sandbox limits, actions, navigation and extension consent.",
   "contract": {
     "title": "Home widget document authoring",
     "contract": "octopus.client_surface@1",
@@ -21,7 +21,7 @@
       "For sandbox widgets, provide the matching inset in your own document: html,body{margin:0;min-width:0;background:transparent} body{box-sizing:border-box;padding:2px 14px 16px;text-align:left;font-family:var(--font-sans);color:var(--color-text-primary)} .content{display:flex;flex-direction:column;align-items:stretch;gap:8px} h2,p{margin:0;overflow-wrap:anywhere}. Use theme colors, modest type sizes and natural wrapping. The sandbox host supplies the outer header and card; do not duplicate them.",
       "Omit data.home_presentation for a document that remains until dismissed or superseded. To show it briefly, set data.home_presentation to {lifetime_ms: 5000}. Lifetime is counted from recorded artifact delivery, not first rendering, and supports integers from 1 to 86400000. Alternatively use {expires_at: '2026-10-04T12:00:00.000Z'} with a real UTC deadline. Do not combine lifetime_ms and expires_at or add other presentation fields.",
       "Only exact run and recipient-interface delivery provenance admits a custom document to Home. The host supplies artifact, run, interface, sequence and delivery time; payload claims do not establish provenance. Malformed or conflicting current revisions fail visibly and must be corrected with a new valid revision.",
-      "Presentation persistence is not extension installation. Long-lived extensions, host filesystem/device sources and installed actions still require the existing extension review and install consent. Never describe a displayed document as installed. MCP is the client tool protocol; it creates no additional policy rights.",
+      "Presentation persistence is not extension installation. A displayed document is not installed. Long-lived widgets and tabs, host filesystem/device sources and their data feeds are Extensions: follow contract.extensions, which the owner reviews and installs in the client.",
       "Actions use existing declared client action events. Sandbox actions must be listed in render.actions and invoked by window.octopusSurface.invoke(actionId). The renderer attaches the document revision and artifact delivery provenance to action events. An emitted event does not prove execution. Keep important results and instructions in ordinary artifacts as well as their presentation.",
       "Use MCP list_artifacts, read_artifact and search_artifacts only for artifacts bound to this invocation. For client navigation, open_client_surface accepts {interface,action:{schema:\"octopus.client_action\",schema_version:1,action:\"open_surface\",surface_id:\"exact visible client surface id\"}}. In readable Home delivery context, client_action.interface supplies the address; the same exact-binding and missing-address rules apply. Unknown or hidden destinations fail visibly. Admission does not prove the client applied the action. Other client mutations require their own declared operations; this tool does not execute shell commands, open arbitrary URLs, or change tasks."
     ],
@@ -91,6 +91,24 @@
           "purpose": "Discover the operation catalogue.",
           "arguments": {
             "method": "tools/list"
+          }
+        },
+        {
+          "purpose": "Inspect what the running client hosts before writing an Extension; add extension_id to read one package's verdict, or source to preview a projection.",
+          "arguments": {
+            "method": "tools/call",
+            "params": {
+              "name": "inspect_client",
+              "arguments": {
+                "interface": "<client_action.interface from the bound Home delivery context>",
+                "action": {
+                  "schema": "octopus.client_action",
+                  "schema_version": 1,
+                  "action": "inspect_client",
+                  "request_id": "<new unique request id>"
+                }
+              }
+            }
           }
         },
         {
@@ -181,6 +199,418 @@
                 }
               }
             }
+          }
+        }
+      ]
+    },
+    "extensions": {
+      "title": "Client Extensions: installed widgets and tabs, with their system side",
+      "contract": "octopus.client_extension@1",
+      "choose": [
+        "Publish a document with publish_widget to show something now or for a limited time. It needs no review and is not installed.",
+        "Write an Extension when the owner asks to add something to the client: a Home widget or a workspace tab that stays installed and keeps itself current from projections, or from files and devices the owner selects.",
+        "When the view needs data nothing projects yet, build the system side in the same task: a feed interface and the run that emits into it. The Extension only reads; it never calls a model, a tool or a run."
+      ],
+      "instructions": [
+        "Inspect first. Call client.mcp inspect_client with client_action.interface from the bound Home delivery context and a new request_id, then wait for client.action.result. It returns extensions_root, packages_root, contract.files (the manifest, surface document and projection schemas of the running client), host (categories, targets, native nodes, glyphs, projection sources with params, host sources, client actions, limits), surfaces, extensions and refused packages. Read the schema files with your granted file read tool before writing.",
+        "Check access. Home's workspace room normally covers packages_root. When no granted writable room covers it, say so; a Task without that grant returns the complete package files to Home, which writes them.",
+        "Choose the shape. category widget uses target voice.widget or voice.window and appears on Home; category tab uses target workspace.surface and appears in navigation and split panes. Repairs are built-in client actions only. Pick a lowercase id that does not start with builtin., is not already listed in extensions and is not an existing surface id.",
+        "Bind data. Native nodes read data.<field> for literal values and sources.<source id>.<field> for document sources (at most 8, kind projection, methods from host.sources.projection). Lists bind item.<field>, tables row.<field>. Before writing paths, call inspect_client with source {method, params, path} to preview real rows. Files and devices the owner must choose are manifest sources (filesystem or device); the owner configures them during setup and their data appears under the same sources.<source id>. A source id cannot be both a manifest source and a document source.",
+        "Write the package. Create <packages_root>/<id>/extension.json with the granted file writer (expected_before_hash null for a new file). The manifest has schema octopus.client_extension, schema_version 1, id equal to its directory name, a semver version, name, description, developer, category, glyph, default_installed false, contribution {kind: surface, document} with a complete octopus.client_surface document whose release_channel is stable, and optional sources. Keep secrets, credentials and private conversation out of the package.",
+        "Read the verdict. Call inspect_client with extension_id. Your revision is the one whose source_digest equals sha256: plus the after_hash your write returned. refused lists exact issues (code, path, message); fix them with a corrected manifest. An extension with admission pending is waiting for the owner: the client shows a review prompt. Tell the owner what to confirm; do not call it installed.",
+        "After installation (installed true, admission reviewed) check unconfigured_sources and runtime_issues: projection failures and sandbox script errors observed while the surface rendered. A fix is a new revision: raise version, rewrite extension.json, and the owner reviews again. A widget's Home visibility is controlled with list_widgets and set_widget; deleting the package directory removes a custom Extension.",
+        "Keep the line. Extension actions only emit client.command and client.open-surface. Anything that must reach a model, a run or another world crosses an interface on the system side as an artifact under policy."
+      ],
+      "feed": {
+        "purpose": "System data a widget shows and keeps current without a model turn for every refresh.",
+        "interface": {
+          "path": "<registry interface root>/<feed id>/interface.json",
+          "descriptor": {
+            "id": "system_feed_<name>",
+            "interface_type": "system",
+            "role": "system",
+            "direction": "inbound",
+            "source_names": [
+              "<name>"
+            ]
+          },
+          "note": "A feed is an interface folder without a life. It names the address artifacts move to; the ledger records every emission."
+        },
+        "producer": "The producing run needs the feed id in its worker ceiling interfaces and in every restrictive EE layer, and an outbound binding to it on the checkpoint that emits, with an artifact_policy allowing exactly the feed label. It emits with artifact.send {interface: <feed id>, label: <feed label>, payload: {...}}. An admitted emission with no reader is success. Author bindings, policy and re-arming with artifact-home-task-authoring; schedule a producer with the installed world_cron activation contract.",
+        "reader": {
+          "id": "<source id>",
+          "kind": "projection",
+          "method": "projection.interface_artifacts.list",
+          "params": {
+            "interface_id": "<feed id>",
+            "labels": [
+              "<feed label>"
+            ],
+            "order": "newest",
+            "limit": 1
+          },
+          "path": "artifacts"
+        },
+        "binding": "sources.<source id>.0.payload.<field> is the newest emission; sources.<source id>.0.created_at is when it was recorded.",
+        "refresh": "Projection sources re-read whenever the ledger changes, so every admitted emission updates the widget."
+      },
+      "use_cases": [
+        {
+          "request": "Tell me on Home when something needs me.",
+          "client": {
+            "schema": "octopus.client_extension",
+            "schema_version": 1,
+            "id": "home.attention",
+            "version": "1.0.0",
+            "name": "Needs you",
+            "description": "Requests from Home and Tasks that wait for the owner, newest first.",
+            "developer": "Octopus Home",
+            "category": "widget",
+            "glyph": "target",
+            "default_installed": false,
+            "contribution": {
+              "kind": "surface",
+              "document": {
+                "schema": "octopus.client_surface",
+                "schema_version": 1,
+                "release_channel": "stable",
+                "id": "home.attention",
+                "revision": 1,
+                "title": "Needs you",
+                "glyph": "target",
+                "target": {
+                  "kind": "voice.widget",
+                  "slot": "right",
+                  "order": 5,
+                  "layout": {
+                    "min_width": 200,
+                    "preferred_width": 300,
+                    "max_width": 460,
+                    "min_height": 120,
+                    "preferred_height": 200,
+                    "max_height": 420,
+                    "content_fit": "reflow"
+                  }
+                },
+                "sources": [
+                  {
+                    "id": "attention",
+                    "kind": "projection",
+                    "method": "projection.interface_artifacts.list",
+                    "params": {
+                      "interface_id": "system_feed_attention",
+                      "labels": [
+                        "attention.request"
+                      ],
+                      "order": "newest",
+                      "limit": 5
+                    },
+                    "path": "artifacts"
+                  }
+                ],
+                "render": {
+                  "kind": "native",
+                  "density": "compact",
+                  "root": {
+                    "type": "stack",
+                    "gap": "sm",
+                    "align": "stretch",
+                    "children": [
+                      {
+                        "type": "list",
+                        "items": {
+                          "path": "sources.attention",
+                          "limit": 5
+                        },
+                        "divided": true,
+                        "empty": "Nothing needs you right now.",
+                        "children": [
+                          {
+                            "type": "text",
+                            "role": "body",
+                            "value": {
+                              "path": "item.payload.title"
+                            }
+                          },
+                          {
+                            "type": "text",
+                            "role": "caption",
+                            "tone": "muted",
+                            "value": {
+                              "path": "item.payload.detail",
+                              "fallback": ""
+                            }
+                          },
+                          {
+                            "type": "text",
+                            "role": "caption",
+                            "tone": "muted",
+                            "value": {
+                              "path": "item.created_at",
+                              "format": "time"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "system": {
+            "interfaces": [
+              {
+                "id": "system_feed_attention",
+                "interface_type": "system",
+                "role": "system",
+                "direction": "inbound",
+                "source_names": [
+                  "attention"
+                ]
+              }
+            ],
+            "producers": "Home, and any Task allowed to ask the owner, emits attention.request to system_feed_attention when it needs a decision. Add the feed to each producer's ceiling and emitting checkpoint as described under feed.producer.",
+            "emission": {
+              "interface": "system_feed_attention",
+              "label": "attention.request",
+              "payload": {
+                "title": "Approve the draft reply to Anna",
+                "detail": "Task Inbox triage is waiting for your choice."
+              }
+            }
+          }
+        },
+        {
+          "request": "Show the free disk space on Home and keep it updated.",
+          "client": {
+            "schema": "octopus.client_extension",
+            "schema_version": 1,
+            "id": "home.disk-space",
+            "version": "1.0.0",
+            "name": "Disk space",
+            "description": "Free space on this Mac, refreshed by a scheduled Octopus run.",
+            "developer": "Octopus Home",
+            "category": "widget",
+            "glyph": "pulse",
+            "default_installed": false,
+            "contribution": {
+              "kind": "surface",
+              "document": {
+                "schema": "octopus.client_surface",
+                "schema_version": 1,
+                "release_channel": "stable",
+                "id": "home.disk-space",
+                "revision": 1,
+                "title": "Disk space",
+                "glyph": "pulse",
+                "target": {
+                  "kind": "voice.widget",
+                  "slot": "right",
+                  "order": 20,
+                  "layout": {
+                    "min_width": 184,
+                    "preferred_width": 260,
+                    "max_width": 420,
+                    "min_height": 110,
+                    "preferred_height": 150,
+                    "max_height": 260,
+                    "content_fit": "reflow"
+                  }
+                },
+                "sources": [
+                  {
+                    "id": "disk",
+                    "kind": "projection",
+                    "method": "projection.interface_artifacts.list",
+                    "params": {
+                      "interface_id": "system_feed_disk_space",
+                      "labels": [
+                        "feed.disk_space"
+                      ],
+                      "order": "newest",
+                      "limit": 1
+                    },
+                    "path": "artifacts"
+                  }
+                ],
+                "render": {
+                  "kind": "native",
+                  "density": "compact",
+                  "root": {
+                    "type": "stack",
+                    "gap": "sm",
+                    "align": "stretch",
+                    "children": [
+                      {
+                        "type": "metric",
+                        "label": "Free",
+                        "value": {
+                          "path": "sources.disk.0.payload.free_gb",
+                          "format": "number",
+                          "fallback": "No reading yet"
+                        },
+                        "detail": {
+                          "path": "sources.disk.0.payload.mount",
+                          "fallback": ""
+                        }
+                      },
+                      {
+                        "type": "progress",
+                        "label": "Used",
+                        "value": {
+                          "path": "sources.disk.0.payload.used_percent",
+                          "fallback": 0
+                        }
+                      },
+                      {
+                        "type": "text",
+                        "role": "caption",
+                        "tone": "muted",
+                        "value": {
+                          "path": "sources.disk.0.created_at",
+                          "format": "time",
+                          "fallback": ""
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "system": {
+            "interfaces": [
+              {
+                "id": "system_feed_disk_space",
+                "interface_type": "system",
+                "role": "system",
+                "direction": "inbound",
+                "source_names": [
+                  "disk_space"
+                ]
+              }
+            ],
+            "producers": "A small producer run with workspace exec rights measures the disk and emits feed.disk_space. A world_cron interval activation wakes it; each wake is one measurement and one emission.",
+            "emission": {
+              "interface": "system_feed_disk_space",
+              "label": "feed.disk_space",
+              "payload": {
+                "mount": "/",
+                "free_gb": 182.4,
+                "used_percent": 61
+              }
+            }
+          }
+        },
+        {
+          "request": "Add a tab with what my Tasks returned.",
+          "client": {
+            "schema": "octopus.client_extension",
+            "schema_version": 1,
+            "id": "tab.task-returns",
+            "version": "1.0.0",
+            "name": "Task returns",
+            "description": "What Tasks returned to Home, newest first, with status and run.",
+            "developer": "Octopus Home",
+            "category": "tab",
+            "glyph": "check",
+            "default_installed": false,
+            "contribution": {
+              "kind": "surface",
+              "document": {
+                "schema": "octopus.client_surface",
+                "schema_version": 1,
+                "release_channel": "stable",
+                "id": "tab.task-returns",
+                "revision": 1,
+                "title": "Task returns",
+                "glyph": "check",
+                "target": {
+                  "kind": "workspace.surface",
+                  "placements": [
+                    "shell"
+                  ],
+                  "order": 80,
+                  "chrome": {
+                    "topbar": "wide",
+                    "workspace": "panel",
+                    "titlebar_glyph": "check"
+                  }
+                },
+                "sources": [
+                  {
+                    "id": "returns",
+                    "kind": "projection",
+                    "method": "projection.interface_artifacts.list",
+                    "params": {
+                      "labels": [
+                        "task.summary"
+                      ],
+                      "order": "newest",
+                      "limit": 30
+                    },
+                    "path": "artifacts"
+                  }
+                ],
+                "render": {
+                  "kind": "native",
+                  "density": "compact",
+                  "root": {
+                    "type": "section",
+                    "title": "Latest returns",
+                    "glyph": "check",
+                    "children": [
+                      {
+                        "type": "table",
+                        "rows": {
+                          "path": "sources.returns",
+                          "limit": 30
+                        },
+                        "empty": "No Task has returned yet.",
+                        "columns": [
+                          {
+                            "key": "status",
+                            "label": "Status",
+                            "value": {
+                              "path": "row.payload.status"
+                            }
+                          },
+                          {
+                            "key": "summary",
+                            "label": "Summary",
+                            "value": {
+                              "path": "row.payload.summary"
+                            }
+                          },
+                          {
+                            "key": "time",
+                            "label": "Returned",
+                            "value": {
+                              "path": "row.created_at",
+                              "format": "time"
+                            }
+                          },
+                          {
+                            "key": "run",
+                            "label": "Run",
+                            "role": "mono",
+                            "value": {
+                              "path": "row.payload.source_run",
+                              "fallback": ""
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "system": {
+            "interfaces": [],
+            "producers": "None. Tasks already return task.summary to Home; the tab reads those movements. This stays client-local."
           }
         }
       ]

@@ -6,6 +6,7 @@ import { formatProjectionError, hasProjectionBridge, readProjection } from "../p
 import { useProjectionGeneration } from "../projectionLive";
 import { readPath } from "../runtimeFormat";
 import { readClientExtensionFilesystemSource } from "../extensions/transport";
+import { clearClientSurfaceRuntimeIssue, reportClientSurfaceRuntimeIssue } from "../extensions/runtimeIssues";
 import { Glyph } from "../components/IconGlyphs";
 import { OCTOPUS_FLOATING_SURFACE_CLASS, OCTOPUS_WIDGET_SURFACE_CLASS } from "../design-system/components";
 import type { OctopusClientAccessProfile } from "../electron";
@@ -69,6 +70,12 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
   const document = admitted.document;
   const densityClass = document.render.kind === "native" ? ` density-${document.render.density ?? "standard"}` : "";
   const dataState = useSurfaceData(admitted);
+  useEffect(() => {
+    if (dataState.loading) return;
+    const scope = { extensionId: admitted.sourceExtensionId, documentId: document.id, sourceDigest: admitted.sourceDigest };
+    if (dataState.error) reportClientSurfaceRuntimeIssue(scope, "source", dataState.error);
+    else clearClientSurfaceRuntimeIssue(scope, "source");
+  }, [admitted.sourceDigest, admitted.sourceExtensionId, dataState.error, dataState.loading, document.id]);
   const voiceWidgetLayout = document.target.kind === "voice.widget" ? document.target.layout : undefined;
   const widgetResize = useVoiceWidgetResize(admitted.sourceArtifactId ? homeSurfaceLayoutIdentity(admitted) : document.id, accessProfile, voicePlacement, voiceWidgetLayout);
   const widgetContentRef = useVoiceWidgetContentFit(
@@ -1345,6 +1352,14 @@ function SandboxSurface({ admitted, appearance, context, onAction }: {
         if (Number.isFinite(next)) setHeight(clamp(next, 80, 1600));
         return;
       }
+      if (event.data.type === "octopus.surface.error") {
+        reportClientSurfaceRuntimeIssue({
+          extensionId: admitted.sourceExtensionId,
+          documentId: admitted.document.id,
+          sourceDigest: admitted.sourceDigest,
+        }, "script", typeof event.data.message === "string" ? event.data.message : "Sandbox script failed");
+        return;
+      }
       if (event.data.type !== "octopus.surface.action" || render.kind !== "sandbox") return;
       const actionId = typeof event.data.actionId === "string" ? event.data.actionId : "";
       const action = render.actions?.[actionId];
@@ -1352,7 +1367,7 @@ function SandboxSurface({ admitted, appearance, context, onAction }: {
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
-  }, [admitted.document.id, onAction, render]);
+  }, [admitted.document.id, admitted.sourceDigest, admitted.sourceExtensionId, onAction, render]);
 
   return (
     <iframe
@@ -1371,7 +1386,7 @@ function sandboxDocument(render: Extract<ClientSurfaceDocument["render"], { kind
   const encodedContext = encodeScriptJson(context);
   const css = escapeClosingTag(`${sandboxThemeCss()}${render.css ?? ""}`, "style");
   const javascript = escapeClosingTag(render.javascript ?? "", "script");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; media-src 'none'; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${render.html}<script>window.octopusSurface=${encodedContext};Object.defineProperty(window.octopusSurface,"invoke",{enumerable:false,value:(actionId)=>{if(typeof actionId==="string"&&/^[a-z0-9][a-z0-9._-]{1,63}$/.test(actionId))parent.postMessage({type:"octopus.surface.action",actionId},"*")}});(()=>{const send=()=>parent.postMessage({type:"octopus.surface.resize",height:Math.ceil(document.documentElement.getBoundingClientRect().height)},"*");new ResizeObserver(send).observe(document.documentElement);addEventListener("load",send);send()})();</script>${javascript ? `<script>${javascript}</script>` : ""}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; media-src 'none'; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${css}</style></head><body>${render.html}<script>(()=>{const fail=(reason)=>parent.postMessage({type:"octopus.surface.error",message:String(reason&&reason.message||reason||"Script error").slice(0,2000)},"*");addEventListener("error",(event)=>fail(event.error||event.message));addEventListener("unhandledrejection",(event)=>fail(event.reason))})();window.octopusSurface=${encodedContext};Object.defineProperty(window.octopusSurface,"invoke",{enumerable:false,value:(actionId)=>{if(typeof actionId==="string"&&/^[a-z0-9][a-z0-9._-]{1,63}$/.test(actionId))parent.postMessage({type:"octopus.surface.action",actionId},"*")}});(()=>{const send=()=>parent.postMessage({type:"octopus.surface.resize",height:Math.ceil(document.documentElement.getBoundingClientRect().height)},"*");new ResizeObserver(send).observe(document.documentElement);addEventListener("load",send);send()})();</script>${javascript ? `<script>${javascript}</script>` : ""}</body></html>`;
 }
 
 function sandboxThemeCss(): string {

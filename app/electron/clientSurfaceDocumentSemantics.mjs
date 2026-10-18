@@ -7,6 +7,15 @@ const DEFAULT_COLLECTION_LIMIT = 50;
 const MAX_COLLECTION_LIMIT = 100;
 const EMBEDDED_IMAGE_PATTERN = /^data:image\/(?:avif|gif|jpeg|png|webp);base64,[a-z0-9+/]+={0,2}$/i;
 
+export const CLIENT_SURFACE_DOCUMENT_LIMITS = Object.freeze({
+  document_bytes: MAX_DOCUMENT_BYTES,
+  data_bytes: MAX_DATA_BYTES,
+  action_payload_bytes: MAX_ACTION_PAYLOAD_BYTES,
+  native_nodes: MAX_NODES,
+  native_depth: MAX_DEPTH,
+  collection_items: MAX_COLLECTION_LIMIT,
+});
+
 export function clientSurfaceDocumentSemanticInspection(document, options = {}) {
   const issues = [];
   const readMethods = new Set(options.readMethods ?? []);

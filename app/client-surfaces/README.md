@@ -101,7 +101,24 @@ A document may declare up to eight read-only projection sources:
 The result is available at `sources.movement_summary`. Sandbox documents receive
 the same object as `window.octopusSurface = { data, sources }`. Projection
 failures fail the document closed and are rendered explicitly; stale or invented
-values are not substituted.
+values are not substituted. Sources re-read whenever the ledger or run records
+change.
+
+A feed - artifacts a run emits into one interface - is read newest first:
+
+```json
+{
+  "id": "disk",
+  "kind": "projection",
+  "method": "projection.interface_artifacts.list",
+  "params": { "interface_id": "system_feed_disk_space", "labels": ["feed.disk_space"], "order": "newest", "limit": 1 },
+  "path": "artifacts"
+}
+```
+
+`sources.disk.0.payload` is then the newest admitted payload and
+`sources.disk.0.created_at` its recorded time. Without `order`, rows are oldest
+first.
 
 ## Client actions
 
@@ -190,3 +207,36 @@ The Test authoring root may be overridden with the absolute
 `OCTOPUS_CLIENT_SURFACES_DIR`. Otherwise the source checkout uses
 `app/client-surfaces`; a packaged client with no discoverable checkout uses its
 own application-data directory.
+
+## Extension packages
+
+Installed widgets and tabs are Extension packages in the selected Home:
+`<home>/client/extensions/packages/<id>/extension.json`, following
+`app/schemas/client_extension_manifest.schema.json`. A package's
+`contribution.document` is an ordinary `stable` surface document. On start the
+client writes the schemas it accepts to `<home>/client/extensions/contract/`, so
+an author reads the running build's contract rather than a copy.
+
+A model reaches this surface through the `client.mcp` operation
+`inspect_client`, a `client.action` the client answers with
+`client.action.result`:
+
+```json
+{ "schema": "octopus.client_action", "schema_version": 1, "action": "inspect_client", "request_id": "inspect-1" }
+```
+
+The result is an `octopus.client_inventory` description: the Extensions root and
+package layout, the contract files, the host vocabulary derived from these
+schemas (targets, native nodes, glyphs, projection sources and their
+parameters, host sources, client actions, limits), visible surfaces, every
+Extension with its admission, owner review, installation and setup state, and
+refused packages with exact issues. `extension_id` narrows it to one package;
+`source` previews what one projection returns, bounded, before bindings are
+written. Errors a surface hits while rendering - a failed source, an uncaught
+sandbox exception - are reported there as `runtime_issues` for the current
+revision.
+
+A new or changed package is pending until the owner reviews it; the client
+prompts for that review on every screen. A manifest edit is a new revision.
+The authoring procedure, data feeds and complete examples are in
+`registry/artifact/artifact-home-widget-authoring` under `contract.extensions`.

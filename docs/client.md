@@ -164,15 +164,25 @@ another event log.
 
 ![Extensions catalog with Home widgets, workspace tabs, and guided repairs](images/client/extensions.png)
 
-Custom Extensions are files too. **Open folder** opens the extension root;
-packages live at `packages/<id>/extension.json` and follow the
-[manifest schema](../app/schemas/client_extension_manifest.schema.json).
-An agent can author them with ordinary file tools when its environment grants
-that path. The client discovers the package, validates it, and asks you to
-review its current revision before installation. It does not silently run
-new code. Custom views use the [surface document contract](../app/client-surfaces/README.md)
+Custom Extensions are files too. **Open folder** opens the extension root,
+`<home>/client/extensions`; packages live at `packages/<id>/extension.json` and
+follow the [manifest schema](../app/schemas/client_extension_manifest.schema.json).
+Custom views use the [surface document contract](../app/client-surfaces/README.md)
 for native components or sandboxed HTML/CSS/JavaScript; no new kernel feature
 is needed.
+
+You can ask Home for one in plain words - "show me X on Home and keep it
+updated", "add a tab with Y". Home first asks the running client what it can
+host (`inspect_client`): the folder, the exact schemas this build accepts,
+targets, components, data sources, and every Extension's state. It then writes
+the package with its ordinary file tools and, when the view needs data nothing
+projects yet, the system side in the same task - for example a small feed
+interface and the run that emits into it on a trigger. The client discovers the
+new package, validates it, and asks you to review its exact revision wherever
+you are; it does not silently run new code. After you install it, it goes live
+without a restart. Refusals, setup gaps, and errors the view hits while
+rendering go back to Home through the same inspection, so it can fix them; each
+fix is a new revision you review again.
 
 ### Where packages come from
 
@@ -192,8 +202,8 @@ files; it does not fetch a newer Driver from an Octopus server. Building the
 app can download dependencies, and an installed integration can contact its
 external service during use. Those are separate network operations.
 
-Client Extensions have their own built-in catalog and local package directory
-in the Electron user-data area. This is separate from the runtime registry.
+Client Extensions have their own built-in catalog and a local package directory
+in the selected Home's `client/extensions`. This is separate from the runtime registry.
 The current client has no hosted Extension marketplace or automatic app
 updater. A new build supplies a new bundled library; local Home changes still
 need to be reconciled through the package lifecycle.
@@ -244,10 +254,10 @@ no single per-task price: it depends on the selected model and work performed.
 
 The **Home screen** is a conversation. The **Home directory**, normally
 `~/.octopus`, is the private state of an installation: its active registry,
-runs, ledger, and interface data. Client preferences and Extensions also use
-Electron's user-data area; provider authentication can live separately, such
-as Codex credentials under `~/.codex`. Changing `OCTOPUS_HOME` alone does not
-isolate all client settings or provider accounts.
+runs, ledger, and interface data. The client keeps its preferences and
+Extensions in that Home's `client/` directory. The launch selection and
+provider authentication live elsewhere, such as Codex credentials under
+`~/.codex`, so changing `OCTOPUS_HOME` alone does not isolate provider accounts.
 
 Use **Settings → About & Diagnostics** for build facts, Doctor, and client logs.
 See [Troubleshooting](../TROUBLESHOOTING.md) before sharing a report or changing

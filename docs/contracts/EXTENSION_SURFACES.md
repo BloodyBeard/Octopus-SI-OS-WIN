@@ -50,6 +50,7 @@ use the recipes below when extending what the runtime can do.
 | A check | A `verifier` folder: descriptor + script | None |
 | An outcome | A `mark` folder, then allow it in a worker's ceiling | None |
 | A role, grounding text, or skill | An `artifact` folder, then bind it on a checkpoint | None |
+| System data kept on screen | A feed interface folder without a life, a run that emits into it, and a client Extension that reads the feed | None |
 
 The last column is the point.
 

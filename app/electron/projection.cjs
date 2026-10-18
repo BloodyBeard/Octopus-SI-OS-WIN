@@ -1202,6 +1202,10 @@ function createProjectionStore(options) {
     const interfaceId = stringValue(params.interface_id);
     const labels = new Set(arrayValue(params.labels).map(stringValue).filter(Boolean));
     const afterSeq = numberValue(params.after_seq, -1);
+    if (params.order !== undefined && params.order !== "oldest" && params.order !== "newest") {
+      throw new Error("interface artifact order must be oldest or newest");
+    }
+    const newest = params.order === "newest";
     const indexed = await readIndexedInterfaceArtifactRows(
       projection,
       runId,
@@ -1220,7 +1224,8 @@ function createProjectionStore(options) {
       seen.add(artifactId);
       selected.push(row);
     }
-    const page = limitRows(selected.sort((left, right) => numberValue(left.seq, -1) - numberValue(right.seq, -1)), params);
+    const ordered = selected.sort((left, right) => numberValue(left.seq, -1) - numberValue(right.seq, -1));
+    const page = limitRows(newest ? ordered.reverse() : ordered, params);
     const payloads = await resolveLedgerArtifactPayloadResults(page);
     const artifacts = [];
     for (const row of page) {
@@ -1251,7 +1256,7 @@ function createProjectionStore(options) {
         payload: resolved?.payload ?? null,
       });
     }
-    return artifacts.sort((left, right) => left.seq - right.seq);
+    return artifacts.sort((left, right) => newest ? right.seq - left.seq : left.seq - right.seq);
   }
 
   function matchesInterfaceArtifactMovement(row, runId, interfaceId, labels, afterSeq, outboundRecipientOnly = false) {
@@ -1266,7 +1271,8 @@ function createProjectionStore(options) {
     }
     const coordinates = artifactMovementCoordinates(row);
     if (runId && coordinates.runId !== runId) return false;
-    return !interfaceId || coordinates.interfaceId === interfaceId;
+    return !interfaceId || coordinates.interfaceId === interfaceId
+      || row.from?.Interface === interfaceId || row.to?.Interface === interfaceId;
   }
 
   async function openValidatedLedgerIndex(projection) {

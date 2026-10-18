@@ -132,6 +132,8 @@ import type { FilesOpenTarget } from "../files/types";
 import { updateOperatorChatPins } from "../../projectionClient";
 import { offerClientProfileStorageRecovery } from "../../clientLocalDataRecovery";
 import { BuiltinClientExtensionActionHost } from "../../extensions/builtinActionContributions";
+import { inspectClient } from "../../extensions/clientInventory";
+import { useExtensionReviewPrompt } from "../../extensions/useExtensionReviewPrompt";
 import type { ClientExtensionRegistryState } from "../../extensions/types";
 import {
   clientDestination,
@@ -2134,7 +2136,13 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     widgets: (action, operationId) => applyHomeWidgetAction({ accessProfile, runId: homeRunId,
       interfaceId: homeChatWorkspace.activeRun?.chatInterfaceId ?? "",
       surfaces: surfaceRegistry.voiceSurfaces, extensions: surfaceRegistry.extensions }, action, operationId),
+    inspect: (action) => inspectClient(action, visibleSurfaces.filter((surface) => !isSidebarOnlySurface(surface))),
     onRefusal: (reason) => appToast.warning(reason),
+  });
+
+  useExtensionReviewPrompt(surfaceRegistry.extensions, accessProfile === "live" && clientWindow.primary, () => {
+    setSettingsOpen(true);
+    selectSettingsSection("extensions");
   });
 
   useEffect(() => {

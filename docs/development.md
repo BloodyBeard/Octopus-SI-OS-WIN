@@ -76,7 +76,7 @@ client preferences and provider credentials have the separate locations below.
 | `Octopus.app` | A built snapshot: client, runtime, startup baseline, and optional local packages. |
 | `<home>/registry/` | Installed, active descriptors and package code, including local configuration and authorized mutations. |
 | Other Home files | Machine roots, runs, EEs, ledger, blobs, installation receipts, and private interface state. |
-| Electron user data / provider state | Client preferences and Extensions / provider-owned credentials. Neither is fully isolated by `OCTOPUS_HOME`. |
+| `<home>/client/` / provider state | The client profile of that Home, including preferences and Extensions / provider-owned credentials, which `OCTOPUS_HOME` does not isolate. |
 
 The normal loop is **edit the owning source or descriptor → run focused checks
 → build the changed distribution → exercise it against an explicitly selected

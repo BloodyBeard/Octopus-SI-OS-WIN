@@ -57,6 +57,7 @@ jobs:
         run: |
           node scripts/test-local-packages.cjs --consent-recipe
           node scripts/test-client-extensions.cjs
+          node scripts/test-client-extension-authoring.cjs
 
       - name: Client interaction and file contracts
         working-directory: app

@@ -1542,6 +1542,80 @@
           }
         },
         {
+          "name": "inspect_client",
+          "description": "Inspect the running Octopus client before writing an Extension or its data source. Read-only. The client returns client.action.result with request_id and client: the Extensions root, packages_root and package layout, contract schema files written by this client build, host vocabulary (categories, targets, slots, native nodes, glyphs, projection sources with params, host sources, client actions, limits), visible surfaces, every Extension with admission (pending/reviewed/dismissed/builtin), installation, setup and runtime issues, and refused packages with exact issues. extension_id narrows the Extension rows to one package. source previews what one client surface projection returns, bounded, so bindings can be written against real rows. Use client_action.interface from the bound Home delivery context and a unique request_id; await the result before writing dependent files.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "interface": {
+                "type": "string",
+                "minLength": 1
+              },
+              "action": {
+                "type": "object",
+                "properties": {
+                  "schema": {
+                    "const": "octopus.client_action"
+                  },
+                  "schema_version": {
+                    "const": 1
+                  },
+                  "action": {
+                    "const": "inspect_client"
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "extension_id": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+                  },
+                  "source": {
+                    "type": "object",
+                    "properties": {
+                      "method": {
+                        "type": "string",
+                        "pattern": "^projection\\.[a-z0-9_.]{1,96}$"
+                      },
+                      "params": {
+                        "type": "object"
+                      },
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "method"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schema",
+                  "schema_version",
+                  "action",
+                  "request_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "interface",
+              "action"
+            ],
+            "additionalProperties": false
+          },
+          "operation": {
+            "kind": "emit",
+            "label": "client.action",
+            "payload_argument": "action"
+          }
+        },
+        {
           "name": "list_widgets",
           "description": "List ready-made and published widgets in the current Home, including exact ids, revision digests, installed and visible state. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state. Await that result before dependent commands; do not repeat an admitted request or use Computer Use for these controls.",
           "input_schema": {
@@ -1662,7 +1736,7 @@
       ]
     }
   },
-  "description": "Octopus client MCP. Call with method tools/list to discover its descriptor-owned catalogue, or method tools/call and params {name, arguments}. Use list_widgets to inspect existing Home widgets and set_widget to show, hide or remove one; publish_widget creates or revises a document. Widget controls return admission first, followed by client.action.result with actual client state. Also opens existing client surfaces and inspects only bound artifacts. Each invocation establishes an MCP connection over the admitted Octopus artifact transport, negotiates the protocol, sends initialized, executes one request, and closes. All effects still pass ordinary artifact.send admission. No ambient host/MCP configuration or global client access.",
+  "description": "Octopus client MCP. Call with method tools/list to discover its descriptor-owned catalogue, or method tools/call and params {name, arguments}. Use inspect_client before changing the client: it reports the Extensions folder, the contracts the running client accepts, what it can host and every Extension's admission, review, installation and runtime state. Use list_widgets to inspect existing Home widgets and set_widget to show, hide or remove one; publish_widget creates or revises a document. Client controls return admission first, followed by client.action.result with actual client state. Also opens existing client surfaces and inspects only bound artifacts. Each invocation establishes an MCP connection over the admitted Octopus artifact transport, negotiates the protocol, sends initialized, executes one request, and closes. All effects still pass ordinary artifact.send admission. No ambient host/MCP configuration or global client access.",
   "args_schema": {
     "type": "object",
     "properties": {
