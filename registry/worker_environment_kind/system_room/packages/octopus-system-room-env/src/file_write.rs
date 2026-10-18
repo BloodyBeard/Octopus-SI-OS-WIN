@@ -94,7 +94,7 @@ struct WriteRequest {
     preimage_bytes: Option<Vec<u8>>,
 }
 
-fn lock_invocation(directory: &Path) -> Result<std::fs::File, String> {
+pub(crate) fn lock_invocation(directory: &Path) -> Result<std::fs::File, String> {
     std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -489,7 +489,7 @@ fn read_effect_record(path: &Path) -> Result<Option<FileWriteEffectRecord>, Stri
     })
 }
 
-fn install_effect_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn install_effect_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let staging_root = path.parent().ok_or_else(|| {
         format!(
             "file.write effect record '{}' has no staging parent",

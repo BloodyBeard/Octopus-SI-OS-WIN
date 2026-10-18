@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_operator_chat",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "product_kind": "application",
   "product_id": "world_operator_chat",
   "release_status": "optional",
@@ -72,6 +72,7 @@
     "driver.desktop_session",
     "driver.filesystem_workspace",
     "artifact.codex_context",
-    "world_provider_realtime"
+    "world_provider_realtime",
+    "system_memory"
   ]
 }

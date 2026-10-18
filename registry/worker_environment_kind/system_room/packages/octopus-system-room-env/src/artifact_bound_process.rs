@@ -28,7 +28,54 @@ struct ArtifactBoundProcess {
     run_records_root: Option<PathBuf>,
     artifact_blobs_root: Option<PathBuf>,
     registry_artifact_root: Option<PathBuf>,
+    ee_instances_root: Option<PathBuf>,
+    durable_var_dir: Option<PathBuf>,
+    memory_collection: Option<String>,
     maximum_bytes: u64,
+}
+
+impl ArtifactBoundProcess {
+    fn memory(
+        &self,
+        input: &InterfaceInvocationEnvelope,
+        descriptor: &ToolDescriptor,
+        call: &ToolCall,
+    ) -> Result<ToolHandlerResult, ToolHandlerError> {
+        let unavailable = |reason: &str| ToolHandlerError::Execution {
+            tool_id: call.tool_id.clone(),
+            reason: reason.to_string(),
+        };
+        let collection = self.memory_collection.as_deref().ok_or_else(|| {
+            unavailable("memory door declares no memory_collection in its private configuration")
+        })?;
+        let artifact_root = self.registry_artifact_root.as_deref().ok_or_else(|| {
+            unavailable("memory operation has no granted registry_artifact_root")
+        })?;
+        let ee_instances_root = self.ee_instances_root.as_deref().ok_or_else(|| {
+            unavailable("memory operation has no granted ee_instances_root")
+        })?;
+        let effect_root = self
+            .durable_var_dir
+            .as_ref()
+            .map(|directory| directory.join("memory-effects"));
+        let room_kinds = descriptor
+            .supported_worker_environment_kinds
+            .iter()
+            .map(|kind| kind.as_str().to_string())
+            .collect::<Vec<_>>();
+        crate::memory_bound::execute(
+            input,
+            call,
+            &crate::memory_bound::MemoryHost {
+                collection,
+                artifact_root,
+                ee_instances_root,
+                effect_root: effect_root.as_deref(),
+                room_kinds: &room_kinds,
+                maximum_bytes: self.maximum_bytes,
+            },
+        )
+    }
 }
 
 impl ToolProcessHandler for ArtifactBoundProcess {
@@ -68,6 +115,9 @@ impl ToolProcessHandler for ArtifactBoundProcess {
             } else if matches!(call.handler_config.get("operation").and_then(serde_json::Value::as_str),
                 Some("collection_discover" | "collection_read" | "collection_prepare")) {
                 crate::collection_tools::execute(&invocation.envelope, &call, self.registry_artifact_root.as_deref(), self.maximum_bytes)
+            } else if matches!(call.handler_config.get("operation").and_then(serde_json::Value::as_str),
+                Some("memory_save" | "memory_search" | "memory_read" | "memory_list")) {
+                self.memory(&invocation.envelope, &invocation.descriptor, &call)
             } else {
                 self.handler.execute(&context, &call).await
             };
@@ -103,12 +153,27 @@ fn handler_completion(
 
 pub async fn run_artifact_bound_tool_process() -> Result<(), String> {
     let env = ToolProcessEnvironment::from_env()?;
+    let memory_collection = env
+        .descriptor_snapshot
+        .as_ref()
+        .and_then(|descriptor| descriptor.interface_driver_config.as_ref())
+        .and_then(|config| config.private_config.get("memory_collection"))
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "memory_collection must be an artifact id string".to_string())
+        })
+        .transpose()?;
     octopus_tool_door_runtime::run_tool_process(Arc::new(ArtifactBoundProcess {
         interface: env.interface,
         handler: ArtifactBoundHandler,
         run_records_root: env.root_slots.get("run_records_root").cloned(),
         artifact_blobs_root: env.root_slots.get("artifact_blobs_root").cloned(),
         registry_artifact_root: env.root_slots.get("registry_artifact_root").cloned(),
+        ee_instances_root: env.root_slots.get("ee_instances_root").cloned(),
+        durable_var_dir: env.durable_var_dir,
+        memory_collection,
         maximum_bytes: env.host_io_limits.max_payload_bytes,
     }))
     .await

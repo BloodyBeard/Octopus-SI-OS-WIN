@@ -82,6 +82,12 @@ struct ScannedEntry {
     bytes: Vec<u8>,
 }
 
+pub struct CollectionRecord {
+    pub entry: CollectionEntry,
+    pub value: Value,
+    pub revision: ContentHash,
+}
+
 struct ScanSnapshot {
     count: usize,
     bytes: u64,
@@ -113,6 +119,22 @@ impl BoundCollection {
     }
     pub fn descriptor(&self) -> &CollectionDescriptor {
         &self.descriptor
+    }
+    pub fn directory(&self) -> &Path {
+        &self.directory.path
+    }
+
+    pub fn records(&self) -> Result<Vec<CollectionRecord>> {
+        let mut records = Vec::new();
+        self.scan(|record| {
+            records.push(CollectionRecord {
+                entry: record.entry.clone(),
+                value: record.value.clone(),
+                revision: record.revision,
+            });
+            Ok(())
+        })?;
+        Ok(records)
     }
 
     pub fn list(&self, scope: &ScopeContext, request: &ListRequest) -> Result<CollectionPage> {

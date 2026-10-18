@@ -1,0 +1,32 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "system_memory",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "system_memory",
+  "release_status": "optional",
+  "display": {
+    "name": "Memory",
+    "description": "Remembers your preferences, corrections and proven procedures across Home and tasks, and finds them again when they matter.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "book-open"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "system_memory",
+      "primary": true,
+      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
+    },
+    {"registry_kind":"tool","owner":"memory.save","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
+    {"registry_kind":"tool","owner":"memory.search","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
+    {"registry_kind":"tool","owner":"memory.read","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
+    {"registry_kind":"tool","owner":"memory.list","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
+    {"registry_kind":"artifact","owner":"artifact-memory-guide"}
+  ],
+  "required_packages": [
+    "driver.system_room"
+  ]
+}

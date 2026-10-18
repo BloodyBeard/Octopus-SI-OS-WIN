@@ -1,0 +1,29 @@
+{
+  "id": "memory.list",
+  "interface": "system_memory",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "interrupted_effect_recovery": "reinvoke_exact_artifact",
+    "authority": {
+      "read_root_slots": ["ee_instances_root", "registry_artifact_root"],
+      "write_root_slots": [], "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "handler_config": { "operation": "memory_list" },
+  "description": "List remembered notes visible to this run in id order, notes saved earlier first, with their usage. Continue with next_cursor. include_withdrawn also shows notes that were superseded, for maintenance work.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "cursor": { "type": "string", "minLength": 1, "maxLength": 128 },
+      "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+      "include_withdrawn": { "type": "boolean" }
+    },
+    "required": [],
+    "additionalProperties": false
+  },
+  "is_world_effect": false
+}

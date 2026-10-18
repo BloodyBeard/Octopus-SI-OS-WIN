@@ -25,7 +25,14 @@ collection.prepare_publication(
     expected_revision: Option<ContentHash>,
     caller: &ScopeContext,
 ) -> Result<PublicationPlan>
+collection.records() -> Result<Vec<CollectionRecord>>
+collection.directory() -> &Path
 ```
+
+`records` returns every validated entry of one complete bounded scan with its
+revision, whatever its state or scope. The caller that asks for it applies its
+own visibility rule before showing anything; the memory tools use it to read
+by EE lineage.
 
 `parse_descriptor` and `parse_entry` validate payloads. `entry_revision` hashes
 canonical whole-entry JSON. `normalized_selection` supplies empty omitted seed

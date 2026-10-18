@@ -42,6 +42,11 @@
       "reason": "Provides the narrowly granted file authoring room used to create Home and projected task checkpoints."
     },
     {
+      "package_id": "system_memory",
+      "selection": "included",
+      "reason": "Lets Home and tasks remember and find preferences, corrections and proven procedures with one call each."
+    },
+    {
       "package_id": "driver.browser_session",
       "selection": "included",
       "reason": "Provides the native browser room and its tools for Home and new tasks under their formed policy."

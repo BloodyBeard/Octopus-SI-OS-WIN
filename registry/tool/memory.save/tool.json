@@ -1,0 +1,33 @@
+{
+  "id": "memory.save",
+  "interface": "system_memory",
+  "process": {
+    "bin": "target/debug/octopus-artifact-bound-tool",
+    "interrupted_effect_recovery": "reinvoke_exact_artifact",
+    "authority": {
+      "read_root_slots": ["ee_instances_root", "registry_artifact_root"],
+      "write_root_slots": ["registry_artifact_root"],
+      "executable_root_slots": [],
+      "read_paths": [], "write_paths": [], "executable_paths": [],
+      "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+      "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+    }
+  },
+  "supported_worker_environment_kinds": ["system_room"],
+  "handler_config": { "operation": "memory_save" },
+  "description": "Remember one durable note: a user preference, a correction, a proven command, path or procedure, or a decision later work must respect. Call it when the user asks you to remember, forget or update something, or when a correction or adopted procedure should outlive this task. Write the note so it stands alone. The memory collection stores it scoped to this run's environment, keeps this call as provenance, and returns the existing note instead of a duplicate. To replace or forget notes saved in this same environment, list their ids in supersedes; they are withdrawn with this save. Never save secrets, credentials, private raw conversations or guesses.",
+  "args_schema": {
+    "type": "object",
+    "properties": {
+      "note": { "type": "string", "minLength": 1, "maxLength": 8192 },
+      "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+      "supersedes": {
+        "type": "array", "maxItems": 16, "uniqueItems": true,
+        "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "required": ["note"],
+    "additionalProperties": false
+  },
+  "is_world_effect": true
+}

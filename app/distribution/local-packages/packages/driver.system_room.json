@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.system_room",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "product_kind": "driver",
   "product_id": "system_room",
   "release_status": "optional",
@@ -152,7 +152,7 @@
     {"registry_kind":"tool","owner":"context.discover","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
     {"registry_kind":"tool","owner":"context.read","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
     {"registry_kind":"tool","owner":"context.prepare_publication","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
-    {"registry_kind":"artifact","owner":"artifact-system-library","data_directories":["entries"]},
+    {"registry_kind":"artifact","owner":"artifact-system-library","data_directories":["entries","usage"]},
     {"registry_kind":"artifact","owner":"artifact-context-collection-guide"}
   ]
 }

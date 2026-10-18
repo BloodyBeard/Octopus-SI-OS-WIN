@@ -15,15 +15,55 @@ side-channel database query and not a memory-specific runtime interface.
 An ordinary run artifact is not automatically memory. It becomes memory, in the
 sense a person would mean, when it is bound into a run's context.
 
-The typical flow:
+Memory is written in two ways:
 
-1. An operator-facing run receives a message through a chat interface.
-2. It decides part of it is worth keeping and sends an artifact toward a
-   memory-maintenance environment.
-3. A memory worker run there interprets the artifact and decides what to
-   store.
-4. The resulting artifact becomes visible only to runs whose bindings and
-   formed policy admit it.
+1. **Directly, during work.** When the user says "remember this", corrects the
+   model, or a procedure is proven, the run makes one `memory.save` call.
+2. **In the background, after work.** When a run settles, an observer run reads
+   a bounded projection of what happened and maintains the same collection;
+   periodically a consolidation run merges and prunes it. Both are ordinary
+   runs started by interfaces.
+
+The resulting entries become visible only to runs whose bindings and formed
+policy admit them.
+
+## Remembering is one call
+
+The model never works out which JSON file to write where. The **Memory** plugin
+(Applications → Plugins, included in the Codex pack) gives Home and tasks four
+tools behind the `system_memory` door:
+
+| Tool | What it does |
+| --- | --- |
+| `memory.save` | Store one note. Optional `title`; optional `supersedes` withdraws earlier notes of the same environment in the same write. |
+| `memory.search` | Keyword search over the notes this run can see, ranked by hits, with previews and ids. |
+| `memory.read` | Open one note in full; records that it was used today. |
+| `memory.list` | Page through visible notes with their usage; `include_withdrawn` for maintenance. |
+
+Behind them, the system room's own executable does the artifact work. The door
+names its collection in its configuration (`memory_collection`); the shipped
+door uses the installation's shared `artifact-system-library` collection. A
+save becomes one ordinary collection entry:
+
+- **Scope** is the calling run's EE. A run sees notes of its own EE and of the
+  EEs above it, never a sibling's.
+- **Provenance** is the invoking tool call, kept as the entry's evidence, so the
+  ledger names the run, trace and checkpoint that saved it.
+- **Deduplication**: saving a note identical to one already visible returns the
+  existing note.
+- **Policy**: saving needs the `create` artifact verb and the collection bound
+  for reading; superseding needs the `change` verb and only reaches notes of the
+  caller's own EE. Anything else fails closed.
+- **Durability**: the write goes through the ordinary ordered file writer with
+  receipts, and a retried call ends in the same result.
+- **Usage**: each read leaves one dated receipt per note per day beside the
+  entries; tools report `days_used` and `last_used`, and consolidation uses them
+  to decide what to keep.
+
+The read path mirrors Codex's: a compact catalogue of visible entries is bound
+into a run when it is authored, a short guide artifact tells the model when to
+consult memory and when to save, and details come on demand through search and
+read. Notes are information, not instructions.
 
 ## Skills are artifacts
 

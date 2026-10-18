@@ -1,0 +1,20 @@
+{
+  "schema_version": 3,
+  "id": "system_memory",
+  "name": "Memory",
+  "description": "Remembers your preferences, corrections and proven procedures across Home and tasks, and finds them again when they matter.",
+  "category": "plugin",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "book-open",
+  "logo": "application-logo.svg",
+  "interfaces": ["system_memory"],
+  "task_capabilities": {
+    "tools": [
+      { "tool": "memory.save", "interface": "system_memory", "worker_environment_kind": "system_room" },
+      { "tool": "memory.search", "interface": "system_memory", "worker_environment_kind": "system_room" },
+      { "tool": "memory.read", "interface": "system_memory", "worker_environment_kind": "system_room" },
+      { "tool": "memory.list", "interface": "system_memory", "worker_environment_kind": "system_room" }
+    ]
+  }
+}

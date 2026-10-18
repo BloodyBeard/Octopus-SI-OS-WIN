@@ -36,7 +36,7 @@ struct PrepareArguments {
     expected_revision: Option<String>,
 }
 
-fn readable_source<'a>(input: &'a InterfaceInvocationEnvelope, id: &str) -> Result<&'a ArtifactBindingPayload, String> {
+pub(crate) fn readable_source<'a>(input: &'a InterfaceInvocationEnvelope, id: &str) -> Result<&'a ArtifactBindingPayload, String> {
     let metadata = input.metadata().map_err(|error| error.to_string())?;
     if !metadata.grant.may_read_artifact(id) {
         return Err("collection source is not readable under the invocation grant".into());
@@ -50,7 +50,7 @@ fn readable_source<'a>(input: &'a InterfaceInvocationEnvelope, id: &str) -> Resu
     Ok(source)
 }
 
-fn open(root: &Path, source: &ArtifactBindingPayload) -> Result<BoundCollection, String> {
+pub(crate) fn open(root: &Path, source: &ArtifactBindingPayload) -> Result<BoundCollection, String> {
     let bytes = source.read_bytes().map_err(|error| error.to_string())?;
     let value = serde_json::from_slice(&bytes).map_err(|error| format!("collection source JSON: {error}"))?;
     BoundCollection::open(root, &source.artifact, &value).map_err(|error| error.to_string())
