@@ -519,6 +519,12 @@ fn discover_interfaces(interface_root: &Path) -> Result<(Vec<InterfaceId>, Vec<S
                 continue;
             }
         };
+        if name == octopus_file_storage::publication::COORDINATION_DIRECTORY {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                errors.push(format!("publication metadata '{}' is not a plain directory", entry.path().display()));
+            }
+            continue;
+        }
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
             interfaces.push(InterfaceId::new(name));
         } else if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -842,8 +848,16 @@ mod tests {
         .unwrap();
         let installation_root = root.path().join("installation");
         std::fs::create_dir(&installation_root).unwrap();
+        let metadata = home.join("registry/interface").join(octopus_file_storage::publication::COORDINATION_DIRECTORY);
+        std::fs::create_dir(&metadata).unwrap();
 
         run(&home, &installation_root).await.unwrap();
+
+        std::fs::remove_dir(&metadata).unwrap();
+        std::os::unix::fs::symlink(&interface, &metadata).unwrap();
+        let (_, errors) = discover_interfaces(&home.join("registry/interface")).unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("not a plain directory"));
 
         assert!(!home.join("state").exists());
         assert!(!home.join("runtime-instance.json").exists());

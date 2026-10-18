@@ -693,6 +693,12 @@ enum SpawnedLifeOutput {
         artifact_manifest_path: PathBuf,
         evidence: Vec<SpawnedEvidenceLine>,
     },
+    RetainedArrival {
+        request_id: u64,
+        delivery_id: String,
+        artifact_manifest_path: PathBuf,
+        evidence: Vec<SpawnedEvidenceLine>,
+    },
     SystemEmission {
         request_id: u64,
         artifact: SpawnedLifeEmissionArtifact,
@@ -714,6 +720,10 @@ enum SpawnedLifeInput {
     DeliveryVerdict {
         request_id: u64,
         verdict: DeliveryVerdict,
+    },
+    RetainedDelivery {
+        request_id: u64,
+        delivery: Result<octopus_ledger::ArtifactDelivery, String>,
     },
 }
 
@@ -798,8 +808,16 @@ fn spawned_context_from_env(
     .with_host_io_limits(host_io_limits)
 }
 
-type PendingVerdicts =
-    Arc<tokio::sync::Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<DeliveryVerdict>>>>;
+enum SpawnedReply {
+    Ordinary(tokio::sync::oneshot::Sender<DeliveryVerdict>),
+    Retained(tokio::sync::oneshot::Sender<Result<octopus_ledger::ArtifactDelivery, String>>),
+}
+
+type PendingVerdicts = Arc<tokio::sync::Mutex<BTreeMap<u64, SpawnedReply>>>;
+
+#[cfg(test)]
+#[path = "../tests/support/spawned.rs"]
+mod spawned_tests;
 
 async fn pump_spawned_life_outputs(
     mut arrivals: tokio::sync::mpsc::Receiver<InterfaceActivationArrival>,
@@ -828,26 +846,7 @@ async fn pump_spawned_life_outputs(
             arrival = arrivals.recv() => {
                 let arrival = arrival
                     .ok_or_else(|| "spawned life arrival channel closed".to_string())?;
-                let request_id = register_spawned_verdict(
-                    &pending,
-                    &mut next_request_id,
-                    arrival.verdict_tx,
-                )
-                .await?;
-                SpawnedLifeOutput::Arrival {
-                    request_id,
-                    artifact_manifest_path: arrival.artifact.manifest_path().to_path_buf(),
-                    evidence: arrival
-                        .evidence
-                        .into_iter()
-                        .map(|item| SpawnedEvidenceLine {
-                            interface_id: item.interface_id.as_str().to_string(),
-                            artifact_id: item.artifact_id.as_str().to_string(),
-                            label: item.label,
-                            bytes: item.bytes,
-                        })
-                        .collect(),
-                }
+                spawned_arrival_output(arrival, &pending, &mut next_request_id).await?
             }
             emission = emissions.recv() => {
                 let emission = emission
@@ -886,6 +885,32 @@ async fn pump_spawned_life_outputs(
     }
 }
 
+async fn spawned_arrival_output(
+    arrival: InterfaceActivationArrival,
+    pending: &PendingVerdicts,
+    next_request_id: &mut u64,
+) -> Result<SpawnedLifeOutput, String> {
+    let InterfaceActivationArrival { artifact, interface: _, evidence, verdict_tx, retained } = arrival;
+    let artifact_manifest_path = artifact.manifest_path().to_path_buf();
+    let evidence = evidence.into_iter().map(|item| SpawnedEvidenceLine {
+        interface_id: item.interface_id.as_str().to_string(),
+        artifact_id: item.artifact_id.as_str().to_string(),
+        label: item.label,
+        bytes: item.bytes,
+    }).collect();
+    match (verdict_tx, retained) {
+        (None, Some(retained)) => {
+            let request_id = register_spawned_reply(pending, next_request_id, SpawnedReply::Retained(retained.reply)).await?;
+            Ok(SpawnedLifeOutput::RetainedArrival { request_id, delivery_id: retained.id, artifact_manifest_path, evidence })
+        }
+        (verdict_tx, None) => {
+            let request_id = register_spawned_verdict(pending, next_request_id, verdict_tx).await?;
+            Ok(SpawnedLifeOutput::Arrival { request_id, artifact_manifest_path, evidence })
+        }
+        _ => Err("spawned arrival must select one acknowledgement contract".into()),
+    }
+}
+
 async fn register_spawned_verdict(
     pending: &PendingVerdicts,
     next_request_id: &mut u64,
@@ -894,12 +919,7 @@ async fn register_spawned_verdict(
     let Some(verdict_tx) = verdict_tx else {
         return Ok(None);
     };
-    let request_id = *next_request_id;
-    *next_request_id = next_request_id
-        .checked_add(1)
-        .ok_or_else(|| "spawned life request id overflow".to_string())?;
-    pending.lock().await.insert(request_id, verdict_tx);
-    Ok(Some(request_id))
+    register_required_spawned_verdict(pending, next_request_id, verdict_tx).await.map(Some)
 }
 
 async fn register_required_spawned_verdict(
@@ -907,11 +927,22 @@ async fn register_required_spawned_verdict(
     next_request_id: &mut u64,
     verdict_tx: tokio::sync::oneshot::Sender<DeliveryVerdict>,
 ) -> Result<u64, String> {
+    register_spawned_reply(pending, next_request_id, SpawnedReply::Ordinary(verdict_tx)).await
+}
+
+async fn register_spawned_reply(
+    pending: &PendingVerdicts,
+    next_request_id: &mut u64,
+    reply: SpawnedReply,
+) -> Result<u64, String> {
     let request_id = *next_request_id;
     *next_request_id = next_request_id
         .checked_add(1)
         .ok_or_else(|| "spawned life request id overflow".to_string())?;
-    pending.lock().await.insert(request_id, verdict_tx);
+    match pending.lock().await.entry(request_id) {
+        std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(reply); }
+        std::collections::btree_map::Entry::Occupied(_) => return Err("spawned life request id already has a reply contract".into()),
+    }
     Ok(request_id)
 }
 
@@ -923,18 +954,23 @@ async fn pump_spawned_life_inputs(
     while let Some(line) = lines.next_line().await? {
         let input: SpawnedLifeInput = serde_json::from_str(&line)
             .map_err(|error| format!("spawned life input is malformed: {error}"))?;
-        let SpawnedLifeInput::DeliveryVerdict {
-            request_id,
-            verdict,
-        } = input;
-        let sender = pending
-            .lock()
-            .await
-            .remove(&request_id)
-            .ok_or_else(|| format!("spawned life received unknown request id {request_id}"))?;
-        let _ = sender.send(verdict);
+        accept_spawned_life_input(&pending, input).await?;
     }
     Err("spawned life input closed".to_string())
+}
+
+async fn accept_spawned_life_input(pending: &PendingVerdicts, input: SpawnedLifeInput) -> Result<(), String> {
+    let request_id = match &input {
+        SpawnedLifeInput::DeliveryVerdict { request_id, .. } | SpawnedLifeInput::RetainedDelivery { request_id, .. } => *request_id,
+    };
+    let reply = pending.lock().await.remove(&request_id)
+        .ok_or_else(|| format!("spawned life received unknown request id {request_id}"))?;
+    match (reply, input) {
+        (SpawnedReply::Ordinary(sender), SpawnedLifeInput::DeliveryVerdict { verdict, .. }) => { let _ = sender.send(verdict); }
+        (SpawnedReply::Retained(sender), SpawnedLifeInput::RetainedDelivery { delivery, .. }) => { let _ = sender.send(delivery); }
+        _ => return Err("spawned life reply changed its request acknowledgement contract".into()),
+    }
+    Ok(())
 }
 
 pub struct OwnOutboundMovement {
