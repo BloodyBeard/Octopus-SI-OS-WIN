@@ -8330,14 +8330,35 @@ async fn hand_tool_failure(
     };
     let verdict = match output {
         Some((callback, source)) => {
-            hand_tool_process_output(ctx, Some(&source), Some(callback), artifact).await?
+            let dispatch: ToolDoorOutputDispatch = Arc::new(|ctx, artifact| {
+                Box::pin(async move { hand_arrival_at_current_source(&ctx, artifact).await })
+            });
+            hand_tool_process_output_with_dispatch(ctx, Some(&source), Some(callback), artifact, dispatch).await?
         }
-        None => ctx.hand_arrival(artifact, Vec::new()).await?,
+        None => hand_arrival_at_current_source(ctx, artifact).await?,
     };
     match verdict {
         DeliveryVerdict::Admitted { .. } => Ok(admitted_state),
         DeliveryVerdict::Refused { .. } if admitted_state == ToolDoorJournalState::Indeterminate => Ok(admitted_state),
         DeliveryVerdict::Refused { .. } => Ok(ToolDoorJournalState::Refused),
+    }
+}
+
+async fn hand_arrival_at_current_source(
+    ctx: &InterfaceLiftContext,
+    artifact: InterfaceArtifactFile,
+) -> Result<DeliveryVerdict, String> {
+    loop {
+        let verdict = ctx.hand_arrival(artifact.clone(), Vec::new()).await?;
+        if !verdict.awaits_current_source() {
+            return Ok(verdict);
+        }
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                return Err("tool failure result remains undelivered while admission is cancelled".into());
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
     }
 }
 
@@ -8969,6 +8990,31 @@ mod tool_process_private_boundary_tests {
     }
     mod completed_output_tests {
         include!("../tests/support/completed_output.rs");
+
+        #[tokio::test]
+        async fn tool_failure_result_is_handed_again_while_its_current_source_settles() {
+            let root = tempfile::tempdir().unwrap(); let root = root.path().canonicalize().unwrap();
+            let (ctx, _, _, mut arrivals, _) = completed_fixture(&root, 1).await;
+            let target = ToolResultTarget::from(&ToolCallArtifact {
+                tool:"test.tool".into(), arguments:serde_json::json!({}), correlation_id:Some("failed-0".into()),
+                label:Some("tool.call".into()), source_interface_evidence:BTreeMap::new(),
+            });
+            let failure = hand_tool_failure(&ctx, 0, "tool_effect_indeterminate",
+                serde_json::json!({"effect_state":"in_flight_outcome_unknown"}), Some(&target), ToolDoorJournalState::Indeterminate, None);
+            tokio::pin!(failure);
+            let mut handed = Vec::new();
+            for verdict in [
+                DeliveryVerdict::refused(RefusedReason::StaleEpoch, serde_json::json!({"reason_detail":"arrival_target_changed"})),
+                DeliveryVerdict::refused(RefusedReason::RegistryUnstable, serde_json::json!({})),
+                DeliveryVerdict::Admitted { seq: 3 },
+            ] {
+                let arrival = tokio::select! { arrival = arrivals.recv() => arrival.unwrap(), result = &mut failure => panic!("failure settled before its current source: {result:?}") };
+                handed.push(arrival.artifact.read_payload_bytes().unwrap());
+                arrival.verdict_tx.unwrap().send(verdict).unwrap();
+            }
+            assert_eq!(failure.await.unwrap(), ToolDoorJournalState::Indeterminate);
+            assert!(handed.windows(2).all(|pair| pair[0] == pair[1]));
+        }
 
         #[tokio::test]
         async fn retained_pending_rehands_selected_output_before_resuming_owner_callback() {
