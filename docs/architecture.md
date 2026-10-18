@@ -308,7 +308,9 @@ sequenceDiagram
 
 1. **Arrival.** The client materializes your message as an artifact and hands
    it to the runtime at the Home chat interface. The hand-in *is* the interface
-   binding; there is no separate request lane.
+   binding; there is no separate request lane. From Home, the same artifact
+   also carries the client's snapshot of tasks, triggers, projects and Agents,
+   so what the model knew is part of the recorded input.
 2. **Admission.** The runtime finds every active checkpoint, in any run, that
    pins that interface folder. For each one it re-reads the run record from
    disk, forms the run's grant, checks the binding, and records the movement.

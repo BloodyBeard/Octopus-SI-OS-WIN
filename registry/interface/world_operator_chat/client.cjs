@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
 const { plannedMaintenanceRuns } = require("./maintenance-client.cjs");
+const { homeStateClientContext } = require("./home-state.cjs");
 
 const CONFIG_PATH = path.join(__dirname, "client.json");
 const LIVE_EVENT_DATA_MAX_BYTES = 8 * 1024;
@@ -36,6 +37,8 @@ const OPERATOR_MESSAGE_INTENT_SCHEMA = "octopus.operator_message_intent";
 const MAX_OPERATOR_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 const MAX_OPERATOR_ATTACHMENT_COUNT = 12;
 const MAX_OPERATOR_ATTACHMENT_TOTAL_BYTES = 512 * 1024 * 1024;
+const MAX_OPERATOR_CLIENT_CONTEXT_ENTRIES = 4;
+const MAX_OPERATOR_CLIENT_CONTEXT_BYTES = 16 * 1024;
 const runAuthoringLocks = new Map();
 const operatorMessageAdmissionLocks = new Map();
 const workspaceTopologyAuthoringLocks = new Map();
@@ -161,10 +164,12 @@ async function submitOperatorTurn(options, request) {
     } else {
       pendingAttachmentPlans = await planOperatorAttachments(attachmentRoot, attachmentInputs);
       const attachments = pendingAttachmentPlans.map((plan) => plan.attachment);
+      const clientContext = await operatorTurnClientContext(options, clientSurfaceRole);
       const messageBytes = Buffer.from(JSON.stringify({
         text,
         message_id: messageId,
         attachments,
+        ...(clientContext.length ? { client_context: clientContext } : {}),
       }));
       const messagePath = operatorMessagePayloadPath(payloadRoot, messageId);
       await writeExactOperatorMessageFile(messagePath, messageBytes, "payload");
@@ -3972,15 +3977,55 @@ function assertOperatorMessageRequestMatchesEnvelope(input, payload) {
   }
 }
 
+async function operatorTurnClientContext(options, clientSurfaceRole) {
+  if (clientSurfaceRole !== "home" || options.readProjection === undefined) return [];
+  if (typeof options.readProjection !== "function") {
+    throw new Error("readProjection must be a trusted client callback");
+  }
+  return operatorClientContext([await homeStateClientContext(options.readProjection, Date.now())]);
+}
+
+function operatorClientContext(value) {
+  const entries = requiredArray(value, "operator message payload.client_context");
+  if (entries.length === 0 || entries.length > MAX_OPERATOR_CLIENT_CONTEXT_ENTRIES) {
+    throw new Error(`operator message client_context carries ${entries.length} entries; allowed 1 to ${MAX_OPERATOR_CLIENT_CONTEXT_ENTRIES}`);
+  }
+  const names = new Set();
+  let totalBytes = 0;
+  return entries.map((entry, index) => {
+    const field = `operator message payload.client_context[${index}]`;
+    const object = requiredObject(entry, field);
+    if (Object.keys(object).length !== 2 || !Object.hasOwn(object, "name") || !Object.hasOwn(object, "text")) {
+      throw new Error(`${field} has an invalid field set`);
+    }
+    if (typeof object.name !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(object.name) || names.has(object.name)) {
+      throw new Error(`${field}.name must be a unique lowercase token`);
+    }
+    names.add(object.name);
+    if (typeof object.text !== "string" || !object.text.trim() || object.text.trim() !== object.text) {
+      throw new Error(`${field}.text must be a nonempty trimmed string`);
+    }
+    totalBytes += Buffer.byteLength(object.text, "utf8");
+    if (totalBytes > MAX_OPERATOR_CLIENT_CONTEXT_BYTES) {
+      throw new Error(`operator message client_context exceeds ${MAX_OPERATOR_CLIENT_CONTEXT_BYTES} bytes`);
+    }
+    return { name: object.name, text: object.text };
+  });
+}
+
 function operatorMessagePayload(value, messageId, attachmentRoot) {
   const payload = requiredObject(value, "operator message payload");
   const fields = ["text", "message_id", "attachments"];
+  const optionalFields = ["client_context"];
   if (
-    Object.keys(payload).length !== fields.length
-    || fields.some((field) => !Object.hasOwn(payload, field))
+    fields.some((field) => !Object.hasOwn(payload, field))
+    || Object.keys(payload).some((field) => !fields.includes(field) && !optionalFields.includes(field))
   ) {
     throw new Error("operator message payload has an invalid field set");
   }
+  const clientContext = Object.hasOwn(payload, "client_context")
+    ? operatorClientContext(payload.client_context)
+    : null;
   if (typeof payload.text !== "string" || payload.text.trim() !== payload.text) {
     throw new Error("operator message payload.text must be a trimmed string");
   }
@@ -4048,6 +4093,7 @@ function operatorMessagePayload(value, messageId, attachmentRoot) {
     text: payload.text,
     message_id: messageId,
     attachments,
+    ...(clientContext ? { client_context: clientContext } : {}),
   };
 }
 

@@ -87,6 +87,33 @@ client.
 Everything else follows Codex: a sidebar, a working pane opened beside the
 conversation, split panes.
 
+## Home chooses when to act
+
+Codex decides by itself when memory is worth reading: a short decision
+boundary, a compact summary already in context, and tools for detail. Home
+works the same way for everything it can do.
+
+- **The boundary is short.** Home's role says when a turn needs only an
+  answer, when to start a task, set a trigger, show a widget, save knowledge,
+  or start a coding task that changes Octopus itself - and when to do none of
+  these. When the operator states a goal, Home starts the work instead of
+  asking for permission, and when unsure it does the cheap reversible part and
+  offers the rest in one line.
+- **The summary is what you see.** Every message sent from Home carries the
+  client's snapshot of the tasks with their status and last reply, the
+  triggers with their schedule, the projects and the Agents. It travels inside
+  the message artifact, so the ledger records exactly what Home knew. Widgets
+  are listed on demand.
+- **Acting is cheap.** A task is one call: a title and the assignment. The
+  installation's defaults pick the environment, worker, model and tools and
+  bring the result back to Home. Procedures for hand-authored runs, widget
+  design and the rest stay in artifacts the model reads only when it needs
+  them; prose that is always in context is the expensive kind.
+
+Home is expected to notice things in that snapshot - a failed task, results
+nobody has looked at, a request that keeps coming back - and propose concrete
+work, never generic suggestions.
+
 ## Transparency
 
 A lot looks hidden and is not. In Home, **Activity** shows what is happening:

@@ -40,6 +40,10 @@ split panes, so a conversation and its evidence can remain visible together.
 ### Home: conversation, Activity, and voice
 
 Home presents one continuing run. Use the composer for text and attachments.
+Each message you send from Home also carries the client's snapshot of what
+you can see - tasks with their status and last reply, triggers, projects and
+Agents - inside the same message artifact, so Home can answer and propose
+work concretely. It is not shown in the conversation.
 Open **Activity** for the conversation and the detailed trace of its work.
 Widgets can show task progress, upcoming work, or other configured sources;
 their visibility and positions are client presentation choices.

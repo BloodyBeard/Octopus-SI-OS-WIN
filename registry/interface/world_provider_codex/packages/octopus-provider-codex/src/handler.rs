@@ -16108,6 +16108,10 @@ fn turn_input_from_operator_payload(
     selected_files: Option<&SelectedFileProjection>,
 ) -> Result<Vec<UserInput>, InterfaceDriverError> {
     let mut input = Vec::new();
+    if let Some(context) = payload.get("client_context") {
+        input.push(UserInput::Text { text: render_operator_client_context(context)?, text_elements: Vec::new() });
+    }
+    let context_items = input.len();
     if let Some(text) = payload
         .get("text")
         .and_then(serde_json::Value::as_str)
@@ -16133,7 +16137,7 @@ fn turn_input_from_operator_payload(
         }
     }
 
-    if input.is_empty()
+    if input.len() == context_items
         && !selected_files.is_some_and(|files| !files.current_attachments.is_empty())
     {
         return Err(InterfaceDriverError::Protocol(
@@ -16141,6 +16145,41 @@ fn turn_input_from_operator_payload(
         ));
     }
     Ok(input)
+}
+
+const OPERATOR_CLIENT_CONTEXT_MAX_ENTRIES: usize = 4;
+const OPERATOR_CLIENT_CONTEXT_MAX_BYTES: usize = 16 * 1024;
+
+fn render_operator_client_context(value: &serde_json::Value) -> Result<String, InterfaceDriverError> {
+    let invalid = |detail: &str| InterfaceDriverError::Protocol(format!("operator client_context {detail}"));
+    let entries = value.as_array().ok_or_else(|| invalid("must be an array"))?;
+    if entries.is_empty() || entries.len() > OPERATOR_CLIENT_CONTEXT_MAX_ENTRIES {
+        return Err(invalid("must carry 1 to 4 entries"));
+    }
+    let mut names = BTreeSet::new();
+    let mut bytes = 0usize;
+    let mut blocks = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let object = entry.as_object().filter(|object| object.len() == 2)
+            .ok_or_else(|| invalid("entries must be exact {name, text} objects"))?;
+        let name = object.get("name").and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty() && name.len() <= 64
+                && name.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase())
+                && name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'))
+            .ok_or_else(|| invalid("entry name must be a lowercase token"))?;
+        if !names.insert(name) {
+            return Err(invalid("repeats an entry name"));
+        }
+        let text = object.get("text").and_then(serde_json::Value::as_str)
+            .filter(|text| !text.trim().is_empty() && text.trim() == *text)
+            .ok_or_else(|| invalid("entry text must be nonempty and trimmed"))?;
+        bytes += text.len();
+        if bytes > OPERATOR_CLIENT_CONTEXT_MAX_BYTES {
+            return Err(invalid("exceeds its byte limit"));
+        }
+        blocks.push(format!("<client_context name=\"{name}\">\n{text}\n</client_context>"));
+    }
+    Ok(blocks.join("\n"))
 }
 
 fn push_attachment_input(
@@ -20402,6 +20441,22 @@ while IFS= read -r _; do :; done
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn operator_client_context_precedes_the_operator_text_and_fails_closed() {
+        let decode = |payload: serde_json::Value| decode_provider_input(
+            &serde_json::to_vec(&payload).unwrap(), OPERATOR_MESSAGE_LABEL, None, &BTreeMap::new(), None);
+        let ProviderInput::Turn(turn) = decode(serde_json::json!({"text":"What next?","message_id":"m","attachments":[],
+            "client_context":[{"name":"home_state","text":"Tasks: none active."}]})).unwrap() else { panic!("operator turn expected") };
+        let texts = turn.iter().map(|item| match item { UserInput::Text { text, .. } => text.as_str(), _ => "" }).collect::<Vec<_>>();
+        assert_eq!(texts, ["<client_context name=\"home_state\">\nTasks: none active.\n</client_context>", "What next?"]);
+        for context in [serde_json::json!([]), serde_json::json!([{"name":"Home","text":"x"}]), serde_json::json!([{"name":"a","text":"x","extra":1}]),
+            serde_json::json!([{"name":"a","text":"x"},{"name":"a","text":"y"}]), serde_json::json!([{"name":"a","text":"x".repeat(17 * 1024)}])] {
+            assert!(decode(serde_json::json!({"text":"What next?","message_id":"m","attachments":[],"client_context":context})).is_err());
+        }
+        assert!(decode(serde_json::json!({"text":"","message_id":"m","attachments":[],
+            "client_context":[{"name":"home_state","text":"Tasks: none active."}]})).is_err());
     }
 
     #[test]

@@ -57,3 +57,19 @@ fn current_run_catalogs_match_the_typed_authoring_request() {
         }
     }
 }
+
+#[test]
+fn create_run_starts_a_task_from_title_and_text_alone() {
+    for owner in ["world_provider_codex", "world_provider_chatgpt"] {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..").join(owner).join("interface.json");
+        let descriptor:serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let operations = descriptor["interface_driver_config"]["private_config"]["run_affordance_profile"]["catalog"]["operations"].as_array().unwrap();
+        let entry = operations.iter().find(|entry| entry["operation"] == "create_run").unwrap();
+        let validator = octopus_tool_registry::ToolArgumentValidator::compile(&entry["input_schema"]).unwrap();
+        let request = serde_json::json!({"title":"Weather widget","text":"Refresh the Kyiv weather widget every hour."});
+        validator.validate(&request).unwrap();
+        let typed: crate::run_affordances::CreateRunRequest = serde_json::from_value(request).unwrap();
+        assert!(typed.creation_key.is_none() && typed.authored.is_none());
+        assert!(validator.validate(&serde_json::json!({"title":"No assignment"})).is_err(), "{owner} create_run admits a task without an assignment");
+    }
+}

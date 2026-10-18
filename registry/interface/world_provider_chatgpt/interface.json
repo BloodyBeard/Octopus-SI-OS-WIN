@@ -67,12 +67,12 @@
       "run_affordance_profile": {
         "catalog": {
           "label": "context.reference",
-          "text": "These provider-owned operations compose ordinary Octopus runs, bindings and file effects. inspect_authoring reports the current selection and grant. To attach tools, worker environments, context or interface routes to this run, use preview_current_run and amend_current_run with the same amendment_key and explicit complete selection; use authored for an exact future contract. For a separate full run, use preview_run and create_run with the same creation_key. Inspect concrete edits and missing dependencies before applying. A new run forms authority from its own worker ceiling and EE chain. Author result verification requirements and exact return interfaces. Ordinary granted file tools can create or repair descriptor and executable packages; a descriptor on disk alone does not grant access. Each operation is exposed only under its declared effect-tool grants.",
+          "text": "These operations compose ordinary Octopus runs through checked file effects. create_run starts a task in one call from the installation defaults. followup_task, send_message and interrupt_run reach a connected run; list_runs shows this run and its connected runs; wait_for_runs waits for their communication. To attach tools, rooms, context or routes to this run, use preview_current_run and then amend_current_run with the same amendment_key and an explicit complete selection; inspect_authoring shows the current one. preview_run, preview_revision and revise_run work with exact authored files. A new run forms its authority from its own worker ceiling and EE chain; a descriptor on disk alone grants nothing.",
           "operations": [
             {
               "name": "inspect_authoring",
               "operation": "inspect_authoring",
-              "description": "Inspect the selected Home roots, native authoring defaults, current grant and installed descriptor/validation facts. Installed capabilities are candidates; each requested run must pass its own policy formation. This call makes no edits.",
+              "description": "Show this run's roots, creation defaults, current grant and installed descriptors. Not needed before create_run; use it before amending this run or authoring exact files. Makes no edits.",
               "input_schema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -880,7 +880,7 @@
             {
               "name": "preview_run",
               "operation": "preview_run",
-              "description": "Prepare a complete run and its exact descriptor, policy and binding file edits without applying them. Choose a stable creation_key and reuse it with create_run. Inspect required writes and missing dependencies; the plan grants no authority. Use authored for a complete explicit run graph with checkpoint waits, verifier requirements and return bindings; it cannot be mixed with template-selection fields.",
+              "description": "Optional dry run of create_run: prepare the same request and show its exact descriptor, policy and binding file edits without applying them. Useful for an authored graph or an unfamiliar selection; pass the same creation_key to create_run to apply it. The plan grants no authority.",
               "input_schema": {
                 "type": "object",
                 "additionalProperties": false,
@@ -900,15 +900,18 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Short task name shown in Tasks."
                   },
                   "text": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "The self-contained assignment: objective, constraints, what to use, deliverable, how to verify and how to report."
                   },
                   "ee_id": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Project EE for the task; omit for the default EE."
                   },
                   "worker_template_interface_id": {
                     "type": "string",
@@ -1413,13 +1416,10 @@
             {
               "name": "create_run",
               "operation": "create_run",
-              "description": "Create a run through checked ordinary file writes, connect its exact interfaces and admit its initial artifact. Use the reviewed creation_key and request. Returns installation and seed evidence; completion of the requested work requires its own artifacts and verification. Use authored for a complete explicit run graph with checkpoint waits, verifier requirements and return bindings; it cannot be mixed with template-selection fields.",
+              "description": "Start a task: title and text are enough. The installation defaults choose the EE, worker, provider, model, rooms and tools, connect the new run to this one and return its result here. Add ee_id for a project, context_artifacts or publications for bound knowledge, and other fields only when the work needs them. Returns the new run and its admitted assignment; completion arrives later as the task's own return. authored takes a complete explicit run graph instead of the defaults and cannot be mixed with them.",
               "input_schema": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": [
-                  "creation_key"
-                ],
                 "not": {
                   "required": [
                     "authored",
@@ -1433,15 +1433,18 @@
                   },
                   "title": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Short task name shown in Tasks."
                   },
                   "text": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "The self-contained assignment: objective, constraints, what to use, deliverable, how to verify and how to report."
                   },
                   "ee_id": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Project EE for the task; omit for the default EE."
                   },
                   "worker_template_interface_id": {
                     "type": "string",
@@ -1946,7 +1949,7 @@
             {
               "name": "list_runs",
               "operation": "list_runs",
-              "description": "Inspect this run and its declared connected peer interfaces from the current admitted grant and record.",
+              "description": "Show this run and the runs connected to it, with their receive interfaces, from the current grant and record.",
               "input_schema": {
                 "type": "object",
                 "additionalProperties": false,

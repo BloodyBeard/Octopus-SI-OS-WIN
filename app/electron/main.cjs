@@ -4316,6 +4316,7 @@ ipcMain.handle("octopus:submit-chat-turn", async (_event, token, request) => {
           ...input,
           blobsRoot: path.join(octopusHome, "ledger", "blobs"),
         }),
+        readProjection: (method) => getProjectionStore("live").read(projectionReadRequest(method)),
         preparePayloadArtifactBindings: ({ payloadArtifactBindings: selectedBase }) => prepareContentAddressedPayloadBindings({
           blobsRoot: path.join(octopusHome, "ledger", "blobs"),
           attachments: stagedAttachments,
