@@ -345,7 +345,7 @@ fn internal_filename(name: &str) -> bool {
         return hash_name(base) || base.strip_prefix("dir-").is_some_and(hash_name);
     }
     if let Some(base) = name.strip_suffix(".install") { return hash_name(base); }
-    if let Some(base) = name.strip_suffix(".bytes") {
+    if let Some(base) = name.strip_suffix(".bytes").or_else(|| name.strip_suffix(".preimage")) {
         return base.split_once('-').is_some_and(|(left, right)| hash_name(left) && hash_name(right));
     }
     if let Some(stem) = temporary_stem(name) {

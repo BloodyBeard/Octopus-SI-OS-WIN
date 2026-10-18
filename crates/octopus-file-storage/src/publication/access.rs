@@ -47,6 +47,7 @@ pub fn file_publication_access(path: &Path) -> io::Result<FilePublicationAccess>
             PublicationFileSelector::Exact(target.pending()),
             PublicationFileSelector::Exact(target.install()),
             names(target.stage_prefix().into(), ".bytes"),
+            names(target.stage_prefix().into(), ".preimage"),
             names(target.receipt_prefix().into(), ".receipt"),
             names(record_temporary_prefix(&target.pending()), ".tmp"),
             names(target.receipt_prefix().into(), ".tmp"),

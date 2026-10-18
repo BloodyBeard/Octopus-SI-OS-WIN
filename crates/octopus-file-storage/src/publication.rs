@@ -240,6 +240,24 @@ impl Target {
 
     fn stage_prefix(&self) -> String { format!("{}-", self.key) }
 
+    fn predecessor(&self, operation_id: &str) -> PathBuf {
+        self.root.join(format!("{}{}.preimage", self.stage_prefix(), hash(operation_id.as_bytes())))
+    }
+
+    fn retain_predecessor(&self, operation_id: &str, file: &File) -> io::Result<()> {
+        let path = self.predecessor(operation_id);
+        match std::fs::hard_link(&self.path, &path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        if FileIdentity::of(&open_regular(&path)?.metadata()?)? != FileIdentity::of(&file.metadata()?)? {
+            return Err(invalid("publication predecessor has foreign retained identity"));
+        }
+        file.sync_all()?;
+        sync_directory(&self.root)
+    }
+
     fn install(&self) -> PathBuf {
         self.root.join(format!("{}.install", self.key))
     }
@@ -293,8 +311,8 @@ impl Target {
         validate_hash(expected.before_hash.as_deref())?;
         validate_hash(expected.after_hash.as_deref())?;
         let removing = match (pending.schema_version, expected.after_hash.as_ref()) {
-            (1, Some(_)) => false,
-            (2, None) if expected.before_hash.is_some() && expected.bytes == 0
+            (1 | 3, Some(_)) => false,
+            (2 | 4, None) if expected.before_hash.is_some() && expected.bytes == 0
                 && pending.before_identity.as_ref() == Some(&pending.stage_identity) => true,
             _ => return Err(invalid("publication intent has invalid change evidence")),
         };
@@ -319,6 +337,17 @@ impl Target {
         let current = current_file(&self.path)?;
         let current_identity = current.as_ref().map(|file| FileIdentity::of(&file.metadata()?)).transpose()?;
         let current_hash = current.as_ref().map(|file| digest_file(file, expected.digest_algorithm)).transpose()?;
+        let predecessor = if pending.schema_version >= 3 && pending.before_identity.is_some() {
+            current_file(&self.predecessor(&expected.operation_id))?
+        } else { None };
+        let retained_before = match &pending.before_identity {
+            None => true,
+            Some(identity) => match &predecessor {
+                Some(file) => FileIdentity::of(&file.metadata()?)? == *identity
+                    && Some(digest_file(file, expected.digest_algorithm)?) == expected.before_hash,
+                None => false,
+            },
+        };
         let mut receipt = expected.clone();
         let applied = if removing {
             current.is_none() && stage_identity.as_ref() == Some(&pending.stage_identity)
@@ -331,7 +360,7 @@ impl Target {
             sync_directory(&self.root)?;
             sync_directory(self.path.parent().unwrap())?;
             receipt.outcome = PublicationOutcome::Applied;
-        } else if (!removing || staged.is_none())
+        } else if retained_before && (!removing || staged.is_none())
             && current_identity == pending.before_identity && current_hash == expected.before_hash
         {
             if resume == Some(expected.operation_id.as_str()) {
@@ -359,6 +388,15 @@ impl Target {
             if let Some(file) = current_file(&path)? {
                 if FileIdentity::of(&file.metadata()?)? != pending.stage_identity {
                     return Err(invalid("publication cleanup found foreign file identity"));
+                }
+                std::fs::remove_file(path)?;
+            }
+        }
+        if pending.schema_version >= 3 {
+            let path = self.predecessor(&pending.receipt.operation_id);
+            if let Some(file) = current_file(&path)? {
+                if Some(FileIdentity::of(&file.metadata()?)?) != pending.before_identity {
+                    return Err(invalid("publication cleanup found foreign predecessor identity"));
                 }
                 std::fs::remove_file(path)?;
             }
@@ -545,8 +583,9 @@ impl WriteGuard {
             return Err(invalid("removal tombstone already exists without a settled receipt"));
         }
         let identity = FileIdentity::of(&current.file.metadata()?)?;
+        target.retain_predecessor(operation_id, &current.file)?;
         let pending = PendingPublication {
-            schema_version: 2,
+            schema_version: 4,
             receipt: expected,
             before_identity: Some(identity.clone()),
             stage_identity: identity,
@@ -633,8 +672,11 @@ impl WriteGuard {
         };
         file.sync_all()?;
         sync_directory(&target.root)?;
+        if observed.as_deref() == expected_before {
+            if let Some(current) = &current { target.retain_predecessor(operation_id, current)?; }
+        }
         let pending = PendingPublication {
-            schema_version: 1,
+            schema_version: 3,
             receipt: expected.clone(),
             before_identity: if observed.as_deref() == expected_before {
                 current.as_ref().map(|file| FileIdentity::of(&file.metadata()?)).transpose()?

@@ -184,6 +184,9 @@ fn removal_requires_membership_and_preserves_algorithm_and_completed_receipts() 
     drop(guard);
     publish(&path, "later", None, b"after").unwrap();
     interrupted(&path, "unknown", &hash(b"after"), Interruption::Installed);
+    let target = Target::open(&path, false).unwrap();
+    let predecessor = target.predecessor("unknown");
+    assert_eq!(std::fs::read(&predecessor).unwrap(), b"after");
     let foreign = root.path().join("foreign");
     std::fs::write(&foreign, b"after").unwrap();
     std::fs::rename(foreign, &path).unwrap();
@@ -224,6 +227,19 @@ fn removal_uncertainty_rejects_absence_and_equal_bytes_without_exact_inode_proof
 
 #[test]
 fn original_prepared_publication_resumes_its_exact_stage_and_uncertainty_stays_closed() {
+    for installed in [false, true] {
+        let legacy = tempfile::tempdir().unwrap();
+        let path = legacy.path().join("record");
+        std::fs::write(&path, b"before").unwrap();
+        interrupted(&path, "legacy", &hash(b"before"), if installed { Interruption::Installed } else { Interruption::Prepared });
+        let target = Target::open(&path, false).unwrap();
+        let mut pending: PendingPublication = read_record(&target.pending()).unwrap().unwrap();
+        pending.schema_version = 1;
+        std::fs::write(target.pending(), serde_json::to_vec(&pending).unwrap()).unwrap();
+        std::fs::remove_file(target.predecessor("legacy")).unwrap();
+        assert_eq!(publish(&path, "legacy", Some(&hash(b"before")), b"after").unwrap().outcome,
+            if installed { PublicationOutcome::Applied } else { PublicationOutcome::Uncertain });
+    }
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("record");
     std::fs::write(&path, b"before").unwrap();
@@ -233,10 +249,14 @@ fn original_prepared_publication_resumes_its_exact_stage_and_uncertainty_stays_c
     let inode = FileIdentity::of(&std::fs::metadata(target.stage("original")).unwrap()).unwrap();
     assert_eq!(publish(&path, "original", Some(&before), b"after").unwrap().outcome, PublicationOutcome::Applied);
     assert_eq!(FileIdentity::of(&std::fs::metadata(&path).unwrap()).unwrap(), inode);
+    assert!(!target.predecessor("original").exists());
 
     interrupted(&path, "unknown", &hash(b"after"), Interruption::Installed);
+    let retained = target.predecessor("unknown");
+    assert_eq!(FileIdentity::of(&std::fs::metadata(&retained).unwrap()).unwrap(), inode);
     let foreign = root.path().join("foreign");
     std::fs::write(&foreign, b"after").unwrap();
+    assert_ne!(FileIdentity::of(&std::fs::metadata(&foreign).unwrap()).unwrap(), inode);
     std::fs::rename(foreign, &path).unwrap();
     let uncertain = publish(&path, "unknown", Some(&hash(b"after")), b"after").unwrap();
     assert_eq!(uncertain.outcome, PublicationOutcome::Uncertain);
