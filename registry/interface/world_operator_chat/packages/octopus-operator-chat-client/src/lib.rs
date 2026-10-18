@@ -4571,6 +4571,28 @@ fn build_chat_run_record(
         }
     }
     let mut context_artifacts = mandatory_role_artifacts.clone();
+    let retained_history = existing_bound_run_authoring_topology(existing, identity)?
+        .map(|binding| {
+            let bytes = serde_json::to_vec(existing.ok_or("retained history has no run")?)
+                .map_err(|error| error.to_string())?;
+            let record = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+            let static_ids = binding
+                .checkpoints
+                .iter()
+                .flat_map(|template| &template.static_artifact_bindings)
+                .chain(binding.payload_artifact_bindings.iter().map(|reference| &reference.id))
+                .collect::<BTreeSet<_>>();
+            Ok::<_, String>(
+                octopus_provider_run_authoring::provider_context_bindings(
+                    &record,
+                    &InterfaceId::new(&identity.model_interface_id),
+                )?
+                .into_iter()
+                .filter(|artifact| !static_ids.contains(&artifact.id))
+                .collect::<Vec<_>>(),
+            )
+        })
+        .transpose()?;
     for id in config
         .run
         .context_artifact_bindings
@@ -4580,6 +4602,7 @@ fn build_chat_run_record(
             conversation
                 .artifact_bindings
                 .iter()
+                .filter(|_| retained_history.is_none())
                 .map(|binding| binding.id.clone()),
         )
         .chain(
@@ -4618,6 +4641,11 @@ fn build_chat_run_record(
         }
         seen.insert(reference.id.as_str().to_string());
         context_artifacts.push(serde_json::json!({"id":reference.id}));
+    }
+    for binding in retained_history.into_iter().flatten() {
+        if seen.insert(binding.id.to_string()) {
+            context_artifacts.push(serde_json::to_value(binding).map_err(|error| error.to_string())?);
+        }
     }
 
     let checkpoint = |id: String,
@@ -7908,8 +7936,26 @@ mod tests {
             }
             let mut continuation=make_request(&inherited,role,id);
             continuation.cycle=format!("{id}_next");
-            continuation.existing_run_record=Some(run.clone());
+            let mut current_context = run.clone();
+            let binding: BoundRunAuthoringTopology = serde_json::from_value(run["interface_state"][&plan.model_interface_id]["run_authoring_binding"].clone()).unwrap();
+            let history = serde_json::to_value([
+                ArtifactBinding { id:octopus_descriptors::ArtifactId::new("turn.interrupted.result:current"), access:Default::default() },
+                ArtifactBinding { id:octopus_descriptors::ArtifactId::new("tool.result:current-tail"), access:octopus_policy::ArtifactAccess { change:true, ..Default::default() } },
+            ]).unwrap();
+            for checkpoint in current_context["checkpoints"].as_array_mut().unwrap() {
+                if run["active_checkpoints"].as_array().unwrap().contains(&checkpoint["id"])
+                    && binding.checkpoints.iter().any(|template| template.role == BoundCheckpointRole::Stable && template.include_context
+                        && checkpoint_matches_bound_template(checkpoint, template, &plan.run_id).unwrap()) {
+                    checkpoint["artifact_bindings"].as_array_mut().unwrap().extend(history.as_array().unwrap().clone());
+                }
+            }
+            continuation.conversation.artifact_bindings = vec![ArtifactBindingSeed { id:"interface.artifact.output:stale".into() }];
+            continuation.existing_run_record=Some(current_context);
             let next=plan_operator_chat_topology(&continuation).expect("ordinary existing Home/task continues the same selected Browser/CU path");
+            let next_record = RunRecord::from_bytes(next.run_record_content.as_bytes()).unwrap();
+            let context = octopus_provider_run_authoring::provider_context_bindings(&next_record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
+            assert_eq!(serde_json::to_value(&context[context.len()-2..]).unwrap(), history);
+            assert!(!context.iter().any(|binding| binding.id.as_str() == "interface.artifact.output:stale"));
             assert_eq!(next.run_id, plan.run_id);
             assert_eq!(next.chat_interface_id, plan.chat_interface_id);
             assert_eq!(next.model_interface_id, plan.model_interface_id);
