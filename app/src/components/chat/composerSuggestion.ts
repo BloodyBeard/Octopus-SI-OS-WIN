@@ -38,16 +38,10 @@ export function composerSuggestionPlugin(parse: (text: string) => Node): Plugin<
         const suggestion = visibleComposerSuggestion(state);
         if (!suggestion) return null;
         return DecorationSet.create(state.doc, [
-          Decoration.node(0, state.doc.firstChild!.nodeSize, { class: "composer-suggestion-line" }),
-          Decoration.widget(1, () => {
-            const span = document.createElement("span");
-            span.className = "composer-suggestion";
-            span.textContent = suggestion.text;
-            span.contentEditable = "false";
-            span.setAttribute("aria-hidden", "true");
-            span.inert = true;
-            return span;
-          }, { side: -1, ignoreSelection: true }),
+          Decoration.node(0, state.doc.firstChild!.nodeSize, {
+            class: "composer-suggestion-line",
+            "data-suggestion": suggestion.text,
+          }),
         ]);
       },
       handleDOMEvents: {

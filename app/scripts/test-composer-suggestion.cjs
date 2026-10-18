@@ -43,9 +43,9 @@ test("ghost text stays outside the draft; acceptance consumes the first Enter, n
   try {
     set("first", "Покажи, как это работает.");
     assert.equal(view.state.doc.textContent, "");
-    assert.equal(view.dom.querySelector(".composer-suggestion").textContent, "Покажи, как это работает.");
-    assert.equal(view.dom.querySelector(".composer-suggestion").getAttribute("aria-hidden"), "true");
-    assert.ok(view.dom.querySelector("p.composer-suggestion-line > .composer-suggestion"));
+    assert.equal(view.dom.querySelector("[data-suggestion]").dataset.suggestion, "Покажи, как это работает.");
+    assert.equal(view.dom.textContent, "");
+    assert.ok(view.dom.querySelector("p.composer-suggestion-line > .ProseMirror-trailingBreak"));
     assert.match(view.dom.getAttribute("aria-description"), /Покажи, как это работает/);
     view.focus();
     press("Enter");
@@ -72,7 +72,7 @@ test("ghost text stays outside the draft; acceptance consumes the first Enter, n
       view.dispatch(view.state.tr.delete(0, view.state.doc.content.size));
     }
     set("dismiss", "A suggestion\nwith multiple lines");
-    view.dom.querySelector(".composer-suggestion").dispatchEvent(new dom.window.MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+    view.dom.querySelector(".composer-suggestion-line").dispatchEvent(new dom.window.MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
     assert.equal(view.state.doc.textContent, "");
     assert.equal(visibleComposerSuggestion(view.state).text, "A suggestion\nwith multiple lines");
     assert.equal(document.activeElement, view.dom);
@@ -121,13 +121,13 @@ test("suggestions survive temporary composer modes and refresh only for a new co
     const first = visible;
     const editor = document.querySelector(".ProseMirror");
     await React.act(async () => editor.focus());
-    assert.equal(editor.querySelector(".composer-suggestion").textContent, first.text);
+    assert.equal(editor.querySelector("[data-suggestion]").dataset.suggestion, first.text);
     assert.equal(editor.querySelector(".placeholder"), null);
     await render({ source: 10, text: "An external draft" });
     await render({ source: 10 });
-    assert.equal(editor.querySelector(".composer-suggestion").textContent, first.text);
+    assert.equal(editor.querySelector("[data-suggestion]").dataset.suggestion, first.text);
     await React.act(async () => editor.blur());
-    assert.equal(editor.querySelector(".composer-suggestion").textContent, first.text);
+    assert.equal(editor.querySelector("[data-suggestion]").dataset.suggestion, first.text);
     for (let i = 0; i < 5; i++) await render({ source: 10 });
     await render({ source: 10, enabled: false });
     assert.equal(visible, null);

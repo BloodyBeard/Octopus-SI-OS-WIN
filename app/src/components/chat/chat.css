@@ -1891,18 +1891,16 @@ mark.octopus-thread-find-active {
 }
 
 .composer-editor-root .composer-suggestion-line {
-  display: grid;
-  caret-color: transparent;
+  display: flow-root;
 }
 
-.composer-editor-root .composer-suggestion-line > :is(.ProseMirror-trailingBreak, .ProseMirror-separator) {
-  display: none;
-}
-
-.composer-editor-root .composer-suggestion {
-  grid-area: 1 / 1;
+.composer-editor-root .composer-suggestion-line::before {
+  float: inline-start;
+  width: 100%;
   min-width: 0;
+  margin-inline-end: -100%;
   color: var(--color-token-input-placeholder-foreground);
+  content: attr(data-suggestion) / "";
   opacity: .5;
   user-select: none;
   pointer-events: none;
