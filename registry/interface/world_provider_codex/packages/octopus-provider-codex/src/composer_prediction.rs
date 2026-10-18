@@ -514,17 +514,34 @@ impl CodexAppServerInterfaceDriver {
         let mut turn_id = None;
         let mut deferred_events = Vec::new();
         let work = async {
-            let parent = effect_rpc(
+            let parent_thread = source["thread_id"]
+                .as_str()
+                .filter(|id| !id.trim().is_empty())
+                .ok_or("prediction source has no thread")?;
+            let read = request(
                 self,
-                &client,
-                "thread/resume",
-                json!({"threadId":source["thread_id"],"excludeTurns":true}),
-                Some(cancel),
-                budget.work_deadline,
+                "thread/read",
+                json!({"threadId":parent_thread,"includeTurns":false}),
+            )?;
+            let parent: Value = read_only(
+                cancel,
+                budget
+                    .work_deadline
+                    .min(Instant::now() + Duration::from_secs(10)),
+                async { client.request_typed(read).await.map_err(rpc_failure) },
             )
             .await?;
+            let parent = &parent["thread"];
+            if parent["id"] != parent_thread
+                || parent["model"]
+                    .as_str()
+                    .is_none_or(|model| model.trim().is_empty())
+            {
+                return Err(PredictionFailure::Integrity(
+                    "prediction source read returned a different or incomplete thread".into(),
+                ));
+            }
             if parent["modelProvider"] != "openai"
-                || parent["collaborationMode"]["mode"] == "plan"
                 || config
                     .unsupported_models
                     .iter()
@@ -532,10 +549,6 @@ impl CodexAppServerInterfaceDriver {
             {
                 return Ok(json!({"status":"unavailable", "suggestion":null}));
             }
-            let parent_thread = source["thread_id"]
-                .as_str()
-                .filter(|id| !id.trim().is_empty())
-                .ok_or("prediction source has no thread")?;
             require_head(
                 self,
                 &client,
@@ -566,6 +579,9 @@ impl CodexAppServerInterfaceDriver {
                 budget.work_deadline,
             )
             .await?;
+            if fork["collaborationMode"]["mode"] == "plan" {
+                return Ok(json!({"status":"unavailable", "suggestion":null}));
+            }
             let prompt = format!(
                 "{}\n\nReturn only JSON matching this schema: {{\"type\":\"object\",\"properties\":{{\"suggestion\":{{\"type\":[\"string\",\"null\"]}}}},\"required\":[\"suggestion\"],\"additionalProperties\":false}}.",
                 config.prompt
@@ -817,7 +833,7 @@ mod tests {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Case {
             Complete,
-            Resume,
+            Read,
             FirstHead,
             Fork,
             SecondHead,
@@ -832,7 +848,7 @@ mod tests {
         }
         for case in [
             Case::Complete,
-            Case::Resume,
+            Case::Read,
             Case::FirstHead,
             Case::Fork,
             Case::SecondHead,
@@ -870,7 +886,11 @@ mod tests {
                     if method == "thread/turns/list" {
                         heads += 1;
                     }
-                    if (case == Case::Resume && method == "thread/resume")
+                    assert_ne!(
+                        method, "thread/resume",
+                        "prediction must never load the source thread"
+                    );
+                    if (case == Case::Read && method == "thread/read")
                         || (case == Case::Fork && method == "thread/fork")
                         || (case == Case::Start && method == "turn/start")
                         || (case == Case::FirstHead && method == "thread/turns/list" && heads == 1)
@@ -878,7 +898,7 @@ mod tests {
                     {
                         server_cancel.cancel();
                         tokio::task::yield_now().await;
-                        if matches!(case, Case::FirstHead | Case::SecondHead) {
+                        if matches!(case, Case::Read | Case::FirstHead | Case::SecondHead) {
                             continue;
                         }
                     }
@@ -890,7 +910,10 @@ mod tests {
                     }
                     let result = match method {
                         "initialize" => json!({"userAgent":"test","codexHome":"/tmp"}),
-                        "thread/resume" => json!({"modelProvider":"openai","model":"supported"}),
+                        "thread/read" => {
+                            assert_eq!(request["params"], json!({"threadId":"parent"}));
+                            json!({"thread":{"id":"parent","modelProvider":"openai","model":"supported"}})
+                        }
                         "thread/turns/list" => {
                             assert_eq!(request["params"]["threadId"], "parent");
                             json!({"data":[{"id":"source","status":"completed"}]})
@@ -1087,7 +1110,7 @@ mod tests {
                     .count()
                     <= 1
             );
-            if matches!(case, Case::Resume | Case::FirstHead) {
+            if matches!(case, Case::Read | Case::FirstHead) {
                 assert!(!methods.iter().any(|m| m == "thread/fork"));
             }
             if matches!(case, Case::Fork | Case::SecondHead) {
