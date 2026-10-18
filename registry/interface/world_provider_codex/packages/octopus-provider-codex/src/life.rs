@@ -1389,7 +1389,7 @@ async fn control_reader_life(
             reader.commit_through(&own)?;
         }
         if movements.is_empty() {
-            reader.commit()?;
+            reader.advance_settled_scan()?;
             scanned_through = scanned_through.max(reader.next_seq());
         }
         fences.retain_mut(|pending_fence| {
@@ -7937,7 +7937,7 @@ mod tests {
                 LedgerTailReader::open_named(&restarted, "turn-control")
                     .unwrap()
                     .next_seq(),
-                movements.len() as u64
+                source_count
             );
             assert_eq!(
                 std::fs::read(&ctx.movements_path)
@@ -7946,6 +7946,24 @@ mod tests {
                     .filter(|byte| **byte == b'\n')
                     .count(),
                 movements.len()
+            );
+            let cursor = restarted.interface_var_dir().join("ledger-cursor.turn-control.json");
+            let durable = (std::fs::read(&cursor).unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&cursor).unwrap()));
+            let mut foreign = movements.last().unwrap().clone();
+            foreign.seq = Seq(movements.len() as u64);
+            foreign.lamport = Lamport(movements.len() as u64 + 1);
+            append_movement(&ctx.movements_path, &foreign);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while fence_control_reader(&fences, &runs[0], None).await.unwrap() <= movements.len() as u64 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                (std::fs::read(&cursor).unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&cursor).unwrap())),
+                durable,
+                "settled foreign ledger progress stays volatile"
             );
             restarted.cancel.cancel();
             task.await.unwrap().unwrap();

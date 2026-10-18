@@ -1615,18 +1615,19 @@ impl ProviderOutputHandoff {
             .checked_add(Duration::from_millis(self.config.result_timeout_ms))
             .ok_or("writer deadline overflow")?;
         let mut planned = authored.clone();
+        let mut known: Option<(String, InterfaceArtifactFile, OrderedArguments)> = None;
         loop {
             if Instant::now() >= deadline {
                 return Err("provider ordered file write awaits its admitted result".into());
             }
             let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
-            let attempts = self.writer_attempts(correlation_generation(
-                &self.config.run,
-                &planned.correlation_id,
-            )?)?;
-            let existing = attempts
-                .into_iter()
-                .find(|a| a.authored.after_hash == planned.after_hash);
+            if known.as_ref().is_none_or(|(after_hash, _, _)| *after_hash != planned.after_hash) {
+                known = self
+                    .writer_attempts(correlation_generation(&self.config.run, &planned.correlation_id)?)?
+                    .into_iter()
+                    .find(|a| a.authored.after_hash == planned.after_hash)
+                    .map(|a| (planned.after_hash.clone(), a.manifest, a.args));
+            }
             if let Some((_, true)) = progress.completed.get(&planned.after_hash) {
                 state.run_record_bytes = planned.content.as_bytes().to_vec();
                 state.run_record_evidence_seq =
@@ -1634,8 +1635,8 @@ impl ProviderOutputHandoff {
                 return Ok(AuthoredRunInstallOutcome::Installed);
             }
             if let Some((_, false)) = progress.completed.get(&planned.after_hash) {
-                let attempt = existing.ok_or("refused ordered write lost its private call")?;
-                let before_content = attempt.args.writes[1].before(maximum)?;
+                let (_, _, args) = known.as_ref().ok_or("refused ordered write lost its private call")?;
+                let before_content = args.writes[1].before(maximum)?;
                 let before = before_content.as_bytes();
                 let remaining = deadline
                     .saturating_duration_since(Instant::now())
@@ -1669,8 +1670,8 @@ impl ProviderOutputHandoff {
                 }
                 continue;
             }
-            let manifest = if let Some(attempt) = existing {
-                attempt.manifest
+            let manifest = if let Some((_, manifest, _)) = &known {
+                manifest.clone()
             } else {
                 if progress.pending.is_some() {
                     return Err("writer Run already has a different admitted attempt".into());
@@ -1710,12 +1711,14 @@ impl ProviderOutputHandoff {
                     },
                 };
                 call.arguments.checked_call(&writer(&self.config)?, &progress.current, &self.run_path, maximum)?;
-                InterfaceArtifactFile::write(
+                let manifest = InterfaceArtifactFile::write(
                     &self.hand_in_root,
                     &self.config.file_write_label,
                     &serde_json::to_vec(&call).map_err(|e| e.to_string())?,
                 )
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+                known = Some((planned.after_hash.clone(), manifest.clone(), call.arguments));
+                manifest
             };
             if progress.pending.is_none() {
                 let verdict = self

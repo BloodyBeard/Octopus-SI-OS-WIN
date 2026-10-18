@@ -1081,6 +1081,7 @@ pub struct LedgerTailReader {
     spotlight: Option<LedgerSqliteReader>,
     resume_without_wait: bool,
     foreign_catch_up_pending: bool,
+    returned_own_through: TailCursor,
     change_watch: Option<LedgerChangeWatch>,
 }
 
@@ -1287,6 +1288,7 @@ impl LedgerTailReader {
             spotlight: LedgerSqliteReader::open(&ctx.ledger_index_path).ok(),
             resume_without_wait: false,
             foreign_catch_up_pending: false,
+            returned_own_through: cursor,
             change_watch: None,
         })
     }
@@ -1488,10 +1490,24 @@ impl LedgerTailReader {
         }
         self.resume_without_wait = !incomplete_tail && scanned.offset < ledger_len;
         self.pending_cursor = scanned;
+        if let Some(last) = own.last() {
+            self.returned_own_through = last.cursor;
+        }
         if advance_empty_scan && own.is_empty() {
             self.advance_scanned()?;
         }
         Ok(own)
+    }
+
+    pub fn advance_settled_scan(&mut self) -> Result<(), String> {
+        if self.returned_own_through.seq > self.cursor.seq {
+            return Err(format!(
+                "interface '{}' cannot advance its ledger cursor past own movement {} before committing it",
+                self.interface.as_str(),
+                self.returned_own_through.seq.saturating_sub(1)
+            ));
+        }
+        self.advance_scanned()
     }
 
     fn advance_scanned(&mut self) -> Result<(), String> {
