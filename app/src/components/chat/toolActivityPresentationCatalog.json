@@ -1185,6 +1185,43 @@
     "target_arguments": [],
     "query_arguments": []
   },
+  "memory.list": {
+    "kind": "list",
+    "conversation_visible": true,
+    "label": "List memory",
+    "target_arguments": [],
+    "query_arguments": [],
+    "target_kind": "artifact"
+  },
+  "memory.read": {
+    "kind": "read",
+    "conversation_visible": true,
+    "label": "Recall",
+    "target_arguments": [
+      "id"
+    ],
+    "query_arguments": [],
+    "target_kind": "artifact"
+  },
+  "memory.save": {
+    "kind": "tool",
+    "conversation_visible": true,
+    "label": "Remember",
+    "target_arguments": [
+      "title"
+    ],
+    "query_arguments": []
+  },
+  "memory.search": {
+    "kind": "search",
+    "conversation_visible": true,
+    "label": "Search memory",
+    "target_arguments": [],
+    "query_arguments": [
+      "query"
+    ],
+    "target_kind": "artifact"
+  },
   "microphone.capture": {
     "kind": "tool",
     "conversation_visible": true,
