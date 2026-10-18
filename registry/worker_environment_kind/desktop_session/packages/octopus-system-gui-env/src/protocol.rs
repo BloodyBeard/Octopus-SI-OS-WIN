@@ -1834,7 +1834,7 @@ pub fn validate_response(response: &Response, request: &Request) -> Result<(), S
     }
     if !matches!(
         evidence.status.as_str(),
-        "ready" | "permission_required" | "stopped"
+        "ready" | "permission_required" | "disabled" | "unavailable" | "stopped"
     ) || !matches!(
         evidence.control.mode.as_str(),
         "idle" | "model" | "human" | "stopped"
@@ -1847,8 +1847,8 @@ pub fn validate_response(response: &Response, request: &Request) -> Result<(), S
     {
         return Err("desktop backend returned an invalid readiness/control state".into());
     }
-    if evidence.status == "ready" && !evidence.permissions.screen_capture {
-        return Err("desktop readiness lacks screen-capture permission".into());
+    if evidence.status == "ready" && (!evidence.permissions.screen_capture || !evidence.permissions.accessibility) {
+        return Err("desktop readiness lacks screen-capture or Accessibility permission".into());
     }
     for screen in &evidence.screens {
         validate_screen(screen)?;

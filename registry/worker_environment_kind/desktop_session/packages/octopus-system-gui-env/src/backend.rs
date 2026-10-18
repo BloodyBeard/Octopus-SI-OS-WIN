@@ -1410,15 +1410,17 @@ impl DesktopHost {
             .map_err(|_| "desktop control lock poisoned")?
             .control
             .clone();
-        Ok(Evidence {
-            status: if !permissions.screen_capture {
-                "permission_required"
-            } else if control.mode == "stopped" {
-                "stopped"
-            } else {
-                "ready"
+        let status = if control.mode == "stopped" { "stopped" } else {
+            match self.application_preferences.as_deref()
+                .map(crate::app_authorization::computer_use_enabled).transpose()? {
+                None => "unavailable",
+                Some(false) => "disabled",
+                Some(true) if !permissions.screen_capture || !permissions.accessibility => "permission_required",
+                Some(true) => "ready",
             }
-            .into(),
+        };
+        Ok(Evidence {
+            status: status.into(),
             permissions,
             control,
             screens,

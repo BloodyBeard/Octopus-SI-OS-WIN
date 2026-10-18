@@ -17,6 +17,7 @@ const KINDS = {
 async function main() {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "octopus-client-setup-")));
   try {
+    await relaunchSelection(path.join(temporary, "launch"));
     await rendererPlanAdmission(path.join(temporary, "renderer"));
     await coldPresetLoader(path.join(temporary, "cold-preset"));
     await normalLifecycle(path.join(temporary, "normal"));
@@ -32,6 +33,26 @@ async function main() {
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });
   }
+}
+
+async function relaunchSelection(root) {
+  const { resolveClientLaunchSelection: read, saveClientLaunchSelection: save } = require("../electron/clientLaunchSelection.cjs");
+  const selectionPath = path.join(root, "launch.json"), userRoot = path.join(root, "user");
+  const resolve = env => read({ selectionPath, userRoot, env });
+  const chosen = resolve({ OCTOPUS_HOME: path.join(root, "Fresh"), CODEX_HOME: path.join(root, "Fresh", "codex") });
+  save(selectionPath, chosen);
+  const restarted = JSON.parse(require("node:child_process").execFileSync(process.execPath, ["-e",
+    `console.log(JSON.stringify(require(process.argv[1]).resolveClientLaunchSelection({selectionPath:process.argv[2],userRoot:process.argv[3],env:{}})))`,
+    path.resolve(__dirname, "../electron/clientLaunchSelection.cjs"), selectionPath, userRoot], { encoding: "utf8" }));
+  assert.deepEqual(restarted, chosen);
+  assert.equal(resolve({ OCTOPUS_HOME: path.join(root, "Other") }).codexHome, undefined);
+  assert.equal(resolve({ CODEX_HOME: path.join(root, "auth") }).home, chosen.home);
+  assert.throws(() => resolve({ OCTOPUS_HOME: "relative" }), /absolute/);
+  await fs.writeFile(selectionPath, "{}");
+  assert.throws(() => resolve({}), /malformed/);
+  await fs.unlink(selectionPath);
+  await fs.symlink(path.join(root, "missing"), selectionPath);
+  assert.throws(() => resolve({}));
 }
 
 async function rendererPlanAdmission(root) {

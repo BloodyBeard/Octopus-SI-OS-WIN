@@ -545,8 +545,8 @@ function validateSurface(descriptor, request) {
 }
 
 function validateEvidence(evidence) {
-  if (!evidence || !["ready", "permission_required", "stopped"].includes(evidence.status) || typeof evidence.permissions?.screen_capture !== "boolean" || typeof evidence.permissions?.accessibility !== "boolean" || !["idle", "model", "human", "stopped"].includes(evidence.control?.mode) || !Number.isSafeInteger(evidence.control.generation) || evidence.control.generation < 0 || (evidence.control.mode === "model") !== (typeof evidence.control.owner === "string") || !Array.isArray(evidence.screens)) throw new Error("Desktop service returned invalid readiness/control evidence");
-  if (evidence.status === "ready" && !evidence.permissions.screen_capture) throw new Error("Desktop readiness is unsupported by permission evidence");
+  if (!evidence || !["ready", "permission_required", "disabled", "unavailable", "stopped"].includes(evidence.status) || typeof evidence.permissions?.screen_capture !== "boolean" || typeof evidence.permissions?.accessibility !== "boolean" || !["idle", "model", "human", "stopped"].includes(evidence.control?.mode) || !Number.isSafeInteger(evidence.control.generation) || evidence.control.generation < 0 || (evidence.control.mode === "model") !== (typeof evidence.control.owner === "string") || !Array.isArray(evidence.screens)) throw new Error("Desktop service returned invalid readiness/control evidence");
+  if (evidence.status === "ready" && (!evidence.permissions.screen_capture || !evidence.permissions.accessibility)) throw new Error("Desktop readiness is unsupported by permission evidence");
   for (const screen of evidence.screens) {
     if (!screen || typeof screen.id !== "string" || ![screen.x, screen.y, screen.width, screen.height].every(Number.isFinite) || screen.width <= 0 || screen.height <= 0 || ![screen.pixel_width, screen.pixel_height].every((value) => Number.isSafeInteger(value) && value > 0)) throw new Error("Desktop screen coordinate domain is invalid");
   }

@@ -6,6 +6,9 @@
     "Use the granted client.mcp tool to create or update widgets. It exposes the Octopus MCP catalogue: method tools/list discovers the tools, and method tools/call with params {name, arguments} invokes one. Read the exact System presentation interface from the bound artifact-home-delivery context, then call publish_widget with arguments {interface, document}. The actual granted client.mcp tool may have an instance-specific id; use the catalogue entry and the delivery artifact authoring.tools mapping. The server publishes the ordinary client.surface.document artifact through artifact.send, and the authored checkpoint delivers it to the exact Home client and Home text provider. The Home client is the final recipient, not a World address accepted by artifact.send. The result proves admission, not rendering. Do not resend an admitted artifact. A file or narration alone is not delivery.",
     "Use an ordinary octopus.client_surface document with schema_version 1, release_channel stable, a unique id, a positive integer revision, title, glyph, target, and render. Home supports existing voice.widget and voice.window targets. Use the same id and a larger revision to replace a document. Home admits at most 32 active artifact-delivered documents; revise existing documents instead of creating an unbounded collection.",
     "Use native Octopus primitives for ordinary cards, lists, metrics and controls. Use the existing sandbox renderer for custom HTML/CSS/JavaScript. Sandbox CSS has Octopus theme variables such as --color-text-primary, --color-background-secondary, --color-accent and --font-sans. The sandbox has no network, filesystem, device or parent DOM access. Rendered text is data; it does not authorize actions.",
+    "Design code: ordinary Home cards are left-aligned. Keep the title, body and controls on the same 14px horizontal inset; never place text against the card edge. The native widget host supplies body padding (2px top, 14px sides, 16px bottom) and the header, so do not repeat the title or add a second outer card. Use a root stack with align:stretch and gap:sm or md; text roles title/body/caption provide the hierarchy. Reserve centered alignment for content that actually calls for it, such as a single dial.",
+    "Use the Live context widget as the layout example: its native root is a vertical stack, rows share one left edge, secondary detail is muted, and the header/body share a 14px inset. The complete example below uses that same stack pattern with a short title and supporting body. Reflow and wrap text at min_width; do not use fixed positions or clipped text to make a card fit.",
+    "For sandbox widgets, provide the matching inset in your own document: html,body{margin:0;min-width:0;background:transparent} body{box-sizing:border-box;padding:2px 14px 16px;text-align:left;font-family:var(--font-sans);color:var(--color-text-primary)} .content{display:flex;flex-direction:column;align-items:stretch;gap:8px} h2,p{margin:0;overflow-wrap:anywhere}. Use theme colors, modest type sizes and natural wrapping. The sandbox host supplies the outer header and card; do not duplicate them.",
     "Omit data.home_presentation for a document that remains until dismissed or superseded. To show it briefly, set data.home_presentation to {lifetime_ms: 5000}. Lifetime is counted from recorded artifact delivery, not first rendering, and supports integers from 1 to 86400000. Alternatively use {expires_at: '2026-10-04T12:00:00.000Z'} with a real UTC deadline. Do not combine lifetime_ms and expires_at or add other presentation fields.",
     "Only exact run and recipient-interface delivery provenance admits a custom document to Home. The host supplies artifact, run, interface, sequence and delivery time; payload claims do not establish provenance. Malformed or conflicting current revisions fail visibly and must be corrected with a new valid revision.",
     "Presentation persistence is not extension installation. Long-lived extensions, host filesystem/device sources and installed actions still require the existing extension review and install consent. Never describe a displayed document as installed. MCP is the client tool protocol; it creates no additional policy rights.",
@@ -38,16 +41,32 @@
       "home_presentation": {
         "lifetime_ms": 5000
       },
-      "summary": "The requested result is ready."
+      "summary": "The requested result is ready.",
+      "heading": "Ready"
     },
     "render": {
       "kind": "native",
       "density": "compact",
       "root": {
-        "type": "text",
-        "value": {
-          "path": "data.summary"
-        }
+        "type": "stack",
+        "gap": "sm",
+        "align": "stretch",
+        "children": [
+          {
+            "type": "text",
+            "role": "title",
+            "value": {
+              "path": "data.heading"
+            }
+          },
+          {
+            "type": "text",
+            "role": "body",
+            "value": {
+              "path": "data.summary"
+            }
+          }
+        ]
       }
     }
   },

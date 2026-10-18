@@ -6,7 +6,12 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { createHash, randomBytes, randomUUID } = require("node:crypto");
 const { nativeTrafficLightPosition, nativeControlInset } = require("./windowChrome.cjs");
+const { resolveClientLaunchSelection, saveClientLaunchSelection } = require("./clientLaunchSelection.cjs");
 
+const clientLaunchSelectionPath = path.join(app.getPath("appData"), "Octopus", "launch.json");
+const clientLaunchSelection = resolveClientLaunchSelection({ selectionPath: clientLaunchSelectionPath, userRoot: os.homedir(), env: process.env });
+process.env.OCTOPUS_HOME = clientLaunchSelection.home;
+if (clientLaunchSelection.codexHome) process.env.CODEX_HOME = clientLaunchSelection.codexHome;
 const clientEnvironment = loadClientEnvironment();
 const clientProfileRoot = path.join(resolveOctopusHome(), "client");
 fs.mkdirSync(clientProfileRoot, { recursive: true, mode: 0o700 });
@@ -2423,6 +2428,7 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
+  saveClientLaunchSelection(clientLaunchSelectionPath, { home: resolveOctopusHome(), codexHome: resolveOperatorCodexHome() });
   app.on("second-instance", () => {
     void app.whenReady().then(() => {
       ensureRuntimeHost();

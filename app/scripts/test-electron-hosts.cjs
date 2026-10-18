@@ -521,6 +521,10 @@ async function verifyStartupPaintOrdering(mainSource) {
   const calls = [];
   const handlers = new Map();
   const context = {
+    clientLaunchSelectionPath: "/launch.json",
+    resolveOctopusHome: () => "/selected-home",
+    resolveOperatorCodexHome: () => "/selected-auth",
+    saveClientLaunchSelection: () => {},
     appendClientLog: (...args) => calls.push(["log", ...args]),
     applyThemePreference: () => calls.push(["theme"]),
     createWindow: () => {

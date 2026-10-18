@@ -34,7 +34,7 @@ export type DesktopScreen = {
 
 export type DesktopEvidence = {
   view_image_ref?: { sha256: string };
-  status: "ready" | "permission_required" | "stopped";
+  status: "ready" | "permission_required" | "disabled" | "unavailable" | "stopped";
   permissions: { screen_capture: boolean; accessibility: boolean };
   control: { mode: "idle" | "model" | "human" | "stopped"; owner: string | null; generation: number };
   screens: DesktopScreen[];

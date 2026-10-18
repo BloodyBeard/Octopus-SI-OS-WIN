@@ -132,9 +132,16 @@ async fn computer_use_preference_denies_and_revokes_native_input() {
         let result = host.handle(request(operation, json!({"type":operation})), operation == "view").await;
         assert!(!result.accepted); assert!(result.error.unwrap().message.contains("computer_use_disabled"));
     }
-    assert!(host.handle(request("status", json!({"type":"status"})), false).await.accepted);
+    let status = host.handle(request("status", json!({"type":"status"})), false).await;
+    assert!(status.accepted); assert_eq!(status.evidence.unwrap().status, "disabled");
+    assert_eq!(unconfigured.handle(request("unconfigured-status", json!({"type":"status"})), false).await.evidence.unwrap().status, "unavailable");
     let preference = preferences.join("computer-use.json");
     crate::app_authorization::create_record(&preference, &json!({"schema_version":1,"enabled":true})).unwrap();
+    let mut native = executor.execute(json!({"type":"status"})).await.unwrap();
+    native["permissions"]["accessibility"] = json!(false);
+    assert_eq!(host.status_from_native(&native).unwrap().status, "permission_required");
+    native["permissions"]["accessibility"] = json!(true);
+    assert_eq!(host.status_from_native(&native).unwrap().status, "ready");
     let generation = host.handle(request("control", json!({"type":"control","mode":"acquire"})), false).await.evidence.unwrap().control.generation;
     let observation = host.handle(request("observe", json!({"type":"observe","screen_id":"screen"})), false).await.evidence.unwrap().observation.unwrap().id;
     let call = request("input", json!({"type":"click","screen_id":"screen","observation_id":observation,

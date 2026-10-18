@@ -970,6 +970,11 @@
   justify-content: flex-start;
 }
 
+.voice-projection-card.is-native > .voice-widget-content > :not(header) {
+  padding: 2px 14px 16px;
+  text-align: left;
+}
+
 .voice-surface-window {
   width: min(260px, 32cqw);
   min-height: 176px;
