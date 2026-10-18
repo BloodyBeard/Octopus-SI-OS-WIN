@@ -17,6 +17,11 @@
       "reason": "Offers a trigger that reviews recent work after a quiet period and improves Octopus when the evidence supports it."
     },
     {
+      "package_id": "world_memory_cron",
+      "selection": "recommended",
+      "reason": "Offers a trigger that consolidates Home memory after a quiet period: duplicates merged, contradictions settled, stale notes folded."
+    },
+    {
       "package_id": "world_provider_chatgpt",
       "selection": "recommended",
       "reason": "Keeps the separate ChatGPT provider available for explicit installation."

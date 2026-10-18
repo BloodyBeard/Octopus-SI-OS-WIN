@@ -1,0 +1,39 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_memory_cron",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_memory_cron",
+  "release_status": "optional",
+  "display": {
+    "name": "Memory consolidation",
+    "description": "A trigger template: after a quiet period in your work, a run merges duplicate notes in Home memory, settles contradictions and folds stale notes into what is still true.",
+    "developer": "Octopus",
+    "category": "connector",
+    "icon": "book-open"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_memory_cron",
+      "primary": true
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_worker_memory_consolidation"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-role-memory-consolidation"
+    }
+  ],
+  "required_packages": [
+    "world_cron",
+    "world_operator_chat",
+    "world_provider_codex",
+    "artifact.codex_context",
+    "driver.system_room",
+    "system_memory"
+  ]
+}

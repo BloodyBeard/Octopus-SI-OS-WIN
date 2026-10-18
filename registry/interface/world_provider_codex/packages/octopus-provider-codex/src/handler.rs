@@ -16582,7 +16582,6 @@ mod tests {
         let native_owners = BTreeSet::from([
             "world_provider_chatgpt".to_string(),
             "world_provider_codex".to_string(),
-            "world_provider_codex_memory_consolidation".to_string(),
         ]);
         let mut owners = BTreeSet::new();
         let mut opencodex_owners = BTreeSet::new();

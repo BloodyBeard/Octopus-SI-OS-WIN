@@ -1,378 +1,138 @@
 {
-  "schema_version": 1,
-  "interface": "world_memory_cron",
-  "activations": [
-    {
-      "enabled": false,
-      "activation_driver_ref": "cron_life",
-      "config": {
-        "run_template": {
-          "id": "run_memory_consolidation",
-          "ee": "ee_memory_maintenance",
-          "worker": "system_worker_memory_consolidation",
-          "trace": "trace:run_memory_consolidation",
-          "status": "running",
-          "interface_state": {
-            "world_memory_cron": {
-              "authoring_generation": 0,
-              "frontier_checkpoint_ids": [
-                "cp_memory_consolidate_in",
-                "cp_memory_schedule_authoring_call",
-                "cp_memory_schedule_authoring_result"
-              ]
-            },
-            "world_provider_codex_memory_consolidation": {
-              "context_generation": 0,
-              "authoring_generation": 0,
-              "frontier_checkpoint_ids": [
-                "cp_memory_context_tool_output",
-                "cp_memory_output",
-                "cp_memory_authoring_call",
-                "cp_memory_authoring_result"
-              ]
-            }
-          },
-          "checkpoints": [
-            {
-              "id": "cp_memory_consolidate_in",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "world_memory_cron",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "world_provider_codex_memory_consolidation",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "all"
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_consolidate_in"
-            },
-            {
-              "id": "cp_memory_schedule_authoring_call",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_interface_authoring_memory_schedule",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "system_context_memory_schedule",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "all"
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_schedule_authoring_call"
-            },
-            {
-              "id": "cp_memory_schedule_authoring_result",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_context_memory_schedule",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_schedule_authoring_result"
-            },
-            {
-              "id": "cp_memory_context_input",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_context_memory_consolidation",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "world_provider_codex_memory_consolidation",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "all"
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_context_input"
-            },
-            {
-              "id": "cp_memory_result",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_worker_memory_consolidation",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [
-                {
-                  "mark": "memory.consolidated",
-                  "artifact_label": "memory.knowledge_graph",
-                  "verifier": "memory_consolidation",
-                  "params": {}
-                }
-              ],
-              "trace": "trace:run_memory_consolidation:cp_memory_result"
-            },
-            {
-              "id": "cp_memory_context_tool_output",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "world_provider_codex_memory_consolidation",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "allow",
-                    "names": [
-                      "tool.call"
-                    ],
-                    "namespaces": []
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "system_context_memory_consolidation",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "allow",
-                      "names": [
-                        "tool.call"
-                      ],
-                      "namespaces": []
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [
-                {
-                  "mark": "tool.call.allowed",
-                  "artifact_label": "tool.call",
-                  "verifier": "tool_call_allowed",
-                  "params": {
-                    "tools": [
-                      "artifact.read",
-                      "artifact.list",
-                      "artifact.search",
-                      "artifact.send",
-                      "file.write"
-                    ]
-                  }
-                }
-              ],
-              "trace": "trace:run_memory_consolidation:cp_memory_context_tool_output"
-            },
-            {
-              "id": "cp_memory_output",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "world_provider_codex_memory_consolidation",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "allow",
-                    "names": [
-                      "interface.artifact.output",
-                      "interface.context.updated",
-                      "turn.error",
-                      "operator.approval.request",
-                      "operator.elicitation.request",
-                      "operator.user_input.request",
-                      "provider.models.catalog",
-                      "provider.operation.error"
-                    ],
-                    "namespaces": []
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "world_memory_cron",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "allow",
-                      "names": [
-                        "interface.artifact.output",
-                        "interface.context.updated",
-                        "turn.error",
-                        "operator.approval.request",
-                        "operator.elicitation.request",
-                        "operator.user_input.request",
-                        "provider.models.catalog",
-                        "provider.operation.error"
-                      ],
-                      "namespaces": []
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_output"
-            },
-            {
-              "id": "cp_memory_authoring_call",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_interface_authoring_memory_consolidation",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "system_context_memory_authoring",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "all"
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_authoring_call"
-            },
-            {
-              "id": "cp_memory_authoring_result",
-              "run": "run_memory_consolidation",
-              "epoch": 0,
-              "interface_binding": {
-                "interface": "system_context_memory_authoring",
-                "config": {
-                  "artifact_policy": {
-                    "mode": "all"
-                  }
-                }
-              },
-              "outbound_interface_bindings": [
-                {
-                  "interface": "world_provider_codex_memory_consolidation",
-                  "config": {
-                    "artifact_policy": {
-                      "mode": "all"
-                    }
-                  }
-                }
-              ],
-              "artifact_bindings": [
-                {
-                  "id": "artifact-role-memory-consolidation"
-                }
-              ],
-              "required_verified_artifacts": [],
-              "trace": "trace:run_memory_consolidation:cp_memory_authoring_result"
-            }
-          ],
-          "active_checkpoints": [
-            "cp_memory_consolidate_in",
-            "cp_memory_schedule_authoring_call",
-            "cp_memory_schedule_authoring_result",
-            "cp_memory_context_input",
-            "cp_memory_result",
-            "cp_memory_context_tool_output",
-            "cp_memory_output",
-            "cp_memory_authoring_call",
-            "cp_memory_authoring_result"
-          ]
-        },
-        "carry_forward": {
-          "mark": "memory.consolidated",
-          "artifact_label": "memory.knowledge_graph"
-        },
-        "authoring": {
-          "source_interface": "system_interface_authoring_memory_schedule",
-          "environment_interface": "system_context_memory_schedule",
-          "file_write_tool": "file.write",
-          "file_write_label": "tool.call",
-          "result_timeout_ms": 30000
-        },
-        "target": {
-          "mode": "existing_run"
-        },
-        "schedule": {
-          "interval_seconds": 3600,
-          "cron": null,
-          "fire_on_start": true,
-          "timezone": "UTC",
-          "reminder_env": "OCTOPUS_MEMORY_CRON_REMINDER",
-          "reminder_default": "memory consolidation maintenance trigger"
-        }
+ "schema_version": 1,
+ "interface": "world_memory_cron",
+ "activations": [
+  {
+   "enabled": false,
+   "activation_driver_ref": "cron_life",
+   "config": {
+    "run_template": {
+     "id": "run_memory_consolidation",
+     "ee": "ee_existence",
+     "worker": "system_worker_cron",
+     "trace": "trace:run_memory_consolidation",
+     "status": "idle",
+     "interface_state": {
+      "world_memory_cron": {
+       "authoring_generation": 0,
+       "frontier_checkpoint_ids": [
+        "cp_memory_consolidation_in",
+        "cp_memory_consolidation_authoring_call",
+        "cp_memory_consolidation_authoring_result"
+       ]
       }
+     },
+     "checkpoints": [
+      {
+       "id": "cp_memory_consolidation_in",
+       "run": "run_memory_consolidation",
+       "epoch": 0,
+       "interface_binding": {
+        "interface": "world_memory_cron",
+        "config": {
+         "artifact_policy": {
+          "mode": "all"
+         }
+        }
+       },
+       "outbound_interface_bindings": [],
+       "artifact_bindings": [],
+       "required_verified_artifacts": [],
+       "trace": "trace:run_memory_consolidation:cp_memory_consolidation_in"
+      },
+      {
+       "id": "cp_memory_consolidation_authoring_call",
+       "run": "run_memory_consolidation",
+       "epoch": 0,
+       "interface_binding": {
+        "interface": "system_interface_authoring_cron",
+        "config": {
+         "artifact_policy": {
+          "mode": "all"
+         }
+        }
+       },
+       "outbound_interface_bindings": [
+        {
+         "interface": "system_context_cron_authoring",
+         "config": {
+          "artifact_policy": {
+           "mode": "all"
+          }
+         }
+        }
+       ],
+       "artifact_bindings": [],
+       "required_verified_artifacts": [],
+       "trace": "trace:run_memory_consolidation:cp_memory_consolidation_authoring_call"
+      },
+      {
+       "id": "cp_memory_consolidation_authoring_result",
+       "run": "run_memory_consolidation",
+       "epoch": 0,
+       "interface_binding": {
+        "interface": "system_context_cron_authoring",
+        "config": {
+         "artifact_policy": {
+          "mode": "all"
+         }
+        }
+       },
+       "outbound_interface_bindings": [],
+       "artifact_bindings": [],
+       "required_verified_artifacts": [],
+       "trace": "trace:run_memory_consolidation:cp_memory_consolidation_authoring_result"
+      }
+     ],
+     "active_checkpoints": [
+      "cp_memory_consolidation_in",
+      "cp_memory_consolidation_authoring_call",
+      "cp_memory_consolidation_authoring_result"
+     ]
+    },
+    "authoring": {
+     "source_interface": "system_interface_authoring_cron",
+     "environment_interface": "system_context_cron_authoring",
+     "file_write_tool": "file.write.cron_authoring",
+     "file_write_label": "tool.call",
+     "result_timeout_ms": 120000,
+     "max_files_per_call": 8
+    },
+    "target": {
+     "mode": "new_run",
+     "ee_id": "ee_operator_interaction",
+     "worker_interface_id": "system_worker_memory_consolidation",
+     "provider_interface_id": "world_provider_codex",
+     "reasoning_effort": "medium",
+     "client_surface_role": "task",
+     "id_prefix": "memory_consolidation",
+     "door_host_slots": {},
+     "selected_worker_environment_kinds": [
+      "system_room"
+     ],
+     "context_artifact_bindings": [
+      {
+       "id": "artifact-role-memory-consolidation"
+      }
+     ]
+    },
+    "schedule": {
+     "interval_seconds": null,
+     "cron": null,
+     "inactivity": {
+      "seconds": 10800,
+      "interface_match": {
+       "interface_type": "world",
+       "role": "user",
+       "interface_driver_ref": "app_server"
+      }
+     },
+     "fire_on_start": false,
+     "timezone": "UTC",
+     "reminder_env": "",
+     "reminder_default": "Consolidate memory. Merge notes that say the same thing, settle contradictions in favour of the newer note, and fold stale notes nobody uses into what is still true. Keep the collection small and useful. If nothing needs to change, change nothing."
     }
-  ]
+   }
+  }
+ ]
 }

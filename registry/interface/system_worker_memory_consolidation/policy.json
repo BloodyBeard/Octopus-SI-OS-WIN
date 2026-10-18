@@ -70,46 +70,39 @@
       "world_provider_xai_oauth",
       "world_provider_xiaomi",
       "world_provider_zai",
-      "world_provider_codex_memory_consolidation",
       "world_memory_cron",
-      "system_context",
-      "system_context_memory_authoring",
-      "system_context_memory_consolidation",
-      "system_context_memory_schedule",
+      "world_operator_chat",
       "system_interface_authoring",
-      "system_interface_authoring_memory_consolidation",
-      "system_interface_authoring_memory_schedule",
       "system_worker_memory_consolidation",
-      "system_worker_memory",
+      "system_memory",
       "system_room"
     ],
     "tools": [
-      "artifact.read",
-      "artifact.list",
-      "artifact.search",
-      "skill.list",
-      "skill.get",
-      "skill.search",
-      "skill.capture",
-      "skill.upsert",
-      "artifact.send",
+      "memory.search",
+      "memory.read",
+      "memory.list",
+      "memory.save",
       "file.write"
     ],
     "wek": [
       "system_room"
     ],
     "mark_outcomes": [
-      "memory.consolidated",
-      "context.recipe.valid",
-      "tool.call.allowed"
+      "operator.approval",
+      "operator.input.provided",
+      "tool.call.allowed",
+      "tool.result.corresponds",
+      "task.summary.received"
     ],
     "hard_blocked_tools": [],
     "artifact_verbs": [
       "read",
-      "create"
+      "create",
+      "change"
     ]
   },
   "role_artifacts": [
+    "artifact-worker-role-template",
     "artifact-role-memory-consolidation"
   ]
 }

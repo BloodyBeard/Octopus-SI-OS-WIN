@@ -24,8 +24,12 @@ Memory is written in two ways:
    through the same tools: it searches first and saves one note per fact,
    superseding what a correction replaces. A verifier admits its outcome only
    when every save it names is scoped to the observed environment and landed
-   in the collection. Periodically a consolidation run merges and prunes the
-   collection. Both are ordinary runs started by interfaces.
+   in the collection. After a quiet period, the **Memory consolidation**
+   trigger template (recommended in the Codex pack) starts an ordinary task in
+   Home's environment: it lists the notes with their usage, merges duplicates,
+   settles contradictions in favour of the newer note and folds stale, unused
+   notes into what is still true. Both are ordinary runs started by
+   interfaces.
 
 The resulting entries become visible only to runs whose bindings and formed
 policy admit them.

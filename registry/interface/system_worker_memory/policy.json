@@ -93,7 +93,6 @@
       "system_room"
     ],
     "mark_outcomes": [
-      "memory.consolidated",
       "context.recipe.valid",
       "tool.call.allowed"
     ],

@@ -280,13 +280,13 @@ mod tests {
         let root = temp_root();
         std::fs::create_dir_all(root.join("artifact")).expect("artifact root writes");
         let mut store = InMemoryBlobs::new();
-        let manifest = br#"{"label":"memory.knowledge_graph","payload_path":"/tmp/memory.json","payload_content_hash":"1111111111111111111111111111111111111111111111111111111111111111"}"#;
+        let manifest = br#"{"label":"payload.candidate","payload_path":"/tmp/payload.json","payload_content_hash":"1111111111111111111111111111111111111111111111111111111111111111"}"#;
         let hash = store.put(manifest);
         let blobs: SharedBlobs = Arc::new(Mutex::new(store));
         let cache = RegistryContextArtifactCache::new(root.clone(), blobs)
             .expect("context artifact cache opens");
 
-        let exact = ArtifactId::new(format!("memory.knowledge_graph:{}", hash.to_hex()));
+        let exact = ArtifactId::new(format!("payload.candidate:{}", hash.to_hex()));
         assert_eq!(cache.resolve(&exact).unwrap(), hash);
         let renamed = ArtifactId::new(format!("context.reference:{}", hash.to_hex()));
         assert!(cache.resolve(&renamed).is_err());
