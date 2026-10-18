@@ -17,10 +17,10 @@ impl ProviderOutputHandoff {
         {
             return Ok(false);
         }
-        let Some((applied_seq, accepted)) = self.last_applied_definition(record, current)? else {
+        let Some((applied_seq, accepted)) = self.last_applied_definition(record)? else {
             return Ok(false);
         };
-        if applied_seq >= self.source_movement_seq || accepted == current {
+        if applied_seq >= self.source_movement_seq {
             return Ok(false);
         }
         let accepted = RunRecord::from_bytes(&accepted).map_err(|error| error.to_string())?;
@@ -66,7 +66,6 @@ impl ProviderOutputHandoff {
     fn last_applied_definition(
         &self,
         record: &RunRecord,
-        current: &[u8],
     ) -> Result<Option<(u64, Vec<u8>)>, String> {
         if self.config.writer_run.is_some() {
             return writer_run::last_applied_target(&self.ctx, &self.session, &self.config);
@@ -78,14 +77,10 @@ impl ProviderOutputHandoff {
                 .ok_or("settled provider state is absent")?,
             "authoring_generation",
         )?;
-        let current_hash = ContentHash::of_bytes(current).to_hex();
         let mut accepted = None;
         for (path, call) in private_authoring_calls(&self.ctx, &self.hand_in_root, &self.config)? {
             if call.correlation_id != format!("provider-run-authoring:{}:{generation}", record.id) {
                 continue;
-            }
-            if call.arguments.expected_after_hash == current_hash {
-                return Ok(None);
             }
             let hash = ContentHash::from_hex(&call.arguments.expected_before_hash)
                 .ok_or("settled provider write has no exact preimage")?;

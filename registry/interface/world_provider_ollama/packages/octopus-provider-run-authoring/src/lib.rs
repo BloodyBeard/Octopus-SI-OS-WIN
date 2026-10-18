@@ -7060,7 +7060,9 @@ impl ProviderOutputHandoff {
         record: &RunRecord,
         record_bytes: &[u8],
     ) -> Result<AuthoringAttemptRecovery, String> {
-        let recover_predecessors = !self.settled_input_definition(record, record_bytes)?;
+        let recover_predecessors = self.config.checkpoints.iter().any(|checkpoint| {
+            checkpoint.role == RunAuthoringCheckpointRole::OwnerInput
+        }) && !self.settled_input_definition(record, record_bytes)?;
         if self.config.writer_run.is_some() { return self.recover_writer_attempt(record, record_bytes, recover_predecessors); }
         let attempt = persisted_authoring_attempt(
             &self.ctx,

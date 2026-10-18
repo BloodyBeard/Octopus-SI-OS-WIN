@@ -248,6 +248,7 @@ async fn exercise_interrupted_source_order(
             before_hash:authored.before_hash.clone(),after_hash:authored.after_hash.clone(),content:authored.content.clone(),
             patch:authored.patch.clone(),correlation_id:authored.correlation_id.clone()};
         let prior = make(&cold, &seed, &seed_output);
+        checked_call(&cold, &seed, &edit(&prior), &cold.hand_in_root);
         install_edit(&cold, &mut proof, &edit(&prior));
         edge(&cold, &mut proof, prior.content.as_bytes(), &prior.pending_handoff.items[0].checkpoint.id,
             &seed_output, cold.config.worker.clone(), MovementKind::InterfaceArrival);
@@ -283,6 +284,7 @@ async fn exercise_interrupted_source_order(
         }
         cold.source_movement_seq = proof.len() as u64;
         edge(&cold, &mut proof, &before, &stable(&before), &queued, cold.ctx.interface.clone(), MovementKind::InterfaceOutbound);
+        cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
         let answer = InterfaceArtifactFile::write(cold.var_dir.join("revision-output"), "interface.artifact.output",
             &serde_json::to_vec(&serde_json::json!({"text":"retained native answer","detached":detached})).unwrap()).unwrap();
         let saved = make(&cold, &before, &answer);
@@ -290,6 +292,8 @@ async fn exercise_interrupted_source_order(
         if detached { saved_edit.correlation_id = format!("provider-writer-run:{run}:2:2"); }
         let carrier = checked_call(&cold, &before, &saved_edit, &cold.hand_in_root);
         let record = RunRecord::from_bytes(&before).unwrap();
+        assert!(cold.settled_input_definition(&record, &before).unwrap(), "the exact completed write is a settled definition, detached={detached}");
+        assert!(matches!(cold.recover_authoring_attempt(&record, &before).unwrap(), AuthoringAttemptRecovery::InFlight(_)));
         let writer = declared_provider_run_writer(&record, &cold.ctx.interface, &run_authoring_profile(descriptor).unwrap()).unwrap();
         let desired = cold.config.checkpoints.iter().filter(|cp| cp.role == RunAuthoringCheckpointRole::OwnerInput).map(|cp| {
             let mut cp = cp.clone(); if cp.name == "future_owner_result" { cp.include_context = true; }

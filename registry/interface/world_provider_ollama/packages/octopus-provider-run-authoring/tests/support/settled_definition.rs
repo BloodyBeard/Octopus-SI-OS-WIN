@@ -80,7 +80,7 @@ async fn selected_home_accepts_new_definition_without_replaying_completed_work()
         home.join("interfaces").join(provider.as_str()),
         home.join("ledger/movements.jsonl"),
         home.join("ledger/blobs"),
-        scratch.path().join("unused-index.sqlite"),
+        home.join("ledger/ledger-index.sqlite"),
         BTreeMap::from([
             ("run_records_root".into(), home.join("state/runs")),
             ("interface_hand_in_root".into(), hand_in.clone()),
