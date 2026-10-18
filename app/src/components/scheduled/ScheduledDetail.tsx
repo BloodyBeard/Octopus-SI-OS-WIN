@@ -25,11 +25,11 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
     <section aria-label={task.displayName} className="scheduled-detail">
       <div className="scheduled-detail-content">
         <div className="scheduled-detail-actions">
-          <MessageTooltip label="Back to Scheduled"><OcIconButton appearance="compact" disabled={pending} glyph="arrowLeft" label="Back to Scheduled" onClick={onBack} title="" /></MessageTooltip>
+          <MessageTooltip label="Back to Triggers"><OcIconButton appearance="compact" disabled={pending} glyph="arrowLeft" label="Back to Triggers" onClick={onBack} title="" /></MessageTooltip>
           <span className="scheduled-detail-state">{task.status === "enabled" ? triggered ? "Triggered" : "Active" : task.status === "disabled" ? "Paused" : "Needs attention"}</span>
           <OcButton disabled={!canEdit || !task.valid || pending} onClick={onEdit} size="sm" variant="secondary">Edit</OcButton>
-          <MessageTooltip label="Scheduled task actions"><OcIconButton appearance="compact" buttonRef={menuRef} glyph="more" label="Scheduled task actions" onClick={() => setMenuOpen(!menuOpen)} title="" /></MessageTooltip>
-          <OcDropdown anchorRef={menuRef} align="end" aria-label="Scheduled task actions" onOpenChange={setMenuOpen} open={menuOpen}>
+          <MessageTooltip label="Trigger actions"><OcIconButton appearance="compact" buttonRef={menuRef} glyph="more" label="Trigger actions" onClick={() => setMenuOpen(!menuOpen)} title="" /></MessageTooltip>
+          <OcDropdown anchorRef={menuRef} align="end" aria-label="Trigger actions" onOpenChange={setMenuOpen} open={menuOpen}>
             <OcMenuItem disabled={!canEdit || !task.valid || pending} label="Edit" leadingIcon="edit" onClick={() => { setMenuOpen(false); onEdit(); }} role="menuitem" />
             <OcMenuItem disabled={!canEdit || !task.valid || pending || triggered} label={task.status === "disabled" ? "Resume" : "Pause"} leadingIcon={task.status === "disabled" ? "play" : "pause"} onClick={() => { setMenuOpen(false); onToggle(); }} role="menuitem" />
             <OcMenuItem disabled={!canEdit || pending} label="Delete" leadingIcon="trash" onClick={() => { setMenuOpen(false); setConfirmDelete(true); }} role="menuitem" tone="danger" />
@@ -37,7 +37,7 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
         </div>
         <header className="scheduled-detail-heading">
           <h1>{task.displayName}</h1>
-          <p><Glyph name="scheduled" size={16} />{describeSchedule(task)}{task.timezone && task.schedule?.type !== "once" ? ` · ${task.timezone}` : ""}</p>
+          <p><Glyph name="scheduled" size={16} />{describeSchedule(task)}{task.timezone && task.schedule?.type !== "once" && task.schedule?.type !== "inactivity" ? ` · ${task.timezone}` : ""}</p>
         </header>
         {!task.valid ? <div className="scheduled-detail-error" role="alert"><Glyph name="warning" size={16} /><span>{task.error}</span></div> : null}
         <section className="scheduled-detail-section">
@@ -45,12 +45,12 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
           <p className="scheduled-detail-instructions">{task.instructions || "No default instructions. This task may use its configured environment override."}</p>
         </section>
         <section className="scheduled-detail-section">
-          <h2>Schedule</h2>
+          <h2>Trigger</h2>
           <DetailGrid rows={[
-            [task.schedule?.type === "once" ? "Runs" : "Repeats", describeSchedule(task)],
-            ["Timezone", task.timezone || "Not configured"],
-            ["Next run", task.status === "disabled" ? "Paused" : nextDueAtMs ? `${formatEvidenceTime(nextDueAtMs)}${estimated ? " · estimated" : ""}` : triggered ? "Does not repeat" : "Not recorded"],
-            ["Last activity", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "No scheduled activity yet"],
+            ["When", describeSchedule(task)],
+            ...(task.schedule?.type === "inactivity" ? [] : [["Timezone", task.timezone || "Not configured"] as [string, string]]),
+            ["Next run", task.status === "disabled" ? "Paused" : nextDueAtMs ? `${formatEvidenceTime(nextDueAtMs)}${estimated ? " · estimated" : ""}` : triggered ? "Does not repeat" : task.schedule?.type === "inactivity" ? "Waiting for new activity" : "Not recorded"],
+            ["Last triggered", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "Not triggered yet"],
           ]} />
         </section>
         <details className="scheduled-interface-details">
@@ -71,7 +71,7 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
         </details>
       </div>
       <OcDialog ariaLabelledBy="scheduled-delete-title" busy={pending} onClose={() => setConfirmDelete(false)} open={confirmDelete} panelClassName="max-w-md">
-        <OcDialogHeader closeDisabled={pending} description="This removes the scheduled interface activation and its owned run record. Ledger evidence is kept." onClose={() => setConfirmDelete(false)} title={`Delete ${task.displayName}?`} titleId="scheduled-delete-title" />
+        <OcDialogHeader closeDisabled={pending} description="This removes the trigger activation and its owned run record. Ledger evidence is kept." onClose={() => setConfirmDelete(false)} title={`Delete ${task.displayName}?`} titleId="scheduled-delete-title" />
         <OcDialogFooter>
           <OcButton disabled={pending} onClick={() => setConfirmDelete(false)} variant="ghost">Cancel</OcButton>
           <OcButton disabled={!canEdit || pending} onClick={onDelete} tone="danger" variant="primary">{pending ? "Deleting…" : "Delete"}</OcButton>

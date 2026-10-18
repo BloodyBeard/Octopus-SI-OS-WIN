@@ -14,7 +14,9 @@ export function normalizeScheduledInterface(value: unknown): ScheduledInterfaceP
       ? { type: "cron" as const, cron: stringValue(rawSchedule.cron) }
       : rawSchedule?.type === "once" && Number.isFinite(Date.parse(stringValue(rawSchedule.due_at)))
         ? { type: "once" as const, dueAt: stringValue(rawSchedule.due_at) }
-        : null;
+        : rawSchedule?.type === "inactivity" && positiveNumber(rawSchedule.seconds) && objectValue(rawSchedule.interface_match)
+          ? { type: "inactivity" as const, seconds: rawSchedule.seconds, interfaceMatch: rawSchedule.interface_match as Record<string, string> }
+          : null;
   const rawTemplate = objectValue(row.run_template);
   const runTemplate = rawTemplate ? {
     runId: stringValue(rawTemplate.run_id),
@@ -58,6 +60,9 @@ export function draftFromScheduledInterface(task: ScheduledInterfaceProjection):
     sourceInterfaceId: task.interfaceId,
     type: task.schedule?.type ?? "interval",
     intervalSeconds: task.schedule?.type === "interval" ? task.schedule.intervalSeconds : 3600,
+    inactivity: task.schedule?.type === "inactivity"
+      ? { seconds: task.schedule.seconds, interface_match: task.schedule.interfaceMatch }
+      : { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" } },
     cron: task.schedule?.type === "cron" ? task.schedule.cron : "0 9 * * 1-5",
     dueAt: task.schedule?.type === "once" ? task.schedule.dueAt : "",
     timezone: task.timezone || "local",
@@ -79,7 +84,7 @@ export function draftFromTemplate(source: ScheduledInterfaceProjection): Schedul
 export function mutationDraft(draft: ScheduledEditorDraft): OctopusScheduledDraft {
   return {
     type: draft.type,
-    ...(draft.type === "interval" ? { intervalSeconds: draft.intervalSeconds } : draft.type === "once" ? { dueAt: draft.dueAt } : { cron: draft.cron }),
+    ...(draft.type === "inactivity" ? { inactivity: draft.inactivity } : draft.type === "interval" ? { intervalSeconds: draft.intervalSeconds } : draft.type === "once" ? { dueAt: draft.dueAt } : { cron: draft.cron }),
     timezone: draft.timezone.trim(),
     fireOnStart: draft.fireOnStart,
     instructions: draft.instructions,
@@ -90,7 +95,10 @@ export function scheduledDraftError(draft: ScheduledEditorDraft, creating: boole
   if (creating && !/^[a-z0-9][a-z0-9_-]*$/.test(draft.interfaceId)) return "Interface id must use lowercase letters, digits, underscores, or hyphens.";
   if (!draft.instructions.trim()) return "Instructions are required.";
   if (!draft.timezone.trim()) return "Timezone is required.";
-  if (draft.type === "interval") {
+  if (draft.type === "inactivity") {
+    if (!positiveNumber(draft.inactivity?.seconds) || draft.inactivity.seconds < 0.001) return "Quiet period must be at least 0.001 seconds.";
+    if (draft.fireOnStart) return "An inactivity trigger waits for activity and then a quiet period.";
+  } else if (draft.type === "interval") {
     if (!positiveNumber(draft.intervalSeconds)) return "Interval must be greater than zero.";
   } else if (draft.type === "once") {
     if (!draft.dueAt || !Number.isFinite(Date.parse(draft.dueAt))) return "Choose a date and time.";
@@ -102,7 +110,7 @@ export function scheduledDraftError(draft: ScheduledEditorDraft, creating: boole
 }
 
 export function formatSchedule(task: Pick<ScheduledInterfaceProjection, "schedule" | "timezone">): string {
-  if (task.schedule?.type === "once") return describeSchedule(task);
+  if (task.schedule?.type === "once" || task.schedule?.type === "inactivity") return describeSchedule(task);
   const timezone = task.timezone?.trim();
   return timezone ? `${describeSchedule(task)} · ${timezone}` : describeSchedule(task);
 }
@@ -110,6 +118,7 @@ export function formatSchedule(task: Pick<ScheduledInterfaceProjection, "schedul
 export function describeSchedule(task: Pick<ScheduledInterfaceProjection, "schedule">): string {
   if (!task.schedule) return "Invalid schedule";
   if (task.schedule.type === "interval") return formatInterval(task.schedule.intervalSeconds);
+  if (task.schedule.type === "inactivity") return `After ${formatInterval(task.schedule.seconds).slice(6)} without activity`;
   if (task.schedule.type === "once") {
     const at = Date.parse(task.schedule.dueAt);
     return Number.isFinite(at) ? `Once · ${formatEvidenceTime(at)}` : "Choose a date and time";
@@ -120,6 +129,7 @@ export function describeSchedule(task: Pick<ScheduledInterfaceProjection, "sched
 export function scheduleExpression(task: Pick<ScheduledInterfaceProjection, "schedule">): string {
   if (!task.schedule) return "None";
   if (task.schedule.type === "once") return task.schedule.dueAt;
+  if (task.schedule.type === "inactivity") return `${task.schedule.seconds}s without activity`;
   return task.schedule.type === "cron" ? task.schedule.cron : `${task.schedule.intervalSeconds}s interval`;
 }
 
@@ -132,7 +142,7 @@ export function nextScheduledRunAtMs(
   fromMs: number = Date.now(),
 ): number | null {
   if (!task.valid || task.status !== "enabled" || !task.schedule) return null;
-  if (task.schedule.type === "once") return task.nextRunAtMs;
+  if (task.schedule.type === "once" || task.schedule.type === "inactivity") return task.nextRunAtMs;
   if (task.nextRunAtMs && task.nextRunAtMs > fromMs) return task.nextRunAtMs;
   if (task.schedule.type === "interval") {
     const period = task.schedule.intervalSeconds * 1000;

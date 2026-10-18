@@ -11,7 +11,7 @@
       "system_room"
     ],
     "tools": [
-      "file.write"
+      "file.write.cron_authoring"
     ],
     "wek": [
       "system_room"

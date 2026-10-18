@@ -7,6 +7,11 @@
   "description": "Codex provider, agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
   "components": [
     {
+      "package_id": "world_cron",
+      "selection": "recommended",
+      "reason": "Provides time and inactivity triggers for ordinary runs."
+    },
+    {
       "package_id": "world_provider_chatgpt",
       "selection": "recommended",
       "reason": "Keeps the separate ChatGPT provider available for explicit installation."

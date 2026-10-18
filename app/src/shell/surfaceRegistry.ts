@@ -141,7 +141,7 @@ export const builtinSurfaceDescriptors: ClientSurfaceDescriptor[] = [
   },
   {
     id: "scheduled",
-    label: "Scheduled",
+    label: "Triggers",
     glyph: "scheduled",
     rendererKind: "builtin.scheduled",
     order: 60,

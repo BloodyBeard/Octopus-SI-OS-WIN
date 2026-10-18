@@ -93,9 +93,10 @@
         "authoring": {
           "source_interface": "system_interface_authoring_cron",
           "environment_interface": "system_context_cron_authoring",
-          "file_write_tool": "file.write",
+          "file_write_tool": "file.write.cron_authoring",
           "file_write_label": "tool.call",
-          "result_timeout_ms": 30000
+          "result_timeout_ms": 30000,
+          "max_files_per_call": 8
         },
         "target": {
           "mode": "existing_run"

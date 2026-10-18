@@ -19,6 +19,10 @@ export type ScheduledInterfaceProjection = {
   } | {
     type: "once";
     dueAt: string;
+  } | {
+    type: "inactivity";
+    seconds: number;
+    interfaceMatch: Record<string, string>;
   } | null;
   timezone: string;
   fireOnStart: boolean;

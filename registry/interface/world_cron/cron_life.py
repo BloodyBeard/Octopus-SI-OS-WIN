@@ -41,6 +41,7 @@ PAYLOADS_DIR = os.path.join(VAR_DIR, "payloads")
 STATE_PATH = os.path.join(VAR_DIR, "cron-state.json")
 START_STATE_PATH = os.path.join(VAR_DIR, "cron-start-state.json")
 INTERVAL_STATE_PATH = os.path.join(VAR_DIR, "cron-interval-state.json")
+INACTIVITY_STATE_PATH = os.path.join(VAR_DIR, "cron-inactivity-state.json")
 RUN_PLANS_DIR = os.path.join(VAR_DIR, "run-plans")
 ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -239,6 +240,8 @@ def atomic_write_bytes(path, body):
 
 
 def exact_keys(value, allowed, required, label):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
     unknown = sorted(set(value) - set(allowed))
     missing = sorted(set(required) - set(value))
     if unknown:
@@ -456,6 +459,9 @@ def scheduled_target(value, topology, carry_forward):
             "id_prefix",
             "interface_private_state_root",
             "door_host_slots",
+            "model",
+            "selected_worker_environment_kinds",
+            "context_artifact_bindings",
         },
         {
             "mode",
@@ -465,7 +471,6 @@ def scheduled_target(value, topology, carry_forward):
             "reasoning_effort",
             "client_surface_role",
             "id_prefix",
-            "interface_private_state_root",
             "door_host_slots",
         },
         "cron target",
@@ -485,14 +490,29 @@ def scheduled_target(value, topology, carry_forward):
             raise ValueError(f"cron target.{field} must be a registry-safe identifier")
     if len(value["id_prefix"]) > 48:
         raise ValueError("cron target.id_prefix must not exceed 48 characters")
+    if "model" in value and (not isinstance(value["model"], str) or not value["model"].strip()):
+        raise ValueError("cron target.model must be non-empty")
+    kinds = value.get("selected_worker_environment_kinds", [])
+    if not isinstance(kinds, list) or any(not isinstance(kind, str) or REGISTRY_ID.fullmatch(kind) is None for kind in kinds) or len(set(kinds)) != len(kinds):
+        raise ValueError("cron target.selected_worker_environment_kinds must contain unique kind ids")
+    artifacts = value.get("context_artifact_bindings", [])
+    if not isinstance(artifacts, list):
+        raise ValueError("cron target.context_artifact_bindings must be an array")
+    for artifact in artifacts:
+        exact_keys(artifact, {"id"}, {"id"}, "cron target context artifact")
+        if not isinstance(artifact["id"], str) or REGISTRY_ID.fullmatch(artifact["id"]) is None:
+            raise ValueError("cron target context artifact must have a registry id")
     reasoning_effort = value["reasoning_effort"]
     if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
         raise ValueError("cron target.reasoning_effort must be non-empty")
     if value["client_surface_role"] not in {"home", "task"}:
         raise ValueError("cron target.client_surface_role must be 'home' or 'task'")
-    private_root = value["interface_private_state_root"]
-    if not isinstance(private_root, str) or not os.path.isabs(private_root):
-        raise ValueError("cron target.interface_private_state_root must be absolute")
+    private_root = os.path.dirname(os.path.realpath(VAR_DIR))
+    if "interface_private_state_root" in value and (
+        not isinstance(value["interface_private_state_root"], str)
+        or os.path.realpath(value["interface_private_state_root"]) != private_root
+    ):
+        raise ValueError("cron target.interface_private_state_root must name this Home's interface state root")
     slots = value["door_host_slots"]
     if not isinstance(slots, dict):
         raise ValueError("cron target.door_host_slots must be a JSON object")
@@ -526,6 +546,7 @@ def scheduled_target(value, topology, carry_forward):
         "id_prefix": value["id_prefix"],
         "interface_private_state_root": private_root,
         "door_host_slots": normalized_slots,
+        **{key: value[key] for key in ("model", "selected_worker_environment_kinds", "context_artifact_bindings") if key in value},
     }
 
 
@@ -651,6 +672,7 @@ def load_schedule():
             "file_write_tool",
             "file_write_label",
             "result_timeout_ms",
+            "max_files_per_call",
         },
         {
             "source_interface",
@@ -671,6 +693,9 @@ def load_schedule():
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"cron activation config.authoring.{field} must be non-empty")
     result_timeout_ms = authoring["result_timeout_ms"]
+    max_files = authoring.get("max_files_per_call", 8)
+    if type(max_files) is not int or max_files <= 0:
+        raise ValueError("authoring.max_files_per_call must be a positive integer")
     if (
         isinstance(result_timeout_ms, bool)
         or not isinstance(result_timeout_ms, int)
@@ -715,6 +740,7 @@ def load_schedule():
             "interval_seconds",
             "cron",
             "due_at",
+            "inactivity",
             "fire_on_start",
             "timezone",
             "reminder_env",
@@ -739,11 +765,16 @@ def load_schedule():
     interval = schedule.get("interval_seconds")
     cron = schedule.get("cron")
     due_at = schedule.get("due_at")
+    inactivity = schedule.get("inactivity")
     has_interval = interval is not None
     has_cron = cron is not None
     has_due_at = due_at is not None
-    if sum((has_interval, has_cron, has_due_at)) != 1:
-        raise ValueError("schedule must declare exactly one of interval_seconds, cron or due_at")
+    if sum((has_interval, has_cron, has_due_at, inactivity is not None)) != 1:
+        raise ValueError("schedule must declare exactly one of interval_seconds, cron, due_at or inactivity")
+    if inactivity is not None:
+        validate_inactivity(inactivity)
+        if fire_on_start:
+            raise ValueError("inactivity schedule requires fire_on_start=false")
     due_unix_ns = parse_due_at(due_at) if has_due_at else None
     if has_due_at and fire_on_start:
         raise ValueError("one-shot schedule.due_at requires fire_on_start=false")
@@ -781,6 +812,7 @@ def load_schedule():
         "cron": cron,
         "due_at": due_at,
         "due_unix_ns": due_unix_ns,
+        "inactivity": inactivity,
         "fire_on_start": fire_on_start,
         "timezone": timezone_value,
         "timezone_name": timezone_name,
@@ -800,6 +832,7 @@ def load_schedule():
                     "target": target,
                     "task_planner_executable": task_planner_executable,
                     **({"due_unix_ns": due_unix_ns} if has_due_at else {}),
+                    **({"inactivity": inactivity} if inactivity is not None else {}),
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -918,10 +951,11 @@ def next_cron_minute(compiled, moment):
     raise ValueError("cron expression has no occurrence in the next eight years")
 
 
-def atomic_write_json(path, value):
+def atomic_write_json(path, value, maximum_bytes=None):
     body = canonical_json(value)
-    if len(body) > HOST_IO_LIMITS["max_control_frame_bytes"]:
-        raise RuntimeError("cron private state exceeds max_control_frame_bytes")
+    limit = HOST_IO_LIMITS["max_control_frame_bytes"] if maximum_bytes is None else maximum_bytes
+    if len(body) > limit:
+        raise RuntimeError(f"cron private state exceeds its {limit}-byte limit")
     atomic_write_bytes(path, body)
 
 
@@ -1319,7 +1353,7 @@ def validate_task_authoring_attempt(schedule, attempt):
     if not isinstance(manifest, dict):
         raise ValueError("cron task authoring attempt manifest must be a JSON object")
     payload_hash = manifest.get("payload_content_hash")
-    expected_artifact_id = f"{schedule['authoring']['file_write_label']}:{payload_hash}"
+    expected_artifact_id = f"{schedule['authoring']['file_write_label']}:{octopus_content_hash(manifest_bytes)}"
     if (
         not isinstance(payload_hash, str)
         or re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None
@@ -1337,12 +1371,13 @@ def task_plan_request(schedule, manifest_hash):
     return {
         "registry_root": roots["registry_root"],
         "ee_instances_root": roots["ee_instances_root"],
+        "run_records_root": roots["run_records_root"],
         "write_hash_algorithm": "blake3",
         "interface_private_state_root": target["interface_private_state_root"],
         "chat_id": chat_id,
         "provider_interface_id": target["provider_interface_id"],
         "reasoning_effort": target["reasoning_effort"],
-        "connect_provider_on_ready": False,
+        **{key: target[key] for key in ("model", "selected_worker_environment_kinds", "context_artifact_bindings") if key in target},
         "ee_id": target["ee_id"],
         "worker_interface_id": target["worker_interface_id"],
         "client_surface_role": target["client_surface_role"],
@@ -1417,6 +1452,8 @@ def validate_task_plan_output(schedule, manifest_hash, plan):
             "worker_relays",
             "interface_writes",
             "run_record_content",
+            "model", "service_tier", "authoring_profile", "required_interface_ids",
+            "required_tool_ids", "run_writes", "removals", "publication_evidence", "publication_expansion",
         },
         {
             "run_id",
@@ -1435,6 +1472,8 @@ def validate_task_plan_output(schedule, manifest_hash, plan):
             "worker_relays",
             "interface_writes",
             "run_record_content",
+            "model", "service_tier", "authoring_profile", "required_interface_ids",
+            "required_tool_ids", "run_writes", "removals",
         },
         "scheduled task planner output",
     )
@@ -1450,6 +1489,10 @@ def validate_task_plan_output(schedule, manifest_hash, plan):
         raise ValueError("scheduled task planner changed the client surface role")
     if plan["reasoning_effort"] != schedule["target"]["reasoning_effort"]:
         raise ValueError("scheduled task planner changed the reasoning effort")
+    if "model" in schedule["target"] and plan["model"] != schedule["target"]["model"]:
+        raise ValueError("scheduled task planner changed the selected model")
+    if plan["removals"] != []:
+        raise ValueError("new scheduled task planning must not remove existing files")
     for field in (
         "model_interface_id",
         "worker_interface_id",
@@ -1481,9 +1524,9 @@ def validate_task_plan_output(schedule, manifest_hash, plan):
             for key, value in values.items()
         ):
             raise ValueError(f"scheduled task planner output.{field} is invalid")
-    writes = plan["interface_writes"]
-    if not isinstance(writes, list) or not writes:
+    if not isinstance(plan["interface_writes"], list) or not plan["interface_writes"] or not isinstance(plan["run_writes"], list):
         raise ValueError("scheduled task planner returned no interface writes")
+    writes = plan["interface_writes"] + plan["run_writes"]
     seen = set()
     for index, write in enumerate(writes):
         if not isinstance(write, dict):
@@ -1565,13 +1608,13 @@ def load_or_prepare_task_plan(schedule, manifest_hash):
         "authoring_attempt": None,
         "plan": plan,
     }
-    atomic_write_json(path, state)
+    atomic_write_json(path, state, HOST_IO_LIMITS["max_payload_bytes"])
     return validate_task_plan(schedule, manifest_hash, state)
 
 
 def commit_task_plan_state(schedule, state):
     validate_task_plan(schedule, state["manifest_hash"], state)
-    atomic_write_json(task_plan_path(state["manifest_hash"]), state)
+    atomic_write_json(task_plan_path(state["manifest_hash"]), state, HOST_IO_LIMITS["max_payload_bytes"])
 
 
 def task_plan_writes(schedule, plan):
@@ -1582,7 +1625,7 @@ def task_plan_writes(schedule, plan):
             "content": write["content"],
             "expected_before_hash": write["expected_before_hash"],
         }
-        for write in plan["interface_writes"]
+        for write in plan["interface_writes"] + plan["run_writes"]
     ]
     run_path = os.path.join(roots["run_records_root"], f"{plan['run_id']}.json")
     if any(write["path"] == run_path for write in writes):
@@ -2523,18 +2566,10 @@ def prepare_new_run_authoring_attempt(schedule, task_state, writes):
         root_slots()["interface_hand_in_root"],
         schedule["authoring"]["source_interface"],
     )
-    manifest_path, _ = materialize_artifact(
+    manifest_path, manifest_hash = materialize_artifact(
         schedule["authoring"]["file_write_label"],
         payload,
         authoring_root,
-    )
-    manifest = json.loads(
-        read_regular_file_bounded(
-            manifest_path,
-            MAX_AUTHORING_MANIFEST_BYTES,
-            "cron task authoring manifest",
-            private=True,
-        )
     )
     task_state["authoring_attempt"] = {
         "before_hash": octopus_content_hash(current),
@@ -2543,7 +2578,7 @@ def prepare_new_run_authoring_attempt(schedule, task_state, writes):
         "manifest_path": manifest_path,
         "artifact_id": (
             f"{schedule['authoring']['file_write_label']}:"
-            f"{manifest['payload_content_hash']}"
+            f"{manifest_hash}"
         ),
     }
     commit_task_plan_state(schedule, task_state)
@@ -2574,8 +2609,7 @@ def finish_new_run_authoring_attempt(schedule, task_state, writes):
             octopus_content_hash(controller) if controller is not None else None
         )
         if controller_hash == attempt["after_hash"] and task_writes_complete(writes):
-            if attempt["after_hash"] not in task_state["controller_frontier_hashes"]:
-                task_state["controller_frontier_hashes"].append(attempt["after_hash"])
+            task_state["controller_frontier_hashes"] = [attempt["after_hash"]]
             task_state["authoring_attempt"] = None
             commit_task_plan_state(schedule, task_state)
             return
@@ -2611,9 +2645,23 @@ def ensure_new_run_target(schedule, manifest_hash):
         and current_hash in task_state["controller_frontier_hashes"]
     ):
         return
-    if task_state["authoring_attempt"] is None:
-        prepare_new_run_authoring_attempt(schedule, task_state, writes)
-    finish_new_run_authoring_attempt(schedule, task_state, writes)
+    if task_state["authoring_attempt"] is not None:
+        manifest = load_json_object(task_state["authoring_attempt"]["manifest_path"], "pending task authoring manifest", MAX_AUTHORING_MANIFEST_BYTES, private=True)
+        payload = read_regular_file_bounded(manifest["payload_path"], HOST_IO_LIMITS["max_payload_bytes"], "pending task authoring payload", private=True)
+        if octopus_content_hash(payload) != manifest["payload_content_hash"]:
+            raise RuntimeError("pending task authoring payload changed")
+        pending = json.loads(payload)["arguments"]["writes"][1:]
+        planned = {write["path"]: write for write in writes}
+        if not pending or any(write != planned.get(write.get("path")) for write in pending):
+            raise RuntimeError("pending authoring batch differs from its task plan")
+        finish_new_run_authoring_attempt(schedule, task_state, pending)
+    size = schedule["authoring"].get("max_files_per_call", 8)
+    for start in range(0, len(writes), size):
+        batch = writes[start:start + size]
+        if task_state["controller_frontier_hashes"] and task_writes_complete(batch):
+            continue
+        prepare_new_run_authoring_attempt(schedule, task_state, batch)
+        finish_new_run_authoring_attempt(schedule, task_state, batch)
 
 
 def resolve_reminder(schedule):
@@ -2637,7 +2685,7 @@ def ensure_time_frontier(schedule):
         raise DeliveryRefused(rearm_verdict)
 
 
-def prepare_time_artifact(moment, reminder, schedule_kind, scheduled_unix_ns=None, due_at=None):
+def prepare_time_artifact(moment, reminder, schedule_kind, scheduled_unix_ns=None, due_at=None, activity=None, window=None):
     payload_value = {
         "source": "cron",
         "source_interface": INTERFACE_ID,
@@ -2651,6 +2699,10 @@ def prepare_time_artifact(moment, reminder, schedule_kind, scheduled_unix_ns=Non
         payload_value["scheduled_unix_ns"] = scheduled_unix_ns
     if due_at is not None:
         payload_value["due_at"] = due_at
+    if activity is not None:
+        payload_value["last_activity"] = activity
+    if window is not None:
+        payload_value["activity_window"] = window
     if reminder:
         payload_value["task"] = reminder
     payload = json.dumps(
@@ -2915,6 +2967,236 @@ def run_cron(schedule, reminder):
             commit_last_fired_minute(minute_key)
 
 
+def validate_inactivity(value):
+    exact_keys(value, {"seconds", "interface_match", "within_ee"}, {"seconds", "interface_match"}, "schedule.inactivity")
+    seconds = value["seconds"]
+    if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds < 0.001:
+        raise ValueError("inactivity.seconds must be finite and at least 0.001")
+    selector = value["interface_match"]
+    exact_keys(selector, {"interface_type", "role", "interface_driver_ref"}, set(), "inactivity.interface_match")
+    if not selector or any(not isinstance(v, str) or not v for v in selector.values()):
+        raise ValueError("inactivity.interface_match requires non-empty descriptor fields")
+    if "within_ee" in value and (not isinstance(value["within_ee"], str) or REGISTRY_ID.fullmatch(value["within_ee"]) is None):
+        raise ValueError("inactivity.within_ee must be a registry-safe EE id")
+
+
+class RunActivity:
+    def __init__(self, schedule):
+        self.schedule = schedule
+        self.documents = {}
+        self.offset = 0
+        self.sequence = -1
+        self.ledger_identity = None
+        self.latest_by_run = {}
+        self.reported = set()
+
+    def document(self, path):
+        info = os.stat(path, follow_symlinks=False)
+        fingerprint = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        cached = self.documents.get(path)
+        if cached is None or cached[0] != fingerprint:
+            cached = (fingerprint, load_json_object(path, "inactivity source", MAX_RUN_RECORD_BYTES))
+            self.documents[path] = cached
+        return cached[1]
+
+    def report(self, path, error):
+        key = (path, str(error))
+        if key not in self.reported and len(self.reported) < 64:
+            self.reported.add(key)
+            sys.stderr.write(f"inactivity source contributes no activity: {path}: {error}\n")
+            sys.stderr.flush()
+
+    def ee_chain(self, ee_id, seen):
+        chain = []
+        while ee_id is not None:
+            if REGISTRY_ID.fullmatch(ee_id) is None or ee_id in chain or len(chain) > 64:
+                raise ValueError(f"EE chain of '{ee_id}' is invalid")
+            path = os.path.join(root_slots()["ee_instances_root"], f"{ee_id}.json")
+            record = self.document(path)
+            seen.add(path)
+            if record.get("ee_id") != ee_id:
+                raise ValueError(f"EE record '{path}' does not match its id")
+            chain.append(ee_id)
+            ee_id = record.get("parent_ee_id")
+            if ee_id is not None and not isinstance(ee_id, str):
+                raise ValueError(f"EE record '{path}' has an invalid parent")
+        return chain
+
+    def selected_runs(self):
+        slots = root_slots()
+        selected = set()
+        seen = set()
+        selector = self.schedule["inactivity"]["interface_match"]
+        within_ee = self.schedule["inactivity"].get("within_ee")
+        owned_runs = {self.schedule["run"]}
+        if os.path.exists(RUN_PLANS_DIR):
+            for entry in os.scandir(RUN_PLANS_DIR):
+                if not entry.name.endswith(".json"):
+                    continue
+                plan = self.document(entry.path)
+                seen.add(entry.path)
+                run_id = plan.get("plan", {}).get("run_id")
+                if plan.get("schema_version") != 1 or not isinstance(run_id, str) or REGISTRY_ID.fullmatch(run_id) is None:
+                    raise ValueError("inactivity target plan has invalid run provenance")
+                owned_runs.add(run_id)
+        for entry in os.scandir(slots["run_records_root"]):
+            if not entry.name.endswith(".json"):
+                continue
+            seen.add(entry.path)
+            try:
+                run = self.document(entry.path)
+                if run.get("id") != entry.name[:-5] or not isinstance(run.get("checkpoints"), list):
+                    raise ValueError("invalid run identity")
+                interfaces = set()
+                for checkpoint in run["checkpoints"]:
+                    for binding in [checkpoint.get("interface_binding"), *checkpoint.get("outbound_interface_bindings", [])]:
+                        if isinstance(binding, dict) and isinstance(binding.get("interface"), str):
+                            interfaces.add(binding["interface"])
+                if INTERFACE_ID in interfaces or run["id"] in owned_runs:
+                    continue
+                if within_ee is not None and within_ee not in self.ee_chain(run.get("ee"), seen):
+                    continue
+                for interface_id in sorted(interfaces):
+                    if REGISTRY_ID.fullmatch(interface_id) is None:
+                        raise ValueError(f"invalid interface id '{interface_id}'")
+                    path = os.path.join(slots["registry_interface_root"], interface_id, "interface.json")
+                    seen.add(path)
+                    try:
+                        descriptor = self.document(path)
+                    except FileNotFoundError:
+                        continue
+                    if descriptor.get("id") != interface_id:
+                        raise ValueError(f"interface '{interface_id}' does not match its folder")
+                    if all(descriptor.get(key) == value for key, value in selector.items()):
+                        selected.add(run["id"])
+                        break
+            except (OSError, ValueError) as error:
+                self.report(entry.path, error)
+        self.documents = {path: cached for path, cached in self.documents.items() if path in seen}
+        return selected
+
+    def latest(self):
+        selected = self.selected_runs()
+        path = _ledger_path()
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            if self.ledger_identity is not None:
+                raise RuntimeError("inactivity ledger disappeared")
+            return None
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            identity = (info.st_dev, info.st_ino)
+            if not stat.S_ISREG(info.st_mode) or self.ledger_identity not in {None, identity} or info.st_size < self.offset:
+                raise RuntimeError("inactivity ledger changed identity or shrank")
+            self.ledger_identity = identity
+            handle.seek(self.offset)
+            while handle.tell() < info.st_size:
+                line = handle.readline(min(MAX_LEDGER_ROW_BYTES + 1, info.st_size - handle.tell()))
+                if len(line) > MAX_LEDGER_ROW_BYTES:
+                    raise RuntimeError("inactivity ledger row exceeds its IO limit")
+                if not line.endswith(b"\n"):
+                    break
+                movement = json.loads(line)
+                if not isinstance(movement, dict) or type(movement.get("seq")) is not int or movement["seq"] != self.sequence + 1:
+                    raise RuntimeError("inactivity ledger is not contiguous")
+                self.sequence = movement["seq"]
+                self.offset = handle.tell()
+                if movement.get("artifact") is None:
+                    continue
+                metadata = movement.get("invocation_metadata") or {}
+                provenance = metadata.get("runtime") or metadata.get("mark_outcome") or {}
+                run_id = provenance.get("run")
+                if run_id is None:
+                    continue
+                recorded = movement.get("recorded_at_unix_ms")
+                if not isinstance(run_id, str) or type(recorded) is not int or recorded < 0:
+                    raise RuntimeError("inactivity movement has invalid run or time provenance")
+                self.latest_by_run[run_id] = {"run": run_id, "seq": self.sequence, "recorded_at_unix_ms": recorded}
+            after = os.stat(path, follow_symlinks=False)
+            if (after.st_dev, after.st_ino) != identity or after.st_size < info.st_size:
+                raise RuntimeError("inactivity ledger changed during read")
+        return max((row for run_id, row in self.latest_by_run.items() if run_id in selected), key=lambda row: row["seq"], default=None)
+
+
+class InactivityTrigger:
+    def __init__(self, schedule, reminder):
+        self.schedule = schedule
+        self.reminder = reminder
+        self.activity = RunActivity(schedule)
+        try:
+            self.state = load_json_object(INACTIVITY_STATE_PATH, "inactivity state", MAX_LEDGER_ROW_BYTES, private=True)
+        except FileNotFoundError:
+            self.state = {"schema_version": 1, "status": "idle", "consumed_seq": -1, "activity": None, "manifest_hash": None, "admitted_seq": None}
+        state = self.state
+        exact_keys(state, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq", "schedule_fingerprint", "inactivity", "next_due_unix_ms"}, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq"}, "inactivity state")
+        if state.get("schema_version") != 1 or state.get("status") not in {"idle", "waiting", "prepared", "admitted"}:
+            raise ValueError("inactivity state has an invalid schema or status")
+        if type(state.get("consumed_seq")) is not int or state["consumed_seq"] < -1:
+            raise ValueError("inactivity state has an invalid consumed sequence")
+        activity = state.get("activity")
+        if activity is not None and (not isinstance(activity, dict) or type(activity.get("seq")) is not int or activity["seq"] < 0 or type(activity.get("recorded_at_unix_ms")) is not int or not isinstance(activity.get("run"), str)):
+            raise ValueError("inactivity state has invalid activity evidence")
+        if state["status"] in {"prepared", "admitted"}:
+            if activity is None or not isinstance(state.get("manifest_hash"), str) or re.fullmatch(r"[0-9a-f]{64}", state["manifest_hash"]) is None:
+                raise ValueError("inactivity state has invalid prepared evidence")
+            artifact_id, _ = arrival_identity("cron.current_time", state["manifest_hash"])
+            admitted = find_admitted_arrival_seq(artifact_id, state.get("admitted_seq"))
+            if state["status"] == "admitted" and (type(state.get("admitted_seq")) is not int or admitted is None):
+                raise RuntimeError("inactivity completion is missing its recorded arrival evidence")
+            if admitted is not None:
+                state.update(status="admitted", consumed_seq=activity["seq"], admitted_seq=admitted)
+                self.save()
+
+    def save(self):
+        atomic_write_json(INACTIVITY_STATE_PATH, self.state)
+
+    def tick(self):
+        latest = self.activity.latest()
+        state = self.state
+        if self.activity.sequence < state["consumed_seq"]:
+            raise RuntimeError("inactivity completion refers to missing ledger history")
+        if state["status"] == "prepared":
+            return self.deliver()
+        due = None if latest is None else latest["recorded_at_unix_ms"] + round(self.schedule["inactivity"]["seconds"] * 1000)
+        if latest is None or latest["seq"] <= state["consumed_seq"]:
+            if state["status"] not in {"idle", "admitted"}:
+                state.update(status="idle", activity=None, next_due_unix_ms=None, manifest_hash=None, admitted_seq=None)
+                self.save()
+            return None
+        if state.get("activity") != latest or state.get("schedule_fingerprint") != self.schedule["fingerprint"]:
+            state.update(status="waiting", activity=latest, schedule_fingerprint=self.schedule["fingerprint"], inactivity=self.schedule["inactivity"], next_due_unix_ms=due, manifest_hash=None, admitted_seq=None)
+            self.save()
+        if time.time_ns() // 1_000_000 < due:
+            return due
+        window = {"after_seq": state["consumed_seq"] if state["consumed_seq"] >= 0 else None, "through_seq": latest["seq"]}
+        _, _, manifest_hash = prepare_time_artifact(now(self.schedule), self.reminder, "inactivity", due * 1_000_000, activity=latest, window=window)
+        state.update(status="prepared", manifest_hash=manifest_hash)
+        self.save()
+        return self.deliver()
+
+    def deliver(self):
+        state = self.state
+        manifest_hash = state["manifest_hash"]
+        manifest_path = prepared_manifest_path("cron.current_time", manifest_hash)
+        if self.schedule["target"]["mode"] == "new_run":
+            ensure_new_run_target(self.schedule, manifest_hash)
+        else:
+            ensure_time_frontier(self.schedule)
+        admitted = hand_artifact_idempotent(manifest_path, "cron.current_time", manifest_hash)
+        state.update(status="admitted", consumed_seq=state["activity"]["seq"], admitted_seq=admitted, next_due_unix_ms=None)
+        self.save()
+        return None
+
+
+def run_inactivity(schedule, reminder):
+    trigger = InactivityTrigger(schedule, reminder)
+    while True:
+        due = trigger.tick()
+        remaining = 5 if due is None else max(0.05, (due - time.time_ns() // 1_000_000) / 1000)
+        time.sleep(min(5, remaining))
+
+
 def main():
     os.umask(0o077)
     private_directory(VAR_DIR)
@@ -2931,7 +3213,9 @@ def main():
     sys.stderr.write(startup)
     sys.stderr.flush()
     signal_ready()
-    if schedule["due_unix_ns"] is not None:
+    if schedule["inactivity"] is not None:
+        run_inactivity(schedule, reminder)
+    elif schedule["due_unix_ns"] is not None:
         run_one_shot(schedule, reminder)
         while True:
             signal.pause()

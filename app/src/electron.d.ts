@@ -1393,7 +1393,8 @@ export type OctopusRuntimeTopologyProjection = {
 };
 
 export type OctopusScheduledDraft = {
-  type: "interval" | "cron" | "once";
+  type: "interval" | "cron" | "once" | "inactivity";
+  inactivity?: { seconds: number; interface_match: Record<string, string> };
   dueAt?: string;
   intervalSeconds?: number;
   cron?: string;

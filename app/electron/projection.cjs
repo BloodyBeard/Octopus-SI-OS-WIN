@@ -6001,6 +6001,7 @@ function createProjectionStore(options) {
         providerChoiceInterfaceId: stringValue(row.provider_choice_interface),
         workerChoiceInterfaceId: stringValue(row.worker_choice_interface),
         doorHostSlots: objectOrEmpty(row.authoring_profile?.door_host_slots),
+        externalInputs: arrayValue(row.authoring_profile?.external_inputs),
         inbound: [],
         outbound: [],
         activity: [],
@@ -6019,6 +6020,7 @@ function createProjectionStore(options) {
         providerChoiceInterfaceId: stringValue(row.provider_choice_interface),
         workerChoiceInterfaceId: stringValue(row.worker_choice_interface),
         doorHostSlots: objectOrEmpty(row.authoring_profile?.door_host_slots),
+        externalInputs: arrayValue(row.authoring_profile?.external_inputs),
         inbound: [],
         outbound: [],
         activity: [],
@@ -6337,6 +6339,11 @@ function createProjectionStore(options) {
     }
     const provider = operatorChatRuntimeProviderId(entry);
     if (!provider) return null;
+    if (row.kind === "InterfaceOutbound" && movementBoundaryInterface(row, "to") === provider
+      && arrayValue(entry.externalInputs).some((input) => input.interface_id === movementBoundaryInterface(row, "from")
+        && input.checkpoint_id === stringValue(row.runtime?.checkpoint ?? row.invocation_metadata?.runtime?.checkpoint))) {
+      return "waiting";
+    }
     if (row.kind === "InterfaceOutbound"
       && movementBoundaryInterface(row, "to") === provider
       && label === "provider.peer.input") {
@@ -6361,6 +6368,7 @@ function createProjectionStore(options) {
     return {
       checkpoints: new Set([
         ...arrayValue(client.cycle_checkpoint_ids),
+        ...arrayValue(entry.externalInputs).map((input) => stringValue(input.checkpoint_id)),
         ...arrayValue(entry.record?.checkpoints)
           .filter((checkpoint) => checkpoint.status === "projected")
           .map((checkpoint) => stringValue(checkpoint.checkpoint_id)),
@@ -6576,7 +6584,8 @@ function createProjectionStore(options) {
       const runId = stringValue(row.run_id);
       const chatInterfaceId = stringValue(row.interface_id);
       return runId && chatInterfaceId
-        ? [[runId, { runId, chatInterfaceId, record: recordsByRun.get(runId) ?? null }]] : [];
+        ? [[runId, { runId, chatInterfaceId, record: recordsByRun.get(runId) ?? null,
+          externalInputs: arrayValue(row.authoring_profile?.external_inputs) }]] : [];
     }));
     if (entries.size === 0) return;
     const delta = await operatorChatLedgerDelta(
@@ -7645,7 +7654,9 @@ function createProjectionStore(options) {
           activation_digest: activationDigest,
           activation_path: activationPath,
           descriptor_path: stringValue(descriptor.descriptor_path),
-          schedule: schedule.due_at != null
+          schedule: schedule.inactivity != null
+            ? { type: "inactivity", ...schedule.inactivity }
+            : schedule.due_at != null
             ? { type: "once", due_at: schedule.due_at }
             : schedule.cron == null
               ? { type: "interval", interval_seconds: schedule.interval_seconds }
@@ -7663,8 +7674,8 @@ function createProjectionStore(options) {
             outbound_interface_ids: arrayValue(trigger?.outbound_interface_bindings).map(interfaceBindingId).filter(Boolean),
             artifact_binding_count: arrayValue(trigger?.artifact_bindings).length,
           },
-          clone_eligible: parsed.config.target.mode === "existing_run"
-            && arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value)),
+          clone_eligible: parsed.config.target.mode === "new_run"
+            || arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value)),
           last_run_at_ms: evidence.lastRunAtMs,
           last_movement_seq: evidence.lastMovementSeq,
           next_run_at_ms: parsed.activation.enabled === false ? null : evidence.nextRunAtMs,
@@ -7711,6 +7722,18 @@ function createProjectionStore(options) {
     const schedule = config.schedule;
     let nextRunAtMs = null;
     let nextRunSource = "";
+    if (schedule.inactivity != null) {
+      const document = await readOptionalRegularJsonDocument(path.join(projection.octopusHome, "interfaces", interfaceId, "cron-inactivity-state.json"), "inactivity trigger state");
+      const state = document?.document;
+      if (state && (state.schema_version !== 1 || !["idle", "waiting", "prepared", "admitted"].includes(state.status))) throw new Error("inactivity trigger state has an invalid schema or status");
+      if (state && ["waiting", "prepared"].includes(state.status) && (!Number.isSafeInteger(state.next_due_unix_ms) || state.next_due_unix_ms < 0)) throw new Error("inactivity trigger state has an invalid deadline");
+      if (state?.schema_version === 1 && ["waiting", "prepared"].includes(state.status)
+        && stableJson(state.inactivity) === stableJson(schedule.inactivity)
+        && Number.isSafeInteger(state.next_due_unix_ms) && state.next_due_unix_ms >= 0) {
+        nextRunAtMs = state.next_due_unix_ms;
+        nextRunSource = "driver_state";
+      }
+    }
     if (deadline !== null && !lastRunAtMs) {
       nextRunAtMs = Number(deadline / 1_000_000n);
       nextRunSource = "schedule";
@@ -10046,7 +10069,7 @@ function parseCronActivationDocument(document, interfaceId) {
   const authoring = config.authoring;
   exactObjectKeys(
     authoring,
-    ["source_interface", "environment_interface", "file_write_tool", "file_write_label", "result_timeout_ms"],
+    ["source_interface", "environment_interface", "file_write_tool", "file_write_label", "result_timeout_ms", "max_files_per_call"],
     ["source_interface", "environment_interface", "file_write_tool", "file_write_label", "result_timeout_ms"],
     "cron authoring config",
   );
@@ -10054,6 +10077,7 @@ function parseCronActivationDocument(document, interfaceId) {
     if (!stringValue(authoring[field])) throw new Error(`cron authoring config.${field} must be non-empty`);
   }
   if (!Number.isSafeInteger(authoring.result_timeout_ms) || authoring.result_timeout_ms <= 0) throw new Error("cron authoring result_timeout_ms must be a positive integer");
+  if (authoring.max_files_per_call !== undefined && (!Number.isSafeInteger(authoring.max_files_per_call) || authoring.max_files_per_call <= 0)) throw new Error("cron authoring max_files_per_call must be a positive integer");
   if (config.carry_forward !== undefined) {
     exactObjectKeys(config.carry_forward, ["mark", "artifact_label"], ["mark", "artifact_label"], "cron carry_forward config");
     if (!stringValue(config.carry_forward.mark) || !stringValue(config.carry_forward.artifact_label)) throw new Error("cron carry_forward fields must be non-empty");
@@ -10071,6 +10095,7 @@ function validateCronTarget(target, template, interfaceId, carryForward) {
       "mode", "ee_id", "worker_interface_id", "provider_interface_id",
       "reasoning_effort", "client_surface_role", "id_prefix",
       "interface_private_state_root", "door_host_slots",
+      "model", "selected_worker_environment_kinds", "context_artifact_bindings",
     ],
     ["mode"],
     "cron target",
@@ -10089,11 +10114,11 @@ function validateCronTarget(target, template, interfaceId, carryForward) {
       "mode", "ee_id", "worker_interface_id", "provider_interface_id",
       "reasoning_effort", "client_surface_role", "id_prefix",
       "interface_private_state_root", "door_host_slots",
+      "model", "selected_worker_environment_kinds", "context_artifact_bindings",
     ],
     [
       "mode", "ee_id", "worker_interface_id", "provider_interface_id",
-      "reasoning_effort", "client_surface_role", "id_prefix",
-      "interface_private_state_root", "door_host_slots",
+      "reasoning_effort", "client_surface_role", "id_prefix", "door_host_slots",
     ],
     "cron target",
   );
@@ -10103,9 +10128,21 @@ function validateCronTarget(target, template, interfaceId, carryForward) {
     requiredSafeRegistryId(target[field], `cron target.${field}`);
   }
   if (stringValue(target.id_prefix).length > 48) throw new Error("cron target.id_prefix must not exceed 48 characters");
+  if (target.model !== undefined && !stringValue(target.model)) throw new Error("cron target.model must be non-empty");
+  if (target.selected_worker_environment_kinds !== undefined) {
+    if (!Array.isArray(target.selected_worker_environment_kinds) || new Set(target.selected_worker_environment_kinds).size !== target.selected_worker_environment_kinds.length) throw new Error("cron target.selected_worker_environment_kinds must contain unique kind ids");
+    for (const kind of target.selected_worker_environment_kinds) requiredSafeRegistryId(kind, "cron target worker environment kind");
+  }
+  if (target.context_artifact_bindings !== undefined) {
+    if (!Array.isArray(target.context_artifact_bindings)) throw new Error("cron target.context_artifact_bindings must be an array");
+    for (const artifact of target.context_artifact_bindings) {
+      exactObjectKeys(artifact, ["id"], ["id"], "cron target context artifact");
+      requiredSafeRegistryId(artifact.id, "cron target context artifact id");
+    }
+  }
   if (!stringValue(target.reasoning_effort)) throw new Error("cron target.reasoning_effort must be non-empty");
   if (!["home", "task"].includes(target.client_surface_role)) throw new Error("cron target.client_surface_role must be home or task");
-  if (!path.isAbsolute(stringValue(target.interface_private_state_root))) throw new Error("cron target.interface_private_state_root must be absolute");
+  if (target.interface_private_state_root !== undefined && !path.isAbsolute(stringValue(target.interface_private_state_root))) throw new Error("cron target.interface_private_state_root must be absolute");
   if (!target.door_host_slots || typeof target.door_host_slots !== "object" || Array.isArray(target.door_host_slots)) {
     throw new Error("cron target.door_host_slots must be a JSON object");
   }
@@ -10125,7 +10162,7 @@ function validateCronTarget(target, template, interfaceId, carryForward) {
 function validateCronSchedule(schedule) {
   exactObjectKeys(
     schedule,
-    ["interval_seconds", "cron", "due_at", "fire_on_start", "timezone", "reminder_env", "reminder_default"],
+    ["interval_seconds", "cron", "due_at", "inactivity", "fire_on_start", "timezone", "reminder_env", "reminder_default"],
     ["fire_on_start", "timezone", "reminder_env", "reminder_default"],
     "cron schedule",
   );
@@ -10135,7 +10172,17 @@ function validateCronSchedule(schedule) {
   const hasInterval = schedule.interval_seconds !== null && schedule.interval_seconds !== undefined;
   const hasCron = schedule.cron !== null && schedule.cron !== undefined;
   const hasDueAt = schedule.due_at !== null && schedule.due_at !== undefined;
-  if (Number(hasInterval) + Number(hasCron) + Number(hasDueAt) !== 1) throw new Error("schedule must declare exactly one of interval_seconds, cron or due_at");
+  const hasInactivity = schedule.inactivity != null;
+  if (Number(hasInterval) + Number(hasCron) + Number(hasDueAt) + Number(hasInactivity) !== 1) throw new Error("schedule must declare exactly one of interval_seconds, cron, due_at or inactivity");
+  if (hasInactivity) {
+    exactObjectKeys(schedule.inactivity, ["seconds", "interface_match", "within_ee"], ["seconds", "interface_match"], "schedule.inactivity");
+    if (schedule.inactivity.within_ee !== undefined) requiredSafeRegistryId(schedule.inactivity.within_ee, "inactivity.within_ee");
+    if (typeof schedule.inactivity.seconds !== "number" || !Number.isFinite(schedule.inactivity.seconds) || schedule.inactivity.seconds < 0.001) throw new Error("inactivity.seconds must be finite and at least 0.001");
+    const selector = schedule.inactivity.interface_match;
+    exactObjectKeys(selector, ["interface_type", "role", "interface_driver_ref"], [], "inactivity.interface_match");
+    if (!Object.keys(selector).length || Object.values(selector).some((value) => typeof value !== "string" || !value)) throw new Error("inactivity.interface_match requires non-empty descriptor fields");
+    if (schedule.fire_on_start) throw new Error("inactivity schedule requires fire_on_start=false");
+  }
   if (hasDueAt) {
     parseScheduledDueAt(schedule.due_at);
     if (schedule.fire_on_start) throw new Error("one-shot schedule.due_at requires fire_on_start=false");
@@ -13945,6 +13992,13 @@ async function deleteScheduledTopology(
       false,
     )
   )));
+  const authoringTool = parsed.config.authoring.file_write_tool;
+  if (authoringTool.endsWith(`_${suffix}`)) {
+    const toolDirectory = path.join(interfaceRoot, "..", "tool", requiredSafeToolId(authoringTool, "scheduled authoring tool"));
+    const tool = await readRegularJsonDocument(path.join(toolDirectory, "tool.json"), "scheduled authoring tool");
+    if (tool.document.id !== authoringTool || tool.document.interface !== parsed.config.authoring.environment_interface) throw new Error("scheduled authoring tool has drifted ownership");
+    removals.push(await snapshotRemovalDirectory(toolDirectory, "scheduled authoring tool", false));
+  }
   const committed = await commitClientAuthoring({
     label: `delete scheduled interface ${interfaceId}`,
     writes: [{ file: runPath, beforeDigest: run.digest, next: null }],
@@ -13982,7 +14036,7 @@ async function createScheduledInterface(
   }
   const parsed = parseCronActivationDocument(sourceActivation.document, sourceInterfaceId);
   const trigger = parsed.config.run_template.checkpoints.find((checkpoint) => interfaceBindingId(checkpoint.interface_binding) === sourceInterfaceId);
-  if (!arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value))) {
+  if (parsed.config.target.mode !== "new_run" && !arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value))) {
     throw new Error("selected scheduled template has no outbound interface binding and cannot create useful work");
   }
   const targetDirectory = path.join(interfaceRoot, interfaceId);
@@ -13995,6 +14049,11 @@ async function createScheduledInterface(
   for (const sourceId of sourceInterfaces) {
     interfaceMap.set(sourceId, sourceId === sourceInterfaceId ? interfaceId : requiredSafeRegistryId(`${sourceId}_${suffix}`, "private interface id"));
   }
+  const sourceToolId = requiredSafeToolId(parsed.config.authoring.file_write_tool, "scheduled authoring tool");
+  const sourceTool = await readRegularJsonDocument(path.join(interfaceRoot, "..", "tool", sourceToolId, "tool.json"), "scheduled authoring tool");
+  if (sourceTool.document.id !== sourceToolId || sourceTool.document.interface !== parsed.config.authoring.environment_interface) throw new Error("scheduled authoring tool must belong to its declared door");
+  const targetToolId = requiredSafeToolId(`${sourceToolId}_${suffix}`, "private authoring tool");
+  interfaceMap.set(sourceToolId, targetToolId);
   const clonedTopology = cloneCronRunTemplate(parsed.config.run_template, interfaceMap, runId, suffix);
   const runTemplate = clonedTopology.runTemplate;
   const activation = remapScheduledValue(
@@ -14018,7 +14077,7 @@ async function createScheduledInterface(
       : await readScheduledInterfaceCloneSource(interfaceRoot, sourceId);
     const descriptor = scheduledSiblingDescriptor(cloneSource, targetId, interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap);
     const life = cloneSource.life
-      ? remapScheduledValue(structuredClone(cloneSource.life), interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap)
+      ? remapScheduledValue(importScheduledLife(cloneSource.life, sourceId), interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap)
       : null;
     const policySource = await readOptionalRegularJsonDocument(path.join(interfaceRoot, sourceId, "policy.json"), `interface policy ${sourceId}`);
     let policy = null;
@@ -14049,6 +14108,8 @@ async function createScheduledInterface(
     }
   }
   const writes = [];
+  const targetToolPath = path.join(interfaceRoot, "..", "tool", targetToolId, "tool.json");
+  writes.push({ file: targetToolPath, beforeDigest: null, next: remapScheduledValue(sourceTool.document, interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap) });
   for (const packagePlan of packages) {
     const directory = path.join(interfaceRoot, packagePlan.targetId);
     writes.push({ file: path.join(directory, "interface.json"), beforeDigest: null, next: packagePlan.descriptor });
@@ -14078,8 +14139,14 @@ async function createScheduledInterface(
 }
 
 function applyScheduledDraft(schedule, draft, creating) {
-  exactObjectKeys(draft, ["type", "intervalSeconds", "cron", "dueAt", "timezone", "fireOnStart", "instructions"], ["type", "timezone", "fireOnStart", "instructions"], "scheduled draft");
-  if (draft.type === "interval") {
+  exactObjectKeys(draft, ["type", "intervalSeconds", "inactivity", "cron", "dueAt", "timezone", "fireOnStart", "instructions"], ["type", "timezone", "fireOnStart", "instructions"], "scheduled draft");
+  delete schedule.inactivity;
+  if (draft.type === "inactivity") {
+    schedule.inactivity = structuredClone(draft.inactivity);
+    schedule.interval_seconds = null;
+    schedule.cron = null;
+    delete schedule.due_at;
+  } else if (draft.type === "interval") {
     if (typeof draft.intervalSeconds !== "number" || !Number.isFinite(draft.intervalSeconds) || draft.intervalSeconds <= 0) throw new Error("intervalSeconds must be a finite positive number");
     schedule.interval_seconds = draft.intervalSeconds;
     schedule.cron = null;
@@ -14095,7 +14162,7 @@ function applyScheduledDraft(schedule, draft, creating) {
     schedule.cron = null;
     schedule.due_at = draft.dueAt;
   } else {
-    throw new Error("scheduled draft type must be interval, cron or once");
+    throw new Error("scheduled draft type must be interval, cron, once or inactivity");
   }
   schedule.timezone = stringValue(draft.timezone);
   schedule.fire_on_start = draft.fireOnStart;
@@ -14168,6 +14235,13 @@ function validateScheduledInterfaceDescriptor(descriptor, interfaceId) {
   if (!Array.isArray(descriptor.source_names) || descriptor.source_names.length === 0 || descriptor.source_names.some((value) => !stringValue(value))) {
     throw new Error(`interface descriptor ${interfaceId} has invalid source_names`);
   }
+}
+
+function importScheduledLife(value, sourceInterfaceId) {
+  if (Array.isArray(value)) return value.map(item => importScheduledLife(item, sourceInterfaceId));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, importScheduledLife(item, sourceInterfaceId)]));
+  return typeof value === "string" && value.startsWith("owner://packages/")
+    ? `interface://${sourceInterfaceId}/${value.slice("owner://".length)}` : value;
 }
 
 function scheduledSiblingDescriptor(cloneSource, interfaceId, interfaceMap, sourceRunId, runId, checkpointMap) {
@@ -14251,6 +14325,12 @@ async function requirePlainDirectory(directory, label) {
 function requiredSafeRegistryId(value, label) {
   const id = requiredString(value, label);
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error(`${label} must be a registry-safe id`);
+  return id;
+}
+
+function requiredSafeToolId(value, label) {
+  const id = requiredString(value, label);
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) throw new Error(`${label} must be a tool-safe id`);
   return id;
 }
 

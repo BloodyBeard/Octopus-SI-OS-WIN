@@ -42,15 +42,15 @@ export function ScheduledEditor({
   }
 
   return (
-    <section aria-label={creating ? "Create scheduled interface" : "Edit scheduled interface"} className="flex h-full min-h-0 flex-col text-base select-none">
+    <section aria-label={creating ? "Create trigger" : "Edit trigger"} className="flex h-full min-h-0 flex-col text-base select-none">
       <header className="flex h-toolbar shrink-0 items-center justify-between gap-3 px-panel">
         <button className="flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-token-text-secondary hover:bg-token-list-hover-background hover:text-token-foreground" onClick={onCancel} type="button">
           <Glyph name="arrowLeft" size={14} />
-          <span>Scheduled</span>
+          <span>Triggers</span>
         </button>
         <div className="flex items-center gap-2">
           <OcButton disabled={pending} onClick={onCancel} size="sm" variant="secondary">Cancel</OcButton>
-          <OcButton disabled={Boolean(error) || pending || !source.cloneEligible} onClick={() => onSave(draft, source)} size="sm">
+          <OcButton disabled={Boolean(error) || pending || (creating && !source.cloneEligible)} onClick={() => onSave(draft, source)} size="sm">
             {pending ? "Saving…" : creating ? "Create" : "Save"}
           </OcButton>
         </div>
@@ -59,7 +59,7 @@ export function ScheduledEditor({
       <div className="min-h-0 flex-1 overflow-y-auto px-toolbar pt-panel pb-panel">
         <div className="mx-auto flex w-full max-w-2xl flex-col gap-7">
           <header className="flex flex-col gap-1">
-            <h1 className="heading-xl font-normal text-token-foreground">{creating ? "New scheduled task" : "Edit scheduled task"}</h1>
+            <h1 className="heading-xl font-normal text-token-foreground">{creating ? "New trigger" : "Edit trigger"}</h1>
             <p className="m-0 text-base text-token-text-secondary">
               Choose instructions and timing for this task.
             </p>
@@ -68,7 +68,7 @@ export function ScheduledEditor({
           {creating ? (
             <EditorSection title="Task template" detail="Choose the registered template this task will use.">
               <OcSelect
-                label="Scheduled interface template"
+                label="Trigger template"
                 onChange={chooseSource}
                 options={sourceOptions}
                 showLabel
@@ -104,18 +104,30 @@ export function ScheduledEditor({
             />
           </EditorSection>
 
-          <EditorSection title="Schedule">
+          <EditorSection title="Trigger">
             <OcSegmented
               label="Schedule type"
-              onChange={(type) => setDraft({ ...draft, type, fireOnStart: type === "once" ? false : draft.fireOnStart })}
+              onChange={(type) => setDraft({ ...draft, type, fireOnStart: type === "once" || type === "inactivity" ? false : draft.fireOnStart })}
               options={[
                 { value: "once", label: "Once" },
                 { value: "interval", label: "Interval" },
                 { value: "cron", label: "Cron" },
+                { value: "inactivity", label: "After inactivity" },
               ]}
               value={draft.type}
             />
-            {draft.type === "interval" ? (
+            {draft.type === "inactivity" ? (
+              <OcTextField
+                description="Each artifact movement in matching tasks restarts this timer. Runs bound to this trigger are excluded. Fires once, then waits for new activity."
+                label="Quiet period in seconds"
+                min="0.001"
+                onChange={(event) => setDraft({ ...draft, inactivity: { ...draft.inactivity!, seconds: Number(event.target.value) } })}
+                showLabel
+                step="any"
+                type="number"
+                value={String(draft.inactivity?.seconds ?? "")}
+              />
+            ) : draft.type === "interval" ? (
               <OcTextField
                 inputMode="decimal"
                 label="Interval in seconds"
@@ -145,7 +157,7 @@ export function ScheduledEditor({
                 value={draft.cron ?? ""}
               />
             )}
-            {draft.type !== "once" ? <><OcTextField
+            {draft.type !== "once" && draft.type !== "inactivity" ? <><OcTextField
               description="Use local, UTC, or an IANA timezone such as Europe/Kyiv"
               label="Timezone"
               onChange={(event) => setDraft({ ...draft, timezone: event.target.value })}
@@ -163,7 +175,9 @@ export function ScheduledEditor({
               <span className="text-token-foreground">Preview</span>
               <span className="mx-2 text-token-input-placeholder-foreground">·</span>
               {formatSchedule({
-                schedule: draft.type === "interval"
+                schedule: draft.type === "inactivity"
+                  ? { type: "inactivity", seconds: draft.inactivity?.seconds ?? 0, interfaceMatch: draft.inactivity?.interface_match ?? {} }
+                  : draft.type === "interval"
                   ? { type: "interval", intervalSeconds: draft.intervalSeconds ?? 0 }
                   : draft.type === "once" ? { type: "once", dueAt: draft.dueAt ?? "" }
                     : { type: "cron", cron: draft.cron ?? "" },

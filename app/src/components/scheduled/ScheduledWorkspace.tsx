@@ -17,9 +17,9 @@ function useScheduledWorkspaceState(active: boolean) {
   const canEdit = canMutateScheduledInterfaces() && !projection.error;
   const templates = projection.tasks.filter((task) => task.valid && task.cloneEligible);
   const selected = projection.tasks.find((task) => task.interfaceId === selectedId) ?? null;
-  const createUnavailableReason = !canEdit ? "Open a connected desktop client to create a scheduled task."
-    : projection.loading ? "Loading scheduled tasks…"
-      : templates.length === 0 ? "A complete scheduled interface template is needed before creating a task." : "";
+  const createUnavailableReason = !canEdit ? "Open a connected desktop client to create a trigger."
+    : projection.loading ? "Loading triggers…"
+      : templates.length === 0 ? "A complete trigger template is needed before creating a task." : "";
 
   async function mutate(request: OctopusScheduledMutationRequest, after: () => void) {
     setPending(true);

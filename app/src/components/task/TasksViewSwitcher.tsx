@@ -15,9 +15,9 @@ export function TasksViewSwitcher({ value, onChange }: {
       type="button"
     >All tasks</button>
     <div className="tasks-view-icon-controls">
-      <MessageTooltip label="Scheduled tasks">
+      <MessageTooltip label="Triggers">
         <button
-          aria-label="Scheduled tasks"
+          aria-label="Triggers"
           aria-pressed={value === "scheduled"}
           className="tasks-view-filter is-icon"
           onClick={() => onChange("scheduled")}

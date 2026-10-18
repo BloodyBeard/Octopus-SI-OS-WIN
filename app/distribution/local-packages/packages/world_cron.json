@@ -1,0 +1,24 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_cron",
+  "version": "1.0.2",
+  "product_kind": "application",
+  "product_id": "world_cron",
+  "release_status": "optional",
+  "display": {
+    "name": "Triggers",
+    "description": "Starts ordinary runs at a chosen time, on an interval, or after a quiet period in selected runs.",
+    "developer": "Octopus",
+    "category": "connector",
+    "icon": "scheduled"
+  },
+  "members": [
+    { "registry_kind": "interface", "owner": "world_cron", "primary": true },
+    { "registry_kind": "interface", "owner": "system_worker_cron" },
+    { "registry_kind": "interface", "owner": "system_interface_authoring_cron" },
+    { "registry_kind": "interface", "owner": "system_context_cron_authoring" },
+    { "registry_kind": "tool", "owner": "file.write.cron_authoring" }
+  ],
+  "required_packages": ["world_operator_chat"]
+}

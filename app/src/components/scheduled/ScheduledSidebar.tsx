@@ -45,16 +45,16 @@ export function ScheduledSidebar({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <div className="scheduled-sidebar">
       <div className="scheduled-sidebar-actions">
-        <OcButton className="scheduled-sidebar-new" disabled={Boolean(workspace.createUnavailableReason) || workspace.pending} leadingIcon="plus" onClick={() => { workspace.startCreate(); onNavigate?.(); }} title={workspace.createUnavailableReason || undefined} variant="ghost">New task</OcButton>
-        <MessageTooltip label="Search scheduled tasks">
-          <OcIconButton appearance="sidebar" aria-controls={searchId} aria-expanded={search !== null} buttonRef={searchButtonRef} glyph="search" label="Search scheduled tasks" onClick={() => setSearch(search === null ? "" : null)} selected={search !== null} title="" />
+        <OcButton className="scheduled-sidebar-new" disabled={Boolean(workspace.createUnavailableReason) || workspace.pending} leadingIcon="plus" onClick={() => { workspace.startCreate(); onNavigate?.(); }} title={workspace.createUnavailableReason || undefined} variant="ghost">New trigger</OcButton>
+        <MessageTooltip label="Search triggers">
+          <OcIconButton appearance="sidebar" aria-controls={searchId} aria-expanded={search !== null} buttonRef={searchButtonRef} glyph="search" label="Search triggers" onClick={() => setSearch(search === null ? "" : null)} selected={search !== null} title="" />
         </MessageTooltip>
       </div>
       {search !== null ? (
         <div className="scheduled-sidebar-search" onKeyDown={(event) => {
           if (event.key === "Escape") { event.stopPropagation(); setSearch(null); searchButtonRef.current?.focus(); }
         }}>
-          <OcSearchField id={searchId} inputRef={searchRef} label="Search scheduled tasks" onChange={setSearch} placeholder="Search scheduled tasks" value={search} />
+          <OcSearchField id={searchId} inputRef={searchRef} label="Search triggers" onChange={setSearch} placeholder="Search triggers" value={search} />
         </div>
       ) : null}
       <div className="scheduled-sidebar-section-title">
@@ -62,19 +62,19 @@ export function ScheduledSidebar({ onNavigate }: { onNavigate?: () => void }) {
         <MessageTooltip label="Filter tasks">
           <OcIconButton appearance="sidebar" buttonRef={filterRef} glyph="filter" label="Filter tasks" onClick={() => setFilterOpen(!filterOpen)} selected={filter !== "all"} title="" />
         </MessageTooltip>
-        <OcDropdown anchorRef={filterRef} align="end" aria-label="Scheduled task status" onOpenChange={setFilterOpen} open={filterOpen}>
+        <OcDropdown anchorRef={filterRef} align="end" aria-label="Trigger status" onOpenChange={setFilterOpen} open={filterOpen}>
           {statusFilters.map(({ value, label }) => <OcMenuItem aria-checked={filter === value} key={value} label={label} onClick={() => { setFilter(value); setFilterOpen(false); }} role="menuitemradio" selected={filter === value} />)}
         </OcDropdown>
       </div>
-      <div className="scheduled-sidebar-list octopus-sidebar-scroll" role="list" aria-label="Scheduled tasks">
-        {workspace.error ? <div className="scheduled-sidebar-notice" role="alert"><p>Scheduled tasks could not be loaded.</p><OcButton onClick={() => void workspace.reload()} size="sm" variant="ghost">Retry</OcButton></div>
-          : workspace.loading && !workspace.tasks.length ? <p className="scheduled-sidebar-notice" role="status">Loading scheduled tasks…</p>
+      <div className="scheduled-sidebar-list octopus-sidebar-scroll" role="list" aria-label="Triggers">
+        {workspace.error ? <div className="scheduled-sidebar-notice" role="alert"><p>Triggers could not be loaded.</p><OcButton onClick={() => void workspace.reload()} size="sm" variant="ghost">Retry</OcButton></div>
+          : workspace.loading && !workspace.tasks.length ? <p className="scheduled-sidebar-notice" role="status">Loading triggers…</p>
             : visible.length ? (filter === "all" ? <>
               <ScheduleGroup rows={visible.filter(({ task }) => task.status === "enabled")} now={now} onNavigate={onNavigate} />
               <ScheduleGroup label="Paused" rows={visible.filter(({ task }) => task.status === "disabled")} now={now} onNavigate={onNavigate} />
               <ScheduleGroup label="Needs attention" rows={visible.filter(({ task }) => task.status === "invalid")} now={now} onNavigate={onNavigate} />
             </> : <ScheduleGroup rows={visible} now={now} onNavigate={onNavigate} />)
-              : <p className="scheduled-sidebar-notice" role="status">{search?.trim() || filter !== "all" ? "No matching tasks" : "No scheduled tasks"}</p>}
+              : <p className="scheduled-sidebar-notice" role="status">{search?.trim() || filter !== "all" ? "No matching tasks" : "No triggers"}</p>}
       </div>
     </div>
   );
@@ -91,7 +91,7 @@ function ScheduleGroup({ label, rows, now, onNavigate }: { label?: string; rows:
       {rows.slice(0, count).map(({ task, next }) => {
         const selected = !editor && selectedId === task.interfaceId;
         const timing = task.status === "disabled" ? "Paused" : task.status === "invalid" ? "Needs attention"
-          : next ? `${task.nextRunSource !== "" && task.nextRunAtMs === next ? "" : "Estimated · "}${scheduledCalendarTime(next, now, task.timezone)}` : task.schedule?.type === "once" && task.lastRunAtMs ? "Triggered" : "Next run not recorded";
+          : next ? `${task.nextRunSource !== "" && task.nextRunAtMs === next ? "" : "Estimated · "}${scheduledCalendarTime(next, now, task.timezone)}` : task.schedule?.type === "once" && task.lastRunAtMs ? "Triggered" : task.schedule?.type === "inactivity" ? "Waiting for new activity" : "Next run not recorded";
         return <div key={task.interfaceId} role="listitem">
           <button aria-current={selected ? "true" : undefined} className="scheduled-sidebar-row" data-sidebar-nav-item="scheduled" data-selected-scheduled-task={selected || undefined} disabled={pending}
             onClick={() => { selectTask(task.interfaceId); onNavigate?.(); }} title={task.status === "invalid" ? task.error : `${task.displayName}\n${timing} · ${describeSchedule(task)} · ${task.timezone}`} type="button">

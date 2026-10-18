@@ -22,10 +22,10 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
   }, [searchFocusTick, requestSearch, navigationInPane]);
 
   return (
-    <section aria-label="Scheduled task details" className="scheduled-content">
+    <section aria-label="Trigger details" className="scheduled-content">
       {navigationInPane ? <div className="scheduled-pane-navigation">
-        <OcButton buttonRef={navigationRef} leadingIcon="scheduled" onClick={() => setNavigationOpen(!navigationOpen)} trailingIcon="chevronDown" variant="ghost">Scheduled tasks</OcButton>
-        <OcDropdown anchorRef={navigationRef} aria-label="Scheduled tasks" className="scheduled-pane-navigation-list" onOpenChange={setNavigationOpen} open={navigationOpen} role="dialog" surface="opaque">
+        <OcButton buttonRef={navigationRef} leadingIcon="scheduled" onClick={() => setNavigationOpen(!navigationOpen)} trailingIcon="chevronDown" variant="ghost">Triggers</OcButton>
+        <OcDropdown anchorRef={navigationRef} aria-label="Triggers" className="scheduled-pane-navigation-list" onOpenChange={setNavigationOpen} open={navigationOpen} role="dialog" surface="opaque">
           <ScheduledSidebar onNavigate={() => setNavigationOpen(false)} />
         </OcDropdown>
       </div> : null}
@@ -51,7 +51,7 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
           action={<OcButton onClick={() => void workspace.reload()} size="sm" variant="secondary">Retry</OcButton>}
           detail={error}
           glyph="warning"
-          title="Scheduled tasks could not be loaded"
+          title="Triggers could not be loaded"
           tone="danger"
         />
       ) : selected ? (
@@ -66,13 +66,13 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
           task={selected}
         />
       ) : loading ? (
-        <div className="scheduled-content-status" role="status">Loading scheduled tasks…</div>
+        <div className="scheduled-content-status" role="status">Loading triggers…</div>
       ) : selectedId ? (
         <OcEmptyState
-          action={<OcButton onClick={() => workspace.selectTask("")} size="sm" variant="secondary">Back to Scheduled</OcButton>}
-          detail="This scheduled interface is no longer available."
+          action={<OcButton onClick={() => workspace.selectTask("")} size="sm" variant="secondary">Back to Triggers</OcButton>}
+          detail="This trigger is no longer available."
           glyph="scheduled"
-          title="Scheduled task unavailable"
+          title="Trigger unavailable"
         />
       ) : (
         <ScheduledLanding disabledReason={workspace.createUnavailableReason} onCreate={workspace.startCreate} />

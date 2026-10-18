@@ -154,6 +154,14 @@ See [registry/verifier/GUIDE.md](../../registry/verifier/GUIDE.md) and
 
 See [registry/worker_environment_kind/GUIDE.md](../../registry/worker_environment_kind/GUIDE.md).
 
+## Time and inactivity triggers
+
+The clock interface supports inactivity: selected runs' artifact movements
+restart a declared quiet period, after which one artifact wakes an ordinary
+run. Its own target runs are excluded and admission evidence survives restart.
+Selection, timing and cursor state belong to the interface package; the client
+projects these activations as Triggers.
+
 ## Media across interfaces
 
 Carry files as artifact references, not filesystem path strings. A transport

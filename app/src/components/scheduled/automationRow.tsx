@@ -132,7 +132,7 @@ function AutomationRowMenu({ actions }: { actions: AutomationRowAction[] }) {
       <button
         aria-expanded={open}
         aria-haspopup="menu"
-        aria-label="Scheduled task actions"
+        aria-label="Trigger actions"
         className={ROW_MENU_BUTTON_CLASS}
         data-state={open ? "open" : "closed"}
         onClick={(event) => {
@@ -144,7 +144,7 @@ function AutomationRowMenu({ actions }: { actions: AutomationRowAction[] }) {
       >
         <Glyph className="icon-xs" name="more" size={16} />
       </button>
-      <OcDropdown anchorRef={triggerRef} align="end" aria-label="Scheduled task actions" onOpenChange={setOpen} open={open} sideOffset={4} style={{ width: 208 }}>
+      <OcDropdown anchorRef={triggerRef} align="end" aria-label="Trigger actions" onOpenChange={setOpen} open={open} sideOffset={4} style={{ width: 208 }}>
         {actions.map((action) => (
           <OcMenuItem disabled={action.disabled} key={action.label} label={action.label} leadingIcon={action.glyph} onClick={action.onSelect} role="menuitem" tone={action.tone} />
         ))}

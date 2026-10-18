@@ -61,6 +61,10 @@
   "outcome_verifier": "memory_capture_outcome",
   "additional_input_rules": [
     {
+      "labels": ["cron.current_time"],
+      "pointers": ["/task", "/last_activity"]
+    },
+    {
       "labels": [
         "provider.peer.input"
       ],

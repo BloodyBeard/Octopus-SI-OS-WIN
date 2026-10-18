@@ -10,10 +10,10 @@ export function ScheduledLanding({ disabledReason, onCreate }: {
       <div className="scheduled-landing-content">
         <header className="scheduled-landing-title">
           <span aria-hidden="true" className="scheduled-landing-emoji">🕗</span>
-          <h1>Schedule a task</h1>
+          <h1>Create a trigger</h1>
           <p>Let Octopus take care of ongoing work and keep you up to date.</p>
         </header>
-        <ul aria-label="Scheduled task suggestions" className="scheduled-suggestions">
+        <ul aria-label="Trigger suggestions" className="scheduled-suggestions">
           {scheduledSuggestions.map((suggestion) => (
             <li key={suggestion.id}>
               <button className="scheduled-suggestion" disabled={Boolean(disabledReason)} onClick={() => onCreate(suggestion)} title={disabledReason || undefined} type="button">
@@ -24,7 +24,7 @@ export function ScheduledLanding({ disabledReason, onCreate }: {
           ))}
         </ul>
         {disabledReason ? <p className="scheduled-create-note" role="status">{disabledReason}</p> : (
-          <OcButton className="scheduled-new-custom" leadingIcon="plus" onClick={() => onCreate()} size="sm" variant="ghost">Create your own task</OcButton>
+          <OcButton className="scheduled-new-custom" leadingIcon="plus" onClick={() => onCreate()} size="sm" variant="ghost">Create your own trigger</OcButton>
         )}
       </div>
     </div>

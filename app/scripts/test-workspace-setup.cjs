@@ -1401,6 +1401,28 @@ async function verifyOperatorChatStatusProjection(temporary) {
     await fs.writeFile(runPath, JSON.stringify(record));
     store.invalidate();
     assert.equal((await readStatuses()).chats[0].turn_open, true, "pending source retains a turn after its input checkpoint is replaced");
+    const sidecarPath = path.join(registryRoot, "interface", workspace.homeInterfaceId, "octopus_os.json");
+    const sidecar = JSON.parse(await fs.readFile(sidecarPath, "utf8"));
+    sidecar.authoring_profile.external_inputs = [{ checkpoint_id: "cp_external_input", interface_id: "peer" }];
+    await fs.writeFile(sidecarPath, JSON.stringify(sidecar));
+    record.interface_state[workspace.homeInterfaceId].cycle_checkpoint_ids = [];
+    delete record.interface_state[provider].pending_handoff;
+    await fs.writeFile(runPath, JSON.stringify(record));
+    store.invalidate();
+    assert.equal((await readStatuses()).chats[0].turn_open, false);
+    nextSeq = current.seq + 1;
+    const external = fixtureMovement(nextSeq++, workspace, "sensor.observation", "peer", "run");
+    external.kind = "InterfaceOutbound"; external.to = { Interface: provider };
+    external.invocation_metadata.runtime.checkpoint = "cp_external_input";
+    await materializeFixtureMovement(octopusHomeRoot, external, { text: "Review recent work." });
+    await fs.appendFile(ledgerPath, `${JSON.stringify(external)}\n`);
+    const waiting = (await readStatuses()).chats[0];
+    assert.deepEqual([waiting.turn_open, waiting.turn_state, waiting.turn_opened_movement_seq], [true, "waiting", external.seq]);
+    const running = await appendStatus("provider.transport.dispatch", provider, { provider_interface: provider, method: "turn/start" });
+    assert.equal(running.turn_state, "working");
+    store.invalidate();
+    assert.deepEqual((await readStatuses()).chats[0], running, "external admission remains visible after its checkpoint is retired");
+    assert.equal((await appendStatus("turn.completed", provider, {})).turn_open, false);
   } finally {
     store.close();
   }

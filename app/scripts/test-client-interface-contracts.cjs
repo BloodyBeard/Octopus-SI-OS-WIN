@@ -171,7 +171,7 @@ test("Scheduled and Archived are labelled icon controls with independent selecti
   const { host, root } = await mount(React.createElement(TasksViewSwitcher, { value: "tasks", onChange: (view) => events.push(view) }));
   const [all, scheduled, archived] = host.querySelectorAll("button");
   assert.equal(all.textContent, "All tasks"); assert.equal(all.getAttribute("aria-pressed"), "true");
-  assert.equal(scheduled.textContent, ""); assert.equal(scheduled.getAttribute("aria-label"), "Scheduled tasks");
+  assert.equal(scheduled.textContent, ""); assert.equal(scheduled.getAttribute("aria-label"), "Triggers");
   assert.equal(archived.textContent, ""); assert.equal(archived.getAttribute("aria-label"), "Archived tasks");
   await act(async () => { scheduled.click(); archived.click(); all.click(); });
   assert.deepEqual(events, ["scheduled", "archived", "tasks"]);
