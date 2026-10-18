@@ -112,10 +112,8 @@ jobs:
       - name: Heart — runtime checkpoint and exactly-once contracts
         run: cargo test -p octopus-runtime --lib
 
-      - name: File publication and retained artifact delivery
-        run: |
-          cargo test --locked -p octopus-file-storage --lib publication::tests -- --test-threads=1
-          cargo test --locked -p octopus-app-server --lib --test worker_interface_cross_run_fan_out
+      - name: File publication contracts
+        run: cargo test --locked -p octopus-file-storage --lib publication::tests -- --test-threads=1
 
       - name: Home bindings and instruction context
         run: |
@@ -163,6 +161,12 @@ jobs:
           node app/scripts/test-local-packages.cjs
           node app/scripts/test-client-setup.cjs
           npm --prefix app run test:cli
+
+      - name: Install declared OCR verifier executable
+        run: brew install tesseract
+
+      - name: Package verifier and retained artifact delivery contracts
+        run: cargo test --locked -p octopus-app-server --lib --test worker_interface_cross_run_fan_out
 
       - name: Home admission, stop and provider recovery
         run: |
