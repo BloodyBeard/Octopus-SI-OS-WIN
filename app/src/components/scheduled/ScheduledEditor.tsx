@@ -1,13 +1,14 @@
 import { useMemo, useState } from "react";
 import { OcButton, OcSegmented, OcSelect, OcSwitch, OcTextArea, OcTextField } from "../../design-system/components";
 import { Glyph } from "../IconGlyphs";
-import { draftFromTemplate, formatSchedule, scheduledDraftError } from "./scheduleModel";
-import type { ScheduledEditorDraft, ScheduledEditorMode, ScheduledInterfaceProjection } from "./types";
+import { draftFromTemplate, formatSchedule, QUIET_PERIOD_UNITS, quietPeriodUnit, scheduledDraftError, type QuietPeriodUnit } from "./scheduleModel";
+import type { ScheduledEditorDraft, ScheduledEditorMode, ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
 
 export function ScheduledEditor({
   draft: initialDraft,
   mode,
   pending,
+  scopeOptions,
   templates,
   onCancel,
   onSave,
@@ -15,11 +16,19 @@ export function ScheduledEditor({
   draft: ScheduledEditorDraft;
   mode: ScheduledEditorMode;
   pending: boolean;
+  scopeOptions: ScheduledScopeOption[];
   templates: ScheduledInterfaceProjection[];
   onCancel: () => void;
   onSave: (draft: ScheduledEditorDraft, source: ScheduledInterfaceProjection) => void;
 }) {
   const [draft, setDraft] = useState(initialDraft);
+  const [quietUnit, setQuietUnit] = useState<QuietPeriodUnit>(quietPeriodUnit(initialDraft.inactivity?.seconds ?? 3600));
+  const unitSeconds = QUIET_PERIOD_UNITS.find((unit) => unit.value === quietUnit)?.seconds ?? 60;
+  const inactivity = draft.inactivity ?? { seconds: 3600, interface_match: {} };
+  const scopeChoices = [{ value: "", label: "All work", description: "Every task and Home conversation" },
+    ...scopeOptions.map((option) => ({ value: option.eeId, label: option.name, description: "This project and its subprojects" })),
+    ...(inactivity.within_ee && !scopeOptions.some((option) => option.eeId === inactivity.within_ee)
+      ? [{ value: inactivity.within_ee, label: inactivity.within_ee, description: "Project not found in this Home" }] : [])];
   const creating = mode.kind === "create";
   const source = templates.find((template) => template.interfaceId === draft.sourceInterfaceId)
     ?? (mode.kind === "create" ? mode.source : mode.task);
@@ -116,18 +125,33 @@ export function ScheduledEditor({
               ]}
               value={draft.type}
             />
-            {draft.type === "inactivity" ? (
-              <OcTextField
-                description="Each artifact movement in matching tasks restarts this timer. Runs bound to this trigger are excluded. Fires once, then waits for new activity."
-                label="Quiet period in seconds"
-                min="0.001"
-                onChange={(event) => setDraft({ ...draft, inactivity: { ...draft.inactivity!, seconds: Number(event.target.value) } })}
+            {draft.type === "inactivity" ? (<>
+              <div className="grid grid-cols-[minmax(0,1fr)_10rem] items-end gap-3">
+                <OcTextField
+                  description="Any work in matching tasks restarts the period. Runs this trigger starts are not counted. It fires once, then waits for new work."
+                  label="Quiet period"
+                  min="1"
+                  onChange={(event) => setDraft({ ...draft, inactivity: { ...inactivity, seconds: Number(event.target.value) * unitSeconds } })}
+                  showLabel
+                  step="1"
+                  type="number"
+                  value={Number.isFinite(inactivity.seconds) ? String(Math.round(inactivity.seconds / unitSeconds * 100) / 100) : ""}
+                />
+                <OcSelect
+                  label="Quiet period unit"
+                  onChange={(unit) => setQuietUnit(unit as QuietPeriodUnit)}
+                  options={QUIET_PERIOD_UNITS.map((unit) => ({ value: unit.value, label: unit.label }))}
+                  value={quietUnit}
+                />
+              </div>
+              <OcSelect
+                label="Scope"
+                onChange={(eeId) => setDraft({ ...draft, inactivity: { seconds: inactivity.seconds, interface_match: inactivity.interface_match, ...(eeId ? { within_ee: eeId } : {}) } })}
+                options={scopeChoices}
                 showLabel
-                step="any"
-                type="number"
-                value={String(draft.inactivity?.seconds ?? "")}
+                value={inactivity.within_ee ?? ""}
               />
-            ) : draft.type === "interval" ? (
+            </>) : draft.type === "interval" ? (
               <OcTextField
                 inputMode="decimal"
                 label="Interval in seconds"
@@ -176,7 +200,7 @@ export function ScheduledEditor({
               <span className="mx-2 text-token-input-placeholder-foreground">·</span>
               {formatSchedule({
                 schedule: draft.type === "inactivity"
-                  ? { type: "inactivity", seconds: draft.inactivity?.seconds ?? 0, interfaceMatch: draft.inactivity?.interface_match ?? {} }
+                  ? { type: "inactivity", seconds: inactivity.seconds, interfaceMatch: inactivity.interface_match, withinEe: inactivity.within_ee ?? "" }
                   : draft.type === "interval"
                   ? { type: "interval", intervalSeconds: draft.intervalSeconds ?? 0 }
                   : draft.type === "once" ? { type: "once", dueAt: draft.dueAt ?? "" }

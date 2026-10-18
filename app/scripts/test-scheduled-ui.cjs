@@ -201,18 +201,59 @@ test("one-shot timestamps validate calendar dates and preserve nanosecond deadli
   for (const invalid of ['2026-02-30T00:00:00Z', '2026-10-04T00:00:00-00:00', '2026-10-04T00:00:00', '2263-01-01T00:00:00Z']) assert.throws(() => parseScheduledDueAt(invalid));
 });
 
-test("inactivity trigger edits preserve source selection and never invent a recurring deadline", async () => {
+test("an installed inactivity template creates a trigger, reports honest state and undoes a journaled run", async () => {
   const inactivity = { seconds: 3600, interface_match: { interface_type: 'world', role: 'user', interface_driver_ref: 'app_server' } };
-  const f = fixture([{ ...schedule(0), clone_eligible: false, schedule: { type: 'inactivity', ...inactivity }, next_run_at_ms: null, next_run_source: '' }]);
+  const template = { ...schedule(0), interface_id: 'world_system_review', display_name: 'System review', status: 'template', template: true, clone_eligible: true, schedule: { type: 'inactivity', ...inactivity }, next_run_at_ms: null, next_run_source: '' };
+  const journal = { digest: 'a'.repeat(64), outcome: 'changed', summary: 'Saved the export procedure as a skill.', undoable: true, undone: false, checks: [{ check: 'doctor', result: 'passed', evidence: 'seq 9' }],
+    changes: [{ kind: 'file', path: '/home/registry/artifact/a/artifact.json', action: 'created', reason: 'repeated', status: 'applied', restorable: true, unrestorable_reason: '' }] };
+  const trigger = { ...template, interface_id: 'world_quiet_review', display_name: 'Quiet review', status: 'enabled', template: false, schedule: { type: 'inactivity', ...inactivity, within_ee: 'ee_project' },
+    inactivity_state: { status: 'waiting', current: true, last_activity_at_ms: Date.now() }, next_run_at_ms: Date.now() + 3_600_000, next_run_source: 'driver_state',
+    deliveries: [{ seq: 12, at_ms: Date.now() - 60_000, run_id: 'run_review_1', chat_interface_id: 'world_operator_chat_review', journal }] };
+  const f = fixture([template]);
   const { host } = await mount();
-  assert.match(host.querySelector('.scheduled-sidebar-row-detail').textContent, /Waiting for new activity.*After 1 hour without activity/);
-  await click(host.querySelector('.scheduled-sidebar-row'));
-  await click(button(host, 'Edit'));
-  assert.equal(button(host, 'Save').disabled, false);
-  await input(host.querySelector('input[type="number"]'), '7200');
-  await click(button(host, 'Save'));
+  assert.equal(host.querySelectorAll('.scheduled-sidebar-row').length, 0);
+  const suggestion = [...host.querySelectorAll('.scheduled-suggestion')].find((element) => element.textContent.includes('System review'));
+  assert.match(suggestion.textContent, /After 1 hour without activity/);
+  await click(suggestion);
+  const quiet = host.querySelector('input[type="number"]');
+  assert.equal(quiet.value, '1');
+  await input(quiet, '2');
+  await click(button(host, 'Create'));
   assert.deepEqual(f.writes[0].draft.inactivity, { ...inactivity, seconds: 7200 });
-  assert.equal(f.writes[0].draft.type, 'inactivity');
-  assert.equal(f.writes[0].draft.fireOnStart, false);
-  assert.equal(f.writes[0].draft.cron, undefined);
+  assert.equal(f.writes[0].sourceInterfaceId, 'world_system_review');
+  f.rows = [template, trigger]; f.writes = [];
+  const view = await mount();
+  await click(view.host.querySelector('.scheduled-sidebar-row'));
+  assert.match(view.host.textContent, /Starts at .* if work stays quiet/);
+  assert.match(view.host.textContent, /1 file changed.*Saved the export procedure as a skill/);
+  await click(button(view.host, 'Undo'));
+  await click(button(document, 'Undo changes'));
+  assert.deepEqual(f.writes[0], { action: 'undo_changes', runId: 'run_review_1', expectedJournalDigest: 'a'.repeat(64) });
+});
+
+test("a change journal undoes only files still holding the recorded result", async () => {
+  const { mutateScheduledInterface } = require("../electron/projection.cjs");
+  const os = require("node:os");
+  const crypto = require("node:crypto");
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "octopus-journal-")));
+  const sha = (text) => crypto.createHash("sha256").update(text).digest("hex");
+  const registry = path.join(home, "registry");
+  const modified = path.join(registry, "interface", "world_a", "interface.json");
+  const created = path.join(registry, "artifact", "artifact-new", "artifact.json");
+  const journalRoot = path.join(home, "state", "change-journals", "run_review");
+  for (const file of [modified, created, path.join(journalRoot, "before", "0")]) fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(modified, "after\n"); fs.writeFileSync(created, "new\n"); fs.writeFileSync(path.join(journalRoot, "before", "0"), "before\n");
+  const journal = { schema_version: 1, run: "run_review", outcome: "changed", summary: "s", changes: [
+    { kind: "file", path: modified, action: "modified", before_sha256: sha("before\n"), after_sha256: sha("after\n"), before_copy: "before/0", reason: "r" },
+    { kind: "file", path: created, action: "created", before_sha256: null, after_sha256: sha("new\n"), before_copy: null, reason: "r" }] };
+  fs.writeFileSync(path.join(journalRoot, "journal.json"), JSON.stringify(journal));
+  const digest = sha(fs.readFileSync(path.join(journalRoot, "journal.json")));
+  const plans = [];
+  const hooks = { commitClientAuthoring: async (plan) => { plans.push(plan); } };
+  fs.writeFileSync(created, "edited later\n");
+  await assert.rejects(mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", expectedJournalDigest: digest }, hooks), /artifact.json is changed/);
+  fs.writeFileSync(created, "new\n");
+  await mutateScheduledInterface(registry, home, { action: "undo_changes", runId: "run_review", expectedJournalDigest: digest }, hooks);
+  assert.deepEqual(plans[0].writes.map((write) => [write.file, write.beforeDigest, write.content ?? write.next]), [[modified, sha("after\n"), "before\n"], [created, sha("new\n"), null]]);
+  fs.rmSync(home, { recursive: true, force: true });
 });

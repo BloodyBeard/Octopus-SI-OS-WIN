@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { readProjection } from "../../projectionClient";
 import { useProjectionGeneration } from "../../projectionLive";
-import { normalizeScheduledInterface } from "./scheduleModel";
-import type { ScheduledInterfaceProjection, ScheduledProjectionResponse } from "./types";
+import { normalizeScheduledInterface, normalizeScopeOptions } from "./scheduleModel";
+import type { ScheduledInterfaceProjection, ScheduledProjectionResponse, ScheduledScopeOption } from "./types";
 
 export function useScheduledInterfaces(enabled = true) {
   const projectionGeneration = useProjectionGeneration();
   const [tasks, setTasks] = useState<ScheduledInterfaceProjection[]>([]);
+  const [scopeOptions, setScopeOptions] = useState<ScheduledScopeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const requestGeneration = useRef(0);
@@ -23,6 +24,7 @@ export function useScheduledInterfaces(enabled = true) {
         .map(normalizeScheduledInterface)
         .filter((task): task is ScheduledInterfaceProjection => Boolean(task));
       setTasks(next);
+      setScopeOptions(normalizeScopeOptions(response.scope_options));
       setError("");
     } catch (failure) {
       if (generation !== requestGeneration.current) return;
@@ -39,5 +41,5 @@ export function useScheduledInterfaces(enabled = true) {
     if (enabled) void reload();
   }, [enabled, projectionGeneration, reload]);
 
-  return { tasks, loading, error, reload };
+  return { tasks, scopeOptions, loading, error, reload };
 }

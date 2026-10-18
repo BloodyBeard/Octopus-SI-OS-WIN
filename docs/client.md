@@ -24,7 +24,7 @@ Screenshots show a development installation, including its incomplete setups.
 | Destination | Use it for |
 | --- | --- |
 | **Home** | The ongoing conversation with Octopus: text, voice calls, current activity, and widgets. |
-| **Tasks** | Work grouped into Projects, reusable Agents, individual tasks, scheduled work, and archived tasks. |
+| **Tasks** | Work grouped into Projects, reusable Agents, individual tasks, triggers, and archived tasks. |
 | **Dashboard** | Inspect Topology, Registry, Worker Environments, and Movements. These views explain what is running and what crossed an interface. |
 | **Inbox** | Review activity and requests that need attention, then open the associated work. |
 | **Applications** | Install and configure providers, connectors, plugins, and context packages; choose where they are available. |
@@ -93,8 +93,9 @@ creating a task does not itself promise branch isolation.
 
 Task environment panels can expose files, a terminal, changes, a browser,
 desktop, or connection details. The available panels come from the task's
-actual environment. **Scheduled** and **Archived** are views within Tasks.
-Scheduling is presented by the client over declared runtime interfaces.
+actual environment. **Triggers** and **Archived** are views within Tasks.
+Triggers are presented by the client over declared runtime interfaces: a time,
+an interval, or a quiet period in your work, each starting an ordinary run.
 
 ![Tasks with Projects, Agents, task history, and the new-task composer](images/client/tasks.png)
 

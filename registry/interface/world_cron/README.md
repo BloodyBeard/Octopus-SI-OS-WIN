@@ -5,8 +5,12 @@ controller run, declares its authoring door, and selects exactly one condition:
 `interval_seconds`, `cron`, `due_at`, or `inactivity`. The client projects these
 activations in **Triggers**. Timing semantics stay inside the interface.
 
-Bind `timezone_database_root` to the host's timezone database through `host.json`
-or the interface's `interface_driver_config.host_slots` before activation.
+The descriptor binds `timezone_database_root` to the system timezone database
+through `interface_driver_config.host_slots`; clones keep that binding.
+
+An activation that is disabled and bound by no run is a template. Packages ship
+templates such as `world_system_review`; Triggers clones one, with private
+copies of its controller interfaces and authoring tool, into a live trigger.
 
 An inactivity condition for user-facing tasks is:
 

@@ -5,6 +5,7 @@ export type ScheduledSuggestion = {
   description: string;
   instructions: string;
   cron: string;
+  templateInterfaceId?: string;
 };
 
 export const scheduledSuggestions: readonly ScheduledSuggestion[] = [

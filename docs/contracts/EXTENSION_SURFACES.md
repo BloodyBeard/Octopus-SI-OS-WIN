@@ -159,9 +159,13 @@ See [registry/worker_environment_kind/GUIDE.md](../../registry/worker_environmen
 
 The clock interface supports inactivity: selected runs' artifact movements
 restart a declared quiet period, after which one artifact wakes an ordinary
-run. Its own target runs are excluded and admission evidence survives restart.
-Selection, timing and cursor state belong to the interface package; the client
-projects these activations as Triggers.
+run. Selection is a descriptor match, optionally narrowed to one EE subtree.
+Its own target runs are excluded, a due period fires exactly once, and
+admission evidence survives restart. Selection, timing and cursor state belong
+to the interface package; the client projects these activations as Triggers.
+A disabled activation that no run binds is a template, shipped by a package:
+Triggers clones it, with private copies of its controller interfaces and
+authoring tool, into a trigger bound to its own controller run.
 
 ## Media across interfaces
 

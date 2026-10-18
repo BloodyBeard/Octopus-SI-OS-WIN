@@ -1,0 +1,42 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_system_review",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_system_review",
+  "release_status": "optional",
+  "display": {
+    "name": "System review",
+    "description": "A trigger template: after a quiet period in your work, a run studies recent experience and improves Octopus when the evidence supports it.",
+    "developer": "Octopus",
+    "category": "connector",
+    "icon": "sparkles"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_system_review",
+      "primary": true
+    },
+    {
+      "registry_kind": "interface",
+      "owner": "system_worker_system_review"
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-system-review-role"
+    }
+  ],
+  "required_packages": [
+    "world_cron",
+    "world_operator_chat",
+    "world_provider_codex",
+    "artifact.codex_context",
+    "driver.system_room",
+    "driver.filesystem_workspace",
+    "driver.browser_session",
+    "driver.desktop_session",
+    "driver.code_mode"
+  ]
+}

@@ -3,18 +3,23 @@ import { OcButton, OcDialog, OcDialogFooter, OcDialogHeader, OcIconButton, OcMen
 import { OcDropdown } from "../../design-system/OcDropdown";
 import { Glyph } from "../IconGlyphs";
 import { MessageTooltip } from "../chat/MessageTooltip";
-import { describeSchedule, formatEvidenceTime, nextScheduledRunAtMs, scheduleExpression } from "./scheduleModel";
-import type { ScheduledInterfaceProjection } from "./types";
+import { describeInactivityState, describeSchedule, formatEvidenceTime, nextScheduledRunAtMs, scheduleExpression } from "./scheduleModel";
+import type { ScheduledDelivery, ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
 
-export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEdit, onToggle }: {
+export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onBack, onDelete, onEdit, onToggle, onUndo }: {
   task: ScheduledInterfaceProjection;
   pending: boolean;
   canEdit: boolean;
+  scopeOptions: ScheduledScopeOption[];
   onBack: () => void;
   onDelete: () => void;
   onEdit: () => void;
   onToggle: () => void;
+  onUndo: (delivery: ScheduledDelivery) => void;
 }) {
+  const [confirmUndo, setConfirmUndo] = useState<ScheduledDelivery | null>(null);
+  const inactivity = task.schedule?.type === "inactivity" ? task.schedule : null;
+  const scopeName = inactivity?.withinEe ? scopeOptions.find((option) => option.eeId === inactivity.withinEe)?.name ?? inactivity.withinEe : "All work";
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLButtonElement>(null);
@@ -46,13 +51,27 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
         </section>
         <section className="scheduled-detail-section">
           <h2>Trigger</h2>
-          <DetailGrid rows={[
+          <DetailGrid rows={inactivity ? [
             ["When", describeSchedule(task)],
-            ...(task.schedule?.type === "inactivity" ? [] : [["Timezone", task.timezone || "Not configured"] as [string, string]]),
-            ["Next run", task.status === "disabled" ? "Paused" : nextDueAtMs ? `${formatEvidenceTime(nextDueAtMs)}${estimated ? " · estimated" : ""}` : triggered ? "Does not repeat" : task.schedule?.type === "inactivity" ? "Waiting for new activity" : "Not recorded"],
+            ["Scope", scopeName],
+            ["Now", describeInactivityState(task)],
+            ["Last work", task.inactivityState?.lastActivityAtMs ? formatEvidenceTime(task.inactivityState.lastActivityAtMs) : "Not recorded"],
+            ["Last triggered", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "Not triggered yet"],
+          ] : [
+            ["When", describeSchedule(task)],
+            ["Timezone", task.timezone || "Not configured"],
+            ["Next run", task.status === "disabled" ? "Paused" : nextDueAtMs ? `${formatEvidenceTime(nextDueAtMs)}${estimated ? " · estimated" : ""}` : triggered ? "Does not repeat" : "Not recorded"],
             ["Last triggered", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "Not triggered yet"],
           ]} />
         </section>
+        {task.deliveries.length ? (
+          <section className="scheduled-detail-section">
+            <h2>Runs</h2>
+            <ul className="scheduled-runs" aria-label="Runs started by this trigger">
+              {task.deliveries.map((delivery) => <DeliveryRow canEdit={canEdit} delivery={delivery} key={delivery.seq} onUndo={() => setConfirmUndo(delivery)} pending={pending} />)}
+            </ul>
+          </section>
+        ) : null}
         <details className="scheduled-interface-details">
           <summary>Interface details<Glyph name="chevronDown" size={14} /></summary>
           <DetailGrid rows={[
@@ -70,6 +89,13 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
           ]} />
         </details>
       </div>
+      <OcDialog ariaLabelledBy="scheduled-undo-title" busy={pending} onClose={() => setConfirmUndo(null)} open={confirmUndo !== null} panelClassName="max-w-md">
+        <OcDialogHeader closeDisabled={pending} description="Each recorded file returns to its exact earlier bytes. Undo stops if a file has changed since this run." onClose={() => setConfirmUndo(null)} title="Undo this run's changes?" titleId="scheduled-undo-title" />
+        <OcDialogFooter>
+          <OcButton disabled={pending} onClick={() => setConfirmUndo(null)} variant="ghost">Cancel</OcButton>
+          <OcButton disabled={!canEdit || pending} onClick={() => { if (confirmUndo) onUndo(confirmUndo); setConfirmUndo(null); }} variant="primary">{pending ? "Restoring…" : "Undo changes"}</OcButton>
+        </OcDialogFooter>
+      </OcDialog>
       <OcDialog ariaLabelledBy="scheduled-delete-title" busy={pending} onClose={() => setConfirmDelete(false)} open={confirmDelete} panelClassName="max-w-md">
         <OcDialogHeader closeDisabled={pending} description="This removes the trigger activation and its owned run record. Ledger evidence is kept." onClose={() => setConfirmDelete(false)} title={`Delete ${task.displayName}?`} titleId="scheduled-delete-title" />
         <OcDialogFooter>
@@ -78,6 +104,43 @@ export function ScheduledDetail({ task, pending, canEdit, onBack, onDelete, onEd
         </OcDialogFooter>
       </OcDialog>
     </section>
+  );
+}
+
+function DeliveryRow({ canEdit, delivery, onUndo, pending }: { canEdit: boolean; delivery: ScheduledDelivery; onUndo: () => void; pending: boolean }) {
+  const journal = delivery.journal;
+  const files = journal?.changes.filter((change) => change.kind === "file") ?? [];
+  const status = !journal ? "No change journal yet"
+    : journal.error ? `Journal unreadable: ${journal.error}`
+      : journal.outcome === "unchanged" ? "No change"
+        : journal.undone ? "Undone"
+          : `${files.length} ${files.length === 1 ? "file" : "files"} changed`;
+  return (
+    <li className="scheduled-run">
+      <div className="scheduled-run-heading">
+        <span className="scheduled-run-time">{formatEvidenceTime(delivery.atMs)}</span>
+        <span className="scheduled-run-status">{status}</span>
+        {journal?.undoable ? <OcButton disabled={!canEdit || pending} onClick={onUndo} size="sm" variant="secondary">Undo</OcButton> : null}
+      </div>
+      {journal?.summary ? <p className="scheduled-run-summary">{journal.summary}</p> : null}
+      {journal && (journal.changes.length || journal.checks.length) ? (
+        <details className="scheduled-interface-details">
+          <summary>Changes and checks<Glyph name="chevronDown" size={14} /></summary>
+          <ul className="scheduled-run-changes">
+            {journal.changes.map((change, index) => change.kind === "file" ? (
+              <li key={`${change.path}:${index}`} title={change.reason}>
+                <span>{change.action} · {change.path}</span>
+                <span>{change.status === "applied" ? change.restorable ? "in place" : `in place · ${change.unrestorableReason}` : change.status === "undone" ? "restored" : "changed since"}</span>
+              </li>
+            ) : (
+              <li key={`other:${index}`} title={change.undo}><span>{change.description}</span><span>{change.undo ? `undo: ${change.undo}` : ""}</span></li>
+            ))}
+            {journal.checks.map((check, index) => <li key={`check:${index}`}><span>{check.check}</span><span>{check.result}</span></li>)}
+          </ul>
+        </details>
+      ) : null}
+      <span className="scheduled-run-ref">{delivery.runId}</span>
+    </li>
   );
 }
 

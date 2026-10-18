@@ -1394,7 +1394,7 @@ export type OctopusRuntimeTopologyProjection = {
 
 export type OctopusScheduledDraft = {
   type: "interval" | "cron" | "once" | "inactivity";
-  inactivity?: { seconds: number; interface_match: Record<string, string> };
+  inactivity?: { seconds: number; interface_match: Record<string, string>; within_ee?: string };
   dueAt?: string;
   intervalSeconds?: number;
   cron?: string;
@@ -1427,14 +1427,20 @@ export type OctopusScheduledMutationRequest =
       action: "delete";
       interfaceId: string;
       expectedDigest: string;
+    }
+  | {
+      action: "undo_changes";
+      runId: string;
+      expectedJournalDigest: string;
     };
 
 export type OctopusScheduledMutationOutcome = {
   action: OctopusScheduledMutationRequest["action"];
-  interfaceId: string;
+  interfaceId?: string;
   runId?: string;
   activationDigest?: string;
   deleted?: boolean;
+  restored?: string[];
 };
 
 export type OctopusApplicationPrivateConfigurationMutation = {

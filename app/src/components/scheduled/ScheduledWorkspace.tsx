@@ -3,7 +3,7 @@ import type { OctopusScheduledMutationRequest } from "../../electron";
 import { canMutateScheduledInterfaces, mutateScheduledInterface } from "../../projectionClient";
 import { draftFromScheduledInterface, draftFromTemplate, mutationDraft } from "./scheduleModel";
 import type { ScheduledSuggestion } from "./scheduledSuggestions";
-import type { ScheduledEditorDraft, ScheduledEditorMode, ScheduledInterfaceProjection } from "./types";
+import type { ScheduledDelivery, ScheduledEditorDraft, ScheduledEditorMode, ScheduledInterfaceProjection } from "./types";
 import { useScheduledInterfaces } from "./useScheduledInterfaces";
 
 function useScheduledWorkspaceState(active: boolean) {
@@ -15,11 +15,15 @@ function useScheduledWorkspaceState(active: boolean) {
   const [searchRequest, setSearchRequest] = useState(0);
   const requestSearch = useCallback(() => setSearchRequest((current) => current + 1), []);
   const canEdit = canMutateScheduledInterfaces() && !projection.error;
-  const templates = projection.tasks.filter((task) => task.valid && task.cloneEligible);
-  const selected = projection.tasks.find((task) => task.interfaceId === selectedId) ?? null;
+  const triggers = projection.tasks.filter((task) => !task.template);
+  const templates = projection.tasks.filter((task) => task.valid && task.cloneEligible)
+    .sort((left, right) => Number(right.template) - Number(left.template) || left.displayName.localeCompare(right.displayName));
+  const timeTemplate = templates.find((task) => task.schedule?.type !== "inactivity") ?? null;
+  const selected = triggers.find((task) => task.interfaceId === selectedId) ?? null;
   const createUnavailableReason = !canEdit ? "Open a connected desktop client to create a trigger."
     : projection.loading ? "Loading triggers…"
       : templates.length === 0 ? "A complete trigger template is needed before creating a task." : "";
+  const timeSuggestionUnavailableReason = createUnavailableReason || (timeTemplate ? "" : "Install a time-based trigger template to use these suggestions.");
 
   async function mutate(request: OctopusScheduledMutationRequest, after: () => void) {
     setPending(true);
@@ -43,15 +47,22 @@ function useScheduledWorkspaceState(active: boolean) {
   }
 
   function startCreate(suggestion?: ScheduledSuggestion) {
-    const source = templates[0];
+    const source = suggestion?.templateInterfaceId
+      ? templates.find((task) => task.interfaceId === suggestion.templateInterfaceId)
+      : suggestion ? timeTemplate : templates[0];
     if (pending || createUnavailableReason || !source) return;
     const draft = draftFromTemplate(source);
     setEditor((previous) => ({
       mode: { kind: "create", source },
-      draft: suggestion ? { ...draft, instructions: suggestion.instructions, type: "cron", cron: suggestion.cron } : draft,
+      draft: suggestion && !suggestion.templateInterfaceId ? { ...draft, instructions: suggestion.instructions, type: "cron", cron: suggestion.cron } : draft,
       revision: (previous?.revision ?? 0) + 1,
     }));
     setMutationError("");
+  }
+
+  function undoChanges(delivery: ScheduledDelivery) {
+    if (pending || !canEdit || !delivery.journal?.undoable) return;
+    void mutate({ action: "undo_changes", runId: delivery.runId, expectedJournalDigest: delivery.journal.digest }, () => {});
   }
 
   function startEdit(task: ScheduledInterfaceProjection) {
@@ -81,8 +92,8 @@ function useScheduledWorkspaceState(active: boolean) {
   }
 
   return {
-    ...projection, selected, selectedId, selectTask, editor, templates, pending, canEdit, createUnavailableReason,
-    mutationError, dismissError: () => setMutationError(""), startCreate, startEdit, save, toggleTask, deleteTask,
+    ...projection, tasks: triggers, selected, selectedId, selectTask, editor, templates, pending, canEdit, createUnavailableReason,
+    timeSuggestionUnavailableReason, mutationError, dismissError: () => setMutationError(""), startCreate, startEdit, save, toggleTask, deleteTask, undoChanges,
     cancelEdit: () => { if (!pending) { setEditor(null); setMutationError(""); } },
     searchRequest, requestSearch,
   };

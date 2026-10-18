@@ -646,7 +646,7 @@ function createProjectionStore(options) {
       case "projection.operator.providers.status":
         return { providers: await operatorProviderStatusRows(projection) };
       case "projection.scheduled_interfaces.list":
-        return { scheduled_interfaces: await scheduledInterfaceRows(projection) };
+        return { scheduled_interfaces: await scheduledInterfaceRows(projection), scope_options: scheduledScopeOptions(projection) };
       case "projection.movements.payload":
         return await movementPayloadPreview(params);
       case "projection.client_surfaces.list":
@@ -7610,6 +7610,15 @@ function createProjectionStore(options) {
     ));
   }
 
+  function scheduledScopeOptions(projection) {
+    const scope = operatorOsScope(projection);
+    const names = new Map(arrayValue(scope.project_presentations).map((row) => [stringValue(row?.ee_id), stringValue(row?.name)]));
+    return arrayValue(scope.projects).map((row) => ({
+      ee_id: stringValue(row.ee_id),
+      name: names.get(stringValue(row.ee_id)) || stringValue(row.goal) || stringValue(row.ee_id),
+    })).filter((row) => row.ee_id);
+  }
+
   async function scheduledInterfaceRows(projection) {
     const rows = [];
     const boundInterfaces = new Set(arrayValue(projection.runRecords).flatMap((record) => (
@@ -7639,23 +7648,24 @@ function createProjectionStore(options) {
           interface: sidecar.interface,
           activations: sidecar.activations,
         }, interfaceId);
-        if (!boundInterfaces.has(interfaceId)) {
-          if (parsed.activation.enabled === false) continue;
-          throw new Error(`scheduled interface '${interfaceId}' is not bound to a run`);
-        }
         const schedule = parsed.config.schedule;
         const runTemplate = parsed.config.run_template;
         const trigger = runTemplate.checkpoints.find((checkpoint) => interfaceBindingId(checkpoint.interface_binding) === interfaceId);
-        const evidence = await scheduledInterfaceEvidence(
-          projection,
-          interfaceId,
-          parsed.config,
-          evidenceRows,
-        );
+        const cloneEligible = parsed.config.target.mode === "new_run"
+          || arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value));
+        const template = !boundInterfaces.has(interfaceId);
+        if (template) {
+          if (parsed.activation.enabled !== false) throw new Error(`scheduled interface '${interfaceId}' is not bound to a run`);
+          if (!cloneEligible) continue;
+        }
+        const evidence = template
+          ? { lastRunAtMs: null, lastMovementSeq: null, nextRunAtMs: null, nextRunSource: "", inactivityState: null, deliveries: [] }
+          : await scheduledInterfaceEvidence(projection, interfaceId, parsed.config, evidenceRows);
         rows.push({
           interface_id: interfaceId,
           display_name: scheduledInterfaceDisplayName(interfaceId, runTemplate.id),
-          status: parsed.activation.enabled === false ? "disabled" : "enabled",
+          template,
+          status: template ? "template" : parsed.activation.enabled === false ? "disabled" : "enabled",
           valid: true,
           activation_digest: activationDigest,
           activation_path: activationPath,
@@ -7680,12 +7690,13 @@ function createProjectionStore(options) {
             outbound_interface_ids: arrayValue(trigger?.outbound_interface_bindings).map(interfaceBindingId).filter(Boolean),
             artifact_binding_count: arrayValue(trigger?.artifact_bindings).length,
           },
-          clone_eligible: parsed.config.target.mode === "new_run"
-            || arrayValue(trigger?.outbound_interface_bindings).some((value) => interfaceBindingId(value)),
+          clone_eligible: cloneEligible,
           last_run_at_ms: evidence.lastRunAtMs,
           last_movement_seq: evidence.lastMovementSeq,
           next_run_at_ms: parsed.activation.enabled === false ? null : evidence.nextRunAtMs,
           next_run_source: parsed.activation.enabled === false ? "" : evidence.nextRunSource,
+          inactivity_state: evidence.inactivityState,
+          deliveries: evidence.deliveries,
         });
       } catch (error) {
         rows.push({
@@ -7706,9 +7717,21 @@ function createProjectionStore(options) {
     ));
   }
 
+  async function readChangeJournal(projection, runId) {
+    try {
+      const plan = await changeJournalPlan(projection.octopusHome, projection.registryRoot, runId);
+      if (!plan) return null;
+      const { writes, ...journal } = plan;
+      return journal;
+    } catch (error) {
+      return { run_id: runId, error: String(error?.message ?? error) };
+    }
+  }
+
   async function scheduledInterfaceEvidence(projection, interfaceId, config, evidenceRows) {
     let lastRunAtMs = 0;
     let lastMovementSeq = 0;
+    const deliveries = [];
     const deadline = config.schedule.due_at == null ? null : parseScheduledDueAt(config.schedule.due_at);
     for (const movement of evidenceRows) {
       if (
@@ -7724,21 +7747,29 @@ function createProjectionStore(options) {
         lastRunAtMs = at;
         lastMovementSeq = seq;
       }
+      deliveries.push({ seq, at_ms: at, run_id: movementRunId(movement) });
     }
     const schedule = config.schedule;
     let nextRunAtMs = null;
     let nextRunSource = "";
+    let inactivityState = null;
     if (schedule.inactivity != null) {
       const document = await readOptionalRegularJsonDocument(path.join(projection.octopusHome, "interfaces", interfaceId, "cron-inactivity-state.json"), "inactivity trigger state");
       const state = document?.document;
       if (state && (state.schema_version !== 1 || !["idle", "waiting", "prepared", "admitted"].includes(state.status))) throw new Error("inactivity trigger state has an invalid schema or status");
       if (state && ["waiting", "prepared"].includes(state.status) && (!Number.isSafeInteger(state.next_due_unix_ms) || state.next_due_unix_ms < 0)) throw new Error("inactivity trigger state has an invalid deadline");
-      if (state?.schema_version === 1 && ["waiting", "prepared"].includes(state.status)
-        && stableJson(state.inactivity) === stableJson(schedule.inactivity)
+      const current = state?.schema_version === 1 && stableJson(state.inactivity ?? null) === stableJson(schedule.inactivity);
+      if (current && ["waiting", "prepared"].includes(state.status)
         && Number.isSafeInteger(state.next_due_unix_ms) && state.next_due_unix_ms >= 0) {
         nextRunAtMs = state.next_due_unix_ms;
         nextRunSource = "driver_state";
       }
+      inactivityState = {
+        status: stringValue(state?.status) || "unstarted",
+        current: Boolean(current) || ["idle", "admitted"].includes(stringValue(state?.status)),
+        last_activity_at_ms: Number.isSafeInteger(state?.activity?.recorded_at_unix_ms) ? state.activity.recorded_at_unix_ms : null,
+        last_activity_run_id: stringValue(state?.activity?.run),
+      };
     }
     if (deadline !== null && !lastRunAtMs) {
       nextRunAtMs = Number(deadline / 1_000_000n);
@@ -7767,11 +7798,19 @@ function createProjectionStore(options) {
       const parsed = typeof state?.last_cron_minute === "string" ? Date.parse(state.last_cron_minute) : NaN;
       if (Number.isFinite(parsed)) lastRunAtMs = parsed;
     }
+    const clientRuns = new Map(arrayValue(operatorOsScope(projection).client_runs).map((row) => [stringValue(row.run_id), row]));
+    const recent = deliveries.sort((left, right) => right.seq - left.seq).slice(0, 8);
+    for (const delivery of recent) {
+      delivery.chat_interface_id = stringValue(clientRuns.get(delivery.run_id)?.interface_id);
+      delivery.journal = delivery.run_id ? await readChangeJournal(projection, delivery.run_id) : null;
+    }
     return {
       lastRunAtMs: lastRunAtMs || null,
       lastMovementSeq: lastMovementSeq || null,
       nextRunAtMs,
       nextRunSource,
+      inactivityState,
+      deliveries: recent,
     };
   }
 
@@ -13915,7 +13954,8 @@ async function assertNoRunRecordReferencesEe(octopusHomeRoot, eeId) {
 
 async function mutateScheduledInterface(registryRoot, octopusHomeRoot, request, hooks = {}) {
   const action = stringValue(request?.action);
-  if (!["create", "update", "set_enabled", "delete"].includes(action)) throw new Error("scheduled mutation action is invalid");
+  if (!["create", "update", "set_enabled", "delete", "undo_changes"].includes(action)) throw new Error("scheduled mutation action is invalid");
+  if (action === "undo_changes") return undoChangeJournal(registryRoot, octopusHomeRoot, request, hooks.commitClientAuthoring);
   const interfaceRoot = await fs.realpath(path.join(registryRoot, "interface"));
   if (action === "create") {
     return createScheduledInterface(
@@ -14332,6 +14372,103 @@ function requiredSafeRegistryId(value, label) {
   const id = requiredString(value, label);
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error(`${label} must be a registry-safe id`);
   return id;
+}
+
+const CHANGE_JOURNAL_MAX_BYTES = 1024 * 1024;
+const CHANGE_JOURNAL_MAX_FILE_BYTES = 16 * 1024 * 1024;
+
+async function currentFileDigest(file) {
+  const stat = await fs.lstat(file).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  if (!stat) return null;
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`${file} is not a regular file`);
+  if (stat.size > CHANGE_JOURNAL_MAX_FILE_BYTES) throw new Error(`${file} exceeds the journal file limit`);
+  return crypto.createHash("sha256").update(await fs.readFile(file)).digest("hex");
+}
+
+async function changeJournalPlan(octopusHome, registryRoot, runId) {
+  requiredSafeRegistryId(runId, "change journal run");
+  const directory = path.join(octopusHome, "state", "change-journals", runId);
+  const file = path.join(directory, "journal.json");
+  const stat = await fs.lstat(file).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  if (!stat) return null;
+  if (stat.size > CHANGE_JOURNAL_MAX_BYTES) throw new Error("change journal exceeds its size limit");
+  const { document, digest } = await readRegularJsonDocument(file, "change journal");
+  exactObjectKeys(document, ["schema_version", "run", "trigger_artifact", "outcome", "summary", "changes", "checks"], ["schema_version", "run", "outcome", "summary", "changes"], "change journal");
+  if (document.schema_version !== 1 || document.run !== runId) throw new Error("change journal belongs to another run or schema");
+  if (!["changed", "unchanged"].includes(document.outcome)) throw new Error("change journal outcome must be changed or unchanged");
+  if (!Array.isArray(document.changes) || (document.checks !== undefined && !Array.isArray(document.checks))) throw new Error("change journal changes and checks must be arrays");
+  const restorableRoots = [
+    ...["interface", "tool", "artifact", "ee_template"].map((kind) => path.join(registryRoot, kind)),
+    path.join(octopusHome, "state", "runs"),
+    path.join(octopusHome, "state", "ee_instances"),
+    path.join(octopusHome, "interfaces"),
+  ];
+  const entries = [];
+  const writes = [];
+  for (const [index, change] of document.changes.entries()) {
+    if (change?.kind !== "file") {
+      entries.push({ kind: "other", description: stringValue(change?.description), undo: stringValue(change?.undo), status: "manual" });
+      continue;
+    }
+    exactObjectKeys(change, ["kind", "path", "action", "before_sha256", "after_sha256", "before_copy", "reason"], ["kind", "path", "action", "before_sha256", "after_sha256", "reason"], `change journal entry ${index + 1}`);
+    const target = stringValue(change.path);
+    if (!path.isAbsolute(target) || path.resolve(target) !== target) throw new Error(`change journal entry ${index + 1} needs a canonical absolute path`);
+    if (!["created", "modified", "deleted"].includes(change.action)) throw new Error(`change journal entry ${index + 1} has an invalid action`);
+    const digest = (value) => value === null ? null : (/^[0-9a-f]{64}$/.test(stringValue(value)) ? value : (() => { throw new Error(`change journal entry ${index + 1} has an invalid hash`); })());
+    const before = digest(change.before_sha256);
+    const after = digest(change.after_sha256);
+    if ((change.action === "created") !== (before === null) || (change.action === "deleted") !== (after === null)) throw new Error(`change journal entry ${index + 1} hashes do not match its action`);
+    const current = await currentFileDigest(target);
+    const status = current === after ? "applied" : current === before ? "undone" : "changed";
+    let restore = "";
+    let reason = "";
+    if (before !== null) {
+      const copy = stringValue(change.before_copy);
+      const copyPath = path.resolve(directory, copy);
+      if (!copy || !isPathInside(directory, copyPath)) reason = "its before copy is missing";
+      else {
+        const bytes = await fs.readFile(copyPath).catch(() => null);
+        if (!bytes || crypto.createHash("sha256").update(bytes).digest("hex") !== before) reason = "its before copy does not match the recorded hash";
+        else if (!Buffer.from(bytes.toString("utf8")).equals(bytes)) reason = "its before copy is not text";
+        else restore = bytes.toString("utf8");
+      }
+    }
+    if (!reason && !restorableRoots.some((root) => isPathInside(root, target))) reason = "it lies outside the Home folders the client restores";
+    entries.push({ kind: "file", path: target, action: change.action, reason: stringValue(change.reason), status, restorable: !reason, unrestorable_reason: reason });
+    if (!reason) writes.push({ file: target, beforeDigest: after, ...(before === null ? { next: null } : { content: restore }), label: `restore ${path.basename(target)}` });
+  }
+  const files = entries.filter((entry) => entry.kind === "file");
+  return {
+    digest,
+    run_id: runId,
+    outcome: document.outcome,
+    summary: stringValue(document.summary),
+    trigger_artifact: stringValue(document.trigger_artifact),
+    checks: arrayValue(document.checks).map((check) => ({ check: stringValue(check?.check), result: stringValue(check?.result), evidence: stringValue(check?.evidence) })),
+    changes: entries,
+    undoable: files.length > 0 && files.every((entry) => entry.status === "applied" && entry.restorable),
+    undone: files.length > 0 && files.every((entry) => entry.status === "undone"),
+    writes,
+  };
+}
+
+async function undoChangeJournal(registryRoot, octopusHomeRoot, request, commitClientAuthoring) {
+  if (typeof commitClientAuthoring !== "function") throw new Error("client authoring transaction is unavailable");
+  const runId = requiredSafeRegistryId(request?.runId, "runId");
+  const plan = await changeJournalPlan(octopusHomeRoot, registryRoot, runId);
+  if (!plan) throw new Error(`run ${runId} kept no change journal`);
+  if (plan.digest !== requiredDigest(request?.expectedJournalDigest, "expectedJournalDigest")) throw new Error("the change journal changed before undo");
+  if (!plan.undoable) {
+    const blocked = plan.changes.filter((entry) => entry.kind === "file" && (entry.status !== "applied" || !entry.restorable));
+    throw new Error(`undo refused: ${blocked.map((entry) => `${entry.path} ${entry.status !== "applied" ? `is ${entry.status}` : `cannot be restored because ${entry.unrestorable_reason}`}`).join("; ")}`);
+  }
+  await commitClientAuthoring({
+    label: `undo changes recorded by ${runId}`,
+    writes: plan.writes,
+    removals: [],
+    publishBarrierPath: plan.writes.at(-1).file,
+  });
+  return { action: "undo_changes", runId, restored: plan.writes.map((write) => write.file) };
 }
 
 function requiredSafeToolId(value, label) {

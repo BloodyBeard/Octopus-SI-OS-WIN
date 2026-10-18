@@ -44,6 +44,7 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
           onCancel={workspace.cancelEdit}
           onSave={workspace.save}
           pending={pending}
+          scopeOptions={workspace.scopeOptions}
           templates={workspace.templates}
         />
       ) : error ? (
@@ -62,7 +63,9 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
           onDelete={() => workspace.deleteTask(selected)}
           onEdit={() => workspace.startEdit(selected)}
           onToggle={() => workspace.toggleTask(selected)}
+          onUndo={workspace.undoChanges}
           pending={pending}
+          scopeOptions={workspace.scopeOptions}
           task={selected}
         />
       ) : loading ? (
@@ -75,7 +78,7 @@ export function LiveScheduledView({ searchFocusTick, navigationInPane = false }:
           title="Trigger unavailable"
         />
       ) : (
-        <ScheduledLanding disabledReason={workspace.createUnavailableReason} onCreate={workspace.startCreate} />
+        <ScheduledLanding disabledReason={workspace.createUnavailableReason} onCreate={workspace.startCreate} templates={workspace.templates} timeDisabledReason={workspace.timeSuggestionUnavailableReason} />
       )}
     </section>
   );

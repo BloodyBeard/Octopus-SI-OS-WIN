@@ -1,11 +1,11 @@
 import type { OctopusScheduledDraft } from "../../electron";
-import type { ScheduledEditorDraft, ScheduledInterfaceProjection } from "./types";
+import type { ChangeJournal, ChangeJournalEntry, InactivityState, ScheduledDelivery, ScheduledEditorDraft, ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
 
 export function normalizeScheduledInterface(value: unknown): ScheduledInterfaceProjection | null {
   const row = objectValue(value);
   if (!row) return null;
   const interfaceId = stringValue(row.interface_id);
-  const status = row.status === "enabled" || row.status === "disabled" || row.status === "invalid" ? row.status : "invalid";
+  const status = row.status === "enabled" || row.status === "disabled" || row.status === "invalid" || row.status === "template" ? row.status : "invalid";
   if (!interfaceId) return null;
   const rawSchedule = objectValue(row.schedule);
   const schedule = rawSchedule?.type === "interval" && positiveNumber(rawSchedule.interval_seconds)
@@ -15,7 +15,7 @@ export function normalizeScheduledInterface(value: unknown): ScheduledInterfaceP
       : rawSchedule?.type === "once" && Number.isFinite(Date.parse(stringValue(rawSchedule.due_at)))
         ? { type: "once" as const, dueAt: stringValue(rawSchedule.due_at) }
         : rawSchedule?.type === "inactivity" && positiveNumber(rawSchedule.seconds) && objectValue(rawSchedule.interface_match)
-          ? { type: "inactivity" as const, seconds: rawSchedule.seconds, interfaceMatch: rawSchedule.interface_match as Record<string, string> }
+          ? { type: "inactivity" as const, seconds: rawSchedule.seconds, interfaceMatch: rawSchedule.interface_match as Record<string, string>, withinEe: stringValue(rawSchedule.within_ee) }
           : null;
   const rawTemplate = objectValue(row.run_template);
   const runTemplate = rawTemplate ? {
@@ -46,12 +46,90 @@ export function normalizeScheduledInterface(value: unknown): ScheduledInterfaceP
     reminderEnv: stringValue(row.reminder_env),
     runTemplate,
     cloneEligible: valid && row.clone_eligible === true,
+    template: row.template === true,
+    inactivityState: normalizeInactivityState(row.inactivity_state),
+    deliveries: Array.isArray(row.deliveries) ? row.deliveries.map(normalizeDelivery).filter((delivery): delivery is ScheduledDelivery => Boolean(delivery)) : [],
     lastRunAtMs: nullableTimestamp(row.last_run_at_ms),
     lastMovementSeq: nullableInteger(row.last_movement_seq),
     nextRunAtMs: nullableTimestamp(row.next_run_at_ms),
     nextRunSource: row.next_run_source === "driver_state" || row.next_run_source === "schedule" ? row.next_run_source : "",
     error: stringValue(row.error) || (valid ? "" : "The activation does not satisfy the cron_life contract."),
   };
+}
+
+function normalizeInactivityState(value: unknown): InactivityState | null {
+  const state = objectValue(value);
+  if (!state) return null;
+  const status = ["unstarted", "idle", "waiting", "prepared", "admitted"].includes(stringValue(state.status)) ? stringValue(state.status) as InactivityState["status"] : "unstarted";
+  return { status, current: state.current === true, lastActivityAtMs: nullableTimestamp(state.last_activity_at_ms) };
+}
+
+function normalizeDelivery(value: unknown): ScheduledDelivery | null {
+  const row = objectValue(value);
+  if (!row || !Number.isSafeInteger(row.seq) || !stringValue(row.run_id)) return null;
+  return {
+    seq: row.seq as number,
+    atMs: nullableTimestamp(row.at_ms) ?? 0,
+    runId: stringValue(row.run_id),
+    chatInterfaceId: stringValue(row.chat_interface_id),
+    journal: normalizeJournal(row.journal),
+  };
+}
+
+function normalizeJournal(value: unknown): ChangeJournal | null {
+  const row = objectValue(value);
+  if (!row) return null;
+  const changes = Array.isArray(row.changes) ? row.changes.flatMap((entry): ChangeJournalEntry[] => {
+    const change = objectValue(entry);
+    if (!change) return [];
+    if (change.kind === "file") {
+      const action = change.action === "created" || change.action === "modified" || change.action === "deleted" ? change.action : null;
+      const status = change.status === "applied" || change.status === "undone" || change.status === "changed" ? change.status : null;
+      return action && status ? [{ kind: "file", path: stringValue(change.path), action, reason: stringValue(change.reason), status, restorable: change.restorable === true, unrestorableReason: stringValue(change.unrestorable_reason) }] : [];
+    }
+    return [{ kind: "other", description: stringValue(change.description), undo: stringValue(change.undo) }];
+  }) : [];
+  return {
+    digest: stringValue(row.digest),
+    outcome: row.outcome === "changed" ? "changed" : "unchanged",
+    summary: stringValue(row.summary),
+    checks: Array.isArray(row.checks) ? row.checks.flatMap((entry) => {
+      const check = objectValue(entry);
+      return check ? [{ check: stringValue(check.check), result: stringValue(check.result), evidence: stringValue(check.evidence) }] : [];
+    }) : [],
+    changes,
+    undoable: row.undoable === true && /^[0-9a-f]{64}$/.test(stringValue(row.digest)),
+    undone: row.undone === true,
+    error: stringValue(row.error),
+  };
+}
+
+export function normalizeScopeOptions(value: unknown): ScheduledScopeOption[] {
+  return Array.isArray(value) ? value.flatMap((entry) => {
+    const row = objectValue(entry);
+    return row && stringValue(row.ee_id) ? [{ eeId: stringValue(row.ee_id), name: stringValue(row.name) || stringValue(row.ee_id) }] : [];
+  }) : [];
+}
+
+export function describeInactivityState(task: Pick<ScheduledInterfaceProjection, "status" | "inactivityState" | "nextRunAtMs">): string {
+  if (task.status === "disabled") return "Paused";
+  const state = task.inactivityState;
+  if (!state || state.status === "unstarted") return "Starts watching once the trigger is running";
+  if (!state.current) return "Applying the new quiet period";
+  if (state.status === "prepared") return "Starting a run";
+  if (state.status === "waiting" && task.nextRunAtMs) return `Starts at ${formatEvidenceTime(task.nextRunAtMs)} if work stays quiet`;
+  return "Waiting for new activity";
+}
+
+export const QUIET_PERIOD_UNITS = [
+  { value: "minutes", label: "Minutes", seconds: 60 },
+  { value: "hours", label: "Hours", seconds: 3600 },
+] as const;
+
+export type QuietPeriodUnit = typeof QUIET_PERIOD_UNITS[number]["value"];
+
+export function quietPeriodUnit(seconds: number): QuietPeriodUnit {
+  return seconds >= 3600 && seconds % 3600 === 0 ? "hours" : "minutes";
 }
 
 export function draftFromScheduledInterface(task: ScheduledInterfaceProjection): ScheduledEditorDraft {
@@ -61,7 +139,7 @@ export function draftFromScheduledInterface(task: ScheduledInterfaceProjection):
     type: task.schedule?.type ?? "interval",
     intervalSeconds: task.schedule?.type === "interval" ? task.schedule.intervalSeconds : 3600,
     inactivity: task.schedule?.type === "inactivity"
-      ? { seconds: task.schedule.seconds, interface_match: task.schedule.interfaceMatch }
+      ? { seconds: task.schedule.seconds, interface_match: task.schedule.interfaceMatch, ...(task.schedule.withinEe ? { within_ee: task.schedule.withinEe } : {}) }
       : { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" } },
     cron: task.schedule?.type === "cron" ? task.schedule.cron : "0 9 * * 1-5",
     dueAt: task.schedule?.type === "once" ? task.schedule.dueAt : "",
@@ -96,7 +174,7 @@ export function scheduledDraftError(draft: ScheduledEditorDraft, creating: boole
   if (!draft.instructions.trim()) return "Instructions are required.";
   if (!draft.timezone.trim()) return "Timezone is required.";
   if (draft.type === "inactivity") {
-    if (!positiveNumber(draft.inactivity?.seconds) || draft.inactivity.seconds < 0.001) return "Quiet period must be at least 0.001 seconds.";
+    if (!positiveNumber(draft.inactivity?.seconds) || draft.inactivity.seconds < 60) return "Quiet period must be at least one minute.";
     if (draft.fireOnStart) return "An inactivity trigger waits for activity and then a quiet period.";
   } else if (draft.type === "interval") {
     if (!positiveNumber(draft.intervalSeconds)) return "Interval must be greater than zero.";
@@ -118,7 +196,7 @@ export function formatSchedule(task: Pick<ScheduledInterfaceProjection, "schedul
 export function describeSchedule(task: Pick<ScheduledInterfaceProjection, "schedule">): string {
   if (!task.schedule) return "Invalid schedule";
   if (task.schedule.type === "interval") return formatInterval(task.schedule.intervalSeconds);
-  if (task.schedule.type === "inactivity") return `After ${formatInterval(task.schedule.seconds).slice(6)} without activity`;
+  if (task.schedule.type === "inactivity") return `After ${formatInterval(task.schedule.seconds).replace(/^Every /, "")} without activity`;
   if (task.schedule.type === "once") {
     const at = Date.parse(task.schedule.dueAt);
     return Number.isFinite(at) ? `Once · ${formatEvidenceTime(at)}` : "Choose a date and time";
