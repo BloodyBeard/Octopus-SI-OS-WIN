@@ -183,6 +183,7 @@ export function liveArtifactMessage(
           stream_seq: artifact.stream_seq,
           byte_start_offset: artifact.byte_start_offset,
           byte_end_offset: artifact.byte_end_offset,
+          source_movement_seq: artifact.source_movement_seq,
           recorded_at_unix_ms: artifact.recorded_at_unix_ms,
         },
         _activity_origin: activityOrigin,

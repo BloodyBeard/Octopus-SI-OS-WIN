@@ -255,6 +255,8 @@ struct ProviderLedgerEvidenceIndex {
     retained_delivery: pending_delivery::Ledger,
 }
 
+type ContextPublications = BTreeMap<String, BTreeSet<u64>>;
+
 #[derive(Clone, PartialEq, Eq)]
 struct IndexedOutboundArtifact {
     source: InterfaceId,
@@ -7613,7 +7615,7 @@ impl ProviderOutputHandoff {
         &self,
         chain: &[CheckedRunTransition],
         current: &[u8],
-    ) -> Result<BTreeMap<String, u64>, String> {
+    ) -> Result<ContextPublications, String> {
         let mut publications = BTreeMap::new();
         let mut sources = BTreeSet::new();
         let profile = RunAuthoringProfile {
@@ -7642,11 +7644,7 @@ impl ProviderOutputHandoff {
         for (_, context) in self.checked_failed_source_contexts(current, chain, None)? {
             for entry in context.artifacts {
                 let sequence = entry.source_movement_seq.ok_or("recovered failed context has no admitted movement")?;
-                if publications.insert(artifact_ref_key(&entry.source_artifact), sequence)
-                    .is_some_and(|previous| previous != sequence)
-                {
-                    return Err("recovered failed context changed its published movement".into());
-                }
+                self.record_context_publication(&mut publications, &entry.source_artifact, sequence)?;
             }
         }
         Ok(publications)
@@ -7654,7 +7652,7 @@ impl ProviderOutputHandoff {
 
     fn extend_admitted_context_publications(
         &self, record: &RunRecord, config: &RunAuthoringConfig, pending: &PendingHandoff,
-        sources: &mut BTreeSet<u64>, publications: &mut BTreeMap<String, u64>,
+        sources: &mut BTreeSet<u64>, publications: &mut ContextPublications,
     ) -> Result<(), String> {
         if pending.items.iter().any(|item| self.session_snapshot_labels.contains(&item.artifact_label))
             && !pending.source_without_context
@@ -7669,11 +7667,7 @@ impl ProviderOutputHandoff {
             for entry in context.artifacts {
                 let sequence = entry.source_movement_seq
                     .ok_or("checked context source has no admitted movement")?;
-                if publications.insert(artifact_ref_key(&entry.source_artifact), sequence)
-                    .is_some_and(|previous| previous != sequence)
-                {
-                    return Err("checked context source changed its admitted movement".into());
-                }
+                self.record_context_publication(publications, &entry.source_artifact, sequence)?;
             }
         }
         let evidence = self.pending_handoff_evidence(pending)?;
@@ -7681,12 +7675,27 @@ impl ProviderOutputHandoff {
             let sequence = sequence
                 .ok_or("published context has no admitted provider output evidence")?;
             let (_, source) = load_pending_artifact(&self.var_dir, item)?;
-            if publications.insert(artifact_ref_key(&source), sequence)
-                .is_some_and(|previous| previous != sequence)
-            {
-                return Err("published context changed its admitted movement".into());
+            self.record_context_publication(publications, &source, sequence)?;
+        }
+        Ok(())
+    }
+
+    fn record_context_publication(
+        &self, publications: &mut ContextPublications, artifact: &ArtifactRef, sequence: u64,
+    ) -> Result<(), String> {
+        let sequences = publications.entry(artifact_ref_key(artifact)).or_default();
+        if let Some(previous) = sequences.first().copied().filter(|_| !sequences.contains(&sequence)) {
+            let mut same_delivery = false;
+            for known in sequences.iter().copied() {
+                if self.session.index()?.retained_delivery.same_output_delivery(
+                    &self.config.run, &self.config.worker, artifact, known, sequence,
+                )? { same_delivery = true; break; }
+            }
+            if !same_delivery {
+                return Err(format!("checked context source '{}' changed its admitted movement from {previous} to {sequence}", artifact.id));
             }
         }
+        sequences.insert(sequence);
         Ok(())
     }
 
@@ -7695,7 +7704,7 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         current: &RunRecord,
         authored: &RunRecord,
-        publications: &BTreeMap<String, u64>,
+        publications: &ContextPublications,
     ) -> Result<(), String> {
         let Some(mut pending) = persisted_pending_handoff(authored, &self.config.provider_interface)? else {
             return Ok(());
@@ -7761,7 +7770,7 @@ impl ProviderOutputHandoff {
         state: &mut HandoffState,
         record: &RunRecord,
         pending: &PendingHandoff,
-        publications: &BTreeMap<String, u64>,
+        publications: &ContextPublications,
     ) -> Result<(), String> {
         if pending.source_movement_seq != self.source_movement_seq && self.result_input_template()?.is_some() {
             let inputs = take_unpublished_context_inputs(state, self.source_movement_seq)?;
@@ -13720,8 +13729,15 @@ fn session_context_entries_agree(
 fn reconcile_recovered_session_snapshot(
     existing: &[SessionContextArtifact],
     recovered: &mut Vec<SessionContextArtifact>,
-    publications: &BTreeMap<String, u64>,
+    publications: &ContextPublications,
     source: &ArtifactRef,
+) -> Result<bool, String> {
+    reconcile_session_context_order(existing, recovered, publications, source, false)
+}
+
+fn reconcile_session_context_order(
+    existing: &[SessionContextArtifact], recovered: &mut Vec<SessionContextArtifact>,
+    publications: &ContextPublications, source: &ArtifactRef, interleave_checked_history: bool,
 ) -> Result<bool, String> {
     let mismatch = |detail: &str| format!(
         "provider recovered snapshot '{}' differs from existing session context: {detail}",
@@ -13737,12 +13753,18 @@ fn reconcile_recovered_session_snapshot(
     let mut last_shared = None;
     for candidate in recovered.iter_mut() {
         if let Some(index) = positions.get(&artifact_ref_key(&candidate.source_artifact)).copied() {
+            let existing_entry = &existing[index];
+            let same_delivery = existing_entry.label == candidate.label && existing_entry.payload == candidate.payload
+                && publications.get(&artifact_ref_key(&candidate.source_artifact)).is_some_and(|sequences| {
+                    existing_entry.source_movement_seq.is_some_and(|seq| sequences.contains(&seq))
+                        && candidate.source_movement_seq.is_some_and(|seq| sequences.contains(&seq))
+                });
             if last_shared.is_some_and(|previous| previous >= index)
-                || !session_context_entries_agree(&existing[index], candidate)
+                || !(session_context_entries_agree(existing_entry, candidate) || same_delivery)
             {
                 return Err(mismatch("shared artifacts changed content or order"));
             }
-            candidate.source_movement_seq = candidate.source_movement_seq.or(existing[index].source_movement_seq);
+            candidate.source_movement_seq = existing_entry.source_movement_seq.or(candidate.source_movement_seq);
             last_shared = Some(index);
             shared.insert(index);
         }
@@ -13761,6 +13783,21 @@ fn reconcile_recovered_session_snapshot(
     let append_gap = |merged: &mut Vec<SessionContextArtifact>, gap: &[SessionContextArtifact],
         pending: &mut Vec<SessionContextArtifact>| -> Result<(), String> {
         if !gap.is_empty() && !pending.is_empty() {
+            if interleave_checked_history {
+                let mut existing = gap.iter().peekable();
+                for entry in std::mem::take(pending) {
+                    let sequence = entry.source_movement_seq.ok_or_else(|| mismatch("inserted context has no admitted movement"))?;
+                    while let Some(previous) = existing.peek() {
+                        let before = previous.source_movement_seq.ok_or_else(|| mismatch("existing context has no admitted movement"))?;
+                        if before == sequence { return Err(mismatch("distinct artifacts claim one movement")); }
+                        if before > sequence { break; }
+                        merged.push(existing.next().unwrap().clone());
+                    }
+                    merged.push(entry);
+                }
+                merged.extend(existing.cloned());
+                return Ok(());
+            }
             let first = pending.first().and_then(|entry| entry.source_movement_seq)
                 .ok_or_else(|| mismatch("inserted context has no admitted movement"))?;
             if gap.iter().any(|entry| entry.source_movement_seq.is_none_or(|sequence| sequence >= first)) {
@@ -13777,15 +13814,15 @@ fn reconcile_recovered_session_snapshot(
             merged.push(candidate);
             existing_position = index + 1;
         } else {
-            let admitted = publications.get(&artifact_ref_key(&candidate.source_artifact)).copied();
+            let admitted = publications.get(&artifact_ref_key(&candidate.source_artifact));
             if (omitted || last_shared.is_some_and(|index| existing_position <= index)) && admitted.is_none() {
                 return Err(mismatch("inserted artifact has no checked admission"));
             }
             if let Some(admitted) = admitted {
-                if candidate.source_movement_seq.is_some_and(|sequence| sequence != admitted) {
+                if candidate.source_movement_seq.is_some_and(|sequence| !admitted.contains(&sequence)) {
                     return Err(mismatch("inserted artifact changed its admitted movement"));
                 }
-                candidate.source_movement_seq = Some(admitted);
+                candidate.source_movement_seq = candidate.source_movement_seq.or(admitted.first().copied());
             }
             pending.push(candidate);
         }
@@ -13812,23 +13849,12 @@ fn merge_failed_source_context(
     let publications = recovered.iter().map(|entry| {
         let sequence = entry.source_movement_seq.ok_or("recovered failed history has no exact movement")?;
         if sequence > source { return Err("recovered failed history follows its source".to_string()); }
-        Ok((artifact_ref_key(&entry.source_artifact), sequence))
+        Ok((artifact_ref_key(&entry.source_artifact), BTreeSet::from([sequence])))
     }).collect::<Result<BTreeMap<_, _>, String>>()?;
     if publications.len() != recovered.len() { return Err("recovered failed history repeats an artifact".into()); }
-    let split = existing.iter().position(|entry| entry.source_movement_seq.is_some_and(|seq| seq > source))
-        .unwrap_or(existing.len());
-    if existing[split..].iter().any(|entry| entry.source_movement_seq.is_none_or(|seq| seq <= source)) {
-        return Err("existing context interleaves later inputs with failed source history".into());
-    }
     let mut merged = recovered.to_vec();
-    if !reconcile_recovered_session_snapshot(&existing[..split], &mut merged, &publications, &source_ref)? {
-        merged = existing[..split].to_vec();
-    }
-    for entry in &existing[split..] {
-        if merged.iter().any(|prior| prior.source_artifact == entry.source_artifact) {
-            return Err("later context repeats a recovered failed source artifact".into());
-        }
-        merged.push(entry.clone());
+    if !reconcile_session_context_order(&existing, &mut merged, &publications, &source_ref, true)? {
+        merged = existing;
     }
     let mut input_position = match input_successor {
         Some(successor) => merged.iter().position(|entry| entry.source_artifact == successor)
@@ -15326,7 +15352,7 @@ mod tests {
         let snapshot = vec![prior[0].clone(), prior[1].clone(), entry("reasoning", 9),
             prior[2].clone(), entry("output", 10)];
         let source = snapshot[4].source_artifact.clone();
-        let publications = BTreeMap::from([(artifact_ref_key(&snapshot[2].source_artifact), 9)]);
+        let publications = BTreeMap::from([(artifact_ref_key(&snapshot[2].source_artifact), BTreeSet::from([9]))]);
         let mut recovered = snapshot.clone();
         assert!(reconcile_recovered_session_snapshot(&prior, &mut recovered, &publications, &source).unwrap());
         assert_eq!(recovered.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), [1, 5, 9, 7, 10]);
@@ -15334,7 +15360,7 @@ mod tests {
         assert!(reconcile_recovered_session_snapshot(&recovered.clone(), &mut recovered, &publications, &source).unwrap());
         assert_eq!(session_artifacts_fingerprint(&recovered).unwrap(), exact);
         assert!(reconcile_recovered_session_snapshot(&prior, &mut snapshot.clone(), &BTreeMap::new(), &source).is_err());
-        let wrong_publication = BTreeMap::from([(artifact_ref_key(&snapshot[2].source_artifact), 8)]);
+        let wrong_publication = BTreeMap::from([(artifact_ref_key(&snapshot[2].source_artifact), BTreeSet::from([8]))]);
         assert!(reconcile_recovered_session_snapshot(&prior, &mut snapshot.clone(), &wrong_publication, &source).is_err());
         for corruption in ["payload", "source", "sequence", "label", "order"] {
             let mut invalid = snapshot.clone();
@@ -15359,7 +15385,7 @@ mod tests {
         admitted.insert(2, entry("peer.input", 6));
         assert!(reconcile_recovered_session_snapshot(&admitted, &mut snapshot.clone(), &publications, &source).is_err());
         let mut checked = publications.clone();
-        checked.insert(artifact_ref_key(&source), 10);
+        checked.insert(artifact_ref_key(&source), BTreeSet::from([10]));
         let mut repaired = snapshot.clone();
         assert!(reconcile_recovered_session_snapshot(&admitted, &mut repaired, &checked, &source).unwrap());
         assert_eq!(repaired.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), [1, 5, 6, 9, 7, 10]);
@@ -15409,6 +15435,17 @@ mod tests {
             let replayed = merge_failed_source_context(&completed, &full, 68, Some(input)).unwrap();
             assert_eq!(session_artifacts_fingerprint(&replayed).unwrap(), session_artifacts_fingerprint(&completed).unwrap());
         }
+        let mut queued = bound.clone();
+        queued.insert(queued.len() - 1, entry("previous.queued.input", 60));
+        let merged = merge_failed_source_context(&queued, &full, 68, Some(98)).unwrap();
+        assert_eq!(session_artifacts_fingerprint(&merged[full.len()..]).unwrap(), session_artifacts_fingerprint(&queued[prior.len()..]).unwrap());
+        queued.insert(prior.len(), entry("previous.result", 66));
+        let merged = merge_failed_source_context(&queued, &full, 68, Some(98)).unwrap();
+        let position = |label| merged.iter().position(|item| item.label == label).unwrap();
+        assert!(position("previous.result") < position("completed.result"));
+        assert!(position("completed.result") < position("continuity"));
+        assert!(position("continuity") < position("previous.queued.input"));
+        assert!(position("previous.queued.input") < position("later.input"));
         let dir = tempfile::tempdir().unwrap();
         let output = InterfaceArtifactFile::write(dir.path(),
             "interface.context.updated", br#"{"label":"interface.context.updated"}"#).unwrap();
@@ -15430,7 +15467,7 @@ mod tests {
         let prior = vec![entry("earlier", 1), entry("progress", 10)];
         let snapshot = vec![prior[0].clone(), entry("call", 12), entry("queued.input", 9), entry("error", 14)];
         let source = snapshot.last().unwrap().source_artifact.clone();
-        let proof = snapshot.iter().map(|entry| (artifact_ref_key(&entry.source_artifact), entry.source_movement_seq.unwrap())).collect::<BTreeMap<_,_>>();
+        let proof = snapshot.iter().map(|entry| (artifact_ref_key(&entry.source_artifact), BTreeSet::from([entry.source_movement_seq.unwrap()]))).collect::<BTreeMap<_,_>>();
         let mut recovered = snapshot.clone();
         assert!(reconcile_recovered_session_snapshot(&prior, &mut recovered, &proof, &source).unwrap());
         assert_eq!(recovered.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), [1,10,12,9,14]);

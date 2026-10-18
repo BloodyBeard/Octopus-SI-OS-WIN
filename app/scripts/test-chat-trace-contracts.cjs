@@ -596,6 +596,7 @@ const exactProviderLiveStream = chatActivityProjectionModule.liveArtifactMessage
 }, new Map());
 assert.equal(exactProviderLiveStream.eventData._movement, undefined);
 assert.equal(exactProviderLiveStream.eventData._stream.stream_seq, 7);
+assert.equal(exactProviderLiveStream.eventData._stream.source_movement_seq, 10);
 assert.equal(exactProviderLiveStream.artifactId, "");
 assert.equal(exactProviderLiveStream.contentHash, "");
 const durableBetweenStreamRows = {

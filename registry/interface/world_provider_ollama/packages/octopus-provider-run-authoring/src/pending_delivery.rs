@@ -13,6 +13,7 @@ pub(super) struct Ledger {
     submitted: HashSet<(String, RuntimeCoordinateKey)>,
     scoped: HashSet<(String, RuntimeCoordinateKey)>,
     unattributed: BTreeSet<String>,
+    arrival_scopes: HashMap<u64, (u64, String, RuntimeCoordinateKey)>,
 }
 
 impl Ledger {
@@ -28,6 +29,7 @@ impl Ledger {
             submitted: HashSet::new(),
             scoped: HashSet::new(),
             unattributed: BTreeSet::new(),
+            arrival_scopes: HashMap::new(),
         }
     }
 
@@ -76,6 +78,12 @@ impl Ledger {
                         }
                     }
                     Some(metadata) => {
+                        if let Some((scope, runtime)) = metadata.invocation()
+                            .filter(|_| movement.kind == MovementKind::InterfaceArrival)
+                            .and_then(|metadata| metadata.delivery_scope_seq.zip(metadata.runtime.as_ref()))
+                        {
+                            self.arrival_scopes.insert(movement.seq.0, (scope, artifact.clone(), RuntimeCoordinateKey::from_runtime(runtime)));
+                        }
                         let runtime = match metadata {
                             octopus_ledger::MovementMetadata::Invocation(metadata) => {
                                 metadata.runtime.as_ref()
@@ -141,6 +149,28 @@ impl Ledger {
                 .all(|(_, state)| matches!(state, RetainedArrivalState::Finished(_))),
             has_output,
         }))
+    }
+
+    pub(super) fn same_output_delivery(
+        &mut self, run: &RunId, worker: &InterfaceId, artifact: &ArtifactRef, left: u64, right: u64,
+    ) -> Result<bool, String> {
+        self.refresh()?;
+        let (Some(a), Some(b)) = (self.arrival_scopes.get(&left), self.arrival_scopes.get(&right)) else {
+            return Ok(false);
+        };
+        if a.0 != b.0 || a.1 != b.1 || a.1 != artifact_ref_key(artifact) { return Ok(false); }
+        let edges = self.index.retained_arrival_edges(a.0).map_err(|error| error.to_string())?;
+        let mut admitted = false;
+        for (sequence, arrival) in [(left, a), (right, b)] {
+            let Some((coordinate, RetainedArrivalState::Finished(verdict))) = edges.iter()
+                .find(|(coordinate, _)| RuntimeCoordinateKey::from_runtime(coordinate) == arrival.2) else { return Ok(false); };
+            if coordinate.run != *run || coordinate.worker != *worker || coordinate.interface != self.interface { return Ok(false); }
+            if let DeliveryVerdict::Admitted { seq } = verdict {
+                if *seq != sequence { return Ok(false); }
+                admitted = true;
+            }
+        }
+        Ok(admitted)
     }
 }
 

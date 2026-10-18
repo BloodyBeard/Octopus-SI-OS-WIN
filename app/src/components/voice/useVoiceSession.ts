@@ -11,7 +11,7 @@ import { nextProjectionChange } from "../../projectionLive";
 import { useClientPreferences, useSetClientPreferences } from "../../clientPreferences";
 import { isVoiceCallActive, voiceTranscriptActivity, type VoiceTranscriptEntry } from "./voicePresentation";
 import { createVoiceTranscript } from "./voiceTranscript";
-import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, openVoiceCall, readVoiceArtifacts, updateVoiceContext, type VoiceCall, type VoiceCallBinding, type VoiceContextSelection } from "./voiceCallArtifacts";
+import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, openVoiceCall, readVoiceArtifacts, updateVoiceContext, voiceContextDelta, type VoiceCall, type VoiceCallBinding, type VoiceContextMessage, type VoiceContextSelection } from "./voiceCallArtifacts";
 
 export type VoicePhase = "idle" | "requesting" | "connecting" | "listening" | "muted" | "recovering" | "ending" | "closure_unconfirmed" | "ended" | "error";
 
@@ -113,8 +113,10 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
   const outputChangeRef = useRef<Promise<void>>(Promise.resolve());
   const enumerationRef = useRef(0);
   const callContextRef = useRef<VoiceContextSelection | null>(null);
-  const sharedContextRef = useRef(new Set<string>());
-  const pendingContextRef = useRef(new Set<string>());
+  const sharedContextRef = useRef(new Map<string, VoiceContextMessage>());
+  const pendingContextRef = useRef(new Map<string, VoiceContextMessage>());
+  const contextPumpRef = useRef(false);
+  const contextFailureRef = useRef(new Set<string>());
   const contextUpdateRef = useRef<Promise<void>>(Promise.resolve());
   const incomingAudioBehaviorRef = useRef(preferences.incomingAudioArtifactBehavior);
   const pendingAudioDecisionRef = useRef<{
@@ -282,8 +284,10 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
     outputChangeRef.current = Promise.resolve();
     contextUpdateRef.current = Promise.resolve();
     callContextRef.current = selection ?? null;
-    sharedContextRef.current = new Set(selection?.messages.map((message) => message.id) ?? []);
-    pendingContextRef.current = new Set();
+    sharedContextRef.current = new Map(selection?.messages.map((message) => [message.id, message]) ?? []);
+    pendingContextRef.current = new Map();
+    contextPumpRef.current = false;
+    contextFailureRef.current = new Set();
     const current = () => generation === generationRef.current;
     const call: VoiceCall = { binding: nextContext, correlationId: cryptoRandomId(), answer: null, control: null, stop: null, closeRequested: false, creationDisposition: "not_created", callId: "", remoteClosed: false };
     callRef.current = call;
@@ -506,24 +510,44 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
     const generation = generationRef.current;
     const shared = sharedContextRef.current;
     const pending = pendingContextRef.current;
-    const added = selection.messages.filter((message) => !shared.has(message.id) && !pending.has(message.id));
-    if (!added.length) return;
-    const recent = added.slice(-24);
-    added.slice(0, added.length - recent.length).forEach((message) => shared.add(message.id));
-    recent.forEach((message) => pending.add(message.id));
+    try {
+      for (const message of selection.messages) {
+        if (contextFailureRef.current.has(message.id)) continue;
+        if (voiceContextDelta(pending.get(message.id) ?? shared.get(message.id), message)) pending.set(message.id, message);
+      }
+      if (pending.size > 24) throw new Error("Voice has more than 24 unconfirmed Home updates.");
+    } catch (failure) {
+      setError(errorText(failure));
+      return;
+    }
+    if (!pending.size) return;
+    if (contextPumpRef.current) return contextUpdateRef.current;
+    contextPumpRef.current = true;
     setPendingContextCount(pending.size);
     const operation = contextUpdateRef.current.then(async () => {
+      let sendingId = "";
       try {
-        for (const message of recent) {
-          if (generation !== generationRef.current) return;
-          shared.add(message.id);
-          await updateVoiceContext(call, message, signal);
+        while (pending.size) {
+          if (generation !== generationRef.current || signal.aborted || call.closeRequested) return;
+          const message = pending.values().next().value!;
+          pending.delete(message.id);
+          sendingId = message.id;
+          const delta = voiceContextDelta(shared.get(message.id), message);
+          if (!delta) continue;
+          await updateVoiceContext(call, delta, signal);
+          shared.set(message.id, message);
         }
       } catch (failure) {
-        if (generation === generationRef.current) setError(`Voice did not confirm this Home context update: ${errorText(failure)} This and any remaining messages in the batch were not confirmed; no automatic retry was made.`);
+        if (generation === generationRef.current) {
+          contextFailureRef.current.add(sendingId);
+          pending.delete(sendingId);
+          setError(`Voice did not confirm this Home context update: ${errorText(failure)} This and any remaining messages were not confirmed; no automatic retry was made.`);
+        }
       } finally {
-        recent.forEach((message) => pending.delete(message.id));
-        if (generation === generationRef.current) setPendingContextCount(pending.size);
+        if (generation === generationRef.current) {
+          contextPumpRef.current = false;
+          setPendingContextCount(0);
+        }
       }
     });
     contextUpdateRef.current = operation;

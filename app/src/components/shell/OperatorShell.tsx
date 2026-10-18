@@ -107,6 +107,7 @@ import { defaultDashboardFilters, type DashboardFilters, type DashboardScope, ty
 import { appToast } from "../../toasts";
 import { normalizeSettingsSection, useClientPreferences, useSetClientPreferences } from "../../clientPreferences";
 import { useVoiceSession } from "../voice/useVoiceSession";
+import { projectHomeVoiceContext } from "../voice/voiceCallArtifacts";
 import type { HomeViewMode } from "../voice/VoiceView";
 import { useMarkActivity } from "../activity/useMarkActivity";
 import { dispatchClientCommand, subscribeClientCommands, type ClientCommandId } from "../../clientActions";
@@ -268,6 +269,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
   const taskWorkspaceNavigationRef = useRef({ main: chatWorkspace, secondary: secondaryChatWorkspace });
   taskWorkspaceNavigationRef.current = { main: chatWorkspace, secondary: secondaryChatWorkspace };
   const voiceSession = useVoiceSession(accessProfile);
+  const voiceContext = useMemo(() => projectHomeVoiceContext(
+    homeChatWorkspace.renderedMessages, homeRunId,
+    homeChatWorkspace.activeRun?.runId === homeRunId ? homeChatWorkspace.activeRun.chatInterfaceId : "",
+  ), [homeChatWorkspace.renderedMessages, homeChatWorkspace.activeRun, homeRunId]);
+  useEffect(() => { void voiceSession.updateContext(voiceContext); }, [voiceSession.updateContext, voiceContext]);
   const setProjectFilterEeId = useCallback((eeId: string) => {
     const next = eeId.trim();
     setProjectFilterEeIdState(next);

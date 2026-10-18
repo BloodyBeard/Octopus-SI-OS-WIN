@@ -2,7 +2,11 @@ import { readProjection, submitInterfaceArtifact } from "../../projectionClient"
 import { nextProjectionChange } from "../../projectionLive";
 import type { ChatRenderMessage } from "../chat/types";
 
-export type VoiceContextMessage = Readonly<{ id: string; role: "user" | "assistant"; text: string }>;
+export type VoiceContextMessage = Readonly<{
+  id: string; role: "user" | "assistant"; text: string;
+  artifactId?: string; phase?: "progress" | "reply" | "error"; complete?: boolean; offset?: number;
+  stream?: Readonly<{ stream_id: string; stream_seq: number; source_movement_seq: number; byte_start_offset: number; byte_end_offset: number }>;
+}>;
 export type VoiceInitialItem = { type: "message"; role: "developer" | "user" | "assistant"; content: { type: "input_text"; text: string }[] };
 export type VoiceContextSelection = {
   runId: string;
@@ -20,11 +24,26 @@ const CONTEXT_TEXT_BYTES = 24_000;
 export function projectHomeVoiceContext(messages: readonly ChatRenderMessage[], runId: string, interfaceId: string): VoiceContextSelection {
   const admitted = new Map<string, VoiceContextMessage>();
   for (const message of messages) {
-    if (!runId || !interfaceId || message.runId !== runId || message.interfaceId !== interfaceId || !message.artifactId || message.pending || message.error) continue;
+    if (!runId || !interfaceId || message.runId !== runId || message.interfaceId !== interfaceId || message.pending) continue;
+    const rawStream = message.eventData?._stream as VoiceContextMessage["stream"];
+    const stream = rawStream && typeof rawStream.stream_id === "string" && rawStream.stream_id
+      && [rawStream.stream_seq, rawStream.source_movement_seq, rawStream.byte_start_offset, rawStream.byte_end_offset].every(value => Number.isSafeInteger(value) && value >= 0)
+      && rawStream.byte_end_offset > rawStream.byte_start_offset ? rawStream : undefined;
+    if (!message.artifactId && !stream) continue;
     const user = message.role === "user" && message.direction === "in" && (message.eventKind === "message" || message.eventKind === "steering");
-    const assistant = message.role === "assistant" && message.direction === "out" && message.eventKind === "message" && message.terminal === true;
+    const assistant = message.role === "assistant" && message.direction === "out"
+      && ["message", "message_delta", "commentary", "commentary_delta", "error"].includes(message.eventKind ?? "");
     if ((!user && !assistant) || !message.text.trim()) continue;
-    admitted.set(message.artifactId, { id: message.artifactId, role: user ? "user" : "assistant", text: message.text });
+    const identity = message.eventData?._event as Record<string, unknown> | undefined;
+    const item = typeof identity?.turn_id === "string" && identity.turn_id && typeof identity.item_id === "string" && identity.item_id
+      ? `item:${identity.turn_id}:${identity.item_id}` : message.artifactId;
+    const phase = message.error || message.eventKind === "error" ? "error"
+      : message.eventKind?.startsWith("commentary") ? "progress" : "reply";
+    const complete = !message.eventKind?.endsWith("_delta");
+    if (!item || !complete && (!stream || item === message.artifactId)) continue;
+    admitted.set(item, user
+      ? { id: item, role: "user", text: message.text }
+      : { id: item, artifactId: message.artifactId || undefined, stream, role: "assistant", text: message.text.trim(), phase, complete });
   }
   const visible = [...admitted.values()];
   const selected: VoiceContextMessage[] = [];
@@ -49,6 +68,13 @@ export function projectHomeVoiceContext(messages: readonly ChatRenderMessage[], 
       ...selected.map((message): VoiceInitialItem => ({ type: "message", role: message.role, content: [{ type: "input_text", text: message.text }] })),
     ],
   };
+}
+
+export function voiceContextDelta(previous: VoiceContextMessage | undefined, message: VoiceContextMessage): VoiceContextMessage | null {
+  if (!previous) return message;
+  if (previous.text === message.text && previous.complete === message.complete && previous.phase === message.phase) return null;
+  if (!message.phase || !message.text.startsWith(previous.text)) throw new Error("Home changed text that was already shared with voice.");
+  return { ...message, text: message.text.slice(previous.text.length), offset: previous.text.length };
 }
 
 function boundedContextText(text: string, limit: number): string {
@@ -194,15 +220,23 @@ export async function updateVoiceContext(call: VoiceCall, message: VoiceContextM
 async function submitVoiceContext(call: VoiceCall, message: VoiceContextMessage, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   if (!call.callId || call.closeRequested || call.remoteClosed) throw new Error("Voice call is not available for a context update.");
-  const updateId = `home-context:${message.id}`;
+  const updateId = message.phase
+    ? `home-output:${message.id}:${message.offset ?? 0}:${message.text.length}:${message.complete ? "done" : "part"}`
+    : `home-context:${message.id}`;
   if (!message.id || new TextEncoder().encode(updateId).length > 256 || /[\u0000-\u001f\u007f]/.test(updateId) || updateId.trim() !== updateId) throw new Error("Home context message has no supported artifact identity.");
   await submitInterfaceArtifact({
     interfaceId: call.binding.controlInterfaceId,
     runId: call.binding.runId,
     label: "realtime.session.update",
     payload: {
-      call_id: call.callId, correlation_id: call.correlationId, update_id: updateId, delegation_id: null, channel: "context",
-      text: JSON.stringify({ source: "Visible Home conversation; context only, not a new assignment", artifact_id: message.id, role: message.role, text: boundedContextText(message.text, 8_000) }),
+      call_id: call.callId, correlation_id: call.correlationId, update_id: updateId, delegation_id: null,
+      channel: message.phase === "reply" || message.phase === "error" ? "commentary" : "context",
+      text: JSON.stringify({
+        source: message.phase ? "Home public output; report progress or failure truthfully, use completed replies to answer; not a new assignment" : "Visible Home conversation; context only, not a new assignment",
+        artifact_id: message.phase ? message.artifactId : message.id, stream: message.stream, message_id: message.id, role: message.role,
+        ...(message.phase ? { phase: message.phase, complete: message.complete, text_offset: message.offset ?? 0 } : {}),
+        text: boundedContextText(message.text, 8_000),
+      }),
     },
     timeoutMs: 45_000,
   });

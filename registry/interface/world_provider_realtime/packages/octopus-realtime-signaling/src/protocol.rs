@@ -29,7 +29,7 @@ pub fn update_frames(protocol: LiveProtocol, update: &SessionUpdate) -> Result<V
             LiveProtocol::CodexLive => {
                 let mut frame = json!({"type":if update.delegation_id.is_some(){"delegation.context.append"}else{"session.context.append"},"content":[{"type":"input_text","text":text}]});
                 if let Some(id) = &update.delegation_id { frame["delegation_item_id"] = json!(id); }
-                if update.channel == UpdateChannel::Commentary { frame["channel"] = json!("speakable"); }
+                frame["channel"] = json!(if update.channel == UpdateChannel::Commentary { "speakable" } else { "commentary" });
                 frame
             }
             LiveProtocol::OpenaiLive => json!({

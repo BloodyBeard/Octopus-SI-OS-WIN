@@ -272,6 +272,25 @@ test('voice context includes only exact admitted Home text, with bounded omissio
   await assert.rejects(api.updateVoiceContext(current, { id: 'message-32', role: 'user', text: 'Another correction' }, new AbortController().signal), /did not accept/);
 });
 
+test('voice shares public streamed progress and exact failures before Home finishes', async () => {
+  const writes = [];
+  const api = host(async () => ({ artifacts: [{ seq: 1, label: 'realtime.session.updated', payload: { correlation_id: 'offer-1', call_id: 'rtc_exact', update_id: writes.at(-1)?.payload.update_id, status: 'transport_written' } }] }), async request => writes.push(request));
+  const base = { id: 'rendered-item', artifactId: '', runId: 'home', interfaceId: 'client', role: 'assistant', direction: 'out', createdAtMs: 1, eventKind: 'commentary_delta', text: 'Checking the controls', eventData: { _event: { turn_id: 'turn', item_id: 'item' }, _stream: { stream_id: 'stream', stream_seq: 1, source_movement_seq: 20, byte_start_offset: 50, byte_end_offset: 150 } } };
+  const first = api.projectHomeVoiceContext([base], 'home', 'client').messages[0];
+  const complete = api.projectHomeVoiceContext([{ ...base, artifactId: 'completed-ref', eventKind: 'commentary', text: 'Checking the controls now' }], 'home', 'client').messages[0];
+  assert.equal(first.id, complete.id);
+  const delta = api.voiceContextDelta(first, complete);
+  assert.equal(delta.text, ' now'); assert.equal(delta.offset, first.text.length);
+  assert.equal(api.voiceContextDelta(complete, complete), null);
+  assert.throws(() => api.voiceContextDelta(first, { ...complete, text: 'Changed prefix' }), /already shared/);
+  const failed = api.projectHomeVoiceContext([{ ...base, artifactId: 'error-ref', eventKind: 'error', error: true, text: 'Home stopped: invalid context', eventData: {} }], 'home', 'client').messages[0];
+  const current = { ...call(), callId: 'rtc_exact' };
+  for (const message of [first, delta, failed]) await api.updateVoiceContext(current, message, new AbortController().signal);
+  assert.deepEqual(writes.map(write => write.payload.channel), ['context', 'context', 'commentary']);
+  assert.equal(new Set(writes.map(write => write.payload.update_id)).size, 3);
+  assert.equal(JSON.parse(writes[2].payload.text).phase, 'error');
+});
+
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
 async function hookHarness() {
@@ -317,6 +336,7 @@ async function hookHarness() {
     closeVoiceCall(current) { if (current.remoteClosed) return Promise.resolve(); if (current.stop) return current.stop; current.closeRequested = true; const stopping = (async () => { if (!current.answer) return; await current.answer; h.closes.push(current.callId); if (h.closeGate) await h.closeGate.promise; if (h.requireLivePeerOnClose) assert.equal(h.peers.at(-1).connectionState, 'connected', 'Provider finalization requires the primary transport'); if (h.closeError) throw new Error(h.closeError); current.closedPayload = { transcript: h.closedTranscript ?? [] }; current.remoteClosed = true; })(); current.stop = stopping; void stopping.catch(() => { if (current.stop === stopping) current.stop = null; }); return stopping; },
     readVoiceArtifacts: async () => ({ artifacts: h.events.splice(0), afterSeq: 1, more: false }),
     updateVoiceContext: async (_, message) => { h.updates.push(message); if (h.updateGate) await h.updateGate.promise; if (h.updateError) throw new Error(h.updateError); },
+    voiceContextDelta: host(async () => {}, async () => {}).voiceContextDelta,
   };
   const { useVoiceSession } = load('useVoiceSession.ts', {
     react: React,
@@ -445,6 +465,20 @@ test('voice activity follows new input, replies and pending context without reli
       await h.act(async () => { h.updateGate.resolve(); await updating; });
       assert.equal(h.current.providerActivity, false);
     }
+  } finally { await h.close(); }
+});
+
+test('voice coalesces updates arriving during delivery and sends the remaining text once', async () => {
+  const h = await hookHarness();
+  try {
+    await h.connect(); h.updateGate = deferred(); let first;
+    const selection = text => ({ runId: 'run_home', interfaceId: 'home-client', messages: [{ id: 'item', role: 'assistant', phase: 'progress', complete: false, text }] });
+    h.act(() => { first = h.current.updateContext(selection('Checking')); }); await h.flush();
+    h.act(() => { void h.current.updateContext(selection('Checking the')); void h.current.updateContext(selection('Checking the controls')); });
+    await h.act(async () => { h.updateGate.resolve(); await first; });
+    assert.deepEqual(h.updates.map(message => message.text), ['Checking', ' the controls']);
+    await h.act(async () => h.current.updateContext(selection('Checking the controls')));
+    assert.equal(h.updates.length, 2);
   } finally { await h.close(); }
 });
 

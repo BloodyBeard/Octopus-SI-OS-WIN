@@ -3348,8 +3348,8 @@ pub(crate) fn reconcile_durable_interrupted_continuity(
     let Some(recovered) = recovered else {
         return Ok((Some(durable), true));
     };
-    if recovered == durable {
-        return Ok((Some(durable), false));
+    if codex_continuity_retains_interrupted_effect(&durable, &recovered) {
+        return Ok((Some(recovered), false));
     }
     let next_generation = recovered.context_generation.checked_add(1).ok_or_else(|| {
         InterfaceDriverError::FailedClosed(
@@ -8866,6 +8866,7 @@ pub(crate) fn native_terminal_group_for_test(
     let mut retired = original.clone();
     if !with_stop { retired.interrupted_pending = retired.pending.take(); }
     retired.native_terminal = native_turn.map(|turn| NativeTerminalEvidence { thread_id: retired.thread_id.clone(), turn });
+    let enriched = with_stop && original.native_terminal.is_none() && retired.native_terminal.is_some();
     let (emit, mut outputs) = ProviderOutputStream::channel();
     emit.continuity.lock().unwrap().continuity = Some(retired);
     emit.continuity.lock().unwrap().pending_input_context = input_changes_context;
@@ -8878,9 +8879,9 @@ pub(crate) fn native_terminal_group_for_test(
         client_projection_output_labels: &projected, live_stream_rules: &rules, live_stream: std::sync::Mutex::new(None), continuity: emit.continuity.clone() };
     sink.bind_live_stream(&original.thread_id, "turn-a").unwrap();
     let mut closure = CodexTurnOutput::interrupted_result_closed("tool_result", "call-a".into(), original.thread_id.clone(), "turn-a".into(), false, source);
-    if !with_stop {
+    if !with_stop || enriched {
         closure.value["native_terminal_source_continuity"] = serde_json::to_value(original).unwrap();
-        closure.value["result_origin"] = serde_json::json!("native_turn_completion");
+        closure.value["result_origin"] = serde_json::json!(if enriched { "interrupted_turn_completion" } else { "native_turn_completion" });
         closure.value["terminal_evidence_source"] = serde_json::json!("thread/read");
     }
     sink.send_interrupted_result(Some(CodexTurnOutput::dynamic_tool_completed_after_interrupt("formed_interfaces".into(), "coder.exec".into(), "call-a".into(), original.thread_id.clone(), "turn-a".into(), false, None,
@@ -12473,6 +12474,34 @@ pub(crate) fn exact_interrupted_control_continuity(
         continuity.run.as_str(),
     )?;
     Ok(Some(continuity.clone()))
+}
+
+pub(crate) fn codex_continuity_retains_interrupted_effect(
+    original: &CodexContinuityState, next: &CodexContinuityState,
+) -> bool {
+    if original.pending.is_some() || original.interrupted_pending.is_none()
+        || next.context_generation < original.context_generation { return false; }
+    let mut comparable = next.clone();
+    comparable.context_generation = original.context_generation;
+    &comparable == original
+}
+
+pub(crate) fn checked_interrupted_context_revision(
+    original: &CodexContinuityState, context: &[SessionContextArtifact],
+    labels: &BTreeSet<String>, before: Option<u64>,
+) -> Result<CodexContinuityState, String> {
+    let mut selected = original.clone();
+    for entry in context {
+        if !labels.contains(&entry.label) { continue; }
+        let Some(raw) = entry.payload.get(CODEX_CONTINUITY_FIELD) else { continue; };
+        if is_foreign_provider_payload(&entry.payload, &original.provider_interface).map_err(|error| error.to_string())? { continue; }
+        let candidate = parse_codex_continuity(raw, &original.provider_interface, &original.run).map_err(|error| error.to_string())?;
+        if !codex_continuity_retains_interrupted_effect(original, &candidate) { continue; }
+        let sequence = entry.source_movement_seq.ok_or("interrupted context revision has no checked source movement")?;
+        if before.is_some_and(|limit| sequence >= limit) { continue; }
+        if candidate.context_generation > selected.context_generation { selected = candidate; }
+    }
+    Ok(selected)
 }
 
 pub(crate) fn interrupted_result_closure_ref(
@@ -17018,6 +17047,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed, interrupted);
+
+        let mut repeated = interrupted.clone(); repeated.context_generation += 1;
+        let (selected, overridden) = reconcile_durable_interrupted_continuity(Some(repeated.clone()), Some(interrupted.clone())).unwrap();
+        assert_eq!(selected, Some(repeated.clone())); assert!(!overridden);
+        for field in ["thread", "generation", "pending"] {
+            let mut wrong = repeated.clone();
+            match field { "thread" => wrong.thread_id = "foreign".into(), "generation" => wrong.context_generation = 0,
+                _ => wrong.interrupted_pending = None }
+            assert!(reconcile_durable_interrupted_continuity(Some(wrong), Some(interrupted.clone())).is_err());
+        }
 
         let operator = continuity(
             "world_provider_codex",

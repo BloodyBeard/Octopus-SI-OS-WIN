@@ -521,7 +521,11 @@ async fn codex_life(
         ))));
     let restored_controls = active_controls.lock().await.iter().map(|(run, broker)|
         (RunId::new(run), broker.source_movement_seq())).collect::<Vec<_>>();
-    for (run, source) in restored_controls { fence_control_reader(&control_fence_tx, &run, source).await?; }
+    for (run, source) in restored_controls {
+        if let Err(error) = fence_control_reader(&control_fence_tx, &run, source).await {
+            return flatten_control_task(control_task.await).and(Err(error));
+        }
+    }
 
     loop {
         if ctx.cancel.is_cancelled() {
@@ -2232,6 +2236,13 @@ impl InterruptedEffectArbiter {
                 && current.control_id == control_id
                 && current.acknowledgement == next.acknowledgement
                 && current.continuity == next.continuity;
+            if control_source_movement_seq > current.control_source_movement_seq
+                && control_id != current.control_id
+                && next.acknowledgement.movement_seq > current.acknowledgement.movement_seq
+                && crate::handler::codex_continuity_retains_interrupted_effect(&current.continuity, &next.continuity)
+            {
+                return Ok(());
+            }
             match &current.phase {
                 InterruptedEffectPhase::AwaitingResult if same_ack => return Ok(()),
                 InterruptedEffectPhase::Resolving { .. }
@@ -3705,8 +3716,9 @@ async fn checked_interrupted_result_continuity(
         crate::handler::stopped_result::validate_saved_settlement(&proof, &turn.envelope, &value, &labels)?;
         Some(proof.source)
     } else { None };
+    let checked = crate::handler::checked_interrupted_context_revision(interrupted, current, &labels, Some(closure.movement_seq))?;
     let closed = interrupted_result_closure_payload(&closure_manifest.label, &closure_payload,
-        settlement_source.as_ref().unwrap_or(interrupted), &result_source.artifact, &labels)?
+        settlement_source.as_ref().unwrap_or(&checked), &result_source.artifact, &labels)?
         .ok_or("interrupted release lost its exact native closure payload")?;
     let mut evidence = current.to_vec();
     let result_payload: serde_json::Value = serde_json::from_slice(&result_payload).map_err(|error| error.to_string())?;
@@ -4731,6 +4743,7 @@ fn movement_is_artifact_admission(
             .invocation_metadata
             .as_ref()
             .and_then(octopus_ledger::MovementMetadata::invocation)
+            .filter(|metadata| metadata.verification_failure.is_none())
             .and_then(octopus_ledger::InvocationMetadata::runtime)
             .is_some_and(|runtime| &runtime.run == run)
         && movement.artifact.as_ref() == Some(expected)
@@ -4922,8 +4935,16 @@ async fn hand_control_result(
                     let continuity = terminal_output_continuity(
                         descriptor, envelope, &context, run, &handoff.current_run_record_bytes().await,
                     ).map_err(|error| error.to_string())?;
-                    if continuity.as_ref().is_some_and(codex_continuity_waits_for_result) {
-                        return Err("terminal turn-control receipt still has an unresolved native effect".into());
+                    if let Some(pending) = continuity.as_ref().filter(|state| codex_continuity_waits_for_result(state)) {
+                        let original = interrupted_effects.durable_continuity(run).await?
+                            .ok_or("terminal turn-control receipt still has an unresolved native effect")?;
+                        if !crate::handler::codex_continuity_retains_interrupted_effect(&original, pending) {
+                            return Err("terminal turn-control receipt changed its unresolved interrupted effect".into());
+                        }
+                        let identity = crate::handler::interrupted_turn_identity(&original)?;
+                        result.thread_id = Some(identity.thread_id);
+                        result.turn_id = Some(identity.turn_id);
+                        result.detail["exact_result_pending"] = serde_json::json!(true);
                     }
                     result.continuity = continuity;
                     persist_control_journal(ctx, source_movement_seq, run, &control_id, &result.action,
@@ -5216,6 +5237,11 @@ async fn drive_turn_with_retries_inner(
     let resolving_interrupted_result = interrupted_effects
         .begin_result(run, turn.seq, &turn.envelope)
         .await?;
+    let durable_interrupted_continuity = if resolving_interrupted_result {
+        let original = durable_interrupted_continuity.as_ref().ok_or("interrupted source lost its durable continuity")?;
+        Some(crate::handler::checked_interrupted_context_revision(original, &handoff.current_session_context_artifacts().await,
+            &codex_context_output_labels(descriptor).map_err(|error| error.to_string())?, None)?)
+    } else { durable_interrupted_continuity };
     let (mut interrupted_after_artifact, mut recovered_handoff_artifacts) = match source_recovery {
         ProviderSourceRecovery::Bridged { .. } => {
             control.finish();
@@ -5911,8 +5937,8 @@ async fn drive_turn_with_retries_inner(
                 return Ok(());
             }
             return Err(format!(
-                "interrupted exact-result source {} ended without one ledger-admitted semantic closure",
-                turn.seq
+                "interrupted exact-result source {} ended without one ledger-admitted semantic closure{}",
+                turn.seq, result.err().map(|error| format!(": {error}")).unwrap_or_default()
             ));
         }
 
@@ -8798,6 +8824,20 @@ mod tests {
         file.sync_all().unwrap();
         let error = find_artifact_admission(&ctx, &run, 0, &expected).unwrap_err();
         assert!(error.contains("malformed row 2"), "{error}");
+
+        let mut failed = serde_json::to_value(&admitted).unwrap();
+        failed["invocation_metadata"]["verification_failure"] = json!({"error":"no_requirement_for_label"});
+        let failed: Movement = serde_json::from_value(failed).unwrap();
+        let mut later = admitted.clone(); later.seq.0 = 2; later.lamport.0 = 3;
+        write_movements(&path, &[source.clone(), failed.clone(), later.clone()]);
+        assert_eq!(find_artifact_admission(&ctx, &run, 0, &expected).unwrap().movement_seq, Some(2));
+        assert!(validate_artifact_admission(&ctx, &run, 0, &DurableArtifactAdmission {
+            artifact: expected.clone(), movement_seq: 1,
+        }).is_err());
+        write_movements(&path, &[source.clone(), failed]);
+        assert_eq!(find_artifact_admission(&ctx, &run, 0, &expected).unwrap().movement_seq, None);
+        write_movements(&path, &[source, admitted, later]);
+        assert!(find_artifact_admission(&ctx, &run, 0, &expected).unwrap_err().contains("duplicate provider admissions"));
     }
 
     #[tokio::test]

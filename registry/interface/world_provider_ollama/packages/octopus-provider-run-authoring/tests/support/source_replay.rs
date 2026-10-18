@@ -94,6 +94,53 @@ async fn pending_output_retains_original_fanout_across_restart_and_refuses_legac
 }
 
 #[test]
+fn context_publications_preserve_fanout_evidence_without_repeating_the_output() {
+    use octopus_ledger::{ArrivalFanoutMetadata, ArrivalFanoutScope, DeliveryMetadata, MovementMetadata};
+    for refused in [false, true] {
+        let mut fixture = CompletedInputReplayFixture::new();
+        let mut record = RunRecord::from_bytes(&std::fs::read(&fixture.handoff.run_path).unwrap()).unwrap();
+        let mut sibling = record.checkpoint(&"client".into()).unwrap().clone(); sibling.id = "observed".into();
+        if refused { sibling.required_verified_artifacts = record.checkpoint(&"tool".into()).unwrap().required_verified_artifacts.clone(); }
+        record.active_checkpoints.push(sibling.id.clone()); record.checkpoints.push(sibling);
+        let bytes = serde_json::to_vec(&record).unwrap();
+        let file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("fanout"), "tool.call", br#"{"label":"tool.call"}"#).unwrap();
+        let artifact = artifact_identity(&file, &fixture.handoff.var_dir).unwrap().artifact;
+        let coordinates = ["client", "observed"].map(|checkpoint| octopus_ledger::RuntimeInvocationMetadata {
+            run:record.id.clone(),ee:record.ee.clone(),worker:record.worker.clone(),interface:"provider".into(),
+            checkpoint:checkpoint.into(),epoch:0,run_record_hash:Some(ContentHash::of_bytes(&bytes).to_hex()),
+        });
+        let scope = fixture.rows.len() as u64;
+        let mut row = fixture.rows[0].clone(); row.seq.0=scope; row.lamport.0=scope; row.kind=MovementKind::ArtifactMoved;
+        row.from=Endpoint::Interface("provider".into()); row.to=row.from.clone(); row.artifact=Some(artifact.clone());
+        row.invocation_metadata=Some(MovementMetadata::ArrivalFanout(ArrivalFanoutMetadata { arrival_fanout:ArrivalFanoutScope {identity:"same-output".into(),targets:coordinates.to_vec()} }));
+        fixture.rows.push(row);
+        let mut arrivals = Vec::new();
+        for coordinate in &coordinates {
+            fixture.edge(&bytes, &coordinate.checkpoint, &file, "worker".into(), MovementKind::InterfaceArrival);
+            let row = fixture.rows.last_mut().unwrap(); arrivals.push(row.seq.0);
+            let mut metadata = row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+            metadata.delivery_scope_seq=Some(scope); row.invocation_metadata=Some(metadata.into());
+        }
+        if refused {
+            let mut row=fixture.rows.last().unwrap().clone(); row.seq.0=fixture.rows.len() as u64;row.lamport.0=row.seq.0;row.kind=MovementKind::DeliveryRefused;
+            row.invocation_metadata=Some(MovementMetadata::Delivery(DeliveryMetadata {runtime:Some(coordinates[1].clone()),source_movement_seq:None,delivery_scope_seq:Some(scope),
+                delivery_verdict:DeliveryVerdict::refused(octopus_ledger::RefusedReason::VerificationFailed,serde_json::json!({"message":"other tool edge"}))}));
+            fixture.rows.push(row);
+        }
+        fixture.save();
+        let mut publications=ContextPublications::new();
+        for seq in &arrivals { fixture.handoff.record_context_publication(&mut publications,&artifact,*seq).unwrap(); }
+        assert_eq!(publications[&artifact_ref_key(&artifact)], arrivals.iter().copied().collect());
+        assert!(fixture.handoff.record_context_publication(&mut publications,&artifact,0).is_err());
+        assert!(!fixture.handoff.session.index().unwrap().retained_delivery.same_output_delivery(&"foreign".into(),&"worker".into(),&artifact,arrivals[0],arrivals[1]).unwrap());
+        let entry=|seq| SessionContextArtifact {label:"tool.call".into(),payload:serde_json::json!({"label":"tool.call"}),source_artifact:artifact.clone(),source_movement_seq:Some(seq)};
+        let existing=vec![entry(arrivals[0])];let mut recovered=vec![entry(arrivals[1])];
+        assert!(reconcile_recovered_session_snapshot(&existing,&mut recovered,&publications,&artifact).unwrap());
+        assert_eq!(session_artifacts_fingerprint(&existing).unwrap(),session_artifacts_fingerprint(&recovered).unwrap());
+    }
+}
+
+#[test]
 fn materialized_checkpoints_preserve_static_role_overlap_access() {
     let fixture = CompletedInputReplayFixture::new();
     let mut template = fixture.handoff.config.checkpoints[0].clone();

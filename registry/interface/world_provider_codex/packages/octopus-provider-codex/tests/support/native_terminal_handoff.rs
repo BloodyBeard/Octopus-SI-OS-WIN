@@ -531,6 +531,40 @@ async fn native_terminal_handoff_cases() {
                 let value=serde_json::to_value(&interrupted).unwrap();
                 assert!(value["pending"].is_null());assert_eq!(value["interrupted_pending"],state["pending"]);
                 assert_eq!(value["context_generation"],json!(before_context+2));assert!(!broker.is_finished());
+                let saved_interrupt=std::fs::read(interrupted_effect_journal_path(&ctx,&run)).unwrap();
+                let repeat_broker=CodexTurnControlBroker::new(None);repeat_broker.finish();
+                let bytes=std::fs::read(run_path).unwrap();let record=RunRecord::from_bytes(&bytes).unwrap();
+                let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                    && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.turn.control")).unwrap();
+                let file=artifact(&root.join("repeat-stop"),"operator.turn.control",json!({"action":"stop","control_id":"stop-b"}));
+                let row=edge(&ctx,&bytes,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+                let repeat=source_envelope(&ctx,root,&row,file);let repeat_seq=append(&ctx,row);
+                let control=decode_admitted_turn_control(&ctx,&descriptor,&repeat).unwrap().unwrap();
+                let admit=Box::pin(handle_control_source(&ctx,&descriptor,&session,&arbiter,&run,ControlSource {
+                    envelope:&repeat,source_movement_seq:repeat_seq,broker:&repeat_broker,control_gates:&gates,control,
+                    terminal_control_fenced:true,independent_reader:true,
+                }));
+                let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&repeat.artifact,0,1,true,0,true);
+                let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+                    tokio::try_join!(admit,async {Ok::<_,String>(gate.await)})
+                }).await.unwrap().unwrap();
+                assert_eq!(result,ControlSourceDisposition::Handled);assert_eq!(delivered[0].0,"turn.control.acknowledged");
+                assert_eq!(std::fs::read(interrupted_effect_journal_path(&ctx,&run)).unwrap(),saved_interrupt);
+                assert!(methods.try_recv().is_err());
+                let TurnControlJournalPhase::Delivered {result:repeat_result}=load_control_journal(&ctx,repeat_seq,&run,"stop-b","stop").unwrap().unwrap().phase else {panic!("repeat Stop receipt")};
+                assert_eq!(repeat_result.detail["exact_result_pending"],true);
+                assert_eq!(repeat_result.thread_id.as_deref(),Some("thread-a"));
+                assert_eq!(repeat_result.turn_id.as_deref(),Some("turn-a"));
+                let interrupted=repeat_result.continuity.unwrap();
+                let ledger_before=std::fs::read(&ctx.movements_path).unwrap();
+                let cold=ProviderHandoffSession::new(&ctx).unwrap();let cold_arbiter=InterruptedEffectArbiter::new(ctx.clone());
+                let control=decode_admitted_turn_control(&ctx,&descriptor,&repeat).unwrap().unwrap();
+                assert_eq!(handle_control_source(&ctx,&descriptor,&cold,&cold_arbiter,&run,ControlSource {
+                    envelope:&repeat,source_movement_seq:repeat_seq,broker:&repeat_broker,control_gates:&gates,control,
+                    terminal_control_fenced:true,independent_reader:true,
+                }).await.unwrap(),ControlSourceDisposition::Handled);
+                assert_eq!(std::fs::read(interrupted_effect_journal_path(&ctx,&run)).unwrap(),saved_interrupt);
+                assert_eq!(std::fs::read(&ctx.movements_path).unwrap(),ledger_before);assert!(methods.try_recv().is_err());
                 let current=std::fs::read(run_path).unwrap();let record=RunRecord::from_bytes(&current).unwrap();
                 let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
                     && cp.inbound_interface()==Some(&InterfaceId::new(worker_interface_id)) && cp.outbound_interfaces().any(|id|id==&descriptor.id)).unwrap();
@@ -539,17 +573,25 @@ async fn native_terminal_handoff_cases() {
                 let envelope=source_envelope(&ctx,root,&row,result);let result_seq=append(&ctx,row);
                 assert!(arbiter.begin_result(&run,result_seq,&envelope).await.unwrap());
                 let handoff=session.from_invocation(&ctx,&descriptor,&run,&envelope,result_seq,&current).unwrap();
+                let labels=codex_context_output_labels(&descriptor).unwrap();
+                let original=arbiter.durable_continuity(&run).await.unwrap().unwrap();
+                let checked=crate::handler::checked_interrupted_context_revision(&original,&handoff.current_session_context_artifacts().await,&labels,None).unwrap();
+                assert_eq!(checked,interrupted);
                 let ProviderStreamEmission::InterruptedResult {stream:Some(stream),retained_outputs,closure,..}=crate::handler::native_terminal_group_for_test(
                     &descriptor,&ctx.interface_var_dir().join("emitted"),&ctx.interface_var_dir().join("streams"),
                     &interrupted,Some(native.clone()),&envelope.artifact,result_seq,true,handoff.input_changes_context().await,
                 ) else {panic!("exact interrupted result group")};
-                let closure_ref=materialized_artifact_ref(&closure.artifact).unwrap();
+                let closure_ref=interrupted_result_closure_ref(&closure.artifact,&checked,&envelope.artifact,&labels).unwrap().unwrap();
                 let mut emissions=vec![stream];emissions.extend(retained_outputs);emissions.push(closure);let count=emissions.len();
                 let admit=Box::pin(admit_interrupted_result(&ctx,&handoff,&broker,Some(&arbiter),&run,result_seq,&closure_ref,emissions));
                 let gate=pump(&ctx,root,run_path,&authoring_id,&listener,receiver,&envelope.artifact,0,count,false,1,false);
                 let (result,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(admit,gate)}).await.unwrap();
                 assert_eq!(result.unwrap(),InterruptedResultAdmission::Admitted(count));assert_eq!(delivered.last().unwrap().0,TURN_INTERRUPTED_RESULT_LABEL);
                 assert!(broker.is_finished());assert!(arbiter.reconciled(&run).await.unwrap());assert!(methods.try_recv().is_err());
+                let (_,_,closure)=arbiter.reconciled_result(&run).await.unwrap().unwrap();
+                checked_interrupted_result_continuity(&ctx,&descriptor,&run,&repeat,&original,
+                    &DurableArtifactAdmission {artifact:envelope.artifact.clone(),movement_seq:result_seq},&closure,
+                    &handoff.current_session_context_artifacts().await).await.unwrap();
                 server.abort();return;
             }
             let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)

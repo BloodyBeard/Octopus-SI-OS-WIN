@@ -194,7 +194,7 @@ fn strict_config_and_utf8_updates_do_not_select_models_or_rewrite_channels() {
     assert_eq!(frames.len(), 2);
     assert!(frames
         .iter()
-        .all(|f| f.get("channel").is_none() && f.get("event_id").is_none()));
+        .all(|f| f["channel"] == "commentary" && f.get("event_id").is_none()));
     assert_eq!(
         frames
             .iter()

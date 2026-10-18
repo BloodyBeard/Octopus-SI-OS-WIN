@@ -158,9 +158,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     && message.interfaceId === homeInterfaceId
   )), [boundRunId, homeInterfaceId, workspace.renderedMessages]);
   const voiceConversationContext = useMemo(() => projectHomeVoiceContext(homeInterfaceMessages, homeRunId, homeInterfaceId), [homeInterfaceMessages, homeRunId, homeInterfaceId]);
-  useEffect(() => {
-    void session.updateContext(voiceConversationContext);
-  }, [session.updateContext, voiceConversationContext]);
   const homeOperatorRequests = useMemo(() => homeInterfaceMessages.filter((message) =>
     ["approval", "user_input", "elicitation"].includes(message.eventKind ?? "") && message.eventData?.resolved !== true
   ), [homeInterfaceMessages]);
