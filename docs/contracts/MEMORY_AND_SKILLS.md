@@ -57,8 +57,10 @@ save becomes one ordinary collection entry:
 - **Policy**: saving needs the `create` artifact verb and the collection bound
   for reading; superseding needs the `change` verb and only reaches notes of the
   caller's own EE. Anything else fails closed.
-- **Durability**: the write goes through the ordinary ordered file writer with
-  receipts, and a retried call ends in the same result.
+- **Durability**: a new note is installed exclusively, whole or not at all; a
+  superseded note is replaced by an atomic exchange that is undone if the note
+  changed meanwhile. The plan is kept per call, so a retried call ends in the
+  same notes.
 - **Usage**: each read leaves one dated receipt per note per day beside the
   entries; tools report `days_used` and `last_used`, and consolidation uses them
   to decide what to keep.

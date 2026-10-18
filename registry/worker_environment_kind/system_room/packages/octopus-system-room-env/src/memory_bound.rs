@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use octopus_context_collections::{
@@ -26,12 +26,21 @@ const MAX_USAGE_DAYS: usize = 4096;
 const PREVIEW_CHARS: usize = 320;
 const APPLICABILITY: &str = "Use when the current work relates to this remembered note.";
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlannedWrite {
+    path: PathBuf,
+    content: String,
+    expected_before_hash: Option<String>,
+    #[serde(rename = "expected_before_content")]
+    _expected_before_content: Option<String>,
+}
+
 pub struct MemoryHost<'a> {
     pub collection: &'a str,
     pub artifact_root: &'a Path,
     pub ee_instances_root: &'a Path,
     pub effect_root: Option<&'a Path>,
-    pub room_kinds: &'a [String],
     pub maximum_bytes: u64,
 }
 
@@ -235,29 +244,65 @@ impl<'a> Memory<'a> {
                 plan
             }
         };
-        self.real_directory(&self.collection.directory().join("entries"), true)?;
-        let roots = BTreeMap::from([(
-            "registry_artifact_root".to_string(),
-            self.host.artifact_root.to_path_buf(),
-        )]);
-        let receipt = crate::execute_file_write_result(
-            self.input,
-            &plan["file_write"],
-            self.host.room_kinds,
-            &roots,
-            &effect_root.join("file-write"),
-            self.host.maximum_bytes,
-        )
-        .map_err(|error| ToolHandlerError::ExecutionWithDetails {
-            tool_id: self.call.tool_id.clone(),
-            reason: error.message,
-            details: error.details.unwrap_or_default(),
-        })?;
+        let entries = self.collection.directory().join("entries");
+        self.real_directory(&entries, true)?;
+        let planned: Vec<PlannedWrite> = serde_json::from_value(plan["file_write"]["writes"].clone())
+            .map_err(|error| self.execution(format!("memory save plan writes are malformed: {error}")))?;
+        let mut writes = Vec::with_capacity(planned.len());
+        for write in &planned {
+            match self.apply(&entries, &directory, write) {
+                Ok(receipt) => writes.push(receipt),
+                Err(reason) => {
+                    return Err(ToolHandlerError::ExecutionWithDetails {
+                        tool_id: self.call.tool_id.clone(),
+                        reason: format!("memory save stopped before it was complete; the same call completes it: {reason}"),
+                        details: serde_json::Map::from_iter([("writes".to_string(), json!(writes))]),
+                    });
+                }
+            }
+        }
         Ok(json!({
             "result": "memory_saved",
             "memory": plan["memory"],
             "withdrawn": plan["withdrawn"],
-            "writes": receipt["writes"],
+            "writes": writes,
+        }))
+    }
+
+    fn apply(&self, entries: &Path, staging: &Path, write: &PlannedWrite) -> Result<Value, String> {
+        let name = write
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| name.ends_with(".json") && !name.starts_with('.'))
+            .ok_or_else(|| format!("memory write '{}' names no entry file", write.path.display()))?;
+        let target = entries.join(name);
+        if write.path != target {
+            return Err(format!("memory write '{}' leaves the collection entries", write.path.display()));
+        }
+        let bytes = write.content.as_bytes();
+        if bytes.len() as u64 > self.host.maximum_bytes {
+            return Err(format!("memory entry '{name}' exceeds the tool's byte bound"));
+        }
+        let after = ContentHash::of_bytes(bytes).to_hex();
+        match &write.expected_before_hash {
+            None => install_new(staging, &target, bytes, &after)?,
+            Some(before) => replace_exact(staging, &target, bytes, before, &after)?,
+        }
+        let observed = std::fs::read(&target)
+            .map(|current| ContentHash::of_bytes(&current).to_hex())
+            .map_err(|error| format!("memory entry '{name}' cannot be read back: {error}"))?;
+        if observed != after {
+            return Err(format!("memory entry '{name}' changed while it was being saved"));
+        }
+        Ok(json!({
+            "path": target,
+            "before_hash": write.expected_before_hash,
+            "after_hash": after,
+            "bytes": bytes.len(),
+            "outcome": "applied",
+            "observed_hash": observed,
+            "error": null,
         }))
     }
 
@@ -592,6 +637,84 @@ impl<'a> Memory<'a> {
             reason: reason.into(),
         }
     }
+}
+
+fn install_new(staging: &Path, target: &Path, bytes: &[u8], after: &str) -> Result<(), String> {
+    let staged = crate::file_write::stage_write(staging, target, bytes)?;
+    let linked = std::fs::hard_link(&staged, target);
+    let _ = std::fs::remove_file(&staged);
+    match linked {
+        Ok(()) => crate::file_write::sync_parent(target),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let current = std::fs::read(target).map_err(|error| error.to_string())?;
+            if ContentHash::of_bytes(&current).to_hex() == after {
+                Ok(())
+            } else {
+                Err(format!("memory entry '{}' already exists with other content", target.display()))
+            }
+        }
+        Err(error) => Err(format!("memory entry '{}' cannot be installed: {error}", target.display())),
+    }
+}
+
+fn replace_exact(staging: &Path, target: &Path, bytes: &[u8], before: &str, after: &str) -> Result<(), String> {
+    let current = std::fs::read(target)
+        .map_err(|error| format!("memory entry '{}' cannot be read: {error}", target.display()))?;
+    let current = ContentHash::of_bytes(&current).to_hex();
+    if current == after {
+        return Ok(());
+    }
+    if current != before {
+        return Err(format!("memory entry '{}' changed since this save was planned", target.display()));
+    }
+    let staged = crate::file_write::stage_write(staging, target, bytes)?;
+    if let Err(error) = exchange(&staged, target) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("memory entry '{}' cannot be replaced: {error}", target.display()));
+    }
+    let displaced = std::fs::read(&staged).map(|old| ContentHash::of_bytes(&old).to_hex());
+    if displaced.as_deref().ok() != Some(before) {
+        let restored = exchange(&staged, target);
+        let _ = std::fs::remove_file(&staged);
+        return Err(match restored {
+            Ok(()) => format!("memory entry '{}' changed while it was being replaced", target.display()),
+            Err(error) => format!("memory entry '{}' changed while it was being replaced and could not be restored: {error}", target.display()),
+        });
+    }
+    let _ = std::fs::remove_file(&staged);
+    crate::file_write::sync_parent(target)
+}
+
+#[cfg(target_vendor = "apple")]
+fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let left = std::ffi::CString::new(left.as_os_str().as_bytes())?;
+    let right = std::ffi::CString::new(right.as_os_str().as_bytes())?;
+    if unsafe { libc::renamex_np(left.as_ptr(), right.as_ptr(), libc::RENAME_SWAP) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exchange(left: &Path, right: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let left = std::ffi::CString::new(left.as_os_str().as_bytes())?;
+    let right = std::ffi::CString::new(right.as_os_str().as_bytes())?;
+    if unsafe {
+        libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, left.as_ptr(), libc::AT_FDCWD, right.as_ptr(), libc::RENAME_EXCHANGE)
+    } == 0
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+fn exchange(_left: &Path, _right: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "atomic exchange is unavailable on this platform"))
 }
 
 fn ee_lineage(root: &Path, ee: &str) -> Result<Vec<String>, String> {

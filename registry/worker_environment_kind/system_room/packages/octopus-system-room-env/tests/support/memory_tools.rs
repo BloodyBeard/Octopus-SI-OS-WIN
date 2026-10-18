@@ -64,7 +64,7 @@ impl Fixture {
             .validate(&arguments).map_err(|error| error.to_string())?;
         let effects = self.root.join("effects");
         let host = MemoryHost { collection: "artifact-memory-test", artifact_root: &self.artifacts, ee_instances_root: &self.ees,
-            effect_root: Some(&effects), room_kinds: &["system_room".to_string()], maximum_bytes: 1024 * 1024 };
+            effect_root: Some(&effects), maximum_bytes: 1024 * 1024 };
         let call = ToolCall { tool_id: tool.into(), arguments, handler_config: descriptor.handler_config.clone() };
         execute(input, &call, &host).map(|result| result.body).map_err(|error| error.to_string())
     }
@@ -110,4 +110,7 @@ fn one_save_is_found_by_later_runs_within_its_scope_lineage() {
     let history = fixture.call("memory.list", json!({"include_withdrawn":true}), "ee_home", &["read"]).unwrap();
     let states = history["memories"].as_array().unwrap().iter().map(|row| row["state"].as_str().unwrap()).collect::<Vec<_>>();
     assert_eq!((history["total"].as_u64(), states.contains(&"withdrawn")), (Some(2), true));
+    let names = std::fs::read_dir(fixture.artifacts.join("artifact-memory-test/entries")).unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect::<Vec<_>>();
+    assert!(names.len() == 2 && names.iter().all(|name| name.ends_with(".json") && !name.starts_with('.')), "{names:?}");
 }

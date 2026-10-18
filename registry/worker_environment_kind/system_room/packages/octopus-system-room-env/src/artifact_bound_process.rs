@@ -38,7 +38,6 @@ impl ArtifactBoundProcess {
     fn memory(
         &self,
         input: &InterfaceInvocationEnvelope,
-        descriptor: &ToolDescriptor,
         call: &ToolCall,
     ) -> Result<ToolHandlerResult, ToolHandlerError> {
         let unavailable = |reason: &str| ToolHandlerError::Execution {
@@ -58,11 +57,6 @@ impl ArtifactBoundProcess {
             .durable_var_dir
             .as_ref()
             .map(|directory| directory.join("memory-effects"));
-        let room_kinds = descriptor
-            .supported_worker_environment_kinds
-            .iter()
-            .map(|kind| kind.as_str().to_string())
-            .collect::<Vec<_>>();
         crate::memory_bound::execute(
             input,
             call,
@@ -71,7 +65,6 @@ impl ArtifactBoundProcess {
                 artifact_root,
                 ee_instances_root,
                 effect_root: effect_root.as_deref(),
-                room_kinds: &room_kinds,
                 maximum_bytes: self.maximum_bytes,
             },
         )
@@ -117,7 +110,7 @@ impl ToolProcessHandler for ArtifactBoundProcess {
                 crate::collection_tools::execute(&invocation.envelope, &call, self.registry_artifact_root.as_deref(), self.maximum_bytes)
             } else if matches!(call.handler_config.get("operation").and_then(serde_json::Value::as_str),
                 Some("memory_save" | "memory_search" | "memory_read" | "memory_list")) {
-                self.memory(&invocation.envelope, &invocation.descriptor, &call)
+                self.memory(&invocation.envelope, &call)
             } else {
                 self.handler.execute(&context, &call).await
             };

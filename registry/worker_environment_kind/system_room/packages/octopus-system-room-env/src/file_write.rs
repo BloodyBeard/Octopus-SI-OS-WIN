@@ -678,7 +678,7 @@ fn canonicalize_declared_path(path: &Path) -> Result<AbsPath, String> {
     }
 }
 
-fn stage_write(
+pub(crate) fn stage_write(
     staging_root: &std::path::Path,
     target: &std::path::Path,
     bytes: &[u8],
@@ -728,7 +728,7 @@ fn stage_write(
     ))
 }
 
-fn sync_parent(target: &std::path::Path) -> Result<(), String> {
+pub(crate) fn sync_parent(target: &std::path::Path) -> Result<(), String> {
     let parent = target.parent().ok_or_else(|| {
         format!(
             "file.write target '{}' has no parent to synchronize",

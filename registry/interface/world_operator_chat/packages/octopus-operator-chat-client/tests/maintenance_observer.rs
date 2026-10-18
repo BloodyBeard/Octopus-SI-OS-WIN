@@ -1582,7 +1582,6 @@ mod movement_gate {
                         artifact_root: &root.join("registry/artifact"),
                         ee_instances_root: &root.join("ee"),
                         effect_root: Some(&root.join("memory-effects")),
-                        room_kinds: &["system_room".to_string()],
                         maximum_bytes: 1 << 26,
                     },
                 )
