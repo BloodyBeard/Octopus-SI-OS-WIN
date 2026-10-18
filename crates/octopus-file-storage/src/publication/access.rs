@@ -15,6 +15,17 @@ pub struct FilePublicationAccess {
     pub file_writes: Vec<PublicationFileSelector>,
 }
 
+pub fn publication_ancestor_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
+    namespace::validate_absolute(path)?;
+    let mut directories = BTreeSet::new();
+    for parent in path.parent().into_iter().flat_map(Path::ancestors) {
+        directories.insert(parent.to_path_buf());
+        directories.insert(parent.join(COORDINATION_DIRECTORY));
+        directories.insert(parent.join(COORDINATION_DIRECTORY).join("history"));
+    }
+    Ok(directories.into_iter().collect())
+}
+
 pub fn file_publication_access(path: &Path) -> io::Result<FilePublicationAccess> {
     namespace::validate_absolute(path)?;
     if path.file_name().is_none() || path.components().any(|part| part.as_os_str() == COORDINATION_DIRECTORY) {

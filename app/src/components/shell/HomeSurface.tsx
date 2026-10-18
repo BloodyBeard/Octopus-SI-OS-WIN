@@ -61,7 +61,7 @@ export function HomeSurface({
             data-state={activityOpen ? "open" : "closed"} type="button" onClick={() => {
               setWidgetsOpen(false);
               onHomeViewModeChange?.(activityOpen ? "voice" : "activity");
-            }}><Glyph name="pulse" size={16} /></button>
+            }}><Glyph name="transcript" size={16} /></button>
         </ShellTooltip>
         <ShellTooltip label="Home widgets">
           <button aria-label="Home widgets" aria-expanded={widgetsOpen} className="app-titlebar-action no-drag"

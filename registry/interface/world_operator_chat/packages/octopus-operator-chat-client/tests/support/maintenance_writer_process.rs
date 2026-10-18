@@ -1,7 +1,5 @@
 use super::*;
-#[allow(dead_code)]
-#[path = "../../../../../../worker_environment_kind/process_session/packages/octopus-process-session-tool-runtime/src/process_authority.rs"]
-mod native_authority;
+use octopus_verifiers::process_authority as native_authority;
 use native_authority::ProcessAuthoritySpecExecution;
 use octopus_interfaces::{
     GrantProjection, InterfaceDescriptor, InvocationMetadata, RuntimeInvocationMetadata,
@@ -219,6 +217,53 @@ async fn exact_file_authoring_tools_apply_under_sandbox_and_refuse_sibling() {
 }
 
 async fn invoke(
+    root: &Path,
+    interface_dir: &Path,
+    interface: &InterfaceDescriptor,
+    descriptor: &ToolDescriptor,
+    roots: &BTreeMap<String, PathBuf>,
+    authority_arguments: &Value,
+    arguments: &Value,
+    record: &Value,
+) -> Value {
+    let private = tempfile::tempdir_in(root).unwrap();
+    let input = private.path().join("input.json");
+    std::fs::write(&input, serde_json::to_vec(&json!({"interface_dir":interface_dir,
+        "interface":interface,"descriptor":descriptor,"roots":roots,
+        "authority_arguments":authority_arguments,"arguments":arguments,"record":record})).unwrap()).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let tool = executable.parent().unwrap().parent().unwrap().join("octopus-file-write-tool");
+    let authority = octopus_verifiers::process_authority::ProcessAuthority::resolve(
+        roots.values().cloned().chain([source().join("registry"), interface_dir.to_path_buf()]),
+        [private.path().to_path_buf()], [executable.clone(), tool], [], [], [],
+        false, false, false, true, octopus_descriptors::ProcessSandboxMode::Enforced,
+    ).unwrap();
+    let prepared = authority.prepare(executable.to_str().unwrap(),
+        &["--exact".into(), "maintenance_writer_process::sandboxed_writer_host".into(), "--nocapture".into()],
+        interface_dir, None).unwrap();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30),
+        tokio::process::Command::new(prepared.program).args(prepared.args)
+            .env_clear().envs(prepared.environment).env("OCTOPUS_WRITER_TEST_INPUT", &input)
+            .current_dir(interface_dir).kill_on_drop(true).output()).await.unwrap().unwrap();
+    assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    read(&private.path().join("result.json"))
+}
+
+#[tokio::test]
+async fn sandboxed_writer_host() {
+    let Some(input) = std::env::var_os("OCTOPUS_WRITER_TEST_INPUT") else { return; };
+    let input = PathBuf::from(input);
+    let value = read(&input);
+    let result = invoke_tool(input.parent().unwrap(),
+        Path::new(value["interface_dir"].as_str().unwrap()),
+        &serde_json::from_value(value["interface"].clone()).unwrap(),
+        &serde_json::from_value(value["descriptor"].clone()).unwrap(),
+        &serde_json::from_value(value["roots"].clone()).unwrap(),
+        &value["authority_arguments"], &value["arguments"], &value["record"]).await;
+    std::fs::write(input.parent().unwrap().join("result.json"), serde_json::to_vec(&result).unwrap()).unwrap();
+}
+
+async fn invoke_tool(
     root: &Path,
     interface_dir: &Path,
     interface: &InterfaceDescriptor,

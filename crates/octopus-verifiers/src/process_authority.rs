@@ -1028,6 +1028,7 @@ fn prepare_macos(
     let mut writable_ancestor_sources = writable.clone();
     writable_ancestor_sources.extend(writable_exact.iter().cloned());
     let writable_ancestors = path_ancestors(&writable_ancestor_sources);
+    let publication = macos_file_publication_access(authority)?;
     let mut paths = BTreeSet::new();
     paths.extend(readable.iter().cloned());
     paths.extend(writable.iter().cloned());
@@ -1035,6 +1036,13 @@ fn prepare_macos(
     paths.extend(writable_exact.iter().cloned());
     paths.insert(cwd.to_path_buf());
     let ancestors = path_ancestors(&paths);
+    let mut directory_reads = ancestors.clone();
+    if authority.allow_sandbox_delegation {
+        for path in &paths {
+            directory_reads.extend(octopus_file_storage::publication::publication_ancestor_directories(path)
+                .map_err(|error| format!("publication ancestry for '{}' is unavailable: {error}", path.display()))?);
+        }
+    }
     let mut policy = String::from(
         "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow process-info* (target same-sandbox))\n(allow sysctl-read)\n(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))\n(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n(allow ipc-posix-sem)\n(allow ipc-posix-shm-read-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink)\n(allow pseudo-tty)\n(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.cfprefsd.agent\") (local-name \"com.apple.cfprefsd.agent\"))\n(allow file-read* file-test-existence (subpath \"/private/etc\") (subpath \"/etc\") (subpath \"/private/var/db/timezone\") (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-test-existence (subpath \"/dev/fd\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+\"))\n(allow file-read* file-test-existence (literal \"/\"))\n",
     );
@@ -1067,12 +1075,64 @@ fn prepare_macos(
         "WRITE_EXACT",
         writable_exact,
     );
-    append_macos_exact_access(
+    append_macos_typed_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-read-data",
+        "DIRECTORY_PIN_READ",
+        directory_reads,
+        Some("DIRECTORY"),
+    );
+    append_macos_typed_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-read* file-test-existence",
+        "PUBLICATION_DIRECTORY_READ",
+        publication.directory_reads,
+        Some("DIRECTORY"),
+    );
+    append_macos_typed_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-write-create",
+        "PUBLICATION_DIRECTORY_CREATE",
+        publication.directory_creates,
+        Some("DIRECTORY"),
+    );
+    append_macos_typed_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-read* file-test-existence",
+        "PUBLICATION_FILE_READ",
+        publication.file_reads,
+        Some("REGULAR-FILE"),
+    );
+    append_macos_typed_exact_access(
+        &mut policy,
+        &mut definitions,
+        "file-write*",
+        "PUBLICATION_FILE_WRITE",
+        publication.file_writes,
+        Some("REGULAR-FILE"),
+    );
+    let mut publication_patterns = Vec::new();
+    for (prefix, operations, patterns) in [
+        ("PUBLICATION_READ_PATTERN", "file-read* file-test-existence", publication.read_patterns),
+        ("PUBLICATION_WRITE_PATTERN", "file-write*", publication.write_patterns),
+    ] {
+        for (index, pattern) in patterns.into_iter().enumerate() {
+            let key = format!("{prefix}_{index}");
+            policy.push_str(&format!("(allow {operations} (require-all (vnode-type REGULAR-FILE) (regex (param \"{key}\"))))\n"));
+            publication_patterns.push((key, pattern));
+        }
+    }
+    append_macos_typed_exact_access(
         &mut policy,
         &mut definitions,
         "file-write-create",
         "WRITE_ANCESTOR_CREATE",
         writable_ancestors,
+        Some("DIRECTORY"),
     );
     append_macos_access(
         &mut policy,
@@ -1086,6 +1146,9 @@ fn prepare_macos(
     executable_paths.extend(process_closure.executables.iter().cloned());
     executable_paths.extend(process_closure.bundle_roots.iter().cloned());
     executable_paths.remove(&sandbox);
+    add_macos_lexical_aliases(&mut executable_paths);
+    let mut executable_exact = authority.executable_exact.clone();
+    add_macos_lexical_aliases(&mut executable_exact);
     append_macos_access(
         &mut policy,
         &mut definitions,
@@ -1098,7 +1161,7 @@ fn prepare_macos(
         &mut definitions,
         "process-exec",
         "PROCESS_EXEC_EXACT",
-        authority.executable_exact.clone(),
+        executable_exact.clone(),
     );
     if authority.allow_sandbox_delegation {
         append_macos_exact_access(
@@ -1125,7 +1188,7 @@ fn prepare_macos(
         &mut definitions,
         "file-map-executable",
         "EXECUTABLE_EXACT",
-        authority.executable_exact.clone(),
+        executable_exact,
     );
     append_macos_exact_access(
         &mut policy,
@@ -1155,6 +1218,10 @@ fn prepare_macos(
         sandbox_args.push(OsString::from("-D"));
         sandbox_args.push(definition);
     }
+    for (key, pattern) in publication_patterns {
+        sandbox_args.push(OsString::from("-D"));
+        sandbox_args.push(OsString::from(format!("{key}={pattern}")));
+    }
     sandbox_args.push(OsString::from("-p"));
     sandbox_args.push(OsString::from(policy));
     sandbox_args.push(OsString::from("--"));
@@ -1171,7 +1238,7 @@ fn prepare_macos(
 #[cfg(target_os = "macos")]
 fn add_macos_lexical_aliases(paths: &mut BTreeSet<PathBuf>) {
     let existing = paths.iter().cloned().collect::<Vec<_>>();
-    for alias in ["/etc", "/tmp", "/var"] {
+    for alias in ["/bin", "/etc", "/sbin", "/tmp", "/var"] {
         let alias = Path::new(alias);
         let Ok(target) = std::fs::canonicalize(alias) else {
             continue;
@@ -1183,6 +1250,110 @@ fn add_macos_lexical_aliases(paths: &mut BTreeSet<PathBuf>) {
             paths.insert(alias.join(suffix));
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacosFilePublicationAccess {
+    directory_reads: BTreeSet<PathBuf>,
+    directory_creates: BTreeSet<PathBuf>,
+    file_reads: BTreeSet<PathBuf>,
+    file_writes: BTreeSet<PathBuf>,
+    read_patterns: BTreeSet<String>,
+    write_patterns: BTreeSet<String>,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_file_publication_access(authority: &ProcessAuthority) -> Result<MacosFilePublicationAccess, String> {
+    use octopus_file_storage::publication::{COORDINATION_DIRECTORY, PublicationFileSelector, file_publication_access};
+    let mut targets = authority.writable_exact.clone();
+    targets.extend(authority.writable.iter().filter(|path| path.is_file()).cloned());
+    let mut access = MacosFilePublicationAccess::default();
+    for target in targets {
+        match std::fs::symlink_metadata(&target) {
+            Ok(metadata) if !metadata.is_file() => continue,
+            Ok(_) => (),
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => (),
+            Err(error) => return Err(format!("file publication authority target cannot be inspected: {error}")),
+        }
+        let parent = target.parent().ok_or_else(|| "file publication authority target has no parent".to_string())?;
+        let local = parent.join(COORDINATION_DIRECTORY);
+        let ancestors = parent.ancestors().map(Path::to_path_buf).collect::<BTreeSet<_>>();
+        let metadata = ancestors.iter().map(|ancestor| ancestor.join(COORDINATION_DIRECTORY)).collect::<BTreeSet<_>>();
+        let history = metadata.iter().map(|root| root.join("history")).collect::<BTreeSet<_>>();
+        let projection = file_publication_access(&target).map_err(|error| format!("file publication authority for '{}' failed: {error}", target.display()))?;
+        for path in projection.directory_reads {
+            validate_macos_publication_path(&path, true)?;
+            if !ancestors.contains(&path) && !metadata.contains(&path) && !history.contains(&path) {
+                return Err("file publication projection reads an unrelated directory".into());
+            }
+            access.directory_reads.insert(path);
+        }
+        for path in projection.directory_creates {
+            validate_macos_publication_path(&path, true)?;
+            if path != local { return Err("file publication projection creates an unrelated directory".into()); }
+            access.directory_reads.insert(path.clone());
+            access.directory_creates.insert(path);
+        }
+        for (writable, selectors) in [(false, projection.file_reads), (true, projection.file_writes)] {
+            for selector in selectors {
+                match selector {
+                    PublicationFileSelector::Exact(path) => {
+                        validate_macos_publication_path(&path, false)?;
+                        let directory = path.parent().ok_or_else(|| "file publication selector has no parent".to_string())?;
+                        if if writable { directory != local.as_path() } else { !metadata.contains(directory) && !history.contains(directory) } {
+                            return Err("file publication projection selects unrelated metadata".into());
+                        }
+                        access.file_reads.insert(path.clone());
+                        if writable { access.file_writes.insert(path); }
+                    }
+                    PublicationFileSelector::Names { directory, prefix, suffix } => {
+                        validate_macos_publication_path(&directory, true)?;
+                        if directory != local || [&prefix, &suffix].into_iter().any(|part| part.is_empty() || part.as_encoded_bytes().contains(&b'/')) {
+                            return Err("file publication projection has an unbounded filename selector".into());
+                        }
+                        let mut directories = BTreeSet::from([directory]);
+                        add_macos_lexical_aliases(&mut directories);
+                        for directory in directories {
+                            let pattern = format!("^{}/{}[^/]*{}$", macos_regex_text(directory.as_os_str())?, macos_regex_text(&prefix)?, macos_regex_text(&suffix)?);
+                            access.read_patterns.insert(pattern.clone());
+                            if writable { access.write_patterns.insert(pattern); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for paths in [&mut access.directory_reads, &mut access.directory_creates, &mut access.file_reads, &mut access.file_writes] {
+        add_macos_lexical_aliases(paths);
+    }
+    Ok(access)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_macos_publication_path(path: &Path, directory: bool) -> Result<(), String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+        || normalize_declared_exact_path(path.to_path_buf())? != path {
+        return Err("file publication projection requires original normal absolute paths".into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if if directory { metadata.is_dir() } else { metadata.is_file() } => Ok(()),
+        Ok(_) => Err("file publication projection has a different filesystem type".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("file publication projection cannot be inspected: {error}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_regex_text(value: &OsStr) -> Result<String, String> {
+    let value = value.to_str().ok_or_else(|| "file publication filename projection requires UTF-8".to_string())?;
+    let mut escaped = String::new();
+    for character in value.chars() {
+        if character.is_control() { return Err("file publication filename projection contains control text".into()); }
+        if "\\.^$|?*+()[]{}".contains(character) { escaped.push('\\'); }
+        escaped.push(character);
+    }
+    Ok(escaped)
 }
 
 #[cfg(target_os = "macos")]
@@ -1332,7 +1503,7 @@ fn macos_selected_executable(
             executable.display()
         )
     })?;
-    if macos_imported_libraries(&bytes).contains(b"/usr/lib/libxcselect.dylib".as_slice()) {
+    if macos_imported_libraries(&bytes).0.contains(b"/usr/lib/libxcselect.dylib".as_slice()) {
         let selector = PathBuf::from("/private/var/select/developer_dir");
         let metadata = std::fs::symlink_metadata(&selector).map_err(|error| {
             format!(
@@ -1478,13 +1649,18 @@ fn macos_runtime_library_paths(
     bundle_roots: &BTreeSet<PathBuf>,
     runtime_roots: &BTreeSet<PathBuf>,
 ) -> Result<BTreeSet<PathBuf>, String> {
-    let mut pending = BTreeSet::from([executable.to_path_buf()]);
+    let executable_bytes = std::fs::read(executable).map_err(|error| error.to_string())?;
+    let (_, executable_rpaths) = macos_imported_libraries(&executable_bytes);
+    let inherited_rpaths = executable_rpaths.iter()
+        .filter_map(|path| resolve_macos_import(path, executable, executable)).collect::<Vec<_>>();
+    let mut candidates = BTreeSet::from([executable.to_path_buf()]);
     for root in bundle_roots {
-        collect_macos_runtime_candidates(root, &mut pending)?;
+        collect_macos_runtime_candidates(root, &mut candidates)?;
     }
+    let mut pending = candidates.into_iter().map(|path| (path, inherited_rpaths.clone())).collect::<BTreeMap<_, _>>();
     let mut inspected = BTreeSet::new();
     let mut libraries = BTreeSet::new();
-    while let Some(path) = pending.pop_first() {
+    while let Some((path, inherited_rpaths)) = pending.pop_first() {
         let resolved = match std::fs::canonicalize(&path) {
             Ok(path) => path,
             Err(_) => continue,
@@ -1496,9 +1672,21 @@ fn macos_runtime_library_paths(
             Ok(bytes) => bytes,
             Err(_) => continue,
         };
-        let imports = macos_imported_libraries(&bytes);
+        let (imports, declared_rpaths) = macos_imported_libraries(&bytes);
+        let mut rpaths = declared_rpaths.iter()
+            .filter_map(|path| resolve_macos_import(path, &resolved, executable)).collect::<Vec<_>>();
+        for inherited in inherited_rpaths {
+            if !rpaths.contains(&inherited) { rpaths.push(inherited); }
+        }
         for import in imports {
-            let Some(import) = resolve_macos_import(&import, &resolved, executable) else {
+            let selected = if let Some(relative) = import.strip_prefix(b"@rpath/") {
+                use std::os::unix::ffi::OsStrExt;
+                rpaths.iter().map(|root| root.join(OsStr::from_bytes(relative)))
+                    .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
+            } else {
+                resolve_macos_import(&import, &resolved, executable)
+            };
+            let Some(import) = selected else {
                 continue;
             };
             if bundle_roots.iter().any(|root| import.starts_with(root))
@@ -1515,7 +1703,7 @@ fn macos_runtime_library_paths(
             }
             libraries.insert(import);
             libraries.insert(canonical.clone());
-            pending.insert(canonical);
+            pending.entry(canonical).or_insert_with(|| rpaths.clone());
         }
     }
     Ok(libraries)
@@ -1572,10 +1760,10 @@ fn macos_runtime_candidate(path: &Path, metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
-    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+fn macos_imported_libraries(bytes: &[u8]) -> (BTreeSet<Vec<u8>>, Vec<Vec<u8>>) {
+    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64, LoadCommandVariant};
 
-    fn thin(bytes: &[u8], imports: &mut BTreeSet<Vec<u8>>) {
+    fn thin(bytes: &[u8], imports: &mut BTreeSet<Vec<u8>>, rpaths: &mut Vec<Vec<u8>>) {
         let Ok(file) = object::File::parse(bytes) else {
             return;
         };
@@ -1591,6 +1779,12 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
                         Ok(Some(command)) => command,
                         Ok(None) | Err(_) => break,
                     };
+                    if let Ok(LoadCommandVariant::Rpath(rpath)) = command.variant() {
+                        if let Ok(path) = command.string(endian, rpath.path) {
+                            let path = path.to_vec();
+                            if !rpaths.contains(&path) { rpaths.push(path); }
+                        }
+                    }
                     let Ok(Some(dylib)) = command.dylib() else {
                         continue;
                     };
@@ -1608,15 +1802,16 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
     }
 
     let mut imports = BTreeSet::new();
+    let mut rpaths = Vec::new();
     match object::FileKind::parse(bytes) {
         Ok(object::FileKind::MachO32 | object::FileKind::MachO64) => {
-            thin(bytes, &mut imports);
+            thin(bytes, &mut imports, &mut rpaths);
         }
         Ok(object::FileKind::MachOFat32) => {
             if let Ok(file) = MachOFatFile32::parse(bytes) {
                 for arch in file.arches() {
                     if let Ok(bytes) = arch.data(bytes) {
-                        thin(bytes, &mut imports);
+                        thin(bytes, &mut imports, &mut rpaths);
                     }
                 }
             }
@@ -1625,14 +1820,14 @@ fn macos_imported_libraries(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
             if let Ok(file) = MachOFatFile64::parse(bytes) {
                 for arch in file.arches() {
                     if let Ok(bytes) = arch.data(bytes) {
-                        thin(bytes, &mut imports);
+                        thin(bytes, &mut imports, &mut rpaths);
                     }
                 }
             }
         }
         _ => {}
     }
-    imports
+    (imports, rpaths)
 }
 
 #[cfg(target_os = "macos")]
@@ -1689,13 +1884,28 @@ fn append_macos_exact_access(
     prefix: &str,
     paths: BTreeSet<PathBuf>,
 ) {
+    append_macos_typed_exact_access(policy, definitions, operations, prefix, paths, None);
+}
+
+#[cfg(target_os = "macos")]
+fn append_macos_typed_exact_access(
+    policy: &mut String,
+    definitions: &mut Vec<(String, PathBuf)>,
+    operations: &str,
+    prefix: &str,
+    paths: BTreeSet<PathBuf>,
+    vnode: Option<&str>,
+) {
     if paths.is_empty() {
         return;
     }
     policy.push_str(&format!("(allow {operations}\n"));
     for (index, path) in paths.into_iter().enumerate() {
         let key = format!("{prefix}_{index}");
-        policy.push_str(&format!("(literal (param \"{key}\"))\n"));
+        match vnode {
+            Some(vnode) => policy.push_str(&format!("(require-all (literal (param \"{key}\")) (vnode-type {vnode}))\n")),
+            None => policy.push_str(&format!("(literal (param \"{key}\"))\n")),
+        }
         definitions.push((key, path));
     }
     policy.push_str(")\n");
@@ -2123,5 +2333,46 @@ mod macos_network_process_tests {
         assert!(!offline
             .environment
             .contains_key(OsStr::new("SSL_CERT_FILE")));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod native_path_tests {
+    use super::*;
+
+    #[test]
+    fn macos_system_firmlink_aliases_preserve_authorized_paths() {
+        let private_etc = std::fs::canonicalize("/etc").expect("/etc");
+        let private_tmp = std::fs::canonicalize("/tmp").expect("/tmp");
+        let private_var = std::fs::canonicalize("/var").expect("/var");
+        let mut paths = BTreeSet::from([
+            private_etc.join("hosts"),
+            private_tmp.join("octopus"),
+            private_var.join("tmp"),
+        ]);
+        add_macos_lexical_aliases(&mut paths);
+        assert!(paths.contains(&PathBuf::from("/etc/hosts")));
+        assert!(paths.contains(&PathBuf::from("/tmp/octopus")));
+        assert!(paths.contains(&PathBuf::from("/var/tmp")));
+    }
+
+    #[test]
+    fn macos_projects_declared_process_capabilities() {
+        let authority = ProcessAuthority::resolve(
+            [], [], [], [], [], [], false, false, true, true,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        ).expect("process authority");
+        let prepared = authority
+            .prepare("/usr/bin/true", &[], Path::new("/tmp"), None)
+            .expect("prepared process");
+        let arguments = prepared
+            .args
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(arguments.contains("process-exec (with no-sandbox)"));
+        assert!(arguments.contains("SANDBOX_DELEGATION_0=/usr/bin/sandbox-exec"));
+        assert!(arguments.contains("lsopen"));
     }
 }
