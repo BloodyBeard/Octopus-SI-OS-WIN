@@ -7,6 +7,7 @@ type ClientToolPresentationDescriptor = ChatToolPresentationDescriptor & {
   surface: "browser" | "web" | "integration" | null;
   targetKind: "file" | "artifact";
   resultTargetFields: string[];
+  operationLabels: Record<string, string>;
 };
 
 export type NativeRunOperationPresentation = {
@@ -22,6 +23,7 @@ export type DynamicToolPresentation = {
   family: DynamicToolPresentationFamily;
   kind: ChatToolPresentationDescriptor["kind"];
   label: string;
+  operationLabel: string;
   path: string;
   pathLabel: string;
   query: string;
@@ -55,6 +57,9 @@ export function dynamicToolPresentation(
   const queryValue = presentationTarget(firstArgument(argumentsValue, descriptor.queryArguments));
   const query = family === "web" ? webSearchQueryLabel(queryValue) : queryValue;
   const operation = nativeRunOperationPresentation(message);
+  const calledOperation = text(argumentsValue.method) === "tools/call"
+    ? text(record(argumentsValue.params).name)
+    : text(argumentsValue.method);
   return {
     surface: clientDescriptor?.surface ?? null,
     conversationVisible: descriptor.conversationVisible,
@@ -62,6 +67,7 @@ export function dynamicToolPresentation(
     family,
     kind: descriptor.kind,
     label: descriptor.label,
+    operationLabel: clientDescriptor?.operationLabels[calledOperation] ?? "",
     path,
     pathLabel: targetKind === "artifact" ? artifactTargetLabel(target) : presentationPathLabel(pathValue),
     query,
@@ -78,6 +84,7 @@ export function dynamicToolPresentation(
 export function dynamicToolOperationLabel(presentation: DynamicToolPresentation): string {
   if (presentation.surface === "browser") return "Used the browser";
   if (presentation.operation) return presentation.operation.label;
+  if (presentation.operationLabel) return presentation.operationLabel;
   const displayToolId = baseDynamicToolId(presentation.exactToolId);
   const fallback = displayToolId.split(".").filter(Boolean).at(-1) ?? displayToolId;
   if (presentation.family === "tool" && displayToolId.includes(".")) return humanize(displayToolId);
@@ -218,6 +225,7 @@ const genericPresentation: ClientToolPresentationDescriptor = {
   targetArguments: [],
   targetKind: "file",
   resultTargetFields: [],
+  operationLabels: {},
 };
 
 const clientToolPresentationCatalog = Object.freeze(Object.fromEntries(
@@ -250,6 +258,8 @@ function parseClientToolActivityPresentation(value: unknown): ClientToolPresenta
     targetArguments: stringArray(row.target_arguments),
     targetKind: row.target_kind === "artifact" ? "artifact" : "file",
     resultTargetFields: stringArray(row.result_target_fields),
+    operationLabels: Object.fromEntries(Object.entries(record(row.operation_labels))
+      .map(([name, label]) => [name, text(label)]).filter(([, label]) => label)),
   };
 }
 

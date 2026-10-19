@@ -2597,6 +2597,7 @@ async function resumeRestartInterruptions() {
   const octopusHome = restartResume.home;
   try {
     if (!runtimeHost || !(await runtimeHost.probe()).ready) return;
+    const instance = JSON.parse(await fs.promises.readFile(path.join(octopusHome, "state", "runtime-instance", "state.json"), "utf8"));
     const client = await getOperatorChatClientLoader().load();
     const outcome = await client.resumeRestartInterruptedTurns({
       octopusHome: () => octopusHome,
@@ -2606,7 +2607,7 @@ async function resumeRestartInterruptions() {
         clientArtifactsRoot: (interfaceId) => path.join(octopusHome, "interface-hand-in", interfaceId, "client"),
         handInArtifact: (input) => handInArtifact({ ...input, octopusHome }),
       }, request),
-    }, { afterSeq: restartResume.afterSeq });
+    }, { afterSeq: restartResume.afterSeq, runtimeStartedAtMs: instance.started_at_unix_ms });
     if (restartResume.home === octopusHome) restartResume.afterSeq = Math.max(restartResume.afterSeq, outcome.watermark - 1);
     for (const row of outcome.resumed) void appendClientLog("info", "runtime.restart_resume.sent", row);
     for (const row of outcome.failed) void appendClientLog("error", "runtime.restart_resume.failed", row);

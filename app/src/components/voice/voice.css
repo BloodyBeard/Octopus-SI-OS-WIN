@@ -488,6 +488,13 @@
   text-align: center;
 }
 
+.home-live-activity__notice {
+  margin: var(--conversation-item-gap) 0 0;
+  color: var(--color-token-conversation-body);
+  font-size: var(--octopus-chat-font-size);
+  text-align: center;
+}
+
 .home-live-activity .octopus-agent-activity-header,
 .home-live-activity .octopus-thinking-fallback {
   align-self: center;

@@ -2324,7 +2324,7 @@ mark.octopus-thread-find-active {
   max-width: 100%;
   flex: 1 1 auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   pointer-events: none;
 }
 
@@ -3420,9 +3420,9 @@ mark.octopus-thread-find-active {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   overflow: hidden;
-  color: color-mix(in srgb, var(--color-token-description-foreground) 80%, transparent);
+  color: var(--color-token-conversation-body);
   font-size: var(--octopus-chat-font-size, 14px);
   line-height: 1.5;
 }
@@ -3431,16 +3431,10 @@ mark.octopus-thread-find-active {
   min-width: 0;
 }
 
-.octopus-inline-activity > svg:first-child {
-  color: var(--color-token-input-placeholder-foreground, var(--color-token-text-tertiary));
-}
-
-.octopus-activity-action {
-  color: var(--color-token-conversation-summary-leading);
-}
-
+.octopus-inline-activity > svg:first-child,
+.octopus-activity-action,
 .octopus-activity-detail {
-  color: color-mix(in srgb, var(--color-token-foreground) 30%, transparent);
+  color: inherit;
 }
 
 .octopus-activity-file-target {

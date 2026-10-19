@@ -1481,6 +1481,7 @@ async function resumeRestartInterruptedTurns(options, request) {
   const config = await readConfig();
   const octopusHome = absolutePath(options.octopusHome(), "octopusHome");
   const afterSeq = integerAtLeast(request?.afterSeq ?? -1, -1, "afterSeq");
+  const runtimeStartedAtMs = integerAtLeast(request?.runtimeStartedAtMs, 1, "runtimeStartedAtMs");
   const readArtifactPayload = requiredFunction(options.readArtifactPayload, "readArtifactPayload");
   const submit = requiredFunction(options.submitTurnControl, "submitTurnControl");
   const { DatabaseSync } = require("node:sqlite");
@@ -1499,13 +1500,22 @@ async function resumeRestartInterruptedTurns(options, request) {
     const later = database.prepare(
       "SELECT 1 FROM movements WHERE runtime_run = ? AND seq > ? AND seq < ? AND (from_id = ? OR to_id = ?) LIMIT 1",
     );
+    const turnInput = database.prepare(
+      `SELECT recorded_at_unix_ms FROM movements WHERE runtime_run = ? AND seq < ? AND kind = 'InterfaceOutbound'
+        AND from_id = ? AND to_id = ? ORDER BY seq DESC LIMIT 1`,
+    );
     interruptions = labels.flatMap((label) => database.prepare(
-      `SELECT seq, to_id, artifact_id, artifact_label, artifact_content, runtime_run FROM movements
+      `SELECT seq, from_id, to_id, artifact_id, artifact_label, artifact_content, runtime_run, recorded_at_unix_ms FROM movements
         WHERE seq > ? AND seq < ? AND kind = 'InterfaceOutbound' AND to_kind = 'interface'
           AND artifact_label = ? AND runtime_interface = to_id
         ORDER BY seq ASC`,
     ).all(afterSeq, watermark, label))
-      .filter((row) => !later.get(String(row.runtime_run), Number(row.seq), watermark, String(row.to_id), String(row.to_id)));
+      .filter((row) => !later.get(String(row.runtime_run), Number(row.seq), watermark, String(row.to_id), String(row.to_id)))
+      .filter((row) => {
+        const input = turnInput.get(String(row.runtime_run), Number(row.seq), String(row.to_id), String(row.from_id));
+        return Number(row.recorded_at_unix_ms) >= runtimeStartedAtMs
+          && Number.isSafeInteger(Number(input?.recorded_at_unix_ms)) && Number(input.recorded_at_unix_ms) < runtimeStartedAtMs;
+      });
   } finally {
     database.close();
   }

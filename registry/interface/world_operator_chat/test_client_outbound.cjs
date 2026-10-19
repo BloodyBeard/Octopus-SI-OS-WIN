@@ -2937,21 +2937,28 @@ test("only a turn a restart cut off is resumed, once its run has no later chat m
   const database = new DatabaseSync(path.join(home, "ledger", "ledger-index.sqlite"));
   database.exec(`CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE movements (seq INTEGER PRIMARY KEY, kind TEXT, from_kind TEXT, from_id TEXT, to_kind TEXT, to_id TEXT,
-      artifact_id TEXT, artifact_label TEXT, artifact_content TEXT, runtime_run TEXT, runtime_interface TEXT);
-    INSERT INTO index_meta VALUES ('watermark', '9');`);
+      artifact_id TEXT, artifact_label TEXT, artifact_content TEXT, runtime_run TEXT, runtime_interface TEXT, recorded_at_unix_ms INTEGER);
+    INSERT INTO index_meta VALUES ('watermark', '20');`);
+  const started = 1_000;
   const payloads = new Map();
-  const insert = database.prepare("INSERT INTO movements VALUES (?, ?, 'interface', ?, 'interface', ?, ?, ?, ?, ?, ?)");
-  const interrupted = (seq, chat, run, payload) => {
+  const insert = database.prepare("INSERT INTO movements VALUES (?, ?, 'interface', ?, 'interface', ?, ?, ?, ?, ?, ?, ?)");
+  const input = (seq, run, at) => insert.run(seq, "InterfaceOutbound", `world_operator_chat_${run}`, `world_provider_codex_${run}`,
+    `operator.message:${seq}`, "operator.message", "0".repeat(64), run, `world_provider_codex_${run}`, at);
+  const interrupted = (seq, run, payload) => {
     const hash = crypto.createHash("sha256").update(`${seq}`).digest("hex");
     payloads.set(hash, payload);
-    insert.run(seq, "InterfaceOutbound", `world_provider_codex_${run}`, chat, `turn.interrupted.result:${hash}`, "turn.interrupted.result", hash, run, chat);
+    insert.run(seq, "InterfaceOutbound", `world_provider_codex_${run}`, `world_operator_chat_${run}`, `turn.interrupted.result:${hash}`,
+      "turn.interrupted.result", hash, run, `world_operator_chat_${run}`, started + seq);
   };
   const restart = { native_terminal_status: "interrupted", result_origin: "native_turn_completion", native_terminal_input_context: true };
-  interrupted(4, "world_operator_chat_d", "run_d", { ...restart, native_terminal_input_context: false });
-  interrupted(5, "world_operator_chat_a", "run_a", restart);
-  interrupted(6, "world_operator_chat_b", "run_b", { ...restart, result_origin: "interrupted_turn_completion" });
-  interrupted(7, "world_operator_chat_c", "run_c", restart);
-  insert.run(8, "InterfaceArrival", "world_operator_chat_c", "world_provider_codex_run_c", "operator.message:later", "operator.message", "0".repeat(64), "run_c", "world_operator_chat_c");
+  for (const run of ["run_a", "run_b", "run_c", "run_d"]) input(["run_a", "run_b", "run_c", "run_d"].indexOf(run) + 1, run, started - 10);
+  input(5, "run_e", started + 5);
+  interrupted(10, "run_d", { ...restart, native_terminal_input_context: false });
+  interrupted(11, "run_a", restart);
+  interrupted(12, "run_b", { ...restart, result_origin: "interrupted_turn_completion" });
+  interrupted(13, "run_c", restart);
+  interrupted(14, "run_e", restart);
+  insert.run(15, "InterfaceArrival", "world_operator_chat_run_c", "world_provider_codex_run_c", "operator.message:later", "operator.message", "0".repeat(64), "run_c", "world_operator_chat_run_c", started + 15);
   database.close();
   const sent = [];
   const options = (submitTurnControl) => ({
@@ -2959,11 +2966,12 @@ test("only a turn a restart cut off is resumed, once its run has no later chat m
     readArtifactPayload: async ({ manifestHash }) => ({ payload: payloads.get(manifestHash) }),
     submitTurnControl,
   });
-  const outcome = await resumeRestartInterruptedTurns(options(async (request) => { sent.push(request); return { ...request }; }), { afterSeq: -1 });
-  assert.deepEqual(sent, [{ interfaceId: "world_operator_chat_a", runId: "run_a", action: "resume", controlId: "control_restart_5" }]);
-  assert.equal(outcome.watermark, 9);
+  const outcome = await resumeRestartInterruptedTurns(options(async (request) => { sent.push(request); return { ...request }; }), { afterSeq: -1, runtimeStartedAtMs: started });
+  assert.deepEqual(sent, [{ interfaceId: "world_operator_chat_run_a", runId: "run_a", action: "resume", controlId: "control_restart_11" }]);
+  assert.equal(outcome.watermark, 20);
   assert.deepEqual((await resumeRestartInterruptedTurns(options(async (request) => { sent.push(request); return request; }),
-    { afterSeq: outcome.watermark - 1 })).resumed, []);
-  const refused = await resumeRestartInterruptedTurns(options(async () => { throw new Error("refused"); }), { afterSeq: -1 });
-  assert.deepEqual([refused.resumed, refused.failed, refused.watermark], [[], [{ runId: "run_a", interruptedSeq: 5, error: "refused" }], 9]);
+    { afterSeq: outcome.watermark - 1, runtimeStartedAtMs: started })).resumed, []);
+  const refused = await resumeRestartInterruptedTurns(options(async () => { throw new Error("refused"); }), { afterSeq: -1, runtimeStartedAtMs: started });
+  assert.deepEqual([refused.resumed, refused.failed, refused.watermark], [[], [{ runId: "run_a", interruptedSeq: 11, error: "refused" }], 20]);
+  await assert.rejects(resumeRestartInterruptedTurns(options(async (request) => request), { afterSeq: -1 }), /runtimeStartedAtMs/);
 });

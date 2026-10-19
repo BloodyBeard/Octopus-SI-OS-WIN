@@ -66,7 +66,6 @@ export function HomeTurnActivity({ activities, startedAtMs, toolPresentations, t
   if (!hasActivity && turnInProgress) return <span role="status"><CadencedShimmerText active>Octopus is working</CadencedShimmerText></span>;
   return (
     <section aria-label="Current run activity" className="home-live-activity">
-      {terminalNotice ? <p role="status">{terminalNotice}</p> : null}
       {hasActivity ? <TurnActivity
         activities={activities}
         activityWindow="latest-context"
@@ -77,6 +76,7 @@ export function HomeTurnActivity({ activities, startedAtMs, toolPresentations, t
         toolPresentations={toolPresentations}
         turnInProgress={turnInProgress}
       /> : null}
+      {terminalNotice ? <p className="home-live-activity__notice" role="status">{terminalNotice}</p> : null}
     </section>
   );
 }

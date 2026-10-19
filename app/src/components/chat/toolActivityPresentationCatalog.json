@@ -526,9 +526,21 @@
   "client.mcp": {
     "kind": "tool",
     "conversation_visible": true,
-    "label": "Client MCP",
+    "label": "Client",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "operation_labels": {
+      "tools/list": "Listed client tools",
+      "list_artifacts": "Listed artifacts",
+      "read_artifact": "Read artifact",
+      "search_artifacts": "Searched artifacts",
+      "publish_widget": "Published widget",
+      "open_client_surface": "Opened client surface",
+      "inspect_client": "Inspected client",
+      "list_widgets": "Listed widgets",
+      "relaunch_client": "Relaunched client",
+      "set_widget": "Updated widget"
+    }
   },
   "code_mode.cancel": {
     "kind": "tool",

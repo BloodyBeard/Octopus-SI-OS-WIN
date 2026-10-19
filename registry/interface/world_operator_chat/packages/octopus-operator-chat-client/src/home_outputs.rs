@@ -300,6 +300,15 @@ pub(super) fn wire(
         return Ok(content);
     }
     let mut record: Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+    let provider_context = record["interface_state"][&identity.model_interface_id]["run_authoring_binding"]["checkpoints"]
+        .as_array()
+        .ok_or("Home provider has no declared checkpoint topology")?
+        .iter()
+        .filter(|template| template["role"] == "stable" && template["include_context"] == true)
+        .flat_map(|template| template["static_artifact_bindings"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .map(String::from)
+        .collect::<std::collections::BTreeSet<_>>();
     let result_binding = |id: &str| AuthoredInterfaceBinding {
         interface: InterfaceId::new(id),
         config: InterfaceBindingConfig {
@@ -313,7 +322,8 @@ pub(super) fn wire(
     for mut template in [template(identity, false)?, template(identity, true)?, result] {
         for binding in context {
             let id = octopus_descriptors::ArtifactId::new(&binding.id);
-            if !roles.contains(&binding.id) && !template.static_artifact_bindings.contains(&id) {
+            if !roles.contains(&binding.id) && !template.static_artifact_bindings.contains(&id)
+                && provider_context.contains(&binding.id) {
                 template.static_artifact_bindings.push(id);
             }
         }

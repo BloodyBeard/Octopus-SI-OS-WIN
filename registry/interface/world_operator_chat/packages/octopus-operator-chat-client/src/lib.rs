@@ -7860,9 +7860,11 @@ mod tests {
                 assert!(delivery["text"].as_str().unwrap().contains(&request.ee_instances_root.display().to_string()));
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
+                let provider_context = octopus_provider_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
                 for label in ["client.surface.document", "client.action", "client.action.result", "realtime.session.update"] {
                     let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)
                         && cp.outbound_interface_bindings.iter().any(|binding| binding.admits(label))).unwrap();
+                    assert!(template.static_artifact_bindings.iter().all(|id| provider_context.iter().any(|binding| &binding.id == id)), "{label}");
                     assert_eq!(template.include_context, label == "client.action.result");
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
                     if label == "client.action" {
