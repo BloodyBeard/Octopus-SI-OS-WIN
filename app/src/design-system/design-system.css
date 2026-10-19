@@ -245,8 +245,9 @@
 
 .oc-dialog[data-oc-dialog-position="top"] {
   --dialog-top-content-max-height: 760px;
+  position: relative;
+  top: max(10dvh, calc((100dvh - var(--dialog-top-content-max-height)) / 2));
   max-height: min(var(--dialog-top-content-max-height), 85dvh);
-  margin-top: max(10dvh, calc((100dvh - var(--dialog-top-content-max-height)) / 2));
 }
 
 .oc-dialog[data-oc-dialog-size="editor"] {
