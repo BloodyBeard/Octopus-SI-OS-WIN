@@ -1530,7 +1530,7 @@ impl ProviderOutputHandoff {
             .checked_add(1)
             .ok_or("provider recovery generation overflow")?;
         let mut generations = if recover_predecessors {
-            revision_attempt_generations(&self.ctx, record, record_bytes, &self.config)?
+            revision_attempt_generations(&self.ctx, &self.session, record, record_bytes, &self.config)?
                 .into_keys().collect::<BTreeSet<_>>()
         } else { BTreeSet::new() };
         generations.insert(expected);

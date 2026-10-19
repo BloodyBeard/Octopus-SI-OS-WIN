@@ -305,7 +305,7 @@ async fn exercise_interrupted_source_order(
         let record = RunRecord::from_bytes(&after).unwrap();
         cold.config = attempt_config(&record, &cold.config).unwrap();
         cold.session = ProviderHandoffSession::new(&cold.ctx).unwrap();
-        assert_eq!(revision_attempt_generations(&cold.ctx, &record, &after, &cold.config).unwrap(), BTreeMap::from([(2, revision.after_hash.clone())]));
+        assert_eq!(revision_attempt_generations(&cold.ctx, &cold.session, &record, &after, &cold.config).unwrap(), BTreeMap::from([(2, revision.after_hash.clone())]));
         let recover = || match cold.recover_authoring_attempt(&record, &after).unwrap() {
             AuthoringAttemptRecovery::InFlight(attempt) => attempt, _ => panic!("lost saved native output"),
         };

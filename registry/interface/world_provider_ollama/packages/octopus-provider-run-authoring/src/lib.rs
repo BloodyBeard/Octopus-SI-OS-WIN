@@ -3680,14 +3680,13 @@ fn attempt_config(record: &RunRecord, config: &RunAuthoringConfig) -> Result<Run
 // Discover only predecessors of the exact current pending source, through its
 // admitted write chain; private files do not authorize an older generation.
 fn revision_attempt_generations(
-    ctx: &InterfaceLiftContext, record: &RunRecord, current: &[u8], config: &RunAuthoringConfig,
+    ctx: &InterfaceLiftContext, session: &ProviderHandoffSession, record: &RunRecord, current: &[u8], config: &RunAuthoringConfig,
 ) -> Result<BTreeMap<u64, String>, String> {
     let mut generations = BTreeMap::new();
     if !config.checkpoints.iter().any(|checkpoint| checkpoint.role == RunAuthoringCheckpointRole::OwnerInput) {
         return Ok(generations);
     }
     let Some(pending) = persisted_pending_handoff(record, &config.provider_interface)? else { return Ok(generations); };
-    let session = ProviderHandoffSession::new(ctx)?;
     let (_, source) = session.index()?.exact_provider_source_outbound(
         &record.id, &record.worker, &config.provider_interface, pending.source_movement_seq,
     )?;
@@ -3753,7 +3752,7 @@ fn persisted_authoring_attempt(
         return Ok(None);
     }
     let predecessors = if recover_predecessors {
-        revision_attempt_generations(ctx, record, record_bytes, config)?
+        revision_attempt_generations(ctx, &ProviderHandoffSession::new(ctx)?, record, record_bytes, config)?
     } else { BTreeMap::new() };
     let mut attempts = Vec::new();
     for (path, call) in calls {
