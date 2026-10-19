@@ -100,7 +100,7 @@
     },
     "target": {
      "mode": "new_run",
-     "ee_id": "ee_operator_interaction",
+     "ee_id": "ee_existence",
      "worker_interface_id": "system_worker_memory_consolidation",
      "provider_interface_id": "world_provider_codex",
      "reasoning_effort": "medium",
