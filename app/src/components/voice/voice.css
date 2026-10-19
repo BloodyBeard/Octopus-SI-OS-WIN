@@ -479,19 +479,26 @@
 }
 
 .home-live-activity {
-  width: fit-content;
   min-width: 0;
-  max-width: 100%;
-  margin-inline: auto;
-  text-align: start;
+  text-align: center;
   --octopus-chat-font-size: 13px;
   --conversation-item-gap: 10px;
+}
+
+.home-live-activity .octopus-turn-activity-content {
+  text-align: center;
 }
 
 .home-live-activity__notice {
   margin: var(--conversation-item-gap) 0 0;
   color: var(--color-token-conversation-body);
   font-size: var(--octopus-chat-font-size);
+  text-align: center;
+}
+
+.home-live-activity .octopus-agent-activity-header,
+.home-live-activity .octopus-thinking-fallback {
+  align-self: center;
 }
 
 .home-live-activity__actions {
@@ -501,6 +508,10 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.home-live-activity__actions > li {
+  justify-content: center;
 }
 
 .home-response-output > div {
