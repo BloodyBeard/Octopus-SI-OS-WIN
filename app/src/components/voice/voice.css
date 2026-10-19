@@ -192,6 +192,7 @@
 
 .voice-session-stage {
   --voice-orb-size: min(520px, 42cqw, calc(100cqh - 310px));
+  --home-composer-rest: 132px;
   position: relative;
   display: grid;
   width: 100%;
@@ -282,14 +283,8 @@
   background: var(--color-token-foreground);
 }
 
-.voice-orb-column {
-  min-width: 0;
-  pointer-events: auto;
-}
-
 .home-response-stage {
   --home-anchor-block: 62px;
-  --home-composer-rest: 132px;
   --home-anchor-top: max(
     12px,
     min(
@@ -677,6 +672,9 @@
 
 .voice-orb-probe {
   position: absolute;
+  top: calc((100% - var(--home-composer-rest)) / 2);
+  left: 50%;
+  translate: -50% 0;
   width: var(--voice-orb-size);
   height: 0;
   visibility: hidden;
@@ -1657,43 +1655,6 @@
   line-height: 16px;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-}
-
-.voice-orb-column {
-  position: relative;
-  display: block;
-  width: var(--voice-orb-size, 520px);
-  max-width: 100%;
-  aspect-ratio: 1;
-  min-width: 0;
-  justify-self: center;
-}
-
-.voice-orb-interaction {
-  position: relative;
-  display: grid;
-  width: 100%;
-  max-width: 100%;
-  aspect-ratio: 1;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.voice-orb-interaction:focus-visible {
-  outline-offset: -18px !important;
-}
-
-.voice-orb-interaction:active {
-  transform: scale(.997);
-}
-
-.voice-orb-interaction:disabled {
-  cursor: wait;
 }
 
 .voice-orb-canvas {
@@ -2749,10 +2710,6 @@ button.voice-call-puck-copy {
 
   .home-response-stage {
     width: min(620px, calc(100cqw - 40px));
-  }
-
-  .voice-orb-column {
-    align-self: center;
   }
 
   .voice-controls {

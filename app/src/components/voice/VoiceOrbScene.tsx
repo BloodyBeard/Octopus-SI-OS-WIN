@@ -38,6 +38,7 @@ type ShaderUniforms = {
   background: WebGLUniformLocation;
   departing: WebGLUniformLocation;
   scene: WebGLUniformLocation;
+  orbCenter: WebGLUniformLocation;
   error: WebGLUniformLocation;
   formTiming: WebGLUniformLocation;
   forms: WebGLUniformLocation;
@@ -88,6 +89,7 @@ precision highp float;
 
 uniform vec2 u_resolution;
 uniform vec4 u_scene;
+uniform vec2 u_orb_center;
 uniform float u_pixel_ratio;
 uniform float u_time;
 uniform float u_thought_time;
@@ -561,7 +563,7 @@ void main() {
   vec2 sceneResolution = u_scene.zw;
   float shortestSide = min(sceneResolution.x, sceneResolution.y);
   float antialias = 1.0 / shortestSide;
-  vec2 point = (gl_FragCoord.xy - u_scene.xy - sceneResolution * 0.5) / shortestSide;
+  vec2 point = (gl_FragCoord.xy - u_orb_center) / shortestSide;
 
   float surfaceLuminance = dot(u_background, vec3(0.2126, 0.7152, 0.0722));
   float lightSurfaceScale = smoothstep(0.58, 0.84, surfaceLuminance);
@@ -864,6 +866,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     let renderPixelRatio = 1;
     let measuredSphere = 0;
     const scene = new Float32Array(4);
+    const orbCenter = new Float32Array(2);
     const ripples = new Float32Array(RIPPLE_COUNT * 4);
     let nextRipple = 0;
     const forms = new Float32Array(FORM_COUNT * 4);
@@ -902,7 +905,11 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
       scene[1] = (rect.bottom - sceneRect.bottom) * scaleY;
       scene[2] = Math.max(1, sceneRect.width * scaleX);
       scene[3] = Math.max(1, sceneRect.height * scaleY);
-      const probeWidth = sizeProbeRef.current?.current?.clientWidth ?? 0;
+      const probe = sizeProbeRef.current?.current;
+      const probeWidth = probe?.clientWidth ?? 0;
+      const probeRect = probe?.getBoundingClientRect();
+      orbCenter[0] = probeRect && probeWidth > 0 ? (probeRect.left + probeRect.width / 2 - rect.left) * scaleX : scene[0] + scene[2] / 2;
+      orbCenter[1] = probeRect && probeWidth > 0 ? (rect.bottom - probeRect.top) * scaleY : scene[1] + scene[3] / 2;
       measuredSphere = probeWidth > 0 ? Math.min(0.36, (probeWidth * scaleX * 0.285) / Math.min(scene[2], scene[3])) : 0;
       const cleared = canvas.width !== width || canvas.height !== height;
       if (cleared) {
@@ -972,6 +979,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
       gl.uniform4fv(uniforms.formTiming, formTiming);
       gl.uniform2f(uniforms.resolution, canvas.width, canvas.height);
       gl.uniform4fv(uniforms.scene, scene);
+      gl.uniform2fv(uniforms.orbCenter, orbCenter);
       gl.uniform1f(uniforms.pixelRatio, renderPixelRatio);
       gl.uniform1f(uniforms.time, seconds);
       gl.uniform1f(uniforms.thoughtTime, thoughtTime);
@@ -1194,6 +1202,7 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     reveal: requiredUniform(gl, program, "u_reveal"),
     resolution: requiredUniform(gl, program, "u_resolution"),
     scene: requiredUniform(gl, program, "u_scene"),
+    orbCenter: requiredUniform(gl, program, "u_orb_center"),
     ripples: requiredUniform(gl, program, "u_ripples"),
     speaking: requiredUniform(gl, program, "u_speaking"),
     speechTime: requiredUniform(gl, program, "u_speech_time"),
