@@ -1442,6 +1442,8 @@ export type OcDialogProps = {
   initialFocusRef?: RefObject<HTMLElement | null>;
   panelClassName?: string;
   size?: OcDialogSize;
+  variant?: "default" | "form";
+  position?: "centered" | "top";
 };
 
 export function OcDialog({
@@ -1455,6 +1457,8 @@ export function OcDialog({
   initialFocusRef,
   panelClassName,
   size = "default",
+  variant = "default",
+  position = "centered",
 }: OcDialogProps) {
   const reducedMotion = useReducedMotion();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -1500,9 +1504,11 @@ export function OcDialog({
         <motion.div
           animate={{ opacity: 1 }}
           className={cx(
-            "oc-dialog-overlay fixed inset-0 z-[1100] flex items-center justify-center",
+            "oc-dialog-overlay fixed inset-0 z-[1100] flex justify-center",
+            position === "top" ? "items-start" : "items-center",
             backdropClassName,
           )}
+          data-oc-dialog-variant={variant}
           exit={{ opacity: 0 }}
           initial={{ opacity: 0 }}
           key="oc-dialog"
@@ -1520,11 +1526,16 @@ export function OcDialog({
             aria-labelledby={ariaLabelledBy}
             aria-modal="true"
             className={cx(
-              "octopus-dialog oc-dialog flex flex-col overflow-hidden rounded-3xl bg-token-dropdown-background/90 text-token-foreground shadow-lg ring-[0.5px] ring-token-border backdrop-blur-xl outline-none",
+              "octopus-dialog oc-dialog flex flex-col overflow-hidden outline-none",
+              variant === "form"
+                ? "relative bg-surface-elevated-secondary text-default"
+                : "rounded-3xl bg-token-dropdown-background/90 text-token-foreground shadow-lg ring-[0.5px] ring-token-border backdrop-blur-xl",
               panelClassName,
             )}
             data-oc-dialog
+            data-oc-dialog-position={position}
             data-oc-dialog-size={size}
+            data-oc-dialog-variant={variant}
             data-settings-layer="true"
             exit={{ opacity: 0, scale: reducedMotion ? 1 : 0.98, y: reducedMotion ? 0 : 4 }}
             initial={{ opacity: 0, scale: reducedMotion ? 1 : 0.98, y: reducedMotion ? 0 : 4 }}

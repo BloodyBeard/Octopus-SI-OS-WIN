@@ -1,149 +1,125 @@
 import { useRef, useState } from "react";
-import { OcButton, OcDialog, OcDialogFooter, OcDialogHeader, OcIconButton, OcMenuItem } from "../../design-system/components";
+import { OcMenuItem } from "../../design-system/components";
 import { OcDropdown } from "../../design-system/OcDropdown";
 import { Glyph } from "../IconGlyphs";
-import { MessageTooltip } from "../chat/MessageTooltip";
-import { describeInactivityState, describeSchedule, formatEvidenceTime, nextScheduledRunAtMs, scheduleExpression } from "./scheduleModel";
-import type { ScheduledDelivery, ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
+import { describeInactivityState, describeSchedule, formatEvidenceTime, formatSchedule, nextScheduledRunAtMs, resolvedTimezone } from "./scheduleModel";
+import { scheduledRowStatus } from "./ScheduledRows";
+import type { ScheduledInterfaceProjection, ScheduledScopeOption } from "./types";
 
-export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onBack, onDelete, onEdit, onToggle, onUndo }: {
+export function ScheduledDetail({ task, pending, canEdit, scopeOptions, onDelete, onEdit, onToggle }: {
   task: ScheduledInterfaceProjection;
   pending: boolean;
   canEdit: boolean;
   scopeOptions: ScheduledScopeOption[];
-  onBack: () => void;
   onDelete: () => void;
   onEdit: () => void;
   onToggle: () => void;
-  onUndo: (delivery: ScheduledDelivery) => void;
 }) {
-  const [confirmUndo, setConfirmUndo] = useState<ScheduledDelivery | null>(null);
-  const inactivity = task.schedule?.type === "inactivity" ? task.schedule : null;
-  const scopeName = inactivity?.withinEe ? scopeOptions.find((option) => option.eeId === inactivity.withinEe)?.name ?? inactivity.withinEe : "All work";
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLButtonElement>(null);
-  const nextDueAtMs = task.status === "enabled" ? nextScheduledRunAtMs(task) : null;
-  const estimated = nextDueAtMs !== task.nextRunAtMs || task.nextRunSource === "";
-  const triggered = task.schedule?.type === "once" && task.lastRunAtMs !== null && task.nextRunAtMs === null;
+  const status = scheduledRowStatus(task);
   return (
-    <section aria-label={task.displayName} className="scheduled-detail">
-      <div className="scheduled-detail-content">
-        <div className="scheduled-detail-actions">
-          <MessageTooltip label="Back to Triggers"><OcIconButton appearance="compact" disabled={pending} glyph="arrowLeft" label="Back to Triggers" onClick={onBack} title="" /></MessageTooltip>
-          <span className="scheduled-detail-state">{task.status === "enabled" ? triggered ? "Triggered" : "Active" : task.status === "disabled" ? "Paused" : "Needs attention"}</span>
-          <OcButton disabled={!canEdit || !task.valid || pending} onClick={onEdit} size="sm" variant="secondary">Edit</OcButton>
-          <MessageTooltip label="Trigger actions"><OcIconButton appearance="compact" buttonRef={menuRef} glyph="more" label="Trigger actions" onClick={() => setMenuOpen(!menuOpen)} title="" /></MessageTooltip>
-          <OcDropdown anchorRef={menuRef} align="end" aria-label="Trigger actions" onOpenChange={setMenuOpen} open={menuOpen}>
-            <OcMenuItem disabled={!canEdit || !task.valid || pending} label="Edit" leadingIcon="edit" onClick={() => { setMenuOpen(false); onEdit(); }} role="menuitem" />
-            <OcMenuItem disabled={!canEdit || !task.valid || pending || triggered} label={task.status === "disabled" ? "Resume" : "Pause"} leadingIcon={task.status === "disabled" ? "play" : "pause"} onClick={() => { setMenuOpen(false); onToggle(); }} role="menuitem" />
-            <OcMenuItem disabled={!canEdit || pending} label="Delete" leadingIcon="trash" onClick={() => { setMenuOpen(false); setConfirmDelete(true); }} role="menuitem" tone="danger" />
-          </OcDropdown>
+    <section aria-label={task.displayName} className="flex h-full min-h-0 flex-col" data-scheduled-detail="">
+      <div className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+        <div className="relative mx-auto flex w-full max-w-(--thread-content-max-width) flex-1 shrink-0 flex-col px-toolbar pt-panel pb-8">
+          <div className="relative flex flex-col">
+            <div className="flex flex-col gap-0">
+              <div className="group flex w-full flex-col items-end justify-end gap-2 pb-6">
+                <div className="bg-token-foreground/5 max-w-[77%] min-w-0 overflow-hidden break-words rounded-2xl px-3 py-2 text-left" data-user-message-bubble="true">
+                  <div className="flex flex-col items-end gap-1">
+                    <div className="text-size-chat relative w-full min-w-0">
+                      <div className="text-size-chat whitespace-pre-wrap select-text">{task.instructions || "No instructions. This trigger may use its configured environment override."}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="group flex flex-col gap-3">
+                <p className="m-0 text-size-chat text-default select-text" data-scheduled-confirmation="">{confirmation(task, status, scopeOptions)}</p>
+                <SummaryCard canEdit={canEdit} onDelete={onDelete} onEdit={onEdit} onToggle={onToggle} pending={pending} status={status} task={task} />
+              </div>
+            </div>
+          </div>
         </div>
-        <header className="scheduled-detail-heading">
-          <h1>{task.displayName}</h1>
-          <p><Glyph name="scheduled" size={16} />{describeSchedule(task)}{task.timezone && task.schedule?.type !== "once" && task.schedule?.type !== "inactivity" ? ` · ${task.timezone}` : ""}</p>
-        </header>
-        {!task.valid ? <div className="scheduled-detail-error" role="alert"><Glyph name="warning" size={16} /><span>{task.error}</span></div> : null}
-        <section className="scheduled-detail-section">
-          <h2>Instructions</h2>
-          <p className="scheduled-detail-instructions">{task.instructions || "No default instructions. This task may use its configured environment override."}</p>
-        </section>
-        <section className="scheduled-detail-section">
-          <h2>Trigger</h2>
-          <DetailGrid rows={inactivity ? [
-            ["When", describeSchedule(task)],
-            ["Scope", scopeName],
-            ["Now", describeInactivityState(task)],
-            ["Last work", task.inactivityState?.lastActivityAtMs ? formatEvidenceTime(task.inactivityState.lastActivityAtMs) : "Not recorded"],
-            ["Last triggered", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "Not triggered yet"],
-          ] : [
-            ["When", describeSchedule(task)],
-            ["Timezone", task.timezone || "Not configured"],
-            ["Next run", task.status === "disabled" ? "Paused" : nextDueAtMs ? `${formatEvidenceTime(nextDueAtMs)}${estimated ? " · estimated" : ""}` : triggered ? "Does not repeat" : "Not recorded"],
-            ["Last triggered", task.lastRunAtMs ? formatEvidenceTime(task.lastRunAtMs) : "Not triggered yet"],
-          ]} />
-        </section>
-        {task.deliveries.length ? (
-          <section className="scheduled-detail-section">
-            <h2>Runs</h2>
-            <ul className="scheduled-runs" aria-label="Runs started by this trigger">
-              {task.deliveries.map((delivery) => <DeliveryRow canEdit={canEdit} delivery={delivery} key={delivery.seq} onUndo={() => setConfirmUndo(delivery)} pending={pending} />)}
-            </ul>
-          </section>
-        ) : null}
-        <details className="scheduled-interface-details">
-          <summary>Interface details<Glyph name="chevronDown" size={14} /></summary>
-          <DetailGrid rows={[
-            ["Interface", task.interfaceId],
-            ["Expression", scheduleExpression(task)],
-            ["Fire on start", task.fireOnStart ? "Yes" : "No"],
-            ["Run", task.runTemplate?.runId ?? "Not available"],
-            ["EE", task.runTemplate?.eeId ?? "Not available"],
-            ["Worker binding", task.runTemplate?.workerInterfaceId ?? "Not available"],
-            ["Outbounds", task.runTemplate?.outboundInterfaceIds.join(", ") || "None"],
-            ["Checkpoints", String(task.runTemplate?.checkpointCount ?? 0)],
-            ["Artifact bindings", String(task.runTemplate?.artifactBindingCount ?? 0)],
-            ["Movement", task.lastMovementSeq == null ? "Not recorded" : `seq ${task.lastMovementSeq}`],
-            ...(task.reminderEnv ? [["Environment override", task.reminderEnv] as [string, string]] : []),
-          ]} />
-        </details>
       </div>
-      <OcDialog ariaLabelledBy="scheduled-undo-title" busy={pending} onClose={() => setConfirmUndo(null)} open={confirmUndo !== null} panelClassName="max-w-md">
-        <OcDialogHeader closeDisabled={pending} description="Each recorded file returns to its exact earlier bytes. Undo stops if a file has changed since this run." onClose={() => setConfirmUndo(null)} title="Undo this run's changes?" titleId="scheduled-undo-title" />
-        <OcDialogFooter>
-          <OcButton disabled={pending} onClick={() => setConfirmUndo(null)} variant="ghost">Cancel</OcButton>
-          <OcButton disabled={!canEdit || pending} onClick={() => { if (confirmUndo) onUndo(confirmUndo); setConfirmUndo(null); }} variant="primary">{pending ? "Restoring…" : "Undo changes"}</OcButton>
-        </OcDialogFooter>
-      </OcDialog>
-      <OcDialog ariaLabelledBy="scheduled-delete-title" busy={pending} onClose={() => setConfirmDelete(false)} open={confirmDelete} panelClassName="max-w-md">
-        <OcDialogHeader closeDisabled={pending} description="This removes the trigger activation and its owned run record. Ledger evidence is kept." onClose={() => setConfirmDelete(false)} title={`Delete ${task.displayName}?`} titleId="scheduled-delete-title" />
-        <OcDialogFooter>
-          <OcButton disabled={pending} onClick={() => setConfirmDelete(false)} variant="ghost">Cancel</OcButton>
-          <OcButton disabled={!canEdit || pending} onClick={onDelete} tone="danger" variant="primary">{pending ? "Deleting…" : "Delete"}</OcButton>
-        </OcDialogFooter>
-      </OcDialog>
     </section>
   );
 }
 
-function DeliveryRow({ canEdit, delivery, onUndo, pending }: { canEdit: boolean; delivery: ScheduledDelivery; onUndo: () => void; pending: boolean }) {
-  const journal = delivery.journal;
-  const files = journal?.changes.filter((change) => change.kind === "file") ?? [];
-  const status = !journal ? "No change journal yet"
-    : journal.error ? `Journal unreadable: ${journal.error}`
-      : journal.outcome === "unchanged" ? "No change"
-        : journal.undone ? "Undone"
-          : `${files.length} ${files.length === 1 ? "file" : "files"} changed`;
+function SummaryCard({ canEdit, onDelete, onEdit, onToggle, pending, status, task }: {
+  canEdit: boolean;
+  onDelete: () => void;
+  onEdit: () => void;
+  onToggle: () => void;
+  pending: boolean;
+  status: ReturnType<typeof scheduledRowStatus>;
+  task: ScheduledInterfaceProjection;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLButtonElement>(null);
+  const editable = canEdit && task.valid && !pending;
+  const subtitle = status === "paused" ? "Paused" : status === "invalid" ? "Needs attention" : formatSchedule(task);
   return (
-    <li className="scheduled-run">
-      <div className="scheduled-run-heading">
-        <span className="scheduled-run-time">{formatEvidenceTime(delivery.atMs)}</span>
-        <span className="scheduled-run-status">{status}</span>
-        {journal?.undoable ? <OcButton disabled={!canEdit || pending} onClick={onUndo} size="sm" variant="secondary">Undo</OcButton> : null}
-      </div>
-      {journal?.summary ? <p className="scheduled-run-summary">{journal.summary}</p> : null}
-      {journal && (journal.changes.length || journal.checks.length) ? (
-        <details className="scheduled-interface-details">
-          <summary>Changes and checks<Glyph name="chevronDown" size={14} /></summary>
-          <ul className="scheduled-run-changes">
-            {journal.changes.map((change, index) => change.kind === "file" ? (
-              <li key={`${change.path}:${index}`} title={change.reason}>
-                <span>{change.action} · {change.path}</span>
-                <span>{change.status === "applied" ? change.restorable ? "in place" : `in place · ${change.unrestorableReason}` : change.status === "undone" ? "restored" : "changed since"}</span>
-              </li>
-            ) : (
-              <li key={`other:${index}`} title={change.undo}><span>{change.description}</span><span>{change.undo ? `undo: ${change.undo}` : ""}</span></li>
-            ))}
-            {journal.checks.map((check, index) => <li key={`check:${index}`}><span>{check.check}</span><span>{check.result}</span></li>)}
-          </ul>
-        </details>
-      ) : null}
-      <span className="scheduled-run-ref">{delivery.runId}</span>
-    </li>
+    <span className="mt-3 flex w-full max-w-[536px] flex-col self-start overflow-hidden rounded-2xl border border-token-border-default bg-token-main-surface-primary shadow-[0_2px_6px_-1px_rgba(0,0,0,0.03)] select-none" data-automation-card="">
+      <span className="group/resource-card relative flex min-h-16 w-full min-w-0 items-center gap-4 p-4">
+        <button
+          aria-describedby={`${task.interfaceId}-summary`}
+          aria-label={`Edit ${task.displayName}`}
+          className="peer/resource-card absolute inset-0 cursor-interaction border-0 bg-transparent group-hover/resource-card:bg-token-list-hover-background/30 focus-visible:ring-1 focus-visible:ring-token-focus-border focus-visible:outline-none focus-visible:ring-inset disabled:cursor-default"
+          disabled={!editable}
+          onClick={onEdit}
+          type="button"
+        />
+        <span className="pointer-events-none relative z-10 flex size-10 shrink-0 items-center justify-center rounded-lg bg-token-bg-secondary text-token-text-secondary">
+          <Glyph name="scheduled" size={20} />
+        </span>
+        <span className="pointer-events-none relative z-10 flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-base leading-5 text-token-text-primary">{task.displayName}</span>
+          <span className="truncate text-sm leading-5 text-token-text-tertiary" id={`${task.interfaceId}-summary`}>{subtitle}</span>
+        </span>
+        <span className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
+          <button
+            className="flex h-token-button-composer-sm cursor-interaction items-center gap-1 rounded-lg border border-token-border bg-transparent px-2 text-sm text-token-foreground hover:bg-token-list-hover-background disabled:cursor-default disabled:opacity-40"
+            disabled={!editable}
+            onClick={onEdit}
+            type="button"
+          >Open</button>
+          <button
+            aria-expanded={menuOpen}
+            aria-haspopup="menu"
+            aria-label="Trigger actions"
+            className="flex size-token-button-composer-sm cursor-interaction items-center justify-center rounded-lg border border-transparent text-token-foreground/50 hover:bg-token-list-hover-background hover:text-token-foreground data-[state=open]:bg-token-list-hover-background"
+            data-state={menuOpen ? "open" : "closed"}
+            onClick={() => setMenuOpen(!menuOpen)}
+            ref={menuRef}
+            type="button"
+          ><Glyph name="more" size={16} /></button>
+          <OcDropdown align="end" anchorRef={menuRef} aria-label="Trigger actions" onOpenChange={setMenuOpen} open={menuOpen} sideOffset={4} style={{ width: 208 }}>
+            <OcMenuItem disabled={!editable} label="Edit" leadingIcon="edit" onClick={() => { setMenuOpen(false); onEdit(); }} role="menuitem" />
+            {status === "completed" ? null : <OcMenuItem disabled={!editable} label={task.status === "disabled" ? "Resume" : "Pause"} leadingIcon={task.status === "disabled" ? "play" : "pause"} onClick={() => { setMenuOpen(false); onToggle(); }} role="menuitem" />}
+            <OcMenuItem disabled={!canEdit || pending} label="Delete" leadingIcon="trash" onClick={() => { setMenuOpen(false); onDelete(); }} role="menuitem" tone="danger" />
+          </OcDropdown>
+        </span>
+      </span>
+    </span>
   );
 }
 
-function DetailGrid({ rows }: { rows: Array<[string, string]> }) {
-  return <dl className="scheduled-detail-grid">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
+function confirmation(task: ScheduledInterfaceProjection, status: ReturnType<typeof scheduledRowStatus>, scopeOptions: ScheduledScopeOption[]): string {
+  if (status === "invalid") return `This trigger needs attention. ${task.error}`;
+  if (status === "paused") return "This trigger is paused. Resume it to start runs again.";
+  if (status === "completed") return "This trigger ran at its chosen time and does not repeat.";
+  if (task.schedule?.type === "inactivity") {
+    const withinEe = task.schedule.withinEe;
+    const where = withinEe ? ` in ${scopeOptions.find((option) => option.eeId === withinEe)?.name ?? withinEe}` : "";
+    const lastWork = task.inactivityState?.lastActivityAtMs ? ` Last work was ${formatEvidenceTime(task.inactivityState.lastActivityAtMs)}.` : "";
+    return `Your trigger is ready. It runs ${describeSchedule(task).replace(/^After/, "after")}${where}. ${describeInactivityState(task)}.${lastWork}`;
+  }
+  const next = nextScheduledRunAtMs(task);
+  if (!next) return "Your trigger is saved. You can review its schedule and settings in trigger details.";
+  const zone = task.schedule?.type === "once" ? undefined : resolvedTimezone(task.timezone);
+  let time: string;
+  try {
+    time = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short", timeZone: zone }).format(new Date(next));
+  } catch {
+    time = new Date(next).toLocaleString();
+  }
+  return `Your trigger is scheduled. Its next run is ${time}${next !== task.nextRunAtMs || task.nextRunSource === "" ? " (estimated)" : ""}.`;
 }

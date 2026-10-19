@@ -178,7 +178,7 @@ export function Sidebar({
         {inbox ? (
           <div className="sidebar-page-heading"><h1>Inbox</h1></div>
         ) : null}
-        {scheduledView ? <ScheduledSidebar /> : <div className="octopus-sidebar-scroll sidebar-page-scroll vertical-scroll-fade-mask flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto px-0 pb-row-x" data-activity={inbox}>
+        {scheduledView ? <ScheduledSidebar onSelectChat={onSelectChat} /> : <div className="octopus-sidebar-scroll sidebar-page-scroll vertical-scroll-fade-mask flex min-h-0 flex-1 flex-col gap-4 overflow-x-hidden overflow-y-auto px-0 pb-row-x" data-activity={inbox}>
           {inbox ? activityContent : (
             <TaskNavigation
               accessProfile={accessProfile}

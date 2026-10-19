@@ -98,6 +98,13 @@
   --text-3xl: var(--text-3xl);
   --text-4xl: var(--text-4xl);
   --text-size-chat: var(--octopus-chat-font-size);
+  --text-form-title: 1rem;
+  --text-form-title--line-height: 1.625rem;
+  --text-form-title--letter-spacing: -0.02em;
+  --text-form-title--font-weight: 590;
+  --text-form-body: 0.875rem;
+  --text-form-body--line-height: 1.25rem;
+  --text-form-body--letter-spacing: -0.15px;
 
   --radius-2xs: calc(0.125rem * var(--corner-scale, 1));
   --radius-xs: calc(0.25rem * var(--corner-scale, 1));

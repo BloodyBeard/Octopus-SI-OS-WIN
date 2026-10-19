@@ -172,7 +172,7 @@ export function mutationDraft(draft: ScheduledEditorDraft): OctopusScheduledDraf
 export function scheduledDraftError(draft: ScheduledEditorDraft, creating: boolean): string {
   if (creating && !/^[a-z0-9][a-z0-9_-]*$/.test(draft.interfaceId)) return "Interface id must use lowercase letters, digits, underscores, or hyphens.";
   if (!draft.instructions.trim()) return "Instructions are required.";
-  if (!draft.timezone.trim()) return "Timezone is required.";
+  if (!draft.timezone.trim()) return "Time zone is required.";
   if (draft.type === "inactivity") {
     if (!positiveNumber(draft.inactivity?.seconds) || draft.inactivity.seconds < 60) return "Quiet period must be at least one minute.";
     if (draft.fireOnStart) return "An inactivity trigger waits for activity and then a quiet period.";
@@ -180,11 +180,138 @@ export function scheduledDraftError(draft: ScheduledEditorDraft, creating: boole
     if (!positiveNumber(draft.intervalSeconds)) return "Interval must be greater than zero.";
   } else if (draft.type === "once") {
     if (!draft.dueAt || !Number.isFinite(Date.parse(draft.dueAt))) return "Choose a date and time.";
+    if (creating && Date.parse(draft.dueAt) <= Date.now()) return "Choose a date and time in the future";
     if (draft.fireOnStart) return "A one-time task runs at its chosen time.";
   } else if (!validCronExpression(draft.cron ?? "")) {
     return "Cron must use five numeric fields: minute hour day-of-month month day-of-week.";
   }
   return "";
+}
+
+export type RepeatMode = "hourly" | "daily" | "weekdays" | "weekly" | "interval" | "inactivity" | "custom";
+
+export const REPEAT_OPTIONS: ReadonlyArray<{ id: RepeatMode; label: string }> = [
+  { id: "hourly", label: "Hourly" },
+  { id: "daily", label: "Daily" },
+  { id: "weekdays", label: "Weekdays" },
+  { id: "weekly", label: "Weekly" },
+  { id: "interval", label: "Interval" },
+  { id: "inactivity", label: "After inactivity" },
+  { id: "custom", label: "Custom" },
+];
+
+export const WEEKDAY_OPTIONS: ReadonlyArray<{ id: number; label: string }> = [
+  { id: 1, label: "Monday" },
+  { id: 2, label: "Tuesday" },
+  { id: 3, label: "Wednesday" },
+  { id: 4, label: "Thursday" },
+  { id: 5, label: "Friday" },
+  { id: 6, label: "Saturday" },
+  { id: 0, label: "Sunday" },
+];
+
+export const INTERVAL_UNITS = [
+  { value: "seconds", label: "seconds", seconds: 1 },
+  { value: "minutes", label: "minutes", seconds: 60 },
+  { value: "hours", label: "hours", seconds: 3600 },
+  { value: "days", label: "days", seconds: 86_400 },
+] as const;
+
+export type IntervalUnit = typeof INTERVAL_UNITS[number]["value"];
+
+export function intervalUnit(seconds: number): IntervalUnit {
+  if (seconds >= 86_400 && seconds % 86_400 === 0) return "days";
+  if (seconds >= 3600 && seconds % 3600 === 0) return "hours";
+  if (seconds >= 60 && seconds % 60 === 0) return "minutes";
+  return "seconds";
+}
+
+type CronShape = { mode: "hourly" | "daily" | "weekdays" | "weekly"; hour: number; minute: number; weekday: number };
+
+function cronShape(expression: string): CronShape | null {
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
+  if (dayOfMonth !== "*" || month !== "*" || !/^\d{1,2}$/.test(minute) || Number(minute) > 59) return null;
+  if (hour === "*") return dayOfWeek === "*" ? { mode: "hourly", hour: 9, minute: Number(minute), weekday: 1 } : null;
+  if (!/^\d{1,2}$/.test(hour) || Number(hour) > 23) return null;
+  const clock = { hour: Number(hour), minute: Number(minute) };
+  if (dayOfWeek === "*") return { mode: "daily", ...clock, weekday: 1 };
+  if (dayOfWeek === "1-5") return { mode: "weekdays", ...clock, weekday: 1 };
+  if (/^[0-7]$/.test(dayOfWeek)) return { mode: "weekly", ...clock, weekday: Number(dayOfWeek) % 7 };
+  return null;
+}
+
+function cronFromShape(shape: CronShape): string {
+  if (shape.mode === "hourly") return `${shape.minute} * * * *`;
+  const days = shape.mode === "daily" ? "*" : shape.mode === "weekdays" ? "1-5" : String(shape.weekday);
+  return `${shape.minute} ${shape.hour} * * ${days}`;
+}
+
+export function repeatMode(draft: Pick<ScheduledEditorDraft, "type" | "cron">): RepeatMode | "once" {
+  if (draft.type === "once" || draft.type === "interval" || draft.type === "inactivity") return draft.type;
+  return cronShape(draft.cron ?? "")?.mode ?? "custom";
+}
+
+export function cronClock(draft: Pick<ScheduledEditorDraft, "cron">): { hour: number; minute: number; weekday: number } {
+  const shape = cronShape(draft.cron ?? "");
+  return shape ? { hour: shape.hour, minute: shape.minute, weekday: shape.weekday } : { hour: 9, minute: 0, weekday: 1 };
+}
+
+export function withRepeatMode(draft: ScheduledEditorDraft, mode: RepeatMode): ScheduledEditorDraft {
+  if (mode === "interval") return { ...draft, type: "interval", intervalSeconds: positiveNumber(draft.intervalSeconds) ? draft.intervalSeconds : 3600 };
+  if (mode === "inactivity") return { ...draft, type: "inactivity", fireOnStart: false };
+  if (mode === "custom") return { ...draft, type: "cron" };
+  return { ...draft, type: "cron", cron: cronFromShape({ mode, ...cronClock(draft) }) };
+}
+
+export function withCronClock(draft: ScheduledEditorDraft, change: Partial<{ hour: number; minute: number; weekday: number }>): ScheduledEditorDraft {
+  const mode = repeatMode(draft);
+  if (mode !== "hourly" && mode !== "daily" && mode !== "weekdays" && mode !== "weekly") return draft;
+  return { ...draft, cron: cronFromShape({ mode, ...cronClock(draft), ...change }) };
+}
+
+export function withRepeat(draft: ScheduledEditorDraft, repeat: boolean): ScheduledEditorDraft {
+  if (!repeat) return { ...draft, type: "once", fireOnStart: false, dueAt: draft.dueAt && Number.isFinite(Date.parse(draft.dueAt)) ? draft.dueAt : defaultDueAt() };
+  return { ...draft, type: validCronExpression(draft.cron ?? "") ? "cron" : "interval" };
+}
+
+function defaultDueAt(): string {
+  const next = new Date();
+  next.setMinutes(0, 0, 0);
+  next.setHours(next.getHours() + 1);
+  return next.toISOString();
+}
+
+export function validCron(expression: string): boolean {
+  return validCronExpression(expression) && parseCron(expression) !== null;
+}
+
+export function resolvedTimezone(timezone: string): string {
+  const value = timezone.trim();
+  return !value || value === "local" ? localTimezone() || "UTC" : value;
+}
+
+export function clockLabel(hour: number, minute: number): string {
+  return formatClock(hour, minute);
+}
+
+export function timezoneName(timezone: string, at: number = Date.now()): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, { timeZone: resolvedTimezone(timezone), timeZoneName: "shortGeneric" })
+      .formatToParts(new Date(at)).find((part) => part.type === "timeZoneName")?.value ?? "";
+  } catch {
+    return timezone;
+  }
+}
+
+export function shortScheduleLabel(task: Pick<ScheduledInterfaceProjection, "schedule">): string {
+  const schedule = task.schedule;
+  if (!schedule || schedule.type === "once") return "";
+  if (schedule.type === "interval") return formatInterval(schedule.intervalSeconds);
+  if (schedule.type === "inactivity") return describeSchedule(task);
+  const mode = cronShape(schedule.cron)?.mode;
+  return mode === "hourly" ? "Hourly" : mode === "daily" ? "Daily" : mode === "weekdays" ? "Weekdays" : mode === "weekly" ? "Weekly" : describeCron(schedule.cron);
 }
 
 export function formatSchedule(task: Pick<ScheduledInterfaceProjection, "schedule" | "timezone">): string {
