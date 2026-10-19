@@ -414,7 +414,7 @@ fn run_package_process(
     payload_bytes: Vec<u8>,
 ) -> Result<VerificationVerdict, serde_json::Value> {
     let scratch_dir = create_scratch_dir(&ctx.descriptor, &ctx.scratch_root, input)?;
-    let script_path = materialize_pinned_script(ctx, &scratch_dir.path)?;
+    let script_path = materialize_pinned_package(ctx)?;
     let payload_path = scratch_dir.path.join("payload");
     std::fs::write(&payload_path, &payload_bytes).map_err(|e| {
         serde_json::json!({
@@ -568,87 +568,112 @@ fn process_timeout_from(descriptor: &VerifierDescriptor, params: &serde_json::Va
     Duration::from_millis(requested.min(declared).max(1))
 }
 
-fn materialize_pinned_script(
-    ctx: &PinnedVerifierPackage,
-    scratch_root: &Path,
-) -> Result<PathBuf, serde_json::Value> {
-    let package_dir = scratch_root.join("verifier_package");
-    std::fs::create_dir(&package_dir).map_err(|error| {
+const PINNED_PACKAGES_DIRECTORY: &str = "pinned";
+
+fn materialize_pinned_package(ctx: &PinnedVerifierPackage) -> Result<PathBuf, serde_json::Value> {
+    let failure = |error: &str, source: String| {
         serde_json::json!({
             "runner": "package_process",
             "verifier": ctx.descriptor.id.as_str(),
-            "error": "pinned verifier package directory cannot be created",
-            "source": error.to_string()
+            "error": error,
+            "source": source
         })
-    })?;
+    };
+    let root = ctx.scratch_root.join(PINNED_PACKAGES_DIRECTORY);
+    std::fs::create_dir_all(&root)
+        .map_err(|error| failure("pinned verifier package root cannot be created", error.to_string()))?;
+    let package_dir = root.join(octopus_ledger::ContentHash::of_bytes(&ctx.closure_bytes()).to_hex());
+    if !pinned_package_matches(ctx, &package_dir) {
+        let staging = root.join(format!(".staging-{}-{}", std::process::id(), unique_nonce()));
+        write_pinned_package(ctx, &staging)
+            .map_err(|error| failure("pinned verifier package cannot be materialized", error))?;
+        if std::fs::rename(&staging, &package_dir).is_err() {
+            if pinned_package_matches(ctx, &package_dir) {
+                let _ = std::fs::remove_dir_all(&staging);
+            } else {
+                let stale = root.join(format!(".stale-{}-{}", std::process::id(), unique_nonce()));
+                if package_dir.exists() {
+                    std::fs::rename(&package_dir, &stale).map_err(|error| {
+                        failure("mismatched pinned verifier package cannot be replaced", error.to_string())
+                    })?;
+                    let _ = std::fs::remove_dir_all(&stale);
+                }
+                std::fs::rename(&staging, &package_dir).map_err(|error| {
+                    failure("pinned verifier package cannot be installed", error.to_string())
+                })?;
+            }
+        }
+        if !pinned_package_matches(ctx, &package_dir) {
+            return Err(failure(
+                "materialized verifier package differs from its pinned bytes",
+                package_dir.display().to_string(),
+            ));
+        }
+    }
+    std::fs::canonicalize(package_dir.join(&ctx.descriptor.script))
+        .map_err(|error| failure("pinned verifier script cannot be canonicalized", error.to_string()))
+}
+
+fn unique_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
+fn write_pinned_package(ctx: &PinnedVerifierPackage, staging: &Path) -> Result<(), String> {
+    std::fs::create_dir(staging).map_err(|error| error.to_string())?;
     for (relative, file) in &ctx.files {
-        let path = package_dir.join(relative);
-        let parent = path.parent().ok_or_else(|| {
-            serde_json::json!({
-                "runner": "package_process",
-                "verifier": ctx.descriptor.id.as_str(),
-                "error": "pinned verifier package file has no parent",
-                "path": relative
-            })
-        })?;
-        std::fs::create_dir_all(parent).map_err(|error| {
-            serde_json::json!({
-                "runner": "package_process",
-                "verifier": ctx.descriptor.id.as_str(),
-                "error": "pinned verifier package directory cannot be materialized",
-                "path": parent.display().to_string(),
-                "source": error.to_string()
-            })
-        })?;
-        std::fs::write(&path, &file.contents).map_err(|error| {
-            serde_json::json!({
-                "runner": "package_process",
-                "verifier": ctx.descriptor.id.as_str(),
-                "error": "pinned verifier package file cannot be materialized",
-                "path": relative,
-                "source": error.to_string()
-            })
-        })?;
+        let path = staging.join(relative);
+        let parent = path.parent().ok_or_else(|| format!("pinned file '{relative}' has no parent"))?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::write(&path, &file.contents).map_err(|error| error.to_string())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = if file.executable { 0o700 } else { 0o600 };
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).map_err(
-                |error| {
-                    serde_json::json!({
-                        "runner": "package_process",
-                        "verifier": ctx.descriptor.id.as_str(),
-                        "error": "pinned verifier package file permissions cannot be materialized",
-                        "path": relative,
-                        "source": error.to_string()
-                    })
-                },
-            )?;
+            let executable = file.executable || *relative == ctx.descriptor.script;
+            let mode = if executable { 0o500 } else { 0o400 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .map_err(|error| error.to_string())?;
         }
     }
-    let script_path = package_dir.join(&ctx.descriptor.script);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| {
-                serde_json::json!({
-                    "runner": "package_process",
-                    "verifier": ctx.descriptor.id.as_str(),
-                    "error": "pinned verifier script cannot be made executable",
-                    "source": error.to_string()
-                })
-            },
-        )?;
+    Ok(())
+}
+
+fn pinned_package_matches(ctx: &PinnedVerifierPackage, package_dir: &Path) -> bool {
+    let mut found = BTreeMap::new();
+    if collect_materialized_files(package_dir, package_dir, &mut found).is_err() {
+        return false;
     }
-    std::fs::canonicalize(&script_path).map_err(|error| {
-        serde_json::json!({
-            "runner": "package_process",
-            "verifier": ctx.descriptor.id.as_str(),
-            "error": "pinned verifier script cannot be canonicalized",
-            "source": error.to_string()
+    found.len() == ctx.files.len()
+        && ctx.files.iter().all(|(relative, file)| {
+            found.get(relative).is_some_and(|(contents, executable)| {
+                *contents == file.contents
+                    && *executable == (file.executable || *relative == ctx.descriptor.script)
+            })
         })
-    })
+}
+
+fn collect_materialized_files(
+    root: &Path,
+    directory: &Path,
+    found: &mut BTreeMap<String, (Vec<u8>, bool)>,
+) -> Result<(), ()> {
+    for entry in std::fs::read_dir(directory).map_err(|_| ())? {
+        let path = entry.map_err(|_| ())?.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|_| ())?;
+        if metadata.is_dir() {
+            collect_materialized_files(root, &path, found)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(());
+        }
+        let relative = path.strip_prefix(root).map_err(|_| ())?.to_str().ok_or(())?.to_string();
+        let contents = std::fs::read(&path).map_err(|_| ())?;
+        found.insert(relative, (contents, package_file_executable(&metadata)));
+    }
+    Ok(())
 }
 
 fn create_scratch_dir(
@@ -931,6 +956,39 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("package_helper")
         );
+    }
+
+    #[test]
+    fn pinned_package_is_materialized_once_and_restored_before_it_runs() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let package = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let script = package.path().join("verify.sh");
+        std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\nprintf '{\"passed\":true,\"details\":{}}'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut ctx = package_ctx("materialized_probe");
+        ctx.descriptor.script = "verify.sh".to_string();
+        ctx.descriptor.authority.executable_commands.insert("/bin/cat".to_string());
+        ctx.package_dir = Some(package.path().to_path_buf());
+        ctx.scratch_root = scratch.path().to_path_buf();
+        let pinned = pin_verifier_package(&ctx).unwrap();
+        let (_, artifact) = blob(b"payload");
+        let input = test_input(artifact, serde_json::json!({"timeout_ms": 2000}));
+        let materialized = scratch.path().join(PINNED_PACKAGES_DIRECTORY)
+            .join(octopus_ledger::ContentHash::of_bytes(&pinned.closure_bytes()).to_hex())
+            .join("verify.sh");
+
+        assert!(run_pinned_verifier_process(&pinned, &input, b"payload".to_vec()).passed);
+        let first = std::fs::metadata(&materialized).unwrap().ino();
+        assert!(run_pinned_verifier_process(&pinned, &input, b"payload".to_vec()).passed);
+        assert_eq!(std::fs::metadata(&materialized).unwrap().ino(), first);
+
+        std::fs::set_permissions(&materialized, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&materialized, "#!/bin/sh\nprintf '{\"passed\":false,\"details\":{}}'\n").unwrap();
+        std::fs::write(materialized.with_file_name("planted.sh"), "#!/bin/sh\n").unwrap();
+        assert!(run_pinned_verifier_process(&pinned, &input, b"payload".to_vec()).passed);
+        assert!(!materialized.with_file_name("planted.sh").exists());
     }
 
     #[cfg(target_os = "macos")]
