@@ -1477,6 +1477,55 @@ async function submitOperatorTurnControl(options, request) {
   };
 }
 
+async function resumeRestartInterruptedTurns(options, request) {
+  const config = await readConfig();
+  const octopusHome = absolutePath(options.octopusHome(), "octopusHome");
+  const afterSeq = integerAtLeast(request?.afterSeq ?? -1, -1, "afterSeq");
+  const readArtifactPayload = requiredFunction(options.readArtifactPayload, "readArtifactPayload");
+  const submit = requiredFunction(options.submitTurnControl, "submitTurnControl");
+  const { DatabaseSync } = require("node:sqlite");
+  const database = new DatabaseSync(path.join(octopusHome, "ledger", "ledger-index.sqlite"), { readOnly: true });
+  let watermark;
+  let interruptions;
+  try {
+    database.exec("PRAGMA query_only = ON");
+    watermark = decimalSafeInteger(
+      String(database.prepare("SELECT value FROM index_meta WHERE key = 'watermark'").get()?.value ?? ""),
+      "ledger index watermark",
+    );
+    const labels = database.prepare("SELECT DISTINCT artifact_label FROM movements WHERE seq > ? AND seq < ? AND kind = 'InterfaceOutbound'").all(afterSeq, watermark)
+      .map((row) => String(row.artifact_label ?? ""))
+      .filter((label) => label && operatorChatLiveEventKind(label, config, {}) === "interrupted_result");
+    const later = database.prepare(
+      "SELECT 1 FROM movements WHERE runtime_run = ? AND seq > ? AND seq < ? AND (from_id = ? OR to_id = ?) LIMIT 1",
+    );
+    interruptions = labels.flatMap((label) => database.prepare(
+      `SELECT seq, to_id, artifact_id, artifact_label, artifact_content, runtime_run FROM movements
+        WHERE seq > ? AND seq < ? AND kind = 'InterfaceOutbound' AND to_kind = 'interface'
+          AND artifact_label = ? AND runtime_interface = to_id
+        ORDER BY seq ASC`,
+    ).all(afterSeq, watermark, label))
+      .filter((row) => !later.get(String(row.runtime_run), Number(row.seq), watermark, String(row.to_id), String(row.to_id)));
+  } finally {
+    database.close();
+  }
+  const resumed = [];
+  for (const row of interruptions) {
+    const manifestHash = contentHashHex(row.artifact_content, "indexed movement artifact_content");
+    const { payload } = await readArtifactPayload({ artifactId: String(row.artifact_id), manifestHash, label: String(row.artifact_label) });
+    if (!payload || typeof payload !== "object" || payload.native_terminal_status !== "interrupted"
+      || payload.result_origin !== "native_turn_completion") continue;
+    const result = await submit({
+      interfaceId: safeSegment(row.to_id, "interrupted chat interface"),
+      runId: safeSegment(row.runtime_run, "interrupted run"),
+      action: "resume",
+      controlId: `control_restart_${Number(row.seq)}`,
+    });
+    resumed.push({ runId: result.runId, interfaceId: result.interfaceId, controlId: result.controlId, interruptedSeq: Number(row.seq) });
+  }
+  return { watermark, resumed };
+}
+
 async function assertGenericOperatorChatArtifactAllowed(request) {
   const config = await readConfig();
   const interfaceId = safeSegment(request?.interfaceId, "interfaceId");
@@ -7962,6 +8011,7 @@ module.exports = {
   releaseOperatorTaskWorkerEnvironments,
   submitOperatorTurn,
   submitOperatorTurnControl,
+  resumeRestartInterruptedTurns,
   requestComposerPrediction: (options, request) => require("./composer-predictions.cjs").requestComposerPrediction({
     ...options, withRunLock: withOperatorRunAuthoringLock, withTopologyLock: withOperatorWorkspaceTopologyLock,
     waitForInterface: waitForInterfaceSocket,

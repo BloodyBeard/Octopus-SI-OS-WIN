@@ -104,6 +104,7 @@ test("a pending quit keeps account reads alive until approved resource cleanup",
     const cdpViewerManager = null, processViewerManager = null, clientSurfaceDocumentStore = null,
       clientExtensionStore = null, clientArtifactStreamStore = null, clientAttachmentStagingStore = null;
     const projectionStores = new Map();
+    const restartResume = { watcher: null, timer: null };
     ${declarations.map((node) => node.getText(main)).join("\n")}
     return { getChatgptSignIn, closeClientResources };
   `)(app, () => account);
