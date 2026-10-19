@@ -40,6 +40,7 @@ import { homeSurfaceLayoutIdentity } from "./homePresentation";
 
 const VOICE_WIDGET_LAYOUT_RESET_EVENT = "octopus:voice-widget-layout-reset";
 const VOICE_FORMING_TRANSITION = { delay: 0.5, duration: 0.42, ease: [0.19, 1, 0.22, 1] as [number, number, number, number] };
+const VOICE_LEAVING_TRANSITION = { duration: 0.36, ease: [0.4, 0, 1, 1] as [number, number, number, number] };
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
@@ -48,6 +49,7 @@ type Props = {
   onDismiss?: () => void;
   voicePlacement?: VoiceSurfacePlacement;
   voiceForming?: boolean;
+  voiceLeaving?: boolean;
 };
 
 export type VoiceSurfacePlacement = {
@@ -65,7 +67,7 @@ type DataState = {
 const EMPTY_PROJECTION_SOURCES: NonNullable<ClientSurfaceDocument["sources"]> = [];
 const EMPTY_HOST_SOURCES: ClientSurfaceHostSource[] = [];
 
-export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDismiss, voiceForming = false, voicePlacement }: Props) {
+export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDismiss, voiceForming = false, voiceLeaving = false, voicePlacement }: Props) {
   const appearance = useAppearance();
   const document = admitted.document;
   const densityClass = document.render.kind === "native" ? ` density-${document.render.density ?? "standard"}` : "";
@@ -121,19 +123,21 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
   if (document.target.kind === "voice.widget") {
     return (
       <motion.section
-        animate={{ opacity: 1 }}
+        animate={{ opacity: voiceLeaving ? 0 : 1 }}
         className={`voice-projection-card client-surface-frame ${OCTOPUS_WIDGET_SURFACE_CLASS} is-${document.render.kind}${densityClass}${widgetResize.layoutReady ? " is-layout-ready" : ""}${widgetResize.interacting ? " is-interacting" : ""}`}
         data-content-fit={document.target.layout.content_fit}
         data-surface-document={document.id}
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
         data-surface-interface={admitted.sourceInterfaceId}
-        data-voice-forming={voiceForming || undefined}
+        data-voice-forming={(voiceForming && !voiceLeaving) || undefined}
+        data-voice-leaving={voiceLeaving || undefined}
         data-voice-slot={voicePlacement?.slot}
+        inert={voiceLeaving || undefined}
         initial={{ opacity: 0 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceLeaving ? VOICE_LEAVING_TRANSITION : voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.16, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}
@@ -178,19 +182,21 @@ export function ClientSurfaceRenderer({ accessProfile, admitted, onAction, onDis
   if (document.target.kind === "voice.window") {
     return (
       <motion.section
-        animate={{ opacity: 1, scale: 1, y: 0 }}
+        animate={voiceLeaving ? { opacity: 0, scale: 0.985, y: 5 } : { opacity: 1, scale: 1, y: 0 }}
         className={`voice-surface-window client-surface-frame ${OCTOPUS_FLOATING_SURFACE_CLASS} is-${document.render.kind}${densityClass}${widgetResize.layoutReady ? " is-layout-ready" : ""}${widgetResize.interacting ? " is-interacting" : ""}`}
         data-surface-document={document.id}
         data-surface-artifact={admitted.sourceArtifactId}
         data-surface-run={admitted.sourceRunId}
         data-surface-interface={admitted.sourceInterfaceId}
-        data-voice-forming={voiceForming || undefined}
+        data-voice-forming={(voiceForming && !voiceLeaving) || undefined}
+        data-voice-leaving={voiceLeaving || undefined}
         data-voice-slot={voicePlacement?.slot}
         data-window-size={document.target.size ?? "standard"}
+        inert={voiceLeaving || undefined}
         initial={{ opacity: 0, scale: 0.985, y: 5 }}
         ref={widgetResize.ref}
         style={widgetResize.style}
-        transition={voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
+        transition={voiceLeaving ? VOICE_LEAVING_TRANSITION : voiceForming ? VOICE_FORMING_TRANSITION : { duration: 0.2, ease: [0.19, 1, 0.22, 1] }}
       >
         <button
           aria-label={`Move ${document.title}`}

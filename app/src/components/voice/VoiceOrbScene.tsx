@@ -872,6 +872,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     const forms = new Float32Array(FORM_COUNT * 4);
     const formTiming = new Float32Array(FORM_COUNT * 4);
     const formedElements = new WeakSet<Element>();
+    const leavingElements = new WeakSet<Element>();
     let nextForm = 0;
     let activeUntil = 0;
     let background = readBackgroundColor(canvas);
@@ -1035,9 +1036,10 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
       const scaleX = canvas.width / canvasRect.width;
       const scaleY = canvas.height / canvasRect.height;
       const now = performance.now();
-      for (const element of host.querySelectorAll("[data-voice-forming].is-layout-ready")) {
-        if (formedElements.has(element)) continue;
-        formedElements.add(element);
+      for (const element of host.querySelectorAll("[data-voice-forming].is-layout-ready, [data-voice-leaving].is-layout-ready")) {
+        const formed = element.hasAttribute("data-voice-leaving") ? leavingElements : formedElements;
+        if (formed.has(element)) continue;
+        formed.add(element);
         const rect = element.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) continue;
         const slot = nextForm * 4;
@@ -1056,7 +1058,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     const formationHost = formationSurfaceRef.current?.current ?? null;
     const formationObserver = new MutationObserver(formFrom);
     if (formationHost) {
-      formationObserver.observe(formationHost, { attributes: true, attributeFilter: ["class", "data-voice-forming"], childList: true, subtree: true });
+      formationObserver.observe(formationHost, { attributes: true, attributeFilter: ["class", "data-voice-forming", "data-voice-leaving"], childList: true, subtree: true });
       formFrom();
     }
     const rippleTarget = rippleSurfaceRef.current?.current ?? null;
