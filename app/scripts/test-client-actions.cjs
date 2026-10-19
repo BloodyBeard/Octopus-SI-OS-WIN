@@ -94,7 +94,7 @@ test('widget results resume after lost admission without repeating the saved act
     assert.equal(calls, 1); assert.equal(view.results.length, 1); assert.match(view.refusals[0], /admission unavailable/);
     fail = false; await view.render({}, true);
     assert.equal(calls, 1); assert.equal(view.results.length, 2); assert.deepEqual(view.results[0], view.results[1]);
-    assert.equal(view.results[1].interfaceId, 'room'); assert.equal(view.results[1].label, 'client.action.result');
+    assert.equal(view.results[1].interfaceId, scope.interfaceId); assert.equal(view.results[1].label, 'client.action.result');
     assert.equal(view.results[1].payload.request_seq, 3); assert.equal(view.results[1].payload.ok, true);
     await view.close(); await view.render(); assert.equal(calls, 1); assert.equal(view.results.length, 2);
     await view.close(); window.localStorage.clear();

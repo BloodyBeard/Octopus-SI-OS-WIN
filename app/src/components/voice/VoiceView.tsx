@@ -363,19 +363,6 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     };
   }, []);
 
-  useLayoutEffect(() => {
-    const stage = stageMainRef.current;
-    if (!stage) return;
-    const update = () => {
-      const shortest = Math.min(stage.clientWidth, stage.clientHeight);
-      stage.style.setProperty("--voice-stage-min", `${Math.round(shortest)}px`);
-    };
-    update();
-    const observer = new ResizeObserver(update);
-    observer.observe(stage);
-    return () => observer.disconnect();
-  }, []);
-
   useEffect(() => subscribeClientCommands((command) => {
     if (!commandsActive) return;
     if (command === "voice_primary") {

@@ -176,7 +176,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                 storage.setItem(pendingKey, JSON.stringify(receipt));
               }
               if (!current()) return;
-              await submitInterfaceArtifact({ interfaceId: identity.from.Interface, runId: scope.runId,
+              await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
                 label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
             }
             storage.setItem(key, JSON.stringify({

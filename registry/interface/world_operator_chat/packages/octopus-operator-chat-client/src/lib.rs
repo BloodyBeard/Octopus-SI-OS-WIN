@@ -7870,9 +7870,11 @@ mod tests {
                             .flat_map(|cp| cp.outbound_interface_bindings.iter())
                             .all(|binding| binding.interface.as_str() != plan.model_interface_id || !binding.admits(label)));
                     }
-                    if label != "realtime.session.update" {
+                    if label == "client.action.result" {
+                        assert_eq!(template.interface_binding.interface.as_str(), plan.chat_interface_id);
+                    } else if label != "realtime.session.update" {
                         assert!(topology.checkpoints.iter().filter(|cp| cp.interface_binding.interface == template.interface_binding.interface)
-                            .all(|cp| ["client.surface.document", "client.action", "client.action.result"].into_iter().all(|name| cp.interface_binding.admits(name))));
+                            .all(|cp| ["client.surface.document", "client.action"].into_iter().all(|name| cp.interface_binding.admits(name))));
                     }
                     let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)
                         && cp.outbound_interface_bindings == template.outbound_interface_bindings).unwrap();

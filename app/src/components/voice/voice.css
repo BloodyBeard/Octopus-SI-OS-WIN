@@ -1667,7 +1667,6 @@
   aspect-ratio: 1;
   min-width: 0;
   justify-self: center;
-  translate: 0 calc(var(--voice-stage-min, 640px) * -0.028);
 }
 
 .voice-orb-interaction {

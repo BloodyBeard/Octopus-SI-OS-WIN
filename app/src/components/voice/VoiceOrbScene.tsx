@@ -562,7 +562,6 @@ void main() {
   float shortestSide = min(sceneResolution.x, sceneResolution.y);
   float antialias = 1.0 / shortestSide;
   vec2 point = (gl_FragCoord.xy - u_scene.xy - sceneResolution * 0.5) / shortestSide;
-  point.y -= 0.028;
 
   float surfaceLuminance = dot(u_background, vec3(0.2126, 0.7152, 0.0722));
   float lightSurfaceScale = smoothstep(0.58, 0.84, surfaceLuminance);
@@ -606,10 +605,10 @@ void main() {
     float topPole = smoothstep(0.12, 0.92, normalizedY);
     float bottomPole = 1.0 - smoothstep(-0.92, -0.12, normalizedY);
     float shellDirection = 0.48 + topPole * 0.34 + bottomPole * 0.46;
-    float shellDiffraction = 0.86 + cos(theta * 2.0 - 0.35) * 0.14;
+    float shellDiffraction = 0.86 + cos(theta * 2.0) * 0.14;
     float shellActivity = smoothstep(0.08, 0.84, max(u_speaking * mix(0.5, 1.0, saturate(u_voice)), u_thinking));
     float shellPower = mix(0.42, 1.0, shellActivity);
-    float lightFocus = saturate(dot(normalize(point + vec2(0.0001)), normalize(vec2(-0.34, 0.94))));
+    float lightFocus = saturate(dot(normalize(point + vec2(0.0001)), vec2(0.0, 1.0)));
     float boostShape = mix(0.3, 1.0, pow(lightFocus, 1.25));
     float shellPowerShaped = 0.42 + max(0.0, shellPower - 0.42) * boostShape;
     float outwardDistance = max(0.0, radius - SPHERE_RADIUS);

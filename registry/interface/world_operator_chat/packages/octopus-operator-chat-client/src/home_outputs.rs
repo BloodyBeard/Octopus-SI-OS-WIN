@@ -60,7 +60,7 @@ pub(super) fn template(
     Ok(result)
 }
 
-const PRESENTATION_LABELS: [&str; 3] = ["client.surface.document", "client.action", "client.action.result"];
+const PRESENTATION_LABELS: [&str; 2] = ["client.surface.document", "client.action"];
 
 fn provider_receipt_binding(id: &str) -> AuthoredInterfaceBinding {
     AuthoredInterfaceBinding {
@@ -307,7 +307,7 @@ pub(super) fn wire(
         },
     };
     let mut result = bound_checkpoint_template(BoundCheckpointRole::IndependentInput,
-        presentation_binding(&interfaces(identity)[0]), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
+        result_binding(&identity.chat_interface_id), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
     result.include_context = true;
     result.name.push_str("_result");
     for mut template in [template(identity, false)?, template(identity, true)?, result] {
