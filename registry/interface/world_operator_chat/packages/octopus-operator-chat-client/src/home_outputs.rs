@@ -47,7 +47,7 @@ pub(super) fn template(
     };
     let mut result = bound_checkpoint_template(
         BoundCheckpointRole::IndependentInput,
-        binding(source),
+        if voice_update { binding(source) } else { presentation_binding(source) },
         if voice_update {
             vec![binding(&identity.model_interface_id)]
         } else {
@@ -58,6 +58,20 @@ pub(super) fn template(
     result.static_artifact_bindings =
         vec![octopus_descriptors::ArtifactId::new(context_id(identity))];
     Ok(result)
+}
+
+const PRESENTATION_LABELS: [&str; 3] = ["client.surface.document", "client.action", "client.action.result"];
+
+fn presentation_binding(id: &str) -> AuthoredInterfaceBinding {
+    AuthoredInterfaceBinding {
+        interface: InterfaceId::new(id),
+        config: InterfaceBindingConfig {
+            artifact_policy: BindingArtifactPolicy::Allow {
+                names: PRESENTATION_LABELS.into_iter().map(String::from).collect(),
+                namespaces: Vec::new(),
+            },
+        },
+    }
 }
 
 pub(super) fn plan(
@@ -281,7 +295,7 @@ pub(super) fn wire(
         },
     };
     let mut result = bound_checkpoint_template(BoundCheckpointRole::IndependentInput,
-        result_binding(&interfaces(identity)[0]), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
+        presentation_binding(&interfaces(identity)[0]), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
     result.include_context = true;
     result.name.push_str("_result");
     for mut template in [template(identity, false)?, template(identity, true)?, result] {

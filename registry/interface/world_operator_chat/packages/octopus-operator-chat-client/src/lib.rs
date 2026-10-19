@@ -7861,10 +7861,16 @@ mod tests {
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
                 for label in ["client.surface.document", "client.action", "client.action.result", "realtime.session.update"] {
-                    let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)).unwrap();
+                    let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)
+                        && cp.outbound_interface_bindings.iter().any(|binding| binding.admits(label))).unwrap();
                     assert_eq!(template.include_context, label == "client.action.result");
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
-                    let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)).unwrap();
+                    if label != "realtime.session.update" {
+                        assert!(topology.checkpoints.iter().filter(|cp| cp.interface_binding.interface == template.interface_binding.interface)
+                            .all(|cp| ["client.surface.document", "client.action", "client.action.result"].into_iter().all(|name| cp.interface_binding.admits(name))));
+                    }
+                    let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)
+                        && cp.outbound_interface_bindings == template.outbound_interface_bindings).unwrap();
                     assert!(checkpoint.artifact_bindings.iter().any(|binding| binding.id == instruction_source.id && binding.access.read));
                 }
             }
