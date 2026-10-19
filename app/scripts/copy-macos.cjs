@@ -29,6 +29,10 @@ function copyFile(source, destination) {
   cloneEntries([{ type: "file", source: path.resolve(source), destination: path.resolve(destination) }]);
 }
 
+function cloneFiles(pairs) {
+  cloneEntries(pairs.map(({ source, destination }) => ({ type: "file", source: path.resolve(source), destination: path.resolve(destination) })));
+}
+
 function cloneEntries(entries) {
   if (process.platform !== "darwin") throw new Error("macOS packaging requires clonefile support");
   const planRoot = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-package-copy-"));
@@ -45,4 +49,4 @@ function cloneEntries(entries) {
   }
 }
 
-module.exports = { copyTree, copyFile };
+module.exports = { copyTree, copyFile, cloneFiles };

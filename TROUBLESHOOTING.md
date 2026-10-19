@@ -5,19 +5,20 @@ quiet fallback. This page says where to look.
 
 ## The first five minutes
 
-1. Run the doctor against the Home you are using. From the checkout root:
+1. Run the doctor against the Home you are using. With the installed app:
 
    ```sh
-   ./app/build/Octopus.app/Contents/Resources/app/bin/octopus doctor
+   /Applications/Octopus.app/Contents/Resources/app/bin/octopus doctor
    ```
 
-   For a custom Home, pass the same `OCTOPUS_HOME` you launch with.
+   For a build from source, use `./app/build/Octopus.app` from the checkout
+   root. For a custom Home, pass the same `OCTOPUS_HOME` you launch with.
 2. Read the error the app shows and use its own retry or sign-in action.
 3. Do not delete the Home or replace its descriptors to make an error go away.
    To start clean, launch with a separate Home instead:
 
    ```sh
-   OCTOPUS_HOME="$HOME/.octopus-preview" ./app/build/Octopus.app/Contents/MacOS/Octopus
+   open -n --env OCTOPUS_HOME="$HOME/.octopus-preview" /Applications/Octopus.app
    ```
 
 ## Where the evidence is
@@ -85,6 +86,42 @@ diagnostics and can include private paths or details. They are not this
 redacted export. Inspect the scoped report first; if a maintainer needs a
 specific setting afterward, share only the relevant sanitized value.
 
+## macOS will not open Octopus, or blocks its tools
+
+The release is ad-hoc signed and not notarized. A disk image downloaded with a
+browser is quarantined, and so is everything copied out of it.
+
+- **"Octopus" Not Opened, or "cannot be opened because Apple cannot check it"**
+  - clear the quarantine of the installed app once:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Octopus.app
+  ```
+
+- **The app opened, but tools, provider lives, or `codex` fail to start, or
+  macOS asks about them one by one** - the app was admitted with **Open
+  Anyway** while still quarantined, and the packages it installed into your Home
+  kept the mark. Quit Octopus and its runtime, then clear both:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Octopus.app
+  xattr -dr com.apple.quarantine "$HOME/.octopus"
+  ```
+
+  Use your `OCTOPUS_HOME` if it is not the default.
+- **The path in an error contains `AppTranslocation`** - Octopus was opened
+  from the disk image or the Downloads folder. Move it to Applications, clear
+  the quarantine as above, and open it from there.
+
+The installer from [Getting started](docs/getting-started.md#install-the-app)
+downloads with `curl` and avoids all three.
+
+## Setup cannot run python3 or git
+
+Octopus runs `python3` and `git` from the Command Line Tools for Xcode. On a Mac
+without them, macOS offers to install the tools instead of running the
+command. Install them with `xcode-select --install` and retry.
+
 ## The build fails
 
 - **`Packaging native PiP requires explicit OCTOPUS_NATIVE_NODE_HEADERS`**  - 
@@ -114,6 +151,9 @@ specific setting afterward, share only the relevant sanitized value.
 - Cancel in the app and start again if the browser tab was closed.
 - The account must have access to the model you select. Availability and usage
   limits belong to the provider account, not to Octopus.
+- The sign-in is shared with Codex CLI through `~/.codex`. An API-key login
+  there asks you to sign in with ChatGPT; see
+  [Codex CLI](docs/getting-started.md#codex-cli) to keep the two apart.
 
 ## Setup says it needs attention
 

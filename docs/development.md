@@ -176,7 +176,8 @@ initial setup are outside the timed exchange. No user Home or live provider is u
 
 `quality` runs on every push and also supports **Run workflow**. A new push
 cancels an older quality run for the same branch or tag. `doomsday` is manual
-only. Neither workflow has a schedule or an automatic retry loop.
+only. `release` runs for a pushed `v*` tag and on **Run workflow**; see
+[Releases](#releases). None of them has a schedule or an automatic retry loop.
 
 Local checks use no GitHub-hosted runner minutes. When publishing a local
 commit status, name the checks actually run, attach it to the exact tested
@@ -194,6 +195,40 @@ That check reads the selected Git blobs and declared package inputs. Required
 public files must be selected, and the publication controls must match the
 checked files. Use it before publishing a checkout; `--worktree` skips the
 staged-file inventory. It does not establish asset provenance or runtime acceptance.
+
+## Releases
+
+A release is the packaged app as a disk image,
+`Octopus-<version>-macos-<arch>.dmg`, with `install.sh` and `checksums.txt`.
+The version is `version` in `app/package.json`; the packager writes it into
+the bundle, and the release tag is `v<version>`.
+
+After `npm --prefix app run package:mac`, build the release assets locally with:
+
+```sh
+node app/scripts/release-macos.cjs
+```
+
+The script checks the bundle (version, identifier, minimum macOS,
+architecture, managed Codex receipt, code signature), then builds the disk
+image on an APFS sparse image in which byte-identical files are clones of one
+copy. The bundle carries the same executables in several package owners, and
+the clones keep the compressed image close to the size of the unique content.
+It mounts the result, compares every path, mode, and SHA-256 with the bundle,
+verifies the signature inside the image, and writes `app/build/release/` and
+`app/build/release-notes.md` from [app/release](../app/release). Nothing is
+uploaded.
+
+The `release` workflow does the same on a hosted macOS runner. **Run workflow**
+is a dry run whose assets stay on the run for seven days. Pushing a tag that
+matches `app/package.json` builds the assets and creates a **draft** GitHub
+release; it becomes public only when a maintainer publishes the draft. Asset
+digests reported by GitHub are checked against `checksums.txt`.
+
+Installing a new release keeps the user's Home. With the runtime stopped, the
+client adopts the new bundled version of package owners that are unchanged
+locally (see [Source and Home](#source-and-home)); a release that changes a
+persisted contract ships its transition in the owning package.
 
 ## Client iteration and acceptance
 

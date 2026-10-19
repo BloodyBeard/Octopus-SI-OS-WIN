@@ -1,0 +1,131 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Release tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          expected="v$(node -p "require('./app/package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match app/package.json ($expected)" >&2
+            exit 1
+          fi
+
+      - name: Install client dependencies
+        run: npm ci --prefix app
+
+      - name: Fetch pinned Node headers
+        run: |
+          curl -fsSL https://nodejs.org/download/release/v24.15.0/node-v24.15.0-headers.tar.gz \
+            -o app/build/node-v24.15.0-headers.tar.gz --create-dirs
+          printf '%s  %s\n' \
+            9a9250039fef572d0bcc110ac5e78055faf5604421211d2d5f578ebc5a34e703 \
+            app/build/node-v24.15.0-headers.tar.gz | shasum -a 256 -c -
+          tar -xzf app/build/node-v24.15.0-headers.tar.gz -C app/build
+
+      - name: Package Octopus.app
+        env:
+          CARGO_INCREMENTAL: "0"
+          OCTOPUS_NATIVE_NODE_HEADERS: ${{ github.workspace }}/app/build/node-v24.15.0/include/node
+        run: npm --prefix app run package:mac
+
+      - name: Build and verify the disk image
+        run: node app/scripts/release-macos.cjs
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: octopus-macos
+          path: |
+            app/build/release/
+            app/build/release-notes.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    needs: macos
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: octopus-macos
+          path: release-assets
+
+      - name: Verify checksums
+        working-directory: release-assets/release
+        run: |
+          test -s checksums.txt
+          sha256sum -c checksums.txt
+          for file in *; do
+            [ "$file" = checksums.txt ] && continue
+            awk -v asset="$file" '$2 == asset { found = 1 } END { exit found ? 0 : 1 }' checksums.txt \
+              || { echo "checksums.txt has no entry for $file" >&2; exit 1; }
+          done
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; delete it or publish a new tag" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" release-assets/release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Octopus ${GITHUB_REF_NAME#v}" \
+            --notes-file release-assets/release-notes.md \
+            --verify-tag \
+            --draft
+
+      - name: Verify uploaded asset digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: release-assets/release
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[] | [.name, .digest] | @tsv' > uploaded.tsv
+          test "$(wc -l < uploaded.tsv)" -eq "$(ls -1 | grep -vc '^uploaded.tsv$')"
+          while IFS="$(printf '\t')" read -r name digest; do
+            if [ "$name" = checksums.txt ]; then
+              expected="$(sha256sum checksums.txt | awk '{ print $1 }')"
+            else
+              expected="$(awk -v asset="$name" '$2 == asset { print $1 }' checksums.txt)"
+            fi
+            if [ -z "$expected" ] || [ "$digest" != "sha256:$expected" ]; then
+              echo "Uploaded asset $name does not match its checksum" >&2
+              exit 1
+            fi
+          done < uploaded.tsv

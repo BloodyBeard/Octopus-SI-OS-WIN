@@ -2,8 +2,8 @@
 
 ## Using Octopus
 
-- [Getting started](getting-started.md) - build the macOS app, first setup,
-  where your data lives.
+- [Getting started](getting-started.md) - install or build the macOS app,
+  first setup, the bundled Codex CLI, where your data lives.
 - [Desktop client](client.md) - Home, Tasks, voice, gestures, Applications,
   Drivers, Extensions, and where packages come from.
 - [Terminal client](cli.md) - interactive chat, shared tasks, setup, and commands
