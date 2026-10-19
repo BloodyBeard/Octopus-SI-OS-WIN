@@ -7,7 +7,7 @@ const { initializeWorkspace, readWorkspaceSetupState, workspaceInitializeRequest
 const { applyLocalApplicationPack, readLocalPackageCatalog, withLocalPackageInstallation, withInstalledAgentPreset } = require("../electron/localPackages.cjs");
 const { createOperatorChatClientLoader } = require("../electron/operatorChatClientContract.cjs");
 const { createClientProviderMetadata, validateProviderModelSelection } = require("../electron/clientProviderMetadata.cjs");
-const { readProviderInterfaceDescriptors, mutateOctopusOsWorkspace } = require("../electron/projection.cjs");
+const { readProviderInterfaceDescriptors, mutateOctopusOsWorkspace, setupTriggerEntries, setupTriggerProof, armSetupTriggers } = require("../electron/projection.cjs");
 const { projectionReadRequest } = require("../electron/projectionReadContract.cjs");
 const { planClientAgentTemplate } = require("../electron/clientAgentCatalog.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
@@ -149,7 +149,15 @@ function createSetupOwners(environment, options = {}) {
       if (!context.proven) return null;
       references.push(projectDefaultReference(entry, context));
     }
+    const triggers = await setupTriggerProof(registryRoot, environment.home, await triggerEntries(plan));
+    if (!triggers) return null;
+    for (const trigger of triggers) references.push(setupReference("workspace_receipt", `trigger.${trigger.interface_id}`, trigger));
     return references;
+  }
+
+  async function triggerEntries(plan) {
+    const catalog = await verifySetupPlan(environment, plan);
+    return setupTriggerEntries(catalog.packs.find((row) => row.id === plan.pack.id), plan.pack.selected_recommended);
   }
 
   return {
@@ -219,6 +227,13 @@ function createSetupOwners(environment, options = {}) {
             });
             getProjection().invalidate();
           }
+          const entries = await triggerEntries(plan);
+          await armSetupTriggers(registryRoot, environment.home, entries, {
+            commitClientAuthoring: (request) => commitProjectionClientAuthoring(environment.home, registryRoot, request,
+              { publication: environment.packageRoots.publication, retirementBarrier: taskRetirementBarrier(environment) }),
+          });
+          getProjection().invalidate();
+          if (!await setupTriggerProof(registryRoot, environment.home, entries)) throw new Error("Setup triggers were armed without read-back proof.");
         });
       },
     },

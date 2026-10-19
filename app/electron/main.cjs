@@ -31,6 +31,9 @@ const {
   mutateApplicationPrivateConfiguration,
   mutateOctopusOsWorkspace,
   mutateScheduledInterface,
+  setupTriggerEntries,
+  setupTriggerProof,
+  armSetupTriggers,
 } = require("./projection.cjs");
 const { projectionReadRequest } = require("./projectionReadContract.cjs");
 const { createClientAccessController } = require("./clientAccess.cjs");
@@ -1256,6 +1259,7 @@ function createClientSetupOwners() {
           }
           getProjectionStore("live").invalidate();
           await applyClientSetupProjectDefaults(plan, context.operationId);
+          await applyClientSetupTriggers(plan, context.operationId);
         });
         getProjectionStore("live").invalidate();
       },
@@ -1471,10 +1475,37 @@ async function clientSetupWorkspaceProof(plan, operationId) {
   ) return null;
   const defaultReferences = await clientSetupProjectDefaultProof(plan, state.receipt);
   if (!defaultReferences) return null;
+  const triggers = await setupTriggerProof(path.join(resolveOctopusHome(), "registry"), resolveOctopusHome(), await clientSetupTriggerEntries(plan));
+  if (!triggers) return null;
   return [
     clientSetupReference("workspace_receipt", operationId, state.receipt),
     ...defaultReferences,
+    ...triggers.map((trigger) => clientSetupReference("workspace_receipt", `trigger.${trigger.interface_id}`, trigger)),
   ];
+}
+
+async function clientSetupTriggerEntries(plan) {
+  const pack = requireClientSetupPack(await readLocalPackageCatalog(clientSetupPackageRoots()), plan);
+  return setupTriggerEntries(pack, plan.pack.selected_recommended);
+}
+
+async function applyClientSetupTriggers(plan, operationId) {
+  const octopusHome = resolveOctopusHome();
+  const registryRoot = path.join(octopusHome, "registry");
+  const state = await readWorkspaceSetupState({ octopusHomeRoot: octopusHome, registryRoot });
+  if (
+    state.status !== "configured"
+    || state.receipt?.operation_id !== operationId
+    || state.receipt.request_digest !== plan.workspace.request_digest
+  ) throw new Error("Workspace receipt is not ready for its triggers.");
+  const entries = await clientSetupTriggerEntries(plan);
+  await armSetupTriggers(registryRoot, octopusHome, entries, {
+    commitClientAuthoring: (authoringRequest) => commitProjectionClientAuthoring(octopusHome, registryRoot, authoringRequest),
+  });
+  getProjectionStore("live").invalidate();
+  if (!await setupTriggerProof(registryRoot, octopusHome, entries)) {
+    throw new Error("Workspace triggers were armed without canonical read-back proof.");
+  }
 }
 
 async function applyClientSetupProjectDefaults(plan, operationId) {

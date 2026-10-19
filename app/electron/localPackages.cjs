@@ -1211,6 +1211,18 @@ function validatePackWorkspaceSetup(pack, packageById) {
   if (unknownDefaults.length) {
     throw new Error(`Application Pack '${pack.id}' has project defaults outside its components: ${unknownDefaults.join(", ")}`);
   }
+  const triggerIds = new Set();
+  const memberOwners = new Set([...packageById.values()].flatMap((manifest) => manifest.members.map((member) => member.owner)));
+  for (const trigger of pack.workspace_setup.triggers ?? []) {
+    const owner = packageById.get(trigger.package_id);
+    if (!componentIds.has(trigger.package_id) || !owner?.members.some((member) => member.registry_kind === "interface" && member.owner === trigger.template_interface_id)) {
+      throw new Error(`Application Pack '${pack.id}' trigger '${trigger.interface_id}' template is not an interface of its component package`);
+    }
+    if (triggerIds.has(trigger.interface_id) || memberOwners.has(trigger.interface_id)) {
+      throw new Error(`Application Pack '${pack.id}' trigger '${trigger.interface_id}' must name a new interface once`);
+    }
+    triggerIds.add(trigger.interface_id);
+  }
   const presetIds = new Set();
   for (const preset of pack.workspace_setup.agent_presets ?? []) {
     if (presetIds.has(preset.id)) throw new Error(`Application Pack '${pack.id}' repeats Agent preset '${preset.id}'`);

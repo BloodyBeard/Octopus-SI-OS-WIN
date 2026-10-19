@@ -165,7 +165,11 @@ admission evidence survives restart. Selection, timing and cursor state belong
 to the interface package; the client projects these activations as Triggers.
 A disabled activation that no run binds is a template, shipped by a package:
 Triggers clones it, with private copies of its controller interfaces and
-authoring tool, into a trigger bound to its own controller run.
+authoring tool, into a trigger bound to its own controller run. An Application
+Pack's `workspace_setup.triggers` names templates that setup arms through the
+same clone, each with its own interface id and quiet period, only when its
+package was selected; a retried setup finds the armed trigger and creates
+nothing.
 
 ## Media across interfaces
 

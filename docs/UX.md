@@ -172,10 +172,11 @@ system could improve - a widget, a skill, a new interface - is ordinary
 configuration over the existing primitives. The platform makes this possible;
 finding what is worth building on it takes creativity.
 
-The System review package ships that configuration as a trigger template. In
-Triggers you choose the quiet period and whether all work or one project
-counts; when that much time passes without work, one ordinary task starts
-with the review prompt. It reads what actually happened and may change memory,
+The System review package ships that configuration as a trigger template, and
+setup arms it: a new Home starts with a live trigger that waits for an hour
+without work. In Triggers you change the quiet period and whether all work or
+one project counts; when that much time passes without work, one ordinary task
+starts with the review prompt. It reads what actually happened and may change memory,
 knowledge and skills, Home widgets, runs, triggers, interfaces or package
 code - or nothing, which is often the right answer. The task keeps a change
 journal with the exact earlier bytes of every file it touched and the checks

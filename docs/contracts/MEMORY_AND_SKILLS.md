@@ -25,7 +25,8 @@ Memory is written in two ways:
    superseding what a correction replaces. A verifier admits its outcome only
    when every save it names is scoped to the observed environment and landed
    in the collection. After a quiet period, the **Memory consolidation**
-   trigger template (recommended in the Codex pack) starts an ordinary task in
+   trigger (recommended in the Codex pack, armed by setup with a three-hour
+   quiet period) starts an ordinary task in
    Home's environment: it lists the notes with their usage, merges duplicates,
    settles contradictions in favour of the newer note and folds stale, unused
    notes into what is still true. Both are ordinary runs started by

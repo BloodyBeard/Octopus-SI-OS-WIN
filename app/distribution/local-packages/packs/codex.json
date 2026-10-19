@@ -2,7 +2,7 @@
   "schema": "octopus.local_application_pack",
   "schema_version": 1,
   "id": "codex",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "name": "Codex Pack",
   "description": "Codex provider, agent working context, and local environments for browser, desktop, files, terminal, and git worktrees.",
   "components": [
@@ -209,6 +209,20 @@
       {
         "package_id": "driver.git_worktree",
         "default_for_new_tasks": false
+      }
+    ],
+    "triggers": [
+      {
+        "package_id": "world_system_review",
+        "template_interface_id": "world_system_review",
+        "interface_id": "world_self_improvement",
+        "quiet_period_seconds": 3600
+      },
+      {
+        "package_id": "world_memory_cron",
+        "template_interface_id": "world_memory_cron",
+        "interface_id": "world_memory_consolidation",
+        "quiet_period_seconds": 10800
       }
     ],
     "agent_presets": [

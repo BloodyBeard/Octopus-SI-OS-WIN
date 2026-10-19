@@ -211,6 +211,22 @@
             },
             "additionalProperties": false
           }
+        },
+        "triggers": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["package_id", "template_interface_id", "interface_id", "quiet_period_seconds"],
+            "properties": {
+              "package_id": { "$ref": "#/$defs/id" },
+              "template_interface_id": { "$ref": "#/$defs/id" },
+              "interface_id": { "$ref": "#/$defs/id" },
+              "quiet_period_seconds": { "type": "integer", "minimum": 60, "maximum": 31536000 }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

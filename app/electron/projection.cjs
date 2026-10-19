@@ -14184,6 +14184,84 @@ async function createScheduledInterface(
   };
 }
 
+function setupTriggerEntries(pack, selectedRecommended) {
+  const chosen = new Set(arrayValue(selectedRecommended));
+  const selected = new Set(arrayValue(pack?.components)
+    .filter((component) => component.selection !== "recommended" || chosen.has(component.package_id))
+    .map((component) => component.package_id));
+  return arrayValue(pack?.workspace_setup?.triggers)
+    .filter((entry) => selected.has(entry.package_id))
+    .map((entry) => ({
+      package_id: entry.package_id,
+      template_interface_id: entry.template_interface_id,
+      interface_id: entry.interface_id,
+      quiet_period_seconds: entry.quiet_period_seconds,
+    }))
+    .sort((left, right) => left.interface_id.localeCompare(right.interface_id));
+}
+
+async function setupTriggerState(interfaceRoot, octopusHomeRoot, entry) {
+  const interfaceId = requiredSafeRegistryId(entry?.interface_id, "setup trigger interface id");
+  const directory = await fs.lstat(path.join(interfaceRoot, interfaceId)).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
+  if (!directory) return null;
+  const activation = await readRegularJsonDocument(path.join(interfaceRoot, interfaceId, "activation.json"), `setup trigger ${interfaceId} activation`);
+  const parsed = parseCronActivationDocument(activation.document, interfaceId);
+  const runId = `run_${interfaceId}`;
+  const run = await readOptionalRegularJsonDocument(path.join(octopusHomeRoot, "state", "runs", `${runId}.json`), `setup trigger run ${runId}`);
+  if (parsed.activation.enabled !== true || parsed.config.run_template.id !== runId || run?.document?.id !== runId
+    || parsed.config.schedule.inactivity?.seconds !== entry.quiet_period_seconds) {
+    throw new Error(`setup trigger ${interfaceId} exists but is not the enabled quiet-period trigger bound to ${runId}`);
+  }
+  return {
+    interface_id: interfaceId,
+    template_interface_id: entry.template_interface_id,
+    run_id: runId,
+    quiet_period_seconds: entry.quiet_period_seconds,
+    activation_digest: activation.digest,
+  };
+}
+
+async function setupTriggerProof(registryRoot, octopusHomeRoot, entries) {
+  const interfaceRoot = await fs.realpath(path.join(registryRoot, "interface"));
+  const proven = [];
+  for (const entry of entries) {
+    const state = await setupTriggerState(interfaceRoot, octopusHomeRoot, entry);
+    if (!state) return null;
+    proven.push(state);
+  }
+  return proven;
+}
+
+async function armSetupTriggers(registryRoot, octopusHomeRoot, entries, hooks = {}) {
+  const interfaceRoot = await fs.realpath(path.join(registryRoot, "interface"));
+  const armed = [];
+  for (const entry of entries) {
+    if (await setupTriggerState(interfaceRoot, octopusHomeRoot, entry)) continue;
+    const sourceInterfaceId = requiredSafeRegistryId(entry.template_interface_id, "setup trigger template");
+    const source = await readRegularJsonDocument(path.join(interfaceRoot, sourceInterfaceId, "activation.json"), `setup trigger template ${sourceInterfaceId}`);
+    const schedule = parseCronActivationDocument(source.document, sourceInterfaceId).config.schedule;
+    if (!schedule.inactivity) throw new Error(`setup trigger template ${sourceInterfaceId} is not a quiet-period trigger`);
+    if (!Number.isSafeInteger(entry.quiet_period_seconds) || entry.quiet_period_seconds < 60) throw new Error(`setup trigger ${entry.interface_id} quiet period must be at least one minute`);
+    armed.push(await createScheduledInterface(interfaceRoot, octopusHomeRoot, {
+      sourceInterfaceId,
+      sourceActivationDigest: source.digest,
+      interfaceId: entry.interface_id,
+      draft: {
+        type: "inactivity",
+        inactivity: {
+          seconds: entry.quiet_period_seconds,
+          interface_match: schedule.inactivity.interface_match,
+          ...(schedule.inactivity.within_ee ? { within_ee: schedule.inactivity.within_ee } : {}),
+        },
+        timezone: schedule.timezone || "local",
+        fireOnStart: false,
+        instructions: schedule.reminder_default,
+      },
+    }, hooks.commitClientAuthoring));
+  }
+  return armed;
+}
+
 function applyScheduledDraft(schedule, draft, creating) {
   exactObjectKeys(draft, ["type", "intervalSeconds", "inactivity", "cron", "dueAt", "timezone", "fireOnStart", "instructions"], ["type", "timezone", "fireOnStart", "instructions"], "scheduled draft");
   delete schedule.inactivity;
@@ -14952,6 +15030,9 @@ module.exports = {
   mutateApplicationPrivateConfiguration,
   mutateOctopusOsWorkspace,
   mutateScheduledInterface,
+  setupTriggerEntries,
+  setupTriggerProof,
+  armSetupTriggers,
   readProviderInterfaceDescriptors,
   DESCRIPTOR_REGISTRIES,
   stringValue,

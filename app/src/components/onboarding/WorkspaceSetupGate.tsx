@@ -1450,6 +1450,7 @@ function parseWorkspacePack(value: unknown, index: number): WorkspacePack {
       },
       provider_interface_id: id(home.provider_interface_id, "workspace Home provider"),
       worker_interface_id: id(home.worker_interface_id, "workspace Home worker"),
+      ...(home.door_host_slots === undefined ? {} : { door_host_slots: home.door_host_slots as Record<string, Record<string, string>> }),
       context_artifact_bindings: contextArtifactBindings,
       selected_worker_environment_kinds: array(home.selected_worker_environment_kinds, "workspace Home worker environments")
         .map((value, kindIndex) => id(value, `workspace Home worker environment ${kindIndex + 1}`)),

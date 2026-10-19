@@ -257,3 +257,48 @@ test("a change journal undoes only files still holding the recorded result", asy
   assert.deepEqual(plans[0].writes.map((write) => [write.file, write.beforeDigest, write.content ?? write.next]), [[modified, sha("after\n"), "before\n"], [created, sha("new\n"), null]]);
   fs.rmSync(home, { recursive: true, force: true });
 });
+
+test("setup arms each selected pack trigger once through the template clone", async () => {
+  const { setupTriggerEntries, setupTriggerProof, armSetupTriggers } = require("../electron/projection.cjs");
+  const os = require("node:os");
+  const repoRegistry = path.join(appRoot, "..", "registry");
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "octopus-setup-triggers-")));
+  const registry = path.join(home, "registry");
+  for (const kind of ["interface", "tool"]) {
+    for (const entry of fs.readdirSync(path.join(repoRegistry, kind), { withFileTypes: true }).filter((row) => row.isDirectory())) {
+      for (const name of ["interface.json", "life.json", "policy.json", "activation.json", "tool.json"]) {
+        const source = path.join(repoRegistry, kind, entry.name, name);
+        if (!fs.existsSync(source)) continue;
+        fs.mkdirSync(path.join(registry, kind, entry.name), { recursive: true });
+        fs.copyFileSync(source, path.join(registry, kind, entry.name, name));
+      }
+    }
+  }
+  fs.mkdirSync(path.join(home, "state", "runs"), { recursive: true });
+  const pack = JSON.parse(fs.readFileSync(path.join(appRoot, "distribution", "local-packages", "packs", "codex.json"), "utf8"));
+  const entries = setupTriggerEntries(pack, ["world_system_review"]);
+  assert.deepEqual(entries.map((entry) => [entry.interface_id, entry.quiet_period_seconds]), [["world_self_improvement", 3600]]);
+  const labels = [];
+  const hooks = { commitClientAuthoring: async (plan) => {
+    labels.push(plan.label);
+    for (const write of plan.writes) {
+      fs.mkdirSync(path.dirname(write.file), { recursive: true });
+      fs.writeFileSync(write.file, `${JSON.stringify(write.next, null, 2)}\n`);
+    }
+  } };
+  assert.equal(await setupTriggerProof(registry, home, entries), null);
+  await armSetupTriggers(registry, home, entries, hooks);
+  await armSetupTriggers(registry, home, entries, hooks);
+  assert.deepEqual(labels, ["create scheduled interface world_self_improvement"]);
+  const [proof] = await setupTriggerProof(registry, home, entries);
+  assert.equal(proof.run_id, "run_world_self_improvement");
+  const read = (id) => JSON.parse(fs.readFileSync(path.join(registry, "interface", id, "activation.json"), "utf8")).activations[0];
+  const armed = read("world_self_improvement");
+  const template = read("world_system_review");
+  assert.equal(armed.enabled, true);
+  assert.equal(template.enabled, false);
+  assert.equal(armed.config.schedule.inactivity.seconds, 3600);
+  assert.equal(armed.config.schedule.reminder_default, template.config.schedule.reminder_default);
+  assert.ok(fs.existsSync(path.join(home, "state", "runs", "run_world_self_improvement.json")));
+  fs.rmSync(home, { recursive: true, force: true });
+});
