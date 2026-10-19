@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import "./icon-glyphs/worker";
 import { motion } from "motion/react";
+import type { ChatRun } from "../chatRuns";
 import type { RunProjection, SelectionRef, TopologySnapshot, WorkerEnvironmentProjection } from "../data/topology";
 import type { OctopusClientAccessProfile } from "../electron";
 import type { AdmittedClientSurfaceDocument } from "../client-surfaces/types";
-import { OcButton, OcEmptyState, OcIconButton, OcSearchField, OcSelect } from "../design-system/components";
+import { OcButton, OcEmptyState, OcIconButton, OcSearchField, OcSelect, OcStatus, cx, type OcTone } from "../design-system/components";
 import { useProjectionStructureGeneration } from "../projectionLive";
 import { formatProjectionError, readProjection } from "../projectionClient";
-import { jsonText, shortId } from "../runtimeFormat";
-import { Glyph } from "./IconGlyphs";
+import { shortId } from "../runtimeFormat";
+import { Glyph, type GlyphName } from "./IconGlyphs";
+import { baseDynamicToolId } from "./chat/toolPresentation";
+import { formatEvidenceTime, relativeEvidenceTime } from "./scheduled/scheduleModel";
 import { primaryWorkerEnvironmentSurface, workerEnvironmentPanelKind, workerEnvironmentSurfaceGlyph } from "./worker-environment/surfaceRegistry";
 import {
   defaultWorkerEnvironmentPaneTarget,
@@ -20,27 +23,40 @@ import { useFixedVirtualRange } from "./useFixedVirtualRange";
 
 type Props = {
   accessProfile: OctopusClientAccessProfile;
+  chatRuns: readonly ChatRun[];
   snapshot: TopologySnapshot;
   searchFocusTick: number;
+  onOpenRun?: (runId: string, role: "home" | "task") => void;
   onSelect?: (selection: SelectionRef) => void;
   surfaces: AdmittedClientSurfaceDocument[];
 };
 
-type WorkerEnvironmentRow = {
+type RoomSection = "tasks" | "home" | "system";
+type RoomTab = "all" | RoomSection;
+type RoomStateFilter = "all" | "open" | "attention" | "closed";
+
+type RoomState = {
+  filter: Exclude<RoomStateFilter, "all"> | "other";
+  label: string;
+  tone: OcTone;
+  detail: string;
+};
+
+type RoomRow = {
   key: string;
-  environmentId: string;
-  environmentName: string;
-  run: RunProjection | null;
-  workerEnvironment: WorkerEnvironmentProjection;
+  room: WorkerEnvironmentProjection;
+  runId: string;
+  projectId: string;
+  projectName: string;
+  section: RoomSection;
+  usedBy: string;
+  openRole: "home" | "task" | null;
+  title: string;
+  detail: string;
+  glyph: GlyphName;
+  state: RoomState;
+  searchText: string;
 };
-
-type WorkerEnvironmentGroup = {
-  environmentId: string;
-  environmentName: string;
-  rows: WorkerEnvironmentRow[];
-};
-
-type WorkerEnvironmentStateFilter = "all" | "active" | "attention" | "released";
 
 type ProjectPresentationProjection = {
   accessProfile: OctopusClientAccessProfile;
@@ -49,17 +65,27 @@ type ProjectPresentationProjection = {
   status: "loading" | "ready" | "degraded";
 };
 
-const WORKER_ENVIRONMENT_STATE_OPTIONS = [
-  { label: "All states", value: "all" as const },
-  { label: "Active rooms", value: "active" as const },
-  { label: "Needs attention", value: "attention" as const },
-  { label: "Released rooms", value: "released" as const },
+const ROOM_TABS: Array<{ value: RoomTab; label: string; note: string }> = [
+  { value: "all", label: "All", note: "" },
+  { value: "tasks", label: "Tasks", note: "Rooms your tasks opened to do their work." },
+  { value: "home", label: "Home", note: "Rooms opened for Home." },
+  { value: "system", label: "System", note: "Rooms Octopus opens for its own upkeep rather than for a task. They come and go on their own and need nothing from you." },
 ];
 
-export function WorkerEnvironmentsView({ accessProfile, snapshot, searchFocusTick, onSelect, surfaces }: Props) {
+const ROOM_STATE_OPTIONS = [
+  { label: "Any state", value: "all" as const },
+  { label: "Open", value: "open" as const },
+  { label: "Needs attention", value: "attention" as const },
+  { label: "Closed", value: "closed" as const },
+];
+
+const ROOM_ROW_HEIGHT = 60;
+
+export function WorkerEnvironmentsView({ accessProfile, chatRuns, snapshot, searchFocusTick, onOpenRun, onSelect, surfaces }: Props) {
   const searchRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
-  const [stateFilter, setStateFilter] = useState<WorkerEnvironmentStateFilter>("all");
+  const [tab, setTab] = useState<RoomTab>("all");
+  const [stateFilter, setStateFilter] = useState<RoomStateFilter>("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [projectFilter, setProjectFilter] = useState("all");
   const [projectProjection, setProjectProjection] = useState<ProjectPresentationProjection>(() => ({
@@ -70,6 +96,8 @@ export function WorkerEnvironmentsView({ accessProfile, snapshot, searchFocusTic
   }));
   const [projectProjectionRetry, setProjectProjectionRetry] = useState(0);
   const projectionGeneration = useProjectionStructureGeneration();
+  const projectionLive = snapshot.projection.mode === "live";
+  const fixture = accessProfile === "lab";
 
   useEffect(() => {
     let disposed = false;
@@ -105,35 +133,39 @@ export function WorkerEnvironmentsView({ accessProfile, snapshot, searchFocusTic
     };
   }, [accessProfile, projectionGeneration, projectProjectionRetry]);
 
-  const rows = useMemo(() => flattenWorkerEnvironments(snapshot, projectProjection.names), [projectProjection.names, snapshot]);
+  const rows = useMemo(
+    () => projectRooms(snapshot, projectProjection.names, chatRuns, surfaces, projectionLive, fixture),
+    [chatRuns, fixture, projectProjection.names, projectionLive, snapshot, surfaces],
+  );
+  const tabCounts = useMemo(() => {
+    const counts: Record<RoomTab, number> = { all: rows.length, tasks: 0, home: 0, system: 0 };
+    for (const row of rows) counts[row.section] += 1;
+    return counts;
+  }, [rows]);
   const kindOptions = useMemo(() => [
-    { label: "All kinds", value: "all" },
-    ...Array.from(new Set(rows.map((row) => row.workerEnvironment.kind).filter(Boolean)))
+    { label: "Any kind", value: "all" },
+    ...Array.from(new Set(rows.map((row) => row.room.kind).filter(Boolean)))
       .sort((left, right) => left.localeCompare(right))
-      .map((kind) => ({ label: humanizeIdentifier(kind), value: kind })),
+      .map((kind) => ({ label: sentenceCase(kind), value: kind })),
   ], [rows]);
   const projectOptions = useMemo(() => [
-    { label: "All projects", value: "all" },
-    ...Array.from(new Map(rows.map((row) => [row.environmentId, row.environmentName])).entries())
+    { label: "Any project", value: "all" },
+    ...Array.from(new Map(rows.map((row) => [row.projectId, row.projectName])).entries())
       .sort((left, right) => left[1].localeCompare(right[1]))
       .map(([value, label]) => ({ label, value })),
   ], [rows]);
-  const filteredRows = useMemo(() => {
+  const visibleRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return rows.filter((row) => (
-      (kindFilter === "all" || row.workerEnvironment.kind === kindFilter)
-      && (projectFilter === "all" || row.environmentId === projectFilter)
-      && workerEnvironmentMatchesState(row.workerEnvironment, stateFilter, snapshot.projection.mode === "live")
-      && (!needle || jsonText({
-        project: row.environmentName,
-        run: row.run,
-        workerEnvironment: row.workerEnvironment,
-        clientSurfaces: workerEnvironmentClientSurfaces(row.workerEnvironment.id, surfaces)
-          .map((surface) => ({ title: surface.document.title, data: surface.document.data })),
-      }).toLowerCase().includes(needle))
+      (tab === "all" || row.section === tab)
+      && (stateFilter === "all" || row.state.filter === stateFilter)
+      && (kindFilter === "all" || row.room.kind === kindFilter)
+      && (projectFilter === "all" || row.projectId === projectFilter)
+      && (!needle || row.searchText.includes(needle))
     ));
-  }, [kindFilter, projectFilter, query, rows, snapshot.projection.mode, stateFilter, surfaces]);
-  const groups = useMemo(() => groupWorkerEnvironments(filteredRows), [filteredRows]);
+  }, [kindFilter, projectFilter, query, rows, stateFilter, tab]);
+  const filtered = Boolean(query.trim()) || stateFilter !== "all" || kindFilter !== "all" || projectFilter !== "all";
+  const tabNote = ROOM_TABS.find((candidate) => candidate.value === tab)?.note ?? "";
 
   useEffect(() => {
     if (searchFocusTick <= 0) return;
@@ -142,99 +174,88 @@ export function WorkerEnvironmentsView({ accessProfile, snapshot, searchFocusTic
 
   return (
     <section className="flex h-full min-h-0 flex-col text-base select-none">
-      <div className="plugins-surface-scroll relative h-full min-h-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]">
-        <div className="flex h-full min-h-0 w-full flex-col">
-          <motion.div animate={{ opacity: 1, transform: "translateY(0)" }} initial={{ opacity: 0, transform: "translateY(-4px)" }} transition={{ duration: 0.2 }}>
-            <div className="mx-auto w-full max-w-[var(--thread-content-max-width)] px-panel pt-panel">
-              <div className="flex items-start justify-between gap-4 px-2">
-                <div className="flex min-w-0 flex-col gap-2">
-                  <h1 className="heading-xl font-normal text-token-foreground">Worker environments</h1>
-                  <div className="text-lg leading-6 text-token-text-secondary">Technical rooms formed for tasks — browsers, worktrees, terminals, containers, and every tool surface their policy permits</div>
-                </div>
-                <span className="mt-1 shrink-0 text-sm tabular-nums text-token-description-foreground">{filteredRows.length}</span>
-              </div>
-            </div>
-          </motion.div>
-          <div className="sticky top-0 z-30 bg-token-main-surface-primary after:pointer-events-none after:absolute after:top-full after:right-0 after:left-0 after:h-8 after:bg-linear-to-b after:from-token-main-surface-primary after:to-transparent after:content-['']">
-            <div className="mx-auto flex w-full max-w-[var(--thread-content-max-width)] flex-wrap items-center gap-2 px-panel pt-panel pb-2">
-              <EnvironmentSearch inputRef={searchRef} query={query} onChange={setQuery} />
-              <OcSelect
-                className="min-w-36"
-                label="Room state"
-                onChange={setStateFilter}
-                options={WORKER_ENVIRONMENT_STATE_OPTIONS}
-                value={stateFilter}
+      <div className="flex h-full min-h-0 w-full flex-col">
+        <motion.div animate={{ opacity: 1, transform: "translateY(0)" }} initial={{ opacity: 0, transform: "translateY(-4px)" }} transition={{ duration: 0.2 }}>
+          <div className="mx-auto w-full max-w-6xl px-panel pt-panel">
+            <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-2">
+              <h1 className="heading-xl m-0 font-normal text-token-foreground">Worker environments</h1>
+              <OcSearchField
+                className="w-full min-w-0 sm:w-72"
+                id="worker-environment-search"
+                inputRef={searchRef}
+                label="Search rooms"
+                onChange={setQuery}
+                placeholder="Search rooms"
+                value={query}
               />
-              {kindOptions.length > 2 ? (
-                <OcSelect className="min-w-36" label="Room kind" onChange={setKindFilter} options={kindOptions} value={kindFilter} />
-              ) : null}
-              {projectOptions.length > 2 ? (
-                <OcSelect className="min-w-36" label="Project" onChange={setProjectFilter} options={projectOptions} value={projectFilter} />
-              ) : null}
             </div>
+            <p className="m-0 mt-2 max-w-3xl px-2 text-base leading-6 text-token-text-secondary">
+              Rooms where work touches the world: a browser, a code checkout, a terminal, a desktop. Octopus opens one when a task's tools need it.
+              Open a room to watch it live, review its changes, or browse its files.
+            </p>
           </div>
-          {projectProjection.status === "degraded" ? (
-            <div className="mx-auto w-full max-w-[var(--thread-content-max-width)] px-panel pt-4">
-              <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-token-border bg-token-main-surface-secondary p-3" role="alert">
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-token-foreground">Project labels could not be refreshed</div>
-                  <div className="mt-1 break-words text-xs leading-5 text-token-text-secondary">
-                    The room projection remains available. Project names use the last successful presentation or their registry fallback until this read succeeds. {projectProjection.error}
-                  </div>
-                </div>
-                <OcButton
-                  leadingIcon="retry"
-                  onClick={() => setProjectProjectionRetry((value) => value + 1)}
-                  size="sm"
-                  variant="secondary"
-                >Retry</OcButton>
-              </div>
-            </div>
-          ) : null}
-          {rows.length > 0 && snapshot.projection.mode !== "live" ? (
-            <div className="mx-auto w-full max-w-[var(--thread-content-max-width)] px-panel pt-4">
-              <div className="rounded-lg border border-token-border bg-token-main-surface-secondary p-3" role="alert">
-                <div className="text-sm font-medium text-token-foreground">{snapshot.projection.label}</div>
-                <div className="mt-1 break-words text-xs leading-5 text-token-text-secondary">
-                  {accessProfile === "lab"
-                    ? "Client Lab rooms are fixture projections and are never reported as currently active."
-                    : "Rooms below are the last successful projection and are not being shown as currently active."} {snapshot.projection.detail}
-                </div>
-              </div>
-            </div>
-          ) : null}
+        </motion.div>
+        <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-x-4 gap-y-2 px-panel pt-5 pb-3">
+          <div aria-label="Rooms by owner" className="hide-scrollbar flex min-w-0 items-center gap-1 overflow-x-auto px-1" role="tablist">
+            {ROOM_TABS.map((candidate) => {
+              const selected = candidate.value === tab;
+              return (
+                <button
+                  aria-selected={selected}
+                  className={cx(
+                    "no-drag flex h-8 shrink-0 cursor-interaction items-center gap-1.5 rounded-full px-3.5 text-base whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    selected ? "bg-text/5 text-default hover:bg-text/10" : "text-tertiary hover:bg-primary-ghost-hover hover:text-default",
+                  )}
+                  key={candidate.value}
+                  onClick={() => setTab(candidate.value)}
+                  role="tab"
+                  type="button"
+                >
+                  {candidate.label}
+                  <span className="text-sm tabular-nums text-token-description-foreground">{tabCounts[candidate.value]}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <OcSelect className="min-w-32" label="Room state" onChange={setStateFilter} options={ROOM_STATE_OPTIONS} value={stateFilter} />
+            {kindOptions.length > 2 ? <OcSelect className="min-w-32" label="Room kind" onChange={setKindFilter} options={kindOptions} value={kindFilter} /> : null}
+            {projectOptions.length > 2 ? <OcSelect className="min-w-32" label="Project" onChange={setProjectFilter} options={projectOptions} value={projectFilter} /> : null}
+          </div>
+        </div>
+        {tabNote ? (
+          <div className="mx-auto w-full max-w-6xl px-panel pb-2">
+            <p className="m-0 px-2 text-sm leading-5 text-token-text-secondary">{tabNote}</p>
+          </div>
+        ) : null}
+        {projectProjection.status === "degraded" ? (
+          <RoomNotice
+            action={<OcButton leadingIcon="retry" onClick={() => setProjectProjectionRetry((value) => value + 1)} size="sm" variant="secondary">Retry</OcButton>}
+            detail={`Rooms are still listed. Project names use the last successful read until this one succeeds. ${projectProjection.error}`}
+            title="Project names could not be refreshed"
+          />
+        ) : null}
+        {rows.length > 0 && !projectionLive ? (
+          <RoomNotice
+            detail={`${fixture ? "Client Lab rooms are samples and are never shown as open." : "These rooms are from the last successful read and are not shown as open."} ${snapshot.projection.detail}`}
+            title={snapshot.projection.label}
+          />
+        ) : null}
+        <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col px-panel pt-1 pb-panel electron:min-w-[calc(320px*var(--octopus-window-zoom))]">
           {rows.length === 0 ? (
-            <div className="mx-auto flex min-h-0 w-full max-w-[var(--thread-content-max-width)] flex-1 flex-col px-panel pt-5 pb-panel electron:min-w-[calc(320px*var(--octopus-window-zoom))]">
-              <EnvironmentEmptyState
-                detail={snapshot.projection.mode === "live"
-                  ? "When a run forms a browser session, worktree, terminal, container, or another execution room, it appears here."
-                  : snapshot.projection.detail}
-                title={snapshot.projection.mode === "live" ? "No worker environments" : snapshot.projection.label}
-              />
-            </div>
-          ) : groups.length === 0 ? (
-            <div className="mx-auto flex min-h-0 w-full max-w-[var(--thread-content-max-width)] flex-1 flex-col px-panel pt-5 pb-panel electron:min-w-[calc(320px*var(--octopus-window-zoom))]">
-              <EnvironmentEmptyState
-                detail="Try a different task, project, room kind, state, capability, or filesystem root."
-                title="No matching environments"
-              />
-            </div>
+            <RoomEmptyState
+              detail={projectionLive
+                ? "When a task needs a browser, a code checkout, a terminal or a desktop, Octopus opens a room for it and it appears here."
+                : snapshot.projection.detail}
+              title={projectionLive ? "No rooms yet" : snapshot.projection.label}
+            />
+          ) : visibleRows.length === 0 ? (
+            <RoomEmptyState
+              detail={filtered ? "Try another search, state, kind or project." : tab === "tasks" ? "None of your tasks has opened a room." : tab === "home" ? "Home has no rooms." : "Octopus has no upkeep rooms."}
+              title={filtered ? "No matching rooms" : "Nothing here"}
+            />
           ) : (
-            <motion.div
-              animate={{ opacity: 1 }}
-              className="mx-auto flex min-h-0 w-full max-w-[var(--thread-content-max-width)] flex-1 flex-col px-panel pt-5 pb-panel electron:min-w-[calc(320px*var(--octopus-window-zoom))]"
-              initial={{ opacity: 0 }}
-              key="worker-environment-gallery"
-              transition={{ duration: 0.2 }}
-            >
-              <WorkerEnvironmentVirtualGallery
-                fixture={accessProfile === "lab"}
-                groups={groups}
-                onSelect={onSelect}
-                projectionLive={snapshot.projection.mode === "live"}
-                surfaces={surfaces}
-              />
-            </motion.div>
+            <RoomTable onOpenRun={onOpenRun} onSelect={onSelect} rows={visibleRows} surfaces={surfaces} />
           )}
         </div>
       </div>
@@ -242,56 +263,42 @@ export function WorkerEnvironmentsView({ accessProfile, snapshot, searchFocusTic
   );
 }
 
-type WorkerEnvironmentVirtualItem =
-  | { group: WorkerEnvironmentGroup; kind: "heading" }
-  | { group: WorkerEnvironmentGroup; kind: "row"; row: WorkerEnvironmentRow };
-
-const WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT = 76;
-
-function WorkerEnvironmentVirtualGallery({ fixture, groups, onSelect, projectionLive, surfaces }: {
-  fixture: boolean;
-  groups: WorkerEnvironmentGroup[];
+function RoomTable({ onOpenRun, onSelect, rows, surfaces }: {
+  onOpenRun?: (runId: string, role: "home" | "task") => void;
   onSelect?: (selection: SelectionRef) => void;
-  projectionLive: boolean;
+  rows: RoomRow[];
   surfaces: AdmittedClientSurfaceDocument[];
 }) {
-  const items = useMemo<WorkerEnvironmentVirtualItem[]>(() => groups.flatMap((group) => [
-    { group, kind: "heading" as const },
-    ...group.rows.map((row) => ({ group, kind: "row" as const, row })),
-  ]), [groups]);
-  const virtualRows = useFixedVirtualRange({ count: items.length, itemSize: WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT });
-  const rowIndexes = useMemo(() => items.flatMap((item, index) => item.kind === "row" ? [index] : []), [items]);
-  const rowIndexSignature = rowIndexes.join(":");
-  const [focusedIndex, setFocusedIndex] = useState(() => rowIndexes[0] ?? 0);
+  const virtualRows = useFixedVirtualRange({ count: rows.length, itemSize: ROOM_ROW_HEIGHT });
+  const rowSignature = rows.map((row) => row.key).join(":");
+  const [focusedIndex, setFocusedIndex] = useState(0);
 
   useEffect(() => {
-    setFocusedIndex(rowIndexes[0] ?? 0);
-  }, [rowIndexSignature]);
+    setFocusedIndex(0);
+  }, [rowSignature]);
 
-  const focusRow = (nextRowPosition: number) => {
-    const itemIndex = rowIndexes[Math.max(0, Math.min(rowIndexes.length - 1, nextRowPosition))];
-    if (itemIndex === undefined) return;
+  const focusRow = (target: number) => {
+    const index = Math.max(0, Math.min(rows.length - 1, target));
     const viewport = virtualRows.scrollRef.current;
     if (!viewport) return;
-    const top = itemIndex * WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT;
-    const bottom = top + WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT;
+    const top = index * ROOM_ROW_HEIGHT;
+    const bottom = top + ROOM_ROW_HEIGHT;
     if (top < viewport.scrollTop) viewport.scrollTop = top;
     else if (bottom > viewport.scrollTop + viewport.clientHeight) viewport.scrollTop = bottom - viewport.clientHeight;
-    setFocusedIndex(itemIndex);
+    setFocusedIndex(index);
     window.requestAnimationFrame(() => {
-      viewport.querySelector<HTMLButtonElement>(`[data-worker-environment-index="${itemIndex}"]`)?.focus();
+      viewport.querySelector<HTMLButtonElement>(`[data-worker-environment-index="${index}"]`)?.focus();
     });
   };
 
-  const onRowKeyDown = (event: KeyboardEvent<HTMLButtonElement>, itemIndex: number) => {
-    const rowPosition = rowIndexes.indexOf(itemIndex);
-    const page = Math.max(1, Math.floor(virtualRows.viewportHeight / WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT));
-    const target = event.key === "ArrowDown" ? rowPosition + 1
-      : event.key === "ArrowUp" ? rowPosition - 1
-        : event.key === "PageDown" ? rowPosition + page
-          : event.key === "PageUp" ? rowPosition - page
+  const onRowKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const page = Math.max(1, Math.floor(virtualRows.viewportHeight / ROOM_ROW_HEIGHT));
+    const target = event.key === "ArrowDown" ? index + 1
+      : event.key === "ArrowUp" ? index - 1
+        : event.key === "PageDown" ? index + page
+          : event.key === "PageUp" ? index - page
             : event.key === "Home" ? 0
-              : event.key === "End" ? rowIndexes.length - 1
+              : event.key === "End" ? rows.length - 1
                 : null;
     if (target === null) return;
     event.preventDefault();
@@ -299,221 +306,142 @@ function WorkerEnvironmentVirtualGallery({ fixture, groups, onSelect, projection
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]" onScroll={virtualRows.onScroll} ref={virtualRows.setScrollRef}>
-      <div style={{ height: virtualRows.totalSize, position: "relative" }}>
-        <div style={{ position: "absolute", top: virtualRows.start * WORKER_ENVIRONMENT_VIRTUAL_ITEM_HEIGHT, width: "100%" }}>
-          {items.slice(virtualRows.start, virtualRows.end).map((item, offset) => {
-            const itemIndex = virtualRows.start + offset;
-            if (item.kind === "heading") {
+    <div aria-label="Worker environments" aria-rowcount={rows.length} className="@container/rooms flex min-h-0 flex-1 flex-col" role="grid">
+      <div className="flex h-11 shrink-0 items-center gap-4 border-b border-token-border px-3 text-sm leading-5 text-token-text-secondary" role="row">
+        <span className="min-w-0 flex-1 ps-11" role="columnheader">Room</span>
+        <span className="hidden w-56 shrink-0 @2xl/rooms:block" role="columnheader">Used by</span>
+        <span className="hidden w-36 shrink-0 @lg/rooms:block" role="columnheader">State</span>
+        <span className="hidden w-32 shrink-0 @xl/rooms:block" role="columnheader">Last activity</span>
+        <span aria-hidden="true" className="w-16 shrink-0" />
+      </div>
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]" onScroll={virtualRows.onScroll} ref={virtualRows.setScrollRef}>
+        <div style={{ height: virtualRows.totalSize, position: "relative" }}>
+          <div style={{ position: "absolute", top: virtualRows.start * ROOM_ROW_HEIGHT, width: "100%" }}>
+            {rows.slice(virtualRows.start, virtualRows.end).map((row, offset) => {
+              const index = virtualRows.start + offset;
               return (
-                <GallerySectionHeader
-                  count={item.group.rows.length}
-                  key={`${item.group.environmentId}:heading`}
-                  onFocusEnvironment={onSelect ? () => onSelect({ kind: "environment", id: item.group.environmentId }) : undefined}
-                  title={item.group.environmentName}
+                <RoomTableRow
+                  index={index}
+                  key={row.key}
+                  onFocus={() => setFocusedIndex(index)}
+                  onKeyDown={(event) => onRowKeyDown(event, index)}
+                  onOpenRun={onOpenRun}
+                  onSelect={onSelect}
+                  row={row}
+                  surfaces={surfaces}
+                  tabIndex={focusedIndex === index ? 0 : -1}
                 />
               );
-            }
-            return (
-              <WorkerEnvironmentListRow
-                fixture={fixture}
-                key={item.row.key}
-                onFocus={() => setFocusedIndex(itemIndex)}
-                onKeyDown={(event) => onRowKeyDown(event, itemIndex)}
-                onOpen={() => dispatchOpenWorkerEnvironmentPane(defaultWorkerEnvironmentPaneTarget(item.row.workerEnvironment, surfaces))}
-                onOpenOverview={() => dispatchOpenWorkerEnvironmentPane({ workerEnvironmentId: item.row.workerEnvironment.id, panelKind: "overview" })}
-                projectionLive={projectionLive}
-                row={item.row}
-                surfaces={surfaces}
-                tabIndex={focusedIndex === itemIndex ? 0 : -1}
-                virtualIndex={itemIndex}
-              />
-            );
-          })}
+            })}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function WorkerEnvironmentListRow({ fixture, row, onOpen, onOpenOverview, projectionLive, surfaces, virtualIndex, tabIndex, onFocus, onKeyDown }: {
-  fixture: boolean;
-  row: WorkerEnvironmentRow;
-  onOpen: () => void;
-  onOpenOverview: () => void;
-  projectionLive: boolean;
+function RoomTableRow({ index, onFocus, onKeyDown, onOpenRun, onSelect, row, surfaces, tabIndex }: {
+  index: number;
+  onFocus: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  onOpenRun?: (runId: string, role: "home" | "task") => void;
+  onSelect?: (selection: SelectionRef) => void;
+  row: RoomRow;
   surfaces: AdmittedClientSurfaceDocument[];
-  virtualIndex?: number;
-  tabIndex?: number;
-  onFocus?: () => void;
-  onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  tabIndex: number;
 }) {
-  const workerEnvironment = row.workerEnvironment;
-  const projectedSurface = primaryWorkerEnvironmentSurface(workerEnvironment);
-  const document = primaryWorkerEnvironmentClientSurface(workerEnvironment.id, surfaces);
-  const surface = document && (!projectedSurface || workerEnvironmentPanelKind(projectedSurface) === "connection")
-    ? null
-    : projectedSurface;
-  const fact = workerEnvironmentFact(row, surface, document);
-  const statusTone = workerEnvironmentStatusTone(workerEnvironment, projectionLive);
-  const stateLabel = workerEnvironmentStateLabel(workerEnvironment, projectionLive, fixture);
-  const title = workerEnvironmentTaskTitle(row);
+  const openRun = row.openRole && onOpenRun ? () => onOpenRun(row.runId, row.openRole!) : null;
+  const lastActivity = relativeEvidenceTime(row.room.lastActivityAtMs);
   return (
-    <div className="group flex h-[76px] w-full items-center border-b border-token-border last:border-b-0 hover:bg-token-list-hover-background focus-within:bg-token-list-hover-background">
-      <button
-        aria-label={`Open ${title} room`}
-        className="flex min-w-0 flex-1 cursor-interaction items-center gap-3 px-3 py-2.5 text-left focus-visible:outline-none"
-        data-worker-environment-index={virtualIndex}
-        onClick={onOpen}
-        onFocus={onFocus}
-        onKeyDown={onKeyDown}
-        tabIndex={tabIndex}
-        type="button"
-      >
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-token-border text-token-text-secondary">
-          <Glyph name={surface ? workerEnvironmentSurfaceGlyph(surface) : document?.document.glyph ?? "ee"} size={16} />
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col">
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-medium text-token-foreground">{title}</span>
-            <span className="flex shrink-0 items-center gap-1.5 text-xs text-token-text-secondary">
-              <span className={`size-1.5 rounded-full ${statusTone === "active" ? "bg-token-charts-green" : statusTone === "error" ? "bg-token-charts-red" : "bg-token-description-foreground"}`} />
-              {stateLabel}
-            </span>
+    <div
+      aria-rowindex={index + 1}
+      className="group relative flex items-center gap-4 border-b border-token-border px-3 last:border-b-0 hover:bg-token-list-hover-background focus-within:bg-token-list-hover-background"
+      role="row"
+      style={{ height: ROOM_ROW_HEIGHT }}
+    >
+      <span className="flex min-w-0 flex-1 items-center gap-3" role="gridcell">
+        <span className="relative size-8 shrink-0">
+          <span className="flex size-full items-center justify-center overflow-hidden rounded-lg border border-token-border bg-token-main-surface-primary text-token-text-secondary">
+            <Glyph name={row.glyph} size={16} />
           </span>
-          {fact ? <span className="min-w-0 truncate text-xs text-token-text-secondary">{fact}</span> : null}
+          <span
+            aria-hidden="true"
+            className={cx(
+              "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border-2 border-token-main-surface-primary",
+              row.state.tone === "success" ? "bg-token-charts-green" : row.state.tone === "danger" ? "bg-token-charts-red" : "hidden",
+            )}
+          />
         </span>
-        {workerEnvironment.kind ? (
-          <span className="flex max-w-56 shrink-0 items-center gap-1.5 rounded-full border border-token-border bg-transparent px-2 py-0.5 text-sm leading-5 text-token-text-primary max-[680px]:hidden">
-            <span className="min-w-0 truncate">{humanizeIdentifier(workerEnvironment.kind)}</span>
-          </span>
+        <button
+          aria-label={`Open ${row.title} room${row.openRole ? ` used by ${row.usedBy}` : ""}`}
+          className="flex min-w-0 flex-1 cursor-interaction flex-col text-left after:absolute after:inset-0 after:z-0 focus-visible:outline-none"
+          data-worker-environment-index={index}
+          onClick={() => dispatchOpenWorkerEnvironmentPane(defaultWorkerEnvironmentPaneTarget(row.room, surfaces))}
+          onFocus={onFocus}
+          onKeyDown={onKeyDown}
+          tabIndex={tabIndex}
+          type="button"
+        >
+          <span className="min-w-0 truncate text-base text-token-foreground">{row.title}</span>
+          {row.detail ? <span className="min-w-0 truncate text-sm leading-5 text-token-text-secondary">{row.detail}</span> : null}
+        </button>
+      </span>
+      <span className="hidden w-56 shrink-0 items-center text-sm leading-5 text-token-text-secondary @2xl/rooms:flex" role="gridcell">
+        {openRun ? (
+          <button
+            className="relative z-10 min-w-0 cursor-interaction truncate text-left hover:text-token-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={openRun}
+            tabIndex={-1}
+            title={row.projectName && row.section === "tasks" ? `${row.usedBy} · ${row.projectName}` : row.usedBy}
+            type="button"
+          >{row.usedBy}</button>
+        ) : (
+          <span className="min-w-0 truncate" title={row.usedBy}>{row.usedBy}</span>
+        )}
+      </span>
+      <span className="hidden w-36 shrink-0 items-center @lg/rooms:flex" role="gridcell">
+        <OcStatus className="relative z-10" detail={row.state.detail} label={row.state.label} tone={row.state.tone} />
+      </span>
+      <span className="hidden w-32 shrink-0 truncate text-sm leading-5 text-token-text-secondary @xl/rooms:block" role="gridcell" title={row.room.lastActivityAtMs ? formatEvidenceTime(row.room.lastActivityAtMs) : undefined}>
+        {lastActivity || "—"}
+      </span>
+      <span className="relative z-10 flex w-16 shrink-0 items-center justify-end gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100" role="gridcell">
+        {openRun ? (
+          <OcIconButton glyph={row.openRole === "home" ? "home" : "chat"} label={row.openRole === "home" ? "Open Home" : `Open ${row.usedBy}`} onClick={openRun} size="xs" tabIndex={-1} variant="ghost" />
+        ) : onSelect ? (
+          <OcIconButton glyph="topology" label="Show its run in topology" onClick={() => onSelect({ kind: "run", id: row.runId })} size="xs" tabIndex={-1} variant="ghost" />
         ) : null}
-        <Glyph className="icon-2xs shrink-0 -rotate-90 text-token-input-placeholder-foreground" name="chevronDown" size={12} />
-      </button>
-      <OcIconButton
-        className="mr-1 shrink-0 text-token-text-secondary"
-        glyph="viewAll"
-        label={`Open ${title} room overview`}
-        onClick={onOpenOverview}
-        size="xs"
-        variant="ghost"
-      />
+        <OcIconButton
+          glyph="viewAll"
+          label={`${row.title} room details`}
+          onClick={() => dispatchOpenWorkerEnvironmentPane({ workerEnvironmentId: row.room.id, panelKind: "overview" })}
+          size="xs"
+          tabIndex={-1}
+          variant="ghost"
+        />
+      </span>
     </div>
   );
 }
 
-function workerEnvironmentFact(
-  row: WorkerEnvironmentRow,
-  surface: ReturnType<typeof primaryWorkerEnvironmentSurface>,
-  document: AdmittedClientSurfaceDocument | null,
-): string {
-  const workerEnvironment = row.workerEnvironment;
-  const data = surface?.data ?? {};
-  const roots = Array.from(new Set(workerEnvironment.surfaces
-    .map((candidate) => candidate.root.trim())
-    .filter(Boolean)));
-  const capability = workerEnvironment.surfaces
-    .filter((candidate) => workerEnvironmentPanelKind(candidate) !== "connection")
-    .map((candidate) => candidate.label.trim())
-    .find(Boolean);
-  const candidates = Array.from(new Set([
-    typeof data.url === "string" ? data.url : "",
-    surface?.viewerUrl ?? "",
-    typeof data.branch === "string" ? data.branch : "",
-    roots[0] ?? surface?.root ?? workerEnvironment.root ?? "",
-    surface?.protocol ?? "",
-    document?.document.title ?? "",
-    workerEnvironment.transport ?? "",
-  ].map((value) => value.trim()).filter(Boolean)));
-  return [row.environmentName, capability, candidates[0], roots.length > 1 ? `+${roots.length - 1} roots` : ""]
-    .filter(Boolean)
-    .join(" · ");
-}
-
-function workerEnvironmentStatusTone(environment: WorkerEnvironmentProjection, projectionLive: boolean): "active" | "error" | "muted" {
-  const lifecycle = environment.lifecycle.toLowerCase();
-  const status = environment.status.toLowerCase();
-  if ([lifecycle, status].some((value) => ["failed", "blocked", "error", "denied"].includes(value))) return "error";
-  if (lifecycle === "active" && ["closed", "released", "offline"].includes(status)) return "error";
-  if (projectionLive && environment.live) return "active";
-  return "muted";
-}
-
-function workerEnvironmentStateLabel(environment: WorkerEnvironmentProjection, projectionLive: boolean, fixture: boolean): string {
-  const lifecycle = humanizeIdentifier(environment.lifecycle || "");
-  const status = humanizeIdentifier(environment.status || "unknown");
-  if (fixture) return `Fixture · ${status || lifecycle}`;
-  if (!projectionLive) return `Last projected · ${status || lifecycle}`;
-  if (lifecycle && lifecycle.toLowerCase() !== status.toLowerCase()) {
-    return `${lifecycle} · ${status}`;
-  }
-  return lifecycle || status;
-}
-
-function workerEnvironmentTaskTitle(row: WorkerEnvironmentRow): string {
-  const title = row.run?.label.trim();
-  if (title) return title;
-  const runId = row.run?.id || row.workerEnvironment.runId;
-  return runId ? `Task ${shortId(runId, 12, 5)}` : `Technical room ${shortId(row.workerEnvironment.id, 12, 5)}`;
-}
-
-function workerEnvironmentMatchesState(environment: WorkerEnvironmentProjection, filter: WorkerEnvironmentStateFilter, projectionLive: boolean): boolean {
-  if (filter === "all") return true;
-  const lifecycle = environment.lifecycle.toLowerCase();
-  const status = environment.status.toLowerCase();
-  const attention = [lifecycle, status].some((value) => ["failed", "blocked", "error", "denied"].includes(value))
-    || (lifecycle === "active" && ["closed", "released", "offline"].includes(status));
-  if (filter === "attention") return attention;
-  if (filter === "released") return lifecycle === "released";
-  return projectionLive && environment.live;
-}
-
-function EnvironmentSearch({ inputRef, query, onChange }: {
-  inputRef: RefObject<HTMLInputElement | null>;
-  query: string;
-  onChange: (value: string) => void;
-}) {
+function RoomNotice({ action, detail, title }: { action?: ReactNode; detail: string; title: string }) {
   return (
-    <OcSearchField
-      className="min-w-0 flex-1"
-      id="worker-environment-search"
-      inputRef={inputRef}
-      label="Search worker environments"
-      onChange={onChange}
-      placeholder="Search worker environments"
-      value={query}
-    />
-  );
-}
-
-function GallerySectionHeader({ title, count, onFocusEnvironment }: {
-  title: string;
-  count: number;
-  onFocusEnvironment?: () => void;
-}) {
-  return (
-    <header className="flex h-[76px] min-w-0 items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-2">
-          <h2 className="m-0 min-w-0 truncate text-base font-medium text-token-text-primary">{title}</h2>
-          {onFocusEnvironment ? (
-            <OcIconButton
-              glyph="topology"
-              label={`Focus ${title} in topology`}
-              onClick={onFocusEnvironment}
-              size="sm"
-              variant="ghost"
-            />
-          ) : null}
+    <div className="mx-auto w-full max-w-6xl px-panel pb-3">
+      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-token-border bg-token-main-surface-secondary p-3" role="alert">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-token-foreground">{title}</div>
+          <div className="mt-1 break-words text-xs leading-5 text-token-text-secondary">{detail}</div>
         </div>
-        <span className="text-sm text-token-input-placeholder-foreground">{count}</span>
-    </header>
+        {action}
+      </div>
+    </div>
   );
 }
 
-function EnvironmentEmptyState({ title, detail }: { title: string; detail: string }) {
+function RoomEmptyState({ title, detail }: { title: string; detail: string }) {
   return (
     <OcEmptyState
-      className="min-h-32 rounded-xl border border-token-border p-6"
+      className="mt-4 min-h-32 rounded-xl border border-token-border p-6"
       detail={detail}
       glyph="ee"
       size="compact"
@@ -522,43 +450,118 @@ function EnvironmentEmptyState({ title, detail }: { title: string; detail: strin
   );
 }
 
-function flattenWorkerEnvironments(snapshot: TopologySnapshot, projectNames: Map<string, string>): WorkerEnvironmentRow[] {
-  return snapshot.environments.flatMap((environment) => {
-    const formed = new Map<string, WorkerEnvironmentRow>();
-    const environmentName = projectNames.get(environment.id) || environment.name;
+function projectRooms(
+  snapshot: TopologySnapshot,
+  projectNames: Map<string, string>,
+  chatRuns: readonly ChatRun[],
+  surfaces: AdmittedClientSurfaceDocument[],
+  projectionLive: boolean,
+  fixture: boolean,
+): RoomRow[] {
+  const chats = new Map(chatRuns.map((run) => [run.runId, run]));
+  const homeEeIds = new Set(chatRuns.filter((run) => run.clientSurfaceRole === "home").map((run) => run.eeId).filter(Boolean));
+  const taskEeIds = new Set(chatRuns.filter((run) => run.clientSurfaceRole === "task" && !homeEeIds.has(run.eeId)).map((run) => run.eeId).filter(Boolean));
+  const formed = new Map<string, { projectId: string; projectName: string; run: RunProjection | null; room: WorkerEnvironmentProjection }>();
+  for (const environment of snapshot.environments) {
+    const projectName = projectNames.get(environment.id) || environment.name;
     for (const run of environment.runs) {
-      for (const workerEnvironment of run.workerEnvironments) {
-        if (!workerEnvironment.id) continue;
-        formed.set(workerEnvironment.id, {
-          key: `${environment.id}:${workerEnvironment.id}`,
-          environmentId: environment.id,
-          environmentName,
-          run,
-          workerEnvironment,
-        });
+      for (const room of run.workerEnvironments) {
+        if (room.id) formed.set(room.id, { projectId: environment.id, projectName, run, room });
       }
     }
-    for (const workerEnvironment of environment.workerEnvironments) {
-      if (!workerEnvironment.id || formed.has(workerEnvironment.id)) continue;
-      const ownerRun = workerEnvironment.runId
-        ? environment.runs.find((candidate) => candidate.id === workerEnvironment.runId) ?? null
-        : null;
-      formed.set(workerEnvironment.id, {
-        key: `${environment.id}:${workerEnvironment.id}`,
-        environmentId: environment.id,
-        environmentName,
-        run: ownerRun,
-        workerEnvironment,
-      });
+    for (const room of environment.workerEnvironments) {
+      if (!room.id || formed.has(room.id)) continue;
+      const run = room.runId ? environment.runs.find((candidate) => candidate.id === room.runId) ?? null : null;
+      formed.set(room.id, { projectId: environment.id, projectName, run, room });
     }
-    return [...formed.values()];
-  }).sort((left, right) => workerEnvironmentRecency(right.workerEnvironment) - workerEnvironmentRecency(left.workerEnvironment));
+  }
+  return [...formed.values()].map(({ projectId, projectName, run, room }): RoomRow => {
+    const runId = run?.id || room.runId;
+    const chat = chats.get(runId);
+    const eeId = run?.eeId || room.eeId || projectId;
+    const section: RoomSection = chat ? (chat.clientSurfaceRole === "home" ? "home" : "tasks") : taskEeIds.has(eeId) ? "tasks" : "system";
+    const usedBy = chat ? (chat.clientSurfaceRole === "home" ? "Home" : chat.title) : runId ? `Run ${shortId(runId, 12, 5)}` : "No run";
+    const presentation = roomPresentation(room, surfaces);
+    const state = roomState(room, projectionLive, fixture);
+    const clientSurfaceTitles = workerEnvironmentClientSurfaces(room.id, surfaces).map((surface) => surface.document.title);
+    return {
+      key: `${projectId}:${room.id}`,
+      room,
+      runId,
+      projectId,
+      projectName,
+      section,
+      usedBy,
+      openRole: chat ? chat.clientSurfaceRole : null,
+      ...presentation,
+      state,
+      searchText: [
+        presentation.title, presentation.detail, usedBy, projectName, room.kind, room.root, room.status, room.lifecycle, state.label,
+        ...room.tools, ...room.capabilities, ...room.surfaces.map((surface) => `${surface.label} ${surface.root}`), ...clientSurfaceTitles,
+      ].join("\n").toLowerCase(),
+    };
+  }).sort((left, right) => roomRecency(right.room) - roomRecency(left.room));
 }
 
-function workerEnvironmentRecency(environment: WorkerEnvironmentProjection): number {
-  const numeric = Number(environment.revision);
+function roomPresentation(room: WorkerEnvironmentProjection, surfaces: AdmittedClientSurfaceDocument[]): { title: string; detail: string; glyph: GlyphName } {
+  const projectedSurface = primaryWorkerEnvironmentSurface(room);
+  const document = primaryWorkerEnvironmentClientSurface(room.id, surfaces);
+  const surface = projectedSurface && workerEnvironmentPanelKind(projectedSurface) !== "connection" ? projectedSurface : null;
+  const data = surface?.data ?? {};
+  const location = [
+    typeof data.url === "string" ? data.url : "",
+    surface?.viewerUrl ?? "",
+    typeof data.branch === "string" ? data.branch : "",
+    document?.document.title ?? "",
+  ].map((value) => value.trim()).find(Boolean);
+  const roots = Array.from(new Set(room.surfaces.map((candidate) => candidate.root.trim()).filter(Boolean)));
+  const detail = location || toolSummary(room.tools) || roots[0] || room.root;
+  return {
+    title: sentenceCase(room.kind) || "Room",
+    detail: detail && roots.length > 1 && detail === roots[0] ? `${detail} +${roots.length - 1} more` : detail,
+    glyph: surface ? workerEnvironmentSurfaceGlyph(surface) : document?.document.glyph ?? "ee",
+  };
+}
+
+function toolSummary(tools: string[]): string {
+  const groups = new Map<string, string[]>();
+  for (const tool of tools) {
+    const base = baseDynamicToolId(tool.trim());
+    if (!base) continue;
+    const separator = base.indexOf(".");
+    const family = separator > 0 ? base.slice(0, separator) : base;
+    const operation = separator > 0 ? base.slice(separator + 1) : "";
+    const operations = groups.get(family) ?? [];
+    if (operation && !operations.includes(operation)) operations.push(operation);
+    groups.set(family, operations);
+  }
+  if (groups.size === 0) return "";
+  if (groups.size === 1) {
+    const [[family, operations]] = [...groups.entries()];
+    return operations.length ? `${sentenceCase(family)}: ${operations.map(spacedIdentifier).join(", ")}` : sentenceCase(family);
+  }
+  return `${[...groups.keys()].map(spacedIdentifier).join(", ")} tools`.replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function roomState(room: WorkerEnvironmentProjection, projectionLive: boolean, fixture: boolean): RoomState {
+  const lifecycle = room.lifecycle.toLowerCase();
+  const status = room.status.toLowerCase();
+  const detail = Array.from(new Set([lifecycle, status].filter(Boolean))).map(sentenceCase).join(" · ");
+  const failed = [lifecycle, status].some((value) => ["failed", "blocked", "error", "denied"].includes(value));
+  const disconnected = lifecycle === "active" && ["closed", "released", "offline"].includes(status);
+  if (failed) return { filter: "attention", label: "Failed", tone: "danger", detail };
+  if (disconnected) return { filter: "attention", label: "Disconnected", tone: "danger", detail };
+  if (lifecycle === "released") return { filter: "closed", label: "Closed", tone: "neutral", detail };
+  if (fixture) return { filter: "other", label: "Sample", tone: "neutral", detail };
+  if (!projectionLive) return { filter: "other", label: "Last seen", tone: "neutral", detail };
+  if (room.live) return { filter: "open", label: "Open", tone: "success", detail };
+  return { filter: "other", label: sentenceCase(status || lifecycle) || "Unknown", tone: "neutral", detail };
+}
+
+function roomRecency(room: WorkerEnvironmentProjection): number {
+  const numeric = Number(room.revision);
   if (Number.isFinite(numeric)) return numeric;
-  const timestamp = Date.parse(environment.revision);
+  const timestamp = Date.parse(room.revision);
   return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
@@ -575,23 +578,10 @@ function projectPresentationNames(value: unknown): Map<string, string> {
   }));
 }
 
-function humanizeIdentifier(value: string): string {
-  return value.trim().replace(/[._-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+function spacedIdentifier(value: string): string {
+  return value.trim().replace(/[._-]+/g, " ");
 }
 
-function groupWorkerEnvironments(rows: WorkerEnvironmentRow[]): WorkerEnvironmentGroup[] {
-  const groups = new Map<string, WorkerEnvironmentGroup>();
-  for (const row of rows) {
-    const group = groups.get(row.environmentId);
-    if (group) {
-      group.rows.push(row);
-      continue;
-    }
-    groups.set(row.environmentId, {
-      environmentId: row.environmentId,
-      environmentName: row.environmentName,
-      rows: [row],
-    });
-  }
-  return [...groups.values()];
+function sentenceCase(value: string): string {
+  return spacedIdentifier(value).toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
 }

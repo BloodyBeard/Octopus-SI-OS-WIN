@@ -244,7 +244,7 @@ export function clientToolActivityPresentation(toolId: string): ClientToolPresen
   return clientToolPresentationCatalog[toolId] ?? null;
 }
 
-function baseDynamicToolId(exactToolId: string): string {
+export function baseDynamicToolId(exactToolId: string): string {
   const separator = exactToolId.indexOf("__");
   return separator > 0 ? exactToolId.slice(0, separator) : exactToolId;
 }

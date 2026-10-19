@@ -112,6 +112,13 @@ the same system, not separate client histories.
 
 See the [movement and metadata example](contracts/LEDGER_INDEX.md#reading-a-movement-in-the-client).
 
+**Dashboard → Worker Environments** lists the rooms where work touches the
+world: a browser session, a Git worktree, a terminal, a desktop. Tabs separate
+rooms opened for tasks, rooms opened for Home, and the system rooms Octopus
+opens for its own upkeep. Each row shows what the room is, which task uses it,
+whether it is open, and when it was last active; opening a row shows the room
+live, its changes, or its files.
+
 ## Applications, Drivers, and Extensions
 
 These are different catalogs, not three names for plugins.

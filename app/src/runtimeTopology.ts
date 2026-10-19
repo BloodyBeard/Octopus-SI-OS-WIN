@@ -870,6 +870,8 @@ export function workerEnvironmentProjection(value: any): WorkerEnvironmentProjec
     lifecycle,
     status,
     live: item.live_available === true,
+    openedAtMs: positiveTimestamp(item.opened_at_unix_ms),
+    lastActivityAtMs: positiveTimestamp(item.last_activity_at_unix_ms),
     label: explicitLabel || workerEnvironmentLabel(kind, id, status, primarySurface),
     detail: explicitDetail || workerEnvironmentDetail(root, session, transport, primarySurface),
     substrateFamily,
@@ -882,6 +884,10 @@ export function workerEnvironmentProjection(value: any): WorkerEnvironmentProjec
     tools,
     surfaces,
   };
+}
+
+function positiveTimestamp(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function workerEnvironmentSurfaceProjections(item: Record<string, any>): WorkerEnvironmentProjection["surfaces"] {

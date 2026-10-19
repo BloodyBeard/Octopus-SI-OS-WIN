@@ -93,6 +93,8 @@ export type WorkerEnvironmentProjection = {
   lifecycle: string;
   status: string;
   live: boolean;
+  openedAtMs: number | null;
+  lastActivityAtMs: number | null;
   label: string;
   detail: string;
   substrateFamily: string;

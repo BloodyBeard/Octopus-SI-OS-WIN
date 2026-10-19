@@ -1136,6 +1136,11 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     openChat(runId);
   }, [openChat]);
 
+  const openSurfaceRun = useCallback((runId: string, role: "home" | "task") => {
+    if (role === "home") openHomeRun(runId);
+    else openChat(runId);
+  }, [openChat, openHomeRun]);
+
   const openNavigationSection = useCallback((section: ClientNavigationSection) => {
     setSecondaryPaneFocused(false);
     if (section === "home") {
@@ -2255,6 +2260,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
     installedVoiceWidgetsReady={surfaceRegistry.extensions.hydrated}
     builtinVoiceWidgetSources={surfaceRegistry.extensions.builtinWidgetSources}
     workerEnvironmentSurfaces={surfaceRegistry.workerEnvironmentSurfaces}
+    onOpenRun={openSurfaceRun}
           />
   ) : null;
   const secondaryPane = secondarySurface || secondaryPaneOpen ? (
@@ -2486,6 +2492,7 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
             installedVoiceWidgetsReady={surfaceRegistry.extensions.hydrated}
             builtinVoiceWidgetSources={surfaceRegistry.extensions.builtinWidgetSources}
             workerEnvironmentSurfaces={surfaceRegistry.workerEnvironmentSurfaces}
+            onOpenRun={openSurfaceRun}
           />}
         </SurfaceRenderBoundary>
       </AppShell>

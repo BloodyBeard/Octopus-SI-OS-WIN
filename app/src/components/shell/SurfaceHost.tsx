@@ -62,6 +62,7 @@ export type SurfaceHostProps = {
   installedVoiceWidgetsReady: boolean;
   builtinVoiceWidgetSources: Record<string, ClientSurfaceHostSource[]>;
   workerEnvironmentSurfaces: AdmittedClientSurfaceDocument[];
+  onOpenRun?: (runId: string, role: "home" | "task") => void;
 };
 
 export function SurfaceHost(props: SurfaceHostProps) {
@@ -102,6 +103,7 @@ function SurfaceContent({
   installedVoiceWidgetsReady,
   builtinVoiceWidgetSources,
   workerEnvironmentSurfaces,
+  onOpenRun,
 }: SurfaceHostProps) {
   if (surface.rendererKind === "builtin.inbox") {
     return inbox ? <Suspense fallback={<SurfaceLoadingState label="Loading Inbox…" />}><InboxSurface {...inbox} /></Suspense>
@@ -155,7 +157,7 @@ function SurfaceContent({
   return (
     <div className={workspacePanelClass(surface)}>
       <Suspense fallback={surfaceFallback}>
-        {renderSurface(accessProfile, surface, topology, query, searchFocusTick, chatWorkspace, homeRunId, voiceSession, homeViewMode, onHomeViewModeChange, paneRole, paneTabStripVisible, commandsActive, onSelect, onOpenFiles, voiceSurfaces, installedVoiceWidgetIds, installedVoiceWidgetsReady, builtinVoiceWidgetSources, workerEnvironmentSurfaces)}
+        {renderSurface(accessProfile, surface, topology, query, searchFocusTick, chatWorkspace, homeRunId, voiceSession, homeViewMode, onHomeViewModeChange, paneRole, paneTabStripVisible, commandsActive, onSelect, onOpenFiles, voiceSurfaces, installedVoiceWidgetIds, installedVoiceWidgetsReady, builtinVoiceWidgetSources, workerEnvironmentSurfaces, onOpenRun)}
       </Suspense>
     </div>
   );
@@ -182,6 +184,7 @@ function renderSurface(
   installedVoiceWidgetsReady: boolean,
   builtinVoiceWidgetSources: Record<string, ClientSurfaceHostSource[]>,
   workerEnvironmentSurfaces: AdmittedClientSurfaceDocument[],
+  onOpenRun: SurfaceHostProps["onOpenRun"],
 ) {
   switch (surface.rendererKind) {
     case "builtin.registry":
@@ -201,7 +204,7 @@ function renderSurface(
     case "builtin.scheduled":
       return <ScheduledView accessProfile={accessProfile} searchFocusTick={searchFocusTick} navigationInPane={paneRole === "secondary"} />;
     case "builtin.worker_environments":
-      return <WorkerEnvironmentsView accessProfile={accessProfile} snapshot={topology} searchFocusTick={searchFocusTick} onSelect={onSelect} surfaces={workerEnvironmentSurfaces} />;
+      return <WorkerEnvironmentsView accessProfile={accessProfile} chatRuns={chatWorkspace.runs} onOpenRun={onOpenRun} onSelect={onSelect} searchFocusTick={searchFocusTick} snapshot={topology} surfaces={workerEnvironmentSurfaces} />;
     case "custom.projection":
       return <CustomProjectionSurface surface={surface} query={query} />;
     case "custom.document":

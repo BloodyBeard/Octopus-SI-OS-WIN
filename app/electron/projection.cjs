@@ -8266,7 +8266,22 @@ function createProjectionStore(options) {
   }
 
   function workerEnvironmentRows(projection) {
-    return arrayValue(projection.workerEnvironments);
+    const rows = arrayValue(projection.workerEnvironments);
+    if (!arrayValue(projection.ledgerRows).length) return rows;
+    return projectionMemo(projection, "ledger", "workerEnvironmentRows", () => {
+      const wanted = new Set(rows.flatMap((row) => [row.opened_at_movement_seq, row.last_activity_movement_seq])
+        .filter(Number.isSafeInteger));
+      const recordedAt = new Map();
+      for (const movement of projection.ledgerRows) {
+        const seq = movement?.seq;
+        if (wanted.has(seq)) recordedAt.set(seq, numberValue(movement.recorded_at_unix_ms ?? movement.wall_clock_unix_ms, 0) || null);
+      }
+      return rows.map((row) => ({
+        ...row,
+        opened_at_unix_ms: recordedAt.get(row.opened_at_movement_seq) ?? null,
+        last_activity_at_unix_ms: recordedAt.get(row.last_activity_movement_seq) ?? null,
+      }));
+    });
   }
 
   function bindingRows(projection) {
