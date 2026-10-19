@@ -108,8 +108,8 @@ function HomeActivityDetail({ message, toolPresentations, turnInProgress }: {
   return (
     <ul className="home-live-activity__actions">
       {actions.map((action) => (
-        <li key={action.id}>
-          {action.glyph ? <Glyph name={action.glyph} size={13} /> : null}
+        <li className="octopus-inline-activity min-w-0" key={action.id}>
+          {action.glyph ? <Glyph aria-hidden="true" className="icon-xs shrink-0" name={action.glyph} /> : null}
           <CadencedShimmerText active={turnInProgress && homeActivityIsActive(message)}>{action.label}</CadencedShimmerText>
         </li>
       ))}

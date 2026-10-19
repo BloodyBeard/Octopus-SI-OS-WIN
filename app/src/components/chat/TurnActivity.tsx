@@ -108,6 +108,7 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
     ? visible.filter((message) => message !== terminalTraceError)
     : visible;
   const stopped = activities.some(turnWasStopped);
+  const stoppedByOperator = activities.some(turnStoppedByOperator);
   const finalStarted = Boolean(response && isFinalAssistantResponse(response));
   const failed = Boolean(terminalTraceError) && !stopped;
   const turnCompleted = activities.some(turnWasCompleted);
@@ -305,7 +306,7 @@ export function TurnActivity({ activityWindow = "all", activities, finalStartedA
         <WorkedForBoundary
           elapsed={elapsed}
           reducedMotion={reducedMotion}
-          status={working ? "working" : stopped ? "stopped" : "worked"}
+          status={working ? "working" : stopped ? stoppedByOperator ? "stopped" : "interrupted" : "worked"}
         />
       ) : null}
       {showWorkedForBoundary && (hasWork || showThinkingFallback) ? <ActivityGap /> : null}
@@ -1005,13 +1006,15 @@ function WorkedForToggle({ elapsed, expanded, onToggle }: {
 function WorkedForBoundary({ elapsed, reducedMotion, status }: {
   elapsed: number;
   reducedMotion: boolean;
-  status: "working" | "worked" | "stopped";
+  status: "working" | "worked" | "stopped" | "interrupted";
 }) {
   const label = status === "working"
     ? elapsed >= 1_000 ? `Working for ${formatElapsed(elapsed)}` : "Working"
     : status === "stopped"
       ? `You stopped after ${formatElapsed(elapsed)}`
-      : `Worked for ${formatElapsed(elapsed)}`;
+      : status === "interrupted"
+        ? `Interrupted after ${formatElapsed(elapsed)}`
+        : `Worked for ${formatElapsed(elapsed)}`;
   return (
     <motion.div
       animate={{ height: "auto", opacity: 1 }}
@@ -1998,6 +2001,10 @@ function safetyBufferingVisible(message: ChatRenderMessage): boolean {
 
 function turnWasStopped(message: ChatRenderMessage): boolean {
   if (message.eventKind === "interrupted_result") return true;
+  return turnStoppedByOperator(message);
+}
+
+function turnStoppedByOperator(message: ChatRenderMessage): boolean {
   if (message.eventKind !== "turn_control") return false;
   const data = record(message.eventData);
   const action = text(data.action);
