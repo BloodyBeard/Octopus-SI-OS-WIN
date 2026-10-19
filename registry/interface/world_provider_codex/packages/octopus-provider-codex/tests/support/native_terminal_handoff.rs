@@ -892,6 +892,28 @@ async fn native_terminal_handoff_cases() {
         let before_context=record.interface_state[&descriptor.id]["context_generation"].as_u64().unwrap();
         let mut state=serde_json::to_value(continuity(before_context,Some(if with_stop {"interrupted_pending"}else{"pending"}))).unwrap();
         state["provider_interface"]=json!(descriptor.id); state["run"]=json!(run);
+        if settlement_phase==Some(25) {
+            let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
+                && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
+            let file=artifact(&root.join("message"),"operator.message",json!({"text":"start","message_id":"initial"}));
+            let row=edge(&ctx,&initial,cp,&file,MovementKind::InterfaceOutbound,descriptor.id.clone());
+            let input=source_envelope(&ctx,root,&row,file);let source_seq=append(&ctx,row);
+            let handoff=ProviderHandoffSession::new(&ctx).unwrap().from_invocation(&ctx,&descriptor,&run,&input,source_seq,&initial).unwrap();
+            state["context_generation"]=json!(before_context+1);
+            let output=artifact(&ctx.interface_var_dir().join("pending"),"interface.artifact.output",json!({"label":"interface.artifact.output","codex_continuity":state}));
+            let mut pending=Vec::new();
+            let held=hold_newest_stream_emission(&handoff,&mut pending,(ProviderEmission{artifact:output,route:ProviderEmissionRoute::ClientProjection},None,Vec::new())).await.unwrap();
+            assert_eq!((held,pending.len()),(0,1));
+            let close=Box::pin(close_stream_emissions(&handoff,&mut pending,true));
+            let gate=pump(&ctx,root,&plan.run_write.path,&authoring_id,&listener,&mut receiver,&input.artifact,0,1,true,0,true);
+            let (closed,delivered)=tokio::time::timeout(std::time::Duration::from_secs(5),async{tokio::join!(close,gate)}).await.unwrap();
+            assert!(matches!(closed.unwrap(),(0,Some(octopus_provider_run_authoring::ProviderHandoffOutcome::Admitted{..}))));
+            assert_eq!(delivered.len(),1);assert!(pending.is_empty());
+            let current=RunRecord::from_bytes(&std::fs::read(&plan.run_write.path).unwrap()).unwrap();
+            let settled=&current.interface_state[&descriptor.id]["pending_handoff"];
+            assert_eq!((settled["source_movement_seq"].clone(),settled["terminal"].clone()),(json!(source_seq),json!(true)));
+            return;
+        }
         if settlement_phase==Some(22) {
             let cp=record.checkpoints.iter().find(|cp|record.active_checkpoints.contains(&cp.id)
                 && cp.outbound_interfaces().any(|id|id==&descriptor.id) && cp.interface_binding.as_ref().unwrap().admits("operator.message")).unwrap();
@@ -1133,7 +1155,7 @@ async fn native_terminal_handoff_cases() {
         }
     }
     for (with_stop, with_answer, native_interrupted, settlement_phase) in [
-        (false,false,false,Some(22)),(false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
+        (false,false,false,Some(25)),(false,false,false,Some(22)),(false,true,false,None),(true,true,false,None),(false,false,false,None),(true,false,false,None),
         (false,false,true,None),(true,false,true,None),(false,false,true,Some(0)),(false,false,true,Some(2)),(false,false,true,Some(3)),(false,false,true,Some(4)),(false,false,true,Some(5)),(false,false,true,Some(6)),(false,false,true,Some(7)),(false,false,true,Some(8)),(false,false,true,Some(9)),(false,false,true,Some(10)),(false,false,true,Some(11)),(false,false,true,Some(12)),(false,false,true,Some(13)),
         (false,false,true,Some(14)),(false,false,true,Some(15)),(false,false,true,Some(16)),(false,false,true,Some(17)),(false,false,true,Some(18)),(false,false,true,Some(19)),
         (false,false,true,Some(20)),(false,false,true,Some(21)),

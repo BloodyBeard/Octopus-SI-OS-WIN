@@ -5112,6 +5112,27 @@ async fn flush_stream_batch_inner(
     Ok(flush_len)
 }
 
+async fn hold_newest_stream_emission(
+    handoff: &ProviderOutputHandoff,
+    pending: &mut Vec<PendingProviderEmission>,
+    emission: PendingProviderEmission,
+) -> Result<usize, String> {
+    pending.push(emission);
+    flush_stream_batch(handoff, pending, true).await
+}
+
+async fn close_stream_emissions(
+    handoff: &ProviderOutputHandoff,
+    pending: &mut Vec<PendingProviderEmission>,
+    terminal: bool,
+) -> Result<(usize, Option<ProviderHandoffOutcome>), String> {
+    let flushed = flush_stream_batch(handoff, pending, true).await?;
+    let Some(last) = pending.pop() else {
+        return Ok((flushed, None));
+    };
+    Ok((flushed, Some(hand_stream_emission(handoff, last, terminal).await?)))
+}
+
 fn drive_turn_with_retries<'a>(
     scope: CodexTurnScope<'a>,
     driver: &'a mut Option<Arc<CodexAppServerInterfaceDriver>>,
@@ -5582,8 +5603,7 @@ async fn drive_turn_with_retries_inner(
                             if resolving_interrupted_result {
                                 return Err("interrupted result cannot create outgoing bindings".into());
                             }
-                            pending.push((emission, None, bindings));
-                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                            forwarded.outputs += hold_newest_stream_emission(&handoff, &mut pending, (emission, None, bindings)).await?;
                         }
                         ProviderStreamEmission::Turn(emission) => {
                             if resolving_interrupted_result {
@@ -5592,18 +5612,7 @@ async fn drive_turn_with_retries_inner(
                                         .to_string(),
                                 );
                             }
-                            pending.push((emission, None, Vec::new()));
-                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
-                        }
-                        ProviderStreamEmission::Terminal(emission) => {
-                            if resolving_interrupted_result {
-                                return Err(
-                                    "interrupted exact-result recovery emitted a non-atomic provider artifact before its closure"
-                                        .to_string(),
-                                );
-                            }
-                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
-                            pending.push((emission, None, Vec::new()));
+                            forwarded.outputs += hold_newest_stream_emission(&handoff, &mut pending, (emission, None, Vec::new())).await?;
                         }
                         ProviderStreamEmission::TerminalGroup { stream, terminal } => {
                             if resolving_interrupted_result {
@@ -5776,17 +5785,14 @@ async fn drive_turn_with_retries_inner(
                     }
                     return Ok::<ForwardedProviderEmissions, String>(forwarded);
                 }
-                if pending.len() > 1 {
-                    let flushed = flush_stream_batch(&handoff, &mut pending, true).await?;
-                    forwarded.outputs += flushed;
-                }
-                if let Some(last) = pending.pop() {
-                    let outcome = hand_stream_emission(
-                        &handoff,
-                        last,
-                        terminal || interrupted_closure.is_some(),
-                    )
-                    .await?;
+                let (flushed, last) = close_stream_emissions(
+                    &handoff,
+                    &mut pending,
+                    terminal || interrupted_closure.is_some(),
+                )
+                .await?;
+                forwarded.outputs += flushed;
+                if let Some(outcome) = last {
                     if let Some(closure) = interrupted_closure {
                         match outcome {
                             ProviderHandoffOutcome::Admitted { seq, artifact } => {

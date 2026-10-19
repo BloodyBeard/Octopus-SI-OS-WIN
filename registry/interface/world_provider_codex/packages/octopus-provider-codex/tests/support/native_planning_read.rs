@@ -228,7 +228,7 @@ async fn native_planning_reads_the_acknowledged_tip_after_progress_without_repla
             }
         }).await.expect("checked planning boundary stalled");
         while let Ok(event) = outputs.try_recv() {
-            let (ProviderStreamEmission::Turn(emission) | ProviderStreamEmission::Terminal(emission)) = event else {
+            let ProviderStreamEmission::Turn(emission) = event else {
                 panic!("late side effect")
             };
             assert!(matches!(
