@@ -198,7 +198,8 @@ export function WorkspaceSetupGate({ accessProfile, children }: Props) {
     } catch (error) {
       if (sequence === refreshSequence.current) {
         console.error("Workspace setup projection could not be read", error);
-        setSnapshotError("Octopus could not verify the current workspace state.");
+        const message = error instanceof Error ? error.message : String(error);
+        setSnapshotError(message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "") || "Octopus could not verify the current workspace state.");
         setLoading(false);
       }
       throw error;
@@ -468,7 +469,7 @@ export function WorkspaceSetupGate({ accessProfile, children }: Props) {
     return (
       <GateState
         action={<OcButton onClick={() => void refresh(true).catch(() => {})}>Try again</OcButton>}
-        detail="The local workspace state is temporarily unavailable."
+        detail={snapshotError}
         title="Workspace could not be checked"
         tone="danger"
       />
