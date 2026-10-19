@@ -1,9 +1,12 @@
 import { createAnthropicAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/anthropic.ts";
 import { createAzureAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/azure.ts";
 import type { ProviderAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/base.ts";
+import { createClaudeCliAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/claude-cli/adapter.ts";
+import { runCodeBuddyMcpServer } from "../node_modules/@bitkyc08/opencodex/src/adapters/codebuddy/mcp-server.ts";
 import { createGoogleAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/google.ts";
 import { createOpenAIChatAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/openai-chat.ts";
 import { createResponsesPassthroughAdapter } from "../node_modules/@bitkyc08/opencodex/src/adapters/openai-responses.ts";
+import { createAdapterEventQueue } from "../node_modules/@bitkyc08/opencodex/src/adapters/run-turn-queue.ts";
 import {
   bridgeToResponsesSSE,
   buildResponseJSON,
@@ -28,7 +31,7 @@ import type {
   OcxProviderConfig,
 } from "../node_modules/@bitkyc08/opencodex/src/types.ts";
 
-type AdapterName = "anthropic" | "azure" | "google" | "openai-chat" | "openai-responses";
+type AdapterName = "anthropic" | "azure" | "claude-cli" | "google" | "openai-chat" | "openai-responses";
 
 type ProviderOptions = {
   annotate_empty_tool_outputs?: boolean;
@@ -78,6 +81,7 @@ type BridgeConfig = {
 const adapterNames = new Set<AdapterName>([
   "anthropic",
   "azure",
+  "claude-cli",
   "google",
   "openai-chat",
   "openai-responses",
@@ -335,6 +339,12 @@ function adapterFor(config: RuntimeProvider): ProviderAdapter {
   const provider = upstreamProvider(config);
   if (config.adapter === "anthropic") return createAnthropicAdapter(provider, config.cache_retention);
   if (config.adapter === "azure") return createAzureAdapter(provider);
+  if (config.adapter === "claude-cli") {
+    return createClaudeCliAdapter(provider, {
+      usageAdmission: async () => ({ state: "unknown", checkedAt: Date.now() }),
+      usageRefusal: () => undefined,
+    });
+  }
   if (config.adapter === "google") return createGoogleAdapter(provider);
   if (config.adapter === "openai-chat") return createOpenAIChatAdapter(provider);
   return createResponsesPassthroughAdapter(provider);
@@ -550,6 +560,9 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
   if (adapter.localTerminal?.(parsed)) {
     return deliver(parsed, responseModel, [{ type: "done", endTurn: true, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }], maps, budget, abort);
   }
+  if (adapter.runTurn !== undefined) {
+    return deliver(parsed, responseModel, turnEvents(adapter, parsed, budget, abort, config.limits.request_timeout_ms), maps, budget, abort);
+  }
   const timer = setTimeout(() => abort.abort("request timeout"), config.limits.request_timeout_ms);
   let upstream: Response;
   let built: Awaited<ReturnType<ProviderAdapter["buildRequest"]>> | undefined;
@@ -606,10 +619,32 @@ async function responsesRequest(request: Request, config: BridgeConfig, adapter:
   return deliver(parsed, responseModel, adapter.parseStream(bounded, budget, built.tierLog), maps, budget, abort);
 }
 
+function turnEvents(
+  adapter: ProviderAdapter,
+  parsed: OcxParsedRequest,
+  budget: TranslatorBudget,
+  abort: AbortController,
+  timeoutMs: number,
+): AsyncIterable<AdapterEvent> {
+  const queue = createAdapterEventQueue({ onBacklogExceeded: () => abort.abort("adapter event backlog exceeded") });
+  const timer = setTimeout(() => abort.abort("request timeout"), timeoutMs);
+  adapter.runTurn!(parsed, { headers: new Headers(), translatorBudget: budget, abortSignal: abort.signal }, (event) => {
+    queue.push(event);
+  })
+    .catch((error) => {
+      queue.push({ type: "error", message: error instanceof Error ? error.message : "provider turn failed", retryable: false });
+    })
+    .finally(() => {
+      clearTimeout(timer);
+      queue.close();
+    });
+  return queue.stream();
+}
+
 async function serve(config: BridgeConfig): Promise<void> {
   const adapter = adapterFor(config.provider);
-  if (adapter.runTurn !== undefined || adapter.fetchResponse !== undefined) {
-    throw new Error(`adapter ${config.provider.adapter} requires an undeclared execution or retry surface`);
+  if (adapter.fetchResponse !== undefined) {
+    throw new Error(`adapter ${config.provider.adapter} requires an undeclared retry surface`);
   }
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -639,6 +674,11 @@ async function serve(config: BridgeConfig): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   await new Promise(() => undefined);
+}
+
+if (process.argv[2] === "__codebuddy-mcp") {
+  await runCodeBuddyMcpServer(process.argv[3] ?? "");
+  await new Promise<never>(() => undefined);
 }
 
 try {

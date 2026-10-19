@@ -39,6 +39,7 @@ const BRIDGE_READY_MAX_BYTES: usize = 64 * 1024;
 pub(crate) enum OpenCodexAdapter {
     Anthropic,
     Azure,
+    ClaudeCli,
     Google,
     OpenaiChat,
     OpenaiResponses,
@@ -148,6 +149,8 @@ pub(crate) struct OpenCodexDescriptorConfig {
     #[serde(default)]
     pub model_env: Option<String>,
     #[serde(default)]
+    pub bridge_env_names: Vec<String>,
+    #[serde(default)]
     pub model_catalog: Option<ModelsResponse>,
     #[serde(default)]
     pub allow_private_network: bool,
@@ -256,6 +259,15 @@ pub(crate) fn descriptor_config(
     {
         return Err("opencodex model_env is not a valid environment variable name".to_string());
     }
+    let mut bridge_env = BTreeSet::new();
+    for name in &parsed.bridge_env_names {
+        if !valid_env_name(name) || !bridge_env.insert(name.as_str()) {
+            return Err(
+                "opencodex bridge_env_names must be unique valid environment variable names"
+                    .to_string(),
+            );
+        }
+    }
     validate_limits(&parsed.limits)?;
     if let Some(catalog) = &parsed.model_catalog {
         if catalog.models.is_empty() {
@@ -310,6 +322,14 @@ pub(crate) async fn connect_interface_driver(
     let base_url = resolve_base_url(transport, config.allow_private_network)?;
     validate_static_headers(transport)?;
     let api_key = resolve_api_key(ctx, descriptor, transport, config)?;
+    if let Some(name) = transport.auth_env_key.as_deref()
+        && config.bridge_env_names.iter().any(|candidate| candidate == name)
+    {
+        return Err(format!(
+            "OpenCodex interface '{}' cannot pass its credential env '{name}' to the bridge environment",
+            descriptor.id
+        ));
+    }
     let auth_header = transport.auth_header.clone();
     let auth_value_prefix = transport.auth_value_prefix.clone().unwrap_or_default();
     match (&api_key, &auth_header, &transport.auth_value_prefix) {
@@ -389,7 +409,13 @@ pub(crate) async fn connect_interface_driver(
             bridge_cwd.display()
         )
     })?;
-    let (bridge_child, port) = spawn_bridge(&bridge, &bridge_cwd, bridge_config).await?;
+    let (bridge_child, port) = spawn_bridge(
+        &bridge,
+        &bridge_cwd,
+        bridge_config,
+        &config.bridge_env_names,
+    )
+    .await?;
     let local_base_url = format!("http://127.0.0.1:{port}/v1");
     let codex_home = build_curated_opencodex_home(
         &provider_home,
@@ -815,6 +841,7 @@ async fn spawn_bridge(
     executable: &Path,
     cwd: &Path,
     mut config: BridgeConfig,
+    environment: &[String],
 ) -> Result<(Child, u16), String> {
     let mut payload = serde_json::to_vec(&config)
         .map_err(|error| format!("OpenCodex bridge config could not be encoded: {error}"))?;
@@ -829,7 +856,10 @@ async fn spawn_bridge(
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
-    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"] {
+    for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
+        .into_iter()
+        .chain(environment.iter().map(String::as_str))
+    {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }

@@ -23,6 +23,21 @@
       "key": { "env": "OCTOPUS_PROVIDER_ANTHROPIC_API_KEY", "label": "Anthropic API key" }
     },
     {
+      "interface": "world_provider_claude_cli",
+      "source_name": "claude_cli",
+      "registry_entry": "claude-cli",
+      "name": "Claude Code",
+      "developer": "Anthropic",
+      "description": "Claude models through the Claude Code CLI you are signed in to on this Mac.",
+      "icon": "claude-color.svg",
+      "cli": {
+        "commands": ["claude", "security"],
+        "env": ["HOME", "USER", "PATH", "LANG"],
+        "home_read": [".claude", ".claude.json", "Library/Keychains"],
+        "home_write": [".claude", ".claude.json"]
+      }
+    },
+    {
       "interface": "world_provider_gemini",
       "source_name": "gemini",
       "registry_entry": "google",

@@ -116,3 +116,25 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
             .contains("credential is missing")
     );
 }
+
+#[test]
+fn opencodex_claude_cli_keeps_its_sign_in_inside_the_cli() {
+    let descriptor: InterfaceDescriptor = serde_json::from_str(include_str!(
+        "../../../../../world_provider_claude_cli/interface.json"
+    ))
+    .unwrap();
+    let declared = descriptor_config(&descriptor).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&declared.adapter).unwrap(),
+        "claude-cli"
+    );
+    assert_eq!(declared.bridge_env_names, ["HOME", "USER", "PATH", "LANG"]);
+    let transport = descriptor
+        .interface_driver_config
+        .as_ref()
+        .unwrap()
+        .transport
+        .as_ref()
+        .unwrap();
+    assert!(transport.auth_env_key.is_none() && transport.auth_secret_ref.is_none());
+}

@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 type SpawnedBridge = {
   child: ReturnType<typeof Bun.spawn>;
@@ -61,9 +63,10 @@ async function readLine(stream: ReadableStream<Uint8Array>): Promise<string> {
   }
 }
 
-async function spawnBridge(value: unknown): Promise<SpawnedBridge> {
-  const binary = resolve(import.meta.dir, "../bin/octopus-opencodex-bridge");
-  const child = Bun.spawn([binary], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+const bridgeBinary = resolve(import.meta.dir, "../bin/octopus-opencodex-bridge");
+
+async function spawnBridge(value: unknown, env?: Record<string, string>): Promise<SpawnedBridge> {
+  const child = Bun.spawn([bridgeBinary], { stdin: "pipe", stdout: "pipe", stderr: "pipe", ...(env ? { env } : {}) });
   children.push(child);
   child.stdin.write(JSON.stringify(value));
   child.stdin.end();
@@ -264,6 +267,88 @@ for (const adapter of ["openai-responses", "azure"]) {
     expect(result.text).toContain("response.completed");
   });
 }
+
+test("claude-cli turns run through the signed-in CLI with a scoped env and the bridge's own capture MCP", async () => {
+  const home = mkdtempSync(join(tmpdir(), "octopus-claude-cli-"));
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "claude"), [
+    "#!/bin/sh",
+    'printf "%s\\n" "$@" > "$HOME/args"',
+    'env > "$HOME/env"',
+    'cat > "$HOME/stdin"',
+    'previous=""',
+    'for argument in "$@"; do if [ "$previous" = "--mcp-config" ]; then cp "$argument" "$HOME/mcp.json"; fi; previous="$argument"; done',
+    'catalog=$(sed -n \'s/.*"__codebuddy-mcp","\\([^"]*\\)".*/\\1/p\' "$HOME/mcp.json")',
+    'cp "$catalog" "$HOME/catalog.json"',
+    `printf '%s\\n' '{"type":"system","subtype":"init","mcp_servers":[{"name":"opencodex","status":"connected"}]}'`,
+    `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"claude cli says hi"}]}}'`,
+    `printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"claude cli says hi","usage":{"input_tokens":3,"output_tokens":4}}'`,
+  ].join("\n"), { mode: 0o755 });
+  const bridge = await spawnBridge(config("https://api.anthropic.com", {
+    id: "world_provider_claude_cli",
+    adapter: "claude-cli",
+    registry_entry: "claude-cli",
+    models: ["claude-sonnet-5"],
+    default_model: "claude-sonnet-5",
+    api_key: undefined,
+    auth_header: undefined,
+    auth_value_prefix: undefined,
+    headers: {},
+    allow_private_network: false,
+  }), {
+    HOME: home,
+    USER: "octopus-test",
+    PATH: `${bin}:/usr/bin:/bin`,
+    TMPDIR: home,
+    ANTHROPIC_API_KEY: "must-not-reach-the-cli",
+  });
+  const response = await fetch(`${bridge.origin}/v1/responses`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      stream: true,
+      input: [{ role: "user", content: [{ type: "input_text", text: "hello claude" }] }],
+      tools: [exactTool],
+    }),
+  });
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text).toContain("claude cli says hi");
+  expect(text).toContain("response.completed");
+  const args = readFileSync(join(home, "args"), "utf8").split("\n");
+  expect(args).toEqual(expect.arrayContaining(["-p", "--tools", "", "--strict-mcp-config", "--setting-sources", "--no-session-persistence", "--model", "claude-sonnet-5", "--mcp-config"]));
+  const env = readFileSync(join(home, "env"), "utf8");
+  expect(env).toContain(`HOME=${home}`);
+  expect(env).toContain("USER=octopus-test");
+  expect(env).not.toContain("ANTHROPIC_");
+  expect(readFileSync(join(home, "stdin"), "utf8")).toContain("hello claude");
+  const mcp = JSON.parse(readFileSync(join(home, "mcp.json"), "utf8"));
+  const server = Object.values(mcp.mcpServers)[0] as { command: string; args: string[] };
+  expect(server.command).toBe(bridgeBinary);
+  expect(server.args[0]).toBe("__codebuddy-mcp");
+  const capture = Bun.spawn([bridgeBinary, "__codebuddy-mcp", join(home, "catalog.json")], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  children.push(capture);
+  capture.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "octopus-test", version: "1" } } })}\n`);
+  capture.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+  capture.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+  const reader = capture.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let listed: { result: { tools: Array<{ name: string }> } } | undefined;
+  while (!listed) {
+    const next = await reader.read();
+    if (next.done) throw new Error("capture MCP exited before listing tools");
+    buffered += decoder.decode(next.value, { stream: true });
+    for (const line of buffered.split("\n").slice(0, -1)) {
+      const message = JSON.parse(line);
+      if (message.id === 2) listed = message;
+    }
+    buffered = buffered.slice(buffered.lastIndexOf("\n") + 1);
+  }
+  expect(listed.result.tools.map((tool) => tool.name).join(",")).toContain("exact_tool");
+});
 
 test("provider descriptors match providers.json and the pinned OpenCodex registry", () => {
   const result = Bun.spawnSync([process.execPath, "run", "scripts/sync-providers.ts", "--check"], { cwd: resolve(import.meta.dir, "..") });

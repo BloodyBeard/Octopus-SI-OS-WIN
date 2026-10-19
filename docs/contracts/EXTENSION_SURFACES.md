@@ -40,7 +40,7 @@ use the recipes below when extending what the runtime can do.
 
 | You want | You add | Runtime code |
 | --- | --- | --- |
-| A model provider OpenCodex can serve | One entry in the OpenCodex bridge's `providers.json`; `scripts/sync-providers.ts` writes its folder and local package from the Codex template and the pinned OpenCodex registry | None |
+| A model provider OpenCodex can serve | One entry in the OpenCodex bridge's `providers.json`; `scripts/sync-providers.ts` writes its folder and local package from the Codex template and the pinned OpenCodex registry; a provider served by the vendor's signed-in CLI declares `cli` (its commands, home paths and bridge environment) instead of a key | None |
 | A provider over another existing wire | One interface folder: `interface.json` + `life.json` importing the wire owner's driver, with its own transport config | None |
 | A provider over a new wire | Driver code inside the interface folder that owns that wire, then the folder above | None |
 | A channel, sensor, or service | One interface folder, with a process if it must listen | None |
