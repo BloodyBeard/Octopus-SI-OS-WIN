@@ -27,7 +27,7 @@ import { ChatComposer } from "../chat/ChatComposer";
 import type { ProjectedFileSource } from "../chat/ProjectedFilePicker";
 import { AirHandVoiceController } from "./AirHandVoiceController";
 import { HomeCallControls } from "./HomeCallControls";
-import { HomeTurnActivity, homeTurnActivity, homeTurnAwaitsFinalReply, homeTurnTerminalNotice } from "./HomeTurnActivity";
+import { HomeTurnActivity, homeTurnActivity, homeTurnAwaitsClientResult, homeTurnAwaitsFinalReply, homeTurnTerminalNotice } from "./HomeTurnActivity";
 import { projectHomeVoiceContext } from "./voiceCallArtifacts";
 import { isVoiceCallActive, voicePresentation } from "./voicePresentation";
 import { VoiceOrbScene } from "./VoiceOrbScene";
@@ -178,19 +178,29 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const latestHomePrompt = useMemo(() => [...homeInterfaceMessages]
     .reverse()
     .find((message) => message.role === "user" && message.direction === "in") ?? null, [homeInterfaceMessages]);
-  const latestHomeTerminal = useMemo(() => {
+  const latestHomeTurnAtMs = useMemo(() => {
     const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
     return [...homeInterfaceMessages]
+      .reverse()
+      .find((message) => message.eventKind === "turn_started" && message.createdAtMs >= latestPromptAtMs)
+      ?.createdAtMs ?? latestPromptAtMs;
+  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+  const latestHomeTerminal = useMemo(() => {
+    const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
+    const terminalSince = (sinceMs: number) => [...homeInterfaceMessages]
       .reverse()
       .find((message) => (
         message.direction === "out"
         && message.role === "assistant"
         && (message.eventKind === "message" || message.eventKind === "error")
         && message.terminal
-        && message.createdAtMs >= latestPromptAtMs
+        && message.createdAtMs >= sinceMs
         && Boolean(message.text.trim() || message.attachments?.length || message.error)
       )) ?? null;
-  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+    const currentTurn = terminalSince(latestHomeTurnAtMs);
+    if (currentTurn || latestHomeTurnAtMs === latestPromptAtMs) return currentTurn;
+    return homeTurnAwaitsFinalReply(homeTurnActivity(homeInterfaceMessages, latestPromptAtMs)) ? null : terminalSince(latestPromptAtMs);
+  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs, latestHomeTurnAtMs]);
   const latestHomeResponse = latestHomeTerminal
     && latestHomeTerminal.eventKind === "message"
     && !latestHomeTerminal.error
@@ -200,22 +210,15 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     && (latestHomeTerminal.eventKind === "error" || latestHomeTerminal.error)
     ? latestHomeTerminal
     : null;
-  const latestHomeStreamingResponse = useMemo(() => {
-    const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
-    const currentTurnAtMs = [...homeInterfaceMessages]
-      .reverse()
-      .find((message) => message.eventKind === "turn_started" && message.createdAtMs >= latestPromptAtMs)
-      ?.createdAtMs ?? latestPromptAtMs;
-    return [...homeInterfaceMessages]
-      .reverse()
-      .find((message) => (
-        message.direction === "out"
-        && message.role === "assistant"
-        && message.eventKind === "message_delta"
-        && message.createdAtMs >= currentTurnAtMs
-        && Boolean(message.text.trim())
-      )) ?? null;
-  }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
+  const latestHomeStreamingResponse = useMemo(() => [...homeInterfaceMessages]
+    .reverse()
+    .find((message) => (
+      message.direction === "out"
+      && message.role === "assistant"
+      && message.eventKind === "message_delta"
+      && message.createdAtMs >= latestHomeTurnAtMs
+      && Boolean(message.text.trim())
+    )) ?? null, [homeInterfaceMessages, latestHomeTurnAtMs]);
   const latestHomeActivity = useMemo(() => homeTurnActivity(
     homeInterfaceMessages, latestHomePrompt?.createdAtMs ?? 0,
   ), [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
@@ -778,7 +781,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
   const viewportRef = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(false);
   const text = response?.text.trim() ?? "";
-  const finalReplyPending = !response && homeTurnAwaitsFinalReply(activity);
+  const finalReplyPending = (!response && homeTurnAwaitsFinalReply(activity)) || homeTurnAwaitsClientResult(activity, toolPresentations);
   const activityNotice = finalReplyPending ? null : homeTurnTerminalNotice(activity);
   const working = (busy || finalReplyPending) && !submitting && !failure && !activityNotice;
   const streamingText = working ? streamingResponse?.text ?? "" : "";

@@ -539,8 +539,13 @@
       "inspect_client": "Inspected client",
       "list_widgets": "Listed widgets",
       "relaunch_client": "Relaunched client",
-      "set_widget": "Updated widget"
-    }
+      "set_widget": "Updated widgets"
+    },
+    "client_result_operations": [
+      "list_widgets",
+      "set_widget",
+      "inspect_client"
+    ]
   },
   "code_mode.cancel": {
     "kind": "tool",

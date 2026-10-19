@@ -39,6 +39,26 @@ export function homeTurnTerminalNotice(activities: ChatRenderMessage[]): string 
   return null;
 }
 
+const CLIENT_RESULT_WAIT_MS = 30_000;
+
+export function homeTurnAwaitsClientResult(activities: ChatRenderMessage[], toolPresentations: ChatToolPresentationIndex, nowMs = Date.now()): boolean {
+  let completedAtMs = 0;
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const message = activities[index];
+    if (message.eventKind === "turn_started") return false;
+    if (!completedAtMs && (message.eventKind === "turn_completed" || message.label === "turn.completed")) {
+      const status = homeEventText(homeEventRecord(homeEventRecord(message.eventData).turn).status).toLocaleLowerCase();
+      if (status !== "completed") return false;
+      completedAtMs = message.createdAtMs;
+      continue;
+    }
+    if (!completedAtMs || message.eventKind !== "dynamic_tool") continue;
+    if (homeEventText(homeEventRecord(message.eventData).status) !== "completed") continue;
+    if (dynamicToolPresentation(message, toolPresentations).awaitsClientResult) return nowMs - completedAtMs < CLIENT_RESULT_WAIT_MS;
+  }
+  return false;
+}
+
 export function homeTurnAwaitsFinalReply(activities: ChatRenderMessage[]): boolean {
   for (let index = activities.length - 1; index >= 0; index -= 1) {
     const message = activities[index];

@@ -8,6 +8,7 @@ type ClientToolPresentationDescriptor = ChatToolPresentationDescriptor & {
   targetKind: "file" | "artifact";
   resultTargetFields: string[];
   operationLabels: Record<string, string>;
+  clientResultOperations: string[];
 };
 
 export type NativeRunOperationPresentation = {
@@ -24,6 +25,7 @@ export type DynamicToolPresentation = {
   kind: ChatToolPresentationDescriptor["kind"];
   label: string;
   operationLabel: string;
+  awaitsClientResult: boolean;
   path: string;
   pathLabel: string;
   query: string;
@@ -32,7 +34,7 @@ export type DynamicToolPresentation = {
   operation: NativeRunOperationPresentation | null;
 };
 
-export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "settings" | "browserUse";
+export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "browserUse";
 
 export function dynamicToolPresentation(
   message: ChatRenderMessage | undefined,
@@ -68,6 +70,7 @@ export function dynamicToolPresentation(
     kind: descriptor.kind,
     label: descriptor.label,
     operationLabel: clientDescriptor?.operationLabels[calledOperation] ?? "",
+    awaitsClientResult: Boolean(calledOperation && clientDescriptor?.clientResultOperations.includes(calledOperation)),
     path,
     pathLabel: targetKind === "artifact" ? artifactTargetLabel(target) : presentationPathLabel(pathValue),
     query,
@@ -107,7 +110,7 @@ export function dynamicToolGlyph(presentation: DynamicToolPresentation): Dynamic
     if (presentation.kind === "list") return "folder";
     return "read";
   }
-  return presentation.surface === "integration" ? "plugins" : "settings";
+  return "plugins";
 }
 
 export function dynamicToolReadLabel(presentation: DynamicToolPresentation, active: boolean): string {
@@ -226,6 +229,7 @@ const genericPresentation: ClientToolPresentationDescriptor = {
   targetKind: "file",
   resultTargetFields: [],
   operationLabels: {},
+  clientResultOperations: [],
 };
 
 const clientToolPresentationCatalog = Object.freeze(Object.fromEntries(
@@ -260,6 +264,7 @@ function parseClientToolActivityPresentation(value: unknown): ClientToolPresenta
     resultTargetFields: stringArray(row.result_target_fields),
     operationLabels: Object.fromEntries(Object.entries(record(row.operation_labels))
       .map(([name, label]) => [name, text(label)]).filter(([, label]) => label)),
+    clientResultOperations: stringArray(row.client_result_operations),
   };
 }
 
