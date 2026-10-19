@@ -7600,10 +7600,8 @@ impl ProviderOutputHandoff {
         &self, state: &mut HandoffState, current: &RunRecord, chain: &[CheckedRunTransition],
     ) -> Result<(), String> {
         if self.result_input_template()?.is_some() {
-            let inputs = take_unpublished_context_inputs(state, self.source_movement_seq)?;
-            state.context_artifacts = current_context_artifacts(current, &self.config)?;
-            restore_consumed_context_inputs(state, inputs)?;
-            return Ok(());
+            let current = current_context_artifacts(current, &self.config)?;
+            return reattach_unpublished_context_inputs(state, self.source_movement_seq, current);
         }
         let mut next = state.clone();
         self.restore_replayed_context(&mut next, current, chain)?;
@@ -13883,21 +13881,53 @@ fn merge_failed_source_context(
     Ok(merged)
 }
 
-fn take_unpublished_context_inputs(
-    state: &mut HandoffState,
-    source_movement_seq: u64,
-) -> Result<Vec<SessionContextArtifact>, String> {
-    let covered = match state.session_snapshot_head.as_ref() {
+fn unpublished_context_start(state: &HandoffState) -> Result<usize, String> {
+    match state.session_snapshot_head.as_ref() {
         Some(head) => {
             if state.session_context.artifacts.get(head.covered_artifact_count)
                 .map(|entry| &entry.source_artifact) != Some(&head.artifact)
             {
                 return Err("provider input recovery lost its pinned snapshot carrier".into());
             }
-            head.covered_artifact_count + 1
+            Ok(head.covered_artifact_count + 1)
         }
-        None => 0,
-    };
+        None => Ok(0),
+    }
+}
+
+fn reattach_unpublished_context_inputs(
+    state: &mut HandoffState,
+    source_movement_seq: u64,
+    context_artifacts: Vec<ArtifactId>,
+) -> Result<(), String> {
+    let covered = unpublished_context_start(state)?;
+    state.context_artifacts = context_artifacts;
+    let mut kept: Vec<SessionContextArtifact> = Vec::with_capacity(state.session_context.artifacts.len());
+    for (position, entry) in std::mem::take(&mut state.session_context.artifacts).into_iter().enumerate() {
+        if position >= covered && entry.source_movement_seq == Some(source_movement_seq) {
+            if let Some(existing) = kept.iter().find(|kept| kept.source_artifact == entry.source_artifact) {
+                if !session_context_entries_agree(existing, &entry) {
+                    return Err(format!(
+                        "provider recovered input '{}' differs from existing session context",
+                        entry.source_artifact.id.as_str()
+                    ));
+                }
+                state.consumed_input = false;
+                continue;
+            }
+            append_artifact(&mut state.context_artifacts, entry.source_artifact.id.clone());
+        }
+        kept.push(entry);
+    }
+    state.session_context.artifacts = kept;
+    Ok(())
+}
+
+fn take_unpublished_context_inputs(
+    state: &mut HandoffState,
+    source_movement_seq: u64,
+) -> Result<Vec<SessionContextArtifact>, String> {
+    let covered = unpublished_context_start(state)?;
     let mut inputs = Vec::new();
     let mut position = 0;
     state.session_context.artifacts.retain(|entry| {
@@ -14154,6 +14184,35 @@ mod tests {
     use octopus_interfaces::{GrantProjection, RuntimeInvocationMetadata};
     use octopus_ledger::{MovementDraft, MovementLog, Seq};
     use octopus_ledger_index::LedgerSqliteIndex;
+
+    #[test]
+    fn reconciled_result_input_keeps_its_place_before_its_outputs() {
+        let entry = |label: &str, seq: u64| SessionContextArtifact {
+            label: label.into(),
+            payload: serde_json::json!({"label": label}),
+            source_artifact: ArtifactRef { id: ArtifactId::new(format!("{label}:{seq}")), content: ContentHash::of_bytes(label.as_bytes()) },
+            source_movement_seq: Some(seq),
+        };
+        let mut state = HandoffState {
+            validated_withdrawal_output: None,
+            context_artifacts: Vec::new(),
+            static_context_artifacts: Vec::new(),
+            session_context: ResolvedSessionContext {
+                provider_interface: InterfaceId::new("world_provider_test"),
+                artifacts: vec![entry("operator.message", 3), entry("tool.result", 10), entry("turn.reasoning", 12), entry("turn.agent_message", 14)],
+            },
+            session_snapshot_head: None,
+            run_record_bytes: Vec::new(),
+            run_record_evidence_seq: None,
+            consumed_input: true,
+            consumed_context_free_independent_input: None,
+            consumed_verified_input: false,
+        };
+        reattach_unpublished_context_inputs(&mut state, 10, vec![ArtifactId::new("operator.message:3")]).unwrap();
+        assert_eq!(state.session_context.artifacts.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), vec![3, 10, 12, 14]);
+        assert_eq!(state.context_artifacts, vec![ArtifactId::new("operator.message:3"), ArtifactId::new("tool.result:10")]);
+        assert!(state.consumed_input);
+    }
 
     fn test_verifier_package_pin() -> octopus_ledger::VerifierPackagePin {
         octopus_ledger::VerifierPackagePin {
