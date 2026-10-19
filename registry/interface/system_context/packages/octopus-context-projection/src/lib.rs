@@ -247,6 +247,21 @@ fn fields(
     Ok(Value::Object(projected))
 }
 
+fn bounded_fields(payload: &Value, pointers: &[String], limit: usize) -> Result<(Value, Vec<Value>), String> {
+    let mut projected = serde_json::Map::new();
+    let mut trimmed = Vec::new();
+    for pointer in pointers {
+        let Some(value) = payload.pointer(pointer) else { continue };
+        let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?.len();
+        if bytes > limit {
+            trimmed.push(json!({"pointer":pointer,"bytes":bytes}));
+        } else {
+            projected.insert(pointer.clone(), value.clone());
+        }
+    }
+    Ok((Value::Object(projected), trimmed))
+}
+
 pub fn project_context(
     config: &ContextProjectionConfig,
     label: &str,
@@ -334,6 +349,7 @@ fn project_window(
     )?;
     let mut evidence = Vec::new();
     let mut omitted = Vec::new();
+    let mut fields_trimmed = false;
     let mut refs = BTreeSet::new();
     let mut last_seq = sequence;
     for entry in &entries[input_index..] {
@@ -356,32 +372,44 @@ fn project_window(
             .iter()
             .find(|rule| rule.labels.contains(&entry.label))
         {
-            if evidence.len() >= config.bounds.max_projected_entries {
-                return Err("selected source evidence exceeds its declared entry bound".into());
-            }
+            let (projected, trimmed) = bounded_fields(&entry.payload, &rule.pointers, config.bounds.max_field_bytes)?;
+            fields_trimmed |= !trimmed.is_empty();
             evidence.push(json!({"label":entry.label,"source_artifact":entry.source_artifact,
-                "source_movement_seq":seq,"fields":fields(&entry.payload,&rule.pointers,config.bounds.max_field_bytes,false)?,
+                "source_movement_seq":seq,"fields":projected,"trimmed_fields":trimmed,
                 "absent_requested_pointers":rule.pointers.iter().filter(|pointer|entry.payload.pointer(pointer).is_none()).collect::<Vec<_>>()}));
         } else {
             omitted.push(json!({"label":entry.label,"source_movement_seq":seq,"source_artifact":entry.source_artifact}));
         }
     }
-    let mut output = json!({
-        "schema_version":1,"label":OUTPUT_LABEL,
-        "source":{"run":config.source_run,"ee":config.source_ee,"worker_interface":config.source_worker_interface,
-            "provider_interface":config.source_provider_interface,"client_interface":config.source_client_interface,
-            "terminal_artifact":carrier,"projection_source_movement_seq":source_movement_seq,
-            "snapshot_parent":parent},
-        "selected_input":{"label":input.label,"source_artifact":input.source_artifact,"source_movement_seq":sequence,"fields":input_fields},
-        "terminal_fields":fields(&payload,&config.terminal_pointers,config.bounds.max_field_bytes,true)?,
-        "evidence":evidence,"collection_source":config.collection_source,"publication_tool":config.publication_tool,
-        "omission":{"before_selected_input":true,"unselected_fields":true,"unselected_labels":true,
-            "selected_fields_trimmed":false,"selected_evidence_trimmed":false,"unselected_entries":omitted,
-            "input_pointers":input_rule.pointers,"terminal_pointers":config.terminal_pointers,
-            "evidence_rules":config.evidence_rules},
-    });
-    render_task(config, &mut output)?;
-    Ok(output)
+    let terminal_fields = fields(&payload,&config.terminal_pointers,config.bounds.max_field_bytes,true)?;
+    let mut trimmed_entries = evidence.len().saturating_sub(config.bounds.max_projected_entries);
+    loop {
+        let mut output = json!({
+            "schema_version":1,"label":OUTPUT_LABEL,
+            "source":{"run":config.source_run,"ee":config.source_ee,"worker_interface":config.source_worker_interface,
+                "provider_interface":config.source_provider_interface,"client_interface":config.source_client_interface,
+                "terminal_artifact":carrier,"projection_source_movement_seq":source_movement_seq,
+                "snapshot_parent":parent},
+            "selected_input":{"label":input.label,"source_artifact":input.source_artifact,"source_movement_seq":sequence,"fields":input_fields},
+            "terminal_fields":terminal_fields,
+            "evidence":&evidence[trimmed_entries..],"collection_source":config.collection_source,"publication_tool":config.publication_tool,
+            "omission":{"before_selected_input":true,"unselected_fields":true,"unselected_labels":true,
+                "selected_fields_trimmed":fields_trimmed,"selected_evidence_trimmed":trimmed_entries > 0,
+                "trimmed_evidence_entries":trimmed_entries,"unselected_entries":omitted,
+                "input_pointers":input_rule.pointers,"terminal_pointers":config.terminal_pointers,
+                "evidence_rules":config.evidence_rules},
+        });
+        render_text(&config.task, &mut output)?;
+        let fits = serde_json::to_vec(&output).map_err(|e| e.to_string())?.len() as u64
+            <= config.bounds.max_output_bytes;
+        if fits {
+            return Ok(output);
+        }
+        if trimmed_entries == evidence.len() {
+            return Err("projected context exceeds its declared output bound".into());
+        }
+        trimmed_entries += 1;
+    }
 }
 
 fn render_text(task: &str, output: &mut Value) -> Result<(), String> {
