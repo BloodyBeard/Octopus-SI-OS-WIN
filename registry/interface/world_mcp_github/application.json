@@ -2,10 +2,10 @@
   "schema_version": 3,
   "id": "world_mcp_github",
   "name": "GitHub",
-  "description": "Work with GitHub repositories, issues, pull requests, and workflows.",
+  "description": "GitHub's MCP server: repositories, code, issues, pull requests and workflows. Needs a GitHub access token.",
   "category": "plugin",
   "developer": "Octopus",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "github",
   "logo": "application-logo.svg",
   "interfaces": [
@@ -30,15 +30,8 @@
     "fields": [
       {
         "interface": "world_mcp_github",
-        "pointer": "/interface_driver_config/transport/base_url_env",
-        "label": "Server URL",
-        "kind": "url",
-        "required": true
-      },
-      {
-        "interface": "world_mcp_github",
         "pointer": "/interface_driver_config/transport/auth_env_key",
-        "label": "Access token",
+        "label": "GitHub access token",
         "kind": "secret",
         "required": true
       }

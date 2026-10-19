@@ -10,50 +10,35 @@
       },
       "args": [
         {
-          "repository_file": "registry/interface/world_slack/octopus_python_boot.py"
-        },
-        {
           "repository_file": "registry/interface/world_slack/slack_life.py"
         }
       ],
-      "private_var_directories": [
-        "content-hash-python-runtime"
-      ],
       "required_files": [
-        "registry/interface/world_slack/octopus_python_boot.py",
         "registry/interface/world_slack/slack_life.py",
         "registry/interface/world_slack/slack_contract.py",
         "registry/interface/world_slack/slack_wire.py",
-        "registry/interface/world_slack/octopus_content_hash.py",
-        "registry/interface/world_slack/requirements-content-hash.lock"
+        "registry/interface/world_slack/octopus_content_hash.py"
       ],
       "inherit_env": [
         "OCTOPUS_SLACK_API_BASE",
-        "OCTOPUS_SLACK_BINDING_REGISTRY",
         "OCTOPUS_SLACK_PROXY",
         "OCTOPUS_SLACK_SOCKET_URL",
         "PATH",
-        "SLACK_ALLOWED_CHANNELS",
         "SLACK_ALLOWED_TEAMS",
-        "SLACK_ALLOWED_USERS",
         "SLACK_ALLOW_ALL_USERS",
-        "SLACK_APP_TOKEN",
-        "SLACK_BOT_TOKEN",
-        "SLACK_FREE_RESPONSE_CHANNELS",
-        "SLACK_HOME_CHANNEL"
+        "SLACK_FREE_RESPONSE_CHANNELS"
       ],
-      "required_env": [
-        "SLACK_BOT_TOKEN",
-        "SLACK_APP_TOKEN"
+      "inherit_env_from_interface": [
+        "/interface_driver_config/private_config/environment/bot_token_env",
+        "/interface_driver_config/private_config/environment/app_token_env",
+        "/interface_driver_config/private_config/environment/allowed_user_ids_env",
+        "/interface_driver_config/private_config/environment/allowed_channel_ids_env",
+        "/interface_driver_config/private_config/environment/home_channel_env"
       ],
+      "required_env": [],
       "authority": {
         "read_root_slots": [
-          "registry_interface_root",
-          "registry_ee_template_root",
-          "registry_tool_root",
-          "registry_worker_environment_kind_root",
-          "run_records_root",
-          "ee_instances_root"
+          "registry_interface_root"
         ],
         "write_root_slots": [],
         "executable_root_slots": [],
@@ -66,23 +51,9 @@
         "read_env_paths": [],
         "write_env_paths": [],
         "executable_env_paths": [],
-        "executable_env_subpaths": [
-          {
-            "env": "OCTOPUS_VAR_DIR",
-            "relative_path": "content-hash-python-runtime"
-          }
-        ],
         "allow_network": true,
         "allow_local_ipc": true
       },
-      "coordinate_root_slots": [
-        "registry_interface_root",
-        "registry_ee_template_root",
-        "registry_tool_root",
-        "registry_worker_environment_kind_root",
-        "run_records_root",
-        "ee_instances_root"
-      ],
       "read_handles": [
         "ledger",
         "blobs",

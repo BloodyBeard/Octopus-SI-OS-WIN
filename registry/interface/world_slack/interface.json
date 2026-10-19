@@ -6,5 +6,16 @@
   "source_names": [
     "slack"
   ],
-  "interface_driver_ref": "slack_life"
+  "interface_driver_ref": "slack_life",
+  "interface_driver_config": {
+    "private_config": {
+      "environment": {
+        "bot_token_env": "SLACK_BOT_TOKEN",
+        "app_token_env": "SLACK_APP_TOKEN",
+        "allowed_user_ids_env": "SLACK_ALLOWED_USERS",
+        "allowed_channel_ids_env": "SLACK_ALLOWED_CHANNELS",
+        "home_channel_env": "SLACK_HOME_CHANNEL"
+      }
+    }
+  }
 }

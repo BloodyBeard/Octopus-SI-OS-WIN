@@ -5,7 +5,7 @@
   },
   "display_information": {
     "name": "Octopus",
-    "description": "Artifact-native Octopus Slack World interface",
+    "description": "Talk to Octopus tasks from Slack.",
     "background_color": "#111111"
   },
   "features": {
@@ -19,12 +19,12 @@
       "always_online": true
     },
     "assistant_view": {
-      "assistant_description": "Work with Octopus through artifact-backed Slack threads and direct messages."
+      "assistant_description": "Send Octopus a message; the task connected to Slack answers in the thread."
     },
     "slash_commands": [
       {
         "command": "/octopus",
-        "description": "Send an artifact-backed command to Octopus",
+        "description": "Send a message to the Octopus task connected to Slack",
         "usage_hint": "help",
         "should_escape": false
       }

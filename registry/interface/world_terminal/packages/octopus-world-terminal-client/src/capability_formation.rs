@@ -1117,11 +1117,8 @@ mod tests {
         );
 
         for interface in [
-            "world_mcp_google_calendar",
-            "world_mcp_google_drive",
-            "world_mcp_microsoft_outlook_email",
-            "world_mcp_notion",
-            "world_mcp_slack",
+            "world_mcp_github",
+            "world_mcp_unity",
         ] {
             let id = InterfaceId::new(interface);
             let binding = &topology.operation_bindings[&id];

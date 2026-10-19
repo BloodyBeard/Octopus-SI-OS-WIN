@@ -697,25 +697,26 @@ fn resolved_transport(
 }
 
 fn resolve_endpoint(transport: &InterfaceTransportConfig) -> Result<Url, String> {
-    let configured = transport.base_url.trim();
-    let endpoint = if !configured.is_empty() {
-        configured.to_string()
-    } else {
-        let env_key = transport
-            .base_url_env
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                "image interface transport has neither base_url nor base_url_env".to_string()
-            })?;
-        std::env::var(env_key)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                format!("image interface endpoint env var '{env_key}' is unset or empty")
-            })?
+    let configured_override = transport
+        .base_url_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|env_key| std::env::var(env_key).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let endpoint = match configured_override {
+        Some(endpoint) => endpoint,
+        None => {
+            let configured = transport.base_url.trim();
+            if configured.is_empty() {
+                return Err(
+                    "image interface endpoint is not configured: set the API URL in the Image Generation setup"
+                        .to_string(),
+                );
+            }
+            configured.to_string()
+        }
     };
     parse_http_url(&endpoint, "image interface endpoint")
 }

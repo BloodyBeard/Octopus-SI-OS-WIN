@@ -2,13 +2,13 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_mcp_unity",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "product_kind": "application",
   "product_id": "world_mcp_unity",
   "release_status": "optional",
   "display": {
     "name": "Unity MCP",
-    "description": "Inspect, edit, test, and operate Unity projects through a running Unity MCP server.",
+    "description": "Unity's MCP server: inspect, edit, test and run Unity projects. Set the URL of the MCP server the Unity Editor runs.",
     "developer": "Octopus",
     "category": "plugin",
     "icon": "code"

@@ -2,10 +2,10 @@
   "schema_version": 3,
   "id": "world_mcp_unity",
   "name": "Unity MCP",
-  "description": "Inspect, edit, test, and operate Unity projects through a running Unity MCP server.",
+  "description": "Unity's MCP server: inspect, edit, test and run Unity projects. Set the URL of the MCP server the Unity Editor runs.",
   "category": "plugin",
   "developer": "Octopus",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "icon": "code",
   "logo": "application-logo.svg",
   "interfaces": [

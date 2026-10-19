@@ -1,5 +1,4 @@
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -66,66 +65,42 @@ def require_string_list(value, name, allow_empty=False):
     return result
 
 
-def authored_interface_binding(interface):
-    return {
-        "interface": require_string(interface, "interface binding identity"),
-        "config": {"artifact_policy": {"mode": "all"}},
-    }
-
-
-def require_interface_binding(value, name):
-    binding = require_keys(value, {"interface", "config"}, set(), name)
-    interface = require_string(binding["interface"], f"{name}.interface")
-    config = require_keys(binding["config"], {"artifact_policy"}, set(), f"{name}.config")
-    policy = require_object(config["artifact_policy"], f"{name}.config.artifact_policy")
-    mode = require_string(policy.get("mode"), f"{name}.config.artifact_policy.mode")
-    if mode == "all":
-        require_keys(policy, {"mode"}, set(), f"{name}.config.artifact_policy")
-    elif mode == "allow":
-        require_keys(policy, {"mode", "names", "namespaces"}, set(), f"{name}.config.artifact_policy")
-        names = require_string_list(policy["names"], f"{name}.config.artifact_policy.names", True)
-        namespaces = require_string_list(policy["namespaces"], f"{name}.config.artifact_policy.namespaces", True)
-        if not names and not namespaces:
-            raise ValueError(f"{name}.config.artifact_policy allow mode grants nothing")
-        if any(namespace.endswith(".") for namespace in namespaces):
-            raise ValueError(f"{name}.config.artifact_policy namespace must not end with '.'")
-    else:
-        raise ValueError(f"{name}.config.artifact_policy.mode must be all or allow")
-    return interface
-
-
-def require_nullable_string(value, name):
-    if value is None:
-        return None
-    return require_string(value, name)
-
-
 def _validate_id_list(values, name, pattern):
     for value in require_string_list(values, name, True):
         if not pattern.fullmatch(value):
             raise ValueError(f"{name} contains malformed Slack id {value!r}")
 
 
-def validate_config(config, interface_id):
+ENVIRONMENT_KEYS = ("bot_token_env", "app_token_env", "allowed_user_ids_env", "allowed_channel_ids_env", "home_channel_env")
+
+
+def validate_environment(value):
+    environment = require_keys(value, set(ENVIRONMENT_KEYS), set(), "Slack interface environment")
+    names = [require_string(environment[key], f"Slack interface environment.{key}") for key in ENVIRONMENT_KEYS]
+    if len(set(names)) != len(names):
+        raise ValueError("Slack interface environment names must be distinct")
+    return environment
+
+
+def validate_config(config):
     require_keys(
         config,
-        {"schema_version", "mode", "ledger", "transport", "authz", "gating", "intake", "routing", "media", "outbound", "private_run", "binding", "gateway_run_template"},
+        {"schema_version", "ledger", "transport", "authz", "gating", "intake", "media", "outbound", "environment"},
         set(),
         "Slack config",
     )
-    if config["schema_version"] != 1:
-        raise ValueError("Slack config schema_version must be 1")
-    if config["mode"] not in {"gateway", "binding"}:
-        raise ValueError("Slack config mode must be gateway or binding")
+    if config["schema_version"] != 2:
+        raise ValueError("Slack config schema_version must be 2")
+    validate_environment(config["environment"])
     ledger = require_keys(config["ledger"], {"max_row_bytes"}, set(), "Slack ledger")
     require_int(ledger["max_row_bytes"], "Slack ledger.max_row_bytes", 256, 16777216)
     transport = require_keys(
         config["transport"],
-        {"api_base_env", "api_base_default", "socket_url_env", "bot_token_env", "app_token_env", "proxy_env", "connect_timeout_ms", "request_timeout_ms", "max_response_bytes", "max_frame_bytes", "reconnect_backoff_ms", "reconnect_backoff_cap_ms", "rate_limit_max_wait_ms", "read_retry_limit"},
+        {"api_base_env", "api_base_default", "socket_url_env", "proxy_env", "connect_timeout_ms", "request_timeout_ms", "max_response_bytes", "max_frame_bytes", "reconnect_backoff_ms", "reconnect_backoff_cap_ms", "rate_limit_max_wait_ms", "read_retry_limit"},
         set(),
         "Slack transport",
     )
-    for key in ("api_base_env", "api_base_default", "socket_url_env", "bot_token_env", "app_token_env", "proxy_env"):
+    for key in ("api_base_env", "api_base_default", "socket_url_env", "proxy_env"):
         require_string(transport[key], f"Slack transport.{key}")
     for key, low, high in (
         ("connect_timeout_ms", 100, 120000),
@@ -142,13 +117,13 @@ def validate_config(config, interface_id):
         raise ValueError("Slack reconnect cap must not be below its initial backoff")
     authz = require_keys(
         config["authz"],
-        {"allow_all_users", "allow_all_users_env", "allowed_user_ids", "allowed_user_ids_env", "allowed_channel_ids", "allowed_channel_ids_env", "allowed_team_ids", "allowed_team_ids_env", "deny_unmatched"},
+        {"allow_all_users", "allow_all_users_env", "allowed_user_ids", "allowed_channel_ids", "allowed_team_ids", "allowed_team_ids_env", "deny_unmatched"},
         set(),
         "Slack authz",
     )
     require_bool(authz["allow_all_users"], "Slack authz.allow_all_users")
     require_bool(authz["deny_unmatched"], "Slack authz.deny_unmatched")
-    for key in ("allow_all_users_env", "allowed_user_ids_env", "allowed_channel_ids_env", "allowed_team_ids_env"):
+    for key in ("allow_all_users_env", "allowed_team_ids_env"):
         require_string(authz[key], f"Slack authz.{key}")
     _validate_id_list(authz["allowed_user_ids"], "Slack authz.allowed_user_ids", USER_RE)
     _validate_id_list(authz["allowed_channel_ids"], "Slack authz.allowed_channel_ids", CHANNEL_RE)
@@ -168,30 +143,13 @@ def validate_config(config, interface_id):
             re.compile(pattern, re.IGNORECASE)
         except re.error as error:
             raise ValueError(f"Slack gating.mention_patterns[{index}] is invalid: {error}") from error
-    intake = require_keys(config["intake"], {"event_types", "interactive_types", "max_pending_events", "pending_retry_ms", "dedup_retention", "thread_context_max_messages"}, set(), "Slack intake")
+    intake = require_keys(config["intake"], {"event_label", "event_types", "interactive_types", "max_pending_events", "dedup_retention", "thread_context_max_messages"}, set(), "Slack intake")
+    require_string(intake["event_label"], "Slack intake.event_label")
     require_string_list(intake["event_types"], "Slack intake.event_types")
     require_string_list(intake["interactive_types"], "Slack intake.interactive_types")
     require_int(intake["max_pending_events"], "Slack intake.max_pending_events", 1, 1000000)
-    require_int(intake["pending_retry_ms"], "Slack intake.pending_retry_ms", 10, 60000)
     require_int(intake["dedup_retention"], "Slack intake.dedup_retention", 1, 1000000)
     require_int(intake["thread_context_max_messages"], "Slack intake.thread_context_max_messages", 0, 1000)
-    routing = require_keys(config["routing"], {"binding_registry_path_env", "private_scope", "unbound_policy", "binding_authoring_mode", "ipc_listen", "ipc_port", "ipc_max_frame_bytes"}, set(), "Slack routing")
-    require_string(routing["binding_registry_path_env"], "Slack routing.binding_registry_path_env")
-    if routing["private_scope"] not in {"registered", "all"}:
-        raise ValueError("Slack routing.private_scope must be registered or all")
-    if routing["unbound_policy"] not in {"admit_gateway", "retain", "refuse"}:
-        raise ValueError("Slack routing.unbound_policy is invalid")
-    if routing["binding_authoring_mode"] not in {"automatic", "operator"}:
-        raise ValueError("Slack routing.binding_authoring_mode must be automatic or operator")
-    listen = require_string(routing["ipc_listen"], "Slack routing.ipc_listen")
-    try:
-        listen_address = ipaddress.ip_address(listen)
-    except ValueError as error:
-        raise ValueError("Slack routing.ipc_listen must be an IP address") from error
-    if listen_address.version != 4 or not listen_address.is_loopback:
-        raise ValueError("Slack routing.ipc_listen must be an IPv4 loopback address")
-    require_int(routing["ipc_port"], "Slack routing.ipc_port", 1, 65535)
-    require_int(routing["ipc_max_frame_bytes"], "Slack routing.ipc_max_frame_bytes", 1024, 134217728)
     media = require_keys(config["media"], {"download_enabled", "max_download_bytes", "max_upload_bytes", "max_files_per_event", "text_preview_bytes", "allowed_download_hosts", "allowed_upload_hosts"}, set(), "Slack media")
     require_bool(media["download_enabled"], "Slack media.download_enabled")
     require_int(media["max_download_bytes"], "Slack media.max_download_bytes", 1, 1073741824)
@@ -202,143 +160,19 @@ def validate_config(config, interface_id):
         for host in require_string_list(media[key], f"Slack media.{key}"):
             if host.lower() != host or "." not in host or "/" in host:
                 raise ValueError(f"Slack media.{key} contains invalid host {host!r}")
-    outbound = require_keys(config["outbound"], {"reply_labels", "stream_labels", "error_labels", "telemetry_labels", "max_message_chars", "max_manifest_bytes", "max_payload_bytes", "stream_edit_interval_ms", "max_blocks", "max_block_json_bytes", "home_channel_env", "reactions", "allowed_web_methods", "retry_safe_web_methods"}, set(), "Slack outbound")
-    for key in ("reply_labels", "stream_labels", "error_labels", "telemetry_labels", "allowed_web_methods", "retry_safe_web_methods"):
-        require_string_list(outbound[key], f"Slack outbound.{key}", key == "telemetry_labels")
+    outbound = require_keys(config["outbound"], {"operation_label", "delivery_label", "max_message_chars", "max_manifest_bytes", "max_payload_bytes", "max_blocks", "max_block_json_bytes", "allowed_web_methods", "retry_safe_web_methods"}, set(), "Slack outbound")
+    require_string(outbound["operation_label"], "Slack outbound.operation_label")
+    require_string(outbound["delivery_label"], "Slack outbound.delivery_label")
+    for key in ("allowed_web_methods", "retry_safe_web_methods"):
+        require_string_list(outbound[key], f"Slack outbound.{key}")
     require_int(outbound["max_message_chars"], "Slack outbound.max_message_chars", 1, 40000)
     require_int(outbound["max_manifest_bytes"], "Slack outbound.max_manifest_bytes", 1, 16777216)
     require_int(outbound["max_payload_bytes"], "Slack outbound.max_payload_bytes", 1, 1073741824)
-    require_int(outbound["stream_edit_interval_ms"], "Slack outbound.stream_edit_interval_ms", 0, 60000)
     require_int(outbound["max_blocks"], "Slack outbound.max_blocks", 0, 50)
     require_int(outbound["max_block_json_bytes"], "Slack outbound.max_block_json_bytes", 2, 1048576)
-    require_string(outbound["home_channel_env"], "Slack outbound.home_channel_env")
-    reactions = require_keys(outbound["reactions"], {"enabled", "processing", "success", "failure"}, set(), "Slack outbound.reactions")
-    require_bool(reactions["enabled"], "Slack outbound.reactions.enabled")
-    for key in ("processing", "success", "failure"):
-        require_string(reactions[key], f"Slack outbound.reactions.{key}")
     if not set(outbound["retry_safe_web_methods"]).issubset(outbound["allowed_web_methods"]):
         raise ValueError("Slack retry_safe_web_methods must be a subset of allowed_web_methods")
-    validate_private_run(config["private_run"])
-    if config["mode"] == "gateway":
-        if config["binding"] is not None:
-            raise ValueError("Slack gateway config must have null binding")
-        validate_gateway_template(config["gateway_run_template"], config)
-    else:
-        if config["gateway_run_template"] is not None:
-            raise ValueError("Slack binding config must have null gateway_run_template")
-        validate_binding(config["binding"], interface_id)
-
-
-def validate_private_run(value):
-    value = require_keys(
-        value,
-        {"ee_template_owner", "parent_ee", "model", "reasoning_effort", "role_artifacts", "interface_owners", "id_prefixes", "file_write_tool", "file_write_label", "file_write_result_label", "worker_environment_kind", "file_write_mark_outcome", "provider_context_output_labels", "result_timeout_ms", "authoring_retry_attempts"},
-        set(),
-        "Slack private_run",
-    )
-    for key in ("ee_template_owner", "parent_ee", "model", "reasoning_effort", "file_write_tool", "file_write_label", "file_write_result_label", "worker_environment_kind", "file_write_mark_outcome"):
-        require_string(value[key], f"Slack private_run.{key}")
-    require_string_list(value["role_artifacts"], "Slack private_run.role_artifacts")
-    require_string_list(value["provider_context_output_labels"], "Slack private_run.provider_context_output_labels")
-    require_int(value["result_timeout_ms"], "Slack private_run.result_timeout_ms", 100, 600000)
-    require_int(value["authoring_retry_attempts"], "Slack private_run.authoring_retry_attempts", 1, 16)
-    owners = require_keys(value["interface_owners"], {"slack", "provider", "interface_authoring", "worker", "worker_environment", "operator"}, set(), "Slack private_run.interface_owners")
-    prefixes = require_keys(value["id_prefixes"], {"run", "ee", "ee_template", "slack", "provider", "interface_authoring", "worker", "worker_environment", "tool"}, set(), "Slack private_run.id_prefixes")
-    for name, item in owners.items():
-        require_string(item, f"Slack private_run.interface_owners.{name}")
-    for name, item in prefixes.items():
-        item = require_string(item, f"Slack private_run.id_prefixes.{name}")
-        if not re.fullmatch(r"[a-z0-9_.]+", item):
-            raise ValueError(f"Slack private_run.id_prefixes.{name} is malformed")
-    return value
-
-
-def validate_gateway_template(template, config):
-    template = require_keys(template, {"id", "ee", "worker", "trace", "status", "interface_state", "checkpoints", "active_checkpoints"}, set(), "Slack gateway_run_template")
-    for key in ("id", "ee", "worker", "trace"):
-        require_string(template[key], f"Slack gateway_run_template.{key}")
-    if template["status"] != "running" or not isinstance(template["interface_state"], dict) or not isinstance(template["checkpoints"], list):
-        raise ValueError("Slack gateway_run_template is not runnable")
-    active = require_string_list(template["active_checkpoints"], "Slack gateway_run_template.active_checkpoints")
-    checkpoints = {}
-    for index, row in enumerate(template["checkpoints"]):
-        row = require_keys(
-            row,
-            {"id", "run", "trace", "epoch", "interface_binding", "outbound_interface_bindings", "artifact_bindings", "required_verified_artifacts"},
-            set(),
-            f"Slack gateway_run_template.checkpoints[{index}]",
-        )
-        checkpoint_id = require_string(row["id"], f"Slack gateway_run_template.checkpoints[{index}].id")
-        if checkpoint_id in checkpoints:
-            raise ValueError(f"Slack gateway_run_template repeats checkpoint {checkpoint_id!r}")
-        if row["run"] != template["id"]:
-            raise ValueError(f"Slack gateway_run_template checkpoint {checkpoint_id!r} belongs to another run")
-        require_string(row["trace"], f"Slack gateway_run_template checkpoint {checkpoint_id}.trace")
-        require_int(row["epoch"], f"Slack gateway_run_template checkpoint {checkpoint_id}.epoch", 0)
-        require_interface_binding(row["interface_binding"], f"Slack gateway_run_template checkpoint {checkpoint_id}.interface_binding")
-        outbound = row["outbound_interface_bindings"]
-        if not isinstance(outbound, list):
-            raise ValueError(f"Slack gateway_run_template checkpoint {checkpoint_id!r} outbound bindings must be an array")
-        for outbound_index, binding in enumerate(outbound):
-            require_interface_binding(binding, f"Slack gateway_run_template checkpoint {checkpoint_id}.outbound_interface_bindings[{outbound_index}]")
-        if not isinstance(row["artifact_bindings"], list) or not isinstance(row["required_verified_artifacts"], list):
-            raise ValueError(f"Slack gateway_run_template checkpoint {checkpoint_id!r} artifact fields must be arrays")
-        checkpoints[checkpoint_id] = row
-    if any(checkpoint_id not in checkpoints for checkpoint_id in active):
-        raise ValueError("Slack gateway_run_template active checkpoint is absent from checkpoints")
-    routes = []
-    for checkpoint_id in active:
-        row = checkpoints[checkpoint_id]
-        outbound_interfaces = [
-            require_interface_binding(binding, f"Slack gateway_run_template checkpoint {checkpoint_id}.outbound_interface_bindings[{index}]")
-            for index, binding in enumerate(row["outbound_interface_bindings"])
-        ]
-        if require_interface_binding(row["interface_binding"], f"Slack gateway_run_template checkpoint {checkpoint_id}.interface_binding") == "world_slack":
-            routes.extend(outbound_interfaces)
-    targets = list(dict.fromkeys(routes))
-    if config["routing"]["binding_authoring_mode"] == "operator":
-        targets = [target for target in targets if target == config["private_run"]["interface_owners"]["operator"]]
-    inbound = len(targets) == 1
-    outbound = inbound and any(
-        require_interface_binding(checkpoints[checkpoint_id]["interface_binding"], f"Slack gateway_run_template checkpoint {checkpoint_id}.interface_binding") == targets[0]
-        and "world_slack" in [
-            require_interface_binding(binding, f"Slack gateway_run_template checkpoint {checkpoint_id}.outbound_interface_bindings[{index}]")
-            for index, binding in enumerate(checkpoints[checkpoint_id]["outbound_interface_bindings"])
-        ]
-        for checkpoint_id in active
-    )
-    if not inbound or not outbound:
-        raise ValueError("Slack gateway_run_template does not route the configured binding authoring mode")
-    return template
-
-
-def validate_binding(binding, interface_id):
-    binding = require_keys(binding, {"interface", "team_id", "channel_id", "thread_ts", "run", "gateway_host", "gateway_port", "secret_file", "bot_token_file"}, set(), "Slack binding")
-    if require_string(binding["interface"], "Slack binding.interface") != interface_id:
-        raise ValueError("Slack binding.interface must match folder identity")
-    if not TEAM_RE.fullmatch(require_string(binding["team_id"], "Slack binding.team_id")):
-        raise ValueError("Slack binding.team_id is malformed")
-    if not CHANNEL_RE.fullmatch(require_string(binding["channel_id"], "Slack binding.channel_id")):
-        raise ValueError("Slack binding.channel_id is malformed")
-    thread = require_nullable_string(binding["thread_ts"], "Slack binding.thread_ts")
-    if thread is not None and not TS_RE.fullmatch(thread):
-        raise ValueError("Slack binding.thread_ts is malformed")
-    require_string(binding["run"], "Slack binding.run")
-    gateway_host = require_string(binding["gateway_host"], "Slack binding.gateway_host")
-    try:
-        gateway_address = ipaddress.ip_address(gateway_host)
-    except ValueError as error:
-        raise ValueError("Slack binding.gateway_host must be an IP address") from error
-    if gateway_address.version != 4 or not gateway_address.is_loopback:
-        raise ValueError("Slack binding.gateway_host must be an IPv4 loopback address")
-    require_int(binding["gateway_port"], "Slack binding.gateway_port", 1, 65535)
-    secret_file = require_string(binding["secret_file"], "Slack binding.secret_file")
-    if not os.path.isabs(secret_file):
-        raise ValueError("Slack binding.secret_file must be absolute")
-    bot_token_file = require_string(binding["bot_token_file"], "Slack binding.bot_token_file")
-    if not os.path.isabs(bot_token_file):
-        raise ValueError("Slack binding.bot_token_file must be absolute")
-    return binding
+    return config
 
 
 def env_flag(name):

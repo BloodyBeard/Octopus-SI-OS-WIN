@@ -2,13 +2,13 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.system_room",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "product_kind": "driver",
   "product_id": "system_room",
   "release_status": "optional",
   "display": {
     "name": "System Room",
-    "description": "Provides Filesystem.",
+    "description": "The file room Home and tasks write through, with artifact, skill and context tools.",
     "developer": "Octopus",
     "category": "worker_environment",
     "icon": "hard-drive"
@@ -66,31 +66,6 @@
     },
     {
       "registry_kind": "tool",
-      "owner": "file.write.discord_gateway",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "tool",
-      "owner": "file.write.matrix_gateway",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "tool",
-      "owner": "file.write.slack_gateway",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "tool",
-      "owner": "file.write.telegram_gateway",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "tool",
-      "owner": "file.write.whatsapp_gateway",
-      "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "tool",
       "owner": "skill.capture",
       "configuration": [{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
     },
@@ -124,35 +99,22 @@
       "owner": "system_room",
       "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]},{"path":"interface.json","fields":[{"pointer":"/interface_driver_config","schema":{"type":"object","required":["private_config"],"properties":{"private_config":{"type":"object","required":["context_artifact_bindings"],"properties":{"context_artifact_bindings":{"type":"array","items":{"type":"object","required":["id"],"properties":{"id":{"type":"string","minLength":1,"pattern":"^[^/\\\\\\u0000]+$"}},"additionalProperties":false},"uniqueItems":true}},"additionalProperties":false}},"additionalProperties":false}}]}]
     },
-    {
-      "registry_kind": "interface",
-      "owner": "system_room_discord_gateway",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "interface",
-      "owner": "system_room_matrix_gateway",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "interface",
-      "owner": "system_room_slack_gateway",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "interface",
-      "owner": "system_room_telegram_gateway",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
-    {
-      "registry_kind": "interface",
-      "owner": "system_room_whatsapp_gateway",
-      "configuration": [{"path":"life.json","fields":[{"pointer":"/processes/0/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]
-    },
     {"registry_kind":"tool","owner":"context.discover","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
     {"registry_kind":"tool","owner":"context.read","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
     {"registry_kind":"tool","owner":"context.prepare_publication","configuration":[{"path":"tool.json","fields":[{"pointer":"/process/authority/sandbox_mode","schema":{"type":"string","enum":["enforced","disabled"]}}]}]},
     {"registry_kind":"artifact","owner":"artifact-system-library","data_directories":["entries","usage"]},
     {"registry_kind":"artifact","owner":"artifact-context-collection-guide"}
+  ],
+  "retired_members": [
+    {"registry_kind":"interface","owner":"system_room_discord_gateway"},
+    {"registry_kind":"interface","owner":"system_room_matrix_gateway"},
+    {"registry_kind":"interface","owner":"system_room_slack_gateway"},
+    {"registry_kind":"interface","owner":"system_room_telegram_gateway"},
+    {"registry_kind":"interface","owner":"system_room_whatsapp_gateway"},
+    {"registry_kind":"tool","owner":"file.write.discord_gateway"},
+    {"registry_kind":"tool","owner":"file.write.matrix_gateway"},
+    {"registry_kind":"tool","owner":"file.write.slack_gateway"},
+    {"registry_kind":"tool","owner":"file.write.telegram_gateway"},
+    {"registry_kind":"tool","owner":"file.write.whatsapp_gateway"}
   ]
 }

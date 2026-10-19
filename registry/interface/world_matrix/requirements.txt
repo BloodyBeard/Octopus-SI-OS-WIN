@@ -1,4 +1,0 @@
-mautrix==0.21.0
-aiohttp-socks==0.11.0
-Markdown==3.10.2
-blake3==1.0.9

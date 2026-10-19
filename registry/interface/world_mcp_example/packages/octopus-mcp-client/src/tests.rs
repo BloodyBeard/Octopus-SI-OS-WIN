@@ -510,79 +510,13 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
         .canonicalize()
         .unwrap();
     let repository_root = registry_root.parent().unwrap();
-    let expected: [(&str, &str, Option<&str>, usize); 13] = [
+    let expected: [(&str, &str, Option<&str>, usize); 2] = [
         ("world_mcp_example", "mcp.example", None, 22),
-        (
-            "world_mcp_atlassian_rovo",
-            "atlassian_rovo",
-            Some("artifact-application-mcp-atlassian-rovo-context"),
-            21,
-        ),
-        (
-            "world_mcp_box",
-            "box",
-            Some("artifact-application-mcp-box-context"),
-            21,
-        ),
         (
             "world_mcp_github",
             "github",
             Some("artifact-application-mcp-github-context"),
             21,
-        ),
-        (
-            "world_mcp_gmail",
-            "gmail",
-            Some("artifact-application-mcp-gmail-context"),
-            21,
-        ),
-        (
-            "world_mcp_google_calendar",
-            "google_calendar",
-            Some("artifact-application-mcp-google-calendar-context"),
-            22,
-        ),
-        (
-            "world_mcp_google_drive",
-            "google_drive",
-            Some("artifact-application-mcp-google-drive-context"),
-            22,
-        ),
-        (
-            "world_mcp_microsoft_outlook_calendar",
-            "microsoft_outlook_calendar",
-            Some("artifact-application-mcp-microsoft-outlook-calendar-context"),
-            21,
-        ),
-        (
-            "world_mcp_microsoft_outlook_email",
-            "microsoft_outlook_email",
-            Some("artifact-application-mcp-microsoft-outlook-email-context"),
-            22,
-        ),
-        (
-            "world_mcp_microsoft_sharepoint",
-            "microsoft_sharepoint",
-            Some("artifact-application-mcp-microsoft-sharepoint-context"),
-            21,
-        ),
-        (
-            "world_mcp_microsoft_teams",
-            "microsoft_teams",
-            Some("artifact-application-mcp-microsoft-teams-context"),
-            21,
-        ),
-        (
-            "world_mcp_notion",
-            "notion",
-            Some("artifact-application-mcp-notion-context"),
-            22,
-        ),
-        (
-            "world_mcp_slack",
-            "slack",
-            Some("artifact-application-mcp-slack-context"),
-            22,
         ),
     ];
     let generic_operations = [
@@ -682,9 +616,6 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
             let context = artifact["text"].as_str().unwrap();
             for required in [
                 interface,
-                "Installation",
-                "availability",
-                "task connection",
                 "mcp.operation_catalog",
                 "mcp.tool_catalog",
                 "mcp.resource_catalog",
@@ -723,7 +654,7 @@ fn every_remote_mcp_operation_is_interface_local_and_strictly_loadable() {
         }
         total += catalog.operations.len();
     }
-    assert_eq!(total, 279);
+    assert_eq!(total, 43);
 }
 
 #[test]

@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_slack",
+  "version": "2.0.0",
+  "product_kind": "application",
+  "product_id": "world_slack",
+  "release_status": "optional",
+  "display": {
+    "name": "Slack",
+    "description": "Message the task you connect to Slack, and let it answer and post in Slack.",
+    "developer": "Octopus",
+    "category": "connector",
+    "icon": "message"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_slack",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-slack-context"
+    }
+  ]
+}

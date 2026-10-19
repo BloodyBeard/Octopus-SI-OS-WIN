@@ -863,51 +863,6 @@
     "target_arguments": [],
     "query_arguments": []
   },
-  "file.write.discord_gateway": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Discord gateway",
-    "target_arguments": [
-      "path"
-    ],
-    "query_arguments": []
-  },
-  "file.write.matrix_gateway": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Matrix gateway",
-    "target_arguments": [
-      "path"
-    ],
-    "query_arguments": []
-  },
-  "file.write.slack_gateway": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Slack gateway",
-    "target_arguments": [
-      "path"
-    ],
-    "query_arguments": []
-  },
-  "file.write.telegram_gateway": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Telegram gateway",
-    "target_arguments": [
-      "path"
-    ],
-    "query_arguments": []
-  },
-  "file.write.whatsapp_gateway": {
-    "kind": "tool",
-    "conversation_visible": false,
-    "label": "Whatsapp gateway",
-    "target_arguments": [
-      "path"
-    ],
-    "query_arguments": []
-  },
   "gui.app_click": {
     "kind": "tool",
     "conversation_visible": true,

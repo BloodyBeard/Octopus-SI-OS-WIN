@@ -10,7 +10,6 @@
       },
       "args": [],
       "inherit_env_from_interface": [
-        "/interface_driver_config/transport/base_url_env",
         "/interface_driver_config/transport/auth_env_key"
       ],
       "authority": {
@@ -39,7 +38,6 @@
       },
       "args": [],
       "inherit_env_from_interface": [
-        "/interface_driver_config/transport/base_url_env",
         "/interface_driver_config/transport/auth_env_key"
       ],
       "authority": {

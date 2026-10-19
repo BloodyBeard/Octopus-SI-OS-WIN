@@ -1,0 +1,27 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_image_generation",
+  "version": "1.1.0",
+  "product_kind": "application",
+  "product_id": "world_image_generation",
+  "release_status": "optional",
+  "display": {
+    "name": "Image Generation",
+    "description": "Create images from a prompt while working in a task. Uses the OpenAI Images API unless you set another URL.",
+    "developer": "Octopus",
+    "category": "plugin",
+    "icon": "image"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_image_generation",
+      "primary": true
+    },
+    {
+      "registry_kind": "artifact",
+      "owner": "artifact-application-image-generation-context"
+    }
+  ]
+}

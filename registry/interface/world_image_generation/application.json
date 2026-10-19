@@ -2,13 +2,21 @@
   "schema_version": 3,
   "id": "world_image_generation",
   "name": "Image Generation",
-  "description": "Create images while working in a task.",
+  "description": "Create images from a prompt while working in a task. Uses the OpenAI Images API unless you set another URL.",
   "category": "plugin",
   "developer": "Octopus",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "icon": "image",
   "logo": "application-logo.png",
-  "interfaces": ["world_image_generation"],
+  "interfaces": [
+    "world_image_generation"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-image-generation-context",
+      "label": "Image Generation contract"
+    }
+  ],
   "task_capabilities": {
     "tools": [
       {
@@ -22,17 +30,17 @@
     "fields": [
       {
         "interface": "world_image_generation",
-        "pointer": "/interface_driver_config/transport/base_url_env",
-        "label": "API URL",
-        "kind": "url",
-        "required": true
-      },
-      {
-        "interface": "world_image_generation",
         "pointer": "/interface_driver_config/transport/auth_env_key",
         "label": "API key",
         "kind": "secret",
         "required": true
+      },
+      {
+        "interface": "world_image_generation",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "API URL (optional)",
+        "kind": "url",
+        "required": false
       }
     ]
   }

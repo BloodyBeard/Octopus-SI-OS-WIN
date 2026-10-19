@@ -1,5 +1,3 @@
-import importlib
-import os
 import struct
 
 
@@ -181,40 +179,5 @@ class _Hasher:
         return output.root_hash()
 
 
-def octopus_content_hash_reference(value):
-    return _Hasher().update(value).digest().hex()
-
-
-_NATIVE_MODULE = None
-_NATIVE_RUNTIME = None
-
-
-def _native_blake3():
-    global _NATIVE_MODULE
-    global _NATIVE_RUNTIME
-    runtime = os.environ.get("OCTOPUS_CONTENT_HASH_RUNTIME")
-    if not isinstance(runtime, str) or not runtime:
-        raise RuntimeError("Octopus native content-hash runtime was not bootstrapped")
-    runtime = os.path.realpath(runtime)
-    if _NATIVE_MODULE is not None:
-        if runtime != _NATIVE_RUNTIME:
-            raise RuntimeError("Octopus native content-hash runtime changed after import")
-        return _NATIVE_MODULE
-    module = importlib.import_module("blake3")
-    module_path = os.path.realpath(module.__file__)
-    if os.path.commonpath((module_path, runtime)) != runtime:
-        raise RuntimeError("Octopus native content-hash module escaped its managed runtime")
-    if module.__version__ != "1.0.9":
-        raise RuntimeError("Octopus native content-hash module version drifted")
-    for value in (b"", b"abc"):
-        if module.blake3(value).hexdigest() != octopus_content_hash_reference(value):
-            raise RuntimeError("Octopus native content-hash module failed its locked verifier")
-    _NATIVE_RUNTIME = runtime
-    _NATIVE_MODULE = module
-    return module
-
-
 def octopus_content_hash(value):
-    if not isinstance(value, (bytes, bytearray, memoryview)):
-        raise TypeError("Octopus content hash input must be bytes")
-    return _native_blake3().blake3(value).hexdigest()
+    return _Hasher().update(value).digest().hex()

@@ -1,6 +1,0 @@
--r requirements.txt
-aiosqlite==0.22.1
-asyncpg==0.31.0
-base58==2.1.1
-pycryptodome==3.23.0
-python-olm==3.2.16

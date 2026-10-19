@@ -320,7 +320,7 @@ mod tests {
     fn registered_exact_clone_executes_the_single_file_write_operation() {
         let descriptor = load_tool_descriptor_from_dir(
             &repository_root().join("registry/tool"),
-            "file.write.slack_gateway",
+            "file.write.cron_authoring",
         )
         .unwrap()
         .unwrap();
@@ -355,7 +355,7 @@ mod tests {
             })),
         };
         let call = decode_invocation(&descriptor.interface, &descriptor, &envelope).unwrap();
-        assert_eq!(call.tool, "file.write.slack_gateway");
+        assert_eq!(call.tool, "file.write.cron_authoring");
         let room_kinds = descriptor
             .supported_worker_environment_kinds
             .iter()

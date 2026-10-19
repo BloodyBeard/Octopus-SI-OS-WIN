@@ -14,7 +14,6 @@
       "model": "gpt-image-1",
       "size": "1024x1024",
       "n": 1,
-      "response_format": "b64_json",
       "data_path": "data",
       "b64_field": "b64_json",
       "url_field": "url",
@@ -25,7 +24,7 @@
       "max_image_bytes": 33554432
     },
     "transport": {
-      "base_url": "",
+      "base_url": "https://api.openai.com/v1/images/generations",
       "base_url_env": "OCTOPUS_IMAGE_GENERATION_URL",
       "wire": "image_json_http",
       "auth_env_key": "OCTOPUS_IMAGE_GENERATION_API_KEY",

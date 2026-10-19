@@ -2,11 +2,67 @@
   "schema_version": 3,
   "id": "world_slack",
   "name": "Slack",
-  "description": "Use Slack conversations in the tasks you choose.",
+  "description": "Message the task you connect to Slack, and let it answer and post in Slack.",
   "category": "connector",
   "developer": "Octopus",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "icon": "message",
   "logo": "application-logo.png",
-  "interfaces": ["world_slack"]
+  "interfaces": [
+    "world_slack"
+  ],
+  "artifact_bindings": [
+    {
+      "artifact_id": "artifact-application-slack-context",
+      "label": "Slack connection contract"
+    }
+  ],
+  "task_capabilities": {
+    "tools": [
+      {
+        "tool": "artifact.send",
+        "interface": "system_room",
+        "worker_environment_kind": "system_room"
+      }
+    ]
+  },
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_slack",
+        "pointer": "/interface_driver_config/private_config/environment/bot_token_env",
+        "label": "Bot token (xoxb-\u2026)",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_slack",
+        "pointer": "/interface_driver_config/private_config/environment/app_token_env",
+        "label": "App-level token (xapp-\u2026)",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_slack",
+        "pointer": "/interface_driver_config/private_config/environment/allowed_user_ids_env",
+        "label": "Allowed member IDs",
+        "kind": "text",
+        "required": true
+      },
+      {
+        "interface": "world_slack",
+        "pointer": "/interface_driver_config/private_config/environment/allowed_channel_ids_env",
+        "label": "Allowed channel IDs",
+        "kind": "text",
+        "required": false
+      },
+      {
+        "interface": "world_slack",
+        "pointer": "/interface_driver_config/private_config/environment/home_channel_env",
+        "label": "Default channel ID",
+        "kind": "text",
+        "required": false
+      }
+    ]
+  }
 }
