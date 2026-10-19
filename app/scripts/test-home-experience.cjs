@@ -518,6 +518,10 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
       assert.equal(body.querySelector('.octopus-agent-activity-body').getAttribute('aria-hidden'), "false");
       assert.match(body.textContent, /Updated notes.txt/);
     }
+    const answered = { ...terminal, eventData: { turn: { status: "completed", items: [{ type: "agentMessage", phase: "final_answer", text: "Done." }] } } };
+    await view.render({ ...props, workspace: { ...workspace, busy: false, renderedMessages: [prompt, commentary, tool, answered] } });
+    assert.doesNotMatch(body.textContent, /Turn ended without a final reply|What would you like to do/);
+    assert.equal(body.closest('.home-response-stage').getAttribute('aria-busy'), "true");
     const failure = { ...terminal, id: "error", eventKind: "error", error: true, text: "Exact provider error" };
     await view.render({ ...props, workspace: { ...workspace, renderedMessages: [prompt, commentary, tool, failure] } });
     assert.match(body.querySelector('[role="alert"]').textContent, /Exact provider error/);

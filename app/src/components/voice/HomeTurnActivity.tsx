@@ -39,6 +39,22 @@ export function homeTurnTerminalNotice(activities: ChatRenderMessage[]): string 
   return null;
 }
 
+export function homeTurnAwaitsFinalReply(activities: ChatRenderMessage[]): boolean {
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const message = activities[index];
+    if (message.eventKind === "turn_started") return false;
+    if (message.eventKind !== "turn_completed" && message.label !== "turn.completed") continue;
+    const turn = homeEventRecord(homeEventRecord(message.eventData).turn);
+    if (homeEventText(turn.status).toLocaleLowerCase() !== "completed") return false;
+    return homeEventArray(turn.items).some((item) => {
+      const entry = homeEventRecord(item);
+      const phase = homeEventText(entry.phase);
+      return entry.type === "agentMessage" && (!phase || phase === "final_answer");
+    });
+  }
+  return false;
+}
+
 export function HomeTurnActivity({ activities, startedAtMs, toolPresentations, turnInProgress, terminalNotice }: {
   activities: ChatRenderMessage[];
   startedAtMs: number;
