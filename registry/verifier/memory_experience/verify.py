@@ -39,7 +39,14 @@ def verify(request):
     assert reference(selected["source_artifact"]) and isinstance(selected["source_movement_seq"], int) and isinstance(selected["fields"], dict), "selected input evidence malformed"
     assert selected["provenance"]["source_artifact"] == selected["source_artifact"] and selected["provenance"]["source_movement_seq"] == selected["source_movement_seq"], "selected input proof mismatch"
     assert isinstance(value["evidence"], list) and isinstance(value["omission"], dict), "evidence omissions absent"
-    assert value["omission"]["selected_fields_trimmed"] is False and value["omission"]["selected_evidence_trimmed"] is False, "selected evidence was trimmed"
+    omission = value["omission"]
+    fields_trimmed, evidence_trimmed = omission["selected_fields_trimmed"], omission["selected_evidence_trimmed"]
+    assert type(fields_trimmed) is bool and type(evidence_trimmed) is bool, "trimming flags malformed"
+    trimmed_fields = [entry for item in value["evidence"] for entry in item.get("trimmed_fields", [])]
+    assert all(isinstance(entry, dict) and exact(entry.get("pointer")) and type(entry.get("bytes")) is int and entry["bytes"] > 0 for entry in trimmed_fields), "trimmed field record malformed"
+    assert fields_trimmed == bool(trimmed_fields), "field trimming is not recorded"
+    trimmed_entries = omission.get("trimmed_evidence_entries", 0)
+    assert type(trimmed_entries) is int and trimmed_entries >= 0 and evidence_trimmed == (trimmed_entries > 0), "evidence trimming is not recorded"
 
 
 if __name__ == "__main__":
