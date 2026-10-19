@@ -126,7 +126,7 @@ async function project(rows, writable) {
     operatorChatRequestKey: () => '', operatorChatIncrementalEventKey: () => '', operatorTurnControlOutcome: () => null,
     operatorTurnControlEndsTurn: () => false,
   });
-  for (const name of ['operatorChatAssistantItemCompleted', 'appendOperatorChatAssistantMessage', 'buildSingleOperatorChatMessages', 'operatorReadOnlyRunMessages']) {
+  for (const name of ['operatorChatStreamPositionCovered', 'operatorChatAssistantItemCompleted', 'appendOperatorChatAssistantMessage', 'buildSingleOperatorChatMessages', 'operatorReadOnlyRunMessages']) {
     assert(declarations.has(name)); vm.runInContext(declarations.get(name), context);
   }
   const entry = { runId: 'run', chatInterfaceId: 'chat', writable, inbound: [], outbound: rows, activity: rows };
@@ -178,5 +178,14 @@ test('completed partial answers retain their text without completing the turn', 
     assert.equal(messages[0].terminal, false);
     assert.equal(messages[0].event_data.phase, 'partial_answer');
     assert.equal(messages.at(-1).terminal, true);
+  }
+});
+
+test('a sealed stream folds each delta position once even when it is delivered twice', async () => {
+  const delta = (seq, text, stream_seq) => ({ ...row(seq, 'message_delta', text, 'answer', 'final_answer'),
+    payload: { ...row(seq, 'message_delta', text, 'answer', 'final_answer').payload, _stream: { stream_id: 'sealed', stream_seq } } });
+  for (const writable of [true, false]) {
+    const messages = await project([delta(1, 'Hel', 3), delta(2, 'lo', 4), delta(3, 'Hel', 3), delta(4, 'lo', 4), delta(5, '!', 6)], writable);
+    assert.deepEqual(messages.map(message => message.text), ['Hello!']);
   }
 });

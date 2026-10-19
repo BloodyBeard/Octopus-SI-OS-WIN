@@ -414,11 +414,19 @@ export function mergeRenderedMessages(
   return coalesceRenderedStreams([...ordered, ...orphaned]);
 }
 
+function streamPosition(message: ChatRenderMessage): { streamId: string; seq: number } | null {
+  const stream = eventRecord(message.eventData?._stream);
+  const streamId = eventString(stream.stream_id);
+  const seq = eventNumber(stream.stream_seq);
+  return streamId && seq > 0 ? { streamId, seq } : null;
+}
+
 function coalesceRenderedStreams(messages: ChatRenderMessage[]): ChatRenderMessage[] {
   const result: ChatRenderMessage[] = [];
   const positions = new Map<string, number>();
   const reasoningSections = new Map<string, number>();
   const textPartsByPosition = new Map<number, string[]>();
+  const coveredStreamByPosition = new Map<number, { streamId: string; seq: number }>();
   for (const message of messages) {
     const completedAssistantItem = assistantItemCompleted(message);
     const family = completedAssistantItem ? "assistant_message" : streamFamily(message.eventKind);
@@ -440,10 +448,12 @@ function coalesceRenderedStreams(messages: ChatRenderMessage[]): ChatRenderMessa
       continue;
     }
     const position = positions.get(key);
+    const at = streamPosition(message);
     if (position === undefined) {
       const nextPosition = result.length;
       positions.set(key, nextPosition);
       textPartsByPosition.set(nextPosition, [message.text]);
+      if (at) coveredStreamByPosition.set(nextPosition, at);
       result.push({ ...message, id: `stream:${key}` });
       continue;
     }
@@ -454,6 +464,9 @@ function coalesceRenderedStreams(messages: ChatRenderMessage[]): ChatRenderMessa
       continue;
     }
     if (assistantItemCompleted(previous)) continue;
+    const covered = coveredStreamByPosition.get(position);
+    if (at && covered?.streamId === at.streamId && at.seq <= covered.seq) continue;
+    if (at) coveredStreamByPosition.set(position, at);
     textPartsByPosition.get(position)?.push(message.text);
     const previousEvent = previous.eventData ?? {};
     const nextEvent = message.eventData ?? {};

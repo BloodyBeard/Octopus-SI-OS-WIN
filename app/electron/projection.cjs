@@ -4511,6 +4511,15 @@ function createProjectionStore(options) {
       && (message.terminal === true || stringValue(data.lifecycle ?? data._event?.lifecycle) === "completed");
   }
 
+  function operatorChatStreamPositionCovered(folded, next) {
+    const covered = objectOrEmpty(objectOrEmpty(folded)._stream);
+    const position = objectOrEmpty(objectOrEmpty(next)._stream);
+    return Boolean(position.stream_id)
+      && position.stream_id === covered.stream_id
+      && Number.isSafeInteger(position.stream_seq)
+      && position.stream_seq <= covered.stream_seq;
+  }
+
   function appendOperatorChatAssistantMessage(messages, items, message) {
     const data = objectOrEmpty(message.event_data), event = objectOrEmpty(data._event);
     const delta = ["message_delta", "commentary_delta"].includes(message.event_kind);
@@ -4527,6 +4536,7 @@ function createProjectionStore(options) {
       return;
     }
     if (delta && operatorChatAssistantItemCompleted(previous)) return;
+    if (delta && operatorChatStreamPositionCovered(previous.event_data, data)) return;
     const text = delta ? previous.text + message.text : message.terminal && !message.text ? previous.text : message.text;
     const eventData = delta ? {
       ...objectOrEmpty(previous.event_data), ...data,
@@ -7302,6 +7312,7 @@ function createProjectionStore(options) {
       const incrementalKey = operatorChatIncrementalEventKey(activityPayload, eventKind);
       if (incrementalKey) {
         const current = incrementalMessages.get(incrementalKey);
+        if (current && operatorChatStreamPositionCovered(current.event_data, eventData)) continue;
         if (current) {
           if (text) current.text += text;
           current.event_data = {
@@ -7508,6 +7519,7 @@ function createProjectionStore(options) {
       const incrementalKey = operatorChatIncrementalEventKey(projected.payload, projected.eventKind);
       if (incrementalKey) {
         const current = incrementalMessages.get(incrementalKey);
+        if (current && operatorChatStreamPositionCovered(current.event_data, eventData)) continue;
         if (current) {
           if (projectedText) current.text += projectedText;
           current.event_data = {

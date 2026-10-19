@@ -724,6 +724,23 @@ const coalescedProjection = chatActivityProjectionModule.mergeRenderedMessages([
 assert.equal(coalescedProjection.length, 1);
 assert.equal(coalescedProjection[0].text, "first second");
 assert.equal(coalescedProjection[0].eventData.lifecycle, "completed");
+const streamDelta = (seq, text) => ({ id: `${"c".repeat(64)}:${seq}`, runId: "run-a", interfaceId: "chat", role: "assistant",
+  createdAtMs: 100 + seq, eventKind: "message_delta", terminal: false, text,
+  eventData: { turn_id: "turn-a", item_id: "answer", phase: "final_answer", lifecycle: "streaming",
+    _activity_origin: { interface_id: "provider", interface_role: "provider" },
+    _stream: { stream_id: "c".repeat(64), stream_seq: seq } } });
+const liveDeltas = [streamDelta(3, "Hello"), streamDelta(4, " there,"), streamDelta(5, " friend.")];
+const sealedFold = { ...liveDeltas[0], text: "Hello there, friend.", eventData: liveDeltas[2].eventData };
+for (const [projected, pending] of [
+  [[sealedFold], liveDeltas],
+  [[sealedFold, ...liveDeltas.slice(1)], liveDeltas],
+  [[], [...liveDeltas, ...liveDeltas.slice(1)]],
+]) {
+  const rendered = chatActivityProjectionModule.mergeRenderedMessages(projected, pending, [], true);
+  assert.deepEqual(rendered.map((message) => message.text), ["Hello there, friend."]);
+}
+assert.equal(chatActivityProjectionModule.mergeRenderedMessages([sealedFold], [...liveDeltas, streamDelta(7, " Bye.")], [], true)[0].text,
+  "Hello there, friend. Bye.");
 const assistantDelta = { id: "delta", runId: "run-a", interfaceId: "chat", role: "assistant", createdAtMs: 1,
   eventKind: "message_delta", terminal: false, text: "Progress", eventData: { turn_id: "turn-a", item_id: "item-a", phase: null, lifecycle: "streaming" } };
 const assistantCompleted = { ...assistantDelta, id: "completed", createdAtMs: 3, eventKind: "commentary",
