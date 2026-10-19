@@ -1176,7 +1176,7 @@ fn prepare_macos(
             "(allow lsopen)\n(allow mach-lookup (global-name \"com.apple.CoreServices.coreservicesd\") (global-name \"com.apple.coreservices.launchservicesd\") (global-name \"com.apple.lsd.mapdb\") (global-name \"com.apple.lsd.modifydb\") (global-name \"com.apple.coreservices.quarantine-resolver\"))\n",
         );
     }
-    let profile = write_macos_profile(authority, profile_root, &policy)?;
+    let profile = write_macos_profile(profile_root, &policy)?;
     let mut sandbox_args = vec![
         OsString::from("-f"),
         profile.path.clone().into_os_string(),
@@ -1287,17 +1287,20 @@ fn macos_profile_string(value: &OsStr) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn write_macos_profile(authority: &ProcessAuthority, profile_root: &Path, policy: &str) -> Result<SandboxProfileFile, String> {
+fn write_macos_profile(profile_root: &Path, policy: &str) -> Result<SandboxProfileFile, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     let root = normalize_existing_directory(profile_root)?;
-    if authority.writable.iter().any(|path| root.starts_with(path))
-        || authority.writable_exact.iter().any(|path| root.starts_with(path) || path.parent() == Some(root.as_path()))
-    {
-        return Err(format!("sandbox profile root '{}' is writable by the process it constrains", root.display()));
-    }
+    let mut guard = macos_regex_atoms(root.as_os_str())?;
+    guard.extend(macos_regex_atoms(OsStr::new("/.sandbox-profile-"))?);
+    guard.push(MacosRegexAtom::AnyName);
+    guard.extend(macos_regex_atoms(OsStr::new(".sb"))?);
+    let mut guard_regex = String::from("^");
+    guard.into_iter().for_each(|atom| atom.push_to(&mut guard_regex));
+    guard_regex.push('$');
+    let policy = format!("{policy}(deny file-write* (regex {}))\n", macos_profile_string(OsStr::new(&guard_regex))?);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| format!("sandbox profile clock is before the Unix epoch: {error}"))?
@@ -2403,10 +2406,22 @@ mod macos_network_process_tests {
         assert!(!run(&denied));
         assert!(!denied.exists());
         assert_eq!(std::fs::read_dir(&profiles).expect("profile root").count(), 0);
-        assert!(authority
-            .prepare(executable.to_str().expect("executable path"), &[], &base, None, &unusual)
-            .unwrap_err()
-            .contains("writable by the process it constrains"));
+        let broad = ProcessAuthority::resolve(
+            std::iter::empty(), [unusual.clone()], std::iter::empty(), std::iter::empty(),
+            std::iter::empty(), [executable.clone()], false, false, false, false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        ).expect("broad authority");
+        let touch = |target: &Path| {
+            let prepared = broad
+                .prepare(executable.to_str().expect("executable path"), &[target.as_os_str().to_os_string()], &base, None, &unusual)
+                .expect("broad authority preparation");
+            std::process::Command::new(&prepared.program).args(&prepared.args).env_clear()
+                .envs(&prepared.environment).current_dir(&base).status().expect("sandboxed process").success()
+        };
+        assert!(touch(&unusual.join("ordinary")));
+        let pending = unusual.join(".sandbox-profile-1-2-3.sb");
+        assert!(!touch(&pending));
+        assert!(!pending.exists());
     }
 
     #[test]
