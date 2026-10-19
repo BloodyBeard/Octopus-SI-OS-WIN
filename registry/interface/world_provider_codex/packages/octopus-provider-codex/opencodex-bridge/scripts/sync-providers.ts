@@ -46,6 +46,7 @@ const EFFORT_DESCRIPTIONS: Record<Effort, string> = {
 };
 const ADAPTERS = new Set(["anthropic", "azure", "google", "openai-chat", "openai-responses"]);
 const CODEX_ONLY_PRIVATE_CONFIG = ["provider_operations", "web_search"];
+const CODEX_NATIVE_SEARCH_TOOLS = ["web.search", "web.extract"];
 const CODEX_ONLY_OVERRIDES = [/^model_context_window=/, /^model_auto_compact_token_limit=/];
 const LIFE_BIN = "interface://world_provider_codex/packages/octopus-provider-codex/life-bin/octopus-provider-opencodex-life";
 const BRIDGE_SUBPATH = "world_provider_codex/packages/octopus-provider-codex/opencodex-bridge/bin/octopus-opencodex-bridge";
@@ -193,6 +194,7 @@ function descriptor(spec: ProviderSpec, template: any, rows: ModelRow[], adapter
   const config = out.interface_driver_config;
   const privateConfig = config.private_config;
   for (const key of CODEX_ONLY_PRIVATE_CONFIG) delete privateConfig[key];
+  privateConfig.model_hidden_tools = privateConfig.model_hidden_tools.filter((tool: string) => !CODEX_NATIVE_SEARCH_TOOLS.includes(tool));
   const preferred = spec.model ? rows[0] : rows.find((row) => row.slug === spec.default_model) ?? rows[0];
   const description = (row: ModelRow) => `${row.display_name} through ${spec.name}.`;
   privateConfig.model = preferred.slug;

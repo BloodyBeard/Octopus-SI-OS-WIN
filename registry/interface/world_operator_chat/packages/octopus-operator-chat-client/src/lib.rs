@@ -7174,9 +7174,12 @@ mod tests {
             serde_json::json!("openai-chat"),
             "the private provider preserves the declared OpenCodex wire adapter"
         );
+        let source_provider: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(registry_root.join("interface/world_provider_ollama/interface.json")).unwrap(),
+        ).unwrap();
         assert_eq!(
             provider_value["interface_driver_config"]["private_config"]["model"],
-            serde_json::json!("qwen2.5-coder:7b"),
+            source_provider["interface_driver_config"]["private_config"]["model"],
             "the variant's own overrides ride into the private sibling"
         );
         assert_eq!(
@@ -7194,10 +7197,19 @@ mod tests {
         ).unwrap();
         let upload_resume = browser_source["interface_driver_config"]["private_config"]["browser_room"]["upload_approval"]["resume_tool"]
             .as_str().expect("selected browser declares its private approval continuation");
-        assert_eq!(
-            provider_value["interface_driver_config"]["private_config"]["model_hidden_tools"],
-            serde_json::json!([&plan.authoring_tool_id, &plan.capability_tools[upload_resume]]),
+        let hidden = provider_value["interface_driver_config"]["private_config"]["model_hidden_tools"]
+            .as_array()
+            .expect("the private provider declares hidden tools")
+            .iter()
+            .map(|tool| tool.as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            hidden.contains(&plan.authoring_tool_id) && hidden.contains(&plan.capability_tools[upload_resume]),
             "authoring and the exact declared approval continuation stay callable by their owners and hidden from the model"
+        );
+        assert!(
+            ["web.search", "web.extract"].iter().all(|tool| !hidden.iter().any(|entry| entry == tool || entry.starts_with(&format!("{tool}__")))),
+            "a provider without native web search keeps the Octopus web tools visible to its model"
         );
         assert_eq!(
             provider_value["interface_driver_config"]["private_config"].get("run_authoring"),

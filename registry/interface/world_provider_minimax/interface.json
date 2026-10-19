@@ -2495,8 +2495,6 @@
       },
       "model_hidden_tools": [
         "file.write",
-        "web.search",
-        "web.extract",
         "gui.app_resume",
         "browser.filechooser_resume",
         "code_mode.resume"
