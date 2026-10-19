@@ -39,12 +39,11 @@
   },
   "interface_driver_config": {
     "supported_reasoning_efforts": [
+      "none",
+      "minimal",
       "low",
       "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra"
+      "high"
     ],
     "private_config": {
       "instruction_artifacts": [],
@@ -2680,6 +2679,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -3072,7 +3078,13 @@
               "slug": "gemini-3.5-flash-lite",
               "display_name": "Gemini 3.5 Flash Lite",
               "description": "Gemini 3.5 Flash Lite through Google Gemini.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,

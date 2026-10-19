@@ -40,12 +40,12 @@
   },
   "interface_driver_config": {
     "supported_reasoning_efforts": [
+      "none",
       "low",
       "medium",
       "high",
       "xhigh",
-      "max",
-      "ultra"
+      "max"
     ],
     "private_config": {
       "instruction_artifacts": [],
@@ -2715,6 +2715,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2729,6 +2736,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2743,6 +2757,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         }
       ],
@@ -3123,7 +3144,13 @@
               "slug": "glm-5.1",
               "display_name": "GLM 5.1",
               "description": "GLM 5.1 through Z.AI GLM.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3149,7 +3176,13 @@
               "slug": "glm-5",
               "display_name": "GLM 5",
               "description": "GLM 5 through Z.AI GLM.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3175,7 +3208,13 @@
               "slug": "glm-4.6",
               "display_name": "GLM 4.6",
               "description": "GLM 4.6 through Z.AI GLM.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,

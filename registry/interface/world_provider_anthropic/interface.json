@@ -48,8 +48,7 @@
       "medium",
       "high",
       "xhigh",
-      "max",
-      "ultra"
+      "max"
     ],
     "private_config": {
       "instruction_artifacts": [],

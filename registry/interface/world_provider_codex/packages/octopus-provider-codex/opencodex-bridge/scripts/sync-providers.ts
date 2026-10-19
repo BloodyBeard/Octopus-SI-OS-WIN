@@ -121,13 +121,25 @@ function setupModel(spec: ProviderSpec): ModelRow[] {
   return [{ slug: spec.model!.slug, display_name: spec.model!.display_name, input_modalities: ["text"], efforts: [] }];
 }
 
+function selectableEfforts(row: ModelRow): Effort[] {
+  return row.efforts.length ? row.efforts : ["none"];
+}
+
+function defaultEffort(row: ModelRow): Effort {
+  return row.default_effort ?? "none";
+}
+
+function effortRows(row: ModelRow) {
+  return selectableEfforts(row).map((effort) => ({ effort, description: EFFORT_DESCRIPTIONS[effort] }));
+}
+
 function codexModelInfo(row: ModelRow, priority: number, description: string) {
   return {
     slug: row.slug,
     display_name: row.display_name,
     description,
-    ...(row.default_effort ? { default_reasoning_level: row.default_effort } : {}),
-    supported_reasoning_levels: row.efforts.map((effort) => ({ effort, description: EFFORT_DESCRIPTIONS[effort] })),
+    default_reasoning_level: defaultEffort(row),
+    supported_reasoning_levels: effortRows(row),
     shell_type: "shell_command",
     visibility: "list",
     supported_in_api: true,
@@ -157,10 +169,8 @@ function pickerModel(row: ModelRow, description: string) {
     output_modalities: ["text"],
     supports_tools: true,
     supports_reasoning: row.efforts.length > 0,
-    ...(row.default_effort ? { default_reasoning_effort: row.default_effort } : {}),
-    ...(row.efforts.length
-      ? { supported_reasoning_efforts: row.efforts.map((effort) => ({ effort, description: EFFORT_DESCRIPTIONS[effort] })) }
-      : {}),
+    default_reasoning_effort: defaultEffort(row),
+    supported_reasoning_efforts: effortRows(row),
     show_in_picker: true,
   };
 }
@@ -186,8 +196,8 @@ function descriptor(spec: ProviderSpec, template: any, rows: ModelRow[], adapter
   const preferred = spec.model ? rows[0] : rows.find((row) => row.slug === spec.default_model) ?? rows[0];
   const description = (row: ModelRow) => `${row.display_name} through ${spec.name}.`;
   privateConfig.model = preferred.slug;
-  if (preferred.default_effort) privateConfig.reasoning_effort = preferred.default_effort;
-  else delete privateConfig.reasoning_effort;
+  privateConfig.reasoning_effort = defaultEffort(preferred);
+  config.supported_reasoning_efforts = EFFORT_ORDER.filter((effort) => rows.some((row) => selectableEfforts(row).includes(effort)));
   privateConfig.model_catalog = rows.map((row) => pickerModel(row, description(row)));
   privateConfig.process_env_names = [];
   privateConfig.opencodex = {
@@ -287,7 +297,7 @@ function localPackage(spec: ProviderSpec, requiredPackage: string) {
         path: "interface.json",
         fields: [
           { pointer: "/interface_driver_config/private_config/model", schema: { type: "string", minLength: 1 } },
-          { pointer: "/interface_driver_config/private_config/reasoning_effort", schema: { type: "string", enum: EFFORT_ORDER.filter((effort) => effort !== "none") } },
+          { pointer: "/interface_driver_config/private_config/reasoning_effort", schema: { type: "string", enum: EFFORT_ORDER } },
         ],
       }],
     }],

@@ -37,12 +37,10 @@
   },
   "interface_driver_config": {
     "supported_reasoning_efforts": [
+      "none",
       "low",
-      "medium",
       "high",
-      "xhigh",
-      "max",
-      "ultra"
+      "max"
     ],
     "private_config": {
       "instruction_artifacts": [],
@@ -2545,6 +2543,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2559,6 +2564,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2636,6 +2648,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         }
       ],
@@ -2789,7 +2808,13 @@
               "slug": "deepseek-chat",
               "display_name": "Deepseek Chat",
               "description": "Deepseek Chat through DeepSeek.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -2815,7 +2840,13 @@
               "slug": "deepseek-reasoner",
               "display_name": "Deepseek Reasoner",
               "description": "Deepseek Reasoner through DeepSeek.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -2926,7 +2957,13 @@
               "slug": "deepseek-v4-flash-vision-exp",
               "display_name": "Deepseek V4 Flash Vision Exp",
               "description": "Deepseek V4 Flash Vision Exp through DeepSeek.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,

@@ -223,11 +223,40 @@ pub struct PrivateRunTopology {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "ProviderReasoningEffortEntry")]
 pub struct ProviderReasoningEffortPreset {
     pub effort: String,
-    #[serde(default)]
     pub description: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderReasoningEffortObject {
+    effort: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ProviderReasoningEffortEntry {
+    Effort(String),
+    Preset(ProviderReasoningEffortObject),
+}
+
+impl From<ProviderReasoningEffortEntry> for ProviderReasoningEffortPreset {
+    fn from(entry: ProviderReasoningEffortEntry) -> Self {
+        match entry {
+            ProviderReasoningEffortEntry::Effort(effort) => Self {
+                effort,
+                description: String::new(),
+            },
+            ProviderReasoningEffortEntry::Preset(preset) => Self {
+                effort: preset.effort,
+                description: preset.description,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -241,6 +270,22 @@ pub struct ProviderModelPreset {
     pub supported_reasoning_efforts: Vec<ProviderReasoningEffortPreset>,
     #[serde(default = "default_true")]
     pub show_in_picker: bool,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub input_modalities: Vec<String>,
+    #[serde(default)]
+    pub output_modalities: Vec<String>,
+    #[serde(default)]
+    pub supports_tools: Option<bool>,
+    #[serde(default)]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default)]
+    pub service_tiers: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub default_service_tier: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -6634,6 +6679,38 @@ mod tests {
             &formed,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn every_registry_provider_catalog_admits_its_default_model_and_effort() {
+        let registry = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../..")
+            .canonicalize()
+            .unwrap()
+            .join("registry/interface");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&registry).unwrap() {
+            let path = entry.unwrap().path().join("interface.json");
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let provider = octopus_descriptors::parse_strict::<InterfaceDescriptor>(&bytes).unwrap();
+            let Some(config) = provider.interface_driver_config.as_ref() else { continue };
+            if !config.private_config.contains_key("model_catalog") {
+                continue;
+            }
+            let formed = provider.interface_policy.variables["models"]
+                .default
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|model| model.as_str().unwrap().to_string())
+                .collect::<BTreeSet<_>>();
+            let model = config.private_config["model"].as_str().unwrap();
+            let effort = config.private_config["reasoning_effort"].as_str().unwrap();
+            validate_provider_model_selection(config, &provider.id, model, effort, &formed)
+                .unwrap_or_else(|error| panic!("{}: {error}", provider.id.as_str()));
+            checked += 1;
+        }
+        assert!(checked >= 30, "only {checked} provider catalogs were checked");
     }
 
     #[test]

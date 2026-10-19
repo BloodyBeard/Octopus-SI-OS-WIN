@@ -33,12 +33,7 @@
   },
   "interface_driver_config": {
     "supported_reasoning_efforts": [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "ultra"
+      "none"
     ],
     "private_config": {
       "instruction_artifacts": [],
@@ -2541,6 +2536,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         }
       ],
@@ -2552,6 +2554,7 @@
         "include_hidden": false
       },
       "model": "groq-model",
+      "reasoning_effort": "none",
       "reasoning_summary": "auto",
       "private_thread_cold_start": "resume_compatible",
       "model_result_projection": {
@@ -2694,7 +2697,13 @@
               "slug": "groq-model",
               "display_name": "Groq model",
               "description": "Groq model through Groq.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,

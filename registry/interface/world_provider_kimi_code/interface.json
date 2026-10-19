@@ -37,11 +37,8 @@
   "interface_driver_config": {
     "supported_reasoning_efforts": [
       "low",
-      "medium",
       "high",
-      "xhigh",
-      "max",
-      "ultra"
+      "max"
     ],
     "private_config": {
       "instruction_artifacts": [],

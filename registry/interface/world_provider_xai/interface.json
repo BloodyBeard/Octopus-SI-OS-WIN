@@ -41,12 +41,11 @@
   },
   "interface_driver_config": {
     "supported_reasoning_efforts": [
+      "none",
       "low",
       "medium",
       "high",
-      "xhigh",
-      "max",
-      "ultra"
+      "xhigh"
     ],
     "private_config": {
       "instruction_artifacts": [],
@@ -2652,6 +2651,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2703,6 +2709,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2719,6 +2732,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2734,6 +2754,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         },
         {
@@ -2748,6 +2775,13 @@
           ],
           "supports_tools": true,
           "supports_reasoning": false,
+          "default_reasoning_effort": "none",
+          "supported_reasoning_efforts": [
+            {
+              "effort": "none",
+              "description": "No reasoning"
+            }
+          ],
           "show_in_picker": true
         }
       ],
@@ -3038,7 +3072,13 @@
               "slug": "grok-4.3",
               "display_name": "Grok 4.3",
               "description": "Grok 4.3 through xAI Grok.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3114,7 +3154,13 @@
               "slug": "grok-4.20-0309-reasoning",
               "display_name": "Grok 4.20 0309 Reasoning",
               "description": "Grok 4.20 0309 Reasoning through xAI Grok.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3143,7 +3189,13 @@
               "slug": "grok-4.20-0309-non-reasoning",
               "display_name": "Grok 4.20 0309 Non Reasoning",
               "description": "Grok 4.20 0309 Non Reasoning through xAI Grok.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3172,7 +3224,13 @@
               "slug": "grok-build-0.1",
               "display_name": "Grok Build 0.1",
               "description": "Grok Build 0.1 through xAI Grok.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
@@ -3200,7 +3258,13 @@
               "slug": "grok-composer-2.5-fast",
               "display_name": "Grok Composer 2.5 Fast",
               "description": "Grok Composer 2.5 Fast through xAI Grok.",
-              "supported_reasoning_levels": [],
+              "default_reasoning_level": "none",
+              "supported_reasoning_levels": [
+                {
+                  "effort": "none",
+                  "description": "No reasoning"
+                }
+              ],
               "shell_type": "shell_command",
               "visibility": "list",
               "supported_in_api": true,
