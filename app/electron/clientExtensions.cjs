@@ -12,6 +12,8 @@ const MAX_MANIFESTS = 128;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_STATE_BYTES = 512 * 1024;
 const MAX_SOURCE_VALUE_BYTES = 8192;
+const MAX_CREDENTIAL_FILE_BYTES = 64 * 1024;
+const MAX_CREDENTIAL_SECRET_BYTES = 4096;
 const MAX_FILE_SOURCE_BYTES = 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 500;
 const MAX_DIRECTORY_DEPTH = 8;
@@ -42,6 +44,7 @@ function createClientExtensionStore(options) {
   const packagesRoot = path.join(root, "packages");
   const receiptsRoot = path.join(root, "lifecycle-receipts");
   const operationsRoot = path.join(root, "lifecycle-operations");
+  const credentialsRoot = path.join(root, "credentials");
   const statePath = path.join(root, "state.json");
   const contractRoot = path.join(root, "contract");
   const contract = {
@@ -62,7 +65,8 @@ function createClientExtensionStore(options) {
     await fsPromises.mkdir(packagesRoot, { recursive: true, mode: 0o700 });
     await fsPromises.mkdir(receiptsRoot, { recursive: true, mode: 0o700 });
     await fsPromises.mkdir(operationsRoot, { recursive: true, mode: 0o700 });
-    for (const candidate of [root, packagesRoot, receiptsRoot, operationsRoot]) {
+    await fsPromises.mkdir(credentialsRoot, { recursive: true, mode: 0o700 });
+    for (const candidate of [root, packagesRoot, receiptsRoot, operationsRoot, credentialsRoot]) {
       const stat = await fsPromises.lstat(candidate);
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
         throw new Error(`client extension path must be a real directory: ${candidate}`);
@@ -118,11 +122,13 @@ function createClientExtensionStore(options) {
     const stateResult = await readState();
     if (stateResult.error) errors.push(stateResult.error);
     const lifecycle = await readLifecycle(manifests, errors);
+    const credentials = await readCredentialStatus(errors);
     return {
       manifests,
       state: stateResult.state,
       stateStatus: stateResult.status,
       lifecycle,
+      credentials,
       errors,
     };
   }
@@ -310,7 +316,7 @@ function createClientExtensionStore(options) {
   }
 
   async function recoverInterruptedWrites() {
-    for (const directory of [root, receiptsRoot]) await recoverInterruptedWritesIn(directory);
+    for (const directory of [root, receiptsRoot, credentialsRoot]) await recoverInterruptedWritesIn(directory);
     const entries = await fsPromises.readdir(operationsRoot, { withFileTypes: true });
     for (const entry of entries) {
       if (!EXTENSION_ID.test(entry.name)) {
@@ -568,6 +574,10 @@ function createClientExtensionStore(options) {
   }
 
   async function readCurrentPackageRevision(id) {
+    return (await readCurrentPackage(id)).revision;
+  }
+
+  async function readCurrentPackage(id) {
     const packageRoot = path.join(packagesRoot, id);
     const packageStat = await fsPromises.lstat(packageRoot);
     if (!packageStat.isDirectory() || packageStat.isSymbolicLink()) throw new Error("Client extension package must be a real directory.");
@@ -582,11 +592,111 @@ function createClientExtensionStore(options) {
     } catch (error) {
       throw new Error(`Client extension manifest is not valid JSON: ${formatError(error)}`);
     }
-    return validateDownloadedManifest(
+    const revision = await validateDownloadedManifest(
       manifest,
       id,
       `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`,
     );
+    return { manifest, revision };
+  }
+
+  async function credentialSourceFor(idValue, sourceIdValue) {
+    const id = requiredExtensionId(idValue);
+    const sourceId = requiredExtensionId(sourceIdValue);
+    const manifest = builtinCatalog.byId.get(id)?.manifest ?? (await readCurrentPackage(id)).manifest;
+    const source = (manifest.sources ?? []).find((candidate) => candidate.id === sourceId);
+    if (!source || source.kind !== "credential") {
+      throw new Error(`Client extension '${id}' declares no credential source '${sourceId}'.`);
+    }
+    return { id, sourceId, source };
+  }
+
+  async function readCredentialFile(id) {
+    const file = path.join(credentialsRoot, `${id}.json`);
+    let bytes;
+    try {
+      bytes = await stableReadFile(file, MAX_CREDENTIAL_FILE_BYTES, `client extension '${id}' credentials`);
+    } catch (error) {
+      if (error?.code === "ENOENT") return {};
+      throw error;
+    }
+    return normalizeCredentialFile(JSON.parse(bytes.toString("utf8")), id);
+  }
+
+  async function readCredentialStatus(errors) {
+    let entries;
+    try {
+      entries = await fsPromises.readdir(credentialsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return {};
+      errors.push(formatError(error));
+      return {};
+    }
+    const status = {};
+    for (const entry of entries) {
+      const match = /^([a-z0-9][a-z0-9._-]{1,63})\.json$/.exec(entry.name);
+      if (!match) continue;
+      try {
+        const sources = await readCredentialFile(match[1]);
+        status[match[1]] = Object.fromEntries(Object.entries(sources).map(([sourceId, record]) => [
+          sourceId,
+          { origin: record.origin, updatedAt: record.updated_at },
+        ]));
+      } catch (error) {
+        errors.push(`credentials/${entry.name}: ${formatError(error)}`);
+      }
+    }
+    return status;
+  }
+
+  async function setCredential(request) {
+    return withExtensionStateLock(root, async () => {
+      await ensureRoot();
+      await recoverInterruptedWrites();
+      if (!request || typeof request !== "object" || Array.isArray(request)) {
+        throw new Error("Client extension credential update must be an object.");
+      }
+      requireExpectedGeneration(request.expectedGeneration);
+      const { id, sourceId, source } = await credentialSourceFor(request.id, request.sourceId);
+      const sources = await readCredentialFile(id);
+      if (request.secret === null) {
+        delete sources[sourceId];
+      } else {
+        sources[sourceId] = {
+          origin: source.origin,
+          secret: requiredCredentialSecret(request.secret),
+          updated_at: new Date().toISOString(),
+        };
+      }
+      const file = path.join(credentialsRoot, `${id}.json`);
+      if (Object.keys(sources).length === 0) {
+        await fsPromises.unlink(file).catch((error) => {
+          if (error?.code !== "ENOENT") throw error;
+        });
+        await syncDirectory(credentialsRoot);
+      } else {
+        await writeJsonAtomic(file, {
+          schema: "octopus.client_extension_credentials",
+          schema_version: 1,
+          extension_id: id,
+          sources,
+        });
+      }
+      changed();
+      return snapshotUnlocked();
+    });
+  }
+
+  async function credential(idValue, sourceIdValue) {
+    return withExtensionStateLock(root, async () => {
+      const { id, sourceId, source } = await credentialSourceFor(idValue, sourceIdValue);
+      const record = (await readCredentialFile(id))[sourceId];
+      if (!record) throw new Error(`${source.label} is not set up.`);
+      if (record.origin !== source.origin) {
+        throw new Error(`${source.label} was saved for ${record.origin}; save it again for ${source.origin}.`);
+      }
+      return { origin: source.origin, checkPath: source.check_path ?? "", secret: record.secret };
+    });
   }
 
   async function writeState(state) {
@@ -641,6 +751,8 @@ function createClientExtensionStore(options) {
     root,
     snapshot,
     mutate,
+    setCredential,
+    credential,
     applyLifecycle,
     withVerifiedLifecycleSnapshot,
     ensureRoot,
@@ -943,8 +1055,42 @@ function snapshotFingerprint(data) {
     state: data.state,
     stateStatus: data.stateStatus,
     lifecycle: data.lifecycle,
+    credentials: data.credentials,
     errors: data.errors,
   })).digest("hex");
+}
+
+function normalizeCredentialFile(value, id) {
+  if (
+    !value || typeof value !== "object" || Array.isArray(value)
+    || value.schema !== "octopus.client_extension_credentials"
+    || value.schema_version !== 1
+    || value.extension_id !== id
+    || !value.sources || typeof value.sources !== "object" || Array.isArray(value.sources)
+  ) {
+    throw new Error("credential file has an unsupported contract");
+  }
+  const sources = {};
+  for (const [sourceId, record] of Object.entries(value.sources)) {
+    requiredExtensionId(sourceId);
+    if (
+      !record || typeof record !== "object" || Array.isArray(record)
+      || typeof record.origin !== "string" || !/^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?$/.test(record.origin)
+      || typeof record.updated_at !== "string"
+    ) {
+      throw new Error(`credential ${sourceId} is invalid`);
+    }
+    sources[sourceId] = { origin: record.origin, secret: requiredCredentialSecret(record.secret), updated_at: record.updated_at };
+  }
+  return sources;
+}
+
+function requiredCredentialSecret(value) {
+  const secret = typeof value === "string" ? value.trim() : "";
+  if (!secret || Buffer.byteLength(secret, "utf8") > MAX_CREDENTIAL_SECRET_BYTES || /[\s\u0000-\u001f\u007f]/.test(secret)) {
+    throw new Error("Credential must be a single line without spaces.");
+  }
+  return secret;
 }
 
 function normalizeSources(value) {

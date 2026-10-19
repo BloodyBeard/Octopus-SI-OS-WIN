@@ -1,7 +1,7 @@
 import type { GlyphName } from "../components/IconGlyphs";
 import type { AdmittedClientSurfaceDocument, ClientSurfaceDocument, ClientSurfaceHostSource } from "../client-surfaces/types";
 
-export type ClientExtensionCategory = "widget" | "tab" | "repair";
+export type ClientExtensionCategory = "widget" | "tab" | "repair" | "input";
 
 export type ClientExtensionFilesystemSource = {
   id: string;
@@ -23,7 +23,28 @@ export type ClientExtensionDeviceSource = {
   device: "camera" | "microphone";
 };
 
-export type ClientExtensionSource = ClientExtensionFilesystemSource | ClientExtensionDeviceSource;
+export type ClientExtensionCredentialSource = {
+  id: string;
+  kind: "credential";
+  label: string;
+  description: string;
+  required: boolean;
+  origin: string;
+  check_path?: string;
+};
+
+export type ClientExtensionSource = ClientExtensionFilesystemSource | ClientExtensionDeviceSource | ClientExtensionCredentialSource;
+
+export type ClientExtensionCredentialStatus = {
+  origin: string;
+  updatedAt: string;
+};
+
+export type ClientExtensionInputProvider = {
+  credential_source: string;
+  endpoint: string;
+  model: string;
+};
 
 export type ClientExtensionIncidentTrigger = {
   incident_code: string;
@@ -33,6 +54,7 @@ export type ClientExtensionIncidentTrigger = {
 export type ClientExtensionContribution =
   | { kind: "builtin"; surface_id: string }
   | { kind: "builtin_action"; action_id: string; triggers: ClientExtensionIncidentTrigger[] }
+  | { kind: "builtin_input"; input_id: string; provider: ClientExtensionInputProvider }
   | { kind: "surface"; document: ClientSurfaceDocument };
 
 export type ClientExtensionManifest = {
@@ -107,6 +129,7 @@ export type ClientExtensionStoreSnapshot = {
   state: Record<string, ClientExtensionStateRecord>;
   stateStatus: "valid" | "invalid" | "missing";
   lifecycle: Record<string, ClientExtensionLifecycleEvidence>;
+  credentials: Record<string, Record<string, ClientExtensionCredentialStatus>>;
   actionStatuses: ClientExtensionActionStatus[];
   errors: string[];
 };
@@ -138,6 +161,7 @@ export type ClientExtensionRecord = AdmittedClientExtension & {
   configured: boolean;
   lifecycle: ClientExtensionLifecycleEvidence;
   sourceConfiguration: Record<string, ClientExtensionSourceConfiguration>;
+  credentials: Record<string, ClientExtensionCredentialStatus>;
 };
 
 export type ClientExtensionMutation = {
@@ -146,6 +170,19 @@ export type ClientExtensionMutation = {
   sources?: Record<string, ClientExtensionSourceConfiguration>;
   reviewed?: ClientExtensionRevision;
   dismissed?: ClientExtensionRevision;
+};
+
+export type ClientExtensionCredentialUpdate = {
+  id: string;
+  sourceId: string;
+  secret: string | null;
+  expectedGeneration: number;
+};
+
+export type ClientExtensionCredentialCheck = {
+  checked: boolean;
+  ok: boolean;
+  status: number;
 };
 
 export type ClientExtensionLifecycleRequest = {
@@ -224,6 +261,14 @@ export type ClientExtensionRegistryState = {
   install: (id: string, operationId?: string) => Promise<void>;
   dismiss: (id: string, operationId?: string) => Promise<void>;
   uninstall: (id: string, operationId?: string) => Promise<void>;
-  configure: (id: string, sources: Record<string, ClientExtensionSourceConfiguration>, install?: boolean, operationId?: string) => Promise<void>;
+  configure: (
+    id: string,
+    sources: Record<string, ClientExtensionSourceConfiguration>,
+    install?: boolean,
+    operationId?: string,
+    credentials?: Record<string, string>,
+  ) => Promise<void>;
+  removeCredential: (id: string, sourceId: string) => Promise<void>;
+  checkCredential: (id: string, sourceId: string) => Promise<ClientExtensionCredentialCheck>;
   revealRoot: () => Promise<void>;
 };

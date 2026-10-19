@@ -28,7 +28,7 @@
     "name": { "type": "string", "minLength": 1, "maxLength": 96 },
     "description": { "type": "string", "minLength": 1, "maxLength": 320 },
     "developer": { "type": "string", "minLength": 1, "maxLength": 96 },
-    "category": { "enum": ["widget", "tab", "repair"] },
+    "category": { "enum": ["widget", "tab", "repair", "input"] },
     "glyph": { "$ref": "https://octopus.local/schemas/client_surface_document.schema.json#/$defs/glyph" },
     "default_installed": { "type": "boolean" },
     "contribution": {
@@ -73,6 +73,29 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["kind", "input_id", "provider"],
+          "properties": {
+            "kind": { "const": "builtin_input" },
+            "input_id": { "$ref": "#/$defs/id" },
+            "provider": {
+              "type": "object",
+              "required": ["credential_source", "endpoint", "model"],
+              "properties": {
+                "credential_source": { "$ref": "#/$defs/id" },
+                "endpoint": {
+                  "type": "string",
+                  "pattern": "^https://[a-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._~/-]{0,255}$",
+                  "maxLength": 320
+                },
+                "model": { "type": "string", "pattern": "^[A-Za-z0-9._:/-]{1,128}$" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         }
       ]
     },
@@ -82,7 +105,8 @@
       "items": {
         "oneOf": [
           { "$ref": "#/$defs/filesystemSource" },
-          { "$ref": "#/$defs/deviceSource" }
+          { "$ref": "#/$defs/deviceSource" },
+          { "$ref": "#/$defs/credentialSource" }
         ]
       }
     }
@@ -140,6 +164,32 @@
             "required": { "type": "boolean" },
             "kind": { "const": "device" },
             "device": { "enum": ["camera", "microphone"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "credentialSource": {
+      "allOf": [
+        { "$ref": "#/$defs/sourceBase" },
+        {
+          "type": "object",
+          "required": ["kind", "origin"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "label": { "type": "string", "minLength": 1, "maxLength": 96 },
+            "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "required": { "type": "boolean" },
+            "kind": { "const": "credential" },
+            "origin": {
+              "type": "string",
+              "pattern": "^https://[a-z0-9.-]+(?::[0-9]{1,5})?$",
+              "maxLength": 256
+            },
+            "check_path": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9._~/-]{0,255}$"
+            }
           },
           "additionalProperties": false
         }

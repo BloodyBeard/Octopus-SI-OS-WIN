@@ -112,7 +112,7 @@ test("inspect_client is a declared client.mcp operation and describes the host f
   assert.throws(() => parseClientAction(inspect({ source: { method: "projection.runs.list", url: "x" } })), /inspect_client/);
   assert.ok(parseClientAction({ schema: "octopus.client_action", schema_version: 1, action: "relaunch_client", request_id: "relaunch-1" }));
   assert.throws(() => parseClientAction({ schema: "octopus.client_action", schema_version: 1, action: "relaunch_client", request_id: "relaunch-1", force: true }), /relaunch_client/);
-  const inventory = buildClientInventory({ snapshot: { generation: 0, root: "/home/client/extensions", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, actionStatuses: [], errors: [] }, surfaces: [], runtimeIssues: [] });
+  const inventory = buildClientInventory({ snapshot: { generation: 0, root: "/home/client/extensions", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, credentials: {}, actionStatuses: [], errors: [] }, surfaces: [], runtimeIssues: [] });
   assert.deepEqual(inventory.host.targets["voice.widget"].slot, documentSchema.$defs.voiceTarget.properties.slot.enum);
   assert.deepEqual(inventory.host.glyphs, documentSchema.$defs.glyph.enum);
   for (const node of ["list", "table", "metric", "progress", "button"]) assert.ok(inventory.host.render.native.nodes.includes(node));
@@ -150,7 +150,7 @@ test("a feed reader shows the newest emission and inspect previews it through th
     await assert.rejects(read({ ...source.params, order: "latest" }), /oldest or newest/);
     globalThis.window = { octopusTransport: {
       projectionRead: (request) => store.read(request),
-      clientExtensions: async () => ({ generation: 0, root: "", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, actionStatuses: [], errors: [] }),
+      clientExtensions: async () => ({ generation: 0, root: "", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, credentials: {}, actionStatuses: [], errors: [] }),
     } };
     const inventory = await inspectClient(inspect({ source: { method: source.method, params: source.params, path: "artifacts.0.payload" } }), []);
     assert.deepEqual(inventory.source_preview, { method: source.method, params: source.params, path: "artifacts.0.payload", ok: true, value: { mount: "/", free_gb: 182.4, used_percent: 61 }, truncated: false });

@@ -4219,6 +4219,23 @@ ipcMain.handle("octopus:client-extension-mutate", async (_event, token, request)
   return clientExtensionSnapshot();
 });
 
+ipcMain.handle("octopus:client-extension-credential", async (_event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  await getClientExtensionStore().setCredential(request);
+  return clientExtensionSnapshot();
+});
+
+ipcMain.handle("octopus:client-extension-credential-check", async (_event, token, request) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  const { origin, checkPath, secret } = await getClientExtensionStore().credential(request?.id, request?.sourceId);
+  if (!checkPath) return { checked: false, ok: false, status: 0 };
+  const response = await electronNet.fetch(`${origin}${checkPath}`, {
+    headers: { Authorization: `Bearer ${secret}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  return { checked: true, ok: response.ok, status: response.status };
+});
+
 ipcMain.handle("octopus:client-extension-lifecycle", async (_event, token, request) => {
   getClientAccessController().requireSession(token, ["live"]);
   const outcome = await getClientExtensionStore().applyLifecycle(request);

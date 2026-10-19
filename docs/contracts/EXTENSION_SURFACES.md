@@ -33,7 +33,7 @@ introducing a new runtime identity.
 
 [Drivers](ENVIRONMENTS.md#in-the-app) package worker-environment kinds.
 [Client Extensions](../client.md#client-extensions) instead add widgets, tabs,
-and guided repairs to the app. Use those when extending the presentation;
+inputs, and guided repairs to the app. Use those when extending the presentation;
 use the recipes below when extending what the runtime can do.
 
 ## What takes what

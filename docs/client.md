@@ -129,7 +129,7 @@ Extensions let you arrange and extend how the client presents your work.
 | --- | --- | --- |
 | **Applications** | Interface or context packages a run can use. The catalog groups AI Providers, Connectors, Plugins, and Context. | A model provider, the Slack connector, an MCP server plugin. |
 | **Drivers** | Worker-environment kinds, their doors, and tools. They supply the room where effects happen. | A browser session or a Git worktree. |
-| **Settings → Extensions** | Client widgets, tabs/panels, and guided repairs. Their declared sources and actions are reviewed during setup. | A Home widget or an additional workspace view. |
+| **Settings → Extensions** | Client widgets, tabs/panels, inputs, and guided repairs. Their declared sources and actions are reviewed during setup. | A Home widget, an additional workspace view, or Smart gestures. |
 
 In architecture documents, *driver* also means the implementation behind any
 interface, including a provider. The **Drivers** screen specifically presents
@@ -160,12 +160,22 @@ Open **Settings → Extensions** to browse and manage additions to the client:
   progress**, or **Memory** with a selected knowledge folder such as an Obsidian
   vault.
 - **Tabs** add workspace views, including **Metrics** and **Codex Usage**.
+- **Inputs** add ways to control the client. **Smart gestures** connects a
+  decision model through your own OpenRouter key so hand movement can be read
+  as intent rather than as a fixed pose list.
 - **Repairs** provide explicit maintenance actions, such as **Codex sign-in
   check** after an authentication failure.
 
 Review an extension's declared sources and actions before installing it, then
 complete any required setup. Adding a client view does not grant a run new
 tools or access to data.
+
+Some extensions need a key. A key is a credential source: the manifest names
+the one origin it may be sent to, setup stores it with owner-only file
+permissions in the Home's `client/extensions/credentials`, and the client page
+and Home never read it back. **Check** asks that origin whether it still
+accepts the key. An input's model call is client presentation work, like
+speech recognition; it is not a provider binding and gives no run access.
 
 An extension's source is client configuration, not an interface binding. For
 example, selecting an Obsidian vault for **Memory** gives that widget a folder

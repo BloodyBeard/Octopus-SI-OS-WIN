@@ -3,6 +3,7 @@ import type { ClientExtensionManifest } from "./types";
 import { admitClientExtensionManifest } from "./validation";
 import { hasBuiltinClientExtensionSurface } from "./builtinSurfaceContributions";
 import { hasBuiltinClientExtensionAction } from "./builtinActionContributions";
+import { hasBuiltinClientExtensionInput } from "./builtinInputContributions";
 
 type BuiltinManifestSource = {
   source_digest: string;
@@ -35,6 +36,12 @@ export const builtinClientExtensions = catalog.map(({ manifest, source_digest: s
     && !hasBuiltinClientExtensionAction(manifest.contribution.action_id)
   ) {
     throw new Error(`built-in repair extension ${manifest.id} has no registered action contribution`);
+  }
+  if (
+    manifest.contribution.kind === "builtin_input"
+    && !hasBuiltinClientExtensionInput(manifest.contribution.input_id)
+  ) {
+    throw new Error(`built-in input extension ${manifest.id} has no registered input contribution`);
   }
   const result = admitClientExtensionManifest(
     manifest,

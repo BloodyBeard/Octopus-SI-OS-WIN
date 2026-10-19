@@ -11,6 +11,7 @@ import {
 import type { OctopusClientAccessProfile } from "../../electron";
 import type {
   ClientExtensionCategory,
+  ClientExtensionCredentialCheck,
   ClientExtensionRecord,
   ClientExtensionRegistryState,
   ClientExtensionSourceConfiguration,
@@ -53,6 +54,10 @@ const CATEGORY_COPY: Record<ClientExtensionCategory, { title: string; descriptio
     title: "Repairs",
     description: "Guided fixes offered when Octopus recognizes a problem.",
   },
+  input: {
+    title: "Input",
+    description: "New ways to control the client with your hands or voice.",
+  },
 };
 
 export function ExtensionsSection({
@@ -78,6 +83,7 @@ export function ExtensionsSection({
   const [installSources, setInstallSources] = useState<{
     extensionId: string;
     value: Record<string, ClientExtensionSourceConfiguration>;
+    credentials: Record<string, string>;
   } | null>(null);
   const [installId, setInstallId] = useState("");
   const [uninstallId, setUninstallId] = useState("");
@@ -280,14 +286,21 @@ export function ExtensionsSection({
           setInstallAfterSetup(false);
           setInstallSources(null);
         }}
-        onSave={(sources) => {
+        onCheckCredential={(sourceId) => setup
+          ? registry.checkCredential(setup.manifest.id, sourceId)
+          : Promise.reject(new Error("No extension is being set up."))}
+        onRemoveCredential={(sourceId) => {
+          if (!setup) return;
+          void perform(setup.manifest.id, () => registry.removeCredential(setup.manifest.id, sourceId));
+        }}
+        onSave={(sources, credentials) => {
           if (!setup) return;
           void perform(setup.manifest.id, async () => {
             if (installAfterSetup) {
-              setInstallSources({ extensionId: setup.manifest.id, value: sources });
+              setInstallSources({ extensionId: setup.manifest.id, value: sources, credentials });
               setInstallId(setup.manifest.id);
             } else {
-              await registry.configure(setup.manifest.id, sources);
+              await registry.configure(setup.manifest.id, sources, false, undefined, credentials);
             }
             setSetupId("");
             setInstallAfterSetup(false);
@@ -341,7 +354,7 @@ export function ExtensionsSection({
           if (!install) return;
           void perform(install.manifest.id, async () => {
             if (installSources?.extensionId === install.manifest.id) {
-              await registry.configure(install.manifest.id, installSources.value, true);
+              await registry.configure(install.manifest.id, installSources.value, true, undefined, installSources.credentials);
             }
             else await registry.install(install.manifest.id);
             revealInstalledTab(install, clientPreferences.hiddenSurfaceIds, setClientPreferences);
@@ -434,7 +447,7 @@ function ExtensionBrowseView({
                 )}
               />
             ) : null}
-            {(["widget", "tab", "repair"] as const).map((category) => {
+            {(["widget", "tab", "input", "repair"] as const).map((category) => {
               const rows = extensions.filter((extension) => extension.manifest.category === category);
               if (!rows.length) return null;
               const copy = CATEGORY_COPY[category];
@@ -817,7 +830,11 @@ function ExtensionDetail({ busy, extension, mutable, onBack, onInstall, onSetup,
                 label={source.label}
                 value={source.kind === "filesystem"
                   ? configuration?.path || (source.required ? "Required · not configured" : "Optional · not configured")
-                  : configuration?.device_id || `${source.device} · system default`}
+                  : source.kind === "credential"
+                    ? extension.credentials[source.id]
+                      ? `Saved · sent only to ${credentialHost(source.origin)}`
+                      : source.required ? "Required · not configured" : "Optional · not configured"
+                    : configuration?.device_id || `${source.device} · system default`}
                 mono={source.kind === "filesystem" && Boolean(configuration?.path)}
               />
             );
@@ -832,17 +849,36 @@ function ExtensionDetail({ busy, extension, mutable, onBack, onInstall, onSetup,
   );
 }
 
-function ExtensionSetupDialog({ accessProfile, busy, extension, installAfterSave, onCancel, onSave }: {
+function ExtensionSetupDialog({
+  accessProfile,
+  busy,
+  extension,
+  installAfterSave,
+  onCancel,
+  onCheckCredential,
+  onRemoveCredential,
+  onSave,
+}: {
   accessProfile: OctopusClientAccessProfile;
   busy: boolean;
   extension: ClientExtensionRecord | null;
   installAfterSave: boolean;
   onCancel: () => void;
-  onSave: (sources: Record<string, ClientExtensionSourceConfiguration>) => void;
+  onCheckCredential: (sourceId: string) => Promise<ClientExtensionCredentialCheck>;
+  onRemoveCredential: (sourceId: string) => void;
+  onSave: (sources: Record<string, ClientExtensionSourceConfiguration>, credentials: Record<string, string>) => void;
 }) {
   const [draft, setDraft] = useState<Record<string, ClientExtensionSourceConfiguration>>({});
+  const [secrets, setSecrets] = useState<Record<string, string>>({});
+  const [checks, setChecks] = useState<Record<string, { pending: boolean; message: string; ok: boolean }>>({});
   const [devices, setDevices] = useState<Record<string, MediaDeviceInfo[]>>({});
   const [localError, setLocalError] = useState("");
+  const extensionId = extension?.manifest.id ?? "";
+
+  useEffect(() => {
+    setSecrets({});
+    setChecks({});
+  }, [extensionId]);
 
   useEffect(() => {
     if (!extension) return;
@@ -879,9 +915,28 @@ function ExtensionSetupDialog({ accessProfile, busy, extension, installAfterSave
     }
   }
 
+  async function checkCredential(sourceId: string, host: string) {
+    setChecks((current) => ({ ...current, [sourceId]: { pending: true, message: "Checking…", ok: false } }));
+    try {
+      const result = await onCheckCredential(sourceId);
+      const message = !result.checked
+        ? "This source declares no check."
+        : result.ok
+          ? `${host} accepted the key.`
+          : `${host} refused the key (HTTP ${result.status}).`;
+      setChecks((current) => ({ ...current, [sourceId]: { pending: false, message, ok: result.checked && result.ok } }));
+    } catch (error) {
+      setChecks((current) => ({
+        ...current,
+        [sourceId]: { pending: false, message: error instanceof Error ? error.message : String(error), ok: false },
+      }));
+    }
+  }
+
   const missingRequired = (extension?.manifest.sources ?? []).some((source) => {
     if (!source.required) return false;
     const configuration = draft[source.id];
+    if (source.kind === "credential") return !extension?.credentials[source.id] && !secrets[source.id]?.trim();
     return source.kind === "filesystem" ? !isAbsoluteClientPath(configuration?.path ?? "") : !configuration?.device_id?.trim();
   });
   const invalidFilesystem = (extension?.manifest.sources ?? []).some((source) => (
@@ -923,6 +978,55 @@ function ExtensionSetupDialog({ accessProfile, busy, extension, installAfterSave
                     <OcButton disabled={busy || accessProfile !== "live"} onClick={() => void choosePath(source.id, source.selection, source.label)} size="sm" variant="secondary">Choose</OcButton>
                   </div>
                 </div>
+              ) : source.kind === "credential" ? (
+                <div className="flex flex-col gap-2" key={source.id}>
+                  <div>
+                    <div className="text-sm font-medium text-token-foreground">{source.label}{source.required ? " · Required" : ""}</div>
+                    <div className="mt-0.5 text-sm text-token-description-foreground">{source.description}</div>
+                  </div>
+                  <div className="flex items-start gap-2">
+                    <OcTextField
+                      autoComplete="off"
+                      className="min-w-0 flex-1"
+                      disabled={busy}
+                      label={source.label}
+                      onChange={(event) => setSecrets((current) => ({ ...current, [source.id]: event.currentTarget.value }))}
+                      placeholder={extension.credentials[source.id] ? "Saved · paste a new key to replace it" : "Paste key"}
+                      showLabel={false}
+                      spellCheck={false}
+                      type="password"
+                      value={secrets[source.id] ?? ""}
+                    />
+                    {extension.credentials[source.id] ? (
+                      <>
+                        {source.check_path ? (
+                          <OcButton
+                            disabled={busy || checks[source.id]?.pending || accessProfile !== "live"}
+                            onClick={() => void checkCredential(source.id, credentialHost(source.origin))}
+                            size="sm"
+                            variant="secondary"
+                          >
+                            Check
+                          </OcButton>
+                        ) : null}
+                        <OcButton
+                          disabled={busy || accessProfile !== "live"}
+                          onClick={() => onRemoveCredential(source.id)}
+                          size="sm"
+                          tone="danger"
+                          variant="ghost"
+                        >
+                          Remove
+                        </OcButton>
+                      </>
+                    ) : null}
+                  </div>
+                  {checks[source.id]?.message ? (
+                    <div className={`text-sm ${checks[source.id]?.ok ? "text-token-description-foreground" : "text-token-error-foreground"}`}>
+                      {checks[source.id]?.message}
+                    </div>
+                  ) : null}
+                </div>
               ) : (
                 <div className="flex flex-col gap-2" key={source.id}>
                   <div>
@@ -949,7 +1053,7 @@ function ExtensionSetupDialog({ accessProfile, busy, extension, installAfterSave
           </div>
           <OcDialogFooter>
             <OcButton disabled={busy} onClick={onCancel} variant="ghost">Cancel</OcButton>
-            <OcButton disabled={busy || accessProfile !== "live" || missingRequired || invalidFilesystem} onClick={() => onSave(draft)} variant="primary">{busy ? "Saving…" : installAfterSave ? "Save and install" : "Save"}</OcButton>
+            <OcButton disabled={busy || accessProfile !== "live" || missingRequired || invalidFilesystem} onClick={() => onSave(draft, secrets)} variant="primary">{busy ? "Saving…" : installAfterSave ? "Save and install" : "Save"}</OcButton>
           </OcDialogFooter>
         </>
       ) : null}
@@ -1119,7 +1223,7 @@ function revealInstalledTab(
 ) {
   if (extension.manifest.category !== "tab") return;
   const contribution = extension.manifest.contribution;
-  if (contribution.kind === "builtin_action") return;
+  if (contribution.kind === "builtin_action" || contribution.kind === "builtin_input") return;
   const surfaceId = contribution.kind === "builtin" ? contribution.surface_id : contribution.document.id;
   if (!hiddenSurfaceIds.includes(surfaceId)) return;
   setClientPreferences({ hiddenSurfaceIds: hiddenSurfaceIds.filter((id) => id !== surfaceId) });
@@ -1128,11 +1232,17 @@ function revealInstalledTab(
 function extensionCategoryLabel(category: ClientExtensionCategory): string {
   if (category === "widget") return "Widget";
   if (category === "tab") return "Tab or panel";
+  if (category === "input") return "Input";
   return "Repair";
 }
 
 function extensionDestinationLabel(category: ClientExtensionCategory): string {
   if (category === "widget") return "A Home widget";
   if (category === "tab") return "A dedicated app space";
+  if (category === "input") return "A way to control the client";
   return "A guided repair";
+}
+
+function credentialHost(origin: string): string {
+  return new URL(origin).host;
 }

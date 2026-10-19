@@ -1,6 +1,8 @@
 import type {
   ClientExtensionActionOutcome,
   ClientExtensionActionRequest,
+  ClientExtensionCredentialCheck,
+  ClientExtensionCredentialUpdate,
   ClientExtensionLifecycleOutcome,
   ClientExtensionLifecycleRequest,
   ClientExtensionMutation,
@@ -202,6 +204,8 @@ declare global {
       clientSurfaceDocuments(): Promise<OctopusClientSurfaceDocumentSnapshot>;
       clientExtensions(): Promise<ClientExtensionStoreSnapshot>;
       mutateClientExtension(request: ClientExtensionMutation): Promise<ClientExtensionStoreSnapshot>;
+      setClientExtensionCredential(request: ClientExtensionCredentialUpdate): Promise<ClientExtensionStoreSnapshot>;
+      checkClientExtensionCredential(request: { id: string; sourceId: string }): Promise<ClientExtensionCredentialCheck>;
       applyClientExtensionLifecycle(request: ClientExtensionLifecycleRequest): Promise<ClientExtensionLifecycleOutcome>;
       revealClientExtensions(): Promise<{ opened: true; path: string }>;
       readClientExtensionFilesystemSource(request: OctopusClientExtensionFilesystemReadRequest): Promise<OctopusClientExtensionFilesystemSource>;

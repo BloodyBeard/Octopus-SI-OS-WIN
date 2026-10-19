@@ -311,6 +311,32 @@ async function main() {
     assert.equal(repairedActiveReceipt.changed, true);
     assert.equal(repairedActiveReceipt.snapshot.lifecycle[crashRecoveredId].receiptState, "valid");
 
+    const inputId = "builtin.input.gesture-intent";
+    const secret = "sk-test-credential-value";
+    snapshot = await store.setCredential({ id: inputId, sourceId: "decision_key", secret, expectedGeneration: store.generation() });
+    assert.deepEqual(Object.keys(snapshot.credentials[inputId]), ["decision_key"]);
+    assert.equal(snapshot.credentials[inputId].decision_key.origin, "https://openrouter.ai");
+    assert.equal(JSON.stringify(snapshot).includes(secret), false);
+    const credentialFile = path.join(root, "credentials", `${inputId}.json`);
+    assert.equal((await fs.stat(credentialFile)).mode & 0o777, 0o600);
+    assert.deepEqual(await store.credential(inputId, "decision_key"), {
+      origin: "https://openrouter.ai",
+      checkPath: "/api/v1/key",
+      secret,
+    });
+    await assert.rejects(
+      store.setCredential({ id: inputId, sourceId: "missing", secret, expectedGeneration: snapshot.generation }),
+      /declares no credential source/,
+    );
+    const moved = JSON.parse(await fs.readFile(credentialFile, "utf8"));
+    moved.sources.decision_key.origin = "https://elsewhere.example";
+    await fs.writeFile(credentialFile, `${JSON.stringify(moved)}\n`, { mode: 0o600 });
+    await assert.rejects(store.credential(inputId, "decision_key"), /save it again for https:\/\/openrouter\.ai/);
+    snapshot = await store.snapshot();
+    snapshot = await store.setCredential({ id: inputId, sourceId: "decision_key", secret: null, expectedGeneration: snapshot.generation });
+    assert.equal(snapshot.credentials[inputId], undefined);
+    await assert.rejects(fs.stat(credentialFile), /ENOENT/);
+
     const repairReceiptPath = path.join(root, "lifecycle-receipts", `${PROVIDER_CREDENTIAL_REPAIR_EXTENSION}.json`);
     await fs.writeFile(repairReceiptPath, "{not-json\n", "utf8");
     snapshot = await store.snapshot();

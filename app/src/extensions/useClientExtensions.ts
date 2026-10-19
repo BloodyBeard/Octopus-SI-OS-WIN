@@ -4,13 +4,16 @@ import type { OctopusClientAccessProfile } from "../electron";
 import { builtinClientExtensions } from "./catalog";
 import {
   applyClientExtensionLifecycle,
+  checkClientExtensionCredential,
   mutateClientExtension,
   readClientExtensions,
   revealClientExtensions,
+  setClientExtensionCredential,
   subscribeClientExtensions,
 } from "./transport";
 import type {
   AdmittedClientExtension,
+  ClientExtensionCredentialStatus,
   ClientExtensionRecord,
   ClientExtensionLifecycleEvidence,
   ClientExtensionRevision,
@@ -28,6 +31,7 @@ const EMPTY_SNAPSHOT: ClientExtensionStoreSnapshot = {
   state: {},
   stateStatus: "valid",
   lifecycle: {},
+  credentials: {},
   actionStatuses: [],
   errors: [],
 };
@@ -103,6 +107,20 @@ export function useClientExtensions(accessProfile: OctopusClientAccessProfile): 
     setHydrated(true);
   }, [accessProfile]);
 
+  const writeCredential = useCallback(async (id: string, sourceId: string, secret: string | null) => {
+    if (accessProfile !== "live") throw new Error("Extensions are read-only in the Test client profile.");
+    const next = await setClientExtensionCredential({
+      id,
+      sourceId,
+      secret,
+      expectedGeneration: snapshotRef.current.generation,
+    });
+    snapshotRef.current = next;
+    setSnapshot(next);
+    setReadError("");
+    setHydrated(true);
+  }, [accessProfile]);
+
   const applyLifecycle = useCallback(async (
     extension: AdmittedClientExtension,
     action: "install" | "remove",
@@ -148,13 +166,30 @@ export function useClientExtensions(accessProfile: OctopusClientAccessProfile): 
       const extension = requireExtensionRecord(materialized.extensions, id);
       await applyLifecycle(extension, "remove", operationId);
     },
-    configure: async (id, sources, install = false, operationId) => {
+    configure: async (id, sources, install = false, operationId, credentials = {}) => {
       const extension = requireExtensionRecord(materialized.extensions, id);
-      const accepted = validateSourceConfiguration(extension, sources, install);
+      for (const [sourceId, secret] of Object.entries(credentials)) {
+        if (secret.trim()) await writeCredential(id, sourceId, secret);
+      }
+      const accepted = validateSourceConfiguration(
+        extension,
+        sources,
+        install,
+        currentCredentials(extension, snapshotRef.current),
+      );
       await mutate(id, install && extension.manifest.contribution.kind === "surface"
         ? { sources: accepted, reviewed: extensionRevision(extension) }
         : { sources: accepted });
       if (install) await applyLifecycle(extension, "install", operationId);
+    },
+    removeCredential: async (id, sourceId) => {
+      requireExtensionRecord(materialized.extensions, id);
+      await writeCredential(id, sourceId, null);
+    },
+    checkCredential: async (id, sourceId) => {
+      if (accessProfile !== "live") throw new Error("Extensions are read-only in the Test client profile.");
+      requireExtensionRecord(materialized.extensions, id);
+      return checkClientExtensionCredential({ id, sourceId });
     },
     revealRoot: async () => {
       if (accessProfile !== "live") throw new Error("Extensions are read-only in the Test client profile.");
@@ -167,7 +202,7 @@ export function materializeClientExtensions(
   snapshot: ClientExtensionStoreSnapshot,
   accessProfile: OctopusClientAccessProfile,
   readError: string,
-): Omit<ClientExtensionRegistryState, "generation" | "root" | "hydrated" | "loading" | "mutable" | "refresh" | "install" | "dismiss" | "uninstall" | "configure" | "revealRoot"> {
+): Omit<ClientExtensionRegistryState, "generation" | "root" | "hydrated" | "loading" | "mutable" | "refresh" | "install" | "dismiss" | "uninstall" | "configure" | "removeCredential" | "checkCredential" | "revealRoot"> {
   const errors = [...snapshot.errors];
   if (readError) errors.push(readError);
   const admittedCustom = snapshot.manifests.flatMap((source) => {
@@ -222,15 +257,16 @@ export function materializeClientExtensions(
       && lifecycle.desiredState === "installed"
       && sameRevision(lifecycle.sourceRevision ?? undefined, revision);
     const installed = receiptInstalled && (builtin || admission === "reviewed");
+    const credentials = currentCredentials(extension, snapshot);
     const configured = (extension.manifest.sources ?? []).every((source) => (
-      !source.required || sourceConfigured(source, sourceConfiguration[source.id])
+      !source.required || sourceConfigured(source, sourceConfiguration[source.id], credentials)
     ));
     const surface = extension.surface ? {
       ...extension.surface,
       sourceExtensionId: extension.manifest.id,
       hostSources: hostSources(extension.manifest.sources ?? [], sourceConfiguration),
     } : undefined;
-    return { ...extension, admission, surface, installed, configured, lifecycle, sourceConfiguration };
+    return { ...extension, admission, surface, installed, configured, lifecycle, sourceConfiguration, credentials };
   }).sort((left, right) => (
     Number(right.installed) - Number(left.installed)
     || left.manifest.category.localeCompare(right.manifest.category)
@@ -299,7 +335,7 @@ function configuredSources(
     }
     const definition = definitions.find((source) => source.id === id);
     if (!definition) continue;
-    const allowedFields = new Set(definition.kind === "filesystem" ? ["path"] : ["device_id"]);
+    const allowedFields = new Set(definition.kind === "filesystem" ? ["path"] : definition.kind === "device" ? ["device_id"] : []);
     const accepted = Object.fromEntries(Object.entries(configuration).filter(([field]) => {
       if (allowedFields.has(field)) return true;
       errors.push(`client extension "${extensionId}" source "${id}" has unknown field "${field}"`);
@@ -310,9 +346,26 @@ function configuredSources(
   return result;
 }
 
-function sourceConfigured(source: ClientExtensionSource, configuration?: ClientExtensionSourceConfiguration): boolean {
+function sourceConfigured(
+  source: ClientExtensionSource,
+  configuration: ClientExtensionSourceConfiguration | undefined,
+  credentials: Record<string, ClientExtensionCredentialStatus>,
+): boolean {
   if (source.kind === "filesystem") return isAbsoluteClientPath(configuration?.path ?? "");
+  if (source.kind === "credential") return Boolean(credentials[source.id]) || !source.required;
   return Boolean(configuration?.device_id?.trim()) || !source.required;
+}
+
+function currentCredentials(
+  extension: AdmittedClientExtension,
+  snapshot: ClientExtensionStoreSnapshot,
+): Record<string, ClientExtensionCredentialStatus> {
+  const stored = snapshot.credentials[extension.manifest.id] ?? {};
+  return Object.fromEntries((extension.manifest.sources ?? []).flatMap((source) => {
+    if (source.kind !== "credential") return [];
+    const status = stored[source.id];
+    return status && status.origin === source.origin ? [[source.id, status]] : [];
+  }));
 }
 
 function isAbsoluteClientPath(value: string): boolean {
@@ -354,13 +407,14 @@ function validateSourceConfiguration(
   extension: ClientExtensionRecord,
   raw: Record<string, ClientExtensionSourceConfiguration>,
   requireComplete: boolean,
+  credentials: Record<string, ClientExtensionCredentialStatus>,
 ): Record<string, ClientExtensionSourceConfiguration> {
   const errors: string[] = [];
   const accepted = configuredSources(extension.manifest.sources ?? [], raw, errors, extension.manifest.id);
   if (errors.length) throw new Error(errors[0]);
   if (requireComplete) {
     const missing = (extension.manifest.sources ?? []).find((source) => (
-      source.required && !sourceConfigured(source, accepted[source.id])
+      source.required && !sourceConfigured(source, accepted[source.id], credentials)
     ));
     if (missing) throw new Error(`Configure required source "${missing.label}" before installing ${extension.manifest.name}.`);
   }
@@ -383,6 +437,7 @@ function hostSources(
         refreshIntervalMs: source.refresh_interval_ms ?? 30000,
       }];
     }
+    if (source.kind === "credential") return [];
     const deviceId = configuration[source.id]?.device_id?.trim() ?? "";
     if (!deviceId && !source.required) return [];
     return [{

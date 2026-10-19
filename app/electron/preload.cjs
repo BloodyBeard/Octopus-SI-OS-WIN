@@ -567,6 +567,12 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   mutateClientExtension(request) {
     return invokeAccess("octopus:client-extension-mutate", request);
   },
+  setClientExtensionCredential(request) {
+    return invokeAccess("octopus:client-extension-credential", request);
+  },
+  checkClientExtensionCredential(request) {
+    return invokeAccess("octopus:client-extension-credential-check", request);
+  },
   applyClientExtensionLifecycle(request) {
     return invokeAccess("octopus:client-extension-lifecycle", request);
   },

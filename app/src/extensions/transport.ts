@@ -1,6 +1,8 @@
 import type {
   ClientExtensionActionOutcome,
   ClientExtensionActionRequest,
+  ClientExtensionCredentialCheck,
+  ClientExtensionCredentialUpdate,
   ClientExtensionLifecycleOutcome,
   ClientExtensionLifecycleRequest,
   ClientExtensionMutation,
@@ -16,6 +18,18 @@ export async function readClientExtensions(): Promise<ClientExtensionStoreSnapsh
 export async function mutateClientExtension(request: ClientExtensionMutation): Promise<ClientExtensionStoreSnapshot> {
   const transport = window.octopusTransport?.mutateClientExtension;
   if (!transport) throw new Error("Client extension mutation requires the desktop client.");
+  return transport(request);
+}
+
+export async function setClientExtensionCredential(request: ClientExtensionCredentialUpdate): Promise<ClientExtensionStoreSnapshot> {
+  const transport = window.octopusTransport?.setClientExtensionCredential;
+  if (!transport) throw new Error("Client extension credentials require the desktop client.");
+  return transport(request);
+}
+
+export async function checkClientExtensionCredential(request: { id: string; sourceId: string }): Promise<ClientExtensionCredentialCheck> {
+  const transport = window.octopusTransport?.checkClientExtensionCredential;
+  if (!transport) throw new Error("Client extension credentials require the desktop client.");
   return transport(request);
 }
 

@@ -16,7 +16,11 @@ export function clientExtensionManifestSemanticIssues(manifest, options = {}) {
       message: "downloaded extensions cannot install themselves by default",
     });
   }
-  if (!compiled && (manifest.contribution.kind === "builtin" || manifest.contribution.kind === "builtin_action")) {
+  if (!compiled && (
+    manifest.contribution.kind === "builtin"
+    || manifest.contribution.kind === "builtin_action"
+    || manifest.contribution.kind === "builtin_input"
+  )) {
     issues.push({
       code: "manifest.contribution.reserved",
       path: "/contribution",
@@ -76,6 +80,37 @@ export function clientExtensionManifestSemanticIssues(manifest, options = {}) {
       code: "manifest.category.mismatch",
       path: "/category",
       message: "repair extensions must contribute a built-in repair action",
+    });
+  }
+
+  if (manifest.contribution.kind === "builtin_input") {
+    if (manifest.category !== "input") {
+      issues.push({
+        code: "manifest.category.mismatch",
+        path: "/category",
+        message: `category ${manifest.category} does not match a built-in input`,
+      });
+    }
+    const provider = manifest.contribution.provider;
+    const credential = (manifest.sources ?? []).find((source) => source.id === provider.credential_source);
+    if (!credential || credential.kind !== "credential") {
+      issues.push({
+        code: "manifest.provider.credential.missing",
+        path: "/contribution/provider/credential_source",
+        message: `provider credential "${provider.credential_source}" is not a declared credential source`,
+      });
+    } else if (new URL(provider.endpoint).origin !== credential.origin) {
+      issues.push({
+        code: "manifest.provider.origin.mismatch",
+        path: "/contribution/provider/endpoint",
+        message: `provider endpoint must use the credential origin ${credential.origin}`,
+      });
+    }
+  } else if (manifest.category === "input") {
+    issues.push({
+      code: "manifest.category.mismatch",
+      path: "/category",
+      message: "input extensions must contribute a built-in input",
     });
   }
 

@@ -186,6 +186,41 @@
           }
         ]
       }
+    },
+    {
+      "source_digest": "sha256:a53ed2995ff1275456435a93e48516d248c383b529e7b3b8c783fa6ed901fb98",
+      "manifest": {
+        "schema": "octopus.client_extension",
+        "schema_version": 1,
+        "id": "builtin.input.gesture-intent",
+        "version": "0.1.0",
+        "name": "Smart gestures",
+        "description": "Lets a decision model read what your hand movement means and choose the client command for it. Uses your own OpenRouter key.",
+        "developer": "Octopus",
+        "category": "input",
+        "glyph": "hand",
+        "default_installed": false,
+        "contribution": {
+          "kind": "builtin_input",
+          "input_id": "gesture.intent",
+          "provider": {
+            "credential_source": "decision_key",
+            "endpoint": "https://openrouter.ai/api/alpha/decisions",
+            "model": "typesafe/jev-1.14"
+          }
+        },
+        "sources": [
+          {
+            "id": "decision_key",
+            "kind": "credential",
+            "label": "OpenRouter API key",
+            "description": "Sent only to openrouter.ai for gesture decisions. Stored in this Home's client folder and never shown again.",
+            "required": true,
+            "origin": "https://openrouter.ai",
+            "check_path": "/api/v1/key"
+          }
+        ]
+      }
     }
   ]
 }

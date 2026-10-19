@@ -49,7 +49,7 @@
     },
     "glyph": {
       "enum": [
-        "octopus", "dashboard", "registry", "metrics", "dollar", "chat", "interfaces", "topology", "ee", "artifact", "file", "binding", "descriptor", "filter", "search", "expand", "more", "close", "copy", "trash", "send", "plus", "microphone", "voice", "volume", "volumeOff", "phoneEnd", "transcript", "weather", "deviceTablet", "deviceMobile", "terminal", "browser", "changes", "desktop", "retry", "stop", "paperclip", "image", "settings", "sliders", "chevronDown", "check", "refresh", "arrowLeft", "navigateBack", "sidebarOpen", "sidebarClosed", "user", "sun", "keyboard", "pulse", "newTask", "scheduled", "plugins", "sites", "pin", "pinOff", "project", "lightbulb", "folder", "folderOpen", "splitPane", "widgets", "layers", "progress", "insights", "memory", "target"
+        "octopus", "dashboard", "registry", "metrics", "dollar", "chat", "interfaces", "topology", "ee", "artifact", "file", "binding", "descriptor", "filter", "search", "expand", "more", "close", "copy", "trash", "send", "plus", "microphone", "voice", "volume", "volumeOff", "phoneEnd", "transcript", "weather", "deviceTablet", "deviceMobile", "terminal", "browser", "changes", "desktop", "retry", "stop", "paperclip", "image", "settings", "sliders", "chevronDown", "check", "refresh", "arrowLeft", "navigateBack", "sidebarOpen", "sidebarClosed", "user", "sun", "keyboard", "pulse", "newTask", "scheduled", "plugins", "sites", "pin", "pinOff", "project", "lightbulb", "folder", "folderOpen", "splitPane", "widgets", "layers", "progress", "insights", "memory", "target", "hand"
       ]
     },
     "voiceTarget": {

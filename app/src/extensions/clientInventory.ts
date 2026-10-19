@@ -19,6 +19,7 @@ type JsonSchema = {
   minimum?: number;
   maximum?: number;
   maxLength?: number;
+  pattern?: string;
   maxItems?: number;
   maxProperties?: number;
   $ref?: string;
@@ -181,12 +182,14 @@ function extensionRow(
       ? { kind: "surface", document_id: contribution.document.id, target: contribution.document.target.kind }
       : contribution.kind === "builtin"
         ? { kind: "builtin", surface_id: contribution.surface_id }
-        : { kind: "builtin_action", action_id: contribution.action_id },
+        : contribution.kind === "builtin_input"
+          ? { kind: "builtin_input", input_id: contribution.input_id, provider: { endpoint: contribution.provider.endpoint, model: contribution.provider.model } }
+          : { kind: "builtin_action", action_id: contribution.action_id },
     admission: record.admission,
     installed: record.installed,
     configured: record.configured,
     unconfigured_sources: (record.manifest.sources ?? [])
-      .filter((source) => source.required && !record.sourceConfiguration[source.id])
+      .filter((source) => source.required && !record.sourceConfiguration[source.id] && !record.credentials[source.id])
       .map((source) => source.id),
     lifecycle: { receipt: record.lifecycle.receiptState, desired: record.lifecycle.desiredState || null },
     runtime_issues: runtimeIssues.filter((issue) => issue.extension_id === record.manifest.id
@@ -206,11 +209,13 @@ function hostVocabulary(): Record<string, unknown> {
   const filesystem = manifestDefs.filesystemSource;
   const filesystemFields = (filesystem as { allOf?: JsonSchema[] }).allOf?.[1]?.properties ?? {};
   const deviceFields = (manifestDefs.deviceSource as { allOf?: JsonSchema[] }).allOf?.[1]?.properties ?? {};
+  const credentialFields = (manifestDefs.credentialSource as { allOf?: JsonSchema[] }).allOf?.[1]?.properties ?? {};
   return {
     categories: {
       widget: { targets: ["voice.widget", "voice.window"], placement: "Home" },
       tab: { targets: ["workspace.surface"], placement: "workspace navigation and split panes" },
       repair: { custom: false, note: "Repairs are built-in client actions; custom packages contribute widgets or tabs." },
+      input: { custom: false, note: "Inputs are built-in client controls that call a declared decision provider with the owner's credential." },
     },
     targets: {
       "voice.widget": {
@@ -257,6 +262,11 @@ function hostVocabulary(): Record<string, unknown> {
           configured_by: "the owner during Extension setup",
         },
         device: { device: deviceFields.device?.enum, configured_by: "the owner during Extension setup" },
+        credential: {
+          origin: credentialFields.origin?.pattern,
+          check_path: credentialFields.check_path?.pattern,
+          configured_by: "the owner during Extension setup; the value is sent only to the declared origin and is never readable by the client page or Home",
+        },
       },
     },
     actions: {
