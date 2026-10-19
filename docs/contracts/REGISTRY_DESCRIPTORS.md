@@ -89,9 +89,10 @@ The registry will accumulate thousands of descriptors. That is not a mess; it
 is the artifact. Each one obeys:
 
 - **An interface's name is its function, not a convenience alias.**
-  `world_microphone` is the audio intake port. `world_speech_to_text` is the
-  transcript-facing port produced after transcription. Do not collapse the two,
-  and do not add parallel raw-transport names beside them.
+  `world_image_generation` turns prompts into images whichever endpoint it
+  calls; `world_slack` is the Slack boundary, not the task that answers there.
+  Do not collapse two functions into one name, and do not add parallel
+  raw-transport names beside them.
 - **Check the live registry before adding.** If an interface already covers the
   boundary, bind that folder. Do not author a parallel one.
 - **A new worker is a new `system_worker_<name>/` folder**, not an entry

@@ -127,7 +127,7 @@ Extensions let you arrange and extend how the client presents your work.
 
 | Catalog | What it adds | Example |
 | --- | --- | --- |
-| **Applications** | Interface or context packages a run can use. The catalog groups AI Providers, Connectors, Plugins, and Artifacts. | A model provider, a messaging connector, a knowledge package. |
+| **Applications** | Interface or context packages a run can use. The catalog groups AI Providers, Connectors, Plugins, and Context. | A model provider, the Slack connector, an MCP server plugin. |
 | **Drivers** | Worker-environment kinds, their doors, and tools. They supply the room where effects happen. | A browser session or a Git worktree. |
 | **Settings → Extensions** | Client widgets, tabs/panels, and guided repairs. Their declared sources and actions are reviewed during setup. | A Home widget or an additional workspace view. |
 
@@ -145,9 +145,12 @@ Installation and access are separate:
 4. **Select/connect** gives a task the relevant bindings. A default for new
    tasks is not evidence that an existing task already uses it.
 
-An installed package grants no authority by itself. The catalogs distinguish
-installation, configuration, project availability, task connections, and
-incomplete states. Removal can be blocked while live records depend on it.
+An installed package grants no authority by itself. Each card shows one
+status: **Not installed**, **Needs setup** (details such as an API key are
+missing), **Not enabled** (installed but not yet available in Home or a
+project), **Enabled**, **Needs repair** or **Check settings**, followed by how
+many tasks are connected. Removal can be blocked while live records depend on
+it.
 
 ### Client Extensions
 

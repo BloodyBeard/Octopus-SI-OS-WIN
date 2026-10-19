@@ -21,10 +21,12 @@ inside its owner folder. Every later instance of it is data.
 ## In the client
 
 The optional desktop client's **Applications** catalog presents these packages
-as providers, connectors, plugins, and context artifacts. A messaging connector,
-for example, installs interface files; making it available in a Project and
-binding it to a task are separate steps. Installation does not make the model
-call it automatically. An application pack groups packages for setup without
+as providers, connectors, plugins, and context artifacts. A connector such as
+Slack installs interface files; making it available in a Project and connecting
+it to a task are separate steps, and only connected tasks receive its messages.
+A plugin is a service the model calls through its interface, such as an MCP
+server, together with the context artifact that teaches the model its contract.
+Installation does not make the model call it automatically. An application pack groups packages for setup without
 introducing a new runtime identity.
 
 ![Applications catalog with a provider pack, installed connectors, and setup states](../images/client/applications.png)
@@ -38,7 +40,8 @@ use the recipes below when extending what the runtime can do.
 
 | You want | You add | Runtime code |
 | --- | --- | --- |
-| A provider over an existing wire (OpenAI-compatible, Anthropic-style, …) | One interface folder: `interface.json` + `life.json` importing the wire owner's driver, with its own transport config | None |
+| A model provider OpenCodex can serve | One entry in the OpenCodex bridge's `providers.json`; `scripts/sync-providers.ts` writes its folder and local package from the Codex template and the pinned OpenCodex registry | None |
+| A provider over another existing wire | One interface folder: `interface.json` + `life.json` importing the wire owner's driver, with its own transport config | None |
 | A provider over a new wire | Driver code inside the interface folder that owns that wire, then the folder above | None |
 | A channel, sensor, or service | One interface folder, with a process if it must listen | None |
 | A worker | A copied `system_worker_<name>/` folder: new id, edited ceiling | None |

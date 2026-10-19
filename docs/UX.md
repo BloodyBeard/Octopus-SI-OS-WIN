@@ -42,11 +42,14 @@ Other models enter as models inside the Codex provider, not as separate agent
 products. [OpenCodex](https://github.com/lidge-jun/opencodex) is the example:
 it lets Codex run models from many providers. In the registry each such
 provider is its own interface folder that reuses the Codex provider's OpenCodex
-driver. This is a quiet center of the UX: Codex stays the way you work, and the
-set of models behind it can grow.
+driver, generated from one list so every provider follows the same OpenCodex
+release. This is a quiet center of the UX: Codex stays the way you work, and
+the set of models behind it can grow.
 
 Earlier integrations borrowed from other agent projects are kept where they
-are cheap to maintain and dropped where they are not.
+are cheap to maintain and dropped where they are not: Slack stays as a
+connector, and the other messaging channels and unconfigurable service stubs
+were removed.
 
 ## Where to go
 
