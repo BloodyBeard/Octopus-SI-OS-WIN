@@ -238,9 +238,10 @@ async fn invoke(
         [private.path().to_path_buf()], [executable.clone(), tool], [], [], [],
         false, false, false, true, octopus_descriptors::ProcessSandboxMode::Enforced,
     ).unwrap();
+    let profiles = tempfile::tempdir().unwrap();
     let prepared = authority.prepare(executable.to_str().unwrap(),
         &["--exact".into(), "maintenance_writer_process::sandboxed_writer_host".into(), "--nocapture".into()],
-        interface_dir, None).unwrap();
+        interface_dir, None, profiles.path()).unwrap();
     let output = tokio::time::timeout(std::time::Duration::from_secs(30),
         tokio::process::Command::new(prepared.program).args(prepared.args)
             .env_clear().envs(prepared.environment).env("OCTOPUS_WRITER_TEST_INPUT", &input)
@@ -344,7 +345,7 @@ async fn invoke_tool(
         .with_file_name("octopus-file-write-tool");
     let process = authority
         .authority
-        .prepare(bin.to_str().unwrap(), &[], interface_dir, None)
+        .prepare(bin.to_str().unwrap(), &[], interface_dir, None, root)
         .unwrap();
     assert_eq!(process.program, Path::new("/usr/bin/sandbox-exec"));
     let mut child =
@@ -450,8 +451,9 @@ fn raw_probe(
     entry: &std::ffi::OsStr,
 ) -> Value {
     let args = [parent.as_os_str().to_owned(), entry.to_owned()];
+    let profiles = tempfile::tempdir().unwrap();
     let process = authority
-        .prepare(binary.to_str().unwrap(), &args, cwd, None)
+        .prepare(binary.to_str().unwrap(), &args, cwd, None, profiles.path())
         .unwrap();
     assert_eq!(process.program, Path::new("/usr/bin/sandbox-exec"));
     let output = std::process::Command::new(process.program)

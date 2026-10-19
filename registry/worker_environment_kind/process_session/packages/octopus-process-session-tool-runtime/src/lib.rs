@@ -1950,6 +1950,7 @@ struct ToolProcessClient {
     formation: Option<WorkerEnvironmentFormation>,
     worker_environment_kind: Option<WorkerEnvKindSpec>,
     last_source_movement_seq: u64,
+    _sandbox_profile: Option<Arc<octopus_verifiers::process_authority::SandboxProfileFile>>,
 }
 
 struct ToolProcessCompletion {
@@ -2362,6 +2363,7 @@ impl ToolProcessClient {
                 &execution.arguments,
                 &executable_base,
                 environment.get("PATH").map(std::ffi::OsString::as_os_str),
+                &generation_dir,
             )
             .map_err(ToolProcessInvokeError::Unavailable)?;
         if prepared.executable != execution.executable
@@ -2376,6 +2378,7 @@ impl ToolProcessClient {
             ));
         }
         let executable = prepared.executable.clone();
+        let sandbox_profile = prepared.sandbox_profile.clone();
         let mut command = tokio::process::Command::new(&prepared.program);
         #[cfg(unix)]
         command.process_group(0);
@@ -2476,6 +2479,7 @@ impl ToolProcessClient {
             formation: formation.cloned(),
             worker_environment_kind: worker_environment_kind.cloned(),
             last_source_movement_seq: 0,
+            _sandbox_profile: sandbox_profile,
         })
     }
 
@@ -9436,6 +9440,7 @@ mod tool_process_private_boundary_tests {
             formation: Some(formation.clone()),
             worker_environment_kind: Some(test_worker_environment_kind()),
             last_source_movement_seq: 7,
+            _sandbox_profile: None,
         }
     }
 
@@ -10262,6 +10267,7 @@ mod tool_process_private_boundary_tests {
 
         let source = tempfile::tempdir().unwrap();
         let generations = tempfile::tempdir().unwrap();
+        let profiles = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("secret"), b"opaque").unwrap();
         let declared = BTreeSet::from([ToolProcessPrivateReadSubpath {
             path: "secret".to_string(),
@@ -10311,7 +10317,7 @@ mod tool_process_private_boundary_tests {
             writable.clone().into_os_string(),
         ];
         let prepared = authority
-            .prepare("/bin/sh", &args, generations.path(), None)
+            .prepare("/bin/sh", &args, generations.path(), None, profiles.path())
             .unwrap();
         let _ = std::process::Command::new(&prepared.program)
             .args(&prepared.args)

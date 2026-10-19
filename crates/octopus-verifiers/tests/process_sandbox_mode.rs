@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, process::Command};
 #[test]
 fn descriptor_mode_controls_os_enforcement_without_relaxing_validation() {
     let root = tempfile::tempdir().unwrap();
+    let profiles = tempfile::tempdir().unwrap();
     for mode in [None, Some("enforced"), Some("disabled")] {
         let mut json = serde_json::to_value(ProcessAuthoritySpec::default()).unwrap();
         json.as_object_mut().unwrap().remove("sandbox_mode");
@@ -34,6 +35,7 @@ fn descriptor_mode_controls_os_enforcement_without_relaxing_validation() {
                 &[target.clone().into_os_string()],
                 root.path(),
                 None,
+                profiles.path(),
             )
             .unwrap();
         assert_eq!(process.program == process.executable, disabled);

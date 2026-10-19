@@ -35,6 +35,18 @@ pub struct PreparedProcess {
     pub args: Vec<OsString>,
     pub executable: PathBuf,
     pub environment: BTreeMap<OsString, OsString>,
+    pub sandbox_profile: Option<std::sync::Arc<SandboxProfileFile>>,
+}
+
+#[derive(Debug)]
+pub struct SandboxProfileFile {
+    path: PathBuf,
+}
+
+impl Drop for SandboxProfileFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +125,7 @@ impl ProcessAuthority {
         args: &[OsString],
         cwd: &Path,
         search_path: Option<&OsStr>,
+        profile_root: &Path,
     ) -> Result<PreparedProcess, String> {
         let cwd = normalize_existing_directory(cwd)?;
         let executable = resolve_executable(declared_program, &cwd, search_path)?;
@@ -122,15 +135,16 @@ impl ProcessAuthority {
                 args: args.to_vec(),
                 executable,
                 environment: BTreeMap::new(),
+                sandbox_profile: None,
             });
         }
         #[cfg(target_os = "macos")]
         {
-            return prepare_macos(self, executable, args, &cwd);
+            return prepare_macos(self, executable, args, &cwd, profile_root);
         }
         #[cfg(target_os = "linux")]
         {
-            let _ = (self, executable, args, cwd, search_path);
+            let _ = (self, executable, args, cwd, search_path, profile_root);
             return Err(
                 "no Linux process-authority backend enforces independent read, write, and execute roots"
                     .to_string(),
@@ -138,7 +152,7 @@ impl ProcessAuthority {
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
-            let _ = (args, cwd, search_path, executable);
+            let _ = (args, cwd, search_path, executable, profile_root);
             Err(
                 "no fail-closed process authority backend is available on this operating system"
                     .to_string(),
@@ -984,6 +998,7 @@ fn prepare_macos(
     executable: PathBuf,
     args: &[OsString],
     cwd: &Path,
+    profile_root: &Path,
 ) -> Result<PreparedProcess, String> {
     let sandbox = PathBuf::from("/usr/bin/sandbox-exec");
     if !executable_file(&sandbox) {
@@ -1046,101 +1061,63 @@ fn prepare_macos(
     let mut policy = String::from(
         "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(allow process-info* (target same-sandbox))\n(allow sysctl-read)\n(allow sysctl-write (sysctl-name \"kern.grade_cputype\"))\n(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))\n(allow ipc-posix-sem)\n(allow ipc-posix-shm-read-data ipc-posix-shm-write-create ipc-posix-shm-write-unlink)\n(allow pseudo-tty)\n(allow mach-lookup (global-name \"com.apple.system.opendirectoryd.libinfo\") (global-name \"com.apple.system.opendirectoryd.membership\") (global-name \"com.apple.PowerManagement.control\") (global-name \"com.apple.cfprefsd.daemon\") (global-name \"com.apple.cfprefsd.agent\") (local-name \"com.apple.cfprefsd.agent\"))\n(allow file-read* file-test-existence (subpath \"/private/etc\") (subpath \"/etc\") (subpath \"/private/var/db/timezone\") (literal \"/dev/random\") (literal \"/dev/urandom\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-test-existence (subpath \"/dev/fd\") (literal \"/dev/null\") (literal \"/dev/zero\"))\n(allow file-read* file-write* file-ioctl (literal \"/dev/ptmx\") (regex #\"^/dev/ttys[0-9]+\"))\n(allow file-read* file-test-existence (literal \"/\"))\n",
     );
-    let mut definitions = Vec::<(String, PathBuf)>::new();
     append_macos_access(
         &mut policy,
-        &mut definitions,
         "file-read* file-test-existence",
-        "READ",
         readable,
-    );
+    )?;
     append_macos_access(
         &mut policy,
-        &mut definitions,
         "file-write*",
-        "WRITE",
         writable,
-    );
+    )?;
     append_macos_exact_access(
         &mut policy,
-        &mut definitions,
         "file-read* file-test-existence",
-        "READ_EXACT",
         readable_exact,
-    );
+    )?;
     append_macos_exact_access(
         &mut policy,
-        &mut definitions,
         "file-write*",
-        "WRITE_EXACT",
         writable_exact,
-    );
+    )?;
     append_macos_typed_exact_access(
         &mut policy,
-        &mut definitions,
         "file-read-data",
-        "DIRECTORY_PIN_READ",
         directory_reads,
         Some("DIRECTORY"),
-    );
+    )?;
     append_macos_typed_exact_access(
         &mut policy,
-        &mut definitions,
         "file-read* file-test-existence",
-        "PUBLICATION_DIRECTORY_READ",
         publication.directory_reads,
         Some("DIRECTORY"),
-    );
+    )?;
     append_macos_typed_exact_access(
         &mut policy,
-        &mut definitions,
         "file-write-create",
-        "PUBLICATION_DIRECTORY_CREATE",
         publication.directory_creates,
         Some("DIRECTORY"),
-    );
-    append_macos_typed_exact_access(
-        &mut policy,
-        &mut definitions,
-        "file-read* file-test-existence",
-        "PUBLICATION_FILE_READ",
-        publication.file_reads,
-        Some("REGULAR-FILE"),
-    );
-    append_macos_typed_exact_access(
-        &mut policy,
-        &mut definitions,
-        "file-write*",
-        "PUBLICATION_FILE_WRITE",
-        publication.file_writes,
-        Some("REGULAR-FILE"),
-    );
-    let mut publication_patterns = Vec::new();
-    for (prefix, operations, patterns) in [
-        ("PUBLICATION_READ_PATTERN", "file-read* file-test-existence", publication.read_patterns),
-        ("PUBLICATION_WRITE_PATTERN", "file-write*", publication.write_patterns),
+    )?;
+    for (operations, files) in [
+        ("file-read* file-test-existence", publication.read_files),
+        ("file-read* file-test-existence file-write*", publication.write_files),
     ] {
-        for (index, pattern) in patterns.into_iter().enumerate() {
-            let key = format!("{prefix}_{index}");
-            policy.push_str(&format!("(allow {operations} (require-all (vnode-type REGULAR-FILE) (regex (param \"{key}\"))))\n"));
-            publication_patterns.push((key, pattern));
+        for pattern in macos_publication_patterns(&files)? {
+            policy.push_str(&format!("(allow {operations} (require-all (vnode-type REGULAR-FILE) (regex {pattern})))\n"));
         }
     }
     append_macos_typed_exact_access(
         &mut policy,
-        &mut definitions,
         "file-write-create",
-        "WRITE_ANCESTOR_CREATE",
         writable_ancestors,
         Some("DIRECTORY"),
-    );
+    )?;
     append_macos_access(
         &mut policy,
-        &mut definitions,
         "file-read-metadata file-test-existence",
-        "ANCESTOR",
         ancestors,
-    );
+    )?;
     let mut executable_paths = authority.executable.clone();
     executable_paths.insert(executable.clone());
     executable_paths.extend(process_closure.executables.iter().cloned());
@@ -1151,26 +1128,20 @@ fn prepare_macos(
     add_macos_lexical_aliases(&mut executable_exact);
     append_macos_access(
         &mut policy,
-        &mut definitions,
         "process-exec",
-        "PROCESS_EXEC",
         executable_paths.clone(),
-    );
+    )?;
     append_macos_exact_access(
         &mut policy,
-        &mut definitions,
         "process-exec",
-        "PROCESS_EXEC_EXACT",
         executable_exact.clone(),
-    );
+    )?;
     if authority.allow_sandbox_delegation {
         append_macos_exact_access(
             &mut policy,
-            &mut definitions,
             "process-exec (with no-sandbox)",
-            "SANDBOX_DELEGATION",
             [sandbox.clone()].into_iter().collect(),
-        );
+        )?;
     }
     let mut mapped_paths = executable_paths;
     mapped_paths.insert(sandbox.clone());
@@ -1178,25 +1149,19 @@ fn prepare_macos(
     mapped_paths.extend(process_closure.bundle_roots);
     append_macos_access(
         &mut policy,
-        &mut definitions,
         "file-map-executable",
-        "EXECUTABLE",
         mapped_paths,
-    );
+    )?;
     append_macos_exact_access(
         &mut policy,
-        &mut definitions,
         "file-map-executable",
-        "EXECUTABLE_EXACT",
         executable_exact,
-    );
+    )?;
     append_macos_exact_access(
         &mut policy,
-        &mut definitions,
         "file-map-executable",
-        "RUNTIME_LIBRARY_EXACT",
         process_closure.runtime_library_paths,
-    );
+    )?;
     if authority.allow_network {
         policy.push_str(
             "(allow network*)\n(allow system-socket)\n(allow file-read* file-test-existence (literal \"/private/var\") (literal \"/var\"))\n(allow mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.networkd\") (global-name \"com.apple.ocspd\") (global-name \"com.apple.trustd\") (global-name \"com.apple.trustd.agent\") (global-name \"com.apple.SystemConfiguration.DNSConfiguration\") (global-name \"com.apple.SystemConfiguration.configd\"))\n",
@@ -1211,28 +1176,147 @@ fn prepare_macos(
             "(allow lsopen)\n(allow mach-lookup (global-name \"com.apple.CoreServices.coreservicesd\") (global-name \"com.apple.coreservices.launchservicesd\") (global-name \"com.apple.lsd.mapdb\") (global-name \"com.apple.lsd.modifydb\") (global-name \"com.apple.coreservices.quarantine-resolver\"))\n",
         );
     }
-    let mut sandbox_args = Vec::new();
-    for (key, value) in definitions {
-        let mut definition = OsString::from(format!("{key}="));
-        definition.push(value.as_os_str());
-        sandbox_args.push(OsString::from("-D"));
-        sandbox_args.push(definition);
-    }
-    for (key, pattern) in publication_patterns {
-        sandbox_args.push(OsString::from("-D"));
-        sandbox_args.push(OsString::from(format!("{key}={pattern}")));
-    }
-    sandbox_args.push(OsString::from("-p"));
-    sandbox_args.push(OsString::from(policy));
-    sandbox_args.push(OsString::from("--"));
-    sandbox_args.push(executable.as_os_str().to_os_string());
+    let profile = write_macos_profile(authority, profile_root, &policy)?;
+    let mut sandbox_args = vec![
+        OsString::from("-f"),
+        profile.path.clone().into_os_string(),
+        OsString::from("--"),
+        executable.as_os_str().to_os_string(),
+    ];
     sandbox_args.extend(args.iter().cloned());
     Ok(PreparedProcess {
         program: sandbox,
         args: sandbox_args,
         executable,
         environment,
+        sandbox_profile: Some(std::sync::Arc::new(profile)),
     })
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_PROFILE_STRING_LIMIT: usize = 1023;
+
+#[cfg(target_os = "macos")]
+fn macos_publication_patterns(paths: &BTreeSet<Vec<MacosRegexAtom>>) -> Result<Vec<String>, String> {
+    let paths = paths.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let pattern = |alternatives: &[&[MacosRegexAtom]]| {
+        let mut regex = String::from("^");
+        macos_regex_union(alternatives, &mut regex);
+        regex.push('$');
+        macos_profile_string(OsStr::new(&regex))
+    };
+    let mut patterns = Vec::new();
+    let mut start = 0;
+    while start < paths.len() {
+        let remaining = paths.len() - start;
+        let mut fitting = 1;
+        let mut failing = None;
+        while failing.is_none() && fitting < remaining {
+            let trial = (fitting * 2).min(remaining);
+            match pattern(&paths[start..start + trial]) {
+                Ok(_) => fitting = trial,
+                Err(_) => failing = Some(trial),
+            }
+        }
+        if let Some(mut failing) = failing {
+            while failing - fitting > 1 {
+                let middle = (fitting + failing) / 2;
+                match pattern(&paths[start..start + middle]) {
+                    Ok(_) => fitting = middle,
+                    Err(_) => failing = middle,
+                }
+            }
+        }
+        patterns.push(pattern(&paths[start..start + fitting])?);
+        start += fitting;
+    }
+    Ok(patterns)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_regex_union(alternatives: &[&[MacosRegexAtom]], regex: &mut String) {
+    let (Some(first), Some(last)) = (alternatives.first(), alternatives.last()) else {
+        return;
+    };
+    let shared = first.iter().zip(last.iter()).take_while(|(left, right)| left == right).count();
+    first[..shared].iter().for_each(|atom| atom.push_to(regex));
+    let tails = alternatives.iter().map(|alternative| &alternative[shared..]).collect::<Vec<_>>();
+    let optional = tails[0].is_empty();
+    let branches = tails[usize::from(optional)..].chunk_by(|left, right| left[0] == right[0]).collect::<Vec<_>>();
+    if branches.is_empty() {
+        return;
+    }
+    let grouped = optional || branches.len() > 1;
+    if grouped {
+        regex.push('(');
+    }
+    for (index, branch) in branches.into_iter().enumerate() {
+        if index > 0 {
+            regex.push('|');
+        }
+        macos_regex_union(branch, regex);
+    }
+    if grouped {
+        regex.push(')');
+    }
+    if optional {
+        regex.push('?');
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_profile_string(value: &OsStr) -> Result<String, String> {
+    let text = value.to_str().ok_or_else(|| format!("macOS sandbox path {value:?} is not UTF-8"))?;
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            character if character.is_control() => {
+                return Err(format!("macOS sandbox path {text:?} contains a control character"));
+            }
+            character => quoted.push(character),
+        }
+    }
+    if quoted.len() - 1 > MACOS_PROFILE_STRING_LIMIT {
+        return Err(format!("macOS sandbox profile string for {text:?} exceeds the profile reader limit of {MACOS_PROFILE_STRING_LIMIT} bytes"));
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
+#[cfg(target_os = "macos")]
+fn write_macos_profile(authority: &ProcessAuthority, profile_root: &Path, policy: &str) -> Result<SandboxProfileFile, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let root = normalize_existing_directory(profile_root)?;
+    if authority.writable.iter().any(|path| root.starts_with(path))
+        || authority.writable_exact.iter().any(|path| root.starts_with(path) || path.parent() == Some(root.as_path()))
+    {
+        return Err(format!("sandbox profile root '{}' is writable by the process it constrains", root.display()));
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("sandbox profile clock is before the Unix epoch: {error}"))?
+        .as_nanos();
+    let path = root.join(format!(
+        ".sandbox-profile-{}-{nonce}-{}.sb",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| format!("sandbox profile '{}' cannot be created: {error}", path.display()))?;
+    let profile = SandboxProfileFile { path };
+    file.write_all(policy.as_bytes())
+        .map_err(|error| format!("sandbox profile '{}' cannot be written: {error}", profile.path.display()))?;
+    Ok(profile)
 }
 
 #[cfg(target_os = "macos")]
@@ -1257,10 +1341,30 @@ fn add_macos_lexical_aliases(paths: &mut BTreeSet<PathBuf>) {
 struct MacosFilePublicationAccess {
     directory_reads: BTreeSet<PathBuf>,
     directory_creates: BTreeSet<PathBuf>,
-    file_reads: BTreeSet<PathBuf>,
-    file_writes: BTreeSet<PathBuf>,
-    read_patterns: BTreeSet<String>,
-    write_patterns: BTreeSet<String>,
+    read_files: BTreeSet<Vec<MacosRegexAtom>>,
+    write_files: BTreeSet<Vec<MacosRegexAtom>>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MacosRegexAtom {
+    Character(char),
+    AnyName,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosRegexAtom {
+    fn push_to(self, regex: &mut String) {
+        match self {
+            Self::Character(character) => {
+                if "\\.^$|?*+()[]{}".contains(character) {
+                    regex.push('\\');
+                }
+                regex.push(character);
+            }
+            Self::AnyName => regex.push_str("[^/]*"),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1304,30 +1408,41 @@ fn macos_file_publication_access(authority: &ProcessAuthority) -> Result<MacosFi
                         if if writable { directory != local.as_path() } else { !metadata.contains(directory) && !history.contains(directory) } {
                             return Err("file publication projection selects unrelated metadata".into());
                         }
-                        access.file_reads.insert(path.clone());
-                        if writable { access.file_writes.insert(path); }
+                        let name = path.file_name().ok_or_else(|| "file publication selector has no file name".to_string())?;
+                        insert_macos_publication_files(&mut access, directory, macos_regex_atoms(name)?, writable)?;
                     }
                     PublicationFileSelector::Names { directory, prefix, suffix } => {
                         validate_macos_publication_path(&directory, true)?;
                         if directory != local || [&prefix, &suffix].into_iter().any(|part| part.is_empty() || part.as_encoded_bytes().contains(&b'/')) {
                             return Err("file publication projection has an unbounded filename selector".into());
                         }
-                        let mut directories = BTreeSet::from([directory]);
-                        add_macos_lexical_aliases(&mut directories);
-                        for directory in directories {
-                            let pattern = format!("^{}/{}[^/]*{}$", macos_regex_text(directory.as_os_str())?, macos_regex_text(&prefix)?, macos_regex_text(&suffix)?);
-                            access.read_patterns.insert(pattern.clone());
-                            if writable { access.write_patterns.insert(pattern); }
-                        }
+                        let mut names = macos_regex_atoms(&prefix)?;
+                        names.push(MacosRegexAtom::AnyName);
+                        names.extend(macos_regex_atoms(&suffix)?);
+                        insert_macos_publication_files(&mut access, &directory, names, writable)?;
                     }
                 }
             }
         }
     }
-    for paths in [&mut access.directory_reads, &mut access.directory_creates, &mut access.file_reads, &mut access.file_writes] {
-        add_macos_lexical_aliases(paths);
-    }
+    let write_files = &access.write_files;
+    access.read_files.retain(|path| !write_files.contains(path));
     Ok(access)
+}
+
+#[cfg(target_os = "macos")]
+fn insert_macos_publication_files(
+    access: &mut MacosFilePublicationAccess,
+    directory: &Path,
+    names: Vec<MacosRegexAtom>,
+    writable: bool,
+) -> Result<(), String> {
+    let mut path = macos_regex_atoms(directory.as_os_str())?;
+    path.push(MacosRegexAtom::Character('/'));
+    path.extend(names);
+    let files = if writable { &mut access.write_files } else { &mut access.read_files };
+    files.insert(path);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -1345,15 +1460,13 @@ fn validate_macos_publication_path(path: &Path, directory: bool) -> Result<(), S
 }
 
 #[cfg(target_os = "macos")]
-fn macos_regex_text(value: &OsStr) -> Result<String, String> {
+fn macos_regex_atoms(value: &OsStr) -> Result<Vec<MacosRegexAtom>, String> {
     let value = value.to_str().ok_or_else(|| "file publication filename projection requires UTF-8".to_string())?;
-    let mut escaped = String::new();
-    for character in value.chars() {
-        if character.is_control() { return Err("file publication filename projection contains control text".into()); }
-        if "\\.^$|?*+()[]{}".contains(character) { escaped.push('\\'); }
-        escaped.push(character);
-    }
-    Ok(escaped)
+    value.chars().map(|character| if character.is_control() {
+        Err("file publication filename projection contains control text".to_string())
+    } else {
+        Ok(MacosRegexAtom::Character(character))
+    }).collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -1855,60 +1968,44 @@ fn resolve_macos_import(import: &[u8], loader: &Path, executable: &Path) -> Opti
 }
 
 #[cfg(target_os = "macos")]
-fn append_macos_access(
-    policy: &mut String,
-    definitions: &mut Vec<(String, PathBuf)>,
-    operations: &str,
-    prefix: &str,
-    paths: BTreeSet<PathBuf>,
-) {
+fn append_macos_access(policy: &mut String, operations: &str, paths: BTreeSet<PathBuf>) -> Result<(), String> {
     if paths.is_empty() {
-        return;
+        return Ok(());
     }
     policy.push_str(&format!("(allow {operations}\n"));
-    for (index, path) in paths.into_iter().enumerate() {
-        let key = format!("{prefix}_{index}");
-        policy.push_str(&format!(
-            "(literal (param \"{key}\")) (subpath (param \"{key}\"))\n"
-        ));
-        definitions.push((key, path));
+    for path in paths {
+        let path = macos_profile_string(path.as_os_str())?;
+        policy.push_str(&format!("(literal {path}) (subpath {path})\n"));
     }
     policy.push_str(")\n");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
-fn append_macos_exact_access(
-    policy: &mut String,
-    definitions: &mut Vec<(String, PathBuf)>,
-    operations: &str,
-    prefix: &str,
-    paths: BTreeSet<PathBuf>,
-) {
-    append_macos_typed_exact_access(policy, definitions, operations, prefix, paths, None);
+fn append_macos_exact_access(policy: &mut String, operations: &str, paths: BTreeSet<PathBuf>) -> Result<(), String> {
+    append_macos_typed_exact_access(policy, operations, paths, None)
 }
 
 #[cfg(target_os = "macos")]
 fn append_macos_typed_exact_access(
     policy: &mut String,
-    definitions: &mut Vec<(String, PathBuf)>,
     operations: &str,
-    prefix: &str,
     paths: BTreeSet<PathBuf>,
     vnode: Option<&str>,
-) {
+) -> Result<(), String> {
     if paths.is_empty() {
-        return;
+        return Ok(());
     }
     policy.push_str(&format!("(allow {operations}\n"));
-    for (index, path) in paths.into_iter().enumerate() {
-        let key = format!("{prefix}_{index}");
+    for path in paths {
+        let path = macos_profile_string(path.as_os_str())?;
         match vnode {
-            Some(vnode) => policy.push_str(&format!("(require-all (literal (param \"{key}\")) (vnode-type {vnode}))\n")),
-            None => policy.push_str(&format!("(literal (param \"{key}\"))\n")),
+            Some(vnode) => policy.push_str(&format!("(require-all (literal {path}) (vnode-type {vnode}))\n")),
+            None => policy.push_str(&format!("(literal {path})\n")),
         }
-        definitions.push((key, path));
     }
     policy.push_str(")\n");
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2240,6 +2337,7 @@ mod macos_network_process_tests {
                 &args,
                 root.path(),
                 None,
+                root.path(),
             )
             .expect("future-root process preparation");
         let status = std::process::Command::new(&prepared.program)
@@ -2260,6 +2358,7 @@ mod macos_network_process_tests {
                 &denied_args,
                 root.path(),
                 None,
+                root.path(),
             )
             .expect("sibling process preparation");
         let denied_status = std::process::Command::new(&denied.program)
@@ -2274,8 +2373,46 @@ mod macos_network_process_tests {
     }
 
     #[test]
+    fn large_exact_authority_reaches_the_sandbox_through_a_private_profile_file() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let base = root.path().canonicalize().expect("canonical root");
+        let profiles = base.join("profiles");
+        let unusual = base.join("quote\"back\\slash é");
+        std::fs::create_dir_all(&profiles).expect("profile root");
+        std::fs::create_dir_all(&unusual).expect("unusual directory");
+        let granted = unusual.join("granted");
+        let mut writable = (0..400).map(|index| base.join(format!("registry/interface/run_{index}/interface.json"))).collect::<Vec<_>>();
+        writable.push(granted.clone());
+        let executable = PathBuf::from("/usr/bin/touch");
+        let authority = ProcessAuthority::resolve(
+            std::iter::empty(), std::iter::empty(), std::iter::empty(), std::iter::empty(),
+            writable, [executable.clone()], false, false, false, false,
+            octopus_descriptors::ProcessSandboxMode::Enforced,
+        ).expect("large exact authority");
+        let run = |target: &Path| {
+            let prepared = authority
+                .prepare(executable.to_str().expect("executable path"), &[target.as_os_str().to_os_string()], &base, None, &profiles)
+                .expect("large authority preparation");
+            assert_eq!(prepared.args.len(), 5);
+            std::process::Command::new(&prepared.program).args(&prepared.args).env_clear()
+                .envs(&prepared.environment).current_dir(&base).status().expect("sandboxed process").success()
+        };
+        assert!(run(&granted));
+        assert!(granted.is_file());
+        let denied = unusual.join("denied");
+        assert!(!run(&denied));
+        assert!(!denied.exists());
+        assert_eq!(std::fs::read_dir(&profiles).expect("profile root").count(), 0);
+        assert!(authority
+            .prepare(executable.to_str().expect("executable path"), &[], &base, None, &unusual)
+            .unwrap_err()
+            .contains("writable by the process it constrains"));
+    }
+
+    #[test]
     fn network_preparation_materializes_the_platform_trust_contract() {
         let cwd = std::env::current_dir().expect("current directory");
+        let profiles = tempfile::tempdir().expect("profile root");
         let executable = PathBuf::from("/usr/bin/true");
         let network = ProcessAuthority::resolve(
             std::iter::empty(),
@@ -2297,17 +2434,15 @@ mod macos_network_process_tests {
                 &[],
                 &cwd,
                 None,
+                profiles.path(),
             )
             .expect("network process preparation");
         assert_eq!(
             prepared.environment.get(OsStr::new("SSL_CERT_FILE")),
             Some(&OsString::from("/private/etc/ssl/cert.pem"))
         );
-        assert!(prepared.args.iter().any(|argument| {
-            argument
-                .to_string_lossy()
-                .ends_with("=/private/etc/ssl/cert.pem")
-        }));
+        assert!(std::fs::read_to_string(&prepared.args[1]).expect("network profile")
+            .contains("(literal \"/private/etc/ssl/cert.pem\")"));
 
         let offline = ProcessAuthority::resolve(
             std::iter::empty(),
@@ -2328,6 +2463,7 @@ mod macos_network_process_tests {
             &[],
             &cwd,
             None,
+            profiles.path(),
         )
         .expect("offline process preparation");
         assert!(!offline
@@ -2362,17 +2498,12 @@ mod native_path_tests {
             [], [], [], [], [], [], false, false, true, true,
             octopus_descriptors::ProcessSandboxMode::Enforced,
         ).expect("process authority");
+        let profiles = tempfile::tempdir().expect("profile root");
         let prepared = authority
-            .prepare("/usr/bin/true", &[], Path::new("/tmp"), None)
+            .prepare("/usr/bin/true", &[], Path::new("/tmp"), None, profiles.path())
             .expect("prepared process");
-        let arguments = prepared
-            .args
-            .iter()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(arguments.contains("process-exec (with no-sandbox)"));
-        assert!(arguments.contains("SANDBOX_DELEGATION_0=/usr/bin/sandbox-exec"));
-        assert!(arguments.contains("lsopen"));
+        let profile = std::fs::read_to_string(&prepared.args[1]).expect("prepared profile");
+        assert!(profile.contains("process-exec (with no-sandbox)\n(literal \"/usr/bin/sandbox-exec\")"));
+        assert!(profile.contains("lsopen"));
     }
 }

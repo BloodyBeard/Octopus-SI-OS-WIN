@@ -2794,11 +2794,13 @@ fn spawn_process_command_life(
             .map_err(|error| format!("resolved interface descriptor failed to encode: {error}"))?;
         let host_io_limits_json = serde_json::to_string(&host_io_limits)
             .map_err(|error| format!("interface host I/O limits failed to encode: {error}"))?;
+        let profile_root = life_profile_root(ctx.var_dir.parent().ok_or("interface life has no private root")?)?;
         let prepared = resolved.authority.prepare(
             &declared_program,
             &arguments,
             &executable_base,
             environment.get("PATH").map(std::ffi::OsString::as_os_str),
+            &profile_root,
         )?;
         let executable = prepared.executable.clone();
         if (command_config.bin.starts_with(OWNER_EXECUTABLE_PREFIX)
@@ -3272,6 +3274,22 @@ fn resolve_process_read_handle(name: &str, path: &Path, exact: bool) -> Result<P
         })
     }?;
     Ok(resolved)
+}
+
+fn life_profile_root(private_root: &Path) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(private_root)
+        .map_err(|error| format!("interface life private root '{}' cannot be resolved: {error}", private_root.display()))?;
+    let profiles = root.join(".life-profiles");
+    match std::fs::create_dir(&profiles) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(format!("interface life profile root '{}' cannot be created: {error}", profiles.display())),
+    }
+    let metadata = std::fs::symlink_metadata(&profiles).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("interface life profile root must be a regular directory".into());
+    }
+    Ok(profiles)
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {

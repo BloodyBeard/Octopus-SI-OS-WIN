@@ -475,6 +475,7 @@ fn run_package_process(
             &[],
             &scratch_dir.path,
             environment.get("PATH").map(OsString::as_os_str),
+            &ctx.scratch_root,
         )
         .map_err(|error| {
             serde_json::json!({

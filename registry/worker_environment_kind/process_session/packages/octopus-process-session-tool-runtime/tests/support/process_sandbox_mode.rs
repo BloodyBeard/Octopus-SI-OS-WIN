@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn disabled_descriptor_launches_directly() {
     let root = tempfile::tempdir().unwrap();
+    let profiles = tempfile::tempdir().unwrap();
     let spec = ProcessAuthoritySpec {
         sandbox_mode: octopus_descriptors::ProcessSandboxMode::Disabled,
         ..Default::default()
@@ -28,6 +29,7 @@ fn disabled_descriptor_launches_directly() {
             &[target.clone().into_os_string()],
             root.path(),
             None,
+            profiles.path(),
         )
         .unwrap();
     assert_eq!(process.program, process.executable);
