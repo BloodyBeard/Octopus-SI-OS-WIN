@@ -4,7 +4,7 @@ import catalogRows from "./toolActivityPresentationCatalog.json";
 export type DynamicToolPresentationFamily = "exec" | "files" | "read" | "web" | "tool";
 
 type ClientToolPresentationDescriptor = ChatToolPresentationDescriptor & {
-  surface: "browser" | "web" | null;
+  surface: "browser" | "web" | "integration" | null;
   targetKind: "file" | "artifact";
   resultTargetFields: string[];
 };
@@ -30,7 +30,7 @@ export type DynamicToolPresentation = {
   operation: NativeRunOperationPresentation | null;
 };
 
-export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "browserUse";
+export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "octopus" | "browserUse";
 
 export function dynamicToolPresentation(
   message: ChatRenderMessage | undefined,
@@ -100,7 +100,7 @@ export function dynamicToolGlyph(presentation: DynamicToolPresentation): Dynamic
     if (presentation.kind === "list") return "folder";
     return "read";
   }
-  return "plugins";
+  return presentation.surface === "integration" ? "plugins" : "octopus";
 }
 
 export function dynamicToolReadLabel(presentation: DynamicToolPresentation, active: boolean): string {
@@ -233,7 +233,8 @@ export function clientToolActivityPresentation(toolId: string): ClientToolPresen
 }
 
 function baseDynamicToolId(exactToolId: string): string {
-  return exactToolId.replace(/__[a-f0-9]+$/i, "");
+  const separator = exactToolId.indexOf("__");
+  return separator > 0 ? exactToolId.slice(0, separator) : exactToolId;
 }
 
 function parseClientToolActivityPresentation(value: unknown): ClientToolPresentationDescriptor | null {
@@ -241,7 +242,7 @@ function parseClientToolActivityPresentation(value: unknown): ClientToolPresenta
   const kind = text(row.kind);
   if (!["command", "file_change", "list", "read", "search", "tool"].includes(kind)) return null;
   return {
-    surface: row.surface === "browser" || row.surface === "web" ? row.surface : null,
+    surface: row.surface === "browser" || row.surface === "web" || row.surface === "integration" ? row.surface : null,
     conversationVisible: row.conversation_visible !== false,
     kind: kind as ChatToolPresentationDescriptor["kind"],
     label: text(row.label),

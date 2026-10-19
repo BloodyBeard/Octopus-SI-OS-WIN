@@ -1064,119 +1064,136 @@
     "conversation_visible": true,
     "label": "Call tool",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.cancel_request": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Cancel request",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.close": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Close",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.complete": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Complete",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.get_prompt": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Get prompt",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.list_prompts": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "List prompts",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.list_resource_templates": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "List resource templates",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.list_resources": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "List resources",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.list_tools": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "List tools",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.ping": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Ping",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.poll_events": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Poll events",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.read_resource": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Read resource",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.send_progress": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Send progress",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.set_logging_level": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Set logging level",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.status": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Status",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.subscribe_resource": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Subscribe resource",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "mcp.unsubscribe_resource": {
     "kind": "tool",
     "conversation_visible": true,
     "label": "Unsubscribe resource",
     "target_arguments": [],
-    "query_arguments": []
+    "query_arguments": [],
+    "surface": "integration"
   },
   "memory.list": {
     "kind": "list",

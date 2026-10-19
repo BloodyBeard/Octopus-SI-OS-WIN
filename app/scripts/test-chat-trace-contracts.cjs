@@ -550,6 +550,24 @@ assert.equal(toolPresentation.dynamicToolOperationLabel(projectedContainerStatus
 assert.equal(toolPresentation.dynamicToolGlyph(projectedBrowserTabs), "browserUse");
 assert.equal(toolPresentation.dynamicToolGlyph(projectedWorkspaceRead), "read");
 assert.equal(toolPresentation.dynamicToolGlyph(projectedWorkspaceExec), "terminal");
+const namedChatSuffix = `system_review_${workspaceToolSuffix}`;
+const projectedNamedExec = toolPresentation.dynamicToolPresentation({
+  eventData: { arguments: { command: "git status --short" }, tool: `workspace.exec__${namedChatSuffix}` },
+}, {});
+const projectedAuthoringWrite = toolPresentation.dynamicToolPresentation({
+  eventData: { arguments: { path: "run.json" }, tool: `file.write__authoring_${namedChatSuffix}` },
+}, {});
+const projectedOctopusMcp = toolPresentation.dynamicToolPresentation({
+  eventData: { arguments: {}, tool: `client.mcp__${namedChatSuffix}` },
+}, {});
+const projectedIntegrationCall = toolPresentation.dynamicToolPresentation({
+  eventData: { arguments: {}, tool: `mcp.call_tool__${namedChatSuffix}` },
+}, {});
+assert.equal(projectedNamedExec.family, "exec");
+assert.equal(projectedNamedExec.target, "git status --short");
+assert.equal(projectedAuthoringWrite.conversationVisible, false);
+assert.equal(toolPresentation.dynamicToolGlyph(projectedOctopusMcp), "octopus");
+assert.equal(toolPresentation.dynamicToolGlyph(projectedIntegrationCall), "plugins");
 
 const exactProviderLiveTool = chatActivityProjectionModule.liveArtifactMessage({
   source: "movement",
@@ -1307,7 +1325,7 @@ async function verifyTranscriptLayout() {
     assert.equal(query(".octopus-agent-activity-body"), null, "settled groups mount collapsed");
     await click(query(".octopus-agent-activity-toggle"));
     assert.deepEqual(rowText(), ["Run list", "Read life.rs"]);
-    assert.ok(query('.structured-activity [data-glyph="plugins"]'), "interface operations retain a tool icon");
+    assert.ok(query('.structured-activity [data-glyph="octopus"]'), "Octopus interface operations carry the Octopus mark");
     assert.equal(query(".structured-activity-body"), null, "closed operation details cannot retain padding");
     await click(query(".structured-activity .octopus-agent-activity-toggle"));
     assert.match(query(".structured-activity-body").textContent, /Arguments\{\}Result[\s\S]*count/);
