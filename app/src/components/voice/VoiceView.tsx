@@ -7,7 +7,7 @@ import { createPortal } from "react-dom";
 import { subscribeClientCommands } from "../../clientActions";
 import type { ChatRun } from "../../chatRuns";
 import { ClientSurfaceRenderer, resetVoiceWidgetLayout, restoreVoiceWidgetLayout } from "../../client-surfaces/ClientSurfaceRenderer";
-import { homeSurfaceIdentity } from "../../client-surfaces/homePresentation";
+import { homeSurfaceIdentity, homeSurfaceLayoutIdentity } from "../../client-surfaces/homePresentation";
 import { useHomeSurfaceDocuments } from "../../client-surfaces/useHomeSurfaceDocuments";
 import { QueuedMessageList } from "../chat/QueuedMessageList";
 import type { AdmittedClientSurfaceDocument, ClientSurfaceActionEvent, ClientSurfaceHostSource } from "../../client-surfaces/types";
@@ -82,6 +82,8 @@ const VOICE_SPEAKER_KEY = "octopus.voice.speaker-enabled.v1";
 const VOICE_HIDDEN_SURFACES_KEY = "octopus.voice.hidden-surfaces.v1";
 const FORMING_DELIVERY_WINDOW_MS = 15_000;
 const FORMING_HOLD_MS = 1_600;
+const LEAVING_HOLD_MS = 420;
+const SURFACE_TRANSITIONS_SETTLE_MS = 1_200;
 const LAB_TASK_PROGRESS: TaskProgressWidget = {
   completion: 62,
   running: 7,
@@ -120,6 +122,10 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   const seenSurfaceIdsRef = useRef(new Set<string>());
   const formingTimersRef = useRef(new Set<number>());
   const [formingSurfaceIds, setFormingSurfaceIds] = useState<ReadonlySet<string>>(() => new Set());
+  const visibilityBaselineRef = useRef<ReadonlyMap<string, AdmittedClientSurfaceDocument> | null>(null);
+  const leavingTimersRef = useRef(new Set<number>());
+  const [leavingSurfaces, setLeavingSurfaces] = useState<ReadonlyMap<string, AdmittedClientSurfaceDocument>>(() => new Map());
+  const [surfaceTransitionsArmed, setSurfaceTransitionsArmed] = useState(false);
   const stageMainRef = useRef<HTMLElement>(null);
   const orbProbeRef = useRef<HTMLElement>(null);
   const outputMeter = useSyncExternalStore(
@@ -196,13 +202,17 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     : null;
   const latestHomeStreamingResponse = useMemo(() => {
     const latestPromptAtMs = latestHomePrompt?.createdAtMs ?? 0;
+    const currentTurnAtMs = [...homeInterfaceMessages]
+      .reverse()
+      .find((message) => message.eventKind === "turn_started" && message.createdAtMs >= latestPromptAtMs)
+      ?.createdAtMs ?? latestPromptAtMs;
     return [...homeInterfaceMessages]
       .reverse()
       .find((message) => (
         message.direction === "out"
         && message.role === "assistant"
         && message.eventKind === "message_delta"
-        && message.createdAtMs >= latestPromptAtMs
+        && message.createdAtMs >= currentTurnAtMs
         && Boolean(message.text.trim())
       )) ?? null;
   }, [homeInterfaceMessages, latestHomePrompt?.createdAtMs]);
@@ -286,11 +296,19 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     : visibleHomeSurfaceIds.has(homeSurfaceIdentity(surface));
   const visibleSurfaces = allSurfaces.filter(surfaceVisible);
   const visibleSurfaceKey = visibleSurfaces.map(homeSurfaceIdentity).join("\n");
-  const leftSurfaces = visibleSurfaces.filter((surface) => (
+  const visibleLayoutIds = new Set(visibleSurfaces.map(homeSurfaceLayoutIdentity));
+  const visibilityBaseline = surfaceTransitionsArmed ? visibilityBaselineRef.current : null;
+  const appearingLayoutIds = new Set(visibilityBaseline ? [...visibleLayoutIds].filter((id) => !visibilityBaseline.has(id)) : []);
+  const leaving = new Map([...leavingSurfaces, ...(visibilityBaseline ?? [])].filter(([id]) => !visibleLayoutIds.has(id)));
+  const renderedSurfaces = [...visibleSurfaces, ...leaving.values()].sort((left, right) => (
+    left.document.target.order - right.document.target.order
+      || left.document.title.localeCompare(right.document.title)
+  ));
+  const leftSurfaces = renderedSurfaces.filter((surface) => (
     (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
     && surface.document.target.slot === "left"
   ));
-  const rightSurfaces = visibleSurfaces.filter((surface) => (
+  const rightSurfaces = renderedSurfaces.filter((surface) => (
     (surface.document.target.kind === "voice.widget" || surface.document.target.kind === "voice.window")
     && surface.document.target.slot === "right"
   ));
@@ -307,7 +325,35 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
     if (delivered.length) formSurfaces(delivered.map(homeSurfaceIdentity));
   }, [visibleSurfaceKey]);
 
-  useEffect(() => () => formingTimersRef.current.forEach((timer) => window.clearTimeout(timer)), []);
+  useEffect(() => {
+    if (!installedWidgetsReady) return;
+    const timer = window.setTimeout(() => setSurfaceTransitionsArmed(true), SURFACE_TRANSITIONS_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [installedWidgetsReady]);
+
+  useEffect(() => {
+    if (!installedWidgetsReady) return;
+    const current = new Map(visibleSurfaces.map((surface) => [homeSurfaceLayoutIdentity(surface), surface] as const));
+    const previous = visibilityBaselineRef.current;
+    visibilityBaselineRef.current = current;
+    if (!previous || !surfaceTransitionsArmed) return;
+    const appeared = [...current].filter(([id]) => !previous.has(id)).map(([, surface]) => homeSurfaceIdentity(surface));
+    if (appeared.length) formSurfaces(appeared);
+    const departed = [...previous].filter(([id]) => !current.has(id));
+    if (!departed.length) return;
+    const departedIds = departed.map(([id]) => id);
+    setLeavingSurfaces((surfaces) => new Map([...surfaces, ...departed]));
+    const timer = window.setTimeout(() => {
+      leavingTimersRef.current.delete(timer);
+      setLeavingSurfaces((surfaces) => new Map([...surfaces].filter(([id]) => !departedIds.includes(id))));
+    }, LEAVING_HOLD_MS);
+    leavingTimersRef.current.add(timer);
+  }, [installedWidgetsReady, surfaceTransitionsArmed, visibleSurfaceKey]);
+
+  useEffect(() => () => {
+    formingTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    leavingTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
 
   useAppErrorToast(chatProductError(workspace) || "");
   useAppErrorToast(homeSurfaces.errors.join("\n"));
@@ -577,7 +623,8 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
             key={homeSurfaceIdentity(surface)}
             onAction={handleSurfaceAction}
             onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
-            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface))}
+            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface)) || appearingLayoutIds.has(homeSurfaceLayoutIdentity(surface))}
+            voiceLeaving={leaving.has(homeSurfaceLayoutIdentity(surface))}
             voicePlacement={{ count: leftSurfaces.length, index, slot: "left" }}
           />
         ))}
@@ -588,7 +635,8 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
             key={homeSurfaceIdentity(surface)}
             onAction={handleSurfaceAction}
             onDismiss={surface.document.target.kind === "voice.window" || !surface.sourceExtensionId ? () => setSurfaceVisible(surface, false) : undefined}
-            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface))}
+            voiceForming={formingSurfaceIds.has(homeSurfaceIdentity(surface)) || appearingLayoutIds.has(homeSurfaceLayoutIdentity(surface))}
+            voiceLeaving={leaving.has(homeSurfaceLayoutIdentity(surface))}
             voicePlacement={{ count: rightSurfaces.length, index, slot: "right" }}
           />
         ))}
