@@ -5631,6 +5631,8 @@ function createProjectionStore(options) {
         ));
         return {
           name,
+          display_name: stringValue(localPackage?.display?.name),
+          description: stringValue(localPackage?.display?.description),
           package_id: stringValue(localPackage?.id) || `driver.${name}`,
           installed,
           materialized,

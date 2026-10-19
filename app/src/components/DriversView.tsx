@@ -64,6 +64,8 @@ type DriverRecord = {
   install_packages?: Array<{ id: string; name: string; source_digest: string; installed: boolean; receipt_state: string }>;
   agent_presets?: DriverAgentPreset[];
   name: string;
+  display_name?: string;
+  description?: string;
   package_id?: string;
   installed: boolean;
   materialized?: boolean;
@@ -1028,7 +1030,7 @@ function DriverCard({ accessProfile, driver, highlighted, lifecycle, onFocus, on
       >
         <DriverVisual driver={driver} size={view === "browse" ? "browse" : "card"} />
         <span className={cx("flex min-w-0 flex-1 flex-col justify-center", view === "browse" ? "gap-px" : "gap-0.5")}>
-          <span className="block truncate font-medium text-default">{titleCase(driver.name)}</span>
+          <span className="block truncate font-medium text-default">{driverName(driver)}</span>
           <span className="block line-clamp-1 text-sm leading-relaxed text-text-description">{driverSummary(driver)}</span>
           <DriverCardMeta driver={driver} />
         </span>
@@ -1057,7 +1059,7 @@ function DriverCard({ accessProfile, driver, highlighted, lifecycle, onFocus, on
               event.stopPropagation();
               onSetup();
             }} size="xs" variant="ghost">{driverAvailableScopeCount(driver) ? "Manage" : "Set up"}</OcButton>
-            {onRemove ? <OcIconButton disabled={accessProfile !== "live" || driver.removal_allowed !== true} glyph="trash" label={`Remove ${titleCase(driver.name)}`} onClick={(event) => {
+            {onRemove ? <OcIconButton disabled={accessProfile !== "live" || driver.removal_allowed !== true} glyph="trash" label={`Remove ${driverName(driver)}`} onClick={(event) => {
               event.stopPropagation();
               onRemove();
             }} size="xs" title={driverRemovalTitle(driver, accessProfile)} variant="ghost" /> : null}
@@ -1072,20 +1074,12 @@ function DriverCard({ accessProfile, driver, highlighted, lifecycle, onFocus, on
 }
 
 function DriverStateStatuses({ driver }: { driver: DriverRecord }) {
-  const availableHome = driver.project_states.some((state) => state.is_root && state.policy_allowed);
-  const availableProjects = driverAvailableProjectCount(driver);
-  const defaults = driver.project_states.filter((state) => state.selected_by_default).length;
   const activeInstances = driver.active_instances.length;
   const status = driverPrimaryStatus(driver);
   return (
     <span className="flex min-w-0 flex-wrap items-center gap-1">
       <OcStatus label={status.label} tone={status.tone} />
-      {availableHome ? <OcStatus label="Available in Home" /> : null}
-      {availableProjects ? (
-        <OcStatus label={availableProjects === 1 ? "Available in project" : `Available in projects · ${availableProjects}`} />
-      ) : null}
-      {defaults ? <OcStatus label={defaults === 1 ? "Default for new tasks" : `Default for new tasks · ${defaults}`} /> : null}
-      {activeInstances ? <OcStatus label={`Active · ${activeInstances}`} tone="success" /> : null}
+      {activeInstances ? <OcStatus label={`In use · ${activeInstances}`} tone="success" /> : null}
     </span>
   );
 }
@@ -1114,7 +1108,7 @@ function DriverCardMeta({ driver }: { driver: DriverRecord }) {
         status.tone === "danger" && "text-token-charts-red",
       )}>{status.label}</span>
       {scope ? <><span aria-hidden="true">·</span><span className="truncate">{scope}</span></> : null}
-      {activeInstances ? <><span aria-hidden="true">·</span><span className="truncate text-token-charts-green">Active {activeInstances}</span></> : null}
+      {activeInstances ? <><span aria-hidden="true">·</span><span className="truncate text-token-charts-green">In use {activeInstances}</span></> : null}
     </span>
   );
 }
@@ -1125,12 +1119,11 @@ function driverPrimaryStatus(driver: DriverRecord): { label: string; tone: "neut
     || driver.partially_materialized === true
     || driver.receipt_state === "stale"
   );
-  if (materializationIncomplete) return { label: "Install incomplete", tone: "danger" };
-  if (driver.installed && !driverAvailableScopeCount(driver)) return { label: "Needs setup", tone: "warning" };
-  if (driver.installed) return { label: "Installed", tone: "success" };
-  if (driver.source_available === true) return { label: "Available locally", tone: "neutral" };
-  if (driver.source_available === false) return { label: "Source unavailable", tone: "danger" };
-  return { label: "Source status unavailable", tone: "warning" };
+  if (materializationIncomplete) return { label: "Needs repair", tone: "danger" };
+  if (driver.installed && !driverAvailableScopeCount(driver)) return { label: "Not enabled", tone: "neutral" };
+  if (driver.installed) return { label: "Enabled", tone: "success" };
+  if (driver.source_available === true) return { label: "Not installed", tone: "neutral" };
+  return { label: "Unavailable", tone: "danger" };
 }
 
 function DriverLifecycleProgress({ operation }: { operation: DriverLifecycleOperation }) {
@@ -1183,7 +1176,7 @@ function DriverDetail({ accessProfile, backButtonRef, driver, lifecycle, onBack,
     <section className="flex h-full min-h-0 flex-col text-base select-none">
       <header className="surface-titlebar-spacer flex h-toolbar shrink-0 items-center px-panel">
         <button className="no-drag cursor-interaction flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-secondary hover:bg-primary-ghost-hover hover:text-default focus:outline-none" onClick={onBack} ref={backButtonRef} type="button">
-          <span>{returnView === "manage" ? "Manage drivers" : "Drivers"}</span><span className="text-tertiary">/</span><span className="truncate text-default">{titleCase(driver.name)}</span>
+          <span>{returnView === "manage" ? "Manage drivers" : "Drivers"}</span><span className="text-tertiary">/</span><span className="truncate text-default">{driverName(driver)}</span>
         </button>
       </header>
       <div className="plugins-surface-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]">
@@ -1193,7 +1186,7 @@ function DriverDetail({ accessProfile, backButtonRef, driver, lifecycle, onBack,
               <DriverVisual driver={driver} size="detail" />
               <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
                 <div className="flex min-w-0 flex-1 basis-64 flex-col gap-1.5">
-                  <h1 className="heading-base min-w-0 break-words text-default electron:heading-lg">{titleCase(driver.name)}</h1>
+                  <h1 className="heading-base min-w-0 break-words text-default electron:heading-lg">{driverName(driver)}</h1>
                   <div className="text-base text-secondary">{driverSummary(driver)}</div>
                   <DriverStateStatuses driver={driver} />
                 </div>
@@ -1231,15 +1224,12 @@ function DriverDetail({ accessProfile, backButtonRef, driver, lifecycle, onBack,
                 : driver.materialized || driver.partially_materialized
                   ? "Driver files were found, but Octopus could not verify one complete installation."
                   : driver.source_available === true
-                    ? "Available locally to install. No project policy or task environment has been added."
-                    : driver.source_available === false
-                      ? "No verified local package source is available."
-                      : "Local package availability is not reported by this projection."} />
-              <DriverDetailRow label="Available in Home" value={availableHome ? "Yes" : "No"} />
-              <DriverDetailRow label="Available in projects" value={availableProjects.length ? availableProjects.map((state) => driverProjectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not available in any project yet."} />
+                    ? "Not installed. Installing adds it to no project until you enable it."
+                    : "This build ships no package for it."} />
+              <DriverDetailRow label="Enabled in Home" value={availableHome ? "Yes" : "No"} />
+              <DriverDetailRow label="Enabled in projects" value={availableProjects.length ? availableProjects.map((state) => driverProjectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not enabled in any project yet."} />
               <DriverDetailRow label="Default for new tasks" value={defaultProjects.length ? defaultProjects.map((state) => driverProjectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not selected by default in any project."} />
-              <DriverDetailRow label="Local source" value={driverLocalSourceDetail(driver)} />
-              {driver.installed || driver.materialized || driver.partially_materialized ? <DriverDetailRow label="Install receipt" value={driverReceiptDetail(driver)} /> : null}
+              {driver.materialized || driver.partially_materialized ? driver.receipt_state === "valid" ? null : <DriverDetailRow label="Install receipt" value={driverReceiptDetail(driver)} /> : null}
               {driver.installed && (driver.removal_block_reason || driver.removal_allowed === undefined) ? <DriverDetailRow label="Removal" value={driver.removal_block_reason || "Removal availability is not reported by this projection."} /> : null}
             </DriverDetailSection>
             {driver.agent_presets?.length ? <DriverDetailSection title="Agent presets">
@@ -1285,7 +1275,7 @@ function DriverRemovalDialog({ accessProfile, driver, lifecycle, onCancel, onCon
       {driver ? (
         <>
           <div className="px-6 pt-8 pb-6">
-            <h2 className="heading-base text-token-foreground electron:heading-lg">Remove {titleCase(driver.name)}?</h2>
+            <h2 className="heading-base text-token-foreground electron:heading-lg">Remove {driverName(driver)}?</h2>
             <p className="mt-2 text-sm leading-5 text-token-text-secondary">This removes the Driver and its package-owned tools from the active registry. Project access must already be removed, and no worker environment may still be active.</p>
             {driver.removal_block_reason || driver.removal_allowed !== true ? <div className="mt-4 rounded-xl border border-token-charts-orange/25 bg-token-charts-orange/10 px-3 py-2 text-sm text-token-charts-orange">{driver.removal_block_reason || (driver.removal_allowed === false ? "This driver cannot be removed in its current state." : "Removal availability is not reported by this projection.")}</div> : null}
           </div>
@@ -1335,7 +1325,7 @@ function DriverSetupDialog({
         <div className="flex items-start gap-4 px-6 pt-8 pb-6">
           <DriverVisual driver={driver} size="detail" />
           <div className="min-w-0 flex-1">
-            <h2 className="heading-base text-token-foreground electron:heading-lg">Set up {titleCase(driver.name)}</h2>
+            <h2 className="heading-base text-token-foreground electron:heading-lg">Set up {driverName(driver)}</h2>
             <p className="mt-1 text-sm leading-5 text-token-text-secondary">Choose the projects that may use this driver and provide any folders or machine settings it needs. An environment starts only when a task uses it.</p>
           </div>
           <OcIconButton disabled={saving} glyph="close" label="Close" onClick={onCancel} variant="ghost" />
@@ -1477,14 +1467,15 @@ function driverGlyph(driver: DriverRecord): GlyphName {
 }
 
 function driverSummary(driver: DriverRecord): string {
+  if (driver.description?.trim()) return driver.description.trim();
   const capabilities = driver.capabilities.slice(0, 3).map(titleCase).join(" · ");
-  return [titleCase(driver.substrate_family), capabilities || `${driver.tool_ids.length} tool${driver.tool_ids.length === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+  return capabilities || `${driver.tool_ids.length} tool${driver.tool_ids.length === 1 ? "" : "s"}`;
 }
 
 function driverInstallTitle(driver: DriverRecord, accessProfile: OctopusClientAccessProfile): string {
   if (accessProfile !== "live") return "Install drivers from the Administrator profile.";
   if (driver.install_block_reason) return driver.install_block_reason;
-  if (driver.source_available === true) return `Install ${titleCase(driver.name)}`;
+  if (driver.source_available === true) return `Install ${driverName(driver)}`;
   if (driver.source_available === false) return "No verified local package source is available.";
   return "Local package availability is not reported by this projection.";
 }
@@ -1492,16 +1483,9 @@ function driverInstallTitle(driver: DriverRecord, accessProfile: OctopusClientAc
 function driverRemovalTitle(driver: DriverRecord, accessProfile: OctopusClientAccessProfile): string {
   if (accessProfile !== "live") return "Remove drivers from the Administrator profile.";
   if (driver.removal_block_reason) return driver.removal_block_reason;
-  if (driver.removal_allowed === true) return `Remove ${titleCase(driver.name)}`;
+  if (driver.removal_allowed === true) return `Remove ${driverName(driver)}`;
   if (driver.removal_allowed === false) return "This driver cannot be removed in its current state.";
   return "Removal availability is not reported by this projection.";
-}
-
-function driverLocalSourceDetail(driver: DriverRecord): string {
-  if (driver.source_available === false) return "Unavailable.";
-  if (driver.source_available !== true) return "Local source status is not reported by this projection.";
-  if (typeof driver.source_file_count !== "number") return "Verified local package source available.";
-  return `${driver.source_file_count} verified package file${driver.source_file_count === 1 ? "" : "s"}.`;
 }
 
 function driverReceiptDetail(driver: DriverRecord): string {
@@ -1531,7 +1515,7 @@ function driverKey(driver: DriverRecord): string {
 }
 
 function driverName(driver: DriverRecord): string {
-  return titleCase(driver.name);
+  return driver.display_name?.trim() || titleCase(driver.name);
 }
 
 function driverOpenButtonId(view: DriverCatalogView, name: string): string {

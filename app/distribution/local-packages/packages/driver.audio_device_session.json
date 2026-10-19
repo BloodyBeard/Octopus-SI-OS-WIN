@@ -2,13 +2,13 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.audio_device_session",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "product_kind": "driver",
   "product_id": "audio_device_session",
   "release_status": "optional",
   "display": {
     "name": "Audio Device Session",
-    "description": "Provides Audio Capture, Audio Device Inventory, Audio Playback, Local Hardware Io, Media Artifact Capture.",
+    "description": "Microphone and speaker access for voice and audio tasks.",
     "developer": "Octopus",
     "category": "worker_environment",
     "icon": "hard-drive"

@@ -2,13 +2,13 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.browser_session",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "product_kind": "driver",
   "product_id": "browser_session",
   "release_status": "optional",
   "display": {
     "name": "Browser Session",
-    "description": "Provides Browser Session, Persistent Browser, Page Navigation, History Navigation, Forms, Pointer Interaction.",
+    "description": "A real browser Home and tasks can drive: open pages, fill forms, click and go back.",
     "developer": "Octopus",
     "category": "worker_environment",
     "icon": "hard-drive"

@@ -2,13 +2,13 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.process_session",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "product_kind": "driver",
   "product_id": "process_session",
   "release_status": "optional",
   "display": {
     "name": "Process Session",
-    "description": "Provides Process Exec, Persistent Process, Pty, Private Workspace, One Shot Exec, Filesystem.",
+    "description": "Private process rooms with their own workspace, terminals and long-running commands.",
     "developer": "Octopus",
     "category": "worker_environment",
     "icon": "hard-drive"

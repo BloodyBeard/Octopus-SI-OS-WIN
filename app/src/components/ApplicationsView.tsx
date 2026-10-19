@@ -211,10 +211,10 @@ type ApplicationCatalogView = "browse" | "manage";
 const CATEGORY_ORDER: ApplicationCategory[] = ["provider", "connector", "plugin", "artifact"];
 const SHA256_DIGEST = /^[a-f0-9]{64}$/;
 const CATEGORY_COPY: Record<ApplicationCategory, { title: string; description: string }> = {
-  provider: { title: "AI Providers", description: "Model interfaces you can make available to Home and agent tasks." },
-  connector: { title: "Connectors", description: "Channels and services you can attach to a task through exact interfaces." },
-  plugin: { title: "Plugins", description: "Capabilities Octopus can choose to use when a task needs them." },
-  artifact: { title: "Artifacts", description: "Installed context and knowledge packages you can include in new tasks." },
+  provider: { title: "AI Providers", description: "Models Home and tasks run on. Codex uses your ChatGPT sign-in; the others connect with an API key through OpenCodex." },
+  connector: { title: "Connectors", description: "Services and triggers that bring messages into a task and carry its replies back out." },
+  plugin: { title: "Plugins", description: "Tools and guides a task picks up when it needs them, such as MCP servers, memory and image generation." },
+  artifact: { title: "Context", description: "Knowledge packages you can attach to new tasks." },
 };
 
 export function ApplicationsView({
@@ -857,7 +857,6 @@ export function ApplicationsView({
                                 accessProfile={accessProfile}
                                 clientSetup={clientSetup}
                                 clientSetupError={clientSetupError}
-                                extensionById={extensionById}
                                 highlighted={highlightedId === applicationPackKey(pack.id)}
                                 lifecycle={packLifecycleOperations[pack.id]}
                                 onApply={() => void applyApplicationPack(pack)}
@@ -963,11 +962,10 @@ export function ApplicationsView({
   );
 }
 
-function ApplicationPackCard({ accessProfile, clientSetup, clientSetupError, extensionById, highlighted, lifecycle, onApply, onOpen, pack, setRef, setupStatus }: {
+function ApplicationPackCard({ accessProfile, clientSetup, clientSetupError, highlighted, lifecycle, onApply, onOpen, pack, setRef, setupStatus }: {
   accessProfile: OctopusClientAccessProfile;
   clientSetup: OctopusClientSetupState | null;
   clientSetupError: string;
-  extensionById: Map<string, ClientExtensionRecord>;
   highlighted: boolean;
   lifecycle?: ApplicationPackLifecycleOperation;
   onApply: () => void;
@@ -1005,7 +1003,7 @@ function ApplicationPackCard({ accessProfile, clientSetup, clientSetupError, ext
             <OcStatus label="Pack" tone="neutral" />
           </span>
           <span className="mt-0.5 block line-clamp-2 text-sm leading-relaxed text-text-description">{pack.description}</span>
-          <ApplicationPackFactBadges clientSetup={clientSetup} clientSetupError={clientSetupError} compact extensionById={extensionById} pack={pack} setupStatus={setupStatus} />
+          <ApplicationPackFactBadges clientSetup={clientSetup} clientSetupError={clientSetupError} compact pack={pack} setupStatus={setupStatus} />
         </span>
       </button>
       {needsApply ? (
@@ -1087,7 +1085,7 @@ function ApplicationPackDetail({ accessProfile, clientSetup, clientSetupError, e
                   <div className="text-base text-token-text-secondary">{pack.description}</div>
                 </div>
                 <div className="flex max-w-full shrink-0 items-center gap-2">
-                  <ApplicationPackFactBadges clientSetup={clientSetup} clientSetupError={clientSetupError} extensionById={extensionById} pack={pack} setupStatus={setupStatus} />
+                  <ApplicationPackFactBadges clientSetup={clientSetup} clientSetupError={clientSetupError} pack={pack} setupStatus={setupStatus} />
                   {needsApply ? (
                     <OcButton
                       disabled={Boolean(busy) || accessProfile !== "live" || Boolean(blockReason)}
@@ -1216,10 +1214,10 @@ function ApplicationPackLogo({ large = false }: { large?: boolean }) {
   );
 }
 
-function ApplicationPackFactBadges({ clientSetup, clientSetupError, compact = false, extensionById, pack, setupStatus }: { clientSetup: OctopusClientSetupState | null; clientSetupError: string; compact?: boolean; extensionById: Map<string, ClientExtensionRecord>; pack: ApplicationPackRecord; setupStatus?: ClientExtensionActionStatus }) {
+function ApplicationPackFactBadges({ clientSetup, clientSetupError, compact = false, pack, setupStatus }: { clientSetup: OctopusClientSetupState | null; clientSetupError: string; compact?: boolean; pack: ApplicationPackRecord; setupStatus?: ClientExtensionActionStatus }) {
   return (
     <span className={cx("flex min-w-0 flex-wrap items-center gap-1", compact && "mt-1")}>
-      {applicationPackFacts(pack, extensionById, setupStatus, clientSetup, clientSetupError).map((fact) => <OcStatus key={fact.label} label={fact.label} tone={fact.tone} />)}
+      {applicationPackFacts(pack, setupStatus, clientSetup, clientSetupError).map((fact) => <OcStatus key={fact.label} label={fact.label} tone={fact.tone} />)}
     </span>
   );
 }
@@ -1458,15 +1456,14 @@ function ApplicationDetail({
                     : "Available to install. No interfaces or task bindings have been added."} />
                 {application.configuration && application.configuration.fields.length ? <DetailRow label="Configuration" value={applicationConfigurationDetail(application.configuration)} /> : null}
                 {setupStatus && application.installed ? <DetailRow label="Provider setup" value={setupStatus.message} /> : null}
-                <DetailRow label="Available" value={availableProjects.length ? availableProjects.map((state) => projectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not available in Home or any project yet."} />
+                <DetailRow label="Enabled in" value={availableProjects.length ? availableProjects.map((state) => projectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not enabled yet. Choose Home or a project in Set up."} />
                 <DetailRow label="Default for new tasks" value={defaultProjects.length ? defaultProjects.map((state) => projectLabel(projectById.get(state.ee_id), state.ee_id, rootEeId)).join(", ") : "Not selected by default in any project."} />
                 <DetailRow label="Connected" value={partiallyConnectedRunCount
                   ? `Connection incomplete in ${partiallyConnectedRunCount} task${partiallyConnectedRunCount === 1 ? "" : "s"}.`
                   : application.connected_run_ids.length
                     ? `Connected to ${application.connected_run_ids.length} task${application.connected_run_ids.length === 1 ? "" : "s"}.`
                     : "Not connected to a task."} />
-                <DetailRow label="Active" value="Shown after a task connects this application; saved configuration alone does not prove a live interface." />
-                <DetailRow label="Package source" value={application.source_kind === "local" ? "Verified package available in the local library." : "Active registry owner without a verified local package source."} />
+                {application.source_kind === "local" ? null : <DetailRow label="Package source" value="This build ships no package for it, so it cannot be repaired or updated." />}
                 {application.installed && application.removal_block_reason ? <DetailRow label="Removal" value={application.removal_block_reason} /> : null}
                 {!application.valid ? <DetailRow label="Installation issue" value={application.missing_interface_ids.length
                   ? `Missing interfaces: ${application.missing_interface_ids.join(", ")}`
@@ -1478,8 +1475,8 @@ function ApplicationDetail({
             <DetailSection title="Included">
               <div className="flex flex-col gap-2">
                 {application.interfaces.map((interfaceId) => <DetailRow key={interfaceId} label="Interface" value={interfaceId} />)}
-                {application.artifact_bindings.map((binding) => <DetailRow key={binding.artifact_id} label="Artifact" value={binding.artifact_id} />)}
-                <DetailRow label="Task access" value="Added only to the tasks and application edges you choose." />
+                {application.artifact_bindings.map((binding) => <DetailRow key={binding.artifact_id} label="Guide for the model" value={binding.label?.trim() || binding.artifact_id} />)}
+                <DetailRow label="Task access" value="A task gets it only when you connect it to that task." />
               </div>
             </DetailSection>
             <DetailSection title="Information">
@@ -1789,63 +1786,24 @@ function applicationCardStatus(application: ApplicationRecord, setupStatus?: Cli
     || application.partially_materialized
     || application.receipt_state === "stale"
   );
-  if (materializationIncomplete) return { label: "Install incomplete", tone: "danger" };
-  if (application.installed && !application.valid) return { label: "Installation issue", tone: "danger" };
-  if (application.configuration?.status === "issue") return { label: "Configuration issue", tone: "danger" };
-  if (application.configuration?.status === "required") return { label: "Setup required", tone: "warning" };
-  if (application.configuration?.status === "unknown") return { label: "Configuration unknown", tone: "neutral" };
+  if (materializationIncomplete || (application.installed && !application.valid)) return { label: "Needs repair", tone: "danger" };
+  if (application.configuration?.status === "issue") return { label: "Check settings", tone: "danger" };
   if (application.partially_connected_run_ids?.length) return { label: "Connection incomplete", tone: "danger" };
   if (setupStatus?.state === "unavailable") return { label: "Setup unavailable", tone: "danger" };
   if (setupStatus?.state === "repair_available" || setupStatus?.state === "sign_in_required") return { label: "Sign in required", tone: "warning" };
+  if (application.configuration?.status === "required") return { label: "Needs setup", tone: "warning" };
   if (setupStatus?.state === "waiting_for_interface") return { label: "Finishing setup", tone: "neutral" };
-  if (application.installed && !application.project_states.some((state) => state.policy_allowed)) return { label: "Needs setup", tone: "warning" };
-  if (application.installed) return { label: application.managed ? "Installed · managed" : "Installed", tone: "success" };
+  if (application.installed && !application.project_states.some((state) => state.policy_allowed)) return { label: "Not enabled", tone: "neutral" };
+  if (application.installed) return { label: "Enabled", tone: "success" };
   return application.source_available
-    ? { label: "Available locally", tone: "neutral" }
-    : { label: "Source unavailable", tone: "danger" };
+    ? { label: "Not installed", tone: "neutral" }
+    : { label: "Unavailable", tone: "danger" };
 }
 
 function applicationFacts(application: ApplicationRecord, setupStatus?: ClientExtensionActionStatus): Array<{ label: string; tone: "neutral" | "success" | "warning" | "danger" }> {
-  const availableHome = application.project_states.some((state) => state.is_root && state.policy_allowed);
-  const availableProjects = application.project_states.filter((state) => !state.is_root && state.policy_allowed).length;
-  const availableScopes = application.project_states.filter((state) => state.policy_allowed).length;
-  const defaults = application.project_states.filter((state) => state.selected_by_default);
-  const materializationNeedsAttention = !application.installed && (
-    application.materialized
-    || application.partially_materialized
-    || application.receipt_state === "stale"
-  );
-  const facts: Array<{ label: string; tone: "neutral" | "success" | "warning" | "danger" }> = [];
-  if (application.installed) {
-    facts.push({
-      label: application.managed ? "Installed · managed" : "Installed",
-      tone: "success",
-    });
-  } else if (materializationNeedsAttention) {
-    facts.push({ label: "Install incomplete", tone: "danger" });
-  } else {
-    facts.push({
-      label: application.source_available ? "Available locally" : "Source unavailable",
-      tone: application.source_available ? "neutral" : "danger",
-    });
-  }
-  if (application.installed && !application.valid) facts.push({ label: "Installation issue", tone: "danger" });
-  else if (application.installed && !availableScopes) facts.push({ label: "Needs setup", tone: "warning" });
-  if (application.configuration?.status === "issue") facts.push({ label: "Configuration issue", tone: "danger" });
-  if (application.configuration?.status === "required") facts.push({ label: "Setup required", tone: "warning" });
-  if (application.configuration?.status === "unknown") facts.push({ label: "Configuration unknown", tone: "neutral" });
-  if (application.configuration?.status === "configured" && application.configuration.fields.some((field) => field.private_saved)) facts.push({ label: "Configuration saved", tone: "neutral" });
-  else if (application.configuration?.status === "configured" && application.configuration.fields.some((field) => ["environment", "both"].includes(field.source))) facts.push({ label: "Configured externally", tone: "neutral" });
-  if (setupStatus?.state === "configured") facts.push({ label: "Sign-in details found", tone: "neutral" });
-  if (setupStatus?.state === "repair_available") facts.push({ label: "Finish sign-in", tone: "warning" });
-  if (setupStatus?.state === "sign_in_required") facts.push({ label: "Sign in required", tone: "warning" });
-  if (setupStatus?.state === "waiting_for_interface") facts.push({ label: "Finishing setup", tone: "neutral" });
-  if (setupStatus?.state === "unavailable") facts.push({ label: "Setup unavailable", tone: "danger" });
-  if (availableHome) facts.push({ label: "Available in Home", tone: "neutral" });
-  if (availableProjects) facts.push({ label: availableProjects === 1 ? "Available in project" : `Available in projects · ${availableProjects}`, tone: "neutral" });
-  if (defaults.length) facts.push({ label: defaults.length === 1 ? "Default for new tasks" : `Default for new tasks · ${defaults.length}`, tone: "neutral" });
-  if (application.connected_run_ids.length) facts.push({ label: `Connected · ${application.connected_run_ids.length}`, tone: "success" });
-  if (application.partially_connected_run_ids?.length) facts.push({ label: `Connection incomplete · ${application.partially_connected_run_ids.length}`, tone: "danger" });
+  const facts = [applicationCardStatus(application, setupStatus)];
+  const connected = application.connected_run_ids.length;
+  if (connected) facts.push({ label: `Connected to ${connected} task${connected === 1 ? "" : "s"}`, tone: "success" });
   return facts;
 }
 
@@ -1856,10 +1814,10 @@ function applicationConfiguration(application: ApplicationRecord | null): Applic
 function applicationConfigurationDetail(configuration: ApplicationConfiguration): string {
   if (configuration.status === "issue") return configuration.error || "Configuration could not be verified.";
   if (configuration.status === "required") return "Setup required before the application can use its external service.";
-  if (configuration.status === "unknown") return "Configuration may be supplied outside the managed runtime and cannot be verified here.";
-  if (configuration.fields.some((field) => field.private_saved)) return "Configuration saved privately for its interface. This does not prove a connection.";
-  if (configuration.fields.some((field) => ["environment", "both"].includes(field.source))) return "Configured externally for the managed runtime. This does not prove a connection.";
-  return "No private configuration is required.";
+  if (configuration.status === "unknown") return "Octopus cannot see the runtime environment here, so it cannot tell whether these details are set.";
+  if (configuration.fields.some((field) => field.private_saved)) return "Saved in Octopus. A task shows whether the service answers.";
+  if (configuration.fields.some((field) => ["environment", "both"].includes(field.source))) return "Set in the environment Octopus starts with.";
+  return "Nothing to configure.";
 }
 
 function configurationFieldKey(field: ApplicationConfigurationField): string {
@@ -1869,8 +1827,8 @@ function configurationFieldKey(field: ApplicationConfigurationField): string {
 function configurationFieldStatus(field: ApplicationConfigurationField): string {
   if (field.source === "conflict") return "Configuration issue";
   if (field.private_saved) return "Saved";
-  if (field.source === "environment") return "Configured externally";
-  if (field.source === "unknown") return "Status unavailable";
+  if (field.source === "environment") return "Set in environment";
+  if (field.source === "unknown") return "Not checked";
   return field.required ? "Not configured" : "Optional";
 }
 
@@ -1884,7 +1842,7 @@ function configurationFieldPlaceholder(field: ApplicationConfigurationField): st
 function ConfigurationStatus({ status }: { status: ApplicationConfiguration["status"] }) {
   if (status === "issue") return <OcStatus label="Configuration issue" tone="danger" />;
   if (status === "required") return <OcStatus label="Setup required" tone="warning" />;
-  if (status === "unknown") return <OcStatus label="Status unavailable" tone="neutral" />;
+  if (status === "unknown") return <OcStatus label="Not checked" tone="neutral" />;
   return <OcStatus label="Configured" tone="neutral" />;
 }
 
@@ -2074,7 +2032,6 @@ function applicationPackSetupStatus(
 
 function applicationPackFacts(
   pack: ApplicationPackRecord,
-  extensionById: Map<string, ClientExtensionRecord>,
   setupStatus?: ClientExtensionActionStatus,
   clientSetup?: OctopusClientSetupState | null,
   clientSetupError = "",
@@ -2087,21 +2044,12 @@ function applicationPackFacts(
       ? { label: "Installed", tone: "success" }
       : inventory.state === "partial"
         ? { label: "Partially installed", tone: "warning" }
-        : { label: "Available locally", tone: "neutral" },
+        : { label: "Not installed", tone: "neutral" },
   ];
-  if (inventory.ready && setupVerified && !currentSetupFailure) {
-    facts.push({ label: "Setup verified", tone: "success" });
-  } else if (inventory.ready && setupStatus?.state === "configured") {
-    facts.push({ label: "Sign-in details found", tone: "neutral" });
-    facts.push({ label: "Needs setup", tone: "warning" });
-  }
-  if (inventory.ready && clientSetupError) facts.push({ label: "Setup status unavailable", tone: "danger" });
+  if (inventory.ready && clientSetupError) facts.push({ label: "Setup unknown", tone: "danger" });
   else if (inventory.ready && setupStatus?.state === "unavailable") facts.push({ label: "Setup unavailable", tone: "danger" });
-  else if (inventory.ready && setupStatus && setupStatus.state !== "configured") facts.push({ label: "Needs setup", tone: "warning" });
-  const installedRecommended = pack.extensions.filter((extension) => (
-    extension.selection === "recommended" && extensionById.get(extension.extension_id)?.installed
-  )).length;
-  if (installedRecommended) facts.push({ label: `Recommended add-on${installedRecommended === 1 ? "" : "s"} installed`, tone: "neutral" });
+  else if (inventory.ready && (currentSetupFailure || !setupVerified)) facts.push({ label: "Needs setup", tone: "warning" });
+  else if (inventory.ready) facts.push({ label: "Ready", tone: "success" });
   return facts;
 }
 
@@ -2124,7 +2072,7 @@ function applicationPackComponentStatus(component: ApplicationPackComponent): { 
     || component.partially_materialized
     || component.receipt_state === "stale"
     || component.error
-  ) return { label: "Install incomplete", tone: "danger" };
+  ) return { label: "Needs repair", tone: "danger" };
   if (component.available) return { label: component.selection === "included" ? "Included" : "Optional", tone: "neutral" };
   return { label: "Unavailable", tone: "danger" };
 }
