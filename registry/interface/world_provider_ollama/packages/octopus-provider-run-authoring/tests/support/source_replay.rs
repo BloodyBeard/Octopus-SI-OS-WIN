@@ -1551,3 +1551,53 @@ async fn selected_home_failed_source_rearms_its_consumed_input() {
     assert_eq!(current_context_artifacts(&after, &failed.config).unwrap(), state.context_artifacts);
     assert_eq!(std::fs::read(home.join("state/runs").join(format!("{run}.json"))).unwrap(), state.run_record_bytes);
 }
+
+#[test]
+fn a_tool_call_write_arms_only_its_own_result_door() {
+    use serde_json::json;
+    let mut fixture = CompletedInputReplayFixture::new();
+    let h = &mut fixture.handoff;
+    h.granted_mark_outcomes.insert("tool.result.received".into());
+    h.granted_tools.insert("search".into());
+    let receiving = |tool: &str| serde_json::from_value::<RequiredVerifiedArtifact>(json!({
+        "mark":"tool.result.received","artifact_label":format!("{tool}.result"),"verifier":"result_correspondence","params":{}
+    })).unwrap();
+    let tool = h.config.checkpoints.iter_mut().find(|cp| cp.name == "tool").unwrap();
+    tool.outbound_interface_bindings = vec![AuthoredInterfaceBinding::all("result_room".into())];
+    tool.result_receiving.insert("read".into(), receiving("read"));
+    let mut search = tool.clone();
+    search.name = "search".into();
+    search.outbound_interface_bindings = vec![AuthoredInterfaceBinding::all("search_room".into())];
+    search.required_verified_artifacts[0].params = json!({"tools":["search"]});
+    search.result_receiving = BTreeMap::from([("search".into(), receiving("search"))]);
+    h.config.checkpoints.push(search.clone());
+    h.bound_topology.checkpoints = h.config.checkpoints.clone();
+    h.config.validate(&h.ctx.interface, &h.config.run).unwrap();
+    let mut seed: serde_json::Value = serde_json::from_slice(&std::fs::read(&h.run_path).unwrap()).unwrap();
+    seed["interface_state"]["provider"][RUN_AUTHORING_BINDING] = serde_json::to_value(&h.bound_topology).unwrap();
+    seed["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "tool").unwrap()["outbound_interface_bindings"] =
+        json!([AuthoredInterfaceBinding::all("result_room".into())]);
+    seed["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&search, "search", &h.config.run, &[]));
+    seed["active_checkpoints"].as_array_mut().unwrap().push(json!("search"));
+    seed["interface_state"]["provider"]["frontier_checkpoint_ids"].as_array_mut().unwrap().push(json!("search"));
+    let before = serde_json::to_vec(&seed).unwrap();
+    std::fs::write(&h.run_path, &before).unwrap();
+    h.state.try_lock().unwrap().run_record_bytes = before.clone();
+    let doors = h.config.checkpoints.iter().filter(|cp| !cp.result_receiving.is_empty()).cloned().collect::<Vec<_>>();
+    let author = |label: &str, payload: serde_json::Value, role: RunAuthoringCheckpointRole| {
+        let file = InterfaceArtifactFile::write(h.var_dir.join(label.replace('.', "_")), label, &serde_json::to_vec(&payload).unwrap()).unwrap();
+        let output_checkpoint = h.config.checkpoints.iter().find(|cp| cp.role == role && cp.name != "search").unwrap().clone();
+        let authored = h.author_run_with_bindings(&before, &[], &[PreparedHandoff {
+            identity:artifact_identity(&file, &h.var_dir).unwrap(), output_checkpoint, verified_inputs:Vec::new(),
+        }], true, None, false, true, &[]).unwrap();
+        let record = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+        validate_pending_items_are_active(&record, &h.config.provider_interface, &authored.pending_handoff).unwrap();
+        doors.iter().map(|door| record.active_checkpoints.iter().filter_map(|id| record.checkpoint(id))
+            .filter(|cp| cp.inbound_interface() == Some(&h.config.provider_interface)
+                && cp.outbound_interface_bindings == door.outbound_interface_bindings).count()).collect::<Vec<_>>()
+    };
+    assert_eq!(author("tool.call", json!({"label":"tool.call","tool":"read","arguments":{},"correlation_id":"only-read"}),
+        RunAuthoringCheckpointRole::ProviderToolOutput), [1, 0], "the call reaches its own door and no other door pins the provider");
+    assert_eq!(author("answer", json!({"text":"no call"}), RunAuthoringCheckpointRole::ProviderArtifactOutput), [1, 1],
+        "a write without a call keeps every result door armed");
+}

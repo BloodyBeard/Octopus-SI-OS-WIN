@@ -8889,7 +8889,8 @@ impl ProviderOutputHandoff {
                 checkpoint,
             });
         }
-        for template in next_config.checkpoints.iter().filter(|template| retains_future_output(template)) {
+        let tool_call = carries_tool_call(&next_config.checkpoints, &pending_items);
+        for template in next_config.checkpoints.iter().filter(|template| retains_future_output(template, tool_call)) {
             if !pending_items.iter().any(|item| pending_output_matches_template(item, template)) {
                 let id = format!("{batch_prefix}_{}",template.name);
                 next_frontier_ids.push(id.clone());
@@ -11629,9 +11630,15 @@ fn pending_output_checkpoint(
     }
 }
 
-fn retains_future_output(template: &RunAuthoringCheckpoint) -> bool {
+fn retains_future_output(template: &RunAuthoringCheckpoint, tool_call: bool) -> bool {
     template.role == RunAuthoringCheckpointRole::ProviderInterfaceOutput
-        || (template.role == RunAuthoringCheckpointRole::ProviderToolOutput && !template.result_receiving.is_empty())
+        || (!tool_call && template.role == RunAuthoringCheckpointRole::ProviderToolOutput && !template.result_receiving.is_empty())
+}
+
+fn carries_tool_call(templates: &[RunAuthoringCheckpoint], items: &[PendingHandoffItem]) -> bool {
+    items.iter().any(|item| templates.iter().any(|template| {
+        template.role == RunAuthoringCheckpointRole::ProviderToolOutput && pending_output_matches_template(item, template)
+    }))
 }
 
 fn pending_output_matches_template(item: &PendingHandoffItem, template: &RunAuthoringCheckpoint) -> bool {
@@ -11773,7 +11780,8 @@ fn validate_pending_output_frontier(
     let topology: Option<BoundRunAuthoringTopology> = provider_state.get(RUN_AUTHORING_BINDING).cloned()
         .map(serde_json::from_value).transpose().map_err(|e|e.to_string())?;
     if let Some(topology) = &topology { topology.validate_identity(record,provider)?; }
-    let retained = topology.iter().flat_map(|topology| &topology.checkpoints).filter(|template| retains_future_output(template)
+    let tool_call = topology.as_ref().is_some_and(|topology| carries_tool_call(&topology.checkpoints, &pending.items));
+    let retained = topology.iter().flat_map(|topology| &topology.checkpoints).filter(|template| retains_future_output(template, tool_call)
         && !pending.items.iter().any(|item| pending_output_matches_template(item, template))).collect::<Vec<_>>();
     let mut retained_ids = BTreeSet::new();
     let item_ids = pending.items.iter().map(|item| item.checkpoint.id.clone()).collect::<BTreeSet<_>>();
