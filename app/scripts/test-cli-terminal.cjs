@@ -377,9 +377,12 @@ def wait_for(needle):
    except OSError: break
 def snapshot(cols, rows):
  global data, offset
- until = time.time() + .08
- while time.time() < until:
-  if select.select([master], [], [], .01)[0]: data += os.read(master, 65536)
+ deadline = time.time() + 3
+ quiet = time.time() + .2
+ while time.time() < quiet and time.time() < deadline:
+  if select.select([master], [], [], .01)[0]:
+   data += os.read(master, 65536)
+   quiet = time.time() + .2
  phases.append({'cols':cols, 'rows':rows, 'bytes':base64.b64encode(data[offset:]).decode('ascii')})
  offset = len(data)
 try:
