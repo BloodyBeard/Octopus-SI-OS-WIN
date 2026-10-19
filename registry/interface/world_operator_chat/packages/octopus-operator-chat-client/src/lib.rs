@@ -4701,8 +4701,10 @@ fn build_chat_run_record(
     let authoring_result_id = format!("cp_authoring_provider_{cycle}");
     let mut cycle_checkpoints = Vec::new();
     if identity.owns_client() {
-        let chat_input_binding =
-            operator_chat_input_binding(&identity.chat_interface_id, &config.artifact_labels.message)?;
+        let chat_input_binding = operator_chat_input_binding_names(
+            &identity.chat_interface_id,
+            &home_outputs::operator_input_labels(identity, &config.artifact_labels.message),
+        )?;
         let turn_control_binding = operator_chat_input_binding(
             &identity.chat_interface_id,
             &config.artifact_labels.turn_control,
@@ -5606,7 +5608,7 @@ fn derive_bound_run_authoring_topology(
             && outbound.len() == 1
             && outbound[0].interface.as_str() == identity.model_interface_id
         {
-            if binding_admits_only(&inbound, message_artifact_label) {
+            if binding_admits_named(&inbound, message_artifact_label) {
                 BoundCheckpointRole::Stable
             } else {
                 BoundCheckpointRole::IndependentInput
@@ -5657,13 +5659,11 @@ fn derive_bound_run_authoring_topology(
     })
 }
 
-fn binding_admits_only(binding: &AuthoredInterfaceBinding, artifact_label: &str) -> bool {
+fn binding_admits_named(binding: &AuthoredInterfaceBinding, artifact_label: &str) -> bool {
     matches!(
         &binding.config.artifact_policy,
         BindingArtifactPolicy::Allow { names, namespaces }
-            if namespaces.is_empty()
-                && names.len() == 1
-                && names[0] == artifact_label
+            if namespaces.is_empty() && names.iter().any(|name| name == artifact_label)
     )
 }
 
@@ -6684,7 +6684,7 @@ mod tests {
             .checkpoints
             .iter()
             .find(|template| {
-                binding_admits_only(&template.interface_binding, "operator.turn.control")
+                binding_admits_named(&template.interface_binding, "operator.turn.control")
             })
             .unwrap();
         assert_eq!(control.role, BoundCheckpointRole::IndependentInput);
@@ -6692,7 +6692,7 @@ mod tests {
         let message = topology
             .checkpoints
             .iter()
-            .find(|template| binding_admits_only(&template.interface_binding, "operator.message"))
+            .find(|template| binding_admits_named(&template.interface_binding, "operator.message"))
             .unwrap();
         assert_eq!(message.role, BoundCheckpointRole::Stable);
         assert!(message.include_context);
@@ -7861,23 +7861,18 @@ mod tests {
                 let record = RunRecord::from_bytes(plan.run_record_content.as_bytes()).unwrap();
                 let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state[&InterfaceId::new(&plan.model_interface_id)]["run_authoring_binding"].clone()).unwrap();
                 let provider_context = octopus_provider_run_authoring::provider_context_bindings(&record, &InterfaceId::new(&plan.model_interface_id)).unwrap();
-                for label in ["client.surface.document", "client.action", "client.action.result", "realtime.session.update"] {
+                let stable = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::Stable
+                    && cp.interface_binding.interface.as_str() == plan.chat_interface_id).unwrap();
+                assert!(stable.interface_binding.admits("operator.message") && stable.interface_binding.admits("client.action.result"));
+                assert!(stable.include_context);
+                for label in ["client.surface.document", "client.action", "realtime.session.update"] {
                     let template = topology.checkpoints.iter().find(|cp| cp.role == BoundCheckpointRole::IndependentInput && cp.interface_binding.admits(label)
                         && cp.outbound_interface_bindings.iter().any(|binding| binding.admits(label))).unwrap();
                     assert!(template.static_artifact_bindings.iter().all(|id| provider_context.iter().any(|binding| &binding.id == id)), "{label}");
-                    assert_eq!(template.include_context, label == "client.action.result");
+                    assert!(!template.include_context);
                     assert!(template.static_artifact_bindings.contains(&instruction_source.id));
-                    if label == "client.action" {
-                        assert!(topology.checkpoints.iter().filter(|cp| cp.interface_binding.interface == template.interface_binding.interface)
-                            .flat_map(|cp| cp.outbound_interface_bindings.iter())
-                            .all(|binding| binding.interface.as_str() != plan.model_interface_id || !binding.admits(label)));
-                    }
-                    if label == "client.action.result" {
-                        assert_eq!(template.interface_binding.interface.as_str(), plan.chat_interface_id);
-                    } else if label != "realtime.session.update" {
-                        assert!(topology.checkpoints.iter().filter(|cp| cp.interface_binding.interface == template.interface_binding.interface)
-                            .all(|cp| ["client.surface.document", "client.action"].into_iter().all(|name| cp.interface_binding.admits(name))));
-                    }
+                    assert!(template.outbound_interface_bindings.iter()
+                        .any(|binding| binding.interface.as_str() == plan.model_interface_id && binding.admits(label)), "{label}");
                     let checkpoint = record.checkpoints.iter().find(|cp| cp.interface_binding.as_ref() == Some(&template.interface_binding)
                         && cp.outbound_interface_bindings == template.outbound_interface_bindings).unwrap();
                     assert!(checkpoint.artifact_bindings.iter().any(|binding| binding.id == instruction_source.id && binding.access.read));

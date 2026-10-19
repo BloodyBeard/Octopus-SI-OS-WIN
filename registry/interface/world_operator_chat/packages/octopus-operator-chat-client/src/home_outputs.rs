@@ -51,7 +51,7 @@ pub(super) fn template(
         if voice_update {
             vec![binding(&identity.model_interface_id)]
         } else {
-            vec![provider_receipt_binding(&identity.model_interface_id), binding(recipient)]
+            vec![presentation_binding(&identity.model_interface_id), binding(recipient)]
         },
         Vec::new(),
     )?;
@@ -62,16 +62,14 @@ pub(super) fn template(
 
 const PRESENTATION_LABELS: [&str; 2] = ["client.surface.document", "client.action"];
 
-fn provider_receipt_binding(id: &str) -> AuthoredInterfaceBinding {
-    AuthoredInterfaceBinding {
-        interface: InterfaceId::new(id),
-        config: InterfaceBindingConfig {
-            artifact_policy: BindingArtifactPolicy::Allow {
-                names: vec!["client.surface.document".into()],
-                namespaces: Vec::new(),
-            },
-        },
+pub(super) const CLIENT_ACTION_RESULT_LABEL: &str = "client.action.result";
+
+pub(super) fn operator_input_labels(identity: &PlannedIdentity, message: &str) -> Vec<String> {
+    let mut labels = vec![message.to_string()];
+    if identity.surface_role == "home" {
+        labels.push(CLIENT_ACTION_RESULT_LABEL.into());
     }
+    labels
 }
 
 fn presentation_binding(id: &str) -> AuthoredInterfaceBinding {
@@ -143,7 +141,7 @@ pub(super) fn plan(
     let ids = interfaces(identity);
     let contract = json!({
         "widget":{"interface":ids[0],"label":"client.surface.document","recipient_interface":identity.chat_interface_id,"document_contract":"artifact-home-widget-authoring"},
-        "client_action":{"interface":ids[0],"label":"client.action","recipient_interface":identity.chat_interface_id,"schema":"octopus.client_action","schema_version":1,"actions":["open_surface","inspect_client","list_widgets","set_widget"],"result_label":"client.action.result"},
+        "client_action":{"interface":ids[0],"label":"client.action","recipient_interface":identity.chat_interface_id,"schema":"octopus.client_action","schema_version":1,"actions":["open_surface","inspect_client","list_widgets","set_widget"],"result_label":CLIENT_ACTION_RESULT_LABEL},
         "voice_update":{"run":voice.context.run_id,"interface":ids[1],"label":"realtime.session.update","recipient_interface":voice.context.provider_id,"payload":{"call_id":"copy from the admitted realtime.delegation artifact","correlation_id":"same admitted call correlation","update_id":"new stable identity for this one semantic update","delegation_id":"same admitted delegation or null","channel":"commentary","text":"Model-selected public progress or result, grounded in Task evidence"}},
         "run":identity.run_id,
         "authoring":authoring
@@ -309,17 +307,7 @@ pub(super) fn wire(
         .filter_map(Value::as_str)
         .map(String::from)
         .collect::<std::collections::BTreeSet<_>>();
-    let result_binding = |id: &str| AuthoredInterfaceBinding {
-        interface: InterfaceId::new(id),
-        config: InterfaceBindingConfig {
-            artifact_policy: BindingArtifactPolicy::Allow { names: vec!["client.action.result".into()], namespaces: Vec::new() },
-        },
-    };
-    let mut result = bound_checkpoint_template(BoundCheckpointRole::IndependentInput,
-        result_binding(&identity.chat_interface_id), vec![result_binding(&identity.model_interface_id)], Vec::new())?;
-    result.include_context = true;
-    result.name.push_str("_result");
-    for mut template in [template(identity, false)?, template(identity, true)?, result] {
+    for mut template in [template(identity, false)?, template(identity, true)?] {
         for binding in context {
             let id = octopus_descriptors::ArtifactId::new(&binding.id);
             if !roles.contains(&binding.id) && !template.static_artifact_bindings.contains(&id)

@@ -1792,6 +1792,30 @@ pub fn provider_context_bindings(record: &RunRecord, provider: &InterfaceId) -> 
     current_context_bindings(record, &topology.checkpoints)
 }
 
+pub fn independent_provider_input(record: &RunRecord, provider: &InterfaceId, checkpoint: &CheckpointId) -> Result<Option<bool>, String> {
+    let topology: BoundRunAuthoringTopology = serde_json::from_value(record.interface_state.get(provider)
+        .and_then(|state| state.get(RUN_AUTHORING_BINDING)).ok_or("provider input has no declared topology")?.clone())
+        .map_err(|error| error.to_string())?;
+    let checkpoint = record.checkpoint(checkpoint).ok_or("provider input checkpoint is absent from its run")?;
+    let matching = topology.checkpoints.iter().filter(|template| template.role.is_provider_input()
+        && checkpoint.interface_binding.as_ref() == Some(&template.interface_binding)
+        && checkpoint.outbound_interface_bindings == template.outbound_interface_bindings
+        && checkpoint.required_verified_artifacts == template.required_verified_artifacts).collect::<Vec<_>>();
+    let [template] = matching.as_slice() else {
+        return Err("provider input checkpoint matches no unique authored template".into());
+    };
+    Ok(match template.role {
+        RunAuthoringCheckpointRole::IndependentInput => Some(!template.include_context),
+        RunAuthoringCheckpointRole::Stable => Some(false),
+        _ => None,
+    })
+}
+
+pub fn open_handoff_before(record: &RunRecord, provider: &InterfaceId, source_movement_seq: u64) -> Result<bool, String> {
+    Ok(persisted_pending_handoff(record, provider)?
+        .is_some_and(|pending| !pending.terminal && pending.source_movement_seq < source_movement_seq))
+}
+
 fn current_context_bindings(record: &RunRecord, templates: &[RunAuthoringCheckpoint]) -> Result<Vec<ArtifactBinding>, String> {
     let mut context = None;
     for template in templates.iter().filter(|template| template.role == RunAuthoringCheckpointRole::Stable && template.include_context) {

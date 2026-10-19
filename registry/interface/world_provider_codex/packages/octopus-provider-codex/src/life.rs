@@ -3392,6 +3392,13 @@ async fn operator_turn_requires_deferral_with_context(
     run: &RunId,
     turn: &QueuedTurn,
 ) -> Result<bool, String> {
+    let independent = independent_provider_input(ctx, turn);
+    if matches!(independent, Ok(Some(_))) && input_awaits_open_handoff(ctx, run, turn)? {
+        return Ok(true);
+    }
+    if matches!(independent, Ok(Some(true))) {
+        return Ok(false);
+    }
     let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
     let handoff = wait_for_provider_handoff(
         ctx, descriptor, session, run, &turn.envelope, turn.seq, &pinned,
@@ -3399,6 +3406,22 @@ async fn operator_turn_requires_deferral_with_context(
     operator_turn_requires_deferral(
         ctx, descriptor, run, turn, &handoff.current_session_context_artifacts().await,
     )
+}
+
+fn input_awaits_open_handoff(ctx: &InterfaceLiftContext, run: &RunId, turn: &QueuedTurn) -> Result<bool, String> {
+    let path = ctx.root_slot("run_records_root")?.join(format!("{}.json", run.as_str()));
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("provider run '{}' current record cannot be read: {error}", run.as_str()))?;
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+    octopus_provider_run_authoring::open_handoff_before(&record, &ctx.interface, turn.seq)
+}
+
+fn independent_provider_input(ctx: &InterfaceLiftContext, turn: &QueuedTurn) -> Result<Option<bool>, String> {
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&ctx.pinned_run_record_bytes(&turn.envelope)?)
+        .map_err(|error| error.to_string())?;
+    let metadata = turn.envelope.metadata().map_err(|error| error.to_string())?;
+    let runtime = metadata.runtime.as_ref().ok_or("provider input has no runtime identity")?;
+    octopus_provider_run_authoring::independent_provider_input(&record, &ctx.interface, &runtime.checkpoint)
 }
 
 async fn prepare_deferred_provider_turn(
@@ -3410,6 +3433,13 @@ async fn prepare_deferred_provider_turn(
 ) -> Result<DeferredTurnReadiness, String> {
     if active_control(active_controls, run).await.is_some_and(|broker| !broker.is_finished()) {
         return Ok(DeferredTurnReadiness::AwaitingSessionSettlement);
+    }
+    if deferred.release.is_none() && matches!(independent_provider_input(ctx, &deferred.turn), Ok(Some(true))) {
+        return Ok(if input_awaits_open_handoff(ctx, run, &deferred.turn)? {
+            DeferredTurnReadiness::AwaitingSessionSettlement
+        } else {
+            DeferredTurnReadiness::Ready(deferred.turn.clone())
+        });
     }
     let source_snapshot = bound_operator_session_snapshot(ctx, descriptor, &deferred.turn)?;
     let source_session_carrier = source_snapshot.as_ref().map(|(carrier, _)| carrier.clone());
