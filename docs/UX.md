@@ -95,7 +95,7 @@ works the same way for everything it can do.
 
 - **The boundary is short.** Home's role says when a turn needs only an
   answer, when to start a task, set a trigger, show a widget, save knowledge,
-  or start a coding task that changes Octopus itself - and when to do none of
+  change the client's own code, or change Octopus itself - and when to do none of
   these. When the operator states a goal, Home starts the work instead of
   asking for permission, and when unsure it does the cheap reversible part and
   offers the rest in one line.

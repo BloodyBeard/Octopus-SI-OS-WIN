@@ -185,6 +185,13 @@ without a restart. Refusals, setup gaps, and errors the view hits while
 rendering go back to Home through the same inspection, so it can fix them; each
 fix is a new revision you review again.
 
+Extensions are additions you install and remove. They are not the only way to
+change the client: the client is ordinary code, and Home, which holds your
+machine's rights in the default setup, can change any part of it. Ask for it in
+plain words; Home finds the client's source, edits it, rebuilds and relaunches
+the client. Work keeps running while the client is closed, because the system
+does not live in the client, and the change is there when it reopens.
+
 ### Where packages come from
 
 **Today the app uses a local package library, not a hosted marketplace.** The
