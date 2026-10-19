@@ -7027,11 +7027,20 @@ mod tests {
             .checkpoints
             .iter()
             .flat_map(|checkpoint| checkpoint.required_verified_artifacts.iter())
-            .filter_map(|required| required.params.get("tools"))
-            .filter_map(serde_json::Value::as_array)
+            .map(|required| serde_json::to_value(required).unwrap())
+            .chain(
+                record
+                    .interface_state
+                    .values()
+                    .filter_map(|state| state.get("writer_run")?["initial_record"]["checkpoints"].as_array())
+                    .flatten()
+                    .filter_map(|checkpoint| checkpoint["required_verified_artifacts"].as_array())
+                    .flatten()
+                    .cloned(),
+            )
+            .filter_map(|required| required["params"]["tools"].as_array().cloned())
             .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_string)
+            .filter_map(|tool| tool.as_str().map(str::to_string))
             .collect();
         let private_policy_write = plan
             .interface_writes
