@@ -12,6 +12,12 @@ if (!fs.existsSync(source)) {
 if (!fs.existsSync(model)) {
   throw new Error("bundled hand_landmarker.task is missing");
 }
+const loadedFileset = ["vision_wasm_internal.js", "vision_wasm_internal.wasm"];
+for (const name of loadedFileset) {
+  if (!fs.statSync(path.join(source, name), { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(`@mediapipe/tasks-vision no longer ships ${name}`);
+  }
+}
 fs.rmSync(destination, { recursive: true, force: true });
-fs.mkdirSync(path.dirname(destination), { recursive: true });
-fs.cpSync(source, destination, { recursive: true });
+fs.mkdirSync(destination, { recursive: true });
+for (const name of loadedFileset) fs.copyFileSync(path.join(source, name), path.join(destination, name));

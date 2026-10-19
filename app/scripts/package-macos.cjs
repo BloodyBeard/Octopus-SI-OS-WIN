@@ -18,6 +18,7 @@ const distributionRoot = path.join(appRoot, "distribution");
 const baselineManifestPath = path.join(distributionRoot, "system-baseline.json");
 const buildRoot = path.join(appRoot, "build");
 const bundleRoot = path.join(buildRoot, "Octopus.app");
+const minimumSystemVersion = "14.0";
 const ownedEngineVerifier = require(path.join(registryRoot, "worker_environment_kind", "browser_session", "packages", "octopus-browser-session-env", "native", "macos", "engine-artifact.cjs"));
 const browserEnginePackage = require(path.join(registryRoot, "worker_environment_kind", "browser_session", "packages", "octopus-browser-session-env", "native", "engine-mode.cjs"));
 const browserEngineMode = browserEnginePackage.packagingMode(process.argv.slice(2), process.env);
@@ -45,7 +46,7 @@ const managedCodexRoot = path.join(openCodexOwnerRoot, "managed-cli");
 const managedCodexDistribution = require(path.join(managedCodexRoot, "bootstrap.cjs"));
 const openCodexLifeBinary = "octopus-provider-opencodex-life";
 const inputIntakeLifeBinary = "octopus-input-intake-life";
-const { captureProviderSigningInputs, sealProviderSigningInputs, signClientResources, bundleManagedCodex, copyRegistrySurface, copyLocalPackageDefinitions, copyRegistryBaseline, collectBundledBinaries, materializeProviderLife, validateOpenCodexOwnerAssets, copyBundledBinaries, registryExecutableOwnership, rewriteBundledExecutablePaths, stripExecutables, transformExecutableCopies, validateBundledLayout } =
+const { captureProviderSigningInputs, sealProviderSigningInputs, signClientResources, bundleManagedCodex, copyRegistrySurface, copyLocalPackageDefinitions, copyRegistryBaseline, collectBundledBinaries, sharedBinaries, materializeProviderLife, validateOpenCodexOwnerAssets, copyBundledBinaries, registryExecutableOwnership, rewriteBundledExecutablePaths, stripExecutables, transformExecutableCopies, validateBundledLayout } =
   require("./runtime-package.cjs").createRuntimePackager({ repoRoot, appRoot, outputRoot: bundledAppRoot });
 
 for (const asset of [
@@ -72,7 +73,7 @@ const pipSdk = fs.realpathSync(capture("xcrun", ["--sdk", "macosx", "--show-sdk-
 const pipOutput = fs.realpathSync(fs.mkdtempSync(path.join(require("node:os").tmpdir(), "octopus-package-pip-")));
 process.once("exit", () => fs.rmSync(pipOutput, { recursive: true, force: true }));
 const pipReceipt = pipBuilder.build({ compiler: pipCompiler, swiftCompiler: pipSwiftCompiler, sdk: pipSdk, headers: fs.realpathSync(pipHeaders),
-  outputRoot: pipOutput, architecture: process.arch, target: "addon", deploymentTarget: "14.0" });
+  outputRoot: pipOutput, architecture: process.arch, target: "addon", deploymentTarget: minimumSystemVersion });
 const bundledBinaries = collectBundledBinaries(registryRoot);
 buildBundledBinaries([...bundledBinaries, openCodexLifeBinary, inputIntakeLifeBinary]);
 materializeProviderLife(openCodexOwnerRoot, openCodexLifeBinary);
@@ -109,9 +110,11 @@ copyRegistrySurface(registryRoot, localPackageRegistryRoot);
 copyLocalPackageDefinitions(path.join(distributionRoot, "local-packages"), localPackageRoot);
 const executableOwnership = registryExecutableOwnership(localPackageRegistryRoot);
 const ownerExecutables = new Set();
-rewriteBundledExecutablePaths(localPackageRegistryRoot, executableOwnership, ownerExecutables);
-rewriteBundledExecutablePaths(bundledRegistryRoot, executableOwnership, ownerExecutables);
-const installedBinaries = copyBundledBinaries(bundledBinaries);
+const installationReferences = new Set();
+rewriteBundledExecutablePaths(localPackageRegistryRoot, executableOwnership, ownerExecutables, installationReferences);
+rewriteBundledExecutablePaths(bundledRegistryRoot, executableOwnership, ownerExecutables, installationReferences);
+const installationBinaries = sharedBinaries(installationReferences);
+const installedBinaries = copyBundledBinaries(installationBinaries);
 stripExecutables([...ownerExecutables, ...installedBinaries]);
 const managedCodexRoots = bundleManagedCodex([bundledRegistryRoot, localPackageRegistryRoot]);
 for (const dependency of [
@@ -126,10 +129,13 @@ for (const dependency of [
 ]) {
   const destination = path.join(bundledAppRoot, "node_modules", dependency);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  copyTree(path.join(appRoot, "node_modules", dependency), destination, { recursive: true });
+  copyTree(path.join(appRoot, "node_modules", dependency), destination, {
+    recursive: true,
+    filter: (candidate) => !candidate.split(path.sep).some((part) => part === "obj.target" || part === ".deps"),
+  });
 }
 copyFile(icnsPath, path.join(resourcesRoot, "octopus.icns"));
-validateBundledLayout([bundledRegistryRoot, localPackageRegistryRoot], bundledBinaries, ownerExecutables);
+validateBundledLayout([bundledRegistryRoot, localPackageRegistryRoot], installationBinaries, ownerExecutables);
 
 setPlist("CFBundleName", "Octopus");
 setPlist("CFBundleDisplayName", "Octopus");
@@ -138,6 +144,7 @@ setPlist("CFBundleIdentifier", "com.octopus.desktop");
 setPlist("CFBundleIconFile", "octopus.icns");
 setPlist("CFBundleShortVersionString", packageVersion);
 setPlist("CFBundleVersion", packageVersion);
+setPlist("LSMinimumSystemVersion", minimumSystemVersion);
 setPlist("NSMicrophoneUsageDescription", "Octopus uses the microphone for persistent voice conversations with your agent.");
 setPlist("NSCameraUsageDescription", "Octopus uses the camera locally to recognize hand gestures. Frames are not recorded or sent to the runtime.");
 setPlistBoolean("NSCameraUseContinuityCameraDeviceType", true);

@@ -26,6 +26,9 @@ test("CLI and desktop share exact owner executable materialization", () => {
       processes: [{ bin: "target/debug/test-life", authority: { executable_paths: ["target/debug/test-tool"] } }],
     });
     put(path.join(source, "interface/test_door/stdio.json"), { command: "target/debug/test-tool", args: ["--server"] });
+    put(path.join(source, "interface/test_planner/interface.json"), {
+      interface_driver_config: { private_config: { task_planner_executable: "target/debug/test-planner" } },
+    });
     put(path.join(source, "interface/test_door/target/excluded"), "development output");
     put(path.join(root, "target/release/test-tool"), "tool executable");
     put(path.join(root, "target/release/test-life"), "door executable");
@@ -35,8 +38,8 @@ test("CLI and desktop share exact owner executable materialization", () => {
     const registry = path.join(outputRoot, "local-packages/registry");
     builder.copyRegistrySurface(source, registry);
     builder.copyRegistryBaseline(source, path.join(outputRoot, "registry"), manifest);
-    const owned = new Set();
-    builder.rewriteBundledExecutablePaths(registry, builder.registryExecutableOwnership(registry), owned);
+    const owned = new Set(), installationReferences = new Set();
+    builder.rewriteBundledExecutablePaths(registry, builder.registryExecutableOwnership(registry), owned, installationReferences);
     const read = file => JSON.parse(fs.readFileSync(path.join(registry, file), "utf8"));
     assert.equal(read("tool/test.run/tool.json").process.bin, "owner://packages/bin/test-tool");
     assert.deepEqual(read("worker_environment_kind/test/worker_environment_kind.json").tool_process_bins, ["owner://packages/bin/test-tool"]);
@@ -45,6 +48,11 @@ test("CLI and desktop share exact owner executable materialization", () => {
     assert.equal(process.bin, "owner://packages/bin/test-life");
     assert.deepEqual(process.authority.executable_paths, []);
     assert.deepEqual(process.authority.executable_root_subpaths, [{ root_slot: "registry_worker_environment_kind_root", relative_path: "test/packages/bin/test-tool" }]);
+    assert.equal(read("interface/test_planner/interface.json").interface_driver_config.private_config.task_planner_executable, "bin/test-planner");
+    const shared = builder.sharedBinaries(installationReferences);
+    assert.ok(shared.includes("octopus") && shared.includes("test-planner"));
+    assert.ok(!shared.includes("test-tool") && !shared.includes("test-life"));
+    assert.ok(builder.collectBundledBinaries(source).includes("test-tool"));
     assert.equal(owned.size, 2);
     for (const file of owned) assert.ok(fs.statSync(file).mode & 0o111);
     assert.equal(fs.readFileSync(path.join(registry, "worker_environment_kind/test/packages/bin/test-tool"), "utf8"), "tool executable");

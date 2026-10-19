@@ -101,20 +101,26 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
     ));
   }
 
+  const installationBinaries = Object.freeze([
+    "octopus",
+    "octopus-operator-chat-artifact",
+    "octopus-operator-chat-topology",
+    "octopus-secret-store",
+    "octopus-world-cron-task-plan",
+  ]);
+
   function collectBundledBinaries(source) {
-    const binaries = new Set([
-      "octopus",
-      "octopus-operator-chat-artifact",
-      "octopus-operator-chat-topology",
-      "octopus-secret-store",
-      "octopus-world-cron-task-plan",
-    ]);
+    const binaries = new Set(installationBinaries);
     visitJson(source, (value) => {
       if (typeof value !== "string") return;
       const match = /^target\/debug\/([^/]+)$/.exec(value);
       if (match) binaries.add(match[1]);
     });
     return [...binaries].sort();
+  }
+
+  function sharedBinaries(installationReferences) {
+    return [...new Set([...installationBinaries, ...installationReferences])].sort();
   }
 
   function materializeProviderLife(ownerRoot, binary) {
@@ -256,7 +262,7 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
     return { registry, toolBinaryKinds, doorInterfaceKinds };
   }
 
-  function rewriteBundledExecutablePaths(root, ownership, ownerExecutables) {
+  function rewriteBundledExecutablePaths(root, ownership, ownerExecutables, installationReferences) {
     visitJsonFiles(root, (file, value) => {
       const relative = path.relative(root, file).split(path.sep);
       const registryKind = relative[0] || "";
@@ -314,6 +320,7 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
           materializeOwnerExecutable(root, "worker_environment_kind", kinds[0], binary, ownerExecutables);
           return `packages/bin/${binary}`;
         }
+        installationReferences.add(binary);
         return `bin/${binary}`;
       });
       if (registryKind === "interface") {
@@ -527,6 +534,7 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
     copyRegistryBaseline,
     registryCopyFilter,
     collectBundledBinaries,
+    sharedBinaries,
     materializeProviderLife,
     validateOpenCodexOwnerAssets,
     visitJson,

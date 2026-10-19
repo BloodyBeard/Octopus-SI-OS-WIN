@@ -35,9 +35,11 @@ function packageCliRuntime({ appRoot = path.resolve(__dirname, "..") } = {}) {
     copyTree(distribution, path.join(stage, "distribution"), { recursive: true });
     const ownership = packager.registryExecutableOwnership(packages);
     const ownerExecutables = new Set();
-    packager.rewriteBundledExecutablePaths(packages, ownership, ownerExecutables);
-    packager.rewriteBundledExecutablePaths(baseline, ownership, ownerExecutables);
-    const sharedExecutables = packager.copyBundledBinaries(binaries);
+    const installationReferences = new Set();
+    packager.rewriteBundledExecutablePaths(packages, ownership, ownerExecutables, installationReferences);
+    packager.rewriteBundledExecutablePaths(baseline, ownership, ownerExecutables, installationReferences);
+    const installationBinaries = packager.sharedBinaries(installationReferences);
+    const sharedExecutables = packager.copyBundledBinaries(installationBinaries);
     packager.stripExecutables([...ownerExecutables, ...sharedExecutables]);
     const managedRoots = packager.bundleManagedCodex([baseline, packages]);
     const managed = require(path.join(source, "interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs"));
@@ -46,12 +48,12 @@ function packageCliRuntime({ appRoot = path.resolve(__dirname, "..") } = {}) {
     packager.signClientResources(stage);
     managed.sealSigning(managedSigning);
     packager.sealProviderSigningInputs(providerSigning);
-    packager.validateBundledLayout([baseline, packages], binaries, ownerExecutables);
+    packager.validateBundledLayout([baseline, packages], installationBinaries, ownerExecutables);
     const receipt = {
       schema: "octopus.cli_runtime_distribution", schema_version: 1,
       package_version: JSON.parse(fs.readFileSync(path.join(appRoot, "package.json"), "utf8")).version,
       platform: process.platform, architecture: process.arch,
-      binaries: binaries.map((binary) => {
+      binaries: installationBinaries.map((binary) => {
         const bytes = fs.readFileSync(path.join(stage, "bin", binary));
         return { path: `bin/${binary}`, bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
       }),
@@ -66,7 +68,7 @@ function packageCliRuntime({ appRoot = path.resolve(__dirname, "..") } = {}) {
     try { fs.renameSync(stage, outputRoot); }
     catch (error) { if (previous) fs.renameSync(previous, outputRoot); previous = null; throw error; }
     if (previous) fs.rmSync(previous, { recursive: true });
-    return { outputRoot, binaryCount: binaries.length, ownerExecutableCount: ownerExecutables.size };
+    return { outputRoot, binaryCount: installationBinaries.length, ownerExecutableCount: ownerExecutables.size };
   } finally {
     if (fs.existsSync(stage)) fs.rmSync(stage, { recursive: true });
   }
