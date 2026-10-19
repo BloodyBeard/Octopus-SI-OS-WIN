@@ -149,9 +149,16 @@ export async function readVoiceArtifacts(call: VoiceCall, labels: string[], afte
   return { artifacts, afterSeq: rows.reduce((seq, artifact) => Math.max(seq, artifact.seq), afterSeq), more: rows.length === 500 };
 }
 
+const CONFIRMED_OUTCOMES: Record<string, string> = {
+  "realtime.session.answer": "call creation",
+  "realtime.session.updated": "context delivery",
+  "realtime.session.closed": "call closure",
+  "realtime.session.recorded": "the call recording",
+};
+
 async function waitForArtifact(call: VoiceCall, label: string, matches: (payload: Record<string, unknown>) => boolean, signal?: AbortSignal) {
   const timeout = new AbortController();
-  const expired = () => new Error(`Voice provider did not confirm ${label === "realtime.session.answer" ? "call creation" : label === "realtime.session.updated" ? "context delivery" : "call closure"} within 45 seconds.`);
+  const expired = () => new Error(`Voice provider did not confirm ${CONFIRMED_OUTCOMES[label] ?? label} within 45 seconds.`);
   const timer = setTimeout(() => timeout.abort(expired()), 45_000);
   const waiting = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
   const deadline = Date.now() + 45_000;
@@ -188,11 +195,17 @@ function waitForVoiceStep<T>(operation: Promise<T>, signal: AbortSignal): Promis
   });
 }
 
+function enqueueVoiceControl<T>(call: VoiceCall, step: () => Promise<T>): Promise<T> {
+  const operation = (call.control ?? Promise.resolve()).then(step);
+  call.control = operation.then(() => {}, () => {});
+  return operation;
+}
+
 export function openVoiceCall(call: VoiceCall, offerSdp: string, initialItems: VoiceInitialItem[] = []): Promise<Record<string, unknown>> {
   if (call.closeRequested) throw new Error("This voice call was cancelled before its offer was submitted.");
   if (call.answer) throw new Error("This voice offer was already submitted.");
   call.creationDisposition = "unconfirmed";
-  call.answer = (async () => {
+  call.answer = enqueueVoiceControl(call, async () => {
     await submitInterfaceArtifact({
       interfaceId: call.binding.controlInterfaceId,
       runId: call.binding.runId,
@@ -205,16 +218,22 @@ export function openVoiceCall(call: VoiceCall, offerSdp: string, initialItems: V
     if (answer.ok !== true) throw new Error(typeof answer.error === "string" ? answer.error : "Voice provider refused the call.");
     if (!call.callId) throw new Error("Voice provider returned no call identity.");
     return answer;
-  })();
+  });
   return call.answer;
 }
 
 export async function updateVoiceContext(call: VoiceCall, message: VoiceContextMessage, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   if (call.closeRequested || call.remoteClosed) throw new Error("Voice call is not available for a context update.");
-  const operation = (call.control ?? Promise.resolve()).then(() => submitVoiceContext(call, message, signal));
-  call.control = operation.then(() => {}, () => {});
-  await operation;
+  await waitForVoiceStep(enqueueVoiceControl(call, () => submitVoiceContext(call, message, signal)), signal);
+}
+
+export function deliverVoiceRecording(call: VoiceCall, handIn: () => Promise<unknown>): Promise<void> {
+  return enqueueVoiceControl(call, async () => {
+    await handIn();
+    const recorded = await waitForArtifact(call, "realtime.session.recorded", () => true);
+    if (recorded.ok !== true) throw new Error(typeof recorded.error === "string" ? recorded.error : "Voice provider did not accept the call recording.");
+  });
 }
 
 async function submitVoiceContext(call: VoiceCall, message: VoiceContextMessage, signal: AbortSignal): Promise<void> {
@@ -243,9 +262,8 @@ async function submitVoiceContext(call: VoiceCall, message: VoiceContextMessage,
   const result = await waitForArtifact(call, "realtime.session.updated", (payload) => (
     payload.call_id === call.callId && payload.update_id === updateId
     && (payload.status !== "chunk_injected" || payload.ok === false)
-  ), signal);
+  ));
   if (result.ok === false || (result.status !== "transport_written" && result.status !== "injected")) throw new Error(typeof result.error === "string" ? result.error : "The voice provider did not accept the Home context update.");
-  signal.throwIfAborted();
 }
 
 export function closeVoiceCall(call: VoiceCall): Promise<void> {
@@ -275,20 +293,28 @@ export function closeVoiceCall(call: VoiceCall): Promise<void> {
         await catchUpCallEvidence(call, signal);
       }
       if (call.remoteClosed) return;
-      signal.throwIfAborted();
-      const stopId = crypto.randomUUID();
-      stage = "stop-request delivery";
-      await waitForVoiceStep(submitInterfaceArtifact({
-        interfaceId: call.binding.controlInterfaceId,
-        runId: call.binding.runId,
-        label: "realtime.session.stop",
-        payload: { call_id: call.callId, correlation_id: call.correlationId, stop_id: stopId },
-        timeoutMs: 45_000,
+      stage = "the provider's confirmation of the previous voice control artifact";
+      const callId = call.callId;
+      const closed = await waitForVoiceStep(enqueueVoiceControl(call, async () => {
+        signal.throwIfAborted();
+        clearTimeout(timer);
+        timer = armDeadline();
+        if (call.remoteClosed) return null;
+        const stopId = crypto.randomUUID();
+        stage = "stop-request delivery";
+        await waitForVoiceStep(submitInterfaceArtifact({
+          interfaceId: call.binding.controlInterfaceId,
+          runId: call.binding.runId,
+          label: "realtime.session.stop",
+          payload: { call_id: callId, correlation_id: call.correlationId, stop_id: stopId },
+          timeoutMs: 45_000,
+        }), signal);
+        stage = "the provider's closure confirmation";
+        return waitForArtifact(call, "realtime.session.closed", (payload) => (
+          payload.call_id === callId && (payload.stop_id === stopId || payload.remote_closed === true)
+        ), signal);
       }), signal);
-      stage = "the provider's closure confirmation";
-      const closed = await waitForArtifact(call, "realtime.session.closed", (payload) => (
-        payload.call_id === call.callId && (payload.stop_id === stopId || payload.remote_closed === true)
-      ), signal);
+      if (!closed) return;
       call.closedPayload = closed;
       if (closed.remote_closed !== true) {
         throw new Error(typeof closed.error === "string" ? closed.error : "Your microphone is off, but the provider has not confirmed call closure.");

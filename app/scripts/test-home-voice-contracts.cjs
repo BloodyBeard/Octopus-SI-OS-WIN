@@ -153,7 +153,7 @@ test('explicit not-created evidence releases a rejected offer without fabricated
   assert.deepEqual(writes.map(row => row.label), ['realtime.session.offer']);
 });
 
-test('hangup cancels a pending context receipt and sends stop without waiting for it', async () => {
+test('hangup releases a pending context update and hands in stop and recording only after its receipt re-arms control', async () => {
   const writes = [], receipt = deferred();
   const current = { ...call(), creationDisposition: 'created', callId: 'rtc_exact', answer: Promise.resolve({}) };
   const api = host(async (_, params) => {
@@ -161,9 +161,9 @@ test('hangup cancels a pending context receipt and sends stop without waiting fo
     if (label === 'realtime.session.updated') await receipt.promise;
     if (label === 'realtime.session.closed' && writes.at(-1)?.label !== 'realtime.session.stop') return { artifacts: [] };
     return { artifacts: [{ seq: 1, artifact_id: label, label, payload: {
-      correlation_id: current.correlationId, call_id: current.callId,
+      ok: true, correlation_id: current.correlationId, call_id: current.callId,
       update_id: 'home-context:message-1', status: 'transport_written',
-      stop_id: writes.at(-1)?.payload.stop_id, remote_closed: true,
+      stop_id: writes.at(-1)?.payload?.stop_id, remote_closed: true,
     } }] };
   }, async request => { writes.push(request); });
   const abort = new AbortController();
@@ -171,13 +171,15 @@ test('hangup cancels a pending context receipt and sends stop without waiting fo
   const rejected = assert.rejects(update, /abort/i);
   await tick();
   abort.abort();
+  await rejected;
   const closing = api.closeVoiceCall(current);
+  const recorded = api.deliverVoiceRecording(current, async () => { writes.push({ label: 'realtime.session.recording' }); });
   await tick();
-  assert.deepEqual(writes.map(row => row.label), ['realtime.session.update', 'realtime.session.stop']);
+  assert.deepEqual(writes.map(row => row.label), ['realtime.session.update'], 'A spent control generation admits nothing before the provider receipt');
   await assert.rejects(api.updateVoiceContext(current, { id: 'message-2', role: 'user', text: 'Late' }, new AbortController().signal), /not available/);
-  await Promise.all([rejected, closing]);
   receipt.resolve();
-  assert.deepEqual(writes.map(row => row.label), ['realtime.session.update', 'realtime.session.stop']);
+  await Promise.all([closing, recorded]);
+  assert.deepEqual(writes.map(row => row.label), ['realtime.session.update', 'realtime.session.stop', 'realtime.session.recording']);
   assert.equal(current.remoteClosed, true);
 });
 
@@ -193,15 +195,20 @@ test('transcript updates retain protocol identity, partial state and distinct re
   assert.throws(() => transcript.artifact({ ...partial, id: '' }), /identity/);
 });
 
-test('hangup sends stop before history reads even while a context acknowledgement is stuck', async () => {
-  const current = { ...call(), creationDisposition: 'created', callId: 'rtc_exact', answer: Promise.resolve({}), control: deferred().promise };
+test('hangup hands in stop once the pending control receipt settles and before any history read', async () => {
+  const receipt = deferred();
+  const current = { ...call(), creationDisposition: 'created', callId: 'rtc_exact', answer: Promise.resolve({}), control: receipt.promise };
   const writes = [];
   const api = host(async (_, params) => {
     assert.equal(writes.length, 1, 'The stop intent must precede any evidence reads');
     assert.deepEqual(params.labels, ['realtime.session.closed']);
     return { artifacts: [{ seq: 1, artifact_id: 'closed', label: 'realtime.session.closed', payload: { correlation_id: current.correlationId, call_id: current.callId, remote_closed: true } }] };
   }, async request => writes.push(request));
-  await api.closeVoiceCall(current);
+  const closing = api.closeVoiceCall(current);
+  await tick();
+  assert.equal(writes.length, 0);
+  receipt.resolve();
+  await closing;
   assert.equal(api.canRetireVoiceCall(current), true);
 });
 

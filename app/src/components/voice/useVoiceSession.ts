@@ -11,7 +11,7 @@ import { nextProjectionChange } from "../../projectionLive";
 import { useClientPreferences, useSetClientPreferences } from "../../clientPreferences";
 import { isVoiceCallActive, voiceTranscriptActivity, type VoiceTranscriptEntry } from "./voicePresentation";
 import { createVoiceTranscript } from "./voiceTranscript";
-import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, openVoiceCall, readVoiceArtifacts, updateVoiceContext, voiceContextDelta, type VoiceCall, type VoiceCallBinding, type VoiceContextMessage, type VoiceContextSelection } from "./voiceCallArtifacts";
+import { assertVoiceControlReady, canRetireVoiceCall, closeVoiceCall, deliverVoiceRecording, openVoiceCall, readVoiceArtifacts, updateVoiceContext, voiceContextDelta, type VoiceCall, type VoiceCallBinding, type VoiceContextMessage, type VoiceContextSelection } from "./voiceCallArtifacts";
 
 export type VoicePhase = "idle" | "requesting" | "connecting" | "listening" | "muted" | "recovering" | "ending" | "closure_unconfirmed" | "ended" | "error";
 
@@ -420,7 +420,7 @@ export function useVoiceSession(accessProfile: OctopusClientAccessProfile) {
       sourceRef.current = source;
       analyserRef.current = analyser;
       if (saveRecording) {
-        const recording = await createVoiceRecording({ audioContext, correlationId: call.correlationId, interfaceId: nextContext.controlInterfaceId, microphoneSource: source, runId: nextContext.runId, startedAt: new Date().toISOString() });
+        const recording = await createVoiceRecording({ audioContext, call, microphoneSource: source, startedAt: new Date().toISOString() });
         if (!current()) { await recording.finish(false); return; }
         recordingRef.current = recording;
         if (remoteStreamRef.current) recording.connectRemote(remoteStreamRef.current);
@@ -828,10 +828,8 @@ type VoiceOutputMeterConnection = {
 
 async function createVoiceRecording(input: {
   audioContext: AudioContext;
-  correlationId: string;
-  interfaceId: string;
+  call: VoiceCall;
   microphoneSource: MediaStreamAudioSourceNode;
-  runId: string;
   startedAt: string;
 }): Promise<VoiceRecordingController> {
   if (typeof MediaRecorder === "undefined") throw new Error("Audio recording is not available on this device.");
@@ -858,16 +856,16 @@ async function createVoiceRecording(input: {
   const extension = recordingExtension(mediaType);
   const handle = await beginInterfaceArtifactStream({
     extension,
-    interfaceId: input.interfaceId,
+    interfaceId: input.call.binding.controlInterfaceId,
     label: "realtime.session.recording",
     mediaType,
     payload: {
       schema: "octopus.voice_recording",
       schema_version: 1,
-      correlation_id: input.correlationId,
+      correlation_id: input.call.correlationId,
       started_at: input.startedAt,
     },
-    runId: input.runId,
+    runId: input.call.binding.runId,
   }).catch((failure) => {
     microphoneSource.disconnect(destination);
     destination.disconnect();
@@ -939,7 +937,7 @@ async function createVoiceRecording(input: {
           await appendQueue;
           if (appendFailure) throw appendFailure;
           if (deliver) {
-            await finalizeInterfaceArtifactStream({ streamId: handle.streamId, timeoutMs: 45_000 });
+            await deliverVoiceRecording(input.call, () => finalizeInterfaceArtifactStream({ streamId: handle.streamId, timeoutMs: 45_000 }));
           } else {
             await abortInterfaceArtifactStream({ streamId: handle.streamId });
           }
