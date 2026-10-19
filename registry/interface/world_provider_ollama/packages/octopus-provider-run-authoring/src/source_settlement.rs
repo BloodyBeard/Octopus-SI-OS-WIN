@@ -644,6 +644,7 @@ impl ProviderOutputHandoff {
             None,
             Some((predecessor, context_generation)),
             None,
+            false,
         )
         .await?
         .into_iter()

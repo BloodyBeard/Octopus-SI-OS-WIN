@@ -9,6 +9,7 @@ pub(super) fn is_publication_completion(before: &PendingHandoff, after: &Pending
         && before.settlement_of == after.settlement_of
         && before.dispatch_fenced == after.dispatch_fenced
         && before.withdrawal == after.withdrawal
+        && before.standing == after.standing
 }
 
 impl ProviderOutputHandoff {

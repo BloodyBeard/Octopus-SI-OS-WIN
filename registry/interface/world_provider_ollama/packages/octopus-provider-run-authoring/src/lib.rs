@@ -321,6 +321,7 @@ pub struct ProviderOutputHandoff {
     checked_settlement_output: Option<(ArtifactRef, ArtifactRef)>,
     context_output_labels: BTreeSet<String>,
     session_snapshot_labels: BTreeSet<String>,
+    standing_candidate_labels: BTreeSet<String>,
     granted_tools: BTreeSet<String>,
     granted_interfaces: BTreeSet<InterfaceId>,
     granted_mark_outcomes: BTreeSet<String>,
@@ -344,6 +345,7 @@ struct HandoffState {
     consumed_input: bool,
     consumed_context_free_independent_input: Option<RunAuthoringCheckpoint>,
     consumed_verified_input: bool,
+    deferred_context_generations: u64,
 }
 
 #[derive(Clone)]
@@ -406,10 +408,23 @@ struct PendingHandoff {
     dispatch_fenced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     withdrawal: Option<Box<source_withdrawal::Withdrawal>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    standing: Vec<PendingHandoffItem>,
+}
+
+impl PendingHandoff {
+    fn with_standing_items(&self) -> Self {
+        let mut pending = self.clone();
+        pending.items = std::mem::take(&mut pending.standing);
+        pending.items.extend(self.items.iter().cloned());
+        pending
+    }
 }
 
 mod context_publication;
 mod pending_delivery;
+mod standing_routes;
+pub use standing_routes::open_standing_handoff_before;
 mod result_inputs;
 pub use result_inputs::{prepare_provider_result_input_retirement, prepare_provider_result_input_revision};
 mod output_connections;
@@ -1933,7 +1948,7 @@ pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -
     }
     let old_context = optional_u64(prior,"context_generation")?;
     let new_context = optional_u64(next,"context_generation")?;
-    if new_context != old_context && Some(new_context) != old_context.checked_add(1) { return Err("checked provider context generation skipped".into()); }
+    if new_context < old_context { return Err("checked provider context generation moved backwards".into()); }
     let pending = persisted_pending_handoff(&after,provider)?.ok_or("checked provider write has no pending handoff")?;
     validate_verified_input_change(&topology, &next_topology, &pending)?;
     let next_config = next_topology.config(&RunAuthoringProfile {
@@ -6098,6 +6113,7 @@ impl ProviderOutputHandoff {
             config,
             context_output_labels,
             session_snapshot_labels,
+            standing_candidate_labels: standing_routes::standing_candidate_labels(descriptor)?,
             granted_tools,
             granted_interfaces,
             granted_mark_outcomes,
@@ -6116,6 +6132,7 @@ impl ProviderOutputHandoff {
                 consumed_input,
                 consumed_context_free_independent_input,
                 consumed_verified_input,
+                deferred_context_generations: 0,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -6204,6 +6221,21 @@ impl ProviderOutputHandoff {
 
     pub async fn current_run_record_bytes(&self) -> Vec<u8> {
         self.state.lock().await.run_record_bytes.clone()
+    }
+
+    pub async fn deferred_context_generations(&self) -> u64 {
+        self.state.lock().await.deferred_context_generations
+    }
+
+    pub async fn context_generation(&self) -> Result<u64, String> {
+        let state = self.state.lock().await;
+        let record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
+        optional_u64(
+            record.interface_state.get(&self.config.provider_interface).ok_or("provider run has no provider state")?,
+            "context_generation",
+        )?
+        .checked_add(state.deferred_context_generations)
+        .ok_or_else(|| "provider context generation overflowed".to_string())
     }
 
     pub async fn reconciled_run_record_bytes(&self) -> Result<Vec<u8>, String> {
@@ -6495,7 +6527,7 @@ impl ProviderOutputHandoff {
         let batch_count = batches.len();
         let mut outcomes = Vec::new();
         for (index, batch) in batches.into_iter().enumerate() {
-            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None, None)
+            let delivered = self.hand_rearm_batch_with_bindings(batch, terminal && index + 1 == batch_count, bindings, consume_input, independent_source.filter(|_| index == 0), amendment, None, None, !terminal)
                 .await?;
             let failed = delivered.iter().any(|outcome| matches!(outcome, ProviderHandoffOutcome::TerminalFailure { .. }));
             outcomes.extend(delivered);
@@ -6516,6 +6548,7 @@ impl ProviderOutputHandoff {
         amendment: Option<&ProviderCapabilityAmendment>,
         settlement_of: Option<(&ArtifactRef, u64)>,
         withdrawal: Option<&source_withdrawal::Withdrawal>,
+        standing: bool,
     ) -> Result<Vec<ProviderHandoffOutcome>, String> {
         let mut state = self.state.lock().await;
         let withdrawal_guard = if withdrawal.is_some() { Some(self.dispatch_ownership().await?) } else { None };
@@ -6551,6 +6584,7 @@ impl ProviderOutputHandoff {
             }
         }
         let mut prepared = Vec::with_capacity(emissions.len());
+        let mut standing_checkpoints_by_output = Vec::with_capacity(emissions.len());
         for emission in emissions {
             let ProviderHandoffEmission {
                 mut artifact,
@@ -6610,6 +6644,11 @@ impl ProviderOutputHandoff {
                 &active.granted_tools,
                 &active.granted_interfaces,
             )?;
+            standing_checkpoints_by_output.push(if standing && !snapshot_output && verified_inputs.is_empty() {
+                active.standing_route_for(&record, &route, &output_checkpoint, &manifest.label)?
+            } else {
+                None
+            });
             prepared.push(PreparedHandoff {
                 identity,
                 output_checkpoint,
@@ -6622,16 +6661,75 @@ impl ProviderOutputHandoff {
         }
         let independent_input = additional_input.as_ref().or(state.consumed_context_free_independent_input.as_ref());
         let context_changed = next_context != state.context_artifacts;
-        let refresh_context = (consume_input && state.consumed_input) || context_changed || amendment.is_some();
-        let mut authored = active.author_run_with_bindings(
+        let own_refresh = (consume_input && state.consumed_input) || context_changed || amendment.is_some();
+        let standing_checkpoints = if standing
+            && !terminal
+            && bindings.is_empty()
+            && amendment.is_none()
+            && settlement_of.is_none()
+            && withdrawal.is_none()
+            && additional_input.is_none()
+            && !self.failed_source
+            && self.checked_settlement_output.is_none()
+            && persisted_pending_handoff(&record, &self.config.provider_interface)?.is_some_and(|pending| {
+                pending.withdrawal.is_none()
+                    && pending.context_publication.is_none()
+                    && if pending.terminal {
+                        pending.source_movement_seq < self.source_movement_seq
+                    } else {
+                        pending.source_movement_seq == self.source_movement_seq
+                    }
+            })
+        {
+            standing_checkpoints_by_output.into_iter().collect::<Option<Vec<_>>>()
+        } else {
+            None
+        };
+        if let Some(checkpoints) = standing_checkpoints {
+            let items = prepared
+                .iter()
+                .zip(checkpoints)
+                .map(|(output, checkpoint)| PendingHandoffItem {
+                    artifact_id: output.identity.artifact.id.clone(),
+                    artifact_content_hash: output.identity.artifact.content.to_hex(),
+                    artifact_label: output.identity.label.clone(),
+                    manifest_relative_path: output.identity.manifest_relative_path.clone(),
+                    checkpoint,
+                })
+                .collect();
+            let (pending, outcomes) = active.hand_standing_batch(&record, items, u64::from(own_refresh)).await?;
+            Self::ground_admitted_context_outputs(
+                &mut next_session_context,
+                &pending,
+                &outcomes,
+                &contributed_context_labels,
+            )?;
+            state.static_context_artifacts = next_static_context;
+            state.session_context = next_session_context;
+            state.session_snapshot_head = next_session_snapshot_head;
+            state.context_artifacts = next_context;
+            state.deferred_context_generations = state
+                .deferred_context_generations
+                .checked_add(u64::from(own_refresh))
+                .ok_or("provider deferred context generation overflowed")?;
+            if consume_input {
+                state.consumed_input = false;
+            }
+            return Ok(outcomes);
+        }
+        let refresh_context = own_refresh || state.deferred_context_generations > 0;
+        let standing_since_write = active.standing_items_since_write(&record)?;
+        let mut authored = active.author_run_with_generations(
             &state.run_record_bytes,
             &next_context,
             &prepared,
             refresh_context,
+            u64::from(own_refresh) + state.deferred_context_generations,
             independent_input,
             consume_input && state.consumed_verified_input,
             terminal,
             bindings,
+            standing_since_write,
         )?;
         if let Some(amendment) = amendment {
             let topology = capability_amendment::apply_to_authored_run(
@@ -6661,6 +6759,7 @@ impl ProviderOutputHandoff {
         }
         if withdrawal.is_some() { active.validate_installed_withdrawal(&state.run_record_bytes)?; }
         drop(withdrawal_guard);
+        state.deferred_context_generations = 0;
         if consume_input {
             state.consumed_input = false;
         }
@@ -7363,8 +7462,12 @@ impl ProviderOutputHandoff {
             if withdrawal_guard.is_some() { self.validate_installed_withdrawal(&state.run_record_bytes)?; }
             drop(withdrawal_guard);
         }
+        let journal = self.standing_journal_for_source(&record)?;
         let pending = persisted_pending_handoff(&record, &self.config.provider_interface)?;
         let Some(pending) = pending else {
+            if journal.is_some() {
+                return Err("provider standing journal has no persisted handoff boundary".into());
+            }
             return Ok((ProviderSourceRecovery::Process, Vec::new()));
         };
         if pending.source_movement_seq < self.source_movement_seq {
@@ -7394,6 +7497,9 @@ impl ProviderOutputHandoff {
             let published = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
             self.restore_pending_context(&mut state, &published, &pending)?;
             restore_consumed_context_inputs(&mut state, input_entries)?;
+            if let Some(journal) = journal {
+                return self.recover_standing_journal(&mut state, journal).await;
+            }
             return Ok((ProviderSourceRecovery::Process, Vec::new()));
         }
         if pending.source_movement_seq > self.source_movement_seq {
@@ -7445,6 +7551,9 @@ impl ProviderOutputHandoff {
             &outcomes,
             &self.contributed_context_output_labels(),
         )?;
+        if let Some(journal) = journal {
+            return self.recover_standing_journal(&mut state, journal).await;
+        }
         Ok((
             ProviderSourceRecovery::Interrupted {
                 last_artifact_label: pending
@@ -7652,6 +7761,7 @@ impl ProviderOutputHandoff {
                 .map_err(|error| error.to_string())?;
             let Some(mut pending) =
                 persisted_pending_handoff(&authored, &self.config.provider_interface)?
+                    .map(|pending| pending.with_standing_items())
             else {
                 continue;
             };
@@ -7729,7 +7839,8 @@ impl ProviderOutputHandoff {
         authored: &RunRecord,
         publications: &ContextPublications,
     ) -> Result<(), String> {
-        let Some(mut pending) = persisted_pending_handoff(authored, &self.config.provider_interface)? else {
+        let Some(mut pending) = persisted_pending_handoff(authored, &self.config.provider_interface)?
+            .map(|pending| pending.with_standing_items()) else {
             return Ok(());
         };
         let visible = current_context_artifacts(current, &self.config)?.into_iter().collect::<BTreeSet<_>>();
@@ -7748,7 +7859,7 @@ impl ProviderOutputHandoff {
         record: &RunRecord,
         pending: &PendingHandoff,
     ) -> Result<(), String> {
-        self.restore_pending_context_with_publications(state, record, pending, &BTreeMap::new())
+        self.restore_pending_context_with_publications(state, record, &pending.with_standing_items(), &BTreeMap::new())
     }
 
     fn source_is_context_free(&self, source: u64) -> Result<bool, String> {
@@ -7836,7 +7947,8 @@ impl ProviderOutputHandoff {
                         let existing_refs = context.artifacts.iter().map(|entry| artifact_ref_key(&entry.source_artifact)).collect::<BTreeSet<_>>();
                         !existing_refs.is_subset(&recovered_refs) && !recovered_refs.is_subset(&existing_refs)
                     }
-                    && persisted_pending_handoff(record, &self.config.provider_interface)?.as_ref() == Some(pending)
+                    && persisted_pending_handoff(record, &self.config.provider_interface)?
+                        .map(|persisted| persisted.with_standing_items()).as_ref() == Some(pending)
                 {
                     let mut owner = self.clone();
                     owner.source_carries_context = !self.source_is_context_free(pending.source_movement_seq)?;
@@ -8580,6 +8692,23 @@ impl ProviderOutputHandoff {
         terminal: bool,
         bindings: &[ProviderOutgoingBinding],
     ) -> Result<AuthoredRun, String> {
+        self.author_run_with_generations(current, context_artifacts, outputs, refresh_context, u64::from(refresh_context),
+            consumed_context_free_independent_input, consumed_verified_input, terminal, bindings, Vec::new())
+    }
+
+    fn author_run_with_generations(
+        &self,
+        current: &[u8],
+        context_artifacts: &[ArtifactId],
+        outputs: &[PreparedHandoff],
+        refresh_context: bool,
+        context_generations: u64,
+        consumed_context_free_independent_input: Option<&RunAuthoringCheckpoint>,
+        consumed_verified_input: bool,
+        terminal: bool,
+        bindings: &[ProviderOutgoingBinding],
+        standing: Vec<PendingHandoffItem>,
+    ) -> Result<AuthoredRun, String> {
         let first_output = outputs
             .first()
             .ok_or_else(|| "provider cannot author an empty response batch".to_string())?;
@@ -8767,6 +8896,23 @@ impl ProviderOutputHandoff {
                 next_frontier.push(materialize_checkpoint(template,&id,&record.id,&mandatory_role_bindings));
             }
         }
+        let standing_role_artifacts = if self.config.writer_run.is_some() {
+            current_mandatory_role_artifacts(&record, &self.config)?
+        } else {
+            mandatory_role_artifacts.clone()
+        };
+        for (id, checkpoint) in standing_routes::materialize_standing_routes(
+            &next_config.checkpoints,
+            &self.config.provider_interface,
+            &self.standing_candidate_labels,
+            &next_frontier,
+            &batch_prefix,
+            &record.id,
+            &standing_role_artifacts,
+        )? {
+            next_frontier_ids.push(id);
+            next_frontier.push(checkpoint);
+        }
         for checkpoint in [authoring_call, authoring_result].into_iter().filter(|_| self.config.writer_run.is_none()) {
             let id = format!("{batch_prefix}_{}", checkpoint.name);
             next_frontier_ids.push(id.clone());
@@ -8845,7 +8991,7 @@ impl ProviderOutputHandoff {
                 )
             })?;
         let context_generation = if refresh_context && !self.failed_source {
-            previous_context_generation.checked_add(1).ok_or_else(|| {
+            previous_context_generation.checked_add(context_generations).ok_or_else(|| {
                 format!(
                     "provider run '{}' context generation overflowed",
                     self.config.run.as_str()
@@ -8880,6 +9026,7 @@ impl ProviderOutputHandoff {
             settlement_of: None,
             dispatch_fenced: true,
             withdrawal: None,
+            standing,
         };
         provider_state.insert(
             "pending_handoff".to_string(),
@@ -11193,32 +11340,7 @@ impl RunAuthoringConfig {
         match route {
             ProviderHandoffRoute::ClientProjection
             | ProviderHandoffRoute::ClientProjectionWithVerifiedInputs { .. } => {
-                let owners = self
-                    .checkpoints
-                    .iter()
-                    .filter(|checkpoint| {
-                        checkpoint.role == RunAuthoringCheckpointRole::ProviderArtifactOutput
-                            && checkpoint.interface_binding.admits(artifact_label)
-                            && checkpoint.outbound_interface_bindings.iter().all(|binding| binding.admits(artifact_label))
-                            && match checkpoint.required_verified_artifacts.as_slice() {
-                                [] => true,
-                                [required] => required.artifact_label == artifact_label,
-                                _ => false,
-                            }
-                    })
-                    .collect::<Vec<_>>();
-                match owners.as_slice() {
-                    [owner] => Ok((*owner).clone()),
-                    [] => Err(format!(
-                        "provider emitted client artifact '{}' with no descriptor-derived output owner",
-                        artifact_label
-                    )),
-                    _ => Err(format!(
-                        "provider emitted client artifact '{}' with {} descriptor-derived output owners",
-                        artifact_label,
-                        owners.len()
-                    )),
-                }
+                standing_routes::client_projection_owner(&self.checkpoints, artifact_label).cloned()
             }
             ProviderHandoffRoute::Tool { tool } => {
                 if !granted_tools.contains(tool) {
@@ -11634,14 +11756,29 @@ fn validate_pending_output_frontier(
         .filter_map(|id| record.checkpoint(id))
         .filter(|checkpoint| checkpoint.inbound_interface() == Some(provider))
         .collect::<Vec<_>>();
+    for item in &pending.items {
+        let matches = provider_bound
+            .iter()
+            .filter(|checkpoint| checkpoint_matches_pending(checkpoint, &item.checkpoint))
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "provider run '{}' pending item '{}' matches {} active provider checkpoints",
+                record.id.as_str(),
+                item.artifact_id.as_str(),
+                matches
+            ));
+        }
+    }
     let topology: Option<BoundRunAuthoringTopology> = provider_state.get(RUN_AUTHORING_BINDING).cloned()
         .map(serde_json::from_value).transpose().map_err(|e|e.to_string())?;
     if let Some(topology) = &topology { topology.validate_identity(record,provider)?; }
     let retained = topology.iter().flat_map(|topology| &topology.checkpoints).filter(|template| retains_future_output(template)
         && !pending.items.iter().any(|item| pending_output_matches_template(item, template))).collect::<Vec<_>>();
     let mut retained_ids = BTreeSet::new();
-    if !retained.is_empty() {
-        let topology = topology.as_ref().ok_or("retained output has no immutable topology")?;
+    let item_ids = pending.items.iter().map(|item| item.checkpoint.id.clone()).collect::<BTreeSet<_>>();
+    let mut standing_ids = BTreeSet::new();
+    if let Some(topology) = &topology {
         let authoring = |role| -> Result<&RunAuthoringCheckpoint,String> {
             let matches = topology.checkpoints.iter().filter(|template| template.role == role).collect::<Vec<_>>();
             match matches.as_slice() { [one] => Ok(*one), _ => Err("retained output has no unique authoring boundary".into()) }
@@ -11657,8 +11794,10 @@ fn validate_pending_output_frontier(
             let [checkpoint] = matches.as_slice() else { return Err("pending provider lost or duplicated its exact retained output/read bindings".into()); };
             if !retained_ids.insert(checkpoint.id.clone()) { return Err("retained outputs overlap one checkpoint".into()); }
         }
+        let claimed = item_ids.union(&retained_ids).cloned().collect::<BTreeSet<_>>();
+        standing_ids = standing_routes::classify_standing_frontier(&provider_bound, &claimed, &topology.checkpoints, provider, &roles)?;
     }
-    if provider_bound.len() != pending.items.len() + retained.len() {
+    if provider_bound.len() != pending.items.len() + retained.len() + standing_ids.len() {
         return Err(format!(
             "provider run '{}' pending handoff has {} active provider checkpoints for {} items",
             record.id.as_str(),
@@ -11675,20 +11814,7 @@ fn validate_pending_output_frontier(
             ));
         }
     }
-    for item in &pending.items {
-        let matches = provider_bound
-            .iter()
-            .filter(|checkpoint| checkpoint_matches_pending(checkpoint, &item.checkpoint))
-            .count();
-        if matches != 1 {
-            return Err(format!(
-                "provider run '{}' pending item '{}' matches {} active provider checkpoints",
-                record.id.as_str(),
-                item.artifact_id.as_str(),
-                matches
-            ));
-        }
-    }
+    retained_ids.extend(standing_ids);
     Ok(retained_ids)
 }
 fn frontier_checkpoint_ids(
@@ -12502,6 +12628,21 @@ fn persisted_pending_handoff(
                         "provider run '{}' pending_handoff repeats checkpoint '{}'",
                         record.id.as_str(),
                         item.checkpoint.id.as_str()
+                    ));
+                }
+            }
+            for item in &pending.standing {
+                if item.artifact_label.trim().is_empty()
+                    || ContentHash::from_hex(&item.artifact_content_hash).is_none()
+                    || !artifacts.insert(item.artifact_id.clone())
+                    || item.checkpoint.interface_binding.interface != *provider
+                    || !item.checkpoint.interface_binding.admits(&item.artifact_label)
+                    || !item.checkpoint.required_verified_artifacts.is_empty()
+                {
+                    return Err(format!(
+                        "provider run '{}' pending_handoff carries a malformed standing delivery '{}'",
+                        record.id.as_str(),
+                        item.artifact_id.as_str()
                     ));
                 }
             }
@@ -14231,6 +14372,7 @@ mod tests {
             consumed_input: true,
             consumed_context_free_independent_input: None,
             consumed_verified_input: false,
+            deferred_context_generations: 0,
         };
         reattach_unpublished_context_inputs(&mut state, 10, vec![ArtifactId::new("operator.message:3")]).unwrap();
         assert_eq!(state.session_context.artifacts.iter().map(|entry| entry.source_movement_seq.unwrap()).collect::<Vec<_>>(), vec![3, 10, 12, 14]);
@@ -14943,6 +15085,7 @@ mod tests {
             checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
+            standing_candidate_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
             granted_interfaces: BTreeSet::new(),
             granted_mark_outcomes: BTreeSet::new(),
@@ -15009,6 +15152,7 @@ mod tests {
                 consumed_input: false,
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
+                deferred_context_generations: 0,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -15237,6 +15381,7 @@ mod tests {
             checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
+            standing_candidate_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
             granted_interfaces: BTreeSet::new(),
             granted_mark_outcomes: BTreeSet::new(),
@@ -15294,6 +15439,7 @@ mod tests {
                 consumed_input: false,
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
+                deferred_context_generations: 0,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -15857,6 +16003,7 @@ mod tests {
             settlement_of: None,
             dispatch_fenced: true,
             withdrawal: None,
+            standing: Vec::new(),
             items: vec![PendingHandoffItem {
                 artifact_id: source.id.clone(),
                 artifact_content_hash: source.content.to_hex(),
@@ -17122,8 +17269,10 @@ mod tests {
                     verified_inputs: Vec::new(),
                 }], true, None, false, true).unwrap();
             let tool_record = RunRecord::from_bytes(tool.content.as_bytes()).unwrap();
-            assert!(!tool_record.checkpoints.iter().any(|checkpoint| checkpoint.outbound_interfaces()
-                .any(|interface| interface.as_str() == "world_client_profile_test")));
+            assert!(tool_record.checkpoints.iter().filter(|checkpoint| checkpoint.outbound_interfaces()
+                .any(|interface| interface.as_str() == "world_client_profile_test"))
+                .all(|checkpoint| checkpoint.id.as_str().contains("_standing_")));
+            assert!(tool.pending_handoff.items.iter().all(|item| item.artifact_label == "tool.call"));
             let mut recovery = failed.clone();
             recovery.ctx.movements_path = var_dir.join("refused-pending.jsonl");
             recovery.ctx.ledger_index_path = var_dir.join("refused-pending.sqlite");
@@ -17278,12 +17427,10 @@ mod tests {
             .from_invocation(&ctx, &descriptor, &run, &input, 23, &run_bytes)
             .unwrap();
         assert_eq!(replay.bound_topology, topology);
-        assert_eq!(
-            frontier_checkpoint_ids(authored_record.interface_state.get(&provider).unwrap())
-                .unwrap()
-                .len(),
-            3
-        );
+        let authored_frontier = frontier_checkpoint_ids(authored_record.interface_state.get(&provider).unwrap()).unwrap();
+        assert_eq!(authored_frontier.len(), 5);
+        assert_eq!(authored_frontier.iter().filter(|id| id.contains("_standing_")).count(), 2,
+            "the write leaves one standing client route and one standing transport dispatch");
         assert_eq!(
             config_from_persisted_profile(&authored_record, &provider, &profile).unwrap(),
             handoff.config
@@ -17372,7 +17519,7 @@ mod tests {
                 &result_payload,
             )
             .unwrap_err();
-        assert!(error.contains("matches 0 active provider checkpoints"));
+        assert!(error.contains("matches 0 active provider checkpoints"), "{error}");
         let original = RunRecord::from_bytes(&run_bytes).unwrap();
         let call_file = handoff.materialize_file_write_call(&authored).unwrap();
         std::fs::write(ctx.blobs_dir.join(authored.before_hash.clone()), &run_bytes).unwrap();
@@ -18925,6 +19072,7 @@ mod tests {
             checked_settlement_output: None,
             context_output_labels: BTreeSet::new(),
             session_snapshot_labels: BTreeSet::new(),
+            standing_candidate_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
             granted_interfaces: BTreeSet::new(),
             granted_mark_outcomes: BTreeSet::new(),
@@ -18946,6 +19094,7 @@ mod tests {
                 consumed_input: false,
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
+                deferred_context_generations: 0,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -19021,6 +19170,198 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standing_route_hands_the_next_output_without_a_run_write() {
+        use tokio_util::sync::CancellationToken;
+
+        let dir = tempfile::tempdir().unwrap();
+        let var_dir = dir.path().join("var/provider");
+        let emitted = var_dir.join("emitted");
+        let reasoning = InterfaceArtifactFile::write(&emitted, "turn.reasoning", br#"{"text":"thinking"}"#).unwrap();
+        let reasoning_identity = artifact_identity(&reasoning, &var_dir).unwrap();
+        let config = config_with_tool_routes(&[]);
+        let output = config
+            .checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput)
+            .unwrap()
+            .clone();
+        let bound_topology = test_bound_topology(&config);
+        let checkpoint = |id: &str, inbound: &str, outbound: &str| serde_json::json!({
+            "id": id, "run": "run_test", "trace": format!("trace:run_test:{id}"), "epoch": 0,
+            "interface_binding": all_binding(inbound), "outbound_interface_bindings": [all_binding(outbound)],
+            "artifact_bindings": [], "required_verified_artifacts": []
+        });
+        let run_value = serde_json::json!({
+            "id": "run_test", "ee": "ee_test", "worker": "system_worker_test", "trace": "trace:run_test", "status": "running",
+            "interface_state": {"world_provider_test": {
+                "context_generation": 0, "authoring_generation": 0,
+                "frontier_checkpoint_ids": ["output_old", "authoring_call_old", "authoring_result_old"]
+            }},
+            "checkpoints": [
+                checkpoint("terminal_input", "world_input_test", "world_provider_test"),
+                checkpoint("output_old", "world_provider_test", "world_client_test"),
+                checkpoint("authoring_call_old", "system_interface_authoring_test", "system_context_authoring_test"),
+                checkpoint("authoring_result_old", "system_context_authoring_test", "world_provider_test"),
+            ],
+            "active_checkpoints": ["terminal_input", "output_old", "authoring_call_old", "authoring_result_old"]
+        });
+        let run_bytes = serde_json::to_vec_pretty(&run_value).unwrap();
+        let run_path = dir.path().join("runs/run_test.json");
+        std::fs::create_dir_all(run_path.parent().unwrap()).unwrap();
+        let movements_path = dir.path().join("ledger/movements.jsonl");
+        std::fs::create_dir_all(movements_path.parent().unwrap()).unwrap();
+        std::fs::write(&movements_path, b"").unwrap();
+        let (arrivals, mut arrival_rx) = tokio::sync::mpsc::channel(2);
+        let descriptor_snapshot = serde_json::from_value(serde_json::json!({
+            "id": "world_provider_test", "interface_type": "world", "role": "provider",
+            "direction": "bidirectional", "source_names": ["test"], "interface_driver_ref": "test_provider"
+        }))
+        .unwrap();
+        let ctx = InterfaceLiftContext::unprivileged(
+            InterfaceId::new("world_provider_test"),
+            dir.path().join("registry/interface/world_provider_test"),
+            Some(descriptor_snapshot),
+            var_dir.clone(),
+            movements_path.clone(),
+            dir.path().join("ledger/blobs"),
+            dir.path().join("ledger/ledger-index.sqlite"),
+            Default::default(),
+            arrivals,
+            CancellationToken::new(),
+        )
+        .with_host_io_limits(InterfaceHostIoLimits {
+            max_control_frame_bytes: 1_048_576,
+            max_stderr_bytes: 262_144,
+            max_manifest_bytes: 1_048_576,
+            max_payload_bytes: 268_435_456,
+        })
+        .unwrap();
+        std::fs::create_dir_all(&ctx.blobs_dir).unwrap();
+        let input = InterfaceArtifactFile::write(&emitted, "operator.input", br#"{"text":"answer"}"#).unwrap();
+        let source_hash = ContentHash::of_bytes(&run_bytes);
+        std::fs::write(ctx.blobs_dir.join(source_hash.to_hex()), &run_bytes).unwrap();
+        let mut metadata = typed_invocation_metadata(&RunId::new("run_test"), "terminal_input", &ctx.interface, 0);
+        metadata.runtime.as_mut().unwrap().run_record_hash = Some(source_hash.to_hex());
+        let source = Movement {
+            trace: octopus_ledger::TraceId("trace:run_test:terminal_input".into()),
+            kind: MovementKind::InterfaceOutbound,
+            from: Endpoint::Interface("world_input_test".into()),
+            to: Endpoint::Interface(ctx.interface.clone()),
+            artifact: Some(pin_artifact(&input, &ctx.blobs_dir)),
+            invocation_metadata: Some(metadata.clone().into()),
+            ..ledger_row(0)
+        };
+        let result_reader = LedgerTailReader::open_named(&ctx, "run-authoring").unwrap();
+        let session = ProviderHandoffSession::new(&ctx).unwrap();
+        let handoff = ProviderOutputHandoff {
+            invocation_metadata: metadata,
+            ctx,
+            config,
+            run_path: run_path.clone(),
+            hand_in_root: dir.path().join("hand-in"),
+            var_dir: var_dir.clone(),
+            source_movement_seq: 0,
+            source_carries_context: true,
+            failed_source: false,
+            checked_settlement_output: None,
+            context_output_labels: BTreeSet::from(["turn.agent_message".to_string()]),
+            session_snapshot_labels: BTreeSet::new(),
+            standing_candidate_labels: BTreeSet::from(["turn.agent_message".to_string(), "turn.reasoning".to_string()]),
+            granted_tools: BTreeSet::new(),
+            granted_interfaces: BTreeSet::new(),
+            granted_mark_outcomes: BTreeSet::new(),
+            bound_topology,
+            delivery_mode: HandoffDeliveryMode::Rearm,
+            session,
+            invocation_session_snapshot: None,
+            state: Arc::new(tokio::sync::Mutex::new(HandoffState {
+                validated_withdrawal_output: None,
+                context_artifacts: Vec::new(),
+                static_context_artifacts: Vec::new(),
+                session_context: ResolvedSessionContext {
+                    provider_interface: InterfaceId::new("world_provider_test"),
+                    artifacts: Vec::new(),
+                },
+                session_snapshot_head: None,
+                run_record_bytes: run_bytes.clone(),
+                run_record_evidence_seq: None,
+                consumed_input: false,
+                consumed_context_free_independent_input: None,
+                consumed_verified_input: false,
+                deferred_context_generations: 0,
+            })),
+            result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
+        };
+        let prepared = [PreparedHandoff { identity: reasoning_identity.clone(), output_checkpoint: output, verified_inputs: Vec::new() }];
+        let authored = handoff.author_run(&run_bytes, &[], &prepared, false, None, false, false).unwrap();
+        let record = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
+        let provider = InterfaceId::new("world_provider_test");
+        let pending = pending_handoff(&record, &provider).unwrap().unwrap();
+        let standing = record
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.id.as_str().ends_with("_standing_client_output"))
+            .expect("the write leaves a standing route for the next client outputs");
+        assert_eq!(
+            standing.interface_binding.as_ref().unwrap().config.artifact_policy,
+            BindingArtifactPolicy::Allow { names: vec!["turn.agent_message".into()], namespaces: Vec::new() },
+            "the standing route takes every client name the write's own outputs do not claim"
+        );
+        assert!(record.checkpoints.iter().any(|checkpoint| checkpoint.id.as_str().ends_with("_standing_transport_dispatch_standing")));
+        validate_pending_items_are_active(&record, &provider, &pending).unwrap();
+        std::fs::write(&run_path, authored.content.as_bytes()).unwrap();
+        std::fs::write(
+            &movements_path,
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&source).unwrap(),
+                serde_json::to_string(&pending_movement(1, &pending.items[0], &reasoning_identity.artifact)).unwrap()
+            ),
+        )
+        .unwrap();
+        handoff.state.lock().await.run_record_bytes = authored.content.as_bytes().to_vec();
+
+        let answer = InterfaceArtifactFile::write(&emitted, "turn.agent_message", br#"{"text":"answer"}"#).unwrap();
+        let answer_ref = pin_artifact(&answer, &dir.path().join("ledger/blobs"));
+        let mut standing_item = pending.items[0].clone();
+        standing_item.checkpoint.id = standing.id.clone();
+        let movements_for_arrival = movements_path.clone();
+        let snapshot = authored.after_hash.clone();
+        let arrival = tokio::spawn(async move {
+            let delivery = arrival_rx.recv().await.unwrap();
+            assert_eq!(delivery.artifact.read_manifest().unwrap().label, "turn.agent_message");
+            let rows = retained_pending_movements(&delivery, pending_movement(2, &standing_item, &answer_ref), &snapshot);
+            use std::io::Write as _;
+            let mut ledger = std::fs::OpenOptions::new().append(true).open(&movements_for_arrival).unwrap();
+            for row in rows { writeln!(ledger, "{}", serde_json::to_string(&row).unwrap()).unwrap(); }
+            ledger.sync_all().unwrap();
+            delivery
+                .retained
+                .unwrap()
+                .reply
+                .send(Ok(octopus_ledger::ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { seq: 3 } }))
+                .unwrap();
+            tokio::time::timeout(Duration::from_millis(25), arrival_rx.recv()).await.is_err()
+        });
+        let outcome = handoff
+            .hand(ProviderEmission { artifact: answer, route: ProviderEmissionRoute::ClientProjection })
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ProviderHandoffOutcome::Admitted { seq: 3, .. }));
+        assert!(arrival.await.unwrap(), "the standing delivery hands the output once");
+        assert_eq!(
+            std::fs::read(&run_path).unwrap(),
+            authored.content.as_bytes(),
+            "the next ordinary output rides the standing route without rewriting the run"
+        );
+        assert_eq!(handoff.deferred_context_generations().await, 1);
+        assert_eq!(handoff.context_generation().await.unwrap(), 1);
+        assert_eq!(
+            handoff.recover_source().await.unwrap(),
+            ProviderSourceRecovery::Interrupted { last_artifact_label: "turn.agent_message".into() },
+            "the private journal carries the standing delivery across a restart"
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_pending_handoff_recovers_from_ledger_without_provider_replay() {
         use octopus_ledger::{Lamport, Seq, TraceId};
         use tokio_util::sync::CancellationToken;
@@ -19054,6 +19395,7 @@ mod tests {
             settlement_of: None,
             dispatch_fenced: true,
             withdrawal: None,
+            standing: Vec::new(),
             items: vec![PendingHandoffItem {
                 artifact_id: identity.artifact.id.clone(),
                 artifact_content_hash: identity.artifact.content.to_hex(),
@@ -19205,6 +19547,7 @@ mod tests {
             checked_settlement_output: None,
             context_output_labels: BTreeSet::from(["interface.artifact.output".to_string()]),
             session_snapshot_labels: BTreeSet::from(["interface.artifact.output".to_string()]),
+            standing_candidate_labels: BTreeSet::new(),
             granted_tools: BTreeSet::new(),
             granted_interfaces: BTreeSet::new(),
             granted_mark_outcomes: BTreeSet::new(),
@@ -19226,6 +19569,7 @@ mod tests {
                 consumed_input: false,
                 consumed_context_free_independent_input: None,
                 consumed_verified_input: false,
+                deferred_context_generations: 0,
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
@@ -19399,6 +19743,7 @@ mod tests {
             consumed_input: false,
             consumed_context_free_independent_input: None,
             consumed_verified_input: false,
+            deferred_context_generations: 0,
         }));
         assert_eq!(
             rearmed_handoff.recover_source().await.unwrap(),

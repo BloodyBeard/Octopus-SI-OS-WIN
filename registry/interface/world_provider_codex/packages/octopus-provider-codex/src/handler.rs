@@ -2139,6 +2139,7 @@ pub(crate) struct CodexProviderInvocation<'a> {
     pub attempt: u32,
     pub admitted_run_record: &'a [u8],
     pub current_run_record: &'a [u8],
+    pub deferred_context_generations: u64,
     pub input_changes_context: bool,
     pub interrupted_after_artifact: Option<String>,
     pub recovered_handoff_artifacts: Arc<Vec<CodexRecoveredHandoffArtifact>>,
@@ -5784,6 +5785,7 @@ impl CodexAppServerInterfaceDriver {
             attempt,
             admitted_run_record,
             current_run_record,
+            deferred_context_generations,
             input_changes_context,
             interrupted_after_artifact,
             recovered_handoff_artifacts,
@@ -6210,8 +6212,9 @@ impl CodexAppServerInterfaceDriver {
         assembled_context.static_context_bytes.extend_from_slice(
             &serde_json::to_vec(&native_catalog.tool_names).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?,
         );
-        let authored_context_generation =
-            read_codex_context_generation(&run_record, &runtime.interface)?;
+        let authored_context_generation = read_codex_context_generation(&run_record, &runtime.interface)?
+            .checked_add(deferred_context_generations)
+            .ok_or_else(|| InterfaceDriverError::FailedClosed("Codex authored context generation overflowed".to_string()))?;
         let context_generation = if durable_interrupt_override {
             recovered
                 .as_ref()
@@ -19266,6 +19269,7 @@ mod tests {
                 attempt: 1,
                 admitted_run_record: &pinned_run_record,
                 current_run_record: &pinned_run_record,
+                deferred_context_generations: 0,
                 input_changes_context: false,
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
@@ -19482,6 +19486,7 @@ while IFS= read -r _; do :; done
                 attempt: 1,
                 admitted_run_record: &admitted_context_record,
                 current_run_record: &current_context_record,
+                deferred_context_generations: 0,
                 input_changes_context: true,
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
@@ -19751,6 +19756,7 @@ while IFS= read -r _; do :; done
                 attempt: 1,
                 admitted_run_record: &pinned_run_record,
                 current_run_record: &pinned_run_record,
+                deferred_context_generations: 0,
                 input_changes_context: true,
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
@@ -19781,6 +19787,7 @@ while IFS= read -r _; do :; done
                 attempt: 1,
                 admitted_run_record: &pinned_run_record,
                 current_run_record: &pinned_run_record,
+                deferred_context_generations: 0,
                 input_changes_context: true,
                 interrupted_after_artifact: None,
                 recovered_handoff_artifacts: Arc::new(Vec::new()),
@@ -19844,6 +19851,7 @@ while IFS= read -r _; do :; done
                 attempt: 2,
                 admitted_run_record: &pinned_run_record,
                 current_run_record: &pinned_run_record,
+                deferred_context_generations: 0,
                 input_changes_context: true,
                 interrupted_after_artifact: Some(TURN_DYNAMIC_TOOL_CALL_LABEL.to_string()),
                 recovered_handoff_artifacts: Arc::new(Vec::new()),

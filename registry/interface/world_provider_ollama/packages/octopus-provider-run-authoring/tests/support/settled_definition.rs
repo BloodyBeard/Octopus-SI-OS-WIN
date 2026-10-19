@@ -115,6 +115,7 @@ async fn selected_home_accepts_new_definition_without_replaying_completed_work()
         failed_source: false,
         context_output_labels,
         session_snapshot_labels,
+        standing_candidate_labels: BTreeSet::new(),
         granted_tools: BTreeSet::new(),
         granted_interfaces: BTreeSet::new(),
         granted_mark_outcomes: BTreeSet::new(),
@@ -135,6 +136,7 @@ async fn selected_home_accepts_new_definition_without_replaying_completed_work()
             consumed_input: true,
             consumed_context_free_independent_input: None,
             consumed_verified_input: false,
+            deferred_context_generations: 0,
         })),
     };
     assert!(handoff.settled_input_definition(&record, &current).unwrap());

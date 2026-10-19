@@ -34,12 +34,8 @@ async function submitClientInterfaceArtifact(options, request) {
     manifest: { label, payload_path: payloadPath },
     timeoutMs,
   });
-  const response = { interfaceId, ...(runId ? { runId } : {}), label, contentHash: digest, verdict };
-  if (request?.reportSpentGeneration === true && verdict?.refused?.reason === "checkpoint_spent") {
-    return { ...response, spentGeneration: true };
-  }
   assertAdmitted(verdict, label);
-  return response;
+  return { interfaceId, ...(runId ? { runId } : {}), label, contentHash: digest, verdict };
 }
 
 async function writeContentAddressedBytes(filePath, bytes, expectedDigest) {

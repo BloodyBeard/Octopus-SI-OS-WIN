@@ -1268,7 +1268,7 @@ impl FrontierAdmission {
         let label = file.read_manifest().map_err(|e| e.to_string())?.label;
         let targets = self
             .runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new(from), &artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new(from), &label)
             .map_err(|e| e.to_string())?;
         if targets.is_empty() {
             return Err(format!("no exact authored target for {from}"));

@@ -472,7 +472,10 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
     state.insert(FRONTIER_CHECKPOINT_IDS.into(), json!(frontier));
     if !delta.static_artifact_additions.is_empty() {
         let before_generation = optional_u64(current.interface_state.get(provider).ok_or("current provider state absent")?, "context_generation")?;
-        state.insert("context_generation".into(), json!(before_generation.checked_add(1).ok_or("context generation overflow")?));
+        let next_generation = before_generation.checked_add(1).ok_or("context generation overflow")?;
+        if state.get("context_generation").and_then(Value::as_u64).is_none_or(|authored| authored < next_generation) {
+            state.insert("context_generation".into(), json!(next_generation));
+        }
         if let Some(values) = state.get_mut("pending_handoff").and_then(|pending| pending.get_mut("context_publication")).and_then(Value::as_array_mut) {
             for id in &delta.static_artifact_additions { if !values.contains(&json!(id)) { values.push(json!(id)); } }
         }

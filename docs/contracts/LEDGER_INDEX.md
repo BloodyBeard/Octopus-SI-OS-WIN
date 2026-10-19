@@ -83,11 +83,15 @@ the kernel.
 ### Layer 1 - the kernel index
 
 In memory, read-through. The arrival path's idempotency questions - has this
-exact checkpoint generation already admitted its artifacts, is this arrival
-already recorded - are answered from an in-memory projection of arrival rows.
+exact checkpoint generation already closed its required set, has it already
+admitted this exact artifact, is this arrival already recorded - are answered
+from an in-memory projection of arrival rows.
 
-A checkpoint generation is `(run, checkpoint, epoch)`. Re-arming requires a new
-checkpoint id or a new epoch. The index holds a watermark and catches up
+A checkpoint generation is `(run, checkpoint, epoch)`. A generation without
+requirements is a standing route: it admits each distinct artifact once, keyed
+by generation and artifact id, and is never re-armed for the next arrival. A
+generation with requirements is spent when its set closes; re-arming it
+requires a new checkpoint id or a new epoch. The index holds a watermark and catches up
 incrementally before answering: the first question after boot folds the whole
 ledger once; every later question folds only the delta. No arrival ever rescans
 the biography of the world.

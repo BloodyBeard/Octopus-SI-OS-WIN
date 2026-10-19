@@ -1011,7 +1011,6 @@ export type OctopusInterfaceArtifactRequest = {
   label: string;
   payload: Record<string, unknown>;
   timeoutMs?: number;
-  reportSpentGeneration?: boolean;
 };
 
 export type OctopusDictationRequest = {
@@ -1035,7 +1034,6 @@ export type OctopusInterfaceArtifactResponse = {
   label: string;
   contentHash: string;
   verdict: unknown;
-  spentGeneration?: true;
 };
 
 export type OctopusArtifactStreamBeginRequest = {

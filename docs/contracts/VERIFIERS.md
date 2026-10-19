@@ -59,10 +59,11 @@ record:
   `artifact_label` on one checkpoint are ambiguous and fail closed: one edge
   cannot close several requirements. To close several at once, an interface
   sends several artifacts.
-- A checkpoint *with* requirements fails an arriving artifact whose label
-  matches none of them, and records that. A checkpoint *without* requirements
-  admits ordinary arrivals. The axis is optional; most checkpoints do not use
-  it.
+- A checkpoint *with* requirements takes no edge for an artifact whose label
+  matches none of them: the fan-out skips it, the same way it skips a binding
+  that does not admit the name. A checkpoint *without* requirements admits
+  ordinary arrivals, each distinct artifact once. The axis is optional; most
+  checkpoints do not use it.
 
 ## 2. Admission on the edge
 
@@ -168,9 +169,10 @@ Verifiers stand on concrete checkpoints, not on bindings.
 "The operator always receives the reply; the tool room receives it only if it
 is a well-formed tool call" is expressed as two checkpoints fed by separate
 artifacts from one model reply: the client-bound checkpoint with no
-requirements, and the room-bound checkpoint with a format verifier. A failed
-check is a `VerificationFailed` row on that route only. The client branch does
-not suffer.
+requirements, and the room-bound checkpoint with a format verifier. The reply
+text never reaches the room-bound checkpoint, because no requirement there
+names it. A tool call that fails the check is a `VerificationFailed` row on
+that route only. The client branch does not suffer.
 
 ## 6. Coordination between runs
 

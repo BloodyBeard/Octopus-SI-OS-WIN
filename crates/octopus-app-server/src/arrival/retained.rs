@@ -15,9 +15,9 @@ impl InterfaceArtifactArrivalFromInterface<'_> {
         let scope = match existing {
             Some(scope) => scope,
             None => {
-                let targets = match self.runtime.resolve_interface_arrival_targets(&self.interface, &pinned.artifact) {
+                let targets = match self.runtime.resolve_interface_arrival_targets(&self.interface, &pinned.artifact_label) {
                     Ok(targets) => targets,
-                    Err(RuntimeError::DescriptorDrift { reason: RefusedReason::NoBinding, .. }) => Vec::new(),
+                    Err(RuntimeError::DescriptorDrift { reason: RefusedReason::NoBinding | RefusedReason::Policy, .. }) => Vec::new(),
                     Err(error) => return Err(error.into()),
                 };
                 for target in &targets { pin_run_record_snapshot(self.blobs, &target.run, &target.run_record)?; }

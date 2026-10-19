@@ -1160,7 +1160,7 @@ async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart()
     drop(busy);
     let ArtifactDelivery::Pending { scope_seq } = first else { unreachable!() };
     let source = log.read_at(Seq(scope_seq)).unwrap().artifact.unwrap();
-    let mut target = embedded.runtime.resolve_interface_arrival_targets(&interface, &source).unwrap()
+    let mut target = embedded.runtime.resolve_interface_arrival_targets(&interface, "coder.build.result").unwrap()
         .into_iter().find(|target| target.run.as_str() == "second").unwrap();
     target.delivery_scope_seq = Some(scope_seq);
     let prepared = embedded.runtime.admit_resolved_interface_checkpoint(
@@ -1195,7 +1195,10 @@ async fn retained_fanout_recovers_only_original_unfinished_edges_after_restart()
     assert!(matches!(completed, ArtifactDelivery::Complete { verdict: DeliveryVerdict::Admitted { .. } }));
     let rows = log.read_from(Seq(0));
     let arrivals: Vec<_> = rows.iter().filter(|row| row.kind == MovementKind::InterfaceArrival).collect();
-    assert_eq!(arrivals.len(), 4);
+    assert_eq!(arrivals.len(), 5);
+    let standing = arrivals.iter().filter(|row| row.runtime().unwrap().checkpoint.as_str() == "first_0")
+        .map(|row| row.artifact.as_ref().unwrap().id.clone()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(standing.len(), 2, "a checkpoint without requirements takes each distinct artifact once");
     assert!(arrivals.iter().any(|row| row.runtime().unwrap().checkpoint.as_str() == "second_0"));
     assert!(!arrivals.iter().any(|row| matches!(row.runtime().unwrap().checkpoint.as_str(), "first_1" | "later_0")));
     assert_eq!(rows.iter().filter(|row| matches!(row.kind, MovementKind::MarkOutcomeAdmitted(_))).count(), 2);

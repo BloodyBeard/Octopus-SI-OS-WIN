@@ -3413,7 +3413,7 @@ fn input_awaits_open_handoff(ctx: &InterfaceLiftContext, run: &RunId, turn: &Que
     let bytes = std::fs::read(&path)
         .map_err(|error| format!("provider run '{}' current record cannot be read: {error}", run.as_str()))?;
     let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
-    octopus_provider_run_authoring::open_handoff_before(&record, &ctx.interface, turn.seq)
+    octopus_provider_run_authoring::open_standing_handoff_before(ctx, &record, &ctx.interface, turn.seq)
 }
 
 fn independent_provider_input(ctx: &InterfaceLiftContext, turn: &QueuedTurn) -> Result<Option<bool>, String> {
@@ -5656,7 +5656,10 @@ async fn drive_turn_with_retries_inner(
                                     flush_stream_batch(&handoff, &mut pending, false).await?;
                                 forwarded.outputs += flushed;
                             }
-                            let outcomes = handoff.hand_batch(vec![stream, terminal]).await?;
+                            let mut outcomes = handoff.hand_progress_batch(vec![stream]).await?;
+                            if outcomes.iter().all(|outcome| matches!(outcome, ProviderHandoffOutcome::Admitted { .. })) {
+                                outcomes.extend(handoff.hand_batch(vec![terminal]).await?);
+                            }
                             if outcomes.len() != 2 {
                                 return Err(format!(
                                     "Codex terminal group produced {} outcomes instead of 2",
@@ -5875,6 +5878,7 @@ async fn drive_turn_with_retries_inner(
             Ok(false) | Err(_) => None,
         };
         let input_changes_context = handoff.input_changes_context().await;
+        let deferred_context_generations = handoff.deferred_context_generations().await;
         let receive = Box::pin(async {
             let result = live
                 .receive_artifact_and_stream_outputs(CodexProviderInvocation {
@@ -5889,6 +5893,7 @@ async fn drive_turn_with_retries_inner(
                     attempt,
                     admitted_run_record: &pinned_run_record,
                     current_run_record: &current_run_record,
+                    deferred_context_generations,
                     input_changes_context,
                     interrupted_after_artifact: interrupted_after_artifact.clone(),
                     recovered_handoff_artifacts: recovered_handoff_artifacts.clone(),
@@ -6894,10 +6899,7 @@ async fn admit_interrupted_result(
         if (outcomes.is_empty() && input_context != sealed_input) || (!outcomes.is_empty() && input_context) {
             return Err("native result input consumption conflicts with checked source recovery".into());
         }
-        let current = octopus_runtime::run_record::RunRecord::from_bytes(&handoff.current_run_record_bytes().await)
-            .map_err(|error| error.to_string())?;
-        let generation = current.interface_state.get(&ctx.interface).and_then(|state| state.get("context_generation"))
-            .and_then(serde_json::Value::as_u64).ok_or("native result handoff has no checked context generation")?;
+        let generation = handoff.context_generation().await?;
         let delta = emissions[outcomes.len()..].iter().map(|emission| emission.artifact.read_manifest()
             .map(|manifest| u64::from(labels.contains(&manifest.label))).map_err(|error| error.to_string()))
             .collect::<Result<Vec<_>, _>>()?.into_iter().sum::<u64>();
@@ -8221,6 +8223,7 @@ mod tests {
                     attempt: 1,
                     admitted_run_record: &pinned_run_record,
                     current_run_record: &pinned_run_record,
+                    deferred_context_generations: 0,
                     input_changes_context: true,
                     interrupted_after_artifact: None,
                     recovered_handoff_artifacts: Arc::new(Vec::new()),
@@ -8396,6 +8399,7 @@ mod tests {
                     attempt: 2,
                     admitted_run_record: &pinned_run_record,
                     current_run_record: &pinned_run_record,
+                    deferred_context_generations: 0,
                     input_changes_context: true,
                     interrupted_after_artifact: Some("turn.dynamic_tool_call".to_string()),
                     recovered_handoff_artifacts: Arc::new(Vec::new()),

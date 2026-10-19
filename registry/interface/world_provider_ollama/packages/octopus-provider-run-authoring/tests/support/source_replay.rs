@@ -372,7 +372,7 @@ impl CompletedInputReplayFixture {
             session:ProviderHandoffSession::new(&ctx).unwrap(),var_dir:ctx.var_dir.clone(),ctx,
             config,run_path,hand_in_root:root.path().join("hand-in"),source_movement_seq:0,source_carries_context:true,failed_source:false,
             checked_settlement_output: None,
-            context_output_labels:BTreeSet::from(["tool.call".into()]),session_snapshot_labels:BTreeSet::new(),
+            context_output_labels:BTreeSet::from(["tool.call".into()]),session_snapshot_labels:BTreeSet::new(),standing_candidate_labels:BTreeSet::new(),
             granted_tools:BTreeSet::from(["read".into(),"write".into()]),granted_interfaces:BTreeSet::new(),granted_mark_outcomes:BTreeSet::new(),
             bound_topology:topology,delivery_mode:HandoffDeliveryMode::Rearm,invocation_session_snapshot:None,
             result_reader:Arc::new(tokio::sync::Mutex::new(result_reader)),
@@ -381,7 +381,7 @@ impl CompletedInputReplayFixture {
                 context_artifacts:Vec::new(),static_context_artifacts:Vec::new(),session_context:ResolvedSessionContext {
                     provider_interface:"provider".into(),artifacts:Vec::new(),
                 },session_snapshot_head:None,run_record_bytes:initial.clone(),run_record_evidence_seq:Some(0),
-                consumed_input:true,consumed_context_free_independent_input:None,consumed_verified_input:false,
+                consumed_input:true,consumed_context_free_independent_input:None,consumed_verified_input:false,deferred_context_generations:0,
             })),
         };
         let file = InterfaceArtifactFile::write(handoff.var_dir.join("input"),"tool.result",
@@ -1408,7 +1408,7 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
         var_dir: ctx.var_dir.clone(), ctx, config, run_path, source_movement_seq,
         source_carries_context: true, failed_source: false,
         checked_settlement_output: None,
-        context_output_labels, session_snapshot_labels,
+        context_output_labels, session_snapshot_labels, standing_candidate_labels: BTreeSet::new(),
         granted_tools: BTreeSet::new(), granted_interfaces: BTreeSet::new(), granted_mark_outcomes: BTreeSet::new(),
         bound_topology, delivery_mode: HandoffDeliveryMode::Rearm, invocation_session_snapshot: None,
         result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
@@ -1417,7 +1417,7 @@ async fn selected_home_independent_handoff_replays_unconsumed_source() {
             context_artifacts: Vec::new(), static_context_artifacts: Vec::new(),
             session_context: ResolvedSessionContext { provider_interface: provider.clone(), artifacts: Vec::new() },
             session_snapshot_head: None, run_record_bytes: current.clone(), run_record_evidence_seq: None,
-            consumed_input: true, consumed_context_free_independent_input: None, consumed_verified_input: false,
+            consumed_input: true, consumed_context_free_independent_input: None, consumed_verified_input: false, deferred_context_generations: 0,
         })),
     };
     let pending = persisted_pending_handoff(&record, &provider).unwrap().unwrap();

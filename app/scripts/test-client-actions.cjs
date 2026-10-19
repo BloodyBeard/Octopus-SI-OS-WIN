@@ -72,7 +72,7 @@ async function harness(read, props = {}) {
   let generation = 0;
   Function('module', 'exports', 'require', compiled)(module, module.exports, id => id === 'react' ? React : id.includes('clientActionSemantics') ? semantics : id === '../projectionClient' ? {
     readProjection: (method, params) => { assert.equal(method, 'projection.client_actions.list'); reads.push(params); return read(params); },
-    submitInterfaceArtifact: async request => { results.push(request); return props.deliver ? props.deliver(request) : undefined; },
+    submitInterfaceArtifact: async request => { results.push(request); if (props.deliver) await props.deliver(request); },
   } : { useProjectionGeneration: () => generation });
   function Consumer(options) { module.exports.useAdmittedClientActions(options); return null; }
   const options = { ...scope, enabled: true, surfaces: [{ id: 'dashboard' }, { id: 'scheduled' }], openSurface: surface => { const cursor = JSON.parse(window.localStorage.getItem(`octopus.client-actions.cursor.v1:${JSON.stringify([options.home, options.runId, options.interfaceId])}`)); assert.ok(cursor.last_consumed.seq >= 0); opens.push(surface.id); }, onRefusal: reason => refusals.push(reason), ...props };
@@ -103,21 +103,6 @@ test('widget results resume after lost admission without repeating the saved act
     window.localStorage.setItem(pendingKey, JSON.stringify({ ...prepared, phase: 'prepared' }));
     await view.render(); assert.equal(calls, 1); assert.equal(view.results.at(-1).payload.ok, false);
     assert.match(view.results.at(-1).payload.error, /effect is unconfirmed/);
-  } finally { await view.close(); }
-});
-
-test('a result refused by a spent Home generation waits quietly for the next generation', async () => {
-  window.localStorage.clear(); let spent = true, calls = 0;
-  const request = { schema: 'octopus.client_action', schema_version: 1, action: 'list_widgets', request_id: 'spent' };
-  const view = await harness(params => response(params, params.after_seq < 5 ? [identity(5, { action: request, turn_closure: 'completed' })] : []), {
-    widgets: async () => { calls++; return []; },
-    deliver: async () => (spent ? { spentGeneration: true } : {}),
-  });
-  try {
-    assert.equal(view.results.length, 1); assert.equal(view.results[0].reportSpentGeneration, true); assert.deepEqual(view.refusals, []);
-    spent = false; await view.render({}, true);
-    assert.equal(calls, 1); assert.equal(view.results.length, 2); assert.deepEqual(view.results[0].payload, view.results[1].payload);
-    assert.deepEqual(view.refusals, []);
   } finally { await view.close(); }
 });
 

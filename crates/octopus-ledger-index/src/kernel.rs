@@ -40,6 +40,7 @@ pub struct ArrivalDedupIndex {
     arrival_artifacts: BTreeSet<ArtifactId>,
     admitted_emissions: BTreeMap<(CheckpointIdentity, InterfaceId, ArtifactId), u64>,
     admitted_checkpoints: BTreeSet<CheckpointIdentity>,
+    admitted_route_artifacts: BTreeSet<(CheckpointIdentity, ArtifactId)>,
     admitted_requirements: BTreeSet<(CheckpointIdentity, String)>,
     pending_required_arrivals: HashMap<InterfaceArrivalMarkProofKey, Movement>,
     pending_requirement_sequences: BTreeMap<(CheckpointIdentity, String), Seq>,
@@ -318,10 +319,11 @@ impl ArrivalDedupIndex {
                     RelayArrivalState::Finished,
                 );
                 self.arrival_artifacts.insert(artifact.id.clone());
-                self.admitted_requirements
-                    .insert((generation.clone(), admission.artifact_label.clone()));
-                if admission.complete {
-                    self.admitted_checkpoints.insert(generation);
+                if !self
+                    .admitted_route_artifacts
+                    .insert((generation, artifact.id.clone()))
+                {
+                    self.malformed_runs.insert(run.clone());
                 }
             }
             None => {
@@ -528,6 +530,24 @@ impl ArrivalDedupIndex {
             .contains(&CheckpointIdentity::new(run, checkpoint, epoch)))
     }
 
+    pub fn route_artifact_admitted(
+        &self,
+        run: &RunId,
+        checkpoint: &CheckpointId,
+        epoch: u64,
+        artifact: &ArtifactId,
+    ) -> Result<bool, LedgerIndexError> {
+        if self.malformed_arrival || self.malformed_runs.contains(run) {
+            return Err(LedgerIndexError::MalformedArrivalMetadata {
+                run: run.as_str().to_string(),
+            });
+        }
+        Ok(self.admitted_route_artifacts.contains(&(
+            CheckpointIdentity::new(run, checkpoint, epoch),
+            artifact.clone(),
+        )))
+    }
+
     pub fn arrival_evidence_duplicate(&self, ids: &[&ArtifactId]) -> Option<ArtifactId> {
         ids.iter()
             .find(|id| self.arrival_artifacts.contains(**id))
@@ -694,7 +714,7 @@ mod tests {
             required_artifact_labels: vec![],
             complete: true,
         });
-        log.append(arrival);
+        let arrival = log.append(arrival);
         index.catch_up(&log).unwrap();
         assert!(matches!(
             index
@@ -702,7 +722,10 @@ mod tests {
                 .unwrap(),
             RelayArrivalState::Finished
         ));
-        assert!(index.checkpoint_admitted(&run, &checkpoint, 1).unwrap());
+        assert!(!index.checkpoint_admitted(&run, &checkpoint, 1).unwrap());
+        assert!(index
+            .route_artifact_admitted(&run, &checkpoint, 1, &arrival.artifact.as_ref().unwrap().id)
+            .unwrap());
         assert!(matches!(
             index.relay_arrival_state(before.seq.0, &run, &checkpoint, 1, "new-record"),
             Err(LedgerIndexError::UnattributedRelayArrival { .. })

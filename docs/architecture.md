@@ -312,8 +312,10 @@ sequenceDiagram
    also carries the client's snapshot of tasks, triggers, projects and Agents,
    so what the model knew is part of the recorded input.
 2. **Admission.** The runtime finds every active checkpoint, in any run, that
-   pins that interface folder. For each one it re-reads the run record from
-   disk, forms the run's grant, checks the binding, and records the movement.
+   pins that interface folder and can take the artifact's name. For each one it
+   re-reads the run record from disk, forms the run's grant, checks the
+   binding, and records the movement. The Home input is a standing route: the
+   next message enters the same checkpoint, and nothing rewrites the run first.
    Each edge gets its own verdict; a refusal on one never becomes a success or
    a redirect somewhere else.
 3. **Outbound.** The Home run's checkpoint names the provider interface as its
@@ -334,9 +336,12 @@ sequenceDiagram
    the provider continues.
 7. **Reply.** The model emits text. That artifact lands on the checkpoint bound
    to the chat interface; the client renders it. The turn is over.
-8. **Next checkpoint.** The interface re-arms the run the same way anything
-   else in the system changes: a file-write tool call against the run record,
-   in a room whose path covers it. **The path is the permission.**
+8. **Turn boundary.** Within the turn, the provider's outputs ride the standing
+   routes its last write left; it records which of them it delivered in its
+   own private journal. At the end of the turn it writes the run once, the
+   same way anything else in the system changes: a file-write tool call
+   against the run record, in a room whose path covers it. That write installs
+   the turn's context and the next routes. **The path is the permission.**
 
 Every arrow that says "movement recorded" is one row in
 `ledger/movements.jsonl`. If the tool room had refused the call, that would be

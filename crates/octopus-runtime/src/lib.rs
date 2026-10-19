@@ -733,6 +733,7 @@ struct RuntimeInner {
 #[derive(Default)]
 struct CheckpointAdmissionState {
     spent: BTreeSet<CheckpointAdmissionKey>,
+    routed: BTreeSet<(CheckpointAdmissionKey, ArtifactId)>,
     admitting: BTreeSet<CheckpointAdmissionKey>,
     waiters: BTreeMap<CheckpointAdmissionKey, tokio::sync::watch::Sender<u64>>,
 }
@@ -763,6 +764,7 @@ pub struct PreparedInterfaceCheckpointAdmission {
     reservation: CheckpointAdmissionReservation,
     admitted: AdmittedCheckpointArtifact,
     checkpoint_complete: bool,
+    standing_route: bool,
     source_guard: Option<Box<dyn AdmissionSourceGuard>>,
     run_guard: octopus_file_storage::publication::ReadGuard,
 }
@@ -786,12 +788,13 @@ impl PreparedInterfaceCheckpointAdmission {
             reservation,
             admitted,
             checkpoint_complete,
+            standing_route,
             source_guard: _source_guard,
             run_guard: _run_guard,
         } = self;
         reservation.inner.gate.admitted.lock().unwrap()
             .extend(observation.admitted_mark_outcomes.iter().cloned());
-        reservation.commit(admitted, checkpoint_complete);
+        reservation.commit(admitted, checkpoint_complete, standing_route);
         observation
     }
 }
@@ -804,19 +807,23 @@ fn admission_sources_changed(error: impl std::fmt::Display) -> RuntimeError {
 }
 
 impl CheckpointAdmissionReservation {
-    fn commit(mut self, admitted: AdmittedCheckpointArtifact, complete: bool) {
-        let mut progress = self.inner.admitted_checkpoint_artifacts.lock().unwrap();
-        progress
-            .entry(self.key.clone())
-            .or_default()
-            .insert(admitted.artifact_label.clone(), admitted);
-        if complete {
-            progress.remove(&self.key);
+    fn commit(mut self, admitted: AdmittedCheckpointArtifact, complete: bool, standing_route: bool) {
+        let artifact = admitted.artifact.id.clone();
+        if !standing_route {
+            let mut progress = self.inner.admitted_checkpoint_artifacts.lock().unwrap();
+            progress
+                .entry(self.key.clone())
+                .or_default()
+                .insert(admitted.artifact_label.clone(), admitted);
+            if complete {
+                progress.remove(&self.key);
+            }
         }
-        drop(progress);
 
         let mut state = self.inner.checkpoint_admission.lock().unwrap();
-        if complete {
+        if standing_route {
+            state.routed.insert((self.key.clone(), artifact));
+        } else if complete {
             state.spent.insert(self.key.clone());
         }
         let wake = release_checkpoint_reservation(&mut state, &self.key);
@@ -983,6 +990,7 @@ impl Runtime {
     fn reset_checkpoint_admission(&self) {
         let mut state = self.inner.checkpoint_admission.lock().unwrap();
         state.spent.clear();
+        state.routed.clear();
         state.admitting.clear();
         state.waiters.clear();
         drop(state);
@@ -1337,7 +1345,20 @@ impl Runtime {
                     return Err(RuntimeError::DescriptorDrift {
                         reason: RefusedReason::CheckpointSpent,
                         detail: format!(
-                            "artifact '{}' arrived for run '{}' on interface '{}', but checkpoint '{}' epoch {} already admitted its authored artifact set in the durable movement log; interface JSON must author a new checkpoint generation before another artifact can enter",
+                            "artifact '{}' arrived for run '{}' on interface '{}', but checkpoint '{}' epoch {} already closed its required verified artifact set in the durable movement log; interface JSON must author a new checkpoint generation before another artifact can enter",
+                            artifact.id.as_str(),
+                            key.run.as_str(),
+                            interface.as_str(),
+                            key.checkpoint.as_str(),
+                            key.epoch
+                        ),
+                    });
+                }
+                if state.routed.contains(&(key.clone(), artifact.id.clone())) {
+                    return Err(RuntimeError::DescriptorDrift {
+                        reason: RefusedReason::CheckpointSpent,
+                        detail: format!(
+                            "artifact '{}' arrived for run '{}' on interface '{}', but checkpoint '{}' epoch {} already admitted this exact artifact in the durable movement log; every arrival on a checkpoint is a distinct artifact",
                             artifact.id.as_str(),
                             key.run.as_str(),
                             interface.as_str(),
@@ -1552,6 +1573,22 @@ impl Runtime {
                 run.as_str(),
                 runtime.checkpoint.as_str()
             )));
+        }
+
+        if admission.required_artifact_labels.is_empty() {
+            let mut state = self.inner.checkpoint_admission.lock().unwrap();
+            if state.spent.contains(&key) || !state.routed.insert((key, artifact.id.clone())) {
+                return Err(RuntimeError::DescriptorDrift {
+                    reason: RefusedReason::CheckpointSpent,
+                    detail: format!(
+                        "durable movement log admits artifact '{}' twice on run '{}' checkpoint '{}'",
+                        artifact.id.as_str(),
+                        run.as_str(),
+                        runtime.checkpoint.as_str()
+                    ),
+                });
+            }
+            return Ok(());
         }
 
         if self
@@ -1818,8 +1855,9 @@ impl Runtime {
     fn interface_arrival_targets(
         &self,
         interface: &InterfaceId,
+        artifact_label: &str,
         skip_emitter: Option<SystemInterfaceEmitter<'_>>,
-    ) -> Result<Vec<InterfaceArrivalTarget>, RuntimeError> {
+    ) -> Result<(Vec<InterfaceArrivalTarget>, usize), RuntimeError> {
         let Some(dir) = self.inner.run_records_dir.lock().unwrap().clone() else {
             return Err(RuntimeError::DescriptorDrift {
                 reason: RefusedReason::UnknownRun,
@@ -1859,6 +1897,7 @@ impl Runtime {
                 .collect::<Vec<_>>()
         };
         let mut targets = Vec::with_capacity(matches.len());
+        let mut pinned = 0;
         for (record, checkpoint_id, run_record) in matches {
             let Some(checkpoint) = record.checkpoint(&checkpoint_id) else {
                 continue;
@@ -1867,6 +1906,19 @@ impl Runtime {
                 if record.id == *emitter.run && checkpoint.id == *emitter.checkpoint {
                     continue;
                 }
+            }
+            pinned += 1;
+            if !checkpoint
+                .interface_binding
+                .as_ref()
+                .is_some_and(|binding| binding.admits(artifact_label))
+                || (!checkpoint.required_verified_artifacts.is_empty()
+                    && !checkpoint
+                        .required_verified_artifacts
+                        .iter()
+                        .any(|required| required.artifact_label == artifact_label))
+            {
+                continue;
             }
             targets.push(InterfaceArrivalTarget {
                 run: record.id.clone(),
@@ -1887,16 +1939,26 @@ impl Runtime {
                 delivery_scope_seq: None,
             });
         }
-        Ok(targets)
+        Ok((targets, pinned))
     }
 
     pub fn resolve_interface_arrival_targets(
         &self,
         interface: &InterfaceId,
-        _artifact: &ArtifactRef,
+        artifact_label: &str,
     ) -> Result<Vec<InterfaceArrivalTarget>, RuntimeError> {
         self.require_known_interface(interface)?;
-        let targets = self.interface_arrival_targets(interface, None)?;
+        let (targets, pinned) = self.interface_arrival_targets(interface, artifact_label, None)?;
+        if targets.is_empty() && pinned > 0 {
+            return Err(RuntimeError::DescriptorDrift {
+                reason: RefusedReason::Policy,
+                detail: format!(
+                    "policy.interface_binding_denied: no active checkpoint pinning interface '{}' admits artifact name '{}'",
+                    interface.as_str(),
+                    artifact_label
+                ),
+            });
+        }
         if targets.is_empty() {
             return Err(RuntimeError::DescriptorDrift {
                 reason: RefusedReason::NoBinding,
@@ -2094,6 +2156,7 @@ impl Runtime {
         &self,
         interface: &InterfaceId,
         artifact: &ArtifactRef,
+        artifact_label: &str,
         emitter: SystemInterfaceEmitter<'_>,
     ) -> Result<Vec<InterfaceArrivalTarget>, RuntimeError> {
         if !self.inner.interface_catalog.is_runtime_relay(interface) {
@@ -2106,7 +2169,8 @@ impl Runtime {
                 ),
             });
         }
-        self.interface_arrival_targets(interface, Some(emitter))
+        self.interface_arrival_targets(interface, artifact_label, Some(emitter))
+            .map(|(targets, _)| targets)
     }
 
     async fn admit_interface_checkpoint(
@@ -2166,6 +2230,7 @@ impl Runtime {
         )?;
         let checkpoint_complete = checkpoint_admission.complete;
         let required_artifact_labels = checkpoint_admission.required_artifact_labels.clone();
+        let standing_route = required_artifact_labels.is_empty();
         let mut observation = self
             .inner
             .gate
@@ -2247,6 +2312,7 @@ impl Runtime {
             reservation,
             admitted,
             checkpoint_complete,
+            standing_route,
             source_guard,
             run_guard,
         })
@@ -3461,7 +3527,7 @@ mod tests {
         let admitted_artifact = test_artifact_ref("turn.input", br#"{"hello":true}"#);
 
         let targets = runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &admitted_artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input")
             .expect("run JSON resolves the checkpoint pinning the arriving interface folder");
         let mut admitted = Vec::new();
         for target in targets {
@@ -3536,7 +3602,7 @@ mod tests {
         );
         let artifact = test_artifact_ref("turn.input", br#"{"hello":true}"#);
         let target = runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input")
             .expect("broad target resolves")
             .into_iter()
             .next()
@@ -3612,7 +3678,7 @@ mod tests {
         let changed = runtime.admit_resolved_interface_checkpoint(&target, artifact.clone(), "turn.input".into(), None).await.err().unwrap();
         assert_eq!(changed.refused_reason(), RefusedReason::StaleEpoch);
         assert_eq!(changed.refusal_detail()["reason_detail"], "arrival_target_changed");
-        let target = runtime.resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &artifact).unwrap().remove(0);
+        let target = runtime.resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input").unwrap().remove(0);
         assert_eq!(target.checkpoint.as_str(), "c2");
 
         let observation = runtime
@@ -3648,7 +3714,7 @@ mod tests {
         let admitted_artifact = test_artifact_ref("turn.input", br#"{"hello":true}"#);
 
         let targets = runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &admitted_artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input")
             .expect("every active checkpoint on the arriving interface is a target");
         assert_eq!(
             targets.len(),
@@ -3721,54 +3787,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spent_checkpoint_rejects_until_json_authors_a_new_generation() {
+    async fn standing_checkpoint_admits_each_distinct_artifact_once() {
         let runtime = runtime_with_interface_catalog();
-        let dir = temp_test_dir("checkpoint-still-current");
+        let dir = temp_test_dir("checkpoint-standing-route");
         runtime.set_run_records_dir(dir.clone());
         let grant = grant_with_interfaces(&["world_test"], &[]);
         runtime.set_run_authority(RunId::new("r1"), grant.clone(), GrantEpoch(0));
-        let record_path = literal_boundary_run_record_fixture(
+        literal_boundary_run_record_fixture(
             &dir,
             &RunId::new("r1"),
             &InterfaceId::new("world_test"),
             &grant,
         );
-        let inv = interface_artifact_admission();
 
-        let obs = runtime
-            .admit_bound_interface_checkpoint(inv)
+        let first = runtime
+            .admit_bound_interface_checkpoint(interface_artifact_admission())
             .await
             .expect("the first artifact is delivered to the JSON-authored checkpoint");
-        assert!(obs.ok);
+        assert!(first.ok);
 
-        let second_inv = interface_artifact_admission();
         let err = runtime
-            .admit_bound_interface_checkpoint(second_inv)
+            .admit_bound_interface_checkpoint(interface_artifact_admission())
             .await
-            .expect_err("the same checkpoint id must not admit a second artifact");
+            .expect_err("one checkpoint generation admits one exact artifact once");
+        assert_eq!(err.refused_reason(), RefusedReason::CheckpointSpent, "got {err:?}");
+
+        let mut next = interface_artifact_admission();
+        next.artifact = test_artifact_ref("turn.input:second", br#"{"hello":"again"}"#);
+        let second = runtime
+            .admit_bound_interface_checkpoint(next.clone())
+            .await
+            .expect("a checkpoint without required verified artifacts admits the next distinct artifact");
+        assert!(second.ok);
         assert_eq!(
-            err.refused_reason(),
-            RefusedReason::CheckpointSpent,
-            "unchanged active checkpoint must reject the next artifact, got {err:?}"
-        );
-        assert!(
-            runtime.admitted_mark_outcomes().is_empty(),
-            "spent-checkpoint rejection must not admit marks"
+            second.invocation_metadata.runtime.as_ref().map(|runtime| runtime.epoch),
+            Some(0),
+            "the next arrival keeps the same checkpoint generation"
         );
 
-        let mut rearmed_record: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&record_path).expect("run record reads"))
-                .expect("run record parses");
-        rearmed_record["checkpoints"][0]["epoch"] = serde_json::json!(1);
-        write_literal_run_record_fixture(&record_path, &rearmed_record)
-            .expect("re-armed run record writes");
-        runtime.set_run_authority(RunId::new("r1"), grant, GrantEpoch(1));
-        let mut rearmed = interface_artifact_admission();
-        rearmed.epoch = GrantEpoch(1);
-        runtime
-            .admit_bound_interface_checkpoint(rearmed)
-            .await
-            .expect("the same checkpoint id admits the newly authored epoch");
+        assert!(runtime.admitted_mark_outcomes().is_empty());
     }
 
     #[tokio::test]
@@ -4082,7 +4139,7 @@ mod tests {
 
         let admitted_artifact = test_artifact_ref("turn.input", br#"{"hello":true}"#);
         let targets = runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &admitted_artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input")
             .expect("the fan-out resolver enumerates every matching active checkpoint");
         let mut admitted: Vec<String> = Vec::new();
         for target in &targets {
@@ -4211,9 +4268,8 @@ mod tests {
             "settled = empty active_checkpoints must refuse fail-closed as a named invariant, got {err:?}"
         );
 
-        let admitted_artifact = test_artifact_ref("turn.input", br#"{"hello":true}"#);
         let err = runtime
-            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), &admitted_artifact)
+            .resolve_interface_arrival_targets(&InterfaceId::new("world_test"), "turn.input")
             .expect_err("an arrival whose folder has no bound target is refused fail-closed");
         assert_eq!(
             err.refused_reason(),

@@ -81,9 +81,6 @@ function clientAction(row: Record<string, unknown>) {
 export function useAdmittedClientActions(options: ClientActionOptions): void {
   const enabled = options.enabled && Boolean(options.home && options.runId && options.interfaceId);
   const generation = useProjectionGeneration(true, enabled);
-  const runGeneration = useRef(0);
-  runGeneration.current = useProjectionGeneration(false, enabled);
-  const spentAtRunGeneration = useRef<number | null>(null);
   const scopeKey = enabled ? JSON.stringify([options.home, options.runId, options.interfaceId]) : "";
   const latest = useRef(options);
   latest.current = options;
@@ -190,15 +187,8 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
               if (!current()) return;
               if (closure === null) return;
               if (closure === "completed") {
-                const before = runGeneration.current;
-                if (spentAtRunGeneration.current === before) return;
-                const delivery = await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
-                  label: "client.action.result", payload: receipt, timeoutMs: 15_000, reportSpentGeneration: true });
-                if (delivery?.spentGeneration) {
-                  spentAtRunGeneration.current = before;
-                  return;
-                }
-                spentAtRunGeneration.current = null;
+                await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
+                  label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
               } else {
                 storage.removeItem(pendingKey);
               }

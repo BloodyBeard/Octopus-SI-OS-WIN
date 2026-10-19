@@ -122,6 +122,7 @@ async function submitOperatorTurn(options, request) {
       interfaceId: chatInterfaceId,
       terminalArtifactLabel: config.artifact_labels.terminal_output,
       errorArtifactLabel: config.artifact_labels.error_output,
+      operatorMessageArtifactLabel: config.artifact_labels.message,
       continuation,
     });
   }
@@ -1841,6 +1842,7 @@ async function planOperatorChatTaskAmendment(options, request) {
     interfaceId: identity.interfaceId,
     terminalArtifactLabel: config.artifact_labels.terminal_output,
     errorArtifactLabel: config.artifact_labels.error_output,
+    operatorMessageArtifactLabel: config.artifact_labels.message,
     continuation: null,
   });
   const topologyPlan = await planOperatorChatTopology({
@@ -4704,10 +4706,85 @@ async function readConversationState({
       continuedFrom,
     };
   }
-  const tail = await readCompleteLedgerTail(movementsPath, priorOffset);
-  let latestSnapshot = null;
-  let operatorMessageSeq = null;
-  let terminalAfterOperatorMessage = false;
+  const fold = await foldConversationLedger({
+    octopusHome,
+    movementsPath,
+    runId,
+    interfaceId,
+    priorOffset,
+    terminalArtifactLabel,
+    errorArtifactLabel,
+    operatorMessageArtifactLabel,
+    currentArrivalKey: operatorMessageCheckpoint
+      ? conversationArrivalKey(operatorMessageCheckpoint.id, operatorMessageCheckpoint.epoch)
+      : null,
+  });
+  const operatorMessageSeq = operatorMessageCheckpoint
+    ? fold.operator_arrivals[conversationArrivalKey(operatorMessageCheckpoint.id, operatorMessageCheckpoint.epoch)] ?? null
+    : null;
+  const terminalAfterOperatorMessage = operatorMessageSeq !== null
+    && fold.latest_snapshot !== null
+    && fold.latest_snapshot.seq > operatorMessageSeq;
+  const latestSnapshot = fold.latest_snapshot ? { id: fold.latest_snapshot.id } : null;
+  const retainedSnapshot = latestSnapshot
+    ?? priorBindings.at(-1)
+    ?? continuation?.artifactBindings?.at(-1)
+    ?? null;
+  return {
+    ledgerOffset: fold.offset,
+    artifactBindings: retainedSnapshot ? uniqueArtifactBindings([retainedSnapshot]) : [],
+    pinnedArtifactBindings,
+    pinnedContextItems,
+    continuedFrom,
+    terminalAfterOperatorMessage,
+    operatorMessageCheckpointAdmitted: operatorMessageSeq !== null,
+  };
+}
+
+function conversationArrivalKey(checkpoint, epoch) {
+  return `${requiredString(checkpoint, "operator message checkpoint")}@${nonNegativeInteger(epoch, "operator message epoch")}`;
+}
+
+function conversationFoldPath(octopusHome, interfaceId) {
+  return path.join(octopusHome, "interfaces", interfaceId, "conversation-fold.client.json");
+}
+
+function emptyConversationFold(runId, priorOffset) {
+  return { schema_version: 1, run: runId, start_offset: priorOffset, offset: priorOffset, latest_snapshot: null, operator_arrivals: {} };
+}
+
+function usableConversationFold(saved, runId, priorOffset, ledgerLength) {
+  return isObject(saved)
+    && saved.schema_version === 1
+    && saved.run === runId
+    && saved.start_offset === priorOffset
+    && Number.isSafeInteger(saved.offset) && saved.offset >= priorOffset && saved.offset <= ledgerLength
+    && (saved.latest_snapshot === null || (isObject(saved.latest_snapshot)
+      && typeof saved.latest_snapshot.id === "string" && Number.isSafeInteger(saved.latest_snapshot.seq)))
+    && isObject(saved.operator_arrivals)
+    && Object.values(saved.operator_arrivals).every((seq) => Number.isSafeInteger(seq));
+}
+
+async function foldConversationLedger({
+  octopusHome,
+  movementsPath,
+  runId,
+  interfaceId,
+  priorOffset,
+  terminalArtifactLabel,
+  errorArtifactLabel,
+  operatorMessageArtifactLabel,
+  currentArrivalKey,
+}) {
+  const foldPath = conversationFoldPath(octopusHome, interfaceId);
+  const ledgerLength = await fs.stat(movementsPath).then((stat) => stat.size, (error) => {
+    if (error?.code === "ENOENT") return 0;
+    throw error;
+  });
+  const saved = await readJsonIfPresent(foldPath).catch(() => null);
+  const fold = usableConversationFold(saved, runId, priorOffset, ledgerLength)
+    ? saved : emptyConversationFold(runId, priorOffset);
+  const tail = await readCompleteLedgerTail(movementsPath, fold.offset);
   for (let index = 0; index < tail.lines.length; index += 1) {
     let movement;
     try {
@@ -4716,47 +4793,54 @@ async function readConversationState({
       throw new Error(`movement ledger contains malformed complete JSON at tail line ${index + 1}: ${error.message}`);
     }
     const artifactId = stringValue(movement?.artifact?.id);
-    const arrivalRuntime = operatorMessageCheckpoint
-      && artifactIdHasLabel(artifactId, operatorMessageArtifactLabel)
+    const arrivalRuntime = artifactIdHasLabel(artifactId, requiredString(operatorMessageArtifactLabel, "operator message artifact label"))
       ? exactArrivalRuntime(movement, interfaceId)
       : null;
-    if (
-      arrivalRuntime?.run === runId
-      && arrivalRuntime.checkpoint === operatorMessageCheckpoint.id
-      && arrivalRuntime.epoch === operatorMessageCheckpoint.epoch
-    ) {
-      operatorMessageSeq = nonNegativeInteger(movement.seq, "operator message arrival seq");
+    if (arrivalRuntime?.run === runId) {
+      fold.operator_arrivals[conversationArrivalKey(arrivalRuntime.checkpoint, arrivalRuntime.epoch)] =
+        nonNegativeInteger(movement.seq, "operator message arrival seq");
     }
     const outboundRuntime = exactOutboundRuntime(movement, interfaceId);
-    const snapshot = outboundRuntime?.run === runId && (
-        artifactIdHasLabel(artifactId, terminalArtifactLabel)
-        || artifactIdHasLabel(artifactId, errorArtifactLabel)
-      );
-    if (!snapshot) continue;
-    if (
-      operatorMessageSeq !== null
-      && nonNegativeInteger(movement.seq, "terminal snapshot seq") > operatorMessageSeq
-    ) {
-      terminalAfterOperatorMessage = true;
+    if (outboundRuntime?.run === runId
+      && (artifactIdHasLabel(artifactId, terminalArtifactLabel) || artifactIdHasLabel(artifactId, errorArtifactLabel))
+      && isObject(movement.artifact)) {
+      fold.latest_snapshot = {
+        id: requiredString(movement.artifact.id, "movement artifact.id"),
+        seq: nonNegativeInteger(movement.seq, "terminal snapshot seq"),
+      };
     }
-    if (!isObject(movement.artifact)) continue;
-    latestSnapshot = {
-      id: requiredString(movement.artifact.id, "movement artifact.id"),
-    };
   }
-  const retainedSnapshot = latestSnapshot
-    ?? priorBindings.at(-1)
-    ?? continuation?.artifactBindings?.at(-1)
-    ?? null;
-  return {
-    ledgerOffset: tail.nextOffset,
-    artifactBindings: retainedSnapshot ? uniqueArtifactBindings([retainedSnapshot]) : [],
-    pinnedArtifactBindings,
-    pinnedContextItems,
-    continuedFrom,
-    terminalAfterOperatorMessage,
-    operatorMessageCheckpointAdmitted: operatorMessageSeq !== null,
-  };
+  const advanced = tail.nextOffset !== fold.offset;
+  fold.offset = tail.nextOffset;
+  for (const [key, seq] of Object.entries(fold.operator_arrivals)) {
+    if (currentArrivalKey !== null && key !== currentArrivalKey
+      && fold.latest_snapshot !== null && seq < fold.latest_snapshot.seq) {
+      delete fold.operator_arrivals[key];
+    }
+  }
+  if (advanced || saved !== fold) await writeConversationFold(foldPath, fold);
+  return fold;
+}
+
+async function writeConversationFold(foldPath, fold) {
+  await fs.mkdir(path.dirname(foldPath), { recursive: true, mode: 0o700 });
+  const temporary = path.join(
+    path.dirname(foldPath),
+    `.${path.basename(foldPath)}.${process.pid}.${randomToken(16)}.tmp`,
+  );
+  let handle;
+  try {
+    handle = await fs.open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(fold)}\n`, "utf8");
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, foldPath);
+  } finally {
+    await handle?.close().catch(() => {});
+    await fs.unlink(temporary).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
 }
 
 function providerAccountRequest(request, includeEvidence) {

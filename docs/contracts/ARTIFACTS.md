@@ -145,9 +145,18 @@ that carrier.
 ## Fan-out
 
 An arriving artifact fans out to **every active checkpoint, in any run, that
-pins the arriving interface folder**. One movement edge per checkpoint, each
-with its own verifier outcome. No label and no sender claim picks a single
-winner.
+pins the arriving interface folder and can take it**. A checkpoint can take an
+artifact when its inbound binding admits the artifact's name and, if it
+declares required verified artifacts, one of them names it. One movement edge
+per such checkpoint, each with its own verifier outcome. No sender claim picks a
+single winner. When checkpoints pin the folder but none can take the name, the
+hand-in is refused as `policy.interface_binding_denied`.
+
+A checkpoint without requirements is a **standing route**: each distinct
+artifact enters its generation once, and the next one enters the same
+generation. An ordinary input or output keeps admitting arrivals without the
+run being rewritten. A checkpoint with requirements is a one-shot wait: it
+closes its required set and is spent.
 
 The scope is the folder, and the rule is the same for World and System
 interfaces. Isolation comes from identity, not from a reach rule: a separate
@@ -155,7 +164,7 @@ conversation is a separate interface folder, so nothing leaks between threads
 without anyone narrowing the fan-out.
 
 **Every edge carries its own verdict.** A refused edge - a spent checkpoint, a
-policy denial, a failed verifier - is recorded as that edge's own typed
+repeated artifact, a policy denial, a failed verifier - is recorded as that edge's own typed
 movement, and sibling edges deliver regardless. The operator's branch never
 suffers for a tool room's failed check. A hand-in as a whole is refused only
 when it admits zero edges.

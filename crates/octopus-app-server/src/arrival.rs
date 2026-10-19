@@ -282,6 +282,7 @@ fn ensure_checkpoint_not_already_admitted(
     run: &RunId,
     checkpoint: &CheckpointId,
     epoch: u64,
+    artifact: &ArtifactRef,
     artifact_label: &str,
 ) -> Result<(), ArrivalError> {
     let mut index = dedup
@@ -295,10 +296,22 @@ fn ensure_checkpoint_not_already_admitted(
         .map_err(|e| ArrivalError::Malformed(e.to_string()))?;
     if admitted {
         return Err(ArrivalError::CheckpointSpent(format!(
-            "run '{}' checkpoint '{}' already admitted an interface artifact in the durable movement \
-             log; interface JSON must author a new checkpoint generation before another artifact can enter",
+            "run '{}' checkpoint '{}' already closed its required verified artifact set in the durable \
+             movement log; interface JSON must author a new checkpoint generation before another artifact can enter",
             run.as_str(),
             checkpoint.as_str()
+        )));
+    }
+    let routed = index
+        .route_artifact_admitted(run, checkpoint, epoch, &artifact.id)
+        .map_err(|e| ArrivalError::Malformed(e.to_string()))?;
+    if routed {
+        return Err(ArrivalError::CheckpointSpent(format!(
+            "run '{}' checkpoint '{}' already admitted artifact '{}' in the durable movement log; \
+             every arrival on a checkpoint is a distinct artifact",
+            run.as_str(),
+            checkpoint.as_str(),
+            artifact.id.as_str()
         )));
     }
     let requirement_admitted = index
@@ -436,6 +449,7 @@ struct DurableCheckpointRecoveryKey {
     run: RunId,
     checkpoint: CheckpointId,
     epoch: u64,
+    route_artifact: Option<octopus_descriptors::ArtifactId>,
 }
 
 struct DurableCheckpointRecoveryGroup {
@@ -654,6 +668,7 @@ pub fn recover_durable_checkpoint_outbound_tail(
             run: run.clone(),
             checkpoint: runtime.checkpoint.clone(),
             epoch: runtime.epoch,
+            route_artifact: required.is_empty().then(|| artifact.id.clone()),
         };
         let group = groups
             .entry(key)
@@ -974,6 +989,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
             &target.run,
             &target.checkpoint,
             target.epoch.0,
+            artifact,
             artifact_label,
         ) {
             return Err(if matches!(error, ArrivalError::CheckpointSpent(_)) {
@@ -1183,7 +1199,7 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
         ));
         let targets = match self
             .runtime
-            .resolve_interface_arrival_targets(&self.interface, &pinned.artifact)
+            .resolve_interface_arrival_targets(&self.interface, &pinned.artifact_label)
         {
             Ok(targets) => targets,
             Err(error) => {
@@ -1342,11 +1358,24 @@ impl<'a> InterfaceArtifactArrivalFromInterface<'a> {
                 source.seq.0
             )));
         }
+        let label = match pin_interface_artifact_payload_from_reference(self.blobs, to_interface, artifact) {
+            Ok(pinned) => pinned.artifact_label,
+            Err(error) => {
+                self.record_delivery_refusal(
+                    error,
+                    Endpoint::Interface(to_interface.clone()),
+                    Endpoint::Interface(to_interface.clone()),
+                    Some(artifact.clone()),
+                );
+                return Ok(Vec::new());
+            }
+        };
         let targets = self
             .runtime
             .resolve_runtime_relay_cross_run_arrival_targets(
                 to_interface,
                 artifact,
+                &label,
                 octopus_runtime::SystemInterfaceEmitter {
                     run: &runtime.run,
                     checkpoint: &runtime.checkpoint,
