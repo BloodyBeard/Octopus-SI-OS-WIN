@@ -54,8 +54,6 @@ use octopus_provider_run_authoring::{
 };
 
 const TURN_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
-const PROVIDER_HANDOFF_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
-const PROVIDER_HANDOFF_BATCH_LIMIT: usize = 32;
 const PROVIDER_CONTROL_READ_BATCH_LIMIT: usize = 128;
 const MACHINE_CODEX_AUTH_FILE_ENV: &str = "OCTOPUS_MACHINE_CODEX_AUTH_FILE";
 
@@ -5114,27 +5112,6 @@ async fn flush_stream_batch_inner(
     Ok(flush_len)
 }
 
-enum ProviderStreamBatchEvent {
-    Emission(Option<ProviderStreamEmission>),
-    Deadline,
-}
-
-async fn next_provider_stream_batch_event(
-    emit_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ProviderStreamEmission>,
-    batch_started_at: Option<tokio::time::Instant>,
-) -> ProviderStreamBatchEvent {
-    let Some(batch_started_at) = batch_started_at else {
-        return ProviderStreamBatchEvent::Emission(emit_rx.recv().await);
-    };
-    tokio::select! {
-        biased;
-        emission = emit_rx.recv() => ProviderStreamBatchEvent::Emission(emission),
-        _ = tokio::time::sleep_until(batch_started_at + PROVIDER_HANDOFF_BATCH_WINDOW) => {
-            ProviderStreamBatchEvent::Deadline
-        }
-    }
-}
-
 fn drive_turn_with_retries<'a>(
     scope: CodexTurnScope<'a>,
     driver: &'a mut Option<Arc<CodexAppServerInterfaceDriver>>,
@@ -5564,26 +5541,11 @@ async fn drive_turn_with_retries_inner(
             let result_source_movement_seq = turn.seq;
             async move {
                 let mut pending = Vec::new();
-                let mut batch_started_at = None;
                 let mut forwarded = ForwardedProviderEmissions::default();
                 let mut interrupted_closure = None;
                 let mut terminal_group_handed = false;
                 loop {
-                    let stream_emission = match next_provider_stream_batch_event(
-                        &mut emit_rx,
-                        batch_started_at,
-                    )
-                    .await
-                    {
-                        ProviderStreamBatchEvent::Emission(emission) => emission,
-                        ProviderStreamBatchEvent::Deadline => {
-                            let flushed = flush_stream_batch(&handoff, &mut pending, false).await?;
-                            forwarded.outputs += flushed;
-                            batch_started_at = None;
-                            continue;
-                        }
-                    };
-                    let Some(stream_emission) = stream_emission else {
+                    let Some(stream_emission) = emit_rx.recv().await else {
                         break;
                     };
                     if interrupted_closure.is_some() || terminal_group_handed {
@@ -5595,7 +5557,6 @@ async fn drive_turn_with_retries_inner(
                     match stream_emission {
                         ProviderStreamEmission::CurrentRunRecord { expected_before, reply } => {
                             forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
-                            batch_started_at = None;
                             let current = handoff.reconciled_run_record_bytes().await?;
                             let current = match expected_before {
                                 Some((hash, record)) => handoff.checked_capability_baseline(&hash, &record).await,
@@ -5608,7 +5569,6 @@ async fn drive_turn_with_retries_inner(
                                 return Err("interrupted result cannot amend its capability contract".into());
                             }
                             forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
-                            batch_started_at = None;
                             // The bridge ends this input's handoff. Its external result
                             // remains pending in the emitted native continuity.
                             let outcomes = handoff.hand_batch_with_capability_amendment(vec![emission], true, &amendment).await?;
@@ -5622,10 +5582,8 @@ async fn drive_turn_with_retries_inner(
                             if resolving_interrupted_result {
                                 return Err("interrupted result cannot create outgoing bindings".into());
                             }
-                            if pending.is_empty() {
-                                batch_started_at = Some(tokio::time::Instant::now());
-                            }
                             pending.push((emission, None, bindings));
+                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
                         }
                         ProviderStreamEmission::Turn(emission) => {
                             if resolving_interrupted_result {
@@ -5634,9 +5592,17 @@ async fn drive_turn_with_retries_inner(
                                         .to_string(),
                                 );
                             }
-                            if pending.is_empty() {
-                                batch_started_at = Some(tokio::time::Instant::now());
+                            pending.push((emission, None, Vec::new()));
+                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
+                        }
+                        ProviderStreamEmission::Terminal(emission) => {
+                            if resolving_interrupted_result {
+                                return Err(
+                                    "interrupted exact-result recovery emitted a non-atomic provider artifact before its closure"
+                                        .to_string(),
+                                );
                             }
+                            forwarded.outputs += flush_stream_batch(&handoff, &mut pending, false).await?;
                             pending.push((emission, None, Vec::new()));
                         }
                         ProviderStreamEmission::TerminalGroup { stream, terminal } => {
@@ -5673,7 +5639,6 @@ async fn drive_turn_with_retries_inner(
                                 ));
                             }
                             forwarded.outputs += outcomes.len();
-                            batch_started_at = None;
                             terminal_group_handed = true;
                         }
                         ProviderStreamEmission::InterruptedResult {
@@ -5738,8 +5703,7 @@ async fn drive_turn_with_retries_inner(
                                     return Err("provider context boundary was not fully admitted".to_string());
                                 }
                                 forwarded.outputs += count;
-                                batch_started_at = None;
-                                Ok(())
+                                    Ok(())
                             }.await;
                             let _ = admitted.send(result.clone());
                             result?;
@@ -5765,7 +5729,6 @@ async fn drive_turn_with_retries_inner(
                             let _ = admitted.send(result.clone());
                             result?;
                             forwarded.outputs += 1;
-                            batch_started_at = None;
                         }
                         ProviderStreamEmission::TransportDispatch { artifact, admitted } => {
                             if resolving_interrupted_result {
@@ -5778,8 +5741,7 @@ async fn drive_turn_with_retries_inner(
                                 let flushed =
                                     flush_stream_batch(&handoff, &mut pending, false).await?;
                                 forwarded.outputs += flushed;
-                                batch_started_at = None;
-                            }
+                                }
                             let result = handoff.hand_transport_dispatch(artifact).await.and_then(
                                 |outcome| match outcome {
                                     ProviderHandoffOutcome::Admitted { .. } => Ok(()),
@@ -5803,11 +5765,6 @@ async fn drive_turn_with_retries_inner(
                                 }
                             }
                         }
-                    }
-                    if pending.len() > PROVIDER_HANDOFF_BATCH_LIMIT {
-                        let flushed = flush_stream_batch(&handoff, &mut pending, true).await?;
-                        forwarded.outputs += flushed;
-                        batch_started_at = Some(tokio::time::Instant::now());
                     }
                 }
                 let terminal = terminal_rx.await.unwrap_or(false);
@@ -7341,20 +7298,6 @@ mod tests {
 
         assert_eq!(load_own_descriptor(&ctx).unwrap(), lifted);
         assert_eq!(load_current_own_descriptor(&ctx).unwrap(), current);
-    }
-
-    #[tokio::test]
-    async fn singleton_stream_batch_reaches_deadline_without_a_second_emission() {
-        let (output, mut emit_rx) = ProviderOutputStream::channel();
-        let batch_started_at = tokio::time::Instant::now()
-            .checked_sub(PROVIDER_HANDOFF_BATCH_WINDOW)
-            .unwrap();
-
-        assert!(matches!(
-            next_provider_stream_batch_event(&mut emit_rx, Some(batch_started_at)).await,
-            ProviderStreamBatchEvent::Deadline
-        ));
-        drop(output);
     }
 
     fn bound(id: &str, payload: serde_json::Value) -> octopus_interfaces::ArtifactBindingPayload {

@@ -1850,6 +1850,7 @@ enum TurnDrainOutcome {
 
 pub(crate) enum ProviderStreamEmission {
     Turn(ProviderEmission),
+    Terminal(ProviderEmission),
     WithOutgoingBindings {
         emission: ProviderEmission,
         bindings: Vec<octopus_provider_run_authoring::ProviderOutgoingBinding>,
@@ -1957,6 +1958,16 @@ impl ProviderOutputStream {
                 InterfaceDriverError::Transport(
                     "turn emission sink closed (the interface life is gone); aborting the turn"
                         .into(),
+                )
+            })
+    }
+
+    fn send_terminal_output(&self, emission: ProviderEmission) -> Result<(), InterfaceDriverError> {
+        self.sender
+            .send(ProviderStreamEmission::Terminal(emission))
+            .map_err(|_| {
+                InterfaceDriverError::Transport(
+                    "turn emission sink closed before its terminal output could be handed".into(),
                 )
             })
     }
@@ -8693,7 +8704,7 @@ impl TurnSink<'_> {
             .map_err(InterfaceDriverError::FailedClosed)?;
         match self.seal_live_stream(&terminal_label, &terminal_artifact_payload_blake3)? {
             Some(stream) => self.emit.send_terminal_group(stream, terminal),
-            None => self.emit.send_turn(terminal),
+            None => self.emit.send_terminal_output(terminal),
         }
     }
 
@@ -8724,13 +8735,13 @@ impl TurnSink<'_> {
             route: provider_route_from_lifecycle(route),
         };
         if manifest.label != INTERFACE_ARTIFACT_OUTPUT_LABEL {
-            return self.emit.send_turn(emission);
+            return self.emit.send_terminal_output(emission);
         }
         let terminal_artifact_payload_blake3 = artifact_payload_blake3(&emission.artifact)
             .map_err(InterfaceDriverError::FailedClosed)?;
         match self.seal_live_stream(&manifest.label, &terminal_artifact_payload_blake3)? {
             Some(stream) => self.emit.send_terminal_group(stream, emission),
-            None => self.emit.send_turn(emission),
+            None => self.emit.send_terminal_output(emission),
         }
     }
 
