@@ -181,7 +181,7 @@ fn write_progress(path: &Path, progress: &Progress) -> io::Result<()> {
     let bytes = serde_json::to_vec(progress).map_err(|error| invalid(error.to_string()))?;
     let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
     let file = write_new_regular(&temporary, &bytes)?;
-    file.sync_all()?;
+    crate::sync_ordered(&file)?;
     std::fs::rename(&temporary, path)?;
     sync_directory(path.parent().unwrap())
 }
@@ -223,7 +223,7 @@ fn unlink(path: &Path, directory: bool, parent_identity: &FileIdentity, identity
         }
         let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), if directory { libc::AT_REMOVEDIR } else { 0 }) };
         if result != 0 { return Err(io::Error::last_os_error()); }
-        parent.sync_all()
+        crate::sync_ordered(&parent)
     }
     #[cfg(not(unix))] { let _ = (path, directory, parent_identity, identity); Err(io::Error::new(io::ErrorKind::Unsupported, "exact tombstone reclamation requires native unlink")) }
 }

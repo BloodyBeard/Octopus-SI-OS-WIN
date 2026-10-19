@@ -500,7 +500,7 @@ fn rename_no_replace(movement: &DirectoryMove, parents: &BTreeMap<PathBuf, FileI
         #[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
         return Err(io::Error::new(io::ErrorKind::Unsupported, "atomic no-replace directory publication is unavailable"));
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
-        return if result == 0 { source_parent.sync_all()?; destination_parent.sync_all() } else { Err(io::Error::last_os_error()) };
+        return if result == 0 { crate::sync_ordered(&source_parent)?; crate::sync_ordered(&destination_parent) } else { Err(io::Error::last_os_error()) };
     }
     #[cfg(not(unix))] { let _ = (source, destination, parents); Err(io::Error::new(io::ErrorKind::Unsupported, "directory publication requires native no-replace moves")) }
 }
@@ -512,13 +512,13 @@ fn sync_preimage(path: &Path, expected: &DirectoryPreimage) -> io::Result<()> {
             let parent = native::directory(entry_path.parent().unwrap())?;
             let file = native::child(&parent, entry_path.file_name().unwrap(), false)?;
             if FileIdentity::of(&file.metadata()?)? != entry.identity { return Err(invalid("directory member changed before durable preparation")); }
-            file.sync_all()?;
+            crate::sync_ordered(&file)?;
         }
     }
     for entry in expected.entries.iter().rev() {
-        if entry.kind == DirectoryEntryKind::Directory { native::pinned_directory(&path.join(&entry.relative_path), &entry.identity)?.sync_all()?; }
+        if entry.kind == DirectoryEntryKind::Directory { crate::sync_ordered(&native::pinned_directory(&path.join(&entry.relative_path), &entry.identity)?)?; }
     }
-    native::pinned_directory(path, &expected.identity)?.sync_all()
+    crate::sync_ordered(&native::pinned_directory(path, &expected.identity)?)
 }
 
 fn result(plan: &Plan, error: Option<String>) -> io::Result<DirectoryPublicationResult> {

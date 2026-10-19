@@ -315,7 +315,7 @@ fn retire_stage(directory: &Path, index: usize, receipt: &Receipt) -> Result<(),
         {
             return Err("applied receipt changed before its durability barrier".into());
         }
-        file.sync_all().map_err(|error| error.to_string())?;
+        octopus_file_storage::sync_ordered(&file).map_err(|error| error.to_string())?;
         sync_parent(&receipt_path)?;
         let stage = directory.join(format!("{index}.bytes"));
         match std::fs::symlink_metadata(&stage) {

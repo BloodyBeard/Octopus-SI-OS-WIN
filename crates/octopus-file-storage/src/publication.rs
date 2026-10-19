@@ -254,7 +254,7 @@ impl Target {
         if FileIdentity::of(&open_regular(&path)?.metadata()?)? != FileIdentity::of(&file.metadata()?)? {
             return Err(invalid("publication predecessor has foreign retained identity"));
         }
-        file.sync_all()?;
+        crate::sync_ordered(file)?;
         sync_directory(&self.root)
     }
 
@@ -356,7 +356,7 @@ impl Target {
             current_identity.as_ref() == Some(&pending.stage_identity) && current_hash == expected.after_hash
         };
         if applied {
-            staged.as_ref().unwrap().sync_all()?;
+            crate::sync_ordered(staged.as_ref().unwrap())?;
             sync_directory(&self.root)?;
             sync_directory(self.path.parent().unwrap())?;
             receipt.outcome = PublicationOutcome::Applied;
@@ -590,7 +590,7 @@ impl WriteGuard {
             before_identity: Some(identity.clone()),
             stage_identity: identity,
         };
-        current.file.sync_all()?;
+        crate::sync_ordered(&current.file)?;
         write_record_once(&target.pending(), &pending)?;
         #[cfg(test)]
         interrupt_at(Interruption::Prepared);
@@ -598,7 +598,7 @@ impl WriteGuard {
         membership.verify()?;
         current.verify()?;
         std::fs::rename(&target.path, &stage)?;
-        current.file.sync_all()?;
+        crate::sync_ordered(&current.file)?;
         sync_directory(&target.root)?;
         sync_directory(target.path.parent().unwrap())?;
         #[cfg(test)]
@@ -670,7 +670,7 @@ impl WriteGuard {
             }
             file
         };
-        file.sync_all()?;
+        crate::sync_ordered(&file)?;
         sync_directory(&target.root)?;
         if observed.as_deref() == expected_before {
             if let Some(current) = &current { target.retain_predecessor(operation_id, current)?; }
@@ -715,7 +715,7 @@ impl WriteGuard {
         interrupt_at(Interruption::Linked);
         std::fs::rename(&link, &target.path)?;
     }
-    prepared.sync_all()?;
+    crate::sync_ordered(&prepared)?;
     sync_directory(target.path.parent().unwrap())?;
     #[cfg(test)]
     interrupt_at(Interruption::Installed);
@@ -933,14 +933,14 @@ fn write_record_once_bounded<T: Serialize>(path: &Path, record: &T, limit: u64) 
         if digest_file(&file, DigestAlgorithm::Sha256)? != hash(&bytes) {
             return Err(invalid("publication evidence already contains a different record"));
         }
-        file.sync_all()?;
+        crate::sync_ordered(&file)?;
         return sync_directory(path.parent().unwrap());
     }
     let mut temporary_name = record_temporary_prefix(path);
     temporary_name.push(format!("{}.{}.tmp", std::process::id(), NEXT_TEMP.fetch_add(1, Ordering::Relaxed)));
     let temporary = path.with_file_name(temporary_name);
     let file = write_new_regular(&temporary, &bytes)?;
-    file.sync_all()?;
+    crate::sync_ordered(&file)?;
     let installed = std::fs::hard_link(&temporary, path);
     let cleanup = std::fs::remove_file(&temporary);
     installed?;
@@ -970,7 +970,7 @@ fn digest_file(mut file: &File, algorithm: DigestAlgorithm) -> io::Result<String
 
 fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
-fn sync_directory(path: &Path) -> io::Result<()> { File::open(path)?.sync_all() }
+fn sync_directory(path: &Path) -> io::Result<()> { crate::sync_directory_ordered(path) }
 fn remove_if_present(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),

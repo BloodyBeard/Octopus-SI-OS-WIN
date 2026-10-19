@@ -927,7 +927,7 @@ fn write_immutable_carrier(
                 .prefix(".artifact-")
                 .make_in(parent, |temporary| octopus_file_storage::write_new(temporary, bytes))
                 .map_err(write_error)?;
-            temporary.as_file().sync_all().map_err(write_error)?;
+            octopus_file_storage::sync_ordered(temporary.as_file()).map_err(write_error)?;
             match temporary.persist_noclobber(path) {
                 Ok(_) => {}
                 Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => verify()?,
@@ -936,9 +936,7 @@ fn write_immutable_carrier(
         }
         Err(error) => return Err(write_error(error)),
     }
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(write_error)
+    octopus_file_storage::sync_directory_ordered(parent).map_err(write_error)
 }
 
 fn write_manifest_atomic(
@@ -956,7 +954,7 @@ fn write_manifest_atomic(
             source,
         })?;
     std::io::Write::write_all(temporary.as_file_mut(), manifest_bytes)
-        .and_then(|_| temporary.as_file().sync_all())
+        .and_then(|_| octopus_file_storage::sync_ordered(temporary.as_file()))
         .map_err(|source| InterfaceArtifactFileError::WriteManifest {
             path: path.display().to_string(),
             source,

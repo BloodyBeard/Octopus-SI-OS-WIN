@@ -7,6 +7,25 @@ mod compression;
 
 pub mod publication;
 
+pub fn sync_ordered(file: &File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_BARRIERFSYNC) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        file.sync_all()
+    }
+}
+
+pub fn sync_directory_ordered(path: &Path) -> io::Result<()> {
+    sync_ordered(&File::open(path)?)
+}
+
 pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<File> {
     #[cfg(target_vendor = "apple")]
     let prepared = compression::FileCompression::open(

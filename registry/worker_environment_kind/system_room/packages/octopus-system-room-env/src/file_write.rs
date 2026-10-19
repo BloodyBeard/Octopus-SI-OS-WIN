@@ -514,7 +514,7 @@ pub(crate) fn install_effect_record(path: &Path, bytes: &[u8]) -> Result<(), Str
                     path.display()
                 ));
             }
-            std::fs::File::open(path).and_then(|file| file.sync_all())
+            std::fs::File::open(path).and_then(|file| octopus_file_storage::sync_ordered(&file))
                 .map_err(|error| format!("file.write existing effect record '{}' cannot be synchronized: {error}", path.display()))?;
             sync_parent(path)
         }
@@ -713,7 +713,7 @@ pub(crate) fn stage_write(
                 ));
             }
         };
-        if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        if let Err(error) = file.write_all(bytes).and_then(|_| octopus_file_storage::sync_ordered(&file)) {
             let _ = std::fs::remove_file(&staged);
             return Err(format!(
                 "file.write could not durably stage '{}': {error}",
@@ -736,7 +736,7 @@ pub(crate) fn sync_parent(target: &std::path::Path) -> Result<(), String> {
         )
     })?;
     std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| octopus_file_storage::sync_ordered(&directory))
         .map_err(|error| {
             format!(
                 "file.write could not synchronize parent directory '{}': {error}",

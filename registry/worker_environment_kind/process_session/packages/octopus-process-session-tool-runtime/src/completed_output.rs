@@ -84,8 +84,8 @@ impl OutputIdentity {
             }
             let file = options.open(path).map_err(|e| e.to_string())?;
             if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("dispatched output carrier is not a regular file".into()); }
-            file.sync_all().map_err(|e| e.to_string())?;
-            sync_tool_door_journal_parent(path.parent().ok_or("dispatched output has no parent")?)?;
+            octopus_file_storage::sync_ordered(&file).map_err(|e| e.to_string())?;
+            sync_completed_output_parent(path.parent().ok_or("dispatched output has no parent")?)?;
         }
         if Self::capture(ctx, artifact)?.0 != *self { return Err("dispatched output changed while retaining its carrier".into()); }
         Ok(())
@@ -269,8 +269,8 @@ impl CompletedOutputs {
                 if !file.metadata().map_err(|e| e.to_string())?.is_file() {
                     return Err("completed output carrier is not a regular file".into());
                 }
-                file.sync_all().map_err(|e| e.to_string())?;
-                sync_tool_door_journal_parent(path.parent().ok_or("completed output has no parent")?)?;
+                octopus_file_storage::sync_ordered(&file).map_err(|e| e.to_string())?;
+                sync_completed_output_parent(path.parent().ok_or("completed output has no parent")?)?;
             }
             outputs.push(Output {
                 manifest_path: artifact.manifest_path().to_path_buf(),
@@ -300,9 +300,9 @@ impl CompletedOutputs {
         let (temporary, mut file) = create_tool_door_journal_temp(&root)?;
         let result = (|| {
             file.write_all(&bytes).map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
+            octopus_file_storage::sync_ordered(&file).map_err(|e| e.to_string())?;
             std::fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
-            sync_tool_door_journal_parent(&root)
+            sync_completed_output_parent(&root)
         })();
         if result.is_err() { let _ = std::fs::remove_file(temporary); }
         result
@@ -588,7 +588,7 @@ pub(super) fn prune_before(var: &Path, sequence: u64, maximum: u64) -> Result<()
         let receipt = read_receipt(&path, maximum)?;
         if receipt.input.sequence < sequence {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-            sync_tool_door_journal_parent(path.parent().ok_or("receipt has no parent")?)?;
+            sync_completed_output_parent(path.parent().ok_or("receipt has no parent")?)?;
         }
     }
     Ok(())
@@ -644,7 +644,7 @@ pub(super) async fn recover_consumed_sources(
         match receipt.deliver(ctx, &input, callback, true).await? {
             ToolProcessBrokerResult::Completed | ToolProcessBrokerResult::Refused { .. } => {
                 std::fs::remove_file(&path).map_err(|e| e.to_string())?;
-                sync_tool_door_journal_parent(path.parent().ok_or("receipt has no parent")?)?;
+                sync_completed_output_parent(path.parent().ok_or("receipt has no parent")?)?;
             }
             _ => return Err("completed-output recovery did not reach an admission verdict".into()),
         }
@@ -696,8 +696,8 @@ impl PreparedToolOutputRecovery {
                 }
                 let file = options.open(path).map_err(|e| e.to_string())?;
                 if !file.metadata().map_err(|e| e.to_string())?.is_file() { return Err("selected output carrier is not regular".into()); }
-                file.sync_all().map_err(|e| e.to_string())?;
-                sync_tool_door_journal_parent(path.parent().ok_or("selected output has no parent")?)?;
+                octopus_file_storage::sync_ordered(&file).map_err(|e| e.to_string())?;
+                sync_completed_output_parent(path.parent().ok_or("selected output has no parent")?)?;
             }
         }
         if let Some(existing) = CompletedOutputs::load(ctx, self.source.seq.0)? {
@@ -796,4 +796,9 @@ pub fn prepare_tool_output_recovery(
                 admission: OutputAdmission::AwaitingVerdict { ledger_offset: 0 }, dispatch: None, delivery_id: None, callback_completed: false }],
         },
     })
+}
+
+fn sync_completed_output_parent(parent: &Path) -> Result<(), String> {
+    octopus_file_storage::sync_directory_ordered(parent)
+        .map_err(|error| format!("completed output directory '{}' cannot be synced: {error}", parent.display()))
 }
