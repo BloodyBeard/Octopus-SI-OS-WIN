@@ -94,6 +94,12 @@ repair preserves those declared fields and refuses conflicting changes to
 package-owned content. Other authorized descriptor edits can still exist, but
 they require an explicit ownership decision before package repair.
 
+An update never drops an installed owner silently. A package that stops
+shipping one lists it under `retired_members`; the update removes it in the same
+transaction as the rest of the release, and only while its files are still
+what the package installed (declared configuration aside). An owner with local
+changes keeps the whole installation as it was, with an error naming the files.
+
 A reusable fix belongs in the source package and its checks. A user's token,
 machine path, run, or personal context belongs in private state. Reproduce a
 bug with the smallest relevant package/configuration and recorded evidence;

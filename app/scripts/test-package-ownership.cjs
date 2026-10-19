@@ -435,6 +435,39 @@ async function ownerAdditionFixtures(root) {
     assert.equal((await adoptLocalPackageUpdates(test.roots)).changed, false);
   }
 }
+async function retirementFixture(root) {
+  const roots = await fixture(root); await install(roots);
+  const manifestPath = path.join(roots.libraryRoot, "packages", "fixture.json"), manifest = JSON.parse(await fs.readFile(manifestPath));
+  manifest.version = "1.1.0"; manifest.members = manifest.members.filter(member => member.owner !== "fixture.tool");
+  manifest.retired_members = [{ registry_kind: "tool", owner: "fixture.tool" }];
+  await json(manifestPath, manifest); await fs.rm(path.join(roots.sourceRegistryRoot, "tool", "fixture.tool"), { recursive: true });
+  return { roots, receiptPath: path.join(roots.stateRoot, "receipts", "fixture.json"), retired: path.join(roots.activeRegistryRoot, "tool", "fixture.tool") };
+}
+async function assertRetirementState({ roots, receiptPath, retired }, applied) {
+  const owners = JSON.parse(await fs.readFile(receiptPath)).members.map(member => member.owner).sort();
+  assert.deepEqual(owners, applied ? ["world_fixture"] : ["fixture.tool", "world_fixture"]);
+  if (applied) await assert.rejects(fs.stat(retired), { code: "ENOENT" });
+  else assert.equal(JSON.parse(await fs.readFile(path.join(retired, "tool.json"))).id, "fixture.tool");
+  assert.deepEqual(await retainedTransactionEntries(path.join(roots.stateRoot, "transactions")), []);
+}
+async function retirementFixtures(root) {
+  const success = await retirementFixture(path.join(root, "success"));
+  assert.equal((await adoptLocalPackageUpdates(success.roots)).changed, true); await assertRetirementState(success, true);
+  assert.equal((await record(success.roots)).receipt_state, "valid");
+  assert.equal((await adoptLocalPackageUpdates(success.roots)).changed, false);
+  const changed = await retirementFixture(path.join(root, "local-change")), reviewed = await fs.readFile(changed.receiptPath);
+  await json(path.join(changed.retired, "tool.json"), { id: "fixture.tool", authored: true });
+  await assert.rejects(adoptLocalPackageUpdates(changed.roots), /cannot retire 'tool\/fixture\.tool' with local changes at tool\.json/);
+  assert.deepEqual(await fs.readFile(changed.receiptPath), reviewed);
+  assert.equal(JSON.parse(await fs.readFile(path.join(changed.retired, "tool.json"))).authored, true);
+  for (const mode of ["update-retire-rename", "update-receipting"]) {
+    const directory = path.join(root, mode), test = await retirementFixture(directory), prior = await fs.readFile(test.receiptPath);
+    child(mode, directory); await recoverLocalPackageTransactions(test.roots);
+    await assertRetirementState(test, mode === "update-receipting");
+    if (mode !== "update-receipting") assert.deepEqual(await fs.readFile(test.receiptPath), prior);
+    await adoptLocalPackageUpdates(test.roots); await assertRetirementState(test, true);
+  }
+}
 async function absentOwnerRenameRaceFixture(root) {
   const test = await additionFixture(root), native = test.roots.publication, receipt = await fs.readFile(test.receiptPath);
   let injected = false, foreignInode;
@@ -528,6 +561,7 @@ async function crash(mode, root) {
     if (moves.some(({ source: from, destination: to }) =>
       ["install-rename", "legacy-committing"].includes(mode) && from.endsWith(".stage") && !path.basename(to).startsWith(".")
       || mode === "update-new-rename" && from.endsWith(".stage") && path.basename(to) === "fixture.zzadded"
+      || mode === "update-retire-rename" && path.basename(from) === "fixture.tool" && to.endsWith(".backup")
       || mode === "remove-rename" && to.endsWith(".backup")
       || mode === "remove-restore" && from.endsWith(".backup")
       || mode === "prepare-verdict" && path.basename(from).startsWith(".prepare.")
@@ -720,6 +754,7 @@ async function run() {
     await dataDirectoryFixture(path.join(root, "data-directories"));
     await nativeRenameFixture(path.join(root, "native-rename"));
     await ownerAdditionFixtures(path.join(root, "owner-additions"));
+    await retirementFixtures(path.join(root, "owner-retirements"));
     await releaseUpdateFixture(path.join(root, "release-update"));
     for (const mode of ["update-materializing", "update-finalizing"]) {
       const directory = path.join(root, mode), roots = await fixture(directory);
@@ -867,7 +902,7 @@ async function run() {
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 if (require.main === module) {
-  const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures,
+  const focused = { "--data-directories": dataDirectoryFixture, "--owner-additions": ownerAdditionFixtures, "--owner-retirements": retirementFixtures,
     "--publication-recovery": publicationRecoveryFixture,
     "--configuration-evolution": configurationEvolutionFixture,
     "--absent-owner-race": absentOwnerRenameRaceFixture, "--conflict-resolutions": conflictResolutionFixtures }[process.argv[2]];

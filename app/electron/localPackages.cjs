@@ -513,6 +513,13 @@ function assertPackageUpdateOwnership(manifest, source, state) {
   }
   for (const baseline of receipt.members) {
     const member = source.members.find(candidate => memberKey(candidate) === memberKey(baseline));
+    const retired = state.retiredMembers.find(candidate => memberKey(candidate) === memberKey(baseline));
+    if (!member && retired && baseline.target === memberRelative(retired)) {
+      if (retired.changes.length) {
+        throw new Error(`Installed package '${manifest.id}' cannot retire '${memberKey(baseline)}' with local changes at ${retired.changes.join(", ")}; prior installation is preserved`);
+      }
+      continue;
+    }
     const active = state.activeMembers.find(candidate => memberKey(candidate) === memberKey(baseline));
     if (!member || baseline.target !== memberRelative(member) || !active?.present) {
       throw new Error(`Installed package '${manifest.id}' changed ownership of '${memberKey(baseline)}'; prior owners must remain declared and present`);
@@ -723,7 +730,7 @@ async function preparePackageUpdate(roots, manifest, source, state, resolutions 
       if (!replacement) throw new Error(`Installed package '${manifest.id}' lost prior owner '${memberKey(member)}' during update`);
       return replacement;
     });
-    return { ...source, members, fileCount: members.reduce((total, member) => total + member.files.length, 0) };
+    return { ...source, members, retired: retiredOwners(state), fileCount: members.reduce((total, member) => total + member.files.length, 0) };
   }
   const members = [];
   for (const member of source.members) {
@@ -798,7 +805,11 @@ async function preparePackageUpdate(roots, manifest, source, state, resolutions 
         return projected ? { ...file, size: projected.owned_size, sha256: projected.owned_sha256 } : file;
       })) });
   }
-  return { ...source, members, fileCount: members.reduce((total, member) => total + member.files.length, 0) };
+  return { ...source, members, retired: retiredOwners(state), fileCount: members.reduce((total, member) => total + member.files.length, 0) };
+}
+
+function retiredOwners(state) {
+  return state.retiredMembers.map(member => ({ registry_kind: member.registry_kind, owner: member.owner, previous_digest: member.digest }));
 }
 
 async function applyLocalApplicationPack(options) {
@@ -1290,6 +1301,9 @@ function parsePackageManifest(value, file) {
   const memberKeys = manifest.members.map(memberKey);
   const repeated = repeatedValues(memberKeys);
   if (repeated.length) throw new Error(`local package '${manifest.id}' repeats registry owners: ${repeated.join(", ")}`);
+  const retiredKeys = (manifest.retired_members ?? []).map(memberKey);
+  const shippedAndRetired = retiredKeys.filter(key => memberKeys.includes(key));
+  if (shippedAndRetired.length) throw new Error(`local package '${manifest.id}' both ships and retires: ${shippedAndRetired.join(", ")}`);
   if (manifest.members.filter((member) => member.primary === true).length > 1) {
     throw new Error(`local package '${manifest.id}' has more than one primary owner`);
   }
@@ -1583,6 +1597,12 @@ function validatePackageOwnership(packages) {
       owners.set(key, packageId);
     }
   }
+  for (const entry of packages) {
+    for (const member of entry.manifest.retired_members ?? []) {
+      const owner = owners.get(memberKey(member));
+      if (owner) throw new Error(`registry owner '${memberKey(member)}' is retired by '${entry.manifest.id}' but shipped by '${owner}'`);
+    }
+  }
 }
 
 async function snapshotPackageSource(roots, manifest, options = {}) {
@@ -1773,6 +1793,28 @@ async function readPackageState(roots, manifest, source) {
     }
     activeMembers.push({ ...member, target, present: true, ...await projectMemberConfiguration(snapshot, member.configuration, deferred) });
   }
+  const retiredMembers = [];
+  for (const member of manifest.retired_members ?? []) {
+    const baseline = receiptResult?.members.find(candidate => memberKey(candidate) === memberKey(member));
+    if (!baseline) continue;
+    const target = memberPath(roots.activeRegistryRoot, member);
+    if (!await pathExists(target)) {
+      retiredMembers.push({ ...member, target, present: false, digest: null, changes: [] });
+      continue;
+    }
+    await requirePlainDirectory(path.dirname(target), path.dirname(target));
+    const snapshot = await snapshotDirectory(target);
+    const active = await projectMemberConfiguration(snapshot, baseline.configuration);
+    const changes = snapshot.excludedEntries.map(entry => snapshotRelativePath(path.relative(snapshot.root, entry)));
+    if (baseline.source_files) {
+      const prior = new Map(baseline.source_files.map(file => [file.path, file])), installed = sourceFileMap(active);
+      for (const relative of new Set([...prior.keys(), ...installed.keys()])) {
+        if (!sameOwnedFile(prior.get(relative), installed.get(relative))) changes.push(relative);
+      }
+    } else if (snapshot.digest !== baseline.digest) changes.push(".");
+    retiredMembers.push({ ...member, target, present: true, digest: snapshot.digest, changes });
+  }
+  const retiredKeys = new Set(retiredMembers.map(memberKey));
   const materialized = present === manifest.members.length;
   const partiallyMaterialized = present > 0 && !materialized;
   const installedDigest = present > 0 ? hashJson({
@@ -1820,10 +1862,11 @@ async function readPackageState(roots, manifest, source) {
     partiallyMaterialized,
     installedDigest,
     activeMembers,
+    retiredMembers,
     receipt: receiptResult,
     receiptState,
     customizations,
-    localChanges: receiptResult?.schema_version === 2 ? receiptResult.members.flatMap(member => {
+    localChanges: receiptResult?.schema_version === 2 ? receiptResult.members.filter(member => !retiredKeys.has(memberKey(member))).flatMap(member => {
       const active = activeMembers.find(candidate => memberKey(candidate) === memberKey(member));
       const baseline = new Map(member.source_files.map(file => [file.path, file]));
       const installed = active?.present ? sourceFileMap(active) : new Map();
@@ -2269,6 +2312,15 @@ async function repairResolvedPackages(roots, entries, operation) {
       state: "planned",
     };
   }));
+  const retirements = pending.flatMap(({ entry, materialization }) => (materialization.retired ?? []).map(member => ({
+    package_id: entry.manifest.id,
+    registry_kind: member.registry_kind,
+    owner: member.owner,
+    target: memberRelative(member),
+    backup: transactionRelative(member, operation.operationId, "backup"),
+    previous_digest: member.previous_digest,
+    state: "planned",
+  })));
   let journal = {
     schema: "octopus.local_package_transaction",
     schema_version: 3,
@@ -2281,6 +2333,7 @@ async function repairResolvedPackages(roots, entries, operation) {
     receipts,
     previous_receipts: previousReceipts,
     moves,
+    ...(retirements.length ? { retirements } : {}),
   };
   const transactionRoot = await createTransactionRoot(roots, operation.operationId, journal);
   const journalPath = path.join(transactionRoot, "journal.json");
@@ -2347,7 +2400,9 @@ async function repairResolvedPackages(roots, entries, operation) {
         percent: Math.round(58 + (index + 1) / journal.moves.length * 34),
       });
     }
+    await retireOwners(roots, journalPath, journal);
     await verifyMaterializedMoves(roots, journal.moves);
+    await verifyRetiredOwners(roots, journal);
     await verifyRepairReceiptOwners(roots, journal.receipts);
     journal.phase = "owners_materialized";
     await writeJournal(journalPath, journal);
@@ -2664,6 +2719,12 @@ async function recoverTransaction(roots, transactionRoot, journalPath) {
   let journal = parseTransaction(document.value, journalPath);
   if (path.basename(transactionRoot) !== journal.operation_id) throw new Error("Package transaction directory disagrees with its operation");
   for (const move of journal.moves) validateMovePaths(roots, move, journal.operation_id);
+  for (const retirement of journal.retirements ?? []) {
+    if (retirement.target !== memberRelative(retirement) || retirement.backup !== transactionRelative(retirement, journal.operation_id, "backup")) {
+      throw new Error(`transaction retirement disagrees with owner '${memberKey(retirement)}'`);
+    }
+    for (const relative of [retirement.target, retirement.backup]) resolveTransactionPath(roots, relative);
+  }
   await assertRegisteredPackageMutationAllowed(roots, transactionPackageIds(journal));
   if (journal.schema_version !== 3) {
     journal = await retireUncommittedPackageTransaction(roots, journalPath, journal);
@@ -2680,6 +2741,14 @@ async function recoverTransaction(roots, transactionRoot, journalPath) {
         if (await pathExists(resolveTransactionPath(roots, move.target))) throw new Error("Removed package owner was recreated before transaction recovery");
       }
     } else {
+      if (journal.operation === "repair") {
+        for (const [index, retirement] of (journal.retirements ?? []).entries()) {
+          if (retirement.previous_digest === null) continue;
+          if (!journal.publications[`retire:${index}`]) throw new Error("Committed retired package owner has no saved publication");
+          await publishPackageMoves(roots, journalPath, journal, `retire:${index}`);
+        }
+        await verifyRetiredOwners(roots, journal);
+      }
       await verifyMaterializedMoves(roots, journal.moves);
       if (journal.operation === "repair") await verifyRepairReceiptOwners(roots, journal.receipts);
     }
@@ -2696,6 +2765,7 @@ async function recoverTransaction(roots, transactionRoot, journalPath) {
   }
   journal.phase = "rolling_back";
   await writeJournal(journalPath, journal);
+  await restoreRetiredOwners(roots, journalPath, journal);
   for (const index of [...journal.moves.keys()].reverse()) {
     const move = journal.moves[index], key = `commit:${index}`;
     if (journal.publications[key]) {
@@ -2784,6 +2854,7 @@ function parseTransaction(value, file) {
 }
 
 function validateInstallRemoveJournalContract(journal) {
+  if (journal.retirements) throw new Error(`${journal.operation} transaction cannot retire package owners`);
   const installing = journal.operation === "install";
   const terminal = installing ? "owners_materialized" : "owners_removed";
   const complete = [terminal, "receipts_written", "committed"].includes(journal.phase);
@@ -2835,10 +2906,26 @@ function validateRepairJournalContract(journal) {
   if (previousReceipts.some((receipt) => !receiptsByPackage.has(receipt.package_id))) {
     throw new Error("repair transaction has previous receipt without replacement");
   }
+  const retirements = journal.retirements ?? [];
+  const retiredByPackage = new Map();
+  for (const retirement of retirements) {
+    const key = memberKey(retirement), previous = priorByPackage.get(retirement.package_id);
+    const retired = retiredByPackage.get(retirement.package_id) ?? new Set();
+    if (retired.has(key) || !previous?.members.some(member => memberKey(member) === key && member.target === retirement.target)
+      || receiptsByPackage.get(retirement.package_id).members.some(member => memberKey(member) === key)) {
+      throw new Error(`repair retirement '${retirement.package_id}:${key}' has no exact prior owner`);
+    }
+    if (retirement.state !== "retired" && ["owners_materialized", "receipts_written", "committed"].includes(journal.phase)) {
+      throw new Error(`repair transaction contains an incomplete retirement '${retirement.package_id}:${key}'`);
+    }
+    retired.add(key);
+    retiredByPackage.set(retirement.package_id, retired);
+  }
   for (const previous of previousReceipts) {
-    const next = receiptsByPackage.get(previous.package_id);
+    const next = receiptsByPackage.get(previous.package_id), retired = retiredByPackage.get(previous.package_id) ?? new Set();
     if (next.product_kind !== previous.product_kind || next.product_id !== previous.product_id
-      || previous.members.some(member => !next.members.some(candidate => memberKey(candidate) === memberKey(member) && candidate.target === member.target))) {
+      || previous.members.some(member => !retired.has(memberKey(member))
+        && !next.members.some(candidate => memberKey(candidate) === memberKey(member) && candidate.target === member.target))) {
       throw new Error(`repair receipt '${previous.package_id}' removes or renames a prior owner`);
     }
   }
@@ -3170,7 +3257,14 @@ function packageDirectoryDigest(preimage) {
 function packagePublicationId(journal, key) { return `package:${journal.operation_id}:${journal.publication_id}:${key}`; }
 
 function packageMoveCoordinates(roots, journal, key) {
-  const [kind, number] = key.split(":"), index = Number(number), move = journal.moves[index];
+  const [kind, number] = key.split(":"), index = Number(number);
+  if (kind === "retire" || kind === "unretire") {
+    const retirement = journal.operation === "repair" ? journal.retirements?.[index] : undefined;
+    if (!retirement || String(index) !== number || retirement.previous_digest === null) throw new Error("Package publication has no exact retired owner index");
+    const target = resolveTransactionPath(roots, retirement.target), backup = resolveTransactionPath(roots, retirement.backup);
+    return kind === "retire" ? [[target, backup, retirement.previous_digest]] : [[backup, target, retirement.previous_digest]];
+  }
+  const move = journal.moves[index];
   if (!move || String(index) !== number) throw new Error("Package publication has no exact owner index");
   const target = resolveTransactionPath(roots, move.target), stage = resolveTransactionPath(roots, move.stage), backup = resolveTransactionPath(roots, move.backup);
   const tx = path.join(roots.transactionsRoot, journal.operation_id);
@@ -3281,6 +3375,39 @@ async function verifyMaterializedMoves(roots, moves) {
 async function removeRepairBackups(roots, journal) {
   for (const [index, move] of journal.moves.entries()) {
     if (move.previous_digest !== null) await reclaimPackagePublication(roots, journal.publications[`commit:${index}`], 0);
+  }
+  for (const [index, retirement] of (journal.retirements ?? []).entries()) {
+    if (retirement.previous_digest !== null) await reclaimPackagePublication(roots, journal.publications[`retire:${index}`], 0);
+  }
+}
+
+async function retireOwners(roots, journalPath, journal) {
+  for (const [index, retirement] of (journal.retirements ?? []).entries()) {
+    if (retirement.previous_digest !== null) await publishPackageMoves(roots, journalPath, journal, `retire:${index}`);
+    journal.retirements[index].state = "retired";
+    await writeJournal(journalPath, journal);
+  }
+}
+
+async function verifyRetiredOwners(roots, journal) {
+  for (const retirement of journal.retirements ?? []) {
+    if (await pathExists(resolveTransactionPath(roots, retirement.target))) {
+      throw new Error(`retired package owner '${retirement.target}' is still present`);
+    }
+  }
+}
+
+async function restoreRetiredOwners(roots, journalPath, journal) {
+  for (const index of [...(journal.retirements ?? []).keys()].reverse()) {
+    const key = `retire:${index}`;
+    if (!journal.publications[key]) continue;
+    try { await publishPackageMoves(roots, journalPath, journal, key); }
+    catch (error) {
+      if (journal.publications[key].receipts.length !== journal.publications[key].moves.length
+        || journal.publications[key].receipts.some(receipt => receipt.outcome === "uncertain")) throw error;
+    }
+    const receipt = journal.publications[key].receipts[0];
+    if (receipt?.outcome === "applied") await publishPackageMoves(roots, journalPath, journal, `unretire:${index}`, [receipt.movement.expected]);
   }
 }
 

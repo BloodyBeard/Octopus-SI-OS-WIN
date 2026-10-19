@@ -124,11 +124,30 @@
         "additionalProperties": false
       }
     },
+    "retirements": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "required": ["package_id", "registry_kind", "owner", "target", "backup", "previous_digest", "state"],
+        "properties": {
+          "package_id": {"$ref": "#/$defs/id"},
+          "registry_kind": {"type": "string", "minLength": 1, "maxLength": 64},
+          "owner": {"$ref": "#/$defs/id"},
+          "target": {"$ref": "#/$defs/relativePath"},
+          "backup": {"$ref": "#/$defs/relativePath"},
+          "previous_digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+          "state": {"enum": ["planned", "retired"]}
+        },
+        "additionalProperties": false
+      }
+    },
     "publications": {
       "type": "object",
       "maxProperties": 24576,
       "propertyNames": {
-        "pattern": "^(stage|commit|undo|discard_stage|discard_target):[0-9]+$"
+        "pattern": "^(stage|commit|undo|discard_stage|discard_target|retire|unretire):[0-9]+$"
       },
       "additionalProperties": {
         "$ref": "#/$defs/directoryPublication"

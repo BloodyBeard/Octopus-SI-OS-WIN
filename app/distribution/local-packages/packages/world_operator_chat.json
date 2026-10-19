@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_operator_chat",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "product_kind": "application",
   "product_id": "world_operator_chat",
   "release_status": "optional",
@@ -62,6 +62,10 @@
     {"registry_kind":"ee_template","owner":"client_maintenance"},
     {"registry_kind":"interface","owner":"system_worker_client_maintenance"},
     {"registry_kind":"interface","owner":"system_client_maintenance"}
+  ],
+  "retired_members": [
+    {"registry_kind":"interface","owner":"system_context_memory_publication"},
+    {"registry_kind":"tool","owner":"file.write.memory_publication"}
   ],
   "required_packages": [
     "driver.browser_session",

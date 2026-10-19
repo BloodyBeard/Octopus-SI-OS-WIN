@@ -35,6 +35,21 @@
       "additionalProperties": false
     },
     "required_packages": {"type": "array", "maxItems": 128, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "retired_members": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "required": ["registry_kind", "owner"],
+        "properties": {
+          "registry_kind": {"enum": ["interface", "worker_environment_kind", "tool", "artifact", "mark", "verifier", "ee_template"]},
+          "owner": {"$ref": "#/$defs/id"}
+        },
+        "additionalProperties": false
+      }
+    },
     "members": {
       "type": "array",
       "minItems": 1,
