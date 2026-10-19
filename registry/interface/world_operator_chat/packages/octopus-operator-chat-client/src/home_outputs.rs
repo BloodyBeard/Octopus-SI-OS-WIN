@@ -51,7 +51,7 @@ pub(super) fn template(
         if voice_update {
             vec![binding(&identity.model_interface_id)]
         } else {
-            vec![binding(&identity.model_interface_id), binding(recipient)]
+            vec![provider_receipt_binding(&identity.model_interface_id), binding(recipient)]
         },
         Vec::new(),
     )?;
@@ -61,6 +61,18 @@ pub(super) fn template(
 }
 
 const PRESENTATION_LABELS: [&str; 3] = ["client.surface.document", "client.action", "client.action.result"];
+
+fn provider_receipt_binding(id: &str) -> AuthoredInterfaceBinding {
+    AuthoredInterfaceBinding {
+        interface: InterfaceId::new(id),
+        config: InterfaceBindingConfig {
+            artifact_policy: BindingArtifactPolicy::Allow {
+                names: vec!["client.surface.document".into()],
+                namespaces: Vec::new(),
+            },
+        },
+    }
+}
 
 fn presentation_binding(id: &str) -> AuthoredInterfaceBinding {
     AuthoredInterfaceBinding {
