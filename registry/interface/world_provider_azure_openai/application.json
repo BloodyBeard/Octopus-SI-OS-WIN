@@ -1,0 +1,38 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_azure_openai",
+  "name": "Azure OpenAI",
+  "description": "A model deployment in your Azure OpenAI resource.",
+  "category": "provider",
+  "developer": "Microsoft",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "interfaces": [
+    "world_provider_azure_openai"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_azure_openai",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Azure OpenAI API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_azure_openai",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Resource URL, for example https://name.openai.azure.com/openai",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_provider_azure_openai",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Deployment name",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

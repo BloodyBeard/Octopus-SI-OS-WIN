@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_ollama",
+  "name": "Ollama",
+  "description": "A model served by Ollama on this Mac.",
+  "category": "provider",
+  "developer": "Ollama",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_ollama"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_ollama",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model name, for example qwen3-coder:30b",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

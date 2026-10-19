@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_deepseek",
+  "name": "DeepSeek",
+  "description": "DeepSeek models through a DeepSeek API key.",
+  "category": "provider",
+  "developer": "DeepSeek",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_deepseek"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_deepseek",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "DeepSeek API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

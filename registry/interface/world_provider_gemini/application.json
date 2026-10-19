@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_gemini",
+  "name": "Google Gemini",
+  "description": "Gemini models through a Google AI Studio API key.",
+  "category": "provider",
+  "developer": "Google",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_gemini"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_gemini",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Gemini API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_lmstudio",
+  "name": "LM Studio",
+  "description": "A model served by LM Studio on this Mac.",
+  "category": "provider",
+  "developer": "LM Studio",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_lmstudio"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_lmstudio",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id as LM Studio lists it",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_zai",
+  "name": "Z.AI GLM",
+  "description": "GLM models through a Z.AI coding plan key.",
+  "category": "provider",
+  "developer": "Z.AI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_zai"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_zai",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Z.AI API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_opencode_zen",
+  "name": "OpenCode Zen",
+  "description": "Curated coding models through an OpenCode Zen key.",
+  "category": "provider",
+  "developer": "OpenCode",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_opencode_zen"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_opencode_zen",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "OpenCode Zen API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_opencode_zen",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id as OpenCode Zen lists it",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

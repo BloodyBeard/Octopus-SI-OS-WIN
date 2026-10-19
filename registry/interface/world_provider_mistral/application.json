@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_mistral",
+  "name": "Mistral",
+  "description": "Mistral models through a Mistral API key.",
+  "category": "provider",
+  "developer": "Mistral AI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_mistral"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_mistral",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Mistral API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_mistral",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example codestral-latest",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "repository": "https://github.com/lidge-jun/opencodex.git",
-  "tag": "v2.39.0",
-  "commit": "af6113a0381d6fff2e4dce587652825c7eeb6423",
-  "npm_package": "@bitkyc08/opencodex@2.39.0",
-  "npm_tarball_sha1": "4311d761bc55e565008b82941a8567ce052dce1b",
-  "npm_integrity": "sha512-fmWhKzgO0g/2IeE3VV02z7iZurXqF7zFUg/BE4sPzKZjtAWblOFFCWpjnfBhPhrYzyWPu6kAP1zSfnk5bB3ZYQ==",
+  "tag": "v2.89.0",
+  "commit": "dd2bdd2fe3ff6fc2d75019c8b7dc201b835b4109",
+  "npm_package": "@bitkyc08/opencodex@2.89.0",
+  "npm_tarball_sha1": "86418f326f35ffdc12adeba22aa3fbe763842ebc",
+  "npm_integrity": "sha512-H+rwyd/Wl/9V1DC1pco6VwyVOyEw6iA6CymakbutW6Sqzw3EfcZLLfMPQtejbLNx9aeZ4LhX5DsFTGxnu1ystg==",
   "license_file": "LICENSE.opencodex",
   "used_surfaces": [
     "src/responses/parser.ts",
@@ -18,7 +18,10 @@
     "src/adapters/google.ts",
     "src/adapters/azure.ts",
     "src/types.ts",
-    "src/server/responses/collaboration.ts#buildToolBridgeMaps"
+    "src/providers/registry.ts",
+    "src/providers/derive.ts#providerConfigSeed,enrichProviderFromRegistry",
+    "src/server/responses/collaboration.ts#buildToolBridgeMaps",
+    "gui/dist/provider-icons"
   ],
   "excluded_surfaces": [
     "src/server/index.ts",

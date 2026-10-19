@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_opencode_go",
+  "name": "OpenCode Go",
+  "description": "Open coding models through an OpenCode Go subscription key.",
+  "category": "provider",
+  "developer": "OpenCode",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_opencode_go"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_opencode_go",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "OpenCode Go API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_opencode_go",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example kimi-k2.7-code",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

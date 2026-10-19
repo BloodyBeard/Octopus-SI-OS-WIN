@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_minimax_cn",
+  "name": "MiniMax China",
+  "description": "MiniMax models through a mainland China MiniMax key.",
+  "category": "provider",
+  "developer": "MiniMax",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_minimax_cn"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_minimax_cn",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "MiniMax China API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_alibaba_coding_plan",
+  "name": "Alibaba Coding Plan",
+  "description": "Qwen coding models through an Alibaba Cloud coding plan key.",
+  "category": "provider",
+  "developer": "Alibaba Cloud",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_alibaba_coding_plan"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_alibaba_coding_plan",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Alibaba Cloud API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_alibaba_coding_plan",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example qwen3-coder-plus",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

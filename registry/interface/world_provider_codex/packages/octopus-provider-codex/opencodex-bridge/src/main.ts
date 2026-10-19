@@ -9,6 +9,9 @@ import {
   buildResponseJSON,
   formatErrorResponse,
 } from "../node_modules/@bitkyc08/opencodex/src/bridge.ts";
+import { PROVIDER_REGISTRY } from "../node_modules/@bitkyc08/opencodex/src/providers/registry.ts";
+import { enrichProviderFromRegistry, providerConfigSeed } from "../node_modules/@bitkyc08/opencodex/src/providers/derive.ts";
+import { buildToolBridgeMaps } from "../node_modules/@bitkyc08/opencodex/src/server/responses/collaboration.ts";
 import {
   createTranslatorBudget,
   isTranslatorBudgetExceededError,
@@ -19,12 +22,10 @@ import {
   providerDestinationResolvedError,
 } from "../node_modules/@bitkyc08/opencodex/src/lib/destination-policy.ts";
 import { parseRequest } from "../node_modules/@bitkyc08/opencodex/src/responses/parser.ts";
-import {
-  namespacedToolName,
-  toolChoiceToolPredicate,
-  type AdapterEvent,
-  type OcxParsedRequest,
-  type OcxProviderConfig,
+import type {
+  AdapterEvent,
+  OcxParsedRequest,
+  OcxProviderConfig,
 } from "../node_modules/@bitkyc08/opencodex/src/types.ts";
 
 type AdapterName = "anthropic" | "azure" | "google" | "openai-chat" | "openai-responses";
@@ -55,8 +56,10 @@ type RuntimeProvider = {
   default_model: string;
   headers: Record<string, string>;
   id: string;
+  model_aliases: Record<string, string>;
   models: string[];
   options: ProviderOptions;
+  registry_entry?: string;
 };
 
 type BridgeConfig = {
@@ -138,6 +141,17 @@ function headersValue(value: unknown, path: string): Record<string, string> {
   return headers;
 }
 
+function modelAliasesValue(value: unknown, models: string[]): Record<string, string> {
+  if (value === undefined) return {};
+  if (!isObject(value)) throw new Error("provider.model_aliases must be an object");
+  const aliases: Record<string, string> = {};
+  for (const [declared, upstream] of Object.entries(value)) {
+    if (!models.includes(declared)) throw new Error(`provider.model_aliases names undeclared model '${declared}'`);
+    aliases[declared] = stringValue(upstream, `provider.model_aliases.${declared}`);
+  }
+  return aliases;
+}
+
 function optionsValue(value: unknown): ProviderOptions {
   if (value === undefined) return {};
   if (!isObject(value)) throw new Error("provider.options must be an object");
@@ -198,6 +212,8 @@ function parseConfig(value: unknown): BridgeConfig {
     "allow_private_network",
     "cache_retention",
     "options",
+    "registry_entry",
+    "model_aliases",
   ], "provider");
   const adapter = stringValue(value.provider.adapter, "provider.adapter") as AdapterName;
   if (!adapterNames.has(adapter)) throw new Error(`provider.adapter '${adapter}' is unsupported`);
@@ -216,6 +232,13 @@ function parseConfig(value: unknown): BridgeConfig {
   const models = stringSet(value.provider.models, "provider.models");
   const defaultModel = stringValue(value.provider.default_model, "provider.default_model");
   if (!models.includes(defaultModel)) throw new Error("provider.default_model is outside provider.models");
+  const registryEntry = value.provider.registry_entry === undefined
+    ? undefined
+    : stringValue(value.provider.registry_entry, "provider.registry_entry");
+  if (registryEntry !== undefined && !PROVIDER_REGISTRY.some((entry) => entry.id === registryEntry)) {
+    throw new Error(`provider.registry_entry '${registryEntry}' is not an OpenCodex registry entry`);
+  }
+  const modelAliases = modelAliasesValue(value.provider.model_aliases, models);
   const apiKey = value.provider.api_key === undefined ? undefined : stringValue(value.provider.api_key, "provider.api_key");
   const authHeader = value.provider.auth_header === undefined ? undefined : stringValue(value.provider.auth_header, "provider.auth_header");
   const authValuePrefix = value.provider.auth_value_prefix === undefined
@@ -242,6 +265,8 @@ function parseConfig(value: unknown): BridgeConfig {
     provider: {
       id: stringValue(value.provider.id, "provider.id"),
       adapter,
+      ...(registryEntry === undefined ? {} : { registry_entry: registryEntry }),
+      model_aliases: modelAliases,
       base_url: baseUrl,
       models,
       default_model: defaultModel,
@@ -263,19 +288,30 @@ function parseConfig(value: unknown): BridgeConfig {
   };
 }
 
+function upstreamModel(config: RuntimeProvider, model: string): string {
+  return config.model_aliases[model] ?? model;
+}
+
 function upstreamProvider(config: RuntimeProvider): OcxProviderConfig {
-  const headers = { ...config.headers };
+  const entry = config.registry_entry === undefined
+    ? undefined
+    : PROVIDER_REGISTRY.find((row) => row.id === config.registry_entry);
+  const seed: Partial<OcxProviderConfig> = entry ? providerConfigSeed(entry) : {};
+  const headers = { ...(seed.headers ?? {}), ...config.headers };
   if (config.api_key !== undefined && config.auth_header !== undefined) {
     headers[config.auth_header] = `${config.auth_value_prefix}${config.api_key}`;
   }
-  return {
-    adapter: config.adapter,
+  const models = config.models.map((model) => upstreamModel(config, model));
+  const provider: OcxProviderConfig = {
+    ...seed,
+    adapter: seed.adapter ?? config.adapter,
     baseUrl: config.base_url,
-    models: [...config.models],
-    selectedModels: [...config.models],
-    defaultModel: config.default_model,
+    models,
+    selectedModels: [...models],
+    defaultModel: upstreamModel(config, config.default_model),
     liveModels: false,
     allowPrivateNetwork: config.allow_private_network,
+    authMode: config.api_key !== undefined ? "key" : seed.authMode === "local" ? "local" : "key",
     ...(config.api_key === undefined ? {} : { apiKey: config.api_key }),
     ...(Object.keys(headers).length === 0 ? {} : { headers }),
     ...(config.options.api_key_transport === undefined ? {} : { apiKeyTransport: config.options.api_key_transport }),
@@ -291,6 +327,8 @@ function upstreamProvider(config: RuntimeProvider): OcxProviderConfig {
     ...(config.options.supports_service_tier === undefined ? {} : { supportsServiceTier: config.options.supports_service_tier }),
     ...(config.options.upstream_http_version === undefined ? {} : { upstreamHttpVersion: config.options.upstream_http_version }),
   };
+  if (entry) enrichProviderFromRegistry(entry.id, provider);
+  return provider;
 }
 
 function adapterFor(config: RuntimeProvider): ProviderAdapter {
@@ -300,50 +338,6 @@ function adapterFor(config: RuntimeProvider): ProviderAdapter {
   if (config.adapter === "google") return createGoogleAdapter(provider);
   if (config.adapter === "openai-chat") return createOpenAIChatAdapter(provider);
   return createResponsesPassthroughAdapter(provider);
-}
-
-function toolBridgeMaps(parsed: OcxParsedRequest, budget: TranslatorBudget) {
-  const toolNsMap = new Map<string, { namespace: string; name: string; freeform?: true }>();
-  const declaredToolNames = new Set<string>();
-  const toolParameterSchemas = new Map<string, Record<string, unknown>>();
-  const freeformToolNames = new Set<string>();
-  const toolSearchToolNames = new Set<string>();
-  const requestedTools = parsed.context.tools ?? [];
-  const allowed = toolChoiceToolPredicate(parsed.options.toolChoice, requestedTools);
-  const authorized = requestedTools.filter(allowed);
-  for (const tool of authorized) {
-    const wireName = namespacedToolName(tool.namespace, tool.name);
-    budget.chargeRetained(Buffer.byteLength(wireName), { kind: "retained_collectors" });
-    declaredToolNames.add(wireName);
-    if (tool.parameters && typeof tool.parameters === "object") toolParameterSchemas.set(wireName, tool.parameters);
-    if (tool.namespace) {
-      budget.chargeRetained(Buffer.byteLength(JSON.stringify([wireName, tool.namespace, tool.name])), { kind: "retained_collectors" });
-      toolNsMap.set(wireName, { namespace: tool.namespace, name: tool.name, ...(tool.freeform ? { freeform: true as const } : {}) });
-    }
-    if (tool.freeform) {
-      budget.chargeRetained(Buffer.byteLength(tool.name), { kind: "retained_collectors" });
-      freeformToolNames.add(tool.name);
-    }
-    if (tool.toolSearch) {
-      budget.chargeRetained(Buffer.byteLength(tool.name), { kind: "retained_collectors" });
-      toolSearchToolNames.add(tool.name);
-    }
-  }
-  const choice = parsed.options.toolChoice;
-  const bareChoices = new Set(choice && typeof choice === "object"
-    ? ("allowedTools" in choice ? choice.allowedTools : [choice.name])
-    : []);
-  const counts = new Map<string, number>();
-  for (const tool of requestedTools) counts.set(tool.name, (counts.get(tool.name) ?? 0) + 1);
-  for (const tool of authorized) {
-    if (!tool.namespace || !bareChoices.has(tool.name) || counts.get(tool.name) !== 1 || declaredToolNames.has(tool.name)) continue;
-    budget.chargeRetained(Buffer.byteLength(tool.name), { kind: "retained_collectors" });
-    declaredToolNames.add(tool.name);
-    budget.chargeRetained(Buffer.byteLength(JSON.stringify([tool.name, tool.namespace, tool.name])), { kind: "retained_collectors" });
-    toolNsMap.set(tool.name, { namespace: tool.namespace, name: tool.name, ...(tool.freeform ? { freeform: true as const } : {}) });
-    if (tool.parameters && typeof tool.parameters === "object") toolParameterSchemas.set(tool.name, tool.parameters);
-  }
-  return { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames };
 }
 
 async function boundedBody(request: Request, limit: number): Promise<Uint8Array> {
@@ -459,15 +453,69 @@ function disposingStream(stream: ReadableStream<Uint8Array>, budget: TranslatorB
   });
 }
 
-function asyncEvents(events: AdapterEvent[]): AsyncIterable<AdapterEvent> {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield* events;
-    },
-  };
+async function* listedEvents(events: AdapterEvent[]): AsyncGenerator<AdapterEvent> {
+  yield* events;
 }
 
-async function responsesRequest(request: Request, config: BridgeConfig): Promise<Response> {
+const SSE_HEADERS = {
+  "Cache-Control": "no-cache",
+  "Connection": "keep-alive",
+  "Content-Type": "text/event-stream",
+  "X-Accel-Buffering": "no",
+};
+
+function deliver(
+  parsed: OcxParsedRequest,
+  responseModel: string,
+  events: AsyncIterable<AdapterEvent> | AdapterEvent[],
+  maps: ReturnType<typeof buildToolBridgeMaps>,
+  budget: TranslatorBudget,
+  abort: AbortController,
+): Promise<Response> | Response {
+  const options = {
+    translatorBudget: budget,
+    replayCacheScope: parsed._reasoningReplayScope,
+    hideThinkingSummary: parsed.options.hideThinkingSummary,
+    hideRawReasoning: parsed.options.hideRawReasoning,
+    declaredToolNames: maps.declaredToolNames,
+    bareCustomToolNames: maps.bareCustomToolNames,
+    enforceDeclaredToolNames: true,
+    terminalRefusalAsFailed: true,
+    toolParameterSchemas: maps.toolParameterSchemas,
+  };
+  if (parsed.stream) {
+    const stream = bridgeToResponsesSSE(
+      Array.isArray(events) ? listedEvents(events) : events,
+      responseModel,
+      maps.toolNsMap,
+      maps.freeformToolNames,
+      maps.toolSearchToolNames,
+      () => abort.abort("client cancelled"),
+      2000,
+      options,
+    );
+    return new Response(disposingStream(stream, budget, abort), { headers: SSE_HEADERS });
+  }
+  return (async () => {
+    try {
+      const collected: AdapterEvent[] = [];
+      for await (const event of events) collected.push(event);
+      const response = buildResponseJSON(collected, responseModel, {
+        ...options,
+        toolNsMap: maps.toolNsMap,
+        freeformToolNames: maps.freeformToolNames,
+        toolSearchToolNames: maps.toolSearchToolNames,
+      });
+      return Response.json(response);
+    } catch (error) {
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider response translation failed");
+    } finally {
+      budget.dispose();
+    }
+  })();
+}
+
+async function responsesRequest(request: Request, config: BridgeConfig, adapter: ProviderAdapter): Promise<Response> {
   let raw: unknown;
   try {
     const bytes = await boundedBody(request, config.limits.max_request_bytes);
@@ -479,18 +527,18 @@ async function responsesRequest(request: Request, config: BridgeConfig): Promise
   if (typeof raw.model !== "string" || !config.provider.models.includes(raw.model)) {
     return formatErrorResponse(400, "invalid_request_error", "request model is outside the exact interface model grant");
   }
+  const responseModel = raw.model;
+  const modelId = upstreamModel(config.provider, responseModel);
   let parsed: OcxParsedRequest;
   const budget = createTranslatorBudget({
     maxCallArgumentBytes: config.limits.max_translated_call_bytes,
     maxTurnBytes: config.limits.max_translated_turn_bytes,
   });
-  let maps: ReturnType<typeof toolBridgeMaps>;
+  let maps: ReturnType<typeof buildToolBridgeMaps>;
   try {
-    parsed = parseRequest(raw);
-    if (parsed.modelId !== raw.model || !config.provider.models.includes(parsed.modelId)) {
-      throw new Error("parsed model disagrees with the exact interface model grant");
-    }
-    maps = toolBridgeMaps(parsed, budget);
+    parsed = parseRequest(modelId === responseModel ? raw : { ...raw, model: modelId });
+    if (parsed.modelId !== modelId) throw new Error("parsed model disagrees with the exact interface model grant");
+    maps = buildToolBridgeMaps(parsed, budget);
   } catch (error) {
     budget.dispose();
     const message = isTranslatorBudgetExceededError(error)
@@ -498,17 +546,20 @@ async function responsesRequest(request: Request, config: BridgeConfig): Promise
       : error instanceof Error ? error.message : "request parsing failed";
     return formatErrorResponse(isTranslatorBudgetExceededError(error) ? 413 : 400, "invalid_request_error", message);
   }
-  const adapter = adapterFor(config.provider);
-  if (adapter.runTurn !== undefined || adapter.fetchResponse !== undefined) {
-    budget.dispose();
-    return formatErrorResponse(400, "unsupported_adapter", "configured adapter requires an undeclared execution or retry surface");
-  }
   const abort = new AbortController();
+  if (adapter.localTerminal?.(parsed)) {
+    return deliver(parsed, responseModel, [{ type: "done", endTurn: true, usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } }], maps, budget, abort);
+  }
   const timer = setTimeout(() => abort.abort("request timeout"), config.limits.request_timeout_ms);
   let upstream: Response;
-  let built: Awaited<ReturnType<ProviderAdapter["buildRequest"]>>;
+  let built: Awaited<ReturnType<ProviderAdapter["buildRequest"]>> | undefined;
   try {
-    built = await adapter.buildRequest(parsed, { headers: new Headers(), translatorBudget: budget, abortSignal: abort.signal });
+    built = await adapter.buildRequest(parsed, {
+      headers: new Headers(),
+      providerName: config.provider.registry_entry ?? config.provider.id,
+      translatorBudget: budget,
+      abortSignal: abort.signal,
+    });
     const target = new URL(built.url);
     const declared = new URL(config.provider.base_url);
     if (target.origin !== declared.origin) throw new Error("adapter target escaped the declared provider origin");
@@ -521,73 +572,45 @@ async function responsesRequest(request: Request, config: BridgeConfig): Promise
     });
   } catch (error) {
     clearTimeout(timer);
+    built?.releaseBodyObservation?.();
     budget.dispose();
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider request failed");
+    const message = error instanceof Error ? error.message : "provider request failed";
+    return isTranslatorBudgetExceededError(error)
+      ? formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the configured limit")
+      : formatErrorResponse(built ? 502 : 400, built ? "upstream_error" : "invalid_request_error", message);
   }
   clearTimeout(timer);
+  built.releaseBodyObservation?.();
   if (!upstream.ok) {
     try {
       const text = await boundedText(upstream, Math.min(config.limits.max_response_bytes, 1024 * 1024));
       const detail = adapter.formatErrorBody?.(upstream.status, upstream.headers, text) ?? "";
-      budget.dispose();
       return formatErrorResponse(upstream.status, "upstream_error", detail || `Provider error ${upstream.status}`, {
         retryAfter: upstream.headers.get("retry-after"),
       });
     } catch (error) {
-      budget.dispose();
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider error body was unreadable");
+    } finally {
+      budget.dispose();
     }
   }
   const bounded = boundedStream(upstream, config.limits.max_response_bytes, abort);
-  const events = adapter.parseStream(bounded, budget, built.tierLog);
-  if (parsed.stream) {
-    const stream = bridgeToResponsesSSE(
-      events,
-      parsed.modelId,
-      maps.toolNsMap,
-      maps.freeformToolNames,
-      maps.toolSearchToolNames,
-      () => abort.abort("client cancelled"),
-      2000,
-      {
-        translatorBudget: budget,
-        replayCacheScope: parsed._reasoningReplayScope,
-        hideThinkingSummary: parsed.options.hideThinkingSummary,
-        declaredToolNames: maps.declaredToolNames,
-        toolParameterSchemas: maps.toolParameterSchemas,
-      },
-    );
-    return new Response(disposingStream(stream, budget, abort), {
-      headers: {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "Content-Type": "text/event-stream",
-        "X-Accel-Buffering": "no",
-      },
-    });
+  if (!parsed.stream && adapter.parseResponse) {
+    try {
+      return deliver(parsed, responseModel, await adapter.parseResponse(bounded, budget, built.tierLog), maps, budget, abort);
+    } catch (error) {
+      budget.dispose();
+      return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider response translation failed");
+    }
   }
-  try {
-    const collected: AdapterEvent[] = [];
-    for await (const event of events) collected.push(event);
-    const response = buildResponseJSON(collected, parsed.modelId, {
-      translatorBudget: budget,
-      replayCacheScope: parsed._reasoningReplayScope,
-      hideThinkingSummary: parsed.options.hideThinkingSummary,
-      toolNsMap: maps.toolNsMap,
-      declaredToolNames: maps.declaredToolNames,
-      toolParameterSchemas: maps.toolParameterSchemas,
-      freeformToolNames: maps.freeformToolNames,
-      toolSearchToolNames: maps.toolSearchToolNames,
-    });
-    budget.dispose();
-    return Response.json(response);
-  } catch (error) {
-    budget.dispose();
-    return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : "provider response translation failed");
-  }
+  return deliver(parsed, responseModel, adapter.parseStream(bounded, budget, built.tierLog), maps, budget, abort);
 }
 
 async function serve(config: BridgeConfig): Promise<void> {
+  const adapter = adapterFor(config.provider);
+  if (adapter.runTurn !== undefined || adapter.fetchResponse !== undefined) {
+    throw new Error(`adapter ${config.provider.adapter} requires an undeclared execution or retry surface`);
+  }
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -603,7 +626,7 @@ async function serve(config: BridgeConfig): Promise<void> {
         });
       }
       if (request.method === "POST" && url.pathname === "/v1/responses") {
-        return responsesRequest(request, config);
+        return responsesRequest(request, config, adapter);
       }
       return formatErrorResponse(404, "not_found", "route is not declared by this provider interface");
     },

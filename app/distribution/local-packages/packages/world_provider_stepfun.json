@@ -1,0 +1,54 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_provider_stepfun",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_provider_stepfun",
+  "release_status": "optional",
+  "display": {
+    "name": "StepFun",
+    "description": "Step models through a StepFun API key.",
+    "developer": "StepFun",
+    "category": "provider",
+    "icon": "sparkles"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_provider_stepfun",
+      "primary": true,
+      "configuration": [
+        {
+          "path": "interface.json",
+          "fields": [
+            {
+              "pointer": "/interface_driver_config/private_config/model",
+              "schema": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            {
+              "pointer": "/interface_driver_config/private_config/reasoning_effort",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "required_packages": [
+    "world_provider_codex"
+  ]
+}

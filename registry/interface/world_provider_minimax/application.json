@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_minimax",
+  "name": "MiniMax",
+  "description": "MiniMax models through an international MiniMax key.",
+  "category": "provider",
+  "developer": "MiniMax",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_minimax"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_minimax",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "MiniMax API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

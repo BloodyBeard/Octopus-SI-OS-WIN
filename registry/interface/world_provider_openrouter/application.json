@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_openrouter",
+  "name": "OpenRouter",
+  "description": "Models from many vendors through one OpenRouter key.",
+  "category": "provider",
+  "developer": "OpenRouter",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_openrouter"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_openrouter",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "OpenRouter API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

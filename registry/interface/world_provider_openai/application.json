@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_openai",
+  "name": "OpenAI API",
+  "description": "GPT models billed to your OpenAI API key.",
+  "category": "provider",
+  "developer": "OpenAI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_openai"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_openai",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "OpenAI API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

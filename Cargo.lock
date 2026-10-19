@@ -6358,19 +6358,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-azure-auth"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-interfaces",
- "octopus-secrets",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "octopus-browser-session-env"
 version = "0.1.0"
 dependencies = [
@@ -7103,20 +7090,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-github-copilot-auth"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-interfaces",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "octopus-identity"
 version = "0.1.0"
 dependencies = [
@@ -7189,22 +7162,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "octopus-interface-activation-http-json-poll"
-version = "0.1.0"
-dependencies = [
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-secrets",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -7707,41 +7664,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-provider-credential-pool"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "octopus-provider-oauth-life"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-store",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-world-provider-anthropic",
- "octopus-world-provider-responses",
- "octopus-world-pyecho-life-runtime",
- "rand 0.9.4",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "octopus-provider-run-authoring"
 version = "0.1.0"
 dependencies = [
@@ -7981,23 +7903,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-speech-interface"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-secrets",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "octopus-substrate-contract"
 version = "0.1.0"
 dependencies = [
@@ -8143,15 +8048,6 @@ version = "0.1.0"
 dependencies = [
  "pretty_assertions",
  "tracing",
-]
-
-[[package]]
-name = "octopus-text-to-speech-interface"
-version = "0.1.0"
-dependencies = [
- "octopus-speech-interface",
- "octopus-world-pyecho-life-runtime",
- "tokio",
 ]
 
 [[package]]
@@ -8498,219 +8394,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "octopus-world-provider-anthropic"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-azure-auth",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-store",
- "octopus-model-context-render",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-tool-handlers",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-bedrock"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "chrono",
- "crc32fast",
- "hex",
- "hmac",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-model-context-render",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-tool-handlers",
- "octopus-world-pyecho-life-runtime",
- "percent-encoding",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-gemini"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "jsonwebtoken",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-store",
- "octopus-model-context-render",
- "octopus-provider-run-authoring",
- "octopus-runtime",
- "octopus-secrets",
- "octopus-tool-handlers",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-github-copilot"
-version = "0.1.0"
-dependencies = [
- "octopus-descriptors",
- "octopus-github-copilot-auth",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-store",
- "octopus-provider-run-authoring",
- "octopus-world-provider-anthropic",
- "octopus-world-provider-responses",
- "octopus-world-pyecho-life-runtime",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-github-copilot-acp"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-descriptors",
- "octopus-github-copilot-auth",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-model-context-render",
- "octopus-provider-run-authoring",
- "octopus-world-pyecho-life-runtime",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-nous-oauth"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-world-provider-openai-compatible",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-openai-compatible"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "futures",
- "octopus-app-server",
- "octopus-app-server-interface",
- "octopus-azure-auth",
- "octopus-context-collections",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-ledger-store",
- "octopus-model-context-render",
- "octopus-operator-chat-client",
- "octopus-provider-credential-pool",
- "octopus-provider-run-authoring",
- "octopus-runtime",
- "octopus-secrets",
- "octopus-system-room-env",
- "octopus-tool-handlers",
- "octopus-tool-registry",
- "octopus-worker-env",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.28.0",
-]
-
-[[package]]
-name = "octopus-world-provider-qwen-oauth"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-world-provider-openai-compatible",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "octopus-world-provider-responses"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "blake3",
- "futures-util",
- "octopus-azure-auth",
- "octopus-descriptors",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-ledger",
- "octopus-model-context-render",
- "octopus-provider-run-authoring",
- "octopus-secrets",
- "octopus-tool-handlers",
- "octopus-world-pyecho-life-runtime",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.28.0",
-]
-
-[[package]]
 name = "octopus-world-pyecho-interface"
 version = "0.1.0"
 dependencies = [
@@ -8747,20 +8430,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "octopus-world-telegram-contract"
-version = "0.1.0"
-dependencies = [
- "octopus-descriptors",
- "octopus-ee",
- "octopus-interface-transport",
- "octopus-interfaces",
- "octopus-policy",
- "octopus-runtime",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -10466,7 +10135,6 @@ dependencies = [
  "js-sys",
  "log",
  "mime",
- "mime_guess",
  "native-tls",
  "percent-encoding",
  "pin-project-lite",

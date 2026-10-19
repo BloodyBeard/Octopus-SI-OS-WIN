@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_xai",
+  "name": "xAI Grok",
+  "description": "Grok models through an xAI API key.",
+  "category": "provider",
+  "developer": "xAI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_xai"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_xai",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "xAI API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

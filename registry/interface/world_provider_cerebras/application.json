@@ -1,0 +1,33 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_cerebras",
+  "name": "Cerebras",
+  "description": "Fast open models on Cerebras through a Cerebras API key.",
+  "category": "provider",
+  "developer": "Cerebras",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_cerebras"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_cerebras",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Cerebras API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_cerebras",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example gpt-oss-120b",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

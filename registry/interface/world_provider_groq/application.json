@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_groq",
+  "name": "Groq",
+  "description": "Open models on Groq hardware through a Groq API key.",
+  "category": "provider",
+  "developer": "Groq",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_groq"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_groq",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Groq API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_groq",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example openai/gpt-oss-120b",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

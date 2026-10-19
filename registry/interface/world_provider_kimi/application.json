@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_kimi",
+  "name": "Moonshot Kimi",
+  "description": "Kimi models through a Moonshot API key.",
+  "category": "provider",
+  "developer": "Moonshot AI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_kimi"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_kimi",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Moonshot API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

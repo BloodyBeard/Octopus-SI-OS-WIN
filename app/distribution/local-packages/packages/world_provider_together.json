@@ -1,0 +1,54 @@
+{
+  "schema": "octopus.local_package",
+  "schema_version": 1,
+  "id": "world_provider_together",
+  "version": "1.0.0",
+  "product_kind": "application",
+  "product_id": "world_provider_together",
+  "release_status": "optional",
+  "display": {
+    "name": "Together AI",
+    "description": "Open models through a Together AI API key.",
+    "developer": "Together AI",
+    "category": "provider",
+    "icon": "sparkles"
+  },
+  "members": [
+    {
+      "registry_kind": "interface",
+      "owner": "world_provider_together",
+      "primary": true,
+      "configuration": [
+        {
+          "path": "interface.json",
+          "fields": [
+            {
+              "pointer": "/interface_driver_config/private_config/model",
+              "schema": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            {
+              "pointer": "/interface_driver_config/private_config/reasoning_effort",
+              "schema": {
+                "type": "string",
+                "enum": [
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "required_packages": [
+    "world_provider_codex"
+  ]
+}

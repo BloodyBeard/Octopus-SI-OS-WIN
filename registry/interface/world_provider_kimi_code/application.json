@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_kimi_code",
+  "name": "Kimi Code",
+  "description": "Kimi coding models through a Kimi Code subscription key.",
+  "category": "provider",
+  "developer": "Moonshot AI",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "logo_dark": "application-logo-dark.svg",
+  "interfaces": [
+    "world_provider_kimi_code"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_kimi_code",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Kimi Code API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_stepfun",
+  "name": "StepFun",
+  "description": "Step models through a StepFun API key.",
+  "category": "provider",
+  "developer": "StepFun",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_stepfun"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_stepfun",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "StepFun API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_nvidia",
+  "name": "NVIDIA NIM",
+  "description": "Models hosted on NVIDIA NIM through a build.nvidia.com key.",
+  "category": "provider",
+  "developer": "NVIDIA",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_nvidia"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_nvidia",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "NVIDIA API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_nvidia",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id, for example openai/gpt-oss-120b",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_vllm",
+  "name": "vLLM",
+  "description": "A model served by vLLM on this Mac.",
+  "category": "provider",
+  "developer": "vLLM",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_vllm"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_vllm",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id as vLLM serves it",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

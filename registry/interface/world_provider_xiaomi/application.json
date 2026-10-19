@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_xiaomi",
+  "name": "Xiaomi MiMo",
+  "description": "MiMo models through a Xiaomi MiMo API key.",
+  "category": "provider",
+  "developer": "Xiaomi",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_xiaomi"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_xiaomi",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Xiaomi MiMo API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

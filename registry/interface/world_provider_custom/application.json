@@ -1,0 +1,38 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_custom",
+  "name": "Custom OpenAI-compatible",
+  "description": "Any server that speaks the OpenAI Chat Completions API.",
+  "category": "provider",
+  "developer": "Octopus",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "interfaces": [
+    "world_provider_custom"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_custom",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_custom",
+        "pointer": "/interface_driver_config/transport/base_url_env",
+        "label": "Server URL ending in /v1",
+        "kind": "url",
+        "required": true
+      },
+      {
+        "interface": "world_provider_custom",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

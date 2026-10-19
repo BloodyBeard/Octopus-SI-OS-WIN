@@ -1,0 +1,25 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_anthropic",
+  "name": "Anthropic API",
+  "description": "Claude models billed to your Anthropic API key.",
+  "category": "provider",
+  "developer": "Anthropic",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_anthropic"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_anthropic",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Anthropic API key",
+        "kind": "secret",
+        "required": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,309 @@
+{
+  "schema_version": 1,
+  "template_interface": "world_provider_codex",
+  "providers": [
+    {
+      "interface": "world_provider_openai",
+      "source_name": "openai",
+      "registry_entry": "openai-apikey",
+      "name": "OpenAI API",
+      "developer": "OpenAI",
+      "description": "GPT models billed to your OpenAI API key.",
+      "icon": "openai.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_OPENAI_API_KEY", "label": "OpenAI API key" }
+    },
+    {
+      "interface": "world_provider_anthropic",
+      "source_name": "anthropic",
+      "registry_entry": "anthropic-apikey",
+      "name": "Anthropic API",
+      "developer": "Anthropic",
+      "description": "Claude models billed to your Anthropic API key.",
+      "icon": "claude-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_ANTHROPIC_API_KEY", "label": "Anthropic API key" }
+    },
+    {
+      "interface": "world_provider_gemini",
+      "source_name": "gemini",
+      "registry_entry": "google",
+      "name": "Google Gemini",
+      "developer": "Google",
+      "description": "Gemini models through a Google AI Studio API key.",
+      "icon": "gemini-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_GEMINI_API_KEY", "label": "Gemini API key" }
+    },
+    {
+      "interface": "world_provider_xai",
+      "source_name": "xai",
+      "registry_entry": "xai",
+      "name": "xAI Grok",
+      "developer": "xAI",
+      "description": "Grok models through an xAI API key.",
+      "icon": "grok.svg",
+      "icon_dark": ["#000000"],
+      "key": { "env": "OCTOPUS_PROVIDER_XAI_API_KEY", "label": "xAI API key" }
+    },
+    {
+      "interface": "world_provider_deepseek",
+      "source_name": "deepseek",
+      "registry_entry": "deepseek",
+      "name": "DeepSeek",
+      "developer": "DeepSeek",
+      "description": "DeepSeek models through a DeepSeek API key.",
+      "icon": "deepseek-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_DEEPSEEK_API_KEY", "label": "DeepSeek API key" }
+    },
+    {
+      "interface": "world_provider_kimi",
+      "source_name": "kimi",
+      "registry_entry": "moonshot",
+      "name": "Moonshot Kimi",
+      "developer": "Moonshot AI",
+      "description": "Kimi models through a Moonshot API key.",
+      "icon": "moonshot-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_MOONSHOT_API_KEY", "label": "Moonshot API key" }
+    },
+    {
+      "interface": "world_provider_kimi_code",
+      "source_name": "kimi_code",
+      "registry_entry": "kimi-code",
+      "name": "Kimi Code",
+      "developer": "Moonshot AI",
+      "description": "Kimi coding models through a Kimi Code subscription key.",
+      "icon": "kimi-color.svg",
+      "icon_dark": ["#1A1A1A"],
+      "key": { "env": "OCTOPUS_PROVIDER_KIMI_CODE_API_KEY", "label": "Kimi Code API key" }
+    },
+    {
+      "interface": "world_provider_minimax",
+      "source_name": "minimax",
+      "registry_entry": "minimax",
+      "name": "MiniMax",
+      "developer": "MiniMax",
+      "description": "MiniMax models through an international MiniMax key.",
+      "icon": "minimax.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_MINIMAX_API_KEY", "label": "MiniMax API key" }
+    },
+    {
+      "interface": "world_provider_minimax_cn",
+      "source_name": "minimax_cn",
+      "registry_entry": "minimax-cn",
+      "name": "MiniMax China",
+      "developer": "MiniMax",
+      "description": "MiniMax models through a mainland China MiniMax key.",
+      "icon": "minimax.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_MINIMAX_CN_API_KEY", "label": "MiniMax China API key" }
+    },
+    {
+      "interface": "world_provider_zai",
+      "source_name": "zai",
+      "registry_entry": "zai",
+      "name": "Z.AI GLM",
+      "developer": "Z.AI",
+      "description": "GLM models through a Z.AI coding plan key.",
+      "icon": "zai.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_ZAI_API_KEY", "label": "Z.AI API key" }
+    },
+    {
+      "interface": "world_provider_stepfun",
+      "source_name": "stepfun",
+      "registry_entry": "stepfun",
+      "name": "StepFun",
+      "developer": "StepFun",
+      "description": "Step models through a StepFun API key.",
+      "icon": "stepfun-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_STEPFUN_API_KEY", "label": "StepFun API key" }
+    },
+    {
+      "interface": "world_provider_xiaomi",
+      "source_name": "xiaomi",
+      "registry_entry": "xiaomi-mimo",
+      "name": "Xiaomi MiMo",
+      "developer": "Xiaomi",
+      "description": "MiMo models through a Xiaomi MiMo API key.",
+      "icon": "xiaomi-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_XIAOMI_API_KEY", "label": "Xiaomi MiMo API key" }
+    },
+    {
+      "interface": "world_provider_openrouter",
+      "source_name": "openrouter",
+      "registry_entry": "openrouter",
+      "name": "OpenRouter",
+      "developer": "OpenRouter",
+      "description": "Models from many vendors through one OpenRouter key.",
+      "icon": "openrouter-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_OPENROUTER_API_KEY", "label": "OpenRouter API key" },
+      "headers": { "X-Title": "Octopus" }
+    },
+    {
+      "interface": "world_provider_mistral",
+      "source_name": "mistral",
+      "registry_entry": "mistral",
+      "name": "Mistral",
+      "developer": "Mistral AI",
+      "description": "Mistral models through a Mistral API key.",
+      "icon": "mistral-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_MISTRAL_API_KEY", "label": "Mistral API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_MISTRAL_MODEL", "label": "Model id, for example codestral-latest", "slug": "mistral-model", "display_name": "Mistral model" }
+    },
+    {
+      "interface": "world_provider_groq",
+      "source_name": "groq",
+      "registry_entry": "groq",
+      "name": "Groq",
+      "developer": "Groq",
+      "description": "Open models on Groq hardware through a Groq API key.",
+      "icon": "groq-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_GROQ_API_KEY", "label": "Groq API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_GROQ_MODEL", "label": "Model id, for example openai/gpt-oss-120b", "slug": "groq-model", "display_name": "Groq model" }
+    },
+    {
+      "interface": "world_provider_together",
+      "source_name": "together",
+      "registry_entry": "together",
+      "name": "Together AI",
+      "developer": "Together AI",
+      "description": "Open models through a Together AI API key.",
+      "icon": "together.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_TOGETHER_API_KEY", "label": "Together API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_TOGETHER_MODEL", "label": "Model id, for example openai/gpt-oss-120b", "slug": "together-model", "display_name": "Together model" }
+    },
+    {
+      "interface": "world_provider_cerebras",
+      "source_name": "cerebras",
+      "registry_entry": "cerebras",
+      "name": "Cerebras",
+      "developer": "Cerebras",
+      "description": "Fast open models on Cerebras through a Cerebras API key.",
+      "icon": "cerebras.svg",
+      "icon_dark": ["#000000"],
+      "key": { "env": "OCTOPUS_PROVIDER_CEREBRAS_API_KEY", "label": "Cerebras API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_CEREBRAS_MODEL", "label": "Model id, for example gpt-oss-120b", "slug": "cerebras-model", "display_name": "Cerebras model" }
+    },
+    {
+      "interface": "world_provider_nvidia",
+      "source_name": "nvidia",
+      "registry_entry": "nvidia",
+      "name": "NVIDIA NIM",
+      "developer": "NVIDIA",
+      "description": "Models hosted on NVIDIA NIM through a build.nvidia.com key.",
+      "icon": "nvidia-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_NVIDIA_API_KEY", "label": "NVIDIA API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_NVIDIA_MODEL", "label": "Model id, for example openai/gpt-oss-120b", "slug": "nvidia-model", "display_name": "NVIDIA NIM model" }
+    },
+    {
+      "interface": "world_provider_huggingface",
+      "source_name": "huggingface",
+      "registry_entry": "huggingface",
+      "name": "Hugging Face",
+      "developer": "Hugging Face",
+      "description": "Models on Hugging Face Inference Providers through a Hugging Face token.",
+      "icon": "huggingface-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_HUGGINGFACE_API_KEY", "label": "Hugging Face token" },
+      "model": { "env": "OCTOPUS_PROVIDER_HUGGINGFACE_MODEL", "label": "Model id, for example openai/gpt-oss-120b", "slug": "huggingface-model", "display_name": "Hugging Face model" }
+    },
+    {
+      "interface": "world_provider_kilocode",
+      "source_name": "kilocode",
+      "registry_entry": "kilo",
+      "name": "Kilo Gateway",
+      "developer": "Kilo Code",
+      "description": "Models through the Kilo gateway and a Kilo API key.",
+      "icon": "kilo.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_KILO_API_KEY", "label": "Kilo API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_KILO_MODEL", "label": "Model id as Kilo lists it", "slug": "kilo-model", "display_name": "Kilo model" }
+    },
+    {
+      "interface": "world_provider_opencode_go",
+      "source_name": "opencode_go",
+      "registry_entry": "opencode-go",
+      "name": "OpenCode Go",
+      "developer": "OpenCode",
+      "description": "Open coding models through an OpenCode Go subscription key.",
+      "icon": "opencode.svg",
+      "icon_dark": ["#211E1E"],
+      "key": { "env": "OCTOPUS_PROVIDER_OPENCODE_GO_API_KEY", "label": "OpenCode Go API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_OPENCODE_GO_MODEL", "label": "Model id, for example kimi-k2.7-code", "slug": "opencode-go-model", "display_name": "OpenCode Go model" }
+    },
+    {
+      "interface": "world_provider_opencode_zen",
+      "source_name": "opencode_zen",
+      "registry_entry": "opencode-zen",
+      "name": "OpenCode Zen",
+      "developer": "OpenCode",
+      "description": "Curated coding models through an OpenCode Zen key.",
+      "icon": "opencode.svg",
+      "icon_dark": ["#211E1E"],
+      "key": { "env": "OCTOPUS_PROVIDER_OPENCODE_ZEN_API_KEY", "label": "OpenCode Zen API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_OPENCODE_ZEN_MODEL", "label": "Model id as OpenCode Zen lists it", "slug": "opencode-zen-model", "display_name": "OpenCode Zen model" }
+    },
+    {
+      "interface": "world_provider_alibaba_coding_plan",
+      "source_name": "alibaba_coding_plan",
+      "registry_entry": "alibaba",
+      "name": "Alibaba Coding Plan",
+      "developer": "Alibaba Cloud",
+      "description": "Qwen coding models through an Alibaba Cloud coding plan key.",
+      "icon": "alibaba-color.svg",
+      "key": { "env": "OCTOPUS_PROVIDER_ALIBABA_API_KEY", "label": "Alibaba Cloud API key" },
+      "model": { "env": "OCTOPUS_PROVIDER_ALIBABA_MODEL", "label": "Model id, for example qwen3-coder-plus", "slug": "alibaba-model", "display_name": "Alibaba model" }
+    },
+    {
+      "interface": "world_provider_ollama",
+      "source_name": "ollama",
+      "registry_entry": "ollama",
+      "name": "Ollama",
+      "developer": "Ollama",
+      "description": "A model served by Ollama on this Mac.",
+      "icon": "ollama-color.svg",
+      "icon_dark": ["#141414"],
+      "local": true,
+      "model": { "env": "OCTOPUS_PROVIDER_OLLAMA_MODEL", "label": "Model name, for example qwen3-coder:30b", "slug": "ollama-model", "display_name": "Ollama model" }
+    },
+    {
+      "interface": "world_provider_lmstudio",
+      "source_name": "lmstudio",
+      "registry_entry": "lm-studio",
+      "name": "LM Studio",
+      "developer": "LM Studio",
+      "description": "A model served by LM Studio on this Mac.",
+      "icon": "lm-studio-color.svg",
+      "local": true,
+      "model": { "env": "OCTOPUS_PROVIDER_LMSTUDIO_MODEL", "label": "Model id as LM Studio lists it", "slug": "lmstudio-model", "display_name": "LM Studio model" }
+    },
+    {
+      "interface": "world_provider_vllm",
+      "source_name": "vllm",
+      "registry_entry": "vllm",
+      "name": "vLLM",
+      "developer": "vLLM",
+      "description": "A model served by vLLM on this Mac.",
+      "icon": "vllm-color.svg",
+      "local": true,
+      "model": { "env": "OCTOPUS_PROVIDER_VLLM_MODEL", "label": "Model id as vLLM serves it", "slug": "vllm-model", "display_name": "vLLM model" }
+    },
+    {
+      "interface": "world_provider_azure_openai",
+      "source_name": "azure_openai",
+      "adapter": "azure",
+      "name": "Azure OpenAI",
+      "developer": "Microsoft",
+      "description": "A model deployment in your Azure OpenAI resource.",
+      "key": { "env": "OCTOPUS_PROVIDER_AZURE_OPENAI_API_KEY", "label": "Azure OpenAI API key", "header": "api-key", "prefix": "" },
+      "base_url": { "env": "OCTOPUS_PROVIDER_AZURE_OPENAI_BASE_URL", "label": "Resource URL, for example https://name.openai.azure.com/openai" },
+      "model": { "env": "OCTOPUS_PROVIDER_AZURE_OPENAI_MODEL", "label": "Deployment name", "slug": "azure-openai-deployment", "display_name": "Azure OpenAI deployment" }
+    },
+    {
+      "interface": "world_provider_custom",
+      "source_name": "custom",
+      "adapter": "openai-chat",
+      "name": "Custom OpenAI-compatible",
+      "developer": "Octopus",
+      "description": "Any server that speaks the OpenAI Chat Completions API.",
+      "key": { "env": "OCTOPUS_PROVIDER_CUSTOM_API_KEY", "label": "API key" },
+      "base_url": { "env": "OCTOPUS_PROVIDER_CUSTOM_BASE_URL", "label": "Server URL ending in /v1" },
+      "model": { "env": "OCTOPUS_PROVIDER_CUSTOM_MODEL", "label": "Model id", "slug": "custom-model", "display_name": "Custom model" },
+      "allow_private_network": true
+    }
+  ]
+}

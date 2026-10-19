@@ -144,6 +144,10 @@ pub(crate) struct OpenCodexDescriptorConfig {
     pub adapter: OpenCodexAdapter,
     pub credential_owner_interface: String,
     #[serde(default)]
+    pub registry_entry: Option<String>,
+    #[serde(default)]
+    pub model_env: Option<String>,
+    #[serde(default)]
     pub model_catalog: Option<ModelsResponse>,
     #[serde(default)]
     pub allow_private_network: bool,
@@ -167,6 +171,10 @@ struct BridgeConfig {
 struct BridgeProvider {
     id: String,
     adapter: OpenCodexAdapter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry_entry: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    model_aliases: BTreeMap<String, String>,
     base_url: String,
     models: Vec<String>,
     default_model: String,
@@ -238,6 +246,16 @@ pub(crate) fn descriptor_config(
         &parsed.credential_owner_interface,
         "opencodex credential_owner_interface",
     )?;
+    if let Some(entry) = parsed.registry_entry.as_deref() {
+        validate_interface_segment(entry, "opencodex registry_entry")?;
+    }
+    if parsed
+        .model_env
+        .as_deref()
+        .is_some_and(|name| !valid_env_name(name))
+    {
+        return Err("opencodex model_env is not a valid environment variable name".to_string());
+    }
     validate_limits(&parsed.limits)?;
     if let Some(catalog) = &parsed.model_catalog {
         if catalog.models.is_empty() {
@@ -288,6 +306,7 @@ pub(crate) async fn connect_interface_driver(
             "OpenCodex selected model '{selected_model}' is outside the freshly formed interface policy models"
         ));
     }
+    let model_aliases = resolve_model_aliases(config, &models)?;
     let base_url = resolve_base_url(transport, config.allow_private_network)?;
     validate_static_headers(transport)?;
     let api_key = resolve_api_key(ctx, descriptor, transport, config)?;
@@ -340,6 +359,8 @@ pub(crate) async fn connect_interface_driver(
         provider: BridgeProvider {
             id: descriptor.id.as_str().to_string(),
             adapter: config.adapter.clone(),
+            registry_entry: config.registry_entry.clone(),
+            model_aliases,
             base_url,
             models,
             default_model: selected_model,
@@ -445,6 +466,29 @@ fn selected_model(descriptor: &InterfaceDescriptor) -> Result<String, String> {
         })
 }
 
+fn resolve_model_aliases(
+    config: &OpenCodexDescriptorConfig,
+    models: &[String],
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(name) = config.model_env.as_deref() else {
+        return Ok(BTreeMap::new());
+    };
+    let [declared] = models else {
+        return Err(format!(
+            "OpenCodex model_env '{name}' requires exactly one declared model slug"
+        ));
+    };
+    let upstream = std::env::var(name)
+        .ok()
+        .filter(|value| valid_text_atom(value))
+        .ok_or_else(|| {
+            format!(
+                "OpenCodex model is not configured: env var '{name}' is unset, empty or untrimmed"
+            )
+        })?;
+    Ok(BTreeMap::from([(declared.clone(), upstream)]))
+}
+
 fn resolve_base_url(
     transport: &InterfaceTransportConfig,
     allow_private_network: bool,
@@ -458,7 +502,7 @@ fn resolve_base_url(
             .ok()
             .filter(|value| valid_text_atom(value))
             .ok_or_else(|| {
-                format!("OpenCodex base URL env var '{name}' is unset, empty or untrimmed")
+                format!("OpenCodex base URL is not configured: env var '{name}' is unset, empty or untrimmed")
             })?,
         None if transport.base_url_env.is_some() => {
             return Err("OpenCodex transport.base_url_env is invalid".to_string());
@@ -535,7 +579,7 @@ fn resolve_api_key(
             .ok()
             .filter(|value| valid_text_atom(value))
             .map(Some)
-            .ok_or_else(|| format!("OpenCodex auth env var '{name}' is unset, empty or untrimmed")),
+            .ok_or_else(|| format!("OpenCodex API key is not configured: env var '{name}' is unset, empty or untrimmed")),
         (Some(reference), None) => {
             let (scope, name) = parse_secret_ref(reference)?;
             if scope.name() != Some(config.credential_owner_interface.as_str()) {

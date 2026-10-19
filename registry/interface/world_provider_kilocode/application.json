@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "id": "world_provider_kilocode",
+  "name": "Kilo Gateway",
+  "description": "Models through the Kilo gateway and a Kilo API key.",
+  "category": "provider",
+  "developer": "Kilo Code",
+  "version": "1.0.0",
+  "icon": "sparkles",
+  "logo": "application-logo.svg",
+  "interfaces": [
+    "world_provider_kilocode"
+  ],
+  "setup": {
+    "fields": [
+      {
+        "interface": "world_provider_kilocode",
+        "pointer": "/interface_driver_config/transport/auth_env_key",
+        "label": "Kilo API key",
+        "kind": "secret",
+        "required": true
+      },
+      {
+        "interface": "world_provider_kilocode",
+        "pointer": "/interface_driver_config/private_config/opencodex/model_env",
+        "label": "Model id as Kilo lists it",
+        "kind": "text",
+        "required": true
+      }
+    ]
+  }
+}

@@ -24,16 +24,6 @@ const REGISTRY_INTERFACE_OWNER_PACKAGES: &[(&str, &str, &str)] = &[
         "registry/interface/world_operator_chat",
     ),
     (
-        "octopus-azure-auth",
-        "registry/interface/world_provider_azure_foundry/packages/octopus-azure-auth",
-        "registry/interface/world_provider_azure_foundry",
-    ),
-    (
-        "octopus-github-copilot-auth",
-        "registry/interface/world_provider_github_copilot/packages/octopus-github-copilot-auth",
-        "registry/interface/world_provider_github_copilot",
-    ),
-    (
         "octopus-model-context-render",
         "registry/interface/world_provider_codex/packages/octopus-model-context-render",
         "registry/interface/world_provider_codex",
@@ -43,55 +33,11 @@ const REGISTRY_INTERFACE_OWNER_PACKAGES: &[(&str, &str, &str)] = &[
         "registry/interface/world_provider_ollama/packages/octopus-provider-run-authoring",
         "registry/interface/world_provider_ollama",
     ),
-    (
-        "octopus-provider-oauth-life",
-        "registry/interface/world_provider_anthropic_oauth/packages/octopus-provider-oauth-life",
-        "registry/interface/world_provider_anthropic_oauth",
-    ),
-    (
-        "octopus-provider-credential-pool",
-        "registry/interface/world_provider_openai_chat/packages/octopus-provider-credential-pool",
-        "registry/interface/world_provider_openai_chat",
-    ),
-    (
-        "octopus-world-provider-anthropic",
-        "registry/interface/world_provider_anthropic/packages/octopus-world-provider-anthropic",
-        "registry/interface/world_provider_anthropic",
-    ),
-    (
-        "octopus-world-provider-gemini",
-        "registry/interface/world_provider_gemini/packages/octopus-world-provider-gemini",
-        "registry/interface/world_provider_gemini",
-    ),
-    (
-        "octopus-world-provider-github-copilot",
-        "registry/interface/world_provider_github_copilot/packages/octopus-world-provider-github-copilot",
-        "registry/interface/world_provider_github_copilot",
-    ),
-    (
-        "octopus-world-provider-openai-compatible",
-        "registry/interface/world_provider_openai_chat/packages/octopus-world-provider-openai-compatible",
-        "registry/interface/world_provider_openai_chat",
-    ),
-    (
-        "octopus-world-provider-responses",
-        "registry/interface/world_provider_responses/packages/octopus-world-provider-responses",
-        "registry/interface/world_provider_responses",
-    ),
 ];
 
 const PROVIDER_IMPLEMENTATION_PACKAGES: &[&str] = &[
-    "octopus-azure-auth",
-    "octopus-github-copilot-auth",
     "octopus-model-context-render",
     "octopus-provider-run-authoring",
-    "octopus-provider-oauth-life",
-    "octopus-provider-credential-pool",
-    "octopus-world-provider-anthropic",
-    "octopus-world-provider-gemini",
-    "octopus-world-provider-github-copilot",
-    "octopus-world-provider-openai-compatible",
-    "octopus-world-provider-responses",
 ];
 
 const FORBIDDEN_HOT_PATH_CRATES: &[&str] = &[

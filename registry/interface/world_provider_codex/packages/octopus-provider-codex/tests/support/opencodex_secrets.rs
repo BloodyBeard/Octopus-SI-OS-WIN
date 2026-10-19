@@ -35,13 +35,13 @@ fn opencodex_configuration_selects_the_bridge_at_the_toml_root() {
     )
     .unwrap();
     assert_eq!(catalog, declared.model_catalog.unwrap());
-    let glm = catalog
+    let sonnet = catalog
         .models
         .iter()
-        .find(|model| model.slug == "z-ai/glm-5.3-flash")
+        .find(|model| model.slug == "anthropic/claude-sonnet-5")
         .unwrap();
-    assert_eq!(glm.context_window, Some(1048576));
-    assert!(!glm.used_fallback_model_metadata);
+    assert_eq!(sonnet.context_window, Some(1000000));
+    assert!(!sonnet.used_fallback_model_metadata);
 }
 
 #[test]
@@ -63,13 +63,16 @@ fn opencodex_reads_the_interface_local_store_for_owner_and_task_interfaces() {
     ))
     .unwrap();
     let config = descriptor_config(&descriptor).unwrap().unwrap();
-    let transport = descriptor
+    let mut transport = descriptor
         .interface_driver_config
         .as_ref()
         .unwrap()
         .transport
         .clone()
         .unwrap();
+    transport.auth_env_key = None;
+    transport.auth_secret_ref =
+        Some("secret://world_provider_openrouter/OPENROUTER_API_KEY".into());
     let (arrivals, _) = tokio::sync::mpsc::channel(1);
     let mut ctx = InterfaceLiftContext::unprivileged(
         descriptor.id.clone(),
