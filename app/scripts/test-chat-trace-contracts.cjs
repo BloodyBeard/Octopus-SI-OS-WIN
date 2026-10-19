@@ -566,7 +566,7 @@ const projectedIntegrationCall = toolPresentation.dynamicToolPresentation({
 assert.equal(projectedNamedExec.family, "exec");
 assert.equal(projectedNamedExec.target, "git status --short");
 assert.equal(projectedAuthoringWrite.conversationVisible, false);
-assert.equal(toolPresentation.dynamicToolGlyph(projectedOctopusMcp), "settings");
+assert.equal(toolPresentation.dynamicToolGlyph(projectedOctopusMcp), "plugins");
 assert.equal(toolPresentation.dynamicToolGlyph(projectedIntegrationCall), "plugins");
 
 const exactProviderLiveTool = chatActivityProjectionModule.liveArtifactMessage({
@@ -1095,7 +1095,7 @@ assert.match(chatThreadHeader, /onPointerDown=\{mode === "pane" \? compactTab\?\
 assert.doesNotMatch(chatThreadHeader, /name="chat"/);
 assert.match(chatThreadHeader, /data-task-summary-trigger="true"[\s\S]*?name="taskSummary"/);
 assert.doesNotMatch(chatThreadHeader, /data-task-summary-trigger="true"[\s\S]{0,500}?name="viewAll"/);
-assert.match(chatThreadHeader, /h-token-button-composer shrink-0[\s\S]*?rounded-lg[\s\S]*?disabled:cursor-default/);
+assert.match(chatThreadHeader, /className="app-titlebar-action no-drag"\s*data-state=\{summaryOpen \? "open" : "closed"\}\s*data-task-summary-trigger="true"/, "header actions share the titlebar action hover");
 assert.equal((chatThreadHeader.match(/chat-thread-header-action-slot no-drag pointer-events-auto flex shrink-0 items-center gap-px/g) ?? []).length, 3);
 assert.match(chatThreadHeader, /summaryDisplayMode === "overlay" \? "Toggle summary" : "Toggle pinned summary"/);
 assert.match(chatThreadHeader, /<OcPopover[\s\S]*?align="end"[\s\S]*?className="task-summary-popover"[\s\S]*?open=\{summaryOpen\}[\s\S]*?placement="bottom"/);
@@ -1325,7 +1325,7 @@ async function verifyTranscriptLayout() {
     assert.equal(query(".octopus-agent-activity-body"), null, "settled groups mount collapsed");
     await click(query(".octopus-agent-activity-toggle"));
     assert.deepEqual(rowText(), ["Run list", "Read life.rs"]);
-    assert.ok(query('.structured-activity [data-glyph="settings"]'), "Octopus interface operations carry the settings mark");
+    assert.ok(query('.structured-activity [data-glyph="plugins"]'), "Octopus interface operations carry the plugin mark");
     assert.equal(query(".structured-activity-body"), null, "closed operation details cannot retain padding");
     await click(query(".structured-activity .octopus-agent-activity-toggle"));
     assert.match(query(".structured-activity-body").textContent, /Arguments\{\}Result[\s\S]*count/);

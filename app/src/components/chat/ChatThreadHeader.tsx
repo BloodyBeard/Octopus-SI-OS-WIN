@@ -23,7 +23,6 @@ type Props = {
   onSummaryOpenChange: (open: boolean) => void;
 };
 
-const TOOLBAR_BUTTON = "no-drag cursor-interaction flex aspect-square h-token-button-composer shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-lg border border-transparent px-2 py-0 !px-0 text-base leading-[18px] text-token-text-tertiary select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border focus-visible:ring-offset-0 disabled:cursor-default disabled:opacity-40 enabled:hover:bg-token-list-hover-background";
 
 export function ChatThreadHeader({
   actionsVisible = true,
@@ -131,7 +130,8 @@ export function ChatThreadHeaderActions({
       <button
         aria-label={summaryLabel}
         aria-pressed={summaryOpen}
-        className={`${TOOLBAR_BUTTON}${summaryOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
+        className="app-titlebar-action no-drag"
+        data-state={summaryOpen ? "open" : "closed"}
         data-task-summary-trigger="true"
         onClick={() => onSummaryOpenChange(!summaryOpen)}
         type="button"
@@ -170,7 +170,8 @@ export function ChatThreadHeaderActions({
             <button
               aria-label={pinnedContextOpen ? "Close pinned context" : "Open pinned context"}
               aria-pressed={pinnedContextOpen}
-              className={`${TOOLBAR_BUTTON}${pinnedContextOpen ? " bg-token-foreground/5 text-token-foreground" : ""}`}
+              className="app-titlebar-action no-drag"
+              data-state={pinnedContextOpen ? "open" : "closed"}
               onClick={() => onPinnedContextOpenChange(!pinnedContextOpen)}
               type="button"
             >
