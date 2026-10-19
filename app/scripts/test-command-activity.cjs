@@ -245,8 +245,8 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   assert.equal(toolPresentation.dynamicToolPresentation({ eventData: { tool: "custom_tool", arguments: { command: "pwd" } } }, {}).family, "tool");
   const runList = { eventData: { namespace: "formed_interfaces", tool: "run_list", arguments: {} } };
   assert.equal(toolPresentation.dynamicToolPresentation(runList, {}).family, "tool");
-  assert.equal(toolPresentation.dynamicToolGlyph(toolPresentation.dynamicToolPresentation(runList, {})), "octopus");
-  assert.equal(toolActivities.completedGroupSummary([runEntry], {}).icon, "octopus");
+  assert.equal(toolPresentation.dynamicToolGlyph(toolPresentation.dynamicToolPresentation(runList, {})), "settings");
+  assert.equal(toolActivities.completedGroupSummary([runEntry], {}).icon, "settings");
   const commentary = { id: "commentary", kind: "standalone", entry: { family: "commentary", active: false, messages: [] } };
   const group = { id: "commands", kind: "group", entries: [{ family: "dynamic_tool", active: false, messages: [] }] };
   for (const units of [[], [commentary], [group, commentary]]) {

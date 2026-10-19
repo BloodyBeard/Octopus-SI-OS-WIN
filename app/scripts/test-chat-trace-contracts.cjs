@@ -566,7 +566,7 @@ const projectedIntegrationCall = toolPresentation.dynamicToolPresentation({
 assert.equal(projectedNamedExec.family, "exec");
 assert.equal(projectedNamedExec.target, "git status --short");
 assert.equal(projectedAuthoringWrite.conversationVisible, false);
-assert.equal(toolPresentation.dynamicToolGlyph(projectedOctopusMcp), "octopus");
+assert.equal(toolPresentation.dynamicToolGlyph(projectedOctopusMcp), "settings");
 assert.equal(toolPresentation.dynamicToolGlyph(projectedIntegrationCall), "plugins");
 
 const exactProviderLiveTool = chatActivityProjectionModule.liveArtifactMessage({
@@ -1325,7 +1325,7 @@ async function verifyTranscriptLayout() {
     assert.equal(query(".octopus-agent-activity-body"), null, "settled groups mount collapsed");
     await click(query(".octopus-agent-activity-toggle"));
     assert.deepEqual(rowText(), ["Run list", "Read life.rs"]);
-    assert.ok(query('.structured-activity [data-glyph="octopus"]'), "Octopus interface operations carry the Octopus mark");
+    assert.ok(query('.structured-activity [data-glyph="settings"]'), "Octopus interface operations carry the settings mark");
     assert.equal(query(".structured-activity-body"), null, "closed operation details cannot retain padding");
     await click(query(".structured-activity .octopus-agent-activity-toggle"));
     assert.match(query(".structured-activity-body").textContent, /Arguments\{\}Result[\s\S]*count/);
@@ -1350,7 +1350,7 @@ async function verifyTranscriptLayout() {
     assert.equal(query("[data-tooltip-target]").getAttribute("data-tooltip-target"), artifactId);
     assert.equal(query("[data-tooltip-target]").getAttribute("data-activates-file"), "true");
     await click(query("[data-tooltip-target]"));
-    assert.deepEqual(artifactReads, [{ artifact_id: "receipt:exact-read", run_id: "run-test", interface_id: "provider-test" }]);
+    assert.deepEqual(artifactReads, [{ call_id: "artifact", run_id: "run-test" }]);
     assert.equal(query("[data-artifact-preview]").textContent, "Historical content");
     assert.deepEqual(artifactErrors, []);
     const artifactPresentation = toolPresentation.dynamicToolPresentation(artifactMessage, {});

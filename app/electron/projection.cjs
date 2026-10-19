@@ -1922,14 +1922,21 @@ function createProjectionStore(options) {
   }
 
   async function admittedArtifactBytes(projection, params) {
-    const artifactId = requiredString(params.artifact_id, "artifact_id");
     const runId = requiredString(params.run_id, "run_id");
-    const interfaceId = requiredString(params.interface_id, "interface_id");
-    const row = await admittedArtifactMovement(projection, artifactId, (candidate) => {
-      const coordinates = artifactMovementCoordinates(candidate);
-      return coordinates.runId === runId && coordinates.interfaceId === interfaceId;
-    });
-    if (!row) throw new Error("The requested artifact is not admitted for this run and interface.");
+    const byCall = Object.hasOwn(params, "call_id");
+    const row = byCall
+      ? await admittedToolResultMovement(projection, runId, requiredString(params.call_id, "call_id"))
+      : await admittedArtifactMovement(projection, requiredString(params.artifact_id, "artifact_id"), (candidate) => {
+        const coordinates = artifactMovementCoordinates(candidate);
+        return coordinates.runId === runId && coordinates.interfaceId === requiredString(params.interface_id, "interface_id");
+      });
+    if (!row) {
+      throw new Error(byCall
+        ? "The tool result for this call is not admitted in this run."
+        : "The requested artifact is not admitted for this run and interface.");
+    }
+    const artifactId = ledgerArtifactId(row);
+    const interfaceId = artifactMovementCoordinates(row).interfaceId;
     const manifestHash = contentHashHex(row?.artifact?.content);
     if (!manifestHash || !row.source_file) throw new Error("The admitted artifact has no content-addressed manifest.");
     const blobRoot = path.join(path.dirname(row.source_file), "blobs");
@@ -1981,6 +1988,39 @@ function createProjectionStore(options) {
       size: selected.bytes.byteLength,
       base64: selected.bytes.toString("base64"),
     };
+  }
+
+  async function admittedToolResultMovement(projection, runId, callId) {
+    const index = await openValidatedLedgerIndex(projection);
+    let rows;
+    if (index) {
+      try {
+        rows = index.database.prepare(
+          `SELECT
+             seq, lamport, recorded_at_unix_ms, trace, kind, mark,
+             from_kind, from_id, to_kind, to_id,
+             artifact_id, artifact_content,
+             runtime_run, runtime_checkpoint, runtime_interface
+           FROM movements
+           WHERE runtime_run = ? AND kind = 'InterfaceOutbound' AND artifact_id LIKE '%.result:%'
+           ORDER BY seq ASC`,
+        ).all(runId).map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
+      } finally {
+        index.database.close();
+      }
+    } else {
+      await refreshLedgerProjection(projection);
+      rows = projection.ledgerRows.filter((row) => (
+        movementRunId(row) === runId
+        && stringValue(row.kind) === "InterfaceOutbound"
+        && ledgerArtifactLabel(row).endsWith(".result")
+      ));
+    }
+    for (const row of rows.filter(isAdmittedInterfaceArtifactMovement)) {
+      const payload = objectOrEmpty(await resolveLedgerArtifactPayload(row));
+      if (stringValue(payload.call_id ?? payload.correlation_id) === callId) return row;
+    }
+    return null;
   }
 
   async function artifactAttachmentBytes(payloadBytes, attachmentId) {

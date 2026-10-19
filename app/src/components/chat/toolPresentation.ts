@@ -32,7 +32,7 @@ export type DynamicToolPresentation = {
   operation: NativeRunOperationPresentation | null;
 };
 
-export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "octopus" | "browserUse";
+export type DynamicToolGlyph = "edit" | "folder" | "read" | "search" | "terminal" | "plugins" | "settings" | "browserUse";
 
 export function dynamicToolPresentation(
   message: ChatRenderMessage | undefined,
@@ -107,7 +107,7 @@ export function dynamicToolGlyph(presentation: DynamicToolPresentation): Dynamic
     if (presentation.kind === "list") return "folder";
     return "read";
   }
-  return presentation.surface === "integration" ? "plugins" : "octopus";
+  return presentation.surface === "integration" ? "plugins" : "settings";
 }
 
 export function dynamicToolReadLabel(presentation: DynamicToolPresentation, active: boolean): string {

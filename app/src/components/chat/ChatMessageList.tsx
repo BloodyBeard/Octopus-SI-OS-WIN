@@ -2288,17 +2288,17 @@ function TraceReadTarget({ message, presentation, onOpenFile }: {
     setReference(null);
     setPending(false);
     return () => { attempt.current += 1; };
-  }, [message.artifactId, message.interfaceId, message.runId, presentation.target]);
+  }, [message.eventData?.call_id, message.runId, presentation.target]);
 
   async function openArtifact() {
     if (pending) return;
     const request = ++attempt.current;
     setPending(true);
     try {
-      if (!message.artifactId || !message.runId || !message.interfaceId) throw new Error("This read has no exact admitted artifact coordinates.");
+      const callId = eventString(message.eventData?.call_id);
+      if (!message.runId || !callId) throw new Error("This read has no admitted tool call to open.");
       const response = await readProjection<ArtifactActivityBytes>("projection.artifact.bytes.read", {
-        artifact_id: message.artifactId,
-        interface_id: message.interfaceId,
+        call_id: callId,
         run_id: message.runId,
       });
       if (request !== attempt.current) return;
@@ -2321,7 +2321,9 @@ function TraceReadTarget({ message, presentation, onOpenFile }: {
 }
 
 function traceReadArtifactReference(message: ChatRenderMessage, presentation: DynamicToolPresentation, response: ArtifactActivityBytes): ArtifactReference {
-  if (response.artifact_id !== message.artifactId || response.run_id !== message.runId || response.interface_id !== message.interfaceId) {
+  const artifactId = eventString(response.artifact_id);
+  const interfaceId = eventString(response.interface_id);
+  if (response.run_id !== message.runId || !artifactId || !interfaceId) {
     throw new Error("The read artifact coordinates do not match the selected trace.");
   }
   const data = eventRecord(decodeJsonArtifactPayload(response.base64));
@@ -2341,7 +2343,7 @@ function traceReadArtifactReference(message: ChatRenderMessage, presentation: Dy
     throw new Error("The admitted artifact read has invalid byte coordinates.");
   }
   return {
-    artifactId: message.artifactId!, runId: message.runId, interfaceId: message.interfaceId,
+    artifactId, runId: message.runId, interfaceId,
     label: `${presentation.pathLabel}${offset !== 0 || body.truncated ? " (read excerpt)" : ""}`,
     source: "message", inlinePayload: body.text,
   };
