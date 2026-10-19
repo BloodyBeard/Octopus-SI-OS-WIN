@@ -9740,6 +9740,7 @@ impl CodexAppServerInterfaceDriver {
         let scope = context.scope;
         let interface_operations = context.interface_operations;
         let mut message_phases = BTreeMap::<String, Option<MessagePhase>>::new();
+        let mut completed_final_answer: Option<(String, String)> = None;
         let mut latest_context_window_usage: Option<ContextWindowUsage> = None;
         let mut latest_provider_token_usage: Option<ProviderTokenUsageEvidence> = None;
         let mut terminal_error: Option<CodexTurnOutput> = None;
@@ -9976,6 +9977,15 @@ impl CodexAppServerInterfaceDriver {
                                     phase,
                                 } => {
                                     message_phases.remove(&id);
+                                    if phase == Some(MessagePhase::FinalAnswer)
+                                        && completed_final_answer
+                                            .replace((id.clone(), text.clone()))
+                                            .is_some()
+                                    {
+                                        return Err(InterfaceDriverError::FailedClosed(format!(
+                                            "Codex turn '{turn_id}' completed more than one final-answer item",
+                                        )));
+                                    }
                                     Some(completed_agent_message_output(
                                         &id,
                                         &text,
@@ -10256,7 +10266,10 @@ impl CodexAppServerInterfaceDriver {
                                         .to_string(),
                                 ));
                             }
-                            let (item_id, text) = completed_turn_final_message(&turn.turn)?;
+                            let (item_id, text) = completed_turn_reply(
+                                &turn.turn,
+                                completed_final_answer.as_ref(),
+                            )?;
                             if let Some(event) = context.lifecycle_prompt {
                                 let value: serde_json::Value =
                                     serde_json::from_str(text).map_err(|error| {
@@ -14455,9 +14468,9 @@ fn completed_turn_final_message(
                     turn.id,
                 )));
             }
-            if id.trim().is_empty() || text.is_empty() {
+            if id.trim().is_empty() {
                 return Err(InterfaceDriverError::FailedClosed(format!(
-                    "Codex completed turn '{}' has a final-answer item without identity or text",
+                    "Codex completed turn '{}' has a final-answer item without identity",
                     turn.id,
                 )));
             }
@@ -14469,6 +14482,19 @@ fn completed_turn_final_message(
             turn.id,
         ))
     })
+}
+
+fn completed_turn_reply<'a>(
+    turn: &'a octopus_appserver_proto::Turn,
+    completed_final_answer: Option<&'a (String, String)>,
+) -> Result<(&'a str, &'a str), InterfaceDriverError> {
+    if turn.items_view != TurnItemsView::NotLoaded {
+        return completed_turn_final_message(turn);
+    }
+    match completed_final_answer {
+        Some((id, text)) if !id.trim().is_empty() => Ok((id.as_str(), text.as_str())),
+        _ => completed_turn_final_message(turn),
+    }
 }
 
 fn rich_item_output(item: ThreadItem) -> Option<CodexTurnOutput> {

@@ -84,6 +84,7 @@ const FORMING_DELIVERY_WINDOW_MS = 15_000;
 const FORMING_HOLD_MS = 1_600;
 const LEAVING_HOLD_MS = 420;
 const SURFACE_TRANSITIONS_SETTLE_MS = 1_200;
+const HOME_DEFERRED_STOP_MS = 30_000;
 const LAB_TASK_PROGRESS: TaskProgressWidget = {
   completion: 62,
   running: 7,
@@ -577,6 +578,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
               voiceStartDisabled={!callState.canStart || Boolean(voiceStartDisabledReason)}
               callControls={<HomeCallControls onSpeakerChange={setSpeakerEnabled} onStart={startVoice} session={session} speakerEnabled={speakerEnabled} />}
               projectedFileSources={projectedFileSources}
+              awaitingClientResult={homeTurnAwaitsClientResult(latestHomeActivity, workspace.toolPresentations)}
               workspace={workspace}
             />
           )}
@@ -965,7 +967,8 @@ function formatResponseArtifactType(attachment: ChatAttachmentView): string {
   return attachment.label || "Artifact";
 }
 
-function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartDisabled, callControls, projectedFileSources, workspace }: {
+function HomeCommandDock({ awaitingClientResult, callActive, commandsActive, onVoiceStart, voiceStartDisabled, callControls, projectedFileSources, workspace }: {
+  awaitingClientResult: boolean;
   callActive: boolean;
   commandsActive: boolean;
   onVoiceStart: () => void;
@@ -974,6 +977,22 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
   projectedFileSources: readonly ProjectedFileSource[];
   workspace: ChatWorkspace;
 }) {
+  const [deferredStopAtMs, setDeferredStopAtMs] = useState(0);
+  const { interruptActiveTurn, turnOpen } = workspace;
+  useEffect(() => {
+    if (!deferredStopAtMs) return;
+    if (turnOpen) {
+      setDeferredStopAtMs(0);
+      void interruptActiveTurn();
+      return;
+    }
+    const timer = window.setTimeout(() => setDeferredStopAtMs(0), Math.max(0, deferredStopAtMs + HOME_DEFERRED_STOP_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [deferredStopAtMs, interruptActiveTurn, turnOpen]);
+  const interrupt = () => {
+    if (turnOpen) void interruptActiveTurn();
+    else if (awaitingClientResult) setDeferredStopAtMs(Date.now());
+  };
   return (
     <div className="home-command-dock">
       {callControls}
@@ -996,11 +1015,11 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           attachments={workspace.attachments}
           canSubmit={workspace.canSubmit}
           fileInputRef={workspace.fileInputRef}
-          interruptPending={workspace.turnControlPending}
+          interruptPending={workspace.turnControlPending || Boolean(deferredStopAtMs)}
           listenToGlobalCommands={commandsActive && !callActive}
           onFilesPicked={workspace.onFilesPicked}
           onKeyDown={workspace.onComposerKeyDown}
-          onInterrupt={workspace.interruptActiveTurn}
+          onInterrupt={interrupt}
           onResume={workspace.resumeActiveTurn}
           onProviderInterfaceChange={workspace.setProviderInterfaceId}
           onProviderModelChange={workspace.setProviderModel}
@@ -1031,7 +1050,7 @@ function HomeCommandDock({ callActive, commandsActive, onVoiceStart, voiceStartD
           onSteer={workspace.steerCurrentTurn}
           submitBlockReason={workspace.submitBlockReason}
           text={workspace.text}
-          turnOpen={workspace.turnOpen}
+          turnOpen={workspace.turnOpen || awaitingClientResult || Boolean(deferredStopAtMs)}
           variant="home"
           voiceStartDisabled={voiceStartDisabled}
         />

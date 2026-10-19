@@ -4674,7 +4674,7 @@ function createProjectionStore(options) {
       payload,
       text: eventKind === "compaction"
         ? ""
-        : eventKind.endsWith("_delta")
+        : eventKind.endsWith("_delta") || eventKind === "message"
           ? operatorChatEventText(payload, eventKind)
           : operatorChatEventText(payload, eventKind) || activityPayloadText(payload) || label,
       error: payload.ok === false || Boolean(payload.error),
@@ -7555,7 +7555,9 @@ function createProjectionStore(options) {
         ? projected.text
         : projected.eventKind === "compaction"
           ? ""
-          : projected.text || operatorChatTurnText(projected.payload, "out") || label;
+          : projected.eventKind === "message"
+            ? projected.text || operatorChatTurnText(projected.payload, "out")
+            : projected.text || operatorChatTurnText(projected.payload, "out") || label;
       if (projected.eventKind === "message_delta" || projected.eventKind === "commentary_delta") {
         if (!projectedText) continue;
         const responseEventData = { ...eventData, _run_activity: false };
