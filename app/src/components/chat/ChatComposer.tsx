@@ -478,11 +478,11 @@ export function ChatComposer({
                 </div>
 
                 {voiceLayoutActive ? (
-                  <div className="composer-voice-footer mb-2 flex items-center gap-2 px-2">
+                  <div className="composer-voice-footer flex items-center gap-2 px-2 py-1">
                     <ShellTooltip label="Cancel dictation">
                       <button
                         aria-label="Cancel dictation"
-                        className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
+                        className="no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-foreground bg-token-foreground/5 enabled:hover:bg-token-foreground/10 border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
                         disabled={dictation.isTranscribing}
                         onClick={dictation.abortDictation}
                         type="button"
@@ -501,7 +501,7 @@ export function ChatComposer({
                     <ShellTooltip label="Stop dictation">
                       <button
                         aria-label="Stop dictation"
-                        className="border-token-border no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-text-tertiary enabled:hover:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
+                        className="no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap select-none focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-full text-token-foreground bg-token-foreground/5 enabled:hover:bg-token-foreground/10 border-transparent h-token-button-composer px-2 py-0 text-sm leading-[18px] aspect-square items-center justify-center !px-0"
                         disabled={dictation.isTranscribing}
                         onClick={() => dictation.stopDictation("insert")}
                         type="button"
