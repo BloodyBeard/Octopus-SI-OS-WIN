@@ -7072,7 +7072,6 @@ mod tests {
             "system_worker_web",
             "system_worker_flash",
             "system_worker_computer_use",
-            "system_worker_telegram",
         ] {
             assert!(
                 relay_pins.contains(pin),
@@ -8311,7 +8310,7 @@ mod tests {
                 interface_id: "system_worker_planner".to_string(),
                 outbound_interface_ids: vec![
                     "system_worker_coder".to_string(),
-                    "system_worker_email".to_string(),
+                    "system_worker_web".to_string(),
                 ],
                 required_verified_artifacts: vec![RequiredVerifiedArtifact {
                     mark: octopus_descriptors::MarkId::new("task.summary.received"),
@@ -8524,7 +8523,7 @@ mod tests {
                 .iter()
                 .map(|binding| binding.interface.as_str())
                 .collect::<Vec<_>>(),
-            vec!["system_worker_coder", "system_worker_email"]
+            vec!["system_worker_coder", "system_worker_web"]
         );
         assert_eq!(relay.required_verified_artifacts.len(), 1);
         assert_eq!(
@@ -8544,7 +8543,7 @@ mod tests {
                 checkpoint
                     .artifact_bindings
                     .iter()
-                    .any(|binding| binding.id.as_str() == "artifact-worker-role-email"),
+                    .any(|binding| binding.id.as_str() == "artifact-worker-role-web"),
                 "checkpoint '{}' omits the role artifact of an exact external-relay worker",
                 checkpoint.id.as_str()
             );
