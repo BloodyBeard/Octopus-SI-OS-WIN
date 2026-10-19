@@ -1543,7 +1543,7 @@
         },
         {
           "name": "inspect_client",
-          "description": "Inspect the running Octopus client before writing an Extension or its data source. Read-only. The client returns client.action.result with request_id and client: the Extensions root, packages_root and package layout, contract schema files written by this client build, host vocabulary (categories, targets, slots, native nodes, glyphs, projection sources with params, host sources, client actions, limits), visible surfaces, every Extension with admission (pending/reviewed/dismissed/builtin), installation, setup and runtime issues, and refused packages with exact issues. extension_id narrows the Extension rows to one package. source previews what one client surface projection returns, bounded, so bindings can be written against real rows. Use client_action.interface from the bound Home delivery context and a unique request_id; await the result before writing dependent files.",
+          "description": "Inspect the running Octopus client before writing an Extension or its data source. Read-only. The client returns client.action.result with request_id and client: the Extensions root, packages_root and package layout, contract schema files written by this client build, host vocabulary (categories, targets, slots, native nodes, glyphs, projection sources with params, host sources, client actions, limits), visible surfaces, every Extension with admission (pending/reviewed/dismissed/builtin), installation, setup and runtime issues, and refused packages with exact issues. extension_id narrows the Extension rows to one package. source previews what one client surface projection returns, bounded, so bindings can be written against real rows. Use client_action.interface from the bound Home delivery context and a unique request_id. The result arrives as your next input, after this turn: end your turn right after this call and write dependent files once it arrives.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1617,7 +1617,7 @@
         },
         {
           "name": "list_widgets",
-          "description": "List ready-made and published widgets in the current Home, including exact ids, revision digests, installed and visible state. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state. Await that result before dependent commands; do not repeat an admitted request or use Computer Use for these controls.",
+          "description": "List ready-made and published widgets in the current Home, including exact ids, revision digests, installed and visible state. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state as your next input, after this turn. End your turn right after this call, saying in one line what you asked the client to do, and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1715,7 +1715,7 @@
         },
         {
           "name": "set_widget",
-          "description": "Show, hide or remove an existing Home widget using its exact widget_id and source_digest from list_widgets. Visible enables a configured built-in through the normal extension lifecycle; custom widgets need no source edits. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state. Await that result before dependent commands; do not repeat an admitted request or use Computer Use for these controls.",
+          "description": "Show, hide or remove an existing Home widget using its exact widget_id and source_digest from list_widgets. Visible enables a configured built-in through the normal extension lifecycle; custom widgets need no source edits. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state as your next input, after this turn. End your turn right after this call, saying in one line what you asked the client to do, and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
           "input_schema": {
             "type": "object",
             "properties": {
