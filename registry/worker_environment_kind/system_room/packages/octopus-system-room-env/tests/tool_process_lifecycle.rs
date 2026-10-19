@@ -475,7 +475,7 @@ async fn client_mcp_process_preserves_bound_scope_emission_verdict_and_lifecycle
     let mut invalid=document.clone();invalid["glyph"]=json!("cloud");invalid["revision"]=json!(1);
     let publish = json!({"method":"tools/call","params":{"name":"publish_widget","arguments":{"interface":target,"document":document}}});
     let widget_requests = [json!({"schema":"octopus.client_action","schema_version":1,"action":"list_widgets","request_id":"inventory"}),
-        json!({"schema":"octopus.client_action","schema_version":1,"action":"set_widget","request_id":"hide","widget_id":"hello","source_digest":"sha256:exact","state":"hidden"})];
+        json!({"schema":"octopus.client_action","schema_version":1,"action":"set_widget","request_id":"hide","changes":[{"widget_id":"hello","source_digest":"sha256:exact","state":"hidden"}]})];
     let requests = [
         json!({"method":"tools/list"}),
         json!({"method":"tools/call","params":{"name":"read_artifact","arguments":{"id":"context:visible"}}}),

@@ -1160,17 +1160,42 @@ function createProjectionStore(options) {
     ))
       .sort((left, right) => left.seq - right.seq)
       .slice(0, params.limit ?? 128);
+    const closures = page.length ? await clientActionTurnClosures(projection, runId, interfaceId, page[0].seq) : [];
     return Promise.all(page.map(async (row) => {
       const identity = {
         artifact_id: row.artifact.id, run_id: runId, seq: row.seq,
         movement_kind: "InterfaceOutbound", from: row.from, to: row.to,
       };
       try {
-        return { ...identity, action: await immutableClientAction(row) };
+        return { ...identity, action: await immutableClientAction(row), turn_closure: await clientActionTurnClosure(closures, row.seq) };
       } catch (error) {
         return { ...identity, error: String(error?.message ?? error) };
       }
     }));
+  }
+
+  async function clientActionTurnClosures(projection, runId, interfaceId, afterSeq) {
+    const labels = new Set(["turn.completed", "turn.interrupted.result", "turn.control.acknowledged"]);
+    const indexed = await readIndexedInterfaceArtifactRows(projection, runId, interfaceId, labels, afterSeq, true);
+    if (indexed === null) await refreshLedgerProjection(projection);
+    return (indexed ?? ledgerRowsForRun(projection, runId))
+      .filter((row) => matchesInterfaceArtifactMovement(row, runId, interfaceId, labels, afterSeq, true))
+      .sort((left, right) => left.seq - right.seq);
+  }
+
+  async function clientActionTurnClosure(closures, actionSeq) {
+    for (const row of closures) {
+      if (row.seq <= actionSeq) continue;
+      const label = ledgerArtifactLabel(row);
+      if (label === "turn.interrupted.result") return "stopped";
+      const payload = objectOrEmpty(await resolveLedgerArtifactPayload(row));
+      if (label === "turn.control.acknowledged") {
+        if (["stop", "interrupt"].includes(stringValue(payload.action))) return "stopped";
+        continue;
+      }
+      return stringValue(objectOrEmpty(payload.turn).status).toLowerCase() === "completed" ? "completed" : "stopped";
+    }
+    return null;
   }
 
   async function immutableClientAction(row) {

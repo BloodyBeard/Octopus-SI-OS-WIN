@@ -185,6 +185,12 @@ without a restart. Refusals, setup gaps, and errors the view hits while
 rendering go back to Home through the same inspection, so it can fix them; each
 fix is a new revision you review again.
 
+Showing, hiding or removing widgets you already have is simpler: Home lists
+them and changes any number of them in one request. The client applies the
+change at once and reports the actual state back when Home's turn ends, and
+Home continues from it. Stop ends the whole request: nothing Home asked for in
+the stopped turn is applied afterwards, and no reply about it follows.
+
 Extensions are additions you install and remove. They are not the only way to
 change the client: the client is ordinary code, and Home, which holds your
 machine's rights in the default setup, can change any part of it. Ask for it in

@@ -1,6 +1,6 @@
 export type WidgetAction = { schema: "octopus.client_action"; schema_version: 1; request_id: string } & (
   { action: "list_widgets" }
-  | { action: "set_widget"; widget_id: string; source_digest: string; state: "visible" | "hidden" | "removed" }
+  | { action: "set_widget"; changes: Array<{ widget_id: string; source_digest: string; state: "visible" | "hidden" | "removed" }> }
 );
 export type InspectClientAction = {
   schema: "octopus.client_action"; schema_version: 1; request_id: string; action: "inspect_client"; extension_id?: string;

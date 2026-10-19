@@ -65,6 +65,12 @@ function readCursor(storage: Storage, key: string, scope: ActionScope): number {
   return deliveryIdentity(cursor.last_consumed, scope).seq;
 }
 
+function turnClosure(row: Record<string, unknown>): "completed" | "stopped" | null {
+  if (row.turn_closure === null || row.turn_closure === undefined) return null;
+  if (row.turn_closure === "completed" || row.turn_closure === "stopped") return row.turn_closure;
+  throw new Error("Client action has an invalid turn closure.");
+}
+
 function clientAction(row: Record<string, unknown>) {
   if (Object.hasOwn(row, "error")) {
     throw new Error(typeof row.error === "string" && row.error ? row.error : "Client action payload could not be verified.");
@@ -122,6 +128,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
             if (identity.seq <= readCursor(storage, key, scope)) continue;
             let action;
             try { action = clientAction(row); } catch (error) { refuse(error instanceof Error ? error.message : String(error)); }
+            const closure = turnClosure(row);
             if (action && action.action !== "open_surface") {
               const pendingKey = `octopus.client-widget-result.v1:${scopeKey}`;
               const retained = storage.getItem(pendingKey);
@@ -144,7 +151,9 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                   receipt = {};
                 }
               } else receipt = {};
-              if (!receipt.request_artifact) {
+              if (!receipt.request_artifact && closure === "stopped") {
+                receipt = { stopped: true };
+              } else if (!receipt.request_artifact) {
                 const base = { schema: "octopus.client_action_result", schema_version: 1,
                   observed_at: new Date().toISOString(),
                   request_artifact: identity.artifact_id, request_seq: identity.seq, request_id: action.request_id, action: action.action };
@@ -176,15 +185,20 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                 storage.setItem(pendingKey, JSON.stringify(receipt));
               }
               if (!current()) return;
-              await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
-                label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
+              if (closure === null) return;
+              if (closure === "completed") {
+                await submitInterfaceArtifact({ interfaceId: scope.interfaceId, runId: scope.runId,
+                  label: "client.action.result", payload: receipt, timeoutMs: 15_000 });
+              } else {
+                storage.removeItem(pendingKey);
+              }
             }
             storage.setItem(key, JSON.stringify({
               schema_version: 1, home: scope.home, run_id: scope.runId, interface_id: scope.interfaceId,
               last_consumed: identity,
             }));
             if (readCursor(storage, key, scope) !== identity.seq) throw new Error("Client action cursor could not be saved.");
-            if (action?.action === "relaunch_client" && latest.current.relaunch) {
+            if (action?.action === "relaunch_client" && closure === "completed" && latest.current.relaunch) {
               await latest.current.relaunch();
               return;
             }

@@ -1617,7 +1617,7 @@
         },
         {
           "name": "list_widgets",
-          "description": "List ready-made and published widgets in the current Home, including exact ids, revision digests, installed and visible state. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state as your next input, after this turn. End your turn right after this call, saying in one line what you asked the client to do, and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
+          "description": "List ready-made and published widgets in the current Home, including exact ids, revision digests, installed and visible state. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state as your next input, after this turn. End your turn right after this call without a reply and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1715,7 +1715,7 @@
         },
         {
           "name": "set_widget",
-          "description": "Show, hide or remove an existing Home widget using its exact widget_id and source_digest from list_widgets. Visible enables a configured built-in through the normal extension lifecycle; custom widgets need no source edits. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client delivers client.action.result with the same request_id and the actual state as your next input, after this turn. End your turn right after this call, saying in one line what you asked the client to do, and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
+          "description": "Show, hide or remove one or more existing Home widgets in one call. List every change in changes, each with the exact widget_id and source_digest from list_widgets and its target state; enable or disable several widgets together rather than one call per widget. Visible enables a configured built-in through the normal extension lifecycle; custom widgets need no source edits. Use client_action.interface from the bound Home delivery context. Choose a unique request_id. This tool returns artifact admission; the client applies the changes and delivers client.action.result with the same request_id and the actual state of every widget as your next input, after this turn. End your turn right after this call without a reply and continue the operator's request when the result arrives; do not poll, repeat an admitted request or use Computer Use for these controls.",
           "input_schema": {
             "type": "object",
             "properties": {
@@ -1740,22 +1740,38 @@
                     "minLength": 1,
                     "maxLength": 256
                   },
-                  "widget_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256
-                  },
-                  "source_digest": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256
-                  },
-                  "state": {
-                    "enum": [
-                      "visible",
-                      "hidden",
-                      "removed"
-                    ]
+                  "changes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "widget_id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "source_digest": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "state": {
+                          "enum": [
+                            "visible",
+                            "hidden",
+                            "removed"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "widget_id",
+                        "source_digest",
+                        "state"
+                      ],
+                      "additionalProperties": false
+                    }
                   }
                 },
                 "required": [
@@ -1763,9 +1779,7 @@
                   "schema_version",
                   "action",
                   "request_id",
-                  "widget_id",
-                  "source_digest",
-                  "state"
+                  "changes"
                 ],
                 "additionalProperties": false
               }
@@ -1785,7 +1799,7 @@
       ]
     }
   },
-  "description": "Octopus client MCP. Call with method tools/list to discover its descriptor-owned catalogue, or method tools/call and params {name, arguments}. Use inspect_client before changing the client: it reports the Extensions folder, the contracts the running client accepts, what it can host and every Extension's admission, review, installation and runtime state. Use list_widgets to inspect existing Home widgets and set_widget to show, hide or remove one; publish_widget creates or revises a document. Client controls return admission first, followed by client.action.result with actual client state. Also opens existing client surfaces and inspects only bound artifacts. Each invocation establishes an MCP connection over the admitted Octopus artifact transport, negotiates the protocol, sends initialized, executes one request, and closes. All effects still pass ordinary artifact.send admission. No ambient host/MCP configuration or global client access.",
+  "description": "Octopus client MCP. Call with method tools/list to discover its descriptor-owned catalogue, or method tools/call and params {name, arguments}. Use inspect_client before changing the client: it reports the Extensions folder, the contracts the running client accepts, what it can host and every Extension's admission, review, installation and runtime state. Use list_widgets to inspect existing Home widgets and set_widget to show, hide or remove one or several in one call; publish_widget creates or revises a document. Client controls return admission first, followed by client.action.result with actual client state. Also opens existing client surfaces and inspects only bound artifacts. Each invocation establishes an MCP connection over the admitted Octopus artifact transport, negotiates the protocol, sends initialized, executes one request, and closes. All effects still pass ordinary artifact.send admission. No ambient host/MCP configuration or global client access.",
   "args_schema": {
     "type": "object",
     "properties": {

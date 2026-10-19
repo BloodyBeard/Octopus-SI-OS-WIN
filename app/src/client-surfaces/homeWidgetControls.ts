@@ -69,20 +69,26 @@ export async function applyHomeWidgetAction(options: Controls, action: WidgetAct
     throw new Error("The selected Home widget registry is not ready.");
   }
   let current = options;
-  if (action.action === "set_widget") {
-    const matches = inventory(options).filter(item => item.widget_id === action.widget_id);
-    if (matches.length !== 1) throw new Error(`Widget ${action.widget_id} is unavailable or ambiguous; list widgets again.`);
-    const widget = matches[0];
-    if (widget.source_digest !== action.source_digest) throw new Error("Widget revision changed; list widgets again before changing it.");
+  const changes = action.action === "set_widget" ? action.changes : [];
+  const before = inventory(options);
+  const widgets = changes.map((change) => {
+    const matches = before.filter(item => item.widget_id === change.widget_id);
+    if (matches.length !== 1) throw new Error(`Widget ${change.widget_id} is unavailable or ambiguous; list widgets again.`);
+    if (matches[0].source_digest !== change.source_digest) throw new Error(`Widget ${change.widget_id} revision changed; list widgets again before changing it.`);
+    if (change.state === "visible" && matches[0].extensionId && !matches[0].available) {
+      throw new Error(`Widget ${change.widget_id} requires source configuration or extension review before it can be enabled.`);
+    }
+    return { change, widget: matches[0] };
+  });
+  for (const { change, widget } of widgets) {
     if (widget.extensionId) {
-      if (action.state === "visible" && !widget.available) throw new Error("Widget requires source configuration or extension review before it can be enabled.");
-      if (action.state === "visible" && !widget.installed) await options.extensions.install(widget.extensionId, operationId);
-      if (action.state === "removed" && widget.installed) await options.extensions.uninstall(widget.extensionId, operationId);
+      if (change.state === "visible" && !widget.installed) await options.extensions.install(widget.extensionId, operationId);
+      if (change.state === "removed" && widget.installed) await options.extensions.uninstall(widget.extensionId, operationId);
       const refreshed = materializeClientExtensions(await readClientExtensions(), "live", "");
       current = { ...options, extensions: { ...options.extensions, ...refreshed } };
       const key = homeWidgetHiddenKey(options.accessProfile);
       const hidden = strings(key) ?? new Set(inventory(current).filter(item => item.installed).map(item => item.widget_id));
-      if (action.state === "visible") hidden.delete(widget.widget_id); else hidden.add(widget.widget_id);
+      if (change.state === "visible") hidden.delete(widget.widget_id); else hidden.add(widget.widget_id);
       saveHomeWidgetStrings(key, hidden);
     } else {
       if (!widget.item) throw new Error("Published widget lost its delivery identity.");
@@ -91,15 +97,16 @@ export async function applyHomeWidgetAction(options: Controls, action: WidgetAct
       const dismissed = strings(key) ?? new Set<string>();
       dismissed.delete(identity);
       dismissed.delete(removedHomeWidgetIdentity(identity));
-      if (action.state === "hidden") dismissed.add(identity);
-      if (action.state === "removed") dismissed.add(removedHomeWidgetIdentity(identity));
+      if (change.state === "hidden") dismissed.add(identity);
+      if (change.state === "removed") dismissed.add(removedHomeWidgetIdentity(identity));
       saveHomeWidgetStrings(key, dismissed);
     }
   }
   const rows = inventory(current);
-  if (action.action === "set_widget" && !rows.some(row => row.widget_id === action.widget_id
-    && row.source_digest === action.source_digest && row.state === action.state)) {
-    throw new Error("Widget changed before its requested presentation state could be confirmed.");
+  for (const change of changes) {
+    if (!rows.some(row => row.widget_id === change.widget_id && row.source_digest === change.source_digest && row.state === change.state)) {
+      throw new Error(`Widget ${change.widget_id} changed before its requested presentation state could be confirmed.`);
+    }
   }
   return rows.map(({ extensionId: _extensionId, item: _item, ...row }) => row);
 }
