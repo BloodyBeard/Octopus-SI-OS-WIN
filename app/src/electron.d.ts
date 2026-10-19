@@ -136,6 +136,7 @@ declare global {
       setTaskMonitorWindowPinned(enabled: boolean): Promise<{ pinned: boolean }>;
       loginItemSettings(request?: { enabled: boolean }): Promise<OctopusLoginItemSettings>;
       windowControl(action: "close" | "minimize" | "zoom"): void;
+      relaunchClient(): Promise<{ relaunching: true }>;
       defaults(): Promise<OctopusTransportDefaults>;
       providerInterfaces(): Promise<OctopusProviderInterfacesResponse>;
       bootStatus(): Promise<OctopusRuntimeHostState>;

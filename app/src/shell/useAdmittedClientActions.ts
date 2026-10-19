@@ -18,6 +18,7 @@ type ClientActionOptions = ActionScope & {
   openSurface: (surface: ClientSurfaceDescriptor) => void;
   widgets?: (action: WidgetAction, operationId: string) => Promise<unknown>;
   inspect?: (action: InspectClientAction) => Promise<Record<string, unknown>>;
+  relaunch?: () => Promise<unknown>;
   onRefusal: (reason: string) => void;
 };
 
@@ -131,7 +132,7 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                   || typeof receipt.observed_at !== "string" || !Number.isFinite(Date.parse(receipt.observed_at))
                   || !["prepared", "completed"].includes(String(receipt.phase))
                   || receipt.phase === "completed" && (typeof receipt.ok !== "boolean"
-                    || (receipt.ok ? !Array.isArray(receipt.widgets) && !isRecord(receipt.client) : typeof receipt.error !== "string"))) {
+                    || (receipt.ok ? !Array.isArray(receipt.widgets) && !isRecord(receipt.client) && !isRecord(receipt.relaunch) : typeof receipt.error !== "string"))) {
                   throw new Error("Saved widget action result is malformed.");
                 }
                 if (receipt.request_artifact !== identity.artifact_id || receipt.request_seq !== identity.seq
@@ -154,6 +155,12 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
                   if (action.action === "inspect_client") {
                     if (!latest.current.inspect) throw new Error("Client inspection is unavailable.");
                     receipt = { ...base, phase: "completed", ok: true, client: await latest.current.inspect(action) };
+                  } else if (action.action === "relaunch_client") {
+                    if (!latest.current.relaunch) throw new Error("Client relaunch is unavailable.");
+                    receipt = { ...base, phase: "completed", ok: true, relaunch: {
+                      status: "requested",
+                      runtime: "The system keeps running while the client restarts; the operator signs in again.",
+                    } };
                   } else {
                     if (!latest.current.widgets) throw new Error("Home widget controls are unavailable.");
                     const widgets = await latest.current.widgets(action, `widget_${identity.artifact_id.split(":")[1]}`);
@@ -177,6 +184,10 @@ export function useAdmittedClientActions(options: ClientActionOptions): void {
               last_consumed: identity,
             }));
             if (readCursor(storage, key, scope) !== identity.seq) throw new Error("Client action cursor could not be saved.");
+            if (action?.action === "relaunch_client" && latest.current.relaunch) {
+              await latest.current.relaunch();
+              return;
+            }
             try {
               if (!action || action.action !== "open_surface") continue;
               const surfaceId = action.surface_id;

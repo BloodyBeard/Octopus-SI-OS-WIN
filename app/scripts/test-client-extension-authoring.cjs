@@ -110,6 +110,8 @@ test("inspect_client is a declared client.mcp operation and describes the host f
   assert.equal(operation.input_schema.properties.action.properties.action.const, "inspect_client");
   assert.ok(parseClientAction(inspect({ extension_id: "home.attention", source: { method: "projection.runs.list", params: { limit: 1 } } })));
   assert.throws(() => parseClientAction(inspect({ source: { method: "projection.runs.list", url: "x" } })), /inspect_client/);
+  assert.ok(parseClientAction({ schema: "octopus.client_action", schema_version: 1, action: "relaunch_client", request_id: "relaunch-1" }));
+  assert.throws(() => parseClientAction({ schema: "octopus.client_action", schema_version: 1, action: "relaunch_client", request_id: "relaunch-1", force: true }), /relaunch_client/);
   const inventory = buildClientInventory({ snapshot: { generation: 0, root: "/home/client/extensions", manifests: [], state: {}, stateStatus: "valid", lifecycle: {}, actionStatuses: [], errors: [] }, surfaces: [], runtimeIssues: [] });
   assert.deepEqual(inventory.host.targets["voice.widget"].slot, documentSchema.$defs.voiceTarget.properties.slot.enum);
   assert.deepEqual(inventory.host.glyphs, documentSchema.$defs.glyph.enum);

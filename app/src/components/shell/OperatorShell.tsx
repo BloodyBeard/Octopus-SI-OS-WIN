@@ -2137,6 +2137,10 @@ export function OperatorShell({ accessProfile, clientWindow, onLogOut, runtimeHo
       interfaceId: homeChatWorkspace.activeRun?.chatInterfaceId ?? "",
       surfaces: surfaceRegistry.voiceSurfaces, extensions: surfaceRegistry.extensions }, action, operationId),
     inspect: (action) => inspectClient(action, visibleSurfaces.filter((surface) => !isSidebarOnlySurface(surface))),
+    relaunch: async () => {
+      if (!window.octopusTransport) throw new Error("Client relaunch is unavailable.");
+      return window.octopusTransport.relaunchClient();
+    },
     onRefusal: (reason) => appToast.warning(reason),
   });
 

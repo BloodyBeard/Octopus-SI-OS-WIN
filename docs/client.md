@@ -188,11 +188,11 @@ fix is a new revision you review again.
 Extensions are additions you install and remove. They are not the only way to
 change the client: the client is ordinary code, and Home, which holds your
 machine's rights in the default setup, can change any part of it. Ask for it in
-plain words; Home finds the client's source, edits it, rebuilds and relaunches
-the client. For that the system has to run outside the client: started from a
-terminal of your own, it keeps running while the client is closed, the client
-attaches to it when it reopens, and the change is there. A system started from
-the client's own launch terminal stops when the client quits.
+plain words; Home finds the client's source, edits it, rebuilds it and asks the
+running client to relaunch. The system keeps running while the client
+restarts, even when it was started from the client's own launch terminal, so
+Home's work continues; you sign in again and the change is there. Quitting the
+client yourself still stops a system it launched.
 
 ### Where packages come from
 

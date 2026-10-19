@@ -34,7 +34,7 @@ function fixture() {
   const subscriptions = new Map(), status = (token) => ({ configured: true, authenticated: Boolean(token) && !revoked.has(token), profile: token && !revoked.has(token) ? "live" : null });
   const controller = { requireSession: (token) => { if (!token || revoked.has(token)) throw new Error("unauthorized"); }, status, lock: (token) => { effects.push(`access.lock:${token}`); revoked.add(token); return status(""); } };
   const aux = { quick: new Window(10), ownedEnvironment: new Window(11), foreignEnvironment: new Window(12), ownedMonitor: new Window(13), foreignMonitor: new Window(14) };
-  const app = Object.assign(new EventEmitter(), { quit: () => { effects.push("app.quit"); app.emit("before-quit", event()); } });
+  const app = Object.assign(new EventEmitter(), { quit: () => { effects.push("app.quit"); app.emit("before-quit", event()); }, relaunch: () => effects.push("app.relaunch") });
   const dependencies = {
     createClientWindowCloseHost, app, console: { error() {} }, ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     clientWindows: { entryForWebContents: (id) => entries.get(id), entries: () => [...entries.values()].filter((entry) => !entry.win.dead), clearAccessToken: (token) => { for (const entry of entries.values()) if (entry.accessToken === token) entry.accessToken = ""; } },
@@ -61,10 +61,10 @@ function fixture() {
     if (ts.isFunctionDeclaration(node)) return ["startClientQuitCleanup", "currentClientWindowCloseSender", "requireClientLockWindow", "nativeDesktopAccessEntries"].includes(node.name?.text);
     if (!ts.isExpressionStatement(node) || !ts.isCallExpression(node.expression)) return false;
     const call = node.expression, owner = call.expression.getText(main), channel = call.arguments[0]?.text;
-    return owner === "app.on" && channel === "before-quit" || owner === "ipcMain.handle" && (channel?.startsWith("octopus:client-window-close-") || channel === "octopus:access-lock");
+    return owner === "app.on" && channel === "before-quit" || owner === "ipcMain.handle" && (channel?.startsWith("octopus:client-window-close-") || channel === "octopus:access-lock" || channel === "octopus:client-relaunch");
   });
-  assert.equal(statements.length, 10);
-  const integration = Function(...Object.keys(dependencies), `let quitCleanupStarted = false, quitReady = false;\n${statements.map((n) => n.getText(main)).join("\n")}\nreturn { host: clientWindowClose, state: () => ({quitCleanupStarted,quitReady}) };`)(...Object.values(dependencies));
+  assert.equal(statements.length, 11);
+  const integration = Function(...Object.keys(dependencies), `let quitCleanupStarted = false, quitReady = false, relaunchRequested = false;\n${statements.map((n) => n.getText(main)).join("\n")}\nreturn { host: clientWindowClose, state: () => ({quitCleanupStarted,quitReady}) };`)(...Object.values(dependencies));
   function add(id, guarded = true, token = `token-${id}`) {
     const win = new Window(id);
     entries.set(id, { win, webContentsId: id, accessToken: token, primary: id === 1 }); integration.host.trackWindow(win, `window-${id}`); subscriptions.set(id, { token });
@@ -144,6 +144,22 @@ test("quit veto invalidates approved peers before cleanup; unanimous native clos
   assert.ok([a, b, boot].every((win) => win.dead)); assert.equal(f.state().quitReady, true);
   assert.equal(f.effects.filter((e) => e === "interrupt").length, 1); assert.ok(f.effects.includes("runtime.close")); assert.ok(f.effects.includes("app.quit"));
   assert.throws(() => f.host.assertCanCreateWindow(), /closing/);
+});
+
+test("a relaunch leaves the launched runtime running; a vetoed relaunch restores an ordinary quit", async () => {
+  const vetoed = fixture(), first = vetoed.add(1);
+  assert.deepEqual(await first.bridge.relaunchClient(), { relaunching: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  await reply(first, false); await tick();
+  vetoed.quit(); await reply(first, true); await tick(); await tick();
+  assert.equal(vetoed.effects.includes("app.relaunch"), false); assert.equal(vetoed.effects.filter((e) => e === "interrupt").length, 1);
+  const f = fixture(), a = f.add(1);
+  assert.deepEqual(await a.bridge.relaunchClient(), { relaunching: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  await reply(a, true); await tick(); await tick();
+  assert.equal(a.dead, true); assert.equal(f.state().quitReady, true);
+  assert.ok(f.effects.includes("app.relaunch")); assert.equal(f.effects.includes("interrupt"), false);
+  assert.ok(f.effects.includes("runtime.close"));
 });
 
 test("navigation, unregister, new windows and destruction cancel stale decisions without phantom approval", async () => {

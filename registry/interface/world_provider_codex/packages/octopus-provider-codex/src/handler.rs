@@ -7475,6 +7475,9 @@ impl CodexAppServerInterfaceDriver {
             .await.map_err(InterfaceDriverError::FailedClosed)? else {
             return Ok(false);
         };
+        if pending.is_none() && terminal.turn.get("status").and_then(serde_json::Value::as_str) == Some("interrupted") {
+            return Ok(false);
+        }
         context.sink.bind_live_stream(&recovered.thread_id, turn_id)?;
         let events = take_native_terminal_events(&mut *self.client.lock().await, &terminal, &recovered.thread_id, turn_id)?;
         let (retired, retained) = interrupted_continuity(Some(recovered.clone())).map_err(InterfaceDriverError::FailedClosed)?;
@@ -22396,6 +22399,7 @@ while IFS= read -r _; do :; done
             (true, false, "wrong_thread"), (true, false, "wrong_turn"), (true, false, "absent"),
             (true, false, "live"), (true, false, "read_error"), (true, false, "wrong_item_turn"),
             (false, false, "completed"), (false, false, "completed_no_events"), (false, true, "completed_no_events"),
+            (false, true, "restart_interrupted"),
             (false, false, "wrong_thread"), (false, false, "wrong_turn"), (false, false, "absent"),
             (false, false, "live"), (false, false, "read_error"), (false, false, "wrong_item_turn"),
         ] {
@@ -22409,7 +22413,7 @@ while IFS= read -r _; do :; done
                 items: vec![ThreadItem::Reasoning { id: "reason-a".into(), summary: vec!["Actual progress".into()], content: vec![] },
                     ThreadItem::AgentMessage { id: "final-a".into(), text: "Already produced native answer.".into(), phase: Some(MessagePhase::FinalAnswer) }],
                 items_view: TurnItemsView::Full,
-                status: match mode { "live" => TurnStatus::InProgress, "drained" | "drained_conflict" => TurnStatus::Interrupted, _ => TurnStatus::Completed },
+                status: match mode { "live" => TurnStatus::InProgress, "drained" | "drained_conflict" | "restart_interrupted" => TurnStatus::Interrupted, _ => TurnStatus::Completed },
                 error: None, started_at: Some(10), completed_at: Some(20), duration_ms: Some(10_000),
             };
             let thread = Thread {
@@ -22582,9 +22586,10 @@ while IFS= read -r _; do :; done
                         false, CodexTurnOutput::interrupted_result_closed("tool_result", "call-a".into(), "thread-a".into(), "turn-a".into(), result.ok, &source.artifact),
                     )).await.unwrap();
                     if !terminal_case {
-                        if mode == "live" { assert!(!checked.unwrap()); } else { assert!(checked.is_err(), "{mode}"); }
+                        if matches!(mode, "live" | "restart_interrupted") { assert!(!checked.unwrap(), "{mode}"); } else { assert!(checked.is_err(), "{mode}"); }
                         assert_eq!(emit.continuity_snapshot().unwrap(), original);
-                        assert_eq!(driver.pending_request(&scope, "tool:call-a").await.unwrap().unwrap().request_id, pending.request_id);
+                        if cold { assert!(!driver.has_pending_request(&scope).await); }
+                        else { assert_eq!(driver.pending_request(&scope, "tool:call-a").await.unwrap().unwrap().request_id, pending.request_id); }
                         assert!(outputs.try_recv().is_err());
                         driver.shutdown().await.unwrap(); server.await.unwrap();
                         continue;

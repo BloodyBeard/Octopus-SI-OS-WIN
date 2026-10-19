@@ -356,6 +356,7 @@ test("setup arms each selected pack trigger once through the template clone", as
   assert.equal(armed.enabled, true);
   assert.equal(template.enabled, false);
   assert.equal(armed.config.schedule.inactivity.seconds, 3600);
+  assert.deepEqual(armed.config.schedule.inactivity.exclude_interface_match, template.config.schedule.inactivity.exclude_interface_match);
   assert.equal(armed.config.schedule.reminder_default, template.config.schedule.reminder_default);
   assert.ok(fs.existsSync(path.join(home, "state", "runs", "run_world_self_improvement.json")));
   fs.rmSync(home, { recursive: true, force: true });

@@ -9,7 +9,8 @@ export function parseClientAction(value) {
   if (value.action === "set_widget" && Object.keys(value).length === 7 && text(value.request_id)
     && text(value.widget_id) && text(value.source_digest) && ["visible", "hidden", "removed"].includes(value.state)) return value;
   if (value.action === "inspect_client" && text(value.request_id) && inspectionScope(value)) return value;
-  throw new Error("Client action must be an exact open_surface, list_widgets, set_widget or inspect_client request.");
+  if (value.action === "relaunch_client" && Object.keys(value).length === 4 && text(value.request_id)) return value;
+  throw new Error("Client action must be an exact open_surface, list_widgets, set_widget, inspect_client or relaunch_client request.");
 }
 
 function inspectionScope(value) {

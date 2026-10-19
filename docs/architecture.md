@@ -436,6 +436,12 @@ interfaces' movements stays in memory, so a busy ledger does not make every
 live interface flush the disk on every append. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
 loss to be repaired with leases and retries.
 
+A restart does not end the work in flight either. A tool call the restart cut
+off reports an unknown effect instead of running twice, and a model turn that
+was waiting on a tool continues with that result once the provider is back.
+The runtime also outlives the terminal that launched it, so relaunching the
+client never stops it.
+
 There is no recovery subsystem. This follows from intent, obligation, and
 memory living in files rather than in a running loop.
 

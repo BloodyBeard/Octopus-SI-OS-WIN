@@ -167,6 +167,34 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(unix)]
+fn survive_terminal_hangup(log: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut output = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(log)?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            let moved = rustix::stdio::dup2_stdout(&output).and_then(|()| rustix::stdio::dup2_stderr(&output));
+            let line = match moved {
+                Ok(()) => "octopus: launch terminal closed; the runtime keeps running and writes here\n".to_string(),
+                Err(error) => format!("octopus: launch terminal closed; output could not move here: {error}\n"),
+            };
+            let _ = output.write_all(line.as_bytes());
+        }
+    });
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn survive_terminal_hangup(_log: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
 #[cfg(not(unix))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
@@ -256,6 +284,7 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
         cancel_for_signal.cancel();
     });
     let mut runtime_instance = runtime_instance::RuntimeInstance::acquire(&octopus_home)?;
+    survive_terminal_hangup(&octopus_home.join("state").join("runtime-instance").join("output.log"))?;
     if cancel.is_cancelled() {
         return Ok(());
     }

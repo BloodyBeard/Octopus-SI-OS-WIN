@@ -6160,6 +6160,7 @@ dependencies = [
  "octopus-tool-registry",
  "octopus-verifiers",
  "octopus-worker-env",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2",

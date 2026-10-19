@@ -370,6 +370,9 @@ contextBridge.exposeInMainWorld("octopusTransport", {
   windowControl(action) {
     ipcRenderer.send("octopus:window-control", action);
   },
+  relaunchClient() {
+    return invokeAccess("octopus:client-relaunch");
+  },
   defaults() {
     return invokeAccess("octopus:transport-defaults");
   },

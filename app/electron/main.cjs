@@ -215,6 +215,7 @@ const workerEnvironmentWindows = new Map();
 const taskMonitorWindows = new Map();
 let quitCleanupStarted = false;
 let quitReady = false;
+let relaunchRequested = false;
 const clientWindowClose = createClientWindowCloseHost({
   accessTokenForSender(sender) { return clientWindows.entryForWebContents(sender.id)?.accessToken ?? ""; },
   authorize(sender, token) {
@@ -225,6 +226,7 @@ const clientWindowClose = createClientWindowCloseHost({
     }
   },
   onQuitApproved: startClientQuitCleanup,
+  onQuitCancelled() { relaunchRequested = false; },
   reportError(error) { console.error("Client window close failed:", error); },
 });
 const clientContextMenu = createClientContextMenuHost({
@@ -2537,7 +2539,8 @@ function startClientQuitCleanup() {
         }).catch(() => {});
       }
     }
-    const interrupted = terminalHost?.interruptLaunch() ?? 0;
+    if (relaunchRequested) app.relaunch();
+    const interrupted = relaunchRequested ? 0 : terminalHost?.interruptLaunch() ?? 0;
     const stopObservation = interrupted > 0 && runtimeHost
       ? runtimeHost.waitUntilStopped()
       : Promise.resolve(true);
@@ -2867,6 +2870,14 @@ ipcMain.handle("octopus:client-doctor", async (_event, token) => {
 });
 
 ipcMain.handle("octopus:boot-status", runtimeBootStatusHandler);
+
+ipcMain.handle("octopus:client-relaunch", async (_event, token) => {
+  getClientAccessController().requireSession(token, ["live"]);
+  if (quitCleanupStarted) throw new Error("The client is already closing.");
+  relaunchRequested = true;
+  setImmediate(() => app.quit());
+  return { relaunching: true };
+});
 
 ipcMain.handle("octopus:runtime-events-subscribe", subscribeRuntimeEvents);
 

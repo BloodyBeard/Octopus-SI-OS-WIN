@@ -1,6 +1,6 @@
 const { randomUUID } = require("node:crypto");
 
-function createClientWindowCloseHost({ authorize, accessTokenForSender, onQuitApproved, reportError = console.error }) {
+function createClientWindowCloseHost({ authorize, accessTokenForSender, onQuitApproved, onQuitCancelled, reportError = console.error }) {
   const windows = new Map();
   let action = null;
   let committed = false;
@@ -22,6 +22,7 @@ function createClientWindowCloseHost({ authorize, accessTokenForSender, onQuitAp
     action = null;
     if (current) for (const record of current.windows) cancelRequest(record, reason);
     current?.complete?.({ accepted: false });
+    if (current?.reason === "quit") onQuitCancelled?.(reason);
   }
 
   function invalidate(record) {
