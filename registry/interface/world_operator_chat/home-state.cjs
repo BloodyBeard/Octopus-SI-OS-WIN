@@ -39,7 +39,7 @@ function renderHomeState({ chats, triggers, scope, nowMs }) {
   const lines = [`Snapshot ${new Date(nowMs).toISOString()}. Detail on demand: list_runs, followup_task, file.read, client.mcp list_widgets.`];
   if (text(scope.status) && scope.status !== "ready") lines.push(`Client scope: ${scope.status}.`);
 
-  const tasks = chats.filter((chat) => chat?.client_surface_role === "task");
+  const tasks = chats.filter((chat) => chat?.client_surface_role === "task" && (chat.writable === true || chat.archived === true));
   const active = tasks.filter((chat) => chat.archived !== true);
   const archived = tasks.length - active.length;
   const failed = active.filter((chat) => taskState(chat) === "failed").length;
@@ -54,7 +54,6 @@ function renderHomeState({ chats, triggers, scope, nowMs }) {
       const project = chat.ee_id && chat.ee_id !== scope.root_ee_id ? projectName(chat.ee_id) || clip(chat.ee_goal, GOAL_CHARS) : "";
       if (project) parts.push(`project ${project}`);
       if (text(chat.agent_name)) parts.push(`agent ${clip(chat.agent_name, TITLE_CHARS)}`);
-      if (chat.writable === false) parts.push("read-only");
       if (Number(chat.updated_at_ms) > 0) parts.push(age(chat.updated_at_ms, nowMs));
       parts.push(text(chat.run_id));
       lines.push(`- ${parts.join(" · ")}`);
@@ -64,12 +63,13 @@ function renderHomeState({ chats, triggers, scope, nowMs }) {
     if (active.length > TASK_LIMIT) lines.push(`- +${active.length - TASK_LIMIT} more`);
   }
 
-  if (triggers.length === 0) {
+  const armed = triggers.filter((trigger) => trigger?.template !== true);
+  if (armed.length === 0) {
     lines.push("Triggers: none.");
   } else {
-    lines.push(`Triggers (${triggers.length}):`);
-    for (const trigger of triggers.slice(0, TRIGGER_LIMIT)) lines.push(`- ${triggerLine(trigger, nowMs)}`);
-    if (triggers.length > TRIGGER_LIMIT) lines.push(`- +${triggers.length - TRIGGER_LIMIT} more`);
+    lines.push(`Triggers (${armed.length}):`);
+    for (const trigger of armed.slice(0, TRIGGER_LIMIT)) lines.push(`- ${triggerLine(trigger, nowMs)}`);
+    if (armed.length > TRIGGER_LIMIT) lines.push(`- +${armed.length - TRIGGER_LIMIT} more`);
   }
 
   const projectList = [...projects.values()].filter((project) => project.eeId !== scope.root_ee_id);
