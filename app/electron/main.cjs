@@ -2609,6 +2609,7 @@ async function resumeRestartInterruptions() {
     }, { afterSeq: restartResume.afterSeq });
     if (restartResume.home === octopusHome) restartResume.afterSeq = Math.max(restartResume.afterSeq, outcome.watermark - 1);
     for (const row of outcome.resumed) void appendClientLog("info", "runtime.restart_resume.sent", row);
+    for (const row of outcome.failed) void appendClientLog("error", "runtime.restart_resume.failed", row);
   } catch (error) {
     void appendClientLog("error", "runtime.restart_resume.failed", { message: error instanceof Error ? error.message : String(error) });
   } finally {

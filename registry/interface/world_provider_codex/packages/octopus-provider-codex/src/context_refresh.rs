@@ -1242,6 +1242,7 @@ impl CodexAppServerInterfaceDriver {
                                 )
                             },
                         )?,
+                        input_changes_context: true,
                         model: Some(current.model.into()),
                         bound_instructions: current.instructions,
                         native_affordances: current.tools,

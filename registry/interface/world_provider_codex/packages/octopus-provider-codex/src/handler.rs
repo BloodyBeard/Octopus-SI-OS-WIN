@@ -3572,16 +3572,11 @@ fn thread_shape_fingerprint(
 fn validate_recovered_thread_coordinates(
     recovered: &CodexContinuityState,
     fingerprint: &str,
-    context_generation: u64,
+    covered_context_generation: u64,
     static_context_fingerprint: &str,
 ) -> Result<(), InterfaceDriverError> {
-    let next_context_generation = recovered.context_generation.checked_add(1).ok_or_else(|| {
-        InterfaceDriverError::FailedClosed(
-            "Codex recovered continuity context generation overflowed".to_string(),
-        )
-    })?;
     if recovered.thread_shape_fingerprint != fingerprint
-        || next_context_generation != context_generation
+        || recovered.context_generation != covered_context_generation
         || recovered.static_context_fingerprint != static_context_fingerprint
     {
         return Err(InterfaceDriverError::FailedClosed(
@@ -3615,6 +3610,7 @@ struct ThreadAcquisition<'a> {
     retired_history: Option<&'a NativeHistoryProof>,
     require_exact_resume: bool,
     context_generation: u64,
+    input_changes_context: bool,
     model: Option<String>,
     bound_instructions: &'a str,
     native_affordances: &'a [DynamicToolSpec],
@@ -3768,12 +3764,18 @@ impl CodexAppServerInterfaceDriver {
             retired_history,
             require_exact_resume,
             context_generation,
+            input_changes_context,
             model,
             bound_instructions,
             native_affordances,
             static_context_fingerprint,
             session_context_available,
         } = acquisition;
+        let covered_context_generation = context_generation
+            .checked_sub(u64::from(input_changes_context))
+            .ok_or_else(|| InterfaceDriverError::FailedClosed(
+                "Codex invocation context generation has no covered predecessor".to_string(),
+            ))?;
         if require_exact_resume && recovered.is_none() {
             return Err(InterfaceDriverError::FailedClosed(
                 "Codex operation requires exact existing thread continuity".to_string(),
@@ -3808,7 +3810,7 @@ impl CodexAppServerInterfaceDriver {
                 || previous.static_context_fingerprint != static_context_fingerprint)
         {
             validate_recovered_thread_coordinates(previous, &previous.thread_shape_fingerprint,
-                context_generation, &previous.static_context_fingerprint)?;
+                covered_context_generation, &previous.static_context_fingerprint)?;
             validate_recovered_reseed_coordinates(previous, context_generation, session_context_available)?;
             let state = self.transport_state.lock().await;
             if let Some(cached) = state.get(scope)
@@ -3831,7 +3833,7 @@ impl CodexAppServerInterfaceDriver {
                         validate_recovered_thread_coordinates(
                             recovered,
                             &fingerprint,
-                            context_generation,
+                            covered_context_generation,
                             static_context_fingerprint,
                         )?;
                         if recovered.context_generation < state.context_generation {
@@ -3873,7 +3875,7 @@ impl CodexAppServerInterfaceDriver {
                     validate_recovered_thread_coordinates(
                         recovered,
                         &fingerprint,
-                        context_generation,
+                        covered_context_generation,
                         static_context_fingerprint,
                     )?;
                     let resume = ClientRequest::ThreadResume {
@@ -6190,7 +6192,7 @@ impl CodexAppServerInterfaceDriver {
             self.model_result_projection()?,
         )?;
         let recovered_result_context = match (&provider_input, recovered.as_ref()) {
-            (ProviderInput::Turn(_), Some(state)) if !codex_continuity_waits_for_result(state) => {
+            (ProviderInput::Turn(_) | ProviderInput::Resume { .. }, Some(state)) if !codex_continuity_waits_for_result(state) => {
                 resumed_model_context(&current_session_context, &effective_source_artifact, state, self.model_result_projection()?)?
             }
             _ => None,
@@ -6947,6 +6949,7 @@ impl CodexAppServerInterfaceDriver {
                     retired_history: None,
                     require_exact_resume: thread_compact_requested || resume_control_id.is_some(),
                     context_generation: invocation_context_generation,
+                    input_changes_context,
                     model: Some(model.clone()),
                     bound_instructions: &bound_instructions,
                     native_affordances,
@@ -6963,7 +6966,7 @@ impl CodexAppServerInterfaceDriver {
             let source = recovered.as_ref().ok_or_else(|| InterfaceDriverError::FailedClosed("native history retirement lost its source".into()))?;
             let (replacement, cold, first) = self.acquire_transport_thread(&scope, ThreadAcquisition {
                 recovered: Some(source), retired_history: Some(&proof), require_exact_resume: false,
-                context_generation: invocation_context_generation, model: Some(model.clone()),
+                context_generation: invocation_context_generation, input_changes_context, model: Some(model.clone()),
                 bound_instructions: &bound_instructions, native_affordances,
                 static_context_fingerprint: &static_context_fingerprint,
                 session_context_available: assembled_context.session_context_available,
@@ -17886,10 +17889,10 @@ mod tests {
         assert_eq!(closed.context_generation, 8);
         assert!(closed.interrupted_pending.is_none());
         validate_recovered_thread_coordinates(
-            &closed, &closed.thread_shape_fingerprint, 9, &closed.static_context_fingerprint,
+            &closed, &closed.thread_shape_fingerprint, 8, &closed.static_context_fingerprint,
         ).unwrap();
         assert!(validate_recovered_thread_coordinates(
-            &closed, &closed.thread_shape_fingerprint, 10, &closed.static_context_fingerprint,
+            &closed, &closed.thread_shape_fingerprint, 9, &closed.static_context_fingerprint,
         ).is_err());
         let mut later_ack = ack.clone();
         later_ack.source_artifact.id = octopus_descriptors::ArtifactId::new("later-stop-ack");
@@ -18070,15 +18073,15 @@ mod tests {
     fn stale_or_unstructured_continuation_fails_closed() {
         let recovered = continuity("world_provider_codex", "run-a", "thr-exact", 7, None);
         assert!(
-            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 7, &"b".repeat(64),)
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 6, &"b".repeat(64),)
                 .is_err()
         );
         assert!(
-            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 8, &"b".repeat(64),)
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 7, &"b".repeat(64),)
                 .is_ok()
         );
         assert!(
-            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 9, &"b".repeat(64),)
+            validate_recovered_thread_coordinates(&recovered, &"a".repeat(64), 8, &"b".repeat(64),)
                 .is_err()
         );
         assert!(validate_recovered_reseed_coordinates(&recovered, 8, true).is_ok());
@@ -18663,7 +18666,7 @@ mod tests {
             assert_eq!(value[CODEX_CONTINUITY_FIELD]["context_generation"], 8);
         }
         let recovered = emit.continuity_snapshot().unwrap();
-        validate_recovered_thread_coordinates(&recovered, &recovered.thread_shape_fingerprint, 9, &recovered.static_context_fingerprint).unwrap();
+        validate_recovered_thread_coordinates(&recovered, &recovered.thread_shape_fingerprint, 8, &recovered.static_context_fingerprint).unwrap();
 
     }
 
@@ -19862,6 +19865,7 @@ while IFS= read -r _; do :; done
                     retired_history: None,
                     require_exact_resume: false,
                     context_generation: 8,
+                    input_changes_context: true,
                     model: Some("gpt-5.5".to_string()),
                     bound_instructions: "role",
                     native_affordances: &[],
@@ -19885,6 +19889,7 @@ while IFS= read -r _; do :; done
                     retired_history: None,
                     require_exact_resume: false,
                     context_generation: 7,
+                    input_changes_context: true,
                     model: Some("gpt-5.5".to_string()),
                     bound_instructions: "role",
                     native_affordances: &[],

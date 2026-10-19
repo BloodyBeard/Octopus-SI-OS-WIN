@@ -1510,20 +1510,26 @@ async function resumeRestartInterruptedTurns(options, request) {
     database.close();
   }
   const resumed = [];
+  const failed = [];
   for (const row of interruptions) {
     const manifestHash = contentHashHex(row.artifact_content, "indexed movement artifact_content");
     const { payload } = await readArtifactPayload({ artifactId: String(row.artifact_id), manifestHash, label: String(row.artifact_label) });
     if (!payload || typeof payload !== "object" || payload.native_terminal_status !== "interrupted"
-      || payload.result_origin !== "native_turn_completion") continue;
-    const result = await submit({
+      || payload.result_origin !== "native_turn_completion" || payload.native_terminal_input_context !== true) continue;
+    const request = {
       interfaceId: safeSegment(row.to_id, "interrupted chat interface"),
       runId: safeSegment(row.runtime_run, "interrupted run"),
       action: "resume",
       controlId: `control_restart_${Number(row.seq)}`,
-    });
-    resumed.push({ runId: result.runId, interfaceId: result.interfaceId, controlId: result.controlId, interruptedSeq: Number(row.seq) });
+    };
+    try {
+      const result = await submit(request);
+      resumed.push({ runId: result.runId, interfaceId: result.interfaceId, controlId: result.controlId, interruptedSeq: Number(row.seq) });
+    } catch (error) {
+      failed.push({ runId: request.runId, interruptedSeq: Number(row.seq), error: error instanceof Error ? error.message : String(error) });
+    }
   }
-  return { watermark, resumed };
+  return { watermark, resumed, failed };
 }
 
 async function assertGenericOperatorChatArtifactAllowed(request) {

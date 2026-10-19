@@ -2946,23 +2946,24 @@ test("only a turn a restart cut off is resumed, once its run has no later chat m
     payloads.set(hash, payload);
     insert.run(seq, "InterfaceOutbound", `world_provider_codex_${run}`, chat, `turn.interrupted.result:${hash}`, "turn.interrupted.result", hash, run, chat);
   };
-  const restart = { native_terminal_status: "interrupted", result_origin: "native_turn_completion" };
+  const restart = { native_terminal_status: "interrupted", result_origin: "native_turn_completion", native_terminal_input_context: true };
+  interrupted(4, "world_operator_chat_d", "run_d", { ...restart, native_terminal_input_context: false });
   interrupted(5, "world_operator_chat_a", "run_a", restart);
   interrupted(6, "world_operator_chat_b", "run_b", { ...restart, result_origin: "interrupted_turn_completion" });
   interrupted(7, "world_operator_chat_c", "run_c", restart);
   insert.run(8, "InterfaceArrival", "world_operator_chat_c", "world_provider_codex_run_c", "operator.message:later", "operator.message", "0".repeat(64), "run_c", "world_operator_chat_c");
   database.close();
   const sent = [];
-  const outcome = await resumeRestartInterruptedTurns({
+  const options = (submitTurnControl) => ({
     octopusHome: () => home,
     readArtifactPayload: async ({ manifestHash }) => ({ payload: payloads.get(manifestHash) }),
-    submitTurnControl: async (request) => { sent.push(request); return { ...request }; },
-  }, { afterSeq: -1 });
+    submitTurnControl,
+  });
+  const outcome = await resumeRestartInterruptedTurns(options(async (request) => { sent.push(request); return { ...request }; }), { afterSeq: -1 });
   assert.deepEqual(sent, [{ interfaceId: "world_operator_chat_a", runId: "run_a", action: "resume", controlId: "control_restart_5" }]);
   assert.equal(outcome.watermark, 9);
-  assert.deepEqual((await resumeRestartInterruptedTurns({
-    octopusHome: () => home,
-    readArtifactPayload: async ({ manifestHash }) => ({ payload: payloads.get(manifestHash) }),
-    submitTurnControl: async (request) => { sent.push(request); return request; },
-  }, { afterSeq: outcome.watermark - 1 })).resumed, []);
+  assert.deepEqual((await resumeRestartInterruptedTurns(options(async (request) => { sent.push(request); return request; }),
+    { afterSeq: outcome.watermark - 1 })).resumed, []);
+  const refused = await resumeRestartInterruptedTurns(options(async () => { throw new Error("refused"); }), { afterSeq: -1 });
+  assert.deepEqual([refused.resumed, refused.failed, refused.watermark], [[], [{ runId: "run_a", interruptedSeq: 5, error: "refused" }], 9]);
 });
