@@ -10232,12 +10232,15 @@ function validateCronSchedule(schedule) {
   const hasInactivity = schedule.inactivity != null;
   if (Number(hasInterval) + Number(hasCron) + Number(hasDueAt) + Number(hasInactivity) !== 1) throw new Error("schedule must declare exactly one of interval_seconds, cron, due_at or inactivity");
   if (hasInactivity) {
-    exactObjectKeys(schedule.inactivity, ["seconds", "interface_match", "within_ee"], ["seconds", "interface_match"], "schedule.inactivity");
+    exactObjectKeys(schedule.inactivity, ["seconds", "interface_match", "exclude_interface_match", "within_ee"], ["seconds", "interface_match"], "schedule.inactivity");
     if (schedule.inactivity.within_ee !== undefined) requiredSafeRegistryId(schedule.inactivity.within_ee, "inactivity.within_ee");
     if (typeof schedule.inactivity.seconds !== "number" || !Number.isFinite(schedule.inactivity.seconds) || schedule.inactivity.seconds < 0.001) throw new Error("inactivity.seconds must be finite and at least 0.001");
-    const selector = schedule.inactivity.interface_match;
-    exactObjectKeys(selector, ["interface_type", "role", "interface_driver_ref"], [], "inactivity.interface_match");
-    if (!Object.keys(selector).length || Object.values(selector).some((value) => typeof value !== "string" || !value)) throw new Error("inactivity.interface_match requires non-empty descriptor fields");
+    for (const field of ["interface_match", "exclude_interface_match"]) {
+      const selector = schedule.inactivity[field];
+      if (field === "exclude_interface_match" && selector === undefined) continue;
+      exactObjectKeys(selector, ["interface_type", "role", "interface_driver_ref"], [], `inactivity.${field}`);
+      if (!Object.keys(selector).length || Object.values(selector).some((value) => typeof value !== "string" || !value)) throw new Error(`inactivity.${field} requires non-empty descriptor fields`);
+    }
     if (schedule.fire_on_start) throw new Error("inactivity schedule requires fire_on_start=false");
   }
   if (hasDueAt) {
@@ -14263,6 +14266,7 @@ async function armSetupTriggers(registryRoot, octopusHomeRoot, entries, hooks = 
         inactivity: {
           seconds: entry.quiet_period_seconds,
           interface_match: schedule.inactivity.interface_match,
+          ...(schedule.inactivity.exclude_interface_match ? { exclude_interface_match: schedule.inactivity.exclude_interface_match } : {}),
           ...(schedule.inactivity.within_ee ? { within_ee: schedule.inactivity.within_ee } : {}),
         },
         timezone: schedule.timezone || "local",

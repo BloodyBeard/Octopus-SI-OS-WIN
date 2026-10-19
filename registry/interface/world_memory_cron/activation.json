@@ -125,6 +125,9 @@
        "interface_type": "world",
        "role": "user",
        "interface_driver_ref": "app_server"
+      },
+      "exclude_interface_match": {
+       "interface_driver_ref": "cron_life"
       }
      },
      "fire_on_start": false,

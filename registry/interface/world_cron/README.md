@@ -22,6 +22,9 @@ An inactivity condition for user-facing tasks is:
       "interface_type": "world",
       "role": "user",
       "interface_driver_ref": "app_server"
+    },
+    "exclude_interface_match": {
+      "interface_driver_ref": "cron_life"
     }
   },
   "fire_on_start": false,
@@ -33,10 +36,15 @@ An inactivity condition for user-facing tasks is:
 
 Every artifact movement with typed run provenance counts, regardless of label.
 A run qualifies when one of its checkpoint bindings names an interface whose
-descriptor matches every selector field. The optional `within_ee` narrows the
-scope to runs whose EE chain contains that EE. The controller, all runs binding
-this trigger and every run it created are excluded. Other sensors and passive
-background runs therefore do not postpone a user-task quiet period. An
+descriptor matches every selector field. The optional `exclude_interface_match`
+removes a run that binds a matching interface or has received an arrival from
+one; the arrival keeps it removed after the binding is retired. With the
+`cron_life` driver ref it keeps time triggers from counting each other's runs as
+the user's work, so two quiet-period triggers cannot wake each other forever.
+The optional `within_ee` narrows the scope to runs whose EE chain contains that
+EE. The controller, all runs binding this trigger and every run it created are
+excluded. Other sensors and passive background runs therefore do not postpone a
+user-task quiet period. An
 unreadable run record contributes no activity and is named on stderr.
 
 The driver folds `movements.jsonl` once at startup, then reads new complete rows

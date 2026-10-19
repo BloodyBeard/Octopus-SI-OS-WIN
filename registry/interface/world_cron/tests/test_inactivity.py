@@ -159,6 +159,25 @@ class InactivityContract(unittest.TestCase):
         self.movement('run_review')
         self.assertEqual(trigger.tick(), due)
 
+    def test_runs_fed_by_excluded_interfaces_are_not_user_activity(self):
+        folder = self.interfaces / 'world_other_trigger'
+        folder.mkdir(parents=True)
+        (folder / 'interface.json').write_text(json.dumps({'id': 'world_other_trigger', 'interface_type': 'world', 'role': 'sensor', 'interface_driver_ref': 'cron_life'}))
+        for name, interfaces in (('run_bound', ['world_user', 'world_other_trigger']), ('run_retired', ['world_user'])):
+            (self.runs / f'{name}.json').write_text(json.dumps({'id': name, 'checkpoints': [{'interface_binding': {'interface': item}} for item in interfaces]}))
+        self.config['schedule']['inactivity']['exclude_interface_match'] = {'interface_driver_ref': 'cron_life'}
+        self.movement('run_a')
+        trigger = self.trigger()
+        due = trigger.tick()
+        self.advance(3500)
+        self.movement('run_bound')
+        self.movement('run_retired', 'cron.current_time:abc', 'InterfaceArrival', 'world_other_trigger')
+        self.movement('run_retired')
+        self.assertEqual(trigger.tick(), due)
+        self.advance(100)
+        trigger.tick()
+        self.assertEqual(self.emissions[0]['last_activity']['run'], 'run_a')
+
     def test_batched_authoring_recovers_lost_ack_without_replaying_completed_writes(self):
         module, schedule = self.module, self.schedule()
         manifest_hash = 'a' * 64

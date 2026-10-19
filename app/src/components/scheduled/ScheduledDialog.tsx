@@ -216,7 +216,7 @@ function inactivityRows(draft: ScheduledEditorDraft, onChange: (draft: Scheduled
     <ScheduleFormRow control={(
       <ScheduleFormMenu<string>
         ariaLabel="Scope"
-        onSelect={(eeId) => onChange({ ...draft, inactivity: { seconds: inactivity.seconds, interface_match: inactivity.interface_match, ...(eeId ? { within_ee: eeId } : {}) } })}
+        onSelect={(eeId) => onChange({ ...draft, inactivity: { seconds: inactivity.seconds, interface_match: inactivity.interface_match, ...(inactivity.exclude_interface_match ? { exclude_interface_match: inactivity.exclude_interface_match } : {}), ...(eeId ? { within_ee: eeId } : {}) } })}
         options={scopes}
         value={inactivity.within_ee ?? ""}
       />

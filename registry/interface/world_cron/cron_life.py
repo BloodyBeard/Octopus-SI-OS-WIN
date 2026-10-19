@@ -2968,14 +2968,17 @@ def run_cron(schedule, reminder):
 
 
 def validate_inactivity(value):
-    exact_keys(value, {"seconds", "interface_match", "within_ee"}, {"seconds", "interface_match"}, "schedule.inactivity")
+    exact_keys(value, {"seconds", "interface_match", "exclude_interface_match", "within_ee"}, {"seconds", "interface_match"}, "schedule.inactivity")
     seconds = value["seconds"]
     if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds < 0.001:
         raise ValueError("inactivity.seconds must be finite and at least 0.001")
-    selector = value["interface_match"]
-    exact_keys(selector, {"interface_type", "role", "interface_driver_ref"}, set(), "inactivity.interface_match")
-    if not selector or any(not isinstance(v, str) or not v for v in selector.values()):
-        raise ValueError("inactivity.interface_match requires non-empty descriptor fields")
+    for field in ("interface_match", "exclude_interface_match"):
+        if field not in value:
+            continue
+        selector = value[field]
+        exact_keys(selector, {"interface_type", "role", "interface_driver_ref"}, set(), f"inactivity.{field}")
+        if not selector or any(not isinstance(v, str) or not v for v in selector.values()):
+            raise ValueError(f"inactivity.{field} requires non-empty descriptor fields")
     if "within_ee" in value and (not isinstance(value["within_ee"], str) or REGISTRY_ID.fullmatch(value["within_ee"]) is None):
         raise ValueError("inactivity.within_ee must be a registry-safe EE id")
 
@@ -2989,6 +2992,8 @@ class RunActivity:
         self.ledger_identity = None
         self.latest_by_run = {}
         self.reported = set()
+        self.excluded_runs = set()
+        self.excluded_sources = {}
 
     def document(self, path):
         info = os.stat(path, follow_symlinks=False)
@@ -3027,6 +3032,7 @@ class RunActivity:
         selected = set()
         seen = set()
         selector = self.schedule["inactivity"]["interface_match"]
+        exclusion = self.schedule["inactivity"].get("exclude_interface_match")
         within_ee = self.schedule["inactivity"].get("within_ee")
         owned_runs = {self.schedule["run"]}
         if os.path.exists(RUN_PLANS_DIR):
@@ -3056,6 +3062,7 @@ class RunActivity:
                     continue
                 if within_ee is not None and within_ee not in self.ee_chain(run.get("ee"), seen):
                     continue
+                matched = excluded = False
                 for interface_id in sorted(interfaces):
                     if REGISTRY_ID.fullmatch(interface_id) is None:
                         raise ValueError(f"invalid interface id '{interface_id}'")
@@ -3067,9 +3074,10 @@ class RunActivity:
                         continue
                     if descriptor.get("id") != interface_id:
                         raise ValueError(f"interface '{interface_id}' does not match its folder")
-                    if all(descriptor.get(key) == value for key, value in selector.items()):
-                        selected.add(run["id"])
-                        break
+                    matched = matched or all(descriptor.get(key) == value for key, value in selector.items())
+                    excluded = excluded or (exclusion is not None and all(descriptor.get(key) == value for key, value in exclusion.items()))
+                if matched and not excluded:
+                    selected.add(run["id"])
             except (OSError, ValueError) as error:
                 self.report(entry.path, error)
         self.documents = {path: cached for path, cached in self.documents.items() if path in seen}
@@ -3112,11 +3120,32 @@ class RunActivity:
                 recorded = movement.get("recorded_at_unix_ms")
                 if not isinstance(run_id, str) or type(recorded) is not int or recorded < 0:
                     raise RuntimeError("inactivity movement has invalid run or time provenance")
+                if movement.get("kind") == "InterfaceArrival" and self.excluded_source(movement.get("from")):
+                    self.excluded_runs.add(run_id)
                 self.latest_by_run[run_id] = {"run": run_id, "seq": self.sequence, "recorded_at_unix_ms": recorded}
             after = os.stat(path, follow_symlinks=False)
             if (after.st_dev, after.st_ino) != identity or after.st_size < info.st_size:
                 raise RuntimeError("inactivity ledger changed during read")
-        return max((row for run_id, row in self.latest_by_run.items() if run_id in selected), key=lambda row: row["seq"], default=None)
+        return max((row for run_id, row in self.latest_by_run.items() if run_id in selected and run_id not in self.excluded_runs), key=lambda row: row["seq"], default=None)
+
+    def excluded_source(self, endpoint):
+        exclusion = self.schedule["inactivity"].get("exclude_interface_match")
+        interface_id = endpoint.get("Interface") if isinstance(endpoint, dict) else None
+        if exclusion is None or not isinstance(interface_id, str) or REGISTRY_ID.fullmatch(interface_id) is None:
+            return False
+        if interface_id not in self.excluded_sources:
+            path = os.path.join(root_slots()["registry_interface_root"], interface_id, "interface.json")
+            try:
+                descriptor = load_json_object(path, "inactivity source", MAX_RUN_RECORD_BYTES)
+            except FileNotFoundError:
+                return False
+            except (OSError, ValueError) as error:
+                self.report(path, error)
+                return False
+            self.excluded_sources[interface_id] = descriptor.get("id") == interface_id and all(
+                descriptor.get(key) == value for key, value in exclusion.items()
+            )
+        return self.excluded_sources[interface_id]
 
 
 class InactivityTrigger:

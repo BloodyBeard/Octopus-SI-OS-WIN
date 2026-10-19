@@ -763,17 +763,6 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         &required_tool_ids,
         &mut updates,
     )?;
-    let source_policy_path = interface_root
-        .join(&request.worker_template_interface_id)
-        .join("policy.json");
-    plan_policy_requirement(
-        source_policy_path,
-        "/ceiling/interfaces",
-        "/ceiling/tools",
-        &external,
-        &[],
-        &mut updates,
-    )?;
     plan_ee_requirements(
         roots,
         parent.ee.as_str(),

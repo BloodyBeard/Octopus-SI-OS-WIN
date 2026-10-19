@@ -15,7 +15,7 @@ export function normalizeScheduledInterface(value: unknown): ScheduledInterfaceP
       : rawSchedule?.type === "once" && Number.isFinite(Date.parse(stringValue(rawSchedule.due_at)))
         ? { type: "once" as const, dueAt: stringValue(rawSchedule.due_at) }
         : rawSchedule?.type === "inactivity" && positiveNumber(rawSchedule.seconds) && objectValue(rawSchedule.interface_match)
-          ? { type: "inactivity" as const, seconds: rawSchedule.seconds, interfaceMatch: rawSchedule.interface_match as Record<string, string>, withinEe: stringValue(rawSchedule.within_ee) }
+          ? { type: "inactivity" as const, seconds: rawSchedule.seconds, interfaceMatch: rawSchedule.interface_match as Record<string, string>, excludeInterfaceMatch: objectValue(rawSchedule.exclude_interface_match) as Record<string, string> | null, withinEe: stringValue(rawSchedule.within_ee) }
           : null;
   const rawTemplate = objectValue(row.run_template);
   const runTemplate = rawTemplate ? {
@@ -139,8 +139,8 @@ export function draftFromScheduledInterface(task: ScheduledInterfaceProjection):
     type: task.schedule?.type ?? "interval",
     intervalSeconds: task.schedule?.type === "interval" ? task.schedule.intervalSeconds : 3600,
     inactivity: task.schedule?.type === "inactivity"
-      ? { seconds: task.schedule.seconds, interface_match: task.schedule.interfaceMatch, ...(task.schedule.withinEe ? { within_ee: task.schedule.withinEe } : {}) }
-      : { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" } },
+      ? { seconds: task.schedule.seconds, interface_match: task.schedule.interfaceMatch, ...(task.schedule.excludeInterfaceMatch ? { exclude_interface_match: task.schedule.excludeInterfaceMatch } : {}), ...(task.schedule.withinEe ? { within_ee: task.schedule.withinEe } : {}) }
+      : { seconds: 3600, interface_match: { interface_type: "world", role: "user", interface_driver_ref: "app_server" }, exclude_interface_match: { interface_driver_ref: "cron_life" } },
     cron: task.schedule?.type === "cron" ? task.schedule.cron : "0 9 * * 1-5",
     dueAt: task.schedule?.type === "once" ? task.schedule.dueAt : "",
     timezone: task.timezone || "local",

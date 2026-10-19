@@ -142,7 +142,12 @@
       "tool.result.corresponds",
       "task.summary.received"
     ],
-    "hard_blocked_tools": []
+    "hard_blocked_tools": [],
+    "artifact_verbs": [
+      "read",
+      "create",
+      "change"
+    ]
   },
   "role_artifacts": [
     "artifact-worker-role-template",

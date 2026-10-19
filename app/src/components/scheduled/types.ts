@@ -64,6 +64,7 @@ export type ScheduledInterfaceProjection = {
     type: "inactivity";
     seconds: number;
     interfaceMatch: Record<string, string>;
+    excludeInterfaceMatch: Record<string, string> | null;
     withinEe: string;
   } | null;
   timezone: string;
