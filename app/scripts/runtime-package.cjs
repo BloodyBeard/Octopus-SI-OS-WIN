@@ -171,6 +171,7 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
       throw new Error(`OpenCodex owner build receipt does not attest the imported life: ${lifeReceiptFile}`);
     }
     const receipt = JSON.parse(fs.readFileSync(receiptFile, "utf8"));
+    const upstream = JSON.parse(fs.readFileSync(path.join(bridgeRoot, "upstream.json"), "utf8"));
     const bridgeBytes = fs.readFileSync(bridge);
     const bridgeDigest = crypto.createHash("sha256").update(bridgeBytes).digest("hex");
     if (
@@ -178,8 +179,10 @@ function createRuntimePackager({ repoRoot, appRoot, outputRoot }) {
       || receipt.executable !== "bin/octopus-opencodex-bridge"
       || receipt.executable_bytes !== bridgeBytes.length
       || receipt.executable_sha256 !== bridgeDigest
-      || receipt?.upstream?.npm_package !== "@bitkyc08/opencodex@2.39.0"
-      || receipt?.upstream?.commit !== "af6113a0381d6fff2e4dce587652825c7eeb6423"
+      || typeof upstream?.npm_package !== "string"
+      || typeof upstream?.commit !== "string"
+      || receipt?.upstream?.npm_package !== upstream.npm_package
+      || receipt?.upstream?.commit !== upstream.commit
     ) {
       throw new Error(`OpenCodex owner build receipt does not attest the packaged bridge: ${receiptFile}`);
     }
