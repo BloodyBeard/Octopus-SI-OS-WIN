@@ -45,6 +45,8 @@ import {
   type WorkerEnvironmentPaneTarget,
 } from "./worker-environment/workerEnvironmentPane";
 import "./chat/chat.css";
+import { useAppearance } from "../appearance";
+import { OctopusSwarm } from "./voice/OctopusSwarm";
 
 export function ChatView({
   workspace: chat,
@@ -69,6 +71,7 @@ export function ChatView({
 }) {
   const headerActionsHost = useWorkspacePaneHeaderActionsHost();
   const clientPreferences = useClientPreferences();
+  const { octopuses } = useAppearance();
   const [summaryOpen, setSummaryOpen] = useState(false);
   const [headerEdgeScrolled, setHeaderEdgeScrolled] = useState(false);
   const [summaryDisplayMode, setSummaryDisplayMode] = useState<"overlay" | "shift" | "gutter">(() => taskSummaryDisplayMode(window.innerWidth));
@@ -594,6 +597,7 @@ export function ChatView({
               dropEnabled={composerVisible}
               emptyLabel={composerVisible ? undefined : chat.activeRun?.archived ? "No messages in this archived task" : "No activity yet"}
               emptyState={chat.activeRunId || !composerVisible ? "empty-task" : "new-task"}
+              backdrop={octopuses ? <OctopusSwarm runs={chat.runs} /> : undefined}
               findActiveIndex={activeFindIndex}
               findQuery={findOpen ? chat.messageQuery : ""}
               messages={chat.renderedMessages}

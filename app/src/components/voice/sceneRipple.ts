@@ -1,0 +1,1 @@
+export const SCENE_RIPPLE_IGNORED_TARGETS = ".chat-composer, button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";

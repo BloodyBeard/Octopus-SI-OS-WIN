@@ -30,7 +30,9 @@ import { HomeCallControls } from "./HomeCallControls";
 import { HomeTurnActivity, homeTurnActivity, homeTurnAwaitsClientResult, homeTurnAwaitsFinalReply, homeTurnTerminalNotice } from "./HomeTurnActivity";
 import { projectHomeVoiceContext } from "./voiceCallArtifacts";
 import { isVoiceCallActive, voicePresentation } from "./voicePresentation";
+import { useAppearance } from "../../appearance";
 import { VoiceOrbScene } from "./VoiceOrbScene";
+import { OctopusOceanScene } from "./OctopusOceanScene";
 import type { VoiceSession } from "./useVoiceSession";
 import {
   buildVoiceWidgetDocuments,
@@ -232,6 +234,7 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   callActiveRef.current = callActive;
   const callState = voicePresentation(session.phase);
   const [callSceneReady, setCallSceneReady] = useState(callActive);
+  const { octopuses: oceanScene } = useAppearance();
   const replyHidden = callActive || callSceneReady;
   const voiceStartDisabledReason = !homeRunId
     ? "Home is not available yet."
@@ -533,9 +536,10 @@ export function VoiceView({ accessProfile, activity, builtinWidgetSources, comma
   return (
     <section className={`voice-view is-${session.phase} is-${viewMode} has-home-composer${environmentOpen ? " has-environment-window" : ""}`} ref={viewRef}>
       <div aria-hidden="true" className="voice-home-scene">
-        <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} sceneSurface={stageMainRef} formationSurface={widgetCanvasRef} rippleSurface={viewRef} sizeProbe={orbProbeRef} />
+        <VoiceOrbScene activity={orbActivity} ambient={!callActive || !callSceneReady} onDispersed={() => { if (!callActiveRef.current) setCallSceneReady(false); }} phase={callSceneReady ? session.phase : "idle"} quietField={oceanScene} sceneSurface={stageMainRef} formationSurface={widgetCanvasRef} rippleSurface={oceanScene ? undefined : viewRef} sizeProbe={orbProbeRef} />
+        {oceanScene ? <OctopusOceanScene activity={orbActivity} calling={callActive} orbProbe={orbProbeRef} rippleSurface={viewRef} /> : null}
       </div>
-      <header className="voice-session-heading">
+      <header className="voice-session-heading" data-ocean-obstacle="">
         <VoiceSessionTitle
           editable={!callActive}
           onChange={setSessionTitle}
@@ -884,6 +888,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
             {responseStreaming || finalVisible ? (
               <article
                 className={`home-response-output${responseStreaming ? " home-response-output--streaming octopus-assistant-streaming" : ""}`}
+                data-ocean-obstacle=""
                 key="assistant-response"
               >
                 {datedResponse ? (
@@ -904,11 +909,11 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
                 {!responseStreaming && attachments.length ? <HomeResponseAttachments attachments={attachments} /> : null}
               </article>
             ) : working || retainedActivity ? (
-              <article className={`home-response-output${working ? " home-response-output--live" : ""}`} key="activity">
+              <article className={`home-response-output${working ? " home-response-output--live" : ""}`} data-ocean-obstacle="" key="activity">
                 <HomeTurnActivity activities={activity} startedAtMs={activityStartedAtMs} toolPresentations={toolPresentations} turnInProgress={working} terminalNotice={activityNotice} />
               </article>
             ) : quiet || loading ? null : (
-              <div className="home-response-empty" key="empty">
+              <div className="home-response-empty" data-ocean-obstacle="" key="empty">
                 <h2>{homeInterfaceReady ? "What would you like to do?" : "Home is not available yet"}</h2>
                 <p>{homeInterfaceReady ? "Talk to Home or send a message." : "The Home connection has not been projected."}</p>
               </div>
@@ -917,7 +922,7 @@ function HomeResponseStage({ operatorRequests, onOperatorRequestResponse, replyH
         </div>
       </motion.div>
       <div className="home-response-stage__composer-footer" ref={composerFooterRef}>
-        <div className="home-response-stage__composer">{composer}</div>
+        <div className="home-response-stage__composer" data-ocean-obstacle="">{composer}</div>
       </div>
     </motion.section>
   );

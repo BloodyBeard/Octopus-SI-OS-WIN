@@ -255,6 +255,17 @@ export function AppearanceSection() {
           />
           <PreferenceRow
             control={(
+              <OcSwitch
+                checked={appearance.octopuses}
+                label="Octopuses"
+                onCheckedChange={(octopuses) => setAppearance({ octopuses })}
+              />
+            )}
+            description="Octopuses swim through the waves on Home and leave when a call starts; on the new-task screen each task's agent swims in its colour"
+            label="Octopuses"
+          />
+          <PreferenceRow
+            control={(
               <NumberUnitField
                 label="Sans font size"
                 max={16}

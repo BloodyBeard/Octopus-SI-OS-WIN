@@ -68,6 +68,23 @@ There are two distinct audio features:
 dictionary, and the floating call controls used outside Home. A selectable
 synthesized voice is offered only when the speech interface declares one.
 
+**Settings → Appearance → Octopuses**, off by default, adds octopuses drawn as
+ASCII glyph tiles that never stop swimming; the Home wave field stays behind
+them, quieter. Each one picks its next destination in open water, away from the
+others and so that together they stay spread across the screen, and steers
+around the visible text, response, and composer instead of crossing them. On
+Home, three monochrome octopuses swim at different depths, harder while Octopus
+is thinking, rippling while it speaks. On the new-task screen, each recent task
+gets one octopus in its agent's colour, brisk while its agent works and slower
+while it waits or is idle. Clicking empty space sends a short wave of digits
+that crumbles as it spreads and passes through the octopuses without moving
+them.
+
+When a voice call starts, the Home octopuses jet away from the orb toward the
+nearest edge and dissolve, while the waves gather into the call orb exactly as
+they do without octopuses. When the call ends and the orb returns to the waves,
+the octopuses swim back in from open edges one after another.
+
 Audio remains part of the artifact contract: microphone or speech interfaces
 produce audio or transcript artifacts; receiving interfaces decide how to
 play or interpret them. An audio artifact can reference binary media without

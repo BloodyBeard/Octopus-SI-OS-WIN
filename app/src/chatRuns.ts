@@ -8,6 +8,7 @@ export const OPERATOR_CHAT_OUTBOUND_LABEL = "interface.artifact.output";
 
 export type ChatRun = {
   voiceContext?: VoiceCallBinding | null;
+  agentColor?: string;
   runId: string;
   title: string;
   chatInterfaceId: string;
@@ -301,6 +302,7 @@ export type ChatRunEventKind =
 
 type RawChatRunRow = {
   voice_context?: unknown;
+  agent_color?: unknown;
   run_id?: unknown;
   title?: unknown;
   chat_interface_id?: unknown;
@@ -406,6 +408,7 @@ export function projectChatRuns(response: { chats?: RawChatRunRow[] }): ChatRun[
       archived: row.archived === true,
       osRootEeId: asString(row.os_root_ee_id),
       voiceContext: asVoiceCallBinding(row.voice_context),
+      agentColor: asString(row.agent_color),
       eeId: asString(row.ee_id),
       eeGoal: asString(row.ee_goal),
       eeTemplateName: asString(row.ee_template_name),

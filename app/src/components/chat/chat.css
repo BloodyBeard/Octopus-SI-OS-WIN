@@ -1758,6 +1758,14 @@ mark.octopus-thread-find-active {
   position: relative;
 }
 
+.octopus-chat-backdrop {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
 .octopus-chat-scroll.is-drag-over::after {
   position: fixed;
   z-index: 20;

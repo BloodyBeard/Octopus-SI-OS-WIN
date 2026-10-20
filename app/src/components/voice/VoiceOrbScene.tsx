@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { useShouldReduceMotion } from "../../appearance";
 import { LIGHT_SCENE_PARTICLE_COLOR } from "../../design-system/sceneParticlePalette";
+import { SCENE_RIPPLE_IGNORED_TARGETS } from "./sceneRipple";
 import type { VoicePhase } from "./useVoiceSession";
 
 export type VoiceOrbActivity =
@@ -14,6 +15,7 @@ type Props = {
   onDispersed?: () => void;
   formationSurface?: RefObject<HTMLElement | null>;
   phase: VoicePhase;
+  quietField?: boolean;
   sceneSurface?: RefObject<HTMLElement | null>;
   rippleSurface?: RefObject<HTMLElement | null>;
   sizeProbe?: RefObject<HTMLElement | null>;
@@ -24,6 +26,7 @@ type OrbFrame = {
   activity: VoiceOrbActivity;
   ambient: boolean;
   phase: VoicePhase;
+  quietField: boolean;
   sphere: number;
 };
 
@@ -37,6 +40,7 @@ type ShaderUniforms = {
   ambient: WebGLUniformLocation;
   background: WebGLUniformLocation;
   departing: WebGLUniformLocation;
+  quietField: WebGLUniformLocation;
   scene: WebGLUniformLocation;
   orbCenter: WebGLUniformLocation;
   error: WebGLUniformLocation;
@@ -66,7 +70,6 @@ const RIPPLE_COUNT = 6;
 const RIPPLE_LIFE_SECONDS = 1.8;
 const FORM_COUNT = 4;
 const FORM_LIFE_SECONDS = 0.9;
-const RIPPLE_IGNORED_TARGETS = ".chat-composer, button, a, input, textarea, select, label, summary, [contenteditable], [role='button'], [role='menu'], [role='menuitem'], [role='dialog'], [role='textbox'], [role='tab'], [role='listbox'], [role='option']";
 
 const VERTEX_SHADER = `#version 300 es
 precision highp float;
@@ -101,6 +104,7 @@ uniform float u_error;
 uniform float u_reveal;
 uniform float u_ambient;
 uniform float u_departing;
+uniform float u_quiet_field;
 uniform vec3 u_background;
 uniform vec4 u_ripples[${RIPPLE_COUNT}];
 uniform vec4 u_forms[${FORM_COUNT}];
@@ -785,6 +789,7 @@ void main() {
     float particleEnvelope = mix(0.45, 0.85, formedCoverage) * max(edgeFade, formation);
     float particleSpark = fineDot * particleDensity * particleEnvelope * max(dustPresence, formation);
     particleLuminance = mix(0.23, 0.76, particleSeed) * particleSpark * mix(1.0, mix(0.525, 1.75, lightSurface), spread)
+      * mix(1.0, mix(0.85, 0.4, lightSurface), u_quiet_field * saturate(spread))
       * (1.0 + formation * mix(2.4, 0.35, lightSurface) + formationEdge * 0.9);
 
     if (rippleWake + rippleCrest > 0.002 && sphere * bodyReveal < 1.0) {
@@ -813,7 +818,7 @@ void main() {
 }
 `;
 
-export function VoiceOrbScene({ activity, ambient = false, animated = true, sceneSurface, formationSurface, onDispersed, phase, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
+export function VoiceOrbScene({ activity, ambient = false, animated = true, sceneSurface, formationSurface, onDispersed, phase, quietField = false, rippleSurface, sizeProbe, sphere = 0.235 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onDispersedRef = useRef(onDispersed);
   onDispersedRef.current = onDispersed;
@@ -825,12 +830,12 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
   sceneSurfaceRef.current = sceneSurface;
   const formationSurfaceRef = useRef(formationSurface);
   formationSurfaceRef.current = formationSurface;
-  const frameRef = useRef<OrbFrame>({ activity, ambient, phase, sphere });
+  const frameRef = useRef<OrbFrame>({ activity, ambient, phase, quietField, sphere });
   const requestRenderRef = useRef<(() => void) | null>(null);
   const [failure, setFailure] = useState("");
   const reducedMotion = useShouldReduceMotion();
   const staticScene = reducedMotion || !animated;
-  frameRef.current = { activity, ambient, phase, sphere };
+  frameRef.current = { activity, ambient, phase, quietField, sphere };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -993,6 +998,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
       gl.uniform1f(uniforms.sphere, measuredSphere > 0 ? measuredSphere : frame.sphere);
       gl.uniform1f(uniforms.reveal, staticScene ? (frame.ambient ? 0 : 1) : smoothStep(0, REVEAL_RISE, revealElapsed));
       gl.uniform1f(uniforms.departing, frame.ambient ? 1 : 0);
+      gl.uniform1f(uniforms.quietField, frame.quietField ? 1 : 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       gl.bindVertexArray(null);
       const dispersed = frame.ambient && (staticScene || revealElapsed === 0);
@@ -1014,7 +1020,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
     };
     const startRipple = (event: PointerEvent) => {
       if (staticScene || event.button !== 0 || !surfaceVisible || !canvasVisible || !pageVisible) return;
-      if (event.target instanceof Element && event.target.closest(RIPPLE_IGNORED_TARGETS)) return;
+      if (event.target instanceof Element && event.target.closest(SCENE_RIPPLE_IGNORED_TARGETS)) return;
       const rect = canvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
       const now = performance.now();
@@ -1147,7 +1153,7 @@ export function VoiceOrbScene({ activity, ambient = false, animated = true, scen
 
   useEffect(() => {
     requestRenderRef.current?.();
-  }, [activity, ambient, phase, sphere]);
+  }, [activity, ambient, phase, quietField, sphere]);
 
   useEffect(() => {
     if (ambient && failure) onDispersedRef.current?.();
@@ -1197,6 +1203,7 @@ function readUniforms(gl: WebGL2RenderingContext, program: WebGLProgram): Shader
     ambient: requiredUniform(gl, program, "u_ambient"),
     background: requiredUniform(gl, program, "u_background"),
     departing: requiredUniform(gl, program, "u_departing"),
+    quietField: requiredUniform(gl, program, "u_quiet_field"),
     error: requiredUniform(gl, program, "u_error"),
     formTiming: requiredUniform(gl, program, "u_form_timing"),
     forms: requiredUniform(gl, program, "u_forms"),

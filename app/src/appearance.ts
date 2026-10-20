@@ -147,6 +147,7 @@ export type AppearanceSettings = {
   density: Density;
   chatTextSize: ChatTextSize;
   cornerSoftness: CornerSoftness;
+  octopuses: boolean;
 };
 
 const STORAGE_KEY = "octopus.appearance.v3";
@@ -186,6 +187,7 @@ export const defaultAppearance: AppearanceSettings = {
   density: "default",
   chatTextSize: "default",
   cornerSoftness: "default",
+  octopuses: false,
 };
 
 const densityScale: Record<Density, number> = { compact: 0.84, default: 1, comfortable: 1.16 };
@@ -280,6 +282,7 @@ function load(): AppearanceSettings {
       density: choice(parsed.density, ["compact", "default", "comfortable"], defaultAppearance.density),
       chatTextSize: choice(parsed.chatTextSize, ["small", "default", "large"], defaultAppearance.chatTextSize),
       cornerSoftness: choice(parsed.cornerSoftness, ["sharp", "default", "round"], defaultAppearance.cornerSoftness),
+      octopuses: booleanValue(parsed.octopuses, defaultAppearance.octopuses),
     };
   } catch {
     return { ...defaultAppearance };
@@ -873,6 +876,7 @@ function normalize(value: AppearanceSettings): AppearanceSettings {
     density: choice(value.density, ["compact", "default", "comfortable"], defaultAppearance.density),
     chatTextSize: choice(value.chatTextSize, ["small", "default", "large"], defaultAppearance.chatTextSize),
     cornerSoftness: choice(value.cornerSoftness, ["sharp", "default", "round"], defaultAppearance.cornerSoftness),
+    octopuses: booleanValue(value.octopuses, defaultAppearance.octopuses),
   };
 }
 

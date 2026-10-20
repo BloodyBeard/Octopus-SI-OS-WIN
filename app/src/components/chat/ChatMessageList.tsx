@@ -55,6 +55,7 @@ type Props = {
   footer: ReactNode;
   dropEnabled?: boolean;
   emptyLabel?: string;
+  backdrop?: ReactNode;
   emptyState?: "new-task" | "loading-task" | "empty-task";
   onOperatorRequestResponse: (message: ChatRenderMessage, response: ChatOperatorResponse) => Promise<void>;
   onOpenAssistantReview: () => void;
@@ -165,6 +166,7 @@ export function ChatMessageList({
   footer,
   dropEnabled = true,
   emptyLabel,
+  backdrop,
   emptyState = "new-task",
   onOperatorRequestResponse,
   onOpenAssistantReview,
@@ -591,9 +593,11 @@ export function ChatMessageList({
         onDrop={dropEnabled ? onDrop : undefined}
         ref={listRef}
       >
-        <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center gap-3 px-panel py-6">
+        {backdrop ? <div aria-hidden="true" className="octopus-chat-backdrop">{backdrop}</div> : null}
+        <div className="relative z-[1] mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center gap-3 px-panel py-6">
           <div
             className="flex max-w-full min-w-0 flex-col items-center gap-4 text-center select-none"
+            data-ocean-obstacle=""
           >
             {footer ? <InteractiveHeroMark /> : <Glyph className="text-token-text-tertiary" name="chat" size={22} />}
             <h1 className="heading-xl font-normal whitespace-pre-wrap text-token-foreground">
@@ -601,7 +605,7 @@ export function ChatMessageList({
             </h1>
           </div>
           {footer ? (
-            <div className="mt-6 flex min-w-0 flex-col gap-2">{footer}</div>
+            <div className="mt-6 flex min-w-0 flex-col gap-2" data-ocean-obstacle="">{footer}</div>
           ) : null}
         </div>
       </div>

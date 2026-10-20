@@ -369,7 +369,7 @@ test("Home sequences reply fade before the call scene and preserves drafts, repl
     "../../toasts": { appToast: { warning: noop, info: () => assert.fail("Routine voice context must not toast") }, useAppErrorToast: error => assert.doesNotMatch(error, /Exact (call|device) diagnostic/) },
     "../chat/OperatorRequestSurface": { OperatorRequestSurface: () => null },
     "../chat/MessageContent": { MessageContent: ({ text }) => React.createElement("span", null, text) },
-    "../../appearance": { useShouldReduceMotion: () => true },
+    "../../appearance": { useShouldReduceMotion: () => true, useAppearance: () => ({ octopuses: false }) },
     "../IconGlyphs": { Glyph: ({ name }) => React.createElement("svg", { "data-glyph": name }) },
     "../CadencedShimmerText": { CadencedShimmerText: ({ children, active }) => React.createElement("span", { "data-active": active }, children) },
     "../chat/ChatComposer": { ChatComposer: composer },
