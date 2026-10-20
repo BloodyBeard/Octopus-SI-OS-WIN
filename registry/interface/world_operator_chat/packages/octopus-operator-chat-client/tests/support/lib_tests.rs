@@ -239,6 +239,7 @@
             external_inputs: vec![ExternalInputSeed {
                 checkpoint_id: "cp_home_project_coordination".to_string(),
                 interface_id: "system_home_project_coordination".to_string(),
+                artifact_names: Vec::new(),
                 required_verified_artifacts: Vec::new(),
             }],
             external_relays: Vec::new(),
@@ -1838,6 +1839,7 @@
             external_inputs: vec![ExternalInputSeed {
                 checkpoint_id: "cp_scheduled_probe".to_string(),
                 interface_id: "world_cron".to_string(),
+                artifact_names: vec!["cron.current_time.scheduledprobe".to_string()],
                 required_verified_artifacts: Vec::new(),
             }],
             external_relays: vec![ExternalRelaySeed {
@@ -2025,15 +2027,11 @@
             .iter()
             .find(|checkpoint| checkpoint.id.as_str() == "cp_scheduled_probe")
             .expect("scheduled external checkpoint");
-        assert_eq!(
-            checkpoint
-                .interface_binding
-                .as_ref()
-                .unwrap()
-                .interface
-                .as_str(),
-            "world_cron"
-        );
+        let scheduled_binding = checkpoint.interface_binding.as_ref().unwrap();
+        assert_eq!(scheduled_binding.interface.as_str(), "world_cron");
+        assert!(scheduled_binding.admits("cron.current_time.scheduledprobe"));
+        assert!(!scheduled_binding.admits("cron.current_time.otherfiring"));
+        assert!(!scheduled_binding.admits("cron.current_time"));
         assert_eq!(
             checkpoint
                 .outbound_interface_bindings

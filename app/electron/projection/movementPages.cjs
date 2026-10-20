@@ -243,26 +243,42 @@ function movementPagesProjection(store) {
     return { rows, count };
   }
 
-  async function indexedArtifactLabelRows(projection, label) {
+  function artifactLabelMatches(value, label, namespace = false) {
+    return value === label || (namespace && typeof value === "string" && value.startsWith(`${label}.`));
+  }
+
+  async function indexedArtifactLabelRows(projection, label, { namespace = false } = {}) {
     const index = await openValidatedLedgerIndex(projection);
     if (!index) return null;
     try {
-      const indexed = index.database.prepare(
-        `SELECT
-           seq, lamport, recorded_at_unix_ms, trace, kind, mark,
-           from_kind, from_id, to_kind, to_id,
-           artifact_id, artifact_content,
-           runtime_run, runtime_checkpoint, runtime_interface
-         FROM movements
-         WHERE artifact_label = ?
-         ORDER BY seq ASC`,
-      ).all(label);
+      const indexed = namespace
+        ? index.database.prepare(
+          `SELECT
+             seq, lamport, recorded_at_unix_ms, trace, kind, mark,
+             from_kind, from_id, to_kind, to_id,
+             artifact_id, artifact_content,
+             runtime_run, runtime_checkpoint, runtime_interface
+           FROM movements
+           WHERE artifact_label = ? OR (artifact_label >= ? AND artifact_label < ?)
+           ORDER BY seq ASC`,
+        ).all(label, `${label}.`, `${label}/`)
+        : index.database.prepare(
+          `SELECT
+             seq, lamport, recorded_at_unix_ms, trace, kind, mark,
+             from_kind, from_id, to_kind, to_id,
+             artifact_id, artifact_content,
+             runtime_run, runtime_checkpoint, runtime_interface
+           FROM movements
+           WHERE artifact_label = ?
+           ORDER BY seq ASC`,
+        ).all(label);
       const rows = indexed.map((row) => normalizeIndexedProjectionMovement(row, index.ledgerPath));
       const tail = await readArtifactLabelLedgerTail(
         index.ledgerPath,
         index.durableEndOffset,
         index.watermark,
         label,
+        namespace,
       );
       if (tail === null) return null;
       rows.push(...tail);
@@ -275,7 +291,7 @@ function movementPagesProjection(store) {
     }
   }
 
-  async function readArtifactLabelLedgerTail(ledgerPath, startOffset, expectedSeq, label) {
+  async function readArtifactLabelLedgerTail(ledgerPath, startOffset, expectedSeq, label, namespace = false) {
     const stat = await fs.stat(ledgerPath);
     if (stat.size < startOffset) return null;
     if (stat.size === startOffset) return [];
@@ -295,7 +311,7 @@ function movementPagesProjection(store) {
         const seq = indexedUnsignedInteger(movement?.seq);
         if (seq === null || seq !== expectedSeq) return null;
         expectedSeq += 1;
-        if (ledgerArtifactLabel(movement) !== label) continue;
+        if (!artifactLabelMatches(ledgerArtifactLabel(movement), label, namespace)) continue;
         rows.push({
           ...movement,
           kind: movementKindText(movement.kind),
@@ -309,5 +325,5 @@ function movementPagesProjection(store) {
     return rows;
   }
 
-  return { filteredMovementRows, indexedArtifactLabelRows, readArtifactLabelLedgerTail, readFilteredLedgerTail, readIndexedFilteredMovements, readIndexedMovementPage, readMovementLedgerTailPage, readMovementPage };
+  return { artifactLabelMatches, filteredMovementRows, indexedArtifactLabelRows, readArtifactLabelLedgerTail, readFilteredLedgerTail, readIndexedFilteredMovements, readIndexedMovementPage, readMovementLedgerTailPage, readMovementPage };
 }

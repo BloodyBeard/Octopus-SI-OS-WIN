@@ -53,7 +53,9 @@ Missing initial activity does not manufacture a deadline. A quiet period that
 elapsed while the interface was stopped fires on restart. Polling resolution is
 five seconds; the deadline uses the ledger's `recorded_at_unix_ms`.
 
-Each quiet episode delivers one `cron.current_time` artifact with
+Each quiet episode delivers one `cron.current_time` artifact (a `new_run`
+target names it `cron.current_time.<suffix>`, and the task it creates admits
+only that name) with
 `schedule_kind: "inactivity"`, its due time, last activity's run and sequence,
 `activity_window` (the ledger sequences after the previous delivery through the
 last activity) and the configured prompt. `cron-inactivity-state.json` records

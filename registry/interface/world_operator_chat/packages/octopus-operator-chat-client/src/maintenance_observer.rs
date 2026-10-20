@@ -533,6 +533,7 @@ pub fn plan_maintenance_observer(
         &[ExternalInputSeed {
             checkpoint_id: "cp_memory_projection_initial".into(),
             interface_id: experience_id.clone(),
+            artifact_names: Vec::new(),
             required_verified_artifacts: vec![projected_requirement.clone()],
         }],
         &[],
@@ -711,6 +712,20 @@ fn created_private_owners(
     Ok(json!({"schema_version":1,"private_interface_ids":interfaces,"private_tool_ids":tools}))
 }
 
+fn admitted_label_family(inputs: &[&BoundCheckpointTemplate], label: &str) -> Vec<String> {
+    let mut family = BTreeSet::new();
+    let descendant = format!("{label}.");
+    for input in inputs {
+        if input.interface_binding.admits(label) {
+            family.insert(label.to_string());
+        }
+        if let BindingArtifactPolicy::Allow { names, .. } = &input.interface_binding.config.artifact_policy {
+            family.extend(names.iter().filter(|name| name.starts_with(&descendant)).cloned());
+        }
+    }
+    family.into_iter().collect()
+}
+
 fn projection_contracts(
     request: &MaintenanceObserverRequest,
     topology: &BoundRunAuthoringTopology,
@@ -758,11 +773,13 @@ fn projection_contracts(
         })
         .collect::<Vec<_>>();
     for rule in &mut rules {
-        rule.labels.retain(|label| {
-            inputs
-                .iter()
-                .any(|input| input.interface_binding.admits(label))
-        });
+        rule.labels = rule
+            .labels
+            .iter()
+            .flat_map(|label| admitted_label_family(&inputs, label))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     }
     rules.retain(|rule| !rule.labels.is_empty());
     if rules.is_empty() {

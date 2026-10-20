@@ -31,11 +31,11 @@ function scheduledInterfacesProjection(store) {
         .some((activation) => activationDriverRef(activation) === "cron_life")
     ));
     const indexedEvidence = descriptors.length > 0
-      ? await store.indexedArtifactLabelRows(projection, "cron.current_time")
+      ? await store.indexedArtifactLabelRows(projection, "cron.current_time", { namespace: true })
       : [];
     if (indexedEvidence === null) await store.refreshLedgerProjection(projection);
     const evidenceRows = (indexedEvidence ?? projection.ledgerRows).filter((movement) => (
-      ledgerArtifactLabel(movement) === "cron.current_time"
+      store.artifactLabelMatches(ledgerArtifactLabel(movement), "cron.current_time", true)
       && isAdmittedInterfaceArtifactMovement(movement)
     ));
     for (const descriptor of descriptors) {

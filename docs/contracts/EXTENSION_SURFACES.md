@@ -166,7 +166,10 @@ run. Selection is a descriptor match, optionally narrowed to one EE subtree;
 a second match excludes runs bound to or fed by matching interfaces, which is
 how a time trigger declares that other triggers' runs are not the user's work.
 Its own target runs are excluded, a due period fires exactly once, and
-admission evidence survives restart. Selection, timing and cursor state belong
+admission evidence survives restart. A trigger that starts a new task per
+firing names each firing under `cron.current_time` with its own suffix, and the
+task it creates admits only that name, so later firings never reach earlier
+tasks. Selection, timing and cursor state belong
 to the interface package; the client projects these activations as Triggers.
 A disabled activation that no run binds is a template, shipped by a package:
 Triggers clones it, with private copies of its controller interfaces and

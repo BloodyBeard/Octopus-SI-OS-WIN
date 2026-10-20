@@ -47,6 +47,8 @@ ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 REGISTRY_ID = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 TOOL_ID = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
+TIME_LABEL = "cron.current_time"
+TASK_TIME_LABEL = re.compile(r"cron\.current_time\.[0-9a-f]{24}\Z")
 
 _NEXT_REQUEST_ID = 1
 _TEMP_SEQUENCE = 1
@@ -1362,7 +1364,7 @@ def validate_task_authoring_attempt(schedule, attempt):
         raise ValueError("cron task authoring attempt artifact identity is invalid")
 
 
-def task_plan_request(schedule, manifest_hash):
+def task_plan_request(schedule, manifest_hash, label):
     target = schedule["target"]
     roots = scheduled_registry_roots(schedule)
     suffix = manifest_hash[:24]
@@ -1387,6 +1389,7 @@ def task_plan_request(schedule, manifest_hash):
             {
                 "checkpoint_id": checkpoint_id,
                 "interface_id": INTERFACE_ID,
+                "artifact_names": [label],
             }
         ],
         "existing_run_record": None,
@@ -1400,10 +1403,10 @@ def task_plan_request(schedule, manifest_hash):
     }
 
 
-def invoke_task_planner(schedule, manifest_hash):
+def invoke_task_planner(schedule, manifest_hash, label):
     roots = scheduled_registry_roots(schedule)
     executable = roots["task_planner_executable"]
-    request = task_plan_request(schedule, manifest_hash)
+    request = task_plan_request(schedule, manifest_hash, label)
     try:
         completed = subprocess.run(
             [executable],
@@ -1585,7 +1588,7 @@ def validate_task_plan_output(schedule, manifest_hash, plan):
         raise ValueError("scheduled task time checkpoint has a mismatched route")
 
 
-def load_or_prepare_task_plan(schedule, manifest_hash):
+def load_or_prepare_task_plan(schedule, manifest_hash, label):
     private_directory(RUN_PLANS_DIR)
     path = task_plan_path(manifest_hash)
     try:
@@ -1598,7 +1601,7 @@ def load_or_prepare_task_plan(schedule, manifest_hash):
         return validate_task_plan(schedule, manifest_hash, state)
     except FileNotFoundError:
         pass
-    plan = invoke_task_planner(schedule, manifest_hash)
+    plan = invoke_task_planner(schedule, manifest_hash, label)
     state = {
         "schema_version": 1,
         "schedule_fingerprint": schedule["fingerprint"],
@@ -2622,8 +2625,8 @@ def finish_new_run_authoring_attempt(schedule, task_state, writes):
         time.sleep(min(0.02, remaining))
 
 
-def ensure_new_run_target(schedule, manifest_hash):
-    task_state = load_or_prepare_task_plan(schedule, manifest_hash)
+def ensure_new_run_target(schedule, manifest_hash, label):
+    task_state = load_or_prepare_task_plan(schedule, manifest_hash, label)
     writes = task_plan_writes(schedule, task_state["plan"])
     run_path = os.path.join(root_slots()["run_records_root"], f"{schedule['run']}.json")
     current = read_regular_file_bounded(
@@ -2677,7 +2680,19 @@ def ensure_time_frontier(schedule):
         raise DeliveryRefused(rearm_verdict)
 
 
-def prepare_time_artifact(moment, reminder, schedule_kind, scheduled_unix_ns=None, due_at=None, activity=None, window=None):
+def time_artifact_label(schedule, payload):
+    if schedule["target"]["mode"] == "new_run":
+        return f"{TIME_LABEL}.{octopus_content_hash(payload)[:24]}"
+    return TIME_LABEL
+
+
+def checked_time_artifact_label(label, context):
+    if label != TIME_LABEL and (not isinstance(label, str) or TASK_TIME_LABEL.fullmatch(label) is None):
+        raise ValueError(f"{context} has an invalid artifact label")
+    return label
+
+
+def prepare_time_artifact(schedule, moment, reminder, schedule_kind, scheduled_unix_ns=None, due_at=None, activity=None, window=None):
     payload_value = {
         "source": "cron",
         "source_interface": INTERFACE_ID,
@@ -2702,8 +2717,9 @@ def prepare_time_artifact(moment, reminder, schedule_kind, scheduled_unix_ns=Non
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
-    manifest_path, manifest_hash = materialize_artifact("cron.current_time", payload)
-    return "cron.current_time", manifest_path, manifest_hash
+    label = time_artifact_label(schedule, payload)
+    manifest_path, manifest_hash = materialize_artifact(label, payload)
+    return label, manifest_path, manifest_hash
 
 
 def deliver_time_artifact(schedule, label, manifest_path, manifest_hash):
@@ -2712,7 +2728,7 @@ def deliver_time_artifact(schedule, label, manifest_path, manifest_hash):
         admitted = find_admitted_arrival_seq(artifact_id)
         if admitted is not None:
             return admitted
-        ensure_new_run_target(schedule, manifest_hash)
+        ensure_new_run_target(schedule, manifest_hash, label)
         return hand_artifact_idempotent(manifest_path, label, manifest_hash)
     ensure_time_frontier(schedule)
     try:
@@ -2727,6 +2743,7 @@ def deliver_time_artifact(schedule, label, manifest_path, manifest_hash):
 
 def emit_time_artifact(moment, reminder, schedule_kind, schedule):
     label, manifest_path, manifest_hash = prepare_time_artifact(
+        schedule,
         moment,
         reminder,
         schedule_kind,
@@ -2769,8 +2786,7 @@ def load_one_shot_state(schedule):
         raise ValueError("cron one-shot configuration changed for an already prepared deadline")
     if state["status"] not in {"prepared", "admitted"}:
         raise ValueError("cron one-shot state has an invalid status")
-    if state["artifact_label"] != "cron.current_time":
-        raise ValueError("cron one-shot state has an invalid artifact label")
+    checked_time_artifact_label(state["artifact_label"], "cron one-shot state")
     if not isinstance(state["manifest_hash"], str) or re.fullmatch(r"[0-9a-f]{64}", state["manifest_hash"]) is None:
         raise ValueError("cron one-shot state has an invalid manifest hash")
     sequence = state["admitted_seq"]
@@ -2787,7 +2803,7 @@ def deliver_one_shot_time_artifact(schedule, label, manifest_path, manifest_hash
     if admitted is not None:
         return admitted
     if schedule["target"]["mode"] == "new_run":
-        ensure_new_run_target(schedule, manifest_hash)
+        ensure_new_run_target(schedule, manifest_hash, label)
     else:
         frontier = ensure_scheduled_run(schedule)
         if frontier_has_arrival(schedule, frontier):
@@ -2804,7 +2820,7 @@ def run_one_shot(schedule, reminder):
                 break
             time.sleep(remaining)
         label, manifest_path, manifest_hash = prepare_time_artifact(
-            now(schedule), reminder, "one_shot", schedule["due_unix_ns"],
+            schedule, now(schedule), reminder, "one_shot", schedule["due_unix_ns"],
             due_at=schedule["due_at"],
         )
         state = {
@@ -2841,6 +2857,7 @@ def emit_interval_due(schedule, reminder, state):
         manifest_path = prepared_manifest_path(label, manifest_hash)
     else:
         label, manifest_path, manifest_hash = prepare_time_artifact(
+            schedule,
             now(schedule),
             reminder,
             "interval",
@@ -2876,6 +2893,7 @@ def emit_fire_on_start(moment, reminder, schedule_kind, schedule):
         manifest_path = prepared_manifest_path(label, manifest_hash)
     else:
         label, manifest_path, manifest_hash = prepare_time_artifact(
+            schedule,
             moment,
             reminder,
             schedule_kind,
@@ -3150,7 +3168,7 @@ class InactivityTrigger:
         except FileNotFoundError:
             self.state = {"schema_version": 1, "status": "idle", "consumed_seq": -1, "activity": None, "manifest_hash": None, "admitted_seq": None}
         state = self.state
-        exact_keys(state, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq", "schedule_fingerprint", "inactivity", "next_due_unix_ms"}, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq"}, "inactivity state")
+        exact_keys(state, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq", "schedule_fingerprint", "inactivity", "next_due_unix_ms", "artifact_label"}, {"schema_version", "status", "consumed_seq", "activity", "manifest_hash", "admitted_seq"}, "inactivity state")
         if state.get("schema_version") != 1 or state.get("status") not in {"idle", "waiting", "prepared", "admitted"}:
             raise ValueError("inactivity state has an invalid schema or status")
         if type(state.get("consumed_seq")) is not int or state["consumed_seq"] < -1:
@@ -3161,7 +3179,7 @@ class InactivityTrigger:
         if state["status"] in {"prepared", "admitted"}:
             if activity is None or not isinstance(state.get("manifest_hash"), str) or re.fullmatch(r"[0-9a-f]{64}", state["manifest_hash"]) is None:
                 raise ValueError("inactivity state has invalid prepared evidence")
-            artifact_id, _ = arrival_identity("cron.current_time", state["manifest_hash"])
+            artifact_id, _ = arrival_identity(self.artifact_label(), state["manifest_hash"])
             admitted = find_admitted_arrival_seq(artifact_id, state.get("admitted_seq"))
             if state["status"] == "admitted" and (type(state.get("admitted_seq")) is not int or admitted is None):
                 raise RuntimeError("inactivity completion is missing its recorded arrival evidence")
@@ -3171,6 +3189,9 @@ class InactivityTrigger:
 
     def save(self):
         atomic_write_json(INACTIVITY_STATE_PATH, self.state)
+
+    def artifact_label(self):
+        return checked_time_artifact_label(self.state.get("artifact_label", TIME_LABEL), "inactivity state")
 
     def tick(self):
         latest = self.activity.latest()
@@ -3183,28 +3204,31 @@ class InactivityTrigger:
         if latest is None or latest["seq"] <= state["consumed_seq"]:
             if state["status"] not in {"idle", "admitted"}:
                 state.update(status="idle", activity=None, next_due_unix_ms=None, manifest_hash=None, admitted_seq=None)
+                state.pop("artifact_label", None)
                 self.save()
             return None
         if state.get("activity") != latest or state.get("schedule_fingerprint") != self.schedule["fingerprint"]:
             state.update(status="waiting", activity=latest, schedule_fingerprint=self.schedule["fingerprint"], inactivity=self.schedule["inactivity"], next_due_unix_ms=due, manifest_hash=None, admitted_seq=None)
+            state.pop("artifact_label", None)
             self.save()
         if time.time_ns() // 1_000_000 < due:
             return due
         window = {"after_seq": state["consumed_seq"] if state["consumed_seq"] >= 0 else None, "through_seq": latest["seq"]}
-        _, _, manifest_hash = prepare_time_artifact(now(self.schedule), self.reminder, "inactivity", due * 1_000_000, activity=latest, window=window)
-        state.update(status="prepared", manifest_hash=manifest_hash)
+        label, _, manifest_hash = prepare_time_artifact(self.schedule, now(self.schedule), self.reminder, "inactivity", due * 1_000_000, activity=latest, window=window)
+        state.update(status="prepared", manifest_hash=manifest_hash, artifact_label=label)
         self.save()
         return self.deliver()
 
     def deliver(self):
         state = self.state
         manifest_hash = state["manifest_hash"]
-        manifest_path = prepared_manifest_path("cron.current_time", manifest_hash)
+        label = self.artifact_label()
+        manifest_path = prepared_manifest_path(label, manifest_hash)
         if self.schedule["target"]["mode"] == "new_run":
-            ensure_new_run_target(self.schedule, manifest_hash)
+            ensure_new_run_target(self.schedule, manifest_hash, label)
         else:
             ensure_time_frontier(self.schedule)
-        admitted = hand_artifact_idempotent(manifest_path, "cron.current_time", manifest_hash)
+        admitted = hand_artifact_idempotent(manifest_path, label, manifest_hash)
         state.update(status="admitted", consumed_seq=state["activity"]["seq"], admitted_seq=admitted, next_due_unix_ms=None)
         self.save()
         return None

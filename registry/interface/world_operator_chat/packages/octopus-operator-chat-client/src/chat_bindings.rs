@@ -66,6 +66,17 @@ pub(crate) fn operator_chat_input_binding_names(
     Ok(binding)
 }
 
+pub(crate) fn external_input_binding(
+    input: &ExternalInputSeed,
+) -> Result<AuthoredInterfaceBinding, String> {
+    if input.artifact_names.is_empty() {
+        return Ok(AuthoredInterfaceBinding::all(InterfaceId::new(&input.interface_id)));
+    }
+    operator_chat_input_binding_names(&input.interface_id, &input.artifact_names).map_err(|error| {
+        format!("external input checkpoint '{}' artifact names: {error}", input.checkpoint_id)
+    })
+}
+
 pub(crate) fn previous_external_route_templates(
     profile: &OctopusOsAuthoringProfile,
     model_interface_id: &str,
@@ -76,7 +87,7 @@ pub(crate) fn previous_external_route_templates(
             input.checkpoint_id.clone(),
             bound_checkpoint_template(
                 BoundCheckpointRole::Stable,
-                AuthoredInterfaceBinding::all(InterfaceId::new(&input.interface_id)),
+                external_input_binding(input)?,
                 vec![AuthoredInterfaceBinding::all(InterfaceId::new(
                     model_interface_id,
                 ))],

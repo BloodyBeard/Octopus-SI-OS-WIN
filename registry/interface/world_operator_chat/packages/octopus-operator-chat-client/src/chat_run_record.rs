@@ -342,13 +342,16 @@ pub(crate) fn build_chat_run_record(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(checkpoint(
+            let mut input_checkpoint = checkpoint(
                 input.checkpoint_id.clone(),
                 Some(&input.interface_id),
                 vec![&identity.model_interface_id],
                 &context_artifacts,
                 required,
-            ))
+            );
+            input_checkpoint["interface_binding"] = serde_json::to_value(external_input_binding(input)?)
+                .map_err(|error| format!("external input checkpoint '{}' binding did not encode: {error}", input.checkpoint_id))?;
+            Ok(input_checkpoint)
         })
         .collect::<Result<Vec<_>, String>>()?;
     let external_relay_checkpoints = external_relays

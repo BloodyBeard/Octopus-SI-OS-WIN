@@ -180,7 +180,7 @@ class InactivityContract(unittest.TestCase):
 
     def test_batched_authoring_recovers_lost_ack_without_replaying_completed_writes(self):
         module, schedule = self.module, self.schedule()
-        manifest_hash = 'a' * 64
+        manifest_hash, label = 'a' * 64, 'cron.current_time.' + 'b' * 24
         state = {'schema_version': 1, 'schedule_fingerprint': schedule['fingerprint'],
                  'manifest_hash': manifest_hash, 'plan': {},
                  'plan_hash': module.octopus_content_hash(module.canonical_json({})),
@@ -208,14 +208,34 @@ class InactivityContract(unittest.TestCase):
             return {'admitted': {'seq': seq}}
         with patch.object(module, 'load_or_prepare_task_plan', lambda *_: state), patch.object(module, 'task_plan_writes', lambda *_: writes), patch.object(module, 'validate_task_plan_output'), patch.object(module, 'send_authoring_manifest', publish):
             with self.assertRaisesRegex(RuntimeError, 'lost publication acknowledgement'):
-                module.ensure_new_run_target(schedule, manifest_hash)
-            module.ensure_new_run_target(schedule, manifest_hash)
-            module.ensure_new_run_target(schedule, manifest_hash)
+                module.ensure_new_run_target(schedule, manifest_hash, label)
+            module.ensure_new_run_target(schedule, manifest_hash, label)
+            module.ensure_new_run_target(schedule, manifest_hash, label)
         self.assertEqual(len(calls), 3)
         self.assertTrue(module.task_writes_complete(writes))
         saved = json.loads(Path(module.task_plan_path(manifest_hash)).read_text())
         self.assertIsNone(saved['authoring_attempt'])
         self.assertEqual(len(saved['controller_frontier_hashes']), 1)
+
+    def test_a_new_task_firing_names_itself_and_its_task_input_admits_only_that_name(self):
+        self.config["target"] = json.loads((test_one_shot.OWNER.parent / "world_system_review" / "activation.json").read_text())["activations"][0]["config"]["target"]
+        self.config["target"].pop("interface_private_state_root", None)
+        slots = json.loads(os.environ["OCTOPUS_ROOT_SLOTS_JSON"])
+        registry = self.root / "registry"
+        slots.update({f"registry_{kind}_root": str(registry / kind) for kind in ("interface", "ee_template", "tool", "worker_environment_kind")})
+        slots.update(ee_instances_root=str(self.root / "ee_instances"), interface_life_install_root=str(self.root / "install"))
+        os.environ["OCTOPUS_ROOT_SLOTS_JSON"] = json.dumps(slots)
+        self.module = self.reload()
+        schedule = self.schedule()
+        moment = self.module.now(schedule)
+        first, _, first_hash = self.module.prepare_time_artifact(schedule, moment, "Improve what is useful.", "inactivity", 1)
+        second, _, _ = self.module.prepare_time_artifact(schedule, moment, "Improve what is useful.", "inactivity", 2)
+        self.assertRegex(first, r"^cron\.current_time\.[0-9a-f]{24}$")
+        self.assertNotEqual(first, second)
+        request = self.module.task_plan_request(schedule, first_hash, first)
+        self.assertEqual([entry["artifact_names"] for entry in request["external_inputs"]], [[first]])
+        existing = dict(schedule, target={"mode": "existing_run"})
+        self.assertEqual(self.module.prepare_time_artifact(existing, moment, "", "inactivity", 1)[0], "cron.current_time")
 
 
 if __name__ == "__main__":

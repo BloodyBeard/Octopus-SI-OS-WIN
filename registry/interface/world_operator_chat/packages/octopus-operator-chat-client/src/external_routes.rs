@@ -31,6 +31,7 @@ pub(crate) fn validate_external_route_shapes(
             &input.required_verified_artifacts,
             &format!("external input checkpoint '{checkpoint}'"),
         )?;
+        external_input_binding(input)?;
         interfaces.insert(interface);
     }
     for relay in relays {

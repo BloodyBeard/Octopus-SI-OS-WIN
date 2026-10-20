@@ -114,6 +114,8 @@ pub struct ExternalInputSeed {
     pub checkpoint_id: String,
     pub interface_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_verified_artifacts: Vec<RequiredVerifiedArtifact>,
 }
 

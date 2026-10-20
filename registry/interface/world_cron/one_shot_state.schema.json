@@ -14,7 +14,7 @@
       "description": "Exact Unix nanoseconds parsed from schedule.due_at, encoded as a decimal string for lossless JavaScript reads; also the receipt filename stem. Do not convert through Number."
     },
     "status": { "enum": ["prepared", "admitted"] },
-    "artifact_label": { "const": "cron.current_time" },
+    "artifact_label": { "type": "string", "pattern": "^cron\\.current_time(\\.[0-9a-f]{24})?$" },
     "manifest_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "admitted_seq": { "type": ["integer", "null"], "minimum": 0 }
   },

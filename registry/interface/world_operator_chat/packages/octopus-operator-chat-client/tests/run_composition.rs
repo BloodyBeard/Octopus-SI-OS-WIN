@@ -483,7 +483,7 @@ fn selected_external_routes_preserve_checkpoints_profiles_and_scoped_dependencie
     assert!(!plan_run_composition(&omitted).unwrap().run_write.content.contains("role-system_worker_unselected"));
     request.external_inputs = vec![ExternalInputSeed {
         checkpoint_id: "selected_input".into(), interface_id: "system_worker_unselected".into(),
-        required_verified_artifacts: Vec::new(),
+        artifact_names: Vec::new(), required_verified_artifacts: Vec::new(),
     }];
     request.external_relays = vec![ExternalRelaySeed {
         checkpoint_id: "selected_relay".into(), interface_id: "system_worker_parent".into(),
