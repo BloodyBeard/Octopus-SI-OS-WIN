@@ -71,7 +71,7 @@ const React = require("react");
 const { createRoot } = require("react-dom/client");
 const compiled = build({
   stdin: {
-    contents: 'export { useChatWorkspace } from "./src/components/chat/useChatWorkspace"; export { ClientPreferencesProvider } from "./src/clientPreferences";',
+    contents: 'export { useChatWorkspace } from "./src/components/chat/useChatWorkspace"; export { ClientPreferencesProvider } from "./src/clientPreferences"; export { clientExtensionIncidentSnapshot } from "./src/extensions/incidents";',
     resolveDir: path.join(__dirname, ".."), loader: "ts",
   },
   bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent",
@@ -543,3 +543,194 @@ for (const profile of ["live", "lab"]) {
     assert.equal(view.current.resumeAvailable, false);
   });
 }
+
+const stagedFile = (name) => ({ id: `stage-${name}`, name, size: 12, type: "text/markdown", label: "operator.file", lastModified: 1, contentHash: "c".repeat(64) });
+const names = (attachments) => attachments.map((attachment) => attachment.name);
+async function queueFollowUp(view, host, text, files = []) {
+  await type(view, "Add totals");
+  void view.current.submit();
+  await until(() => view.current.busy && host.turns.length === 1, "first turn not sent");
+  await type(view, text);
+  if (files.length) {
+    view.current.onFilesPicked(files);
+    await until(() => view.current.attachments.length === files.length, "the files were not attached");
+  }
+  await view.current.submit();
+  await until(() => view.current.queuedTurns.length === 1 && view.current.text === "" && view.current.attachments.length === 0, "the follow-up was not queued");
+  return view.current.queuedTurns[0];
+}
+
+test("a follow-up queued with files keeps them through an unchanged edit and is delivered with them under its own identity", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "lab");
+  const queued = await queueFollowUp(view, host, "Also chart it", [stagedFile("notes.md")]);
+  assert.deepEqual(names(queued.attachments), ["notes.md"]);
+  await view.current.editQueuedTurn(queued.id);
+  await until(() => view.current.editingQueuedTurn && view.current.text === "Also chart it", "the queued message did not return to the composer");
+  assert.deepEqual(names(view.current.attachments), ["notes.md"]);
+  await view.current.submit();
+  await until(() => !view.current.editingQueuedTurn && view.current.queuedTurns[0]?.status === "queued", "the edit was not saved");
+  host.reply("run-1", "Totals added.");
+  await until(() => host.turns.length === 2, "the follow-up was never dispatched");
+  assert.deepEqual([host.turns[1].messageId, names(host.turns[1].attachments), host.turns[1].recoverPreparedMessage],
+    [queued.id.replace(/^queued_/, "msg_"), ["notes.md"], false]);
+  host.reply("run-1", "Chart added.");
+  await until(() => !view.current.busy && view.current.queuedTurns.length === 0, "the queue never drained");
+});
+
+test("a queued message saved with a changed payload is delivered as a new message", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "lab");
+  const queued = await queueFollowUp(view, host, "Also chart it");
+  await view.current.editQueuedTurn(queued.id);
+  await until(() => view.current.editingQueuedTurn && view.current.text === "Also chart it", "the queued message did not return to the composer");
+  await type(view, "Also chart it in euros");
+  await view.current.submit();
+  await until(() => !view.current.editingQueuedTurn && view.current.queuedTurns[0]?.text === "Also chart it in euros", "the edit was not saved");
+  host.reply("run-1", "Totals added.");
+  await until(() => host.turns.length === 2, "the edited follow-up was never dispatched");
+  assert.match(host.turns[1].messageId, /^msg_/);
+  assert.notEqual(host.turns[1].messageId, queued.id.replace(/^queued_/, "msg_"));
+  host.reply("run-1", "Chart added.");
+  await until(() => !view.current.busy, "the queue never drained");
+});
+
+test("attached files alone keep a task from moving to another pane", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "lab");
+  view.current.onFilesPicked([stagedFile("notes.md")]);
+  await until(() => view.current.attachments.length === 1, "the file was not attached");
+  assert.equal(view.current.paneTransferBlockReason("run-1"), "Send or remove attached files before moving this task.");
+  view.current.removeAttachment(view.current.attachments[0].id);
+  await until(() => view.current.attachments.length === 0, "the file was not removed");
+  assert.equal(view.current.paneTransferBlockReason("run-1"), "");
+});
+
+test("a live provider failure with a failure code is reported once as an incident of the task's provider", { timeout: 15_000 }, async () => {
+  const { clientExtensionIncidentSnapshot } = await compiled;
+  const host = fakeHost();
+  const read = host.transport.readOperatorChatArtifacts;
+  host.transport.readOperatorChatArtifacts = async (request) => {
+    const batch = await read(request);
+    return batch && { ...batch, artifacts: batch.artifacts.map((artifact) => artifact.event_data.failure_code ? { ...artifact, from_interface_id: "provider.test.bound" } : artifact) };
+  };
+  const view = await openTask(host, "live");
+  await type(view, "Add totals");
+  void view.current.submit();
+  await until(() => host.turns.length === 1 && view.current.turnOpen, "the turn was not submitted");
+  host.append("run-1", "assistant", "Sign in again", { event_kind: "error", error: true, event_data: { failure_code: "provider_auth_expired" } });
+  host.append("run-1", "assistant", "Sign in again", { event_kind: "error", error: true, event_data: { failure_code: "provider_auth_expired" } });
+  Object.assign(host.run("run-1"), { turn_open: false, turn_state: "failed" });
+  await until(() => !view.current.busy, "the failure never closed the turn");
+  assert.deepEqual(clientExtensionIncidentSnapshot().filter((incident) => incident.code === "provider_auth_expired").map(({ interfaceId, message }) => [interfaceId, message]),
+    [[provider.id, "Sign in again"]]);
+});
+
+for (const profile of ["live", "lab"]) {
+  test(`an acknowledged resume reopens the turn before the task status catches up and sends no message (${profile})`, { timeout: 15_000 }, async () => {
+    const host = fakeHost();
+    const view = await openTask(host, profile);
+    await type(view, "Add totals");
+    void view.current.submit();
+    await until(() => view.current.turnOpen, "turn never opened");
+    await view.current.interruptActiveTurn();
+    host.append("run-1", "assistant", "", control("run-1", "stop", host.controls[0].controlId));
+    Object.assign(host.run("run-1"), { turn_open: false, turn_state: "idle" });
+    await until(() => !view.current.busy && view.current.resumeAvailable && !view.current.turnControlPending, "the stop never settled");
+    await type(view, "Keep this draft");
+    await view.current.resumeActiveTurn();
+    const [stop, resume] = host.controls;
+    assert.deepEqual([resume.runId, resume.interfaceId, resume.action], ["run-1", "chat.run-1", "resume"]);
+    assert.match(resume.controlId, /^control_/);
+    assert.notEqual(resume.controlId, stop.controlId);
+    const seq = host.append("run-1", "assistant", "", control("run-1", "resume", resume.controlId));
+    host.run("run-1").last_movement_seq = seq - 1;
+    await until(() => view.current.turnOpen && !view.current.turnControlPending && !view.current.resumeAvailable, () => `the acknowledged resume did not reopen the turn: ${JSON.stringify({ open: view.current.turnOpen, pending: view.current.turnControlPending })}`);
+    assert.equal(host.run("run-1").turn_open, false);
+    assert.deepEqual([host.turns.length, view.current.text], [1, "Keep this draft"]);
+  });
+}
+
+test("a live reply that ends the turn releases a stop that was never acknowledged", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  await type(view, "Add totals");
+  void view.current.submit();
+  await until(() => view.current.turnOpen, "turn never opened");
+  await view.current.interruptActiveTurn();
+  await until(() => view.current.turnControlPending, "the stop is not pending");
+  host.reply("run-1", "Totals added.");
+  await until(() => !view.current.busy && !view.current.turnOpen && !view.current.turnControlPending, () => `the reply did not release the stop: ${JSON.stringify({ busy: view.current.busy, open: view.current.turnOpen, pending: view.current.turnControlPending })}`);
+});
+
+test("stopping the first turn of a new task reaches the run the host created before the task list shows it", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  const read = host.transport.projectionRead;
+  host.transport.projectionRead = async (request) => {
+    const response = await read(request);
+    return response.chats ? { ...response, chats: response.chats.filter((chat) => chat.run_id !== "run-new") } : response;
+  };
+  const view = await mount(host, "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
+  void view.current.submit();
+  await until(() => host.turns.length === 1 && view.current.activeRunId === "run-new" && view.current.turnOpen, () => `the new run's turn never opened: ${view.current.activeRunId}`);
+  assert.equal(view.current.runs.some((run) => run.runId === "run-new"), false);
+  await view.current.interruptActiveTurn();
+  assert.deepEqual(host.controls.map((request) => [request.runId, request.interfaceId, request.action]), [["run-new", "chat.run-new", "stop"]]);
+});
+
+test("returning to a task shows its loaded history at once, and reselecting the open task keeps its view", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.runs.push(runRow("run-2"));
+  host.messages["run-2"] = [messageRow("run-2", 1, "user", "Plan the trip"), messageRow("run-2", 2, "assistant", "Trip planned.")];
+  const view = await openTask(host, "lab");
+  view.current.setMessageQuery("report");
+  await until(() => view.current.messageQuery === "report", "the find query was not set");
+  view.current.selectRun("run-1");
+  await settle(2);
+  assert.equal(view.current.messageQuery, "report");
+  view.current.selectRun("run-2");
+  await until(() => !view.current.loadingMessages && view.current.renderedMessages.some((message) => message.text === "Trip planned."), "the second task never loaded");
+  host.holdMessages = new Promise(() => {});
+  view.current.selectRun("run-1");
+  await until(() => view.current.activeRunId === "run-1", "the first task was not selected again");
+  assert.equal(view.current.loadingMessages, false);
+  assert.ok(view.current.renderedMessages.some((message) => message.text === "Here is the report."));
+});
+
+test("a projection change re-reads the Agent catalog without dropping the current one and never reads the interface list", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "lab");
+  await type(view, "Add totals");
+  await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  let catalogReads = 0;
+  const read = host.transport.projectionRead;
+  host.transport.projectionRead = async (request) => {
+    if (request.method === "projection.operator.chat.contexts") { catalogReads += 1; await held; }
+    return read(request);
+  };
+  host.changed("runs");
+  await until(() => catalogReads === 1, "the catalog was not re-read");
+  await settle(2);
+  assert.deepEqual([view.current.executionContexts.map((context) => context.eeId), view.current.canSubmit], [["ee.root"], true]);
+  release();
+  await settle();
+  assert.equal(host.reads.includes("projection.interfaces.list"), false);
+});
+
+test("a live client applies the provider's own receipts to the task before its status is re-read", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await openTask(host, "live");
+  const statusReads = () => host.reads.filter((method) => method === "projection.operator.chats.status").length;
+  const before = statusReads();
+  host.changed = () => {};
+  host.append("run-1", "assistant", "", { event_kind: "turn_started", terminal: false });
+  host.run("run-1").last_movement_seq = 2;
+  await until(() => view.current.turnOpen && view.current.runs.find((run) => run.runId === "run-1")?.turnState === "working", "the provider's receipt did not open the turn");
+  assert.equal(statusReads(), before);
+});
