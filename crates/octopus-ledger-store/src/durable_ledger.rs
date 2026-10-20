@@ -140,29 +140,41 @@ impl GrantValueCache {
     }
 }
 
-pub struct DurableMovementDecoder {
-    blobs: DurableBlobs,
+#[derive(Default)]
+struct GrantCaches {
     grants: Mutex<GrantValueCache>,
     validated_grants: Mutex<HashMap<ContentHash, (GrantFileFingerprint, Vec<String>)>>,
 }
 
+fn ledger_grant_caches(root: &Path) -> Arc<GrantCaches> {
+    static CACHES: std::sync::OnceLock<Mutex<HashMap<PathBuf, Arc<GrantCaches>>>> =
+        std::sync::OnceLock::new();
+    let mut caches = CACHES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Arc::clone(caches.entry(root.to_path_buf()).or_default())
+}
+
+pub struct DurableMovementDecoder {
+    blobs: DurableBlobs,
+    caches: Arc<GrantCaches>,
+}
+
 impl DurableMovementDecoder {
     pub fn for_log(movements_path: impl AsRef<Path>) -> Self {
+        let dir = movement_metadata_root(movements_path.as_ref());
         Self {
-            blobs: DurableBlobs {
-                dir: movement_metadata_root(movements_path.as_ref()),
-            },
-            grants: Mutex::new(GrantValueCache::default()),
-            validated_grants: Mutex::new(HashMap::new()),
+            caches: ledger_grant_caches(&dir),
+            blobs: DurableBlobs { dir },
         }
     }
 
     pub fn open(movements_path: impl AsRef<Path>) -> LedgerResult<Self> {
         let root = movement_metadata_root(movements_path.as_ref());
         Ok(Self {
+            caches: ledger_grant_caches(&root),
             blobs: DurableBlobs::open(root)?,
-            grants: Mutex::new(GrantValueCache::default()),
-            validated_grants: Mutex::new(HashMap::new()),
         })
     }
 
@@ -201,7 +213,7 @@ impl DurableMovementDecoder {
     }
 
     pub fn validated_grant_count(&self) -> LedgerResult<usize> {
-        self.validated_grants
+        self.caches.validated_grants
             .lock()
             .map(|grants| grants.len())
             .map_err(|_| LedgerError::MalformedMovementMetadata {
@@ -238,6 +250,7 @@ impl DurableMovementDecoder {
     fn validate_grant(&self, hash: ContentHash, line: usize) -> LedgerResult<Vec<String>> {
         let fingerprint = self.grant_fingerprint(hash)?;
         let validated = self
+            .caches
             .validated_grants
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
@@ -258,7 +271,7 @@ impl DurableMovementDecoder {
                 message: format!("content-addressed invocation grant is malformed: {error}"),
             }
         })?;
-        self.validated_grants
+        self.caches.validated_grants
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
                 line,
@@ -271,6 +284,7 @@ impl DurableMovementDecoder {
     fn grant_value(&self, hash: ContentHash, line: usize) -> LedgerResult<serde_json::Value> {
         let fingerprint = self.grant_fingerprint(hash)?;
         let cached = self
+            .caches
             .grants
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
@@ -289,7 +303,7 @@ impl DurableMovementDecoder {
             }
         })?;
         let value = Arc::new(grant);
-        self.grants
+        self.caches.grants
             .lock()
             .map_err(|_| LedgerError::MalformedMovementMetadata {
                 line,
@@ -1211,7 +1225,7 @@ mod tests {
             );
             decoder.decode_projection(row.as_bytes(), i).unwrap();
         }
-        assert!(decoder.grants.lock().unwrap().entries.len() <= 64);
+        assert!(decoder.caches.grants.lock().unwrap().entries.len() <= 64);
         let grant_path = metadata_root.join(hashes[0].to_hex());
         let original = std::fs::read(&grant_path).unwrap();
         let modified = std::fs::metadata(&grant_path).unwrap().modified().unwrap();
