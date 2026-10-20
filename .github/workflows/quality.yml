@@ -41,6 +41,7 @@ jobs:
       - name: Client source and contract checks
         working-directory: app
         run: |
+          xargs -P 4 -I{} bash -c 'out=$({} 2>&1) || { printf "FAILED: %s\n%s\n" "{}" "$out"; exit 255; }' <<'CHECKS'
           npx tsc --noEmit --incremental false
           npm run check:design-system
           npm run test:chat-trace-contracts
@@ -84,17 +85,21 @@ jobs:
           node scripts/test-client-catalog-cycle.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
+          CHECKS
 
       - name: Client package and lifecycle contracts
         working-directory: app
         run: |
+          xargs -P 4 -I{} bash -c 'out=$({} 2>&1) || { printf "FAILED: %s\n%s\n" "{}" "$out"; exit 255; }' <<'CHECKS'
           node scripts/test-local-packages.cjs --consent-recipe
           node scripts/test-client-extensions.cjs
           node scripts/test-client-extension-authoring.cjs
+          CHECKS
 
       - name: Client interaction and file contracts
         working-directory: app
         run: |
+          xargs -P 4 -I{} bash -c 'out=$({} 2>&1) || { printf "FAILED: %s\n%s\n" "{}" "$out"; exit 255; }' <<'CHECKS'
           node scripts/test-client-navigation.cjs
           node scripts/test-client-context-menu.cjs
           node scripts/test-client-interface-contracts.cjs
@@ -110,9 +115,11 @@ jobs:
           node scripts/test-air-hand-swipe.cjs
           node scripts/test-scheduled-ui.cjs
           node scripts/test-markdown-presentation.mjs
+          CHECKS
 
       - name: Interface package source contracts
         run: |
+          xargs -P 4 -I{} bash -c 'out=$({} 2>&1) || { printf "FAILED: %s\n%s\n" "{}" "$out"; exit 255; }' <<'CHECKS'
           node registry/interface/world_operator_chat/test_client_outbound.cjs
           node registry/interface/world_operator_chat/test_planned_artifact_write.cjs
           node registry/interface/world_operator_chat/test_publication.cjs
@@ -124,6 +131,7 @@ jobs:
           node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/setup-host.test.cjs
           node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/engine-mode.test.cjs
           node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/standard-history.test.cjs
+          CHECKS
 
       - name: Public source boundary
         run: node app/scripts/check-public-source.cjs
