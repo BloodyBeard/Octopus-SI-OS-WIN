@@ -14,6 +14,11 @@ concurrency:
   group: quality-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
 jobs:
   client:
     runs-on: ubuntu-latest
@@ -123,6 +128,30 @@ jobs:
       - name: Public source boundary
         run: node app/scripts/check-public-source.cjs
 
+  workspace-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux audio headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev
+
+      - name: Compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Workspace check (fail-closed, no degraded compile)
+        run: cargo check --workspace --all-targets --keep-going
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -143,20 +172,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes libasound2-dev
 
+      - name: Compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Workspace check (fail-closed, no degraded compile)
-        run: cargo check --workspace --all-targets --keep-going
+      - name: Install test runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
-      - name: Policy, ledger proof, runtime checkpoint and Home binding contracts
+      - name: Policy, ledger proof, runtime checkpoint, Home binding and file publication contracts
         run: |
-          cargo test --locked -p octopus-policy -p octopus-ledger-index -p octopus-runtime --lib
-          cargo test --locked -p octopus-operator-chat-client --lib real_registry_home_plan_exports_authoring_and_exact_policy_requirements
-          cargo test --locked -p octopus-model-context-render --test instructions
-
-      - name: File publication contracts
-        run: cargo test --locked -p octopus-file-storage --lib publication::tests -- --test-threads=1
+          cargo nextest run --locked -p octopus-policy -p octopus-ledger-index -p octopus-runtime -p octopus-operator-chat-client -p octopus-model-context-render -p octopus-file-storage --lib --test instructions -E 'package(octopus-policy) | package(octopus-ledger-index) | package(octopus-runtime) | binary(instructions) | (package(octopus-operator-chat-client) & test(real_registry_home_plan_exports_authoring_and_exact_policy_requirements)) | (package(octopus-file-storage) & test(/^publication::tests::/))'
 
   native-client:
     runs-on: macos-latest
@@ -189,6 +218,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
@@ -215,8 +247,11 @@ jobs:
         run: |
           mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
           install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
-          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology
-          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology
+          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology & topology=$!
+          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology & preset=$!
+          wait $topology; topology_status=$?
+          wait $preset; preset_status=$?
+          test $topology_status -eq 0 -a $preset_status -eq 0
 
   native-contracts:
     runs-on: macos-latest
@@ -249,18 +284,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install test runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: Install declared OCR verifier executable
         run: brew install tesseract
 
       - name: Package verifier, Home admission, provider recovery and voice contracts
         run: |
-          cargo test --locked -p octopus-app-server -p octopus-operator-chat-client -p octopus-run-authoring -p octopus-provider-codex -p octopus-realtime-signaling --lib
-          cargo test --locked -p octopus-app-server --test worker_interface_cross_run_fan_out
-          cargo test --locked -p octopus-operator-chat-client --test conditioned_publication
-          cargo test --locked -p octopus-operator-chat-client --test run_composition input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results
+          cargo nextest run --locked -p octopus-app-server -p octopus-operator-chat-client -p octopus-run-authoring -p octopus-provider-codex -p octopus-realtime-signaling --lib --test worker_interface_cross_run_fan_out --test conditioned_publication --test run_composition -E 'not binary(run_composition) | test(input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results)'
 
   tool-continuations:
     runs-on: macos-latest
@@ -276,10 +316,17 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install test runner
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
       - name: Tool receipt and Code Mode continuation contracts
         run: |
-          cargo test --locked -p octopus-process-session-tool-runtime --lib -- --test-threads=1
-          cargo test --locked -p octopus-code-mode-room --lib -- --test-threads=1
+          cargo nextest run --locked -p octopus-process-session-tool-runtime -p octopus-code-mode-room --lib

@@ -1,0 +1,10 @@
+[test-groups]
+serial = { max-threads = 1 }
+
+[profile.default]
+fail-fast = false
+slow-timeout = { period = "120s" }
+
+[[profile.default.overrides]]
+filter = "package(octopus-code-mode-room) | package(octopus-process-session-tool-runtime) | (package(octopus-file-storage) & test(/^publication::tests::/))"
+test-group = "serial"
