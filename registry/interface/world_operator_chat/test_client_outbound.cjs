@@ -189,7 +189,7 @@ test("provider authentication recovery stays visible and non-terminal", () => {
 });
 
 test("live compaction batch stays on the active turn", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-native-compaction-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-native-compaction-"));
   const runId = "run_native_compaction";
   const interfaceId = "world_operator_chat_nativecompaction";
   const providerInterfaceId = "world_provider_codex_nativecompaction";
@@ -286,7 +286,7 @@ test("live compaction batch stays on the active turn", async (t) => {
 });
 
 test("exact provider failure terminates the live turn with diagnostic evidence", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-provider-turn-failure-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-provider-turn-failure-"));
   const runId = "run_provider_failure";
   const interfaceId = "world_operator_chat_providerfailure";
   const providerInterfaceId = "world_provider_codex_providerfailure";
@@ -361,7 +361,7 @@ test("exact provider failure terminates the live turn with diagnostic evidence",
 });
 
 test("live turn.stream keeps one bounded cursor budget, wakes on nested append, and reads append tails linearly", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-live-turn-stream-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-live-turn-stream-"));
   t.after(async () => fs.promises.rm(root, { recursive: true, force: true }));
   const runId = "run_live_stream_contract";
   const interfaceId = "world_operator_chat_livestream";
@@ -577,7 +577,7 @@ test("live turn.stream keeps one bounded cursor budget, wakes on nested append, 
 });
 
 test("turn control uses the exact operator socket without a projection read", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-turn-control-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-turn-control-"));
   const runId = "run_operator_chat_controltest";
   const interfaceId = "world_operator_chat_controltest";
   const providerInterfaceId = "world_provider_codex_controltest";
@@ -944,7 +944,7 @@ test("interface socket replacement wait refuses a live prior listener until its 
 });
 
 test("workspace topology authoring is serialized per Octopus home", async () => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-topology-lock-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-topology-lock-"));
   let releaseFirst;
   const firstMayFinish = new Promise((resolve) => { releaseFirst = resolve; });
   const entered = [];
@@ -1144,7 +1144,7 @@ test("operator chat fails closed on exact-target runtime drift", () => {
 });
 
 test("operator chat shares one ledger watcher across concurrent waits", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-ledger-watch-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-ledger-watch-"));
   const movementsPath = path.join(root, "movements.jsonl");
   await fs.promises.writeFile(movementsPath, "");
   const waits = Array.from({ length: 12 }, () => watchLedgerChange(movementsPath, 2_000));
@@ -1428,7 +1428,7 @@ async function createProviderLoginFixture(root, scenario = {}) {
 }
 
 test("model refresh observes its generation, waits for rearm, and works without account operations", { timeout: 4_000 }, async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-catalog-recovery-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-catalog-recovery-"));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const fixture = await createProviderLoginFixture(root);
   const runPath = path.join(root, "runs", `${ACTIVE_RUN}.json`), ledgerPath = path.join(root, "ledger", "movements.jsonl");
@@ -1490,7 +1490,7 @@ test("model refresh observes its generation, waits for rearm, and works without 
 });
 
 test("provider account proof crosses exact Home, redacts identity, advances its cursor, and revalidates", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-provider-account-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-provider-account-"));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const runsRoot = path.join(root, "runs");
   const ledgerPath = path.join(root, "ledger", "movements.jsonl");
@@ -1603,7 +1603,7 @@ test("provider account proof crosses exact Home, redacts identity, advances its 
 });
 
 test("ordinary provider browser sign-in uses exact Home, safe URL callback, matching status, and final account proof", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-provider-login-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-provider-login-"));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const fixture = await createProviderLoginFixture(root, {
     statusOutputs: (poll) => poll === 1
@@ -1740,7 +1740,7 @@ test("provider browser sign-in fails closed on malformed, unsafe, foreign, faile
   ];
   for (const item of cases) {
     await t.test(item.name, async () => {
-      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-provider-login-refusal-"));
+      const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-provider-login-refusal-"));
       try {
         const fixture = await createProviderLoginFixture(root, item.scenario);
         await assert.rejects(
@@ -1786,7 +1786,7 @@ test("provider account typed failures repair only explicit authentication eviden
 });
 
 test("author-only surface planning returns validated topology without committing or handing in", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-author-only-plan-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-author-only-plan-"));
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
@@ -1837,8 +1837,8 @@ test("author-only surface planning returns validated topology without committing
 });
 
 test("new task authoring and Project deletion enforce both topology orderings", async (t) => {
-  const taskFirstRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-task-first-topology-"));
-  const deleteFirstRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-delete-first-topology-"));
+  const taskFirstRoot = await fs.promises.mkdtemp(path.join("/tmp", "octopus-task-first-topology-"));
+  const deleteFirstRoot = await fs.promises.mkdtemp(path.join("/tmp", "octopus-delete-first-topology-"));
   t.after(async () => {
     await Promise.all([
       fs.promises.rm(taskFirstRoot, { recursive: true, force: true }),
@@ -1904,7 +1904,7 @@ test("new task authoring and Project deletion enforce both topology orderings", 
 });
 
 test("new task remains idle when operator input hand-in is refused", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-new-task-refused-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-new-task-refused-"));
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
@@ -1930,7 +1930,7 @@ test("new task remains idle when operator input hand-in is refused", async (t) =
 });
 
 test("new task retry after a lost verdict reuses one exact authored run and admission", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-new-task-admission-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-new-task-admission-"));
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
@@ -2012,7 +2012,7 @@ test("new task retry after a lost verdict reuses one exact authored run and admi
 });
 
 test("ordinary existing submission hands into its active client without topology writes", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-existing-run-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-existing-run-"));
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
@@ -2375,7 +2375,7 @@ test("attachment crash before admission resumes only from an exact reattachment"
 });
 
 test("operator message admission recovers an accepted turn after the delivery verdict is lost", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-message-admission-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-message-admission-"));
   t.after(async () => {
     await fs.promises.rm(root, { recursive: true, force: true });
   });
@@ -2583,7 +2583,7 @@ test("operator message admission recovers an accepted turn after the delivery ve
 });
 
 test("task deletion releases its exact worker environment through an allow-only artifact cycle", async (t) => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-task-release-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-task-release-"));
   const runsRoot = path.join(root, "state", "runs");
   const registryRoot = path.join(root, "registry", "interface");
   const controlRoot = path.join(root, "app-server-control");
@@ -2900,7 +2900,7 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
 
 
 test("operator ledger pages stop reading at their page while retaining exact replay offsets", async t => {
-  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "octopus-ledger-page-"));
+  const root = await fs.promises.mkdtemp(path.join("/tmp", "octopus-ledger-page-"));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const file = path.join(root, "movements.jsonl");
   const rows = Array.from({ length: 2000 }, (_, seq) => movement({ seq, trace: "🎙".repeat(128), artifact: { id: `message:${seq}`, content: "a".repeat(64) } }));

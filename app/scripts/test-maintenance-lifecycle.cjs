@@ -12,8 +12,12 @@ const appRequire = createRequire(projectionFile);
 const { blake3 } = appRequire("@noble/hashes/blake3");
 const lifecycle = require("../../registry/interface/world_operator_chat/maintenance-lifecycle.cjs");
 const { maintenanceFixture } = require("../../registry/interface/world_operator_chat/test_maintenance_client.cjs");
-const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
-const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
+const projectionAuthoring = require("../electron/clientWorkspaceAuthoring.cjs");
+const workspaceSetup = require("../electron/workspaceSetup.cjs");
+const { withFixturePublisher, fixtureFilePublisher, fixtureDirectoryPublisher } = require("./fixturePublication.cjs");
+const commitProjectionClientAuthoring = (home, registry, request, options = {}) =>
+  projectionAuthoring.commitProjectionClientAuthoring(home, registry, request, withFixturePublisher({ octopusHomeRoot: home, ...options }));
+const recoverWorkspaceTransactions = (options) => workspaceSetup.recoverWorkspaceTransactions(withFixturePublisher(options));
 const loaded = { exports: require("../electron/projection/taskDeletion.cjs") };
 const authoringFile = path.join(__dirname, "../electron/workspaceSetup.cjs"), authoring = { exports: {} };
 vm.runInNewContext(`${fsSync.readFileSync(authoringFile, "utf8")}\nmodule.exports = {
@@ -33,7 +37,8 @@ const digest = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex"
 
 async function proofFor(ctx) {
   const ledger = await fs.readFile(path.join(ctx.roots.ledger_root, "movements.jsonl"));
-  return { schema_version: 1, phase: "held", operation_id: ctx.operation_id, selection_digest: ctx.selection_digest,
+  return { schema_version: ctx.directory_inventory ? 2 : 1, phase: "held", operation_id: ctx.operation_id, selection_digest: ctx.selection_digest,
+    ...(ctx.directory_inventory ? { directory_inventory_digest: digest(Buffer.from(canonical(ctx.directory_inventory))) } : {}),
     interface_ids: [...ctx.selection.interface_ids], originals: ctx.originals.map(({ file, expected_digest }) => ({ file, expected_digest })),
     retired: ctx.retired.map((entry) => ({ ...entry })),
     ledger_boundary: { complete_offset: ledger.length, sequence: 1, sha256: digest(ledger) } };
@@ -46,12 +51,14 @@ function contractBarrier(overrides = {}) {
   }), withHeldProof: async (ctx, operation) => {
     for (const retired of ctx.retired) await assert.rejects(fs.stat(retired.file), /ENOENT/);
     let held = true;
+    const publication = fixtureDirectoryPublisher(path.dirname(ctx.roots.ledger_root));
     try {
       return await operation({ verify: async () => {
         assert.equal(held, true);
         for (const original of ctx.originals) assert.equal(digest(Buffer.from(original.content)), original.expected_digest);
         return overrides.verify ? overrides.verify(ctx) : proofFor(ctx);
-      } });
+      }, ...Object.fromEntries(["snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"].map((method) =>
+        [method, async (...args) => { assert.equal(held, true); return publication[method](...args); }])) });
     } finally { held = false; }
   } };
 }
@@ -60,14 +67,15 @@ async function stagedRetiredGroup(f, withProof = false) {
   let request;
   await f.remove({}, async (value) => { request = value; return { cleanupWarnings: [] }; });
   const options = adapter.exports.commitProjectionClientAuthoring(f.root, f.registry, request);
-  const api = authoring.exports, roots = await api.normalizeRoots(options);
+  const api = authoring.exports, roots = await api.normalizeRoots({ ...options,
+    publishFiles: fixtureFilePublisher(options.octopusHomeRoot), publication: fixtureDirectoryPublisher(options.octopusHomeRoot) });
   await api.ensureStateRoots(roots);
   const transactionRoot = await api.stageClientAuthoringTransaction(roots, api.parseClientAuthoringPlan(options.plan));
   const journal = await api.readJournal(roots, transactionRoot);
   const before = new Map(await Promise.all(journal.writes.map(async (write) => [write.destination, await fs.readFile(write.destination)])));
   journal.phase = "committing";
   for (const write of [...journal.writes].sort((a, b) => Number(a.publish_barrier) - Number(b.publish_barrier))) {
-    if (write.state !== "unchanged") { await api.applyJournalWrite(roots, transactionRoot, write); write.state = "applied"; }
+    if (write.state !== "unchanged") { await api.applyJournalWrite(roots, transactionRoot, journal, journal.writes.indexOf(write)); write.state = "applied"; }
   }
   if (withProof) {
     journal.retirement.proof = await proofFor(await api.retirementContext(roots, transactionRoot, journal));
@@ -375,7 +383,7 @@ test("recovery after descriptor tombstoning uses pinned originals and prior proo
   assert.ok(checks > 1); assert.equal(await fs.readFile(path.join(f.root, "ledger/movements.jsonl"), "utf8"), "retained movements\n");
 });
 
-test("cleaned journal can finish staging cleanup after partial original-file removal without touching private state", async (t) => {
+test("a cleaned journal renamed for cleanup without its native plan fails closed and keeps private state", async (t) => {
   const f = await fixture(t), staged = await stagedRetiredGroup(f, true);
   for (const removal of staged.journal.removals) {
     await authoring.exports.applyClientAuthoringRemoval(staged.roots, staged.transactionRoot, removal, staged.journal);
@@ -388,12 +396,13 @@ test("cleaned journal can finish staging cleanup after partial original-file rem
   const cleanupRoot = path.join(staged.roots.transactionsRoot, `.cleanup-${staged.journal.operation_id}`);
   await fs.rename(staged.transactionRoot, cleanupRoot);
   await fs.unlink(path.join(cleanupRoot, staged.journal.writes.find((write) => write.before_file).before_file));
-  await recoverWorkspaceTransactions({ octopusHomeRoot: f.root, registryRoot: f.registry });
-  assert.deepEqual(await fs.readdir(staged.roots.transactionsRoot), []);
+  await assert.rejects(recoverWorkspaceTransactions({ octopusHomeRoot: f.root, registryRoot: f.registry }),
+    (error) => error.code === "workspace_directory_publication_uncertain");
+  assert.deepEqual(await fs.readdir(staged.roots.transactionsRoot), [path.basename(cleanupRoot)]);
   assert.equal(await fs.readFile(path.join(f.entries, "published.json"), "utf8"), "published knowledge");
 });
 
-test("completed rollback can recover partial staging cleanup while ordinary Run activity advances", async (t) => {
+test("a rollback written outside native publication is refused while ordinary Run activity advances", async (t) => {
   const f = await fixture(t), staged = await stagedRetiredGroup(f);
   for (const write of staged.journal.writes) {
     await fs.writeFile(write.destination, staged.before.get(write.destination));
@@ -406,9 +415,9 @@ test("completed rollback can recover partial staging cleanup while ordinary Run 
   await fs.unlink(path.join(cleanupRoot, staged.journal.writes.find((write) => write.before_file).before_file));
   const advanced = Buffer.from(JSON.stringify({ ...f.source, status: "running" }));
   await fs.writeFile(f.sourceFile, advanced);
-  await recoverWorkspaceTransactions({ octopusHomeRoot: f.root, registryRoot: f.registry });
+  await assert.rejects(recoverWorkspaceTransactions({ octopusHomeRoot: f.root, registryRoot: f.registry }), /exact publication evidence/);
   assert.deepEqual(await fs.readFile(f.sourceFile), advanced);
-  assert.deepEqual(await fs.readdir(staged.roots.transactionsRoot), []);
+  assert.deepEqual(await fs.readdir(staged.roots.transactionsRoot), [path.basename(cleanupRoot)]);
   assert.equal((await f.readTopology()).records.size, 4);
 });
 
