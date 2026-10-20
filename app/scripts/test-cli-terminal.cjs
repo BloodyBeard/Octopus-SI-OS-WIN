@@ -385,6 +385,23 @@ def snapshot(cols, rows):
    quiet = time.time() + .2
  phases.append({'cols':cols, 'rows':rows, 'bytes':base64.b64encode(data[offset:]).decode('ascii')})
  offset = len(data)
+def drain():
+ global data
+ quiet = time.time() + .2
+ while time.time() < quiet:
+  if select.select([master], [], [], .01)[0]:
+   data += os.read(master, 65536)
+   quiet = time.time() + .2
+def press_alone(key):
+ global data
+ drain()
+ mark = len(data)
+ os.write(master, key)
+ deadline = time.time() + 6
+ while len(data) == mark:
+  if time.time() > deadline: raise AssertionError('PTY did not redraw after '+repr(key))
+  if select.select([master], [], [], .1)[0]: data += os.read(master, 65536)
+ drain()
 try:
  wait_for(b'Home:')
  os.write(master, b'/help\r')
@@ -400,8 +417,7 @@ try:
  time.sleep(.08)
  os.write(master, b'/tasks\r')
  wait_for(b'Your tasks')
- os.write(master, b'\x1b')
- time.sleep(.08)
+ press_alone(b'\x1b')
  os.write(master, 'draft 日本🙂 wrap me safely across this narrow terminal'.encode('utf8'))
  wait_for('日本🙂'.encode('utf8'))
  snapshot(29, 9)
