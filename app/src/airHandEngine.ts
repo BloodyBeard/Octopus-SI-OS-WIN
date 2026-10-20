@@ -28,16 +28,27 @@ export class AirHandGestureEngine {
   private pinchStartSpread: number | null = null;
   private clickIntent = new ClickIntentDetector();
   private palmStabilizer = new PalmPointStabilizer();
+  private holdAnchor: Point | null = null;
 
   reset(): void {
+    this.resetPose();
+    this.swipe.reset();
+  }
+
+  lost(now: number, options: { mirrorX: boolean; sensitivity: GestureSensitivity }): AirHandGestureId | null {
+    this.resetPose();
+    return swipeEvent(this.swipe.lost(now, swipeThreshold(options.sensitivity), swipeSpeed(options.sensitivity)), options.mirrorX);
+  }
+
+  private resetPose(): void {
     this.candidate = "none";
     this.candidateSince = 0;
     this.fired = false;
-    this.swipe.reset();
     this.pointerGraceUntil = 0;
     this.pinchStartSpread = null;
     this.clickIntent.reset();
     this.palmStabilizer.reset();
+    this.holdAnchor = null;
   }
 
   process(
@@ -72,6 +83,7 @@ export class AirHandGestureEngine {
           this.fired = false;
         }
         const ratio = Math.min(3, Math.max(0.35, geometry.spread / this.pinchStartSpread));
+        this.swipe.reset();
         return { event: null, point: null, palmPoint, pinchRatio: ratio, curls, pose: "pinch" };
       }
       this.pinchStartSpread = null;
@@ -88,6 +100,7 @@ export class AirHandGestureEngine {
       this.candidate = "pinch";
       this.candidateSince = now;
       this.fired = false;
+      this.swipe.reset();
       return { event: null, point: null, palmPoint, pinchRatio: 1, curls, pose: "pinch" };
     }
 
@@ -111,17 +124,25 @@ export class AirHandGestureEngine {
       this.candidate = classified;
       this.candidateSince = now;
       this.fired = false;
+      this.holdAnchor = controlPoint;
     }
 
-    if (classified === "mission_control") {
-      const direction = stabilizedPalm ? this.swipe.update(stabilizedPalm.x, now, swipeThreshold(options.sensitivity)) : 0;
-      if (direction === 0) return { event: null, point: null, palmPoint, pinchRatio: null, curls, pose: classified };
-      const movesRight = options.mirrorX ? direction < 0 : direction > 0;
-      return { event: movesRight ? "swipe_right" : "swipe_left", point: null, palmPoint, pinchRatio: null, curls, pose: classified };
+    const swipeEligible = classified === "open_palm" || classified === "mission_control" || classified === "none";
+    const palmWidth = geometry?.palmWidth ?? 0;
+    const direction = controlPoint
+      ? this.swipe.update(controlPoint, now, swipeEligible, Math.min(swipeThreshold(options.sensitivity), Math.max(SWIPE_MIN_TRAVEL, palmWidth * SWIPE_HAND_WIDTHS)), swipeSpeed(options.sensitivity))
+      : 0;
+    const swiped = swipeEvent(direction, options.mirrorX);
+    if (swiped) {
+      this.fired = true;
+      return { event: swiped, point: null, palmPoint, pinchRatio: null, curls, pose: classified };
     }
-    this.swipe.release(now);
 
     const event = shortcutEventForPose(classified);
+    if (event && STILL_POSES.has(classified) && controlPoint && this.holdAnchor && distance(controlPoint, this.holdAnchor) > HOLD_STILL_TRAVEL) {
+      this.holdAnchor = controlPoint;
+      this.candidateSince = now;
+    }
     if (!event || this.fired || now - this.candidateSince < holdDuration(options.sensitivity)) {
       return { event: null, point: pointerPoint, palmPoint, pinchRatio: null, curls, pose: classified };
     }
@@ -165,71 +186,91 @@ function classifyLandmarks(landmarks: NormalizedLandmark[], previous: AirHandPos
   return { curls, pose: thumbOpen ? "aim" : "none" };
 }
 
-const SWIPE_WINDOW_MS = 650;
-const SWIPE_REARM_COOLDOWN_MS = 350;
-const SWIPE_REST_TRAVEL = 0.025;
-const SWIPE_REST_MS = 160;
-const SWIPE_POSE_GRACE_MS = 250;
+const STILL_POSES = new Set<AirHandPose>(["open_palm", "fist"]);
+const HOLD_STILL_TRAVEL = 0.035;
+const SWIPE_WINDOW_MS = 480;
+const SWIPE_STALE_MS = 250;
+const SWIPE_POSE_GRACE_MS = 200;
+const SWIPE_LOST_GRACE_MS = 220;
+const SWIPE_EXIT_FRACTION = 0.6;
+const SWIPE_MIN_TRAVEL = 0.05;
+const SWIPE_HAND_WIDTHS = 1.8;
+const SWIPE_DOMINANCE = 1.4;
+const SWIPE_STRAIGHTNESS = 0.7;
+const SWIPE_SAME_DIRECTION_MS = 380;
+const SWIPE_RETURN_SUPPRESS_MS = 750;
+
+type SwipeSample = { at: number; x: number; y: number };
 
 class SwipeDetector {
-  private samples: Array<{ at: number; x: number }> = [];
-  private armed = true;
-  private firedAt = 0;
-  private restX = 0;
-  private restSince = 0;
-  private releasedAt: number | null = null;
+  private samples: SwipeSample[] = [];
+  private ineligibleSince: number | null = null;
+  private lostAt: number | null = null;
+  private lastFired: { at: number; direction: -1 | 1 } | null = null;
+  private threshold = 0;
 
   reset(): void {
     this.samples = [];
-    this.armed = true;
-    this.firedAt = 0;
-    this.restX = 0;
-    this.restSince = 0;
-    this.releasedAt = null;
+    this.ineligibleSince = null;
+    this.lostAt = null;
   }
 
-  release(now: number): void {
-    if (this.samples.length === 0) return;
-    if (this.releasedAt == null) this.releasedAt = now;
-    else if (now - this.releasedAt > SWIPE_POSE_GRACE_MS) this.reset();
-  }
-
-  update(palmX: number, now: number, threshold: number): -1 | 0 | 1 {
+  update(position: Point, now: number, eligible: boolean, threshold: number, speed: number): -1 | 0 | 1 {
+    this.lostAt = null;
+    this.threshold = threshold;
+    if (!eligible) {
+      this.ineligibleSince ??= now;
+      if (now - this.ineligibleSince > SWIPE_POSE_GRACE_MS) this.samples = [];
+      return 0;
+    }
+    this.ineligibleSince = null;
     const latest = this.samples[this.samples.length - 1];
-    if (!latest || now - latest.at > SWIPE_POSE_GRACE_MS) {
-      this.reset();
-      this.samples = [{ at: now, x: palmX }];
-      return 0;
-    }
-    this.releasedAt = null;
-    if (!this.armed) {
-      this.samples = [{ at: now, x: palmX }];
-      if (Math.abs(palmX - this.restX) > SWIPE_REST_TRAVEL) {
-        this.restX = palmX;
-        this.restSince = now;
-      } else if (now - this.restSince >= SWIPE_REST_MS && now - this.firedAt >= SWIPE_REARM_COOLDOWN_MS) {
-        this.armed = true;
-      }
-      return 0;
-    }
-    this.samples.push({ at: now, x: palmX });
-    while (this.samples.length > 1 && now - this.samples[0].at > SWIPE_WINDOW_MS) this.samples.shift();
-    let low = palmX;
-    let high = palmX;
-    for (const sample of this.samples) {
-      low = Math.min(low, sample.x);
-      high = Math.max(high, sample.x);
-    }
-    const rightward = palmX - low;
-    const leftward = high - palmX;
-    if (Math.max(rightward, leftward) < threshold) return 0;
-    this.armed = false;
-    this.firedAt = now;
-    this.restX = palmX;
-    this.restSince = now;
-    this.samples = [{ at: now, x: palmX }];
-    return rightward >= leftward ? 1 : -1;
+    if (latest && now - latest.at > SWIPE_STALE_MS) this.samples = [];
+    this.samples.push({ at: now, x: position.x, y: position.y });
+    while (this.samples.length > 2 && now - this.samples[0].at > SWIPE_WINDOW_MS) this.samples.shift();
+    return this.evaluate(now, threshold, speed);
   }
+
+  lost(now: number, threshold: number, speed: number): -1 | 0 | 1 {
+    if (this.samples.length === 0) return 0;
+    if (this.lostAt == null) {
+      this.lostAt = now;
+      return this.evaluate(now, Math.min(threshold, this.threshold || threshold) * SWIPE_EXIT_FRACTION, speed);
+    }
+    if (now - this.lostAt > SWIPE_LOST_GRACE_MS) this.samples = [];
+    return 0;
+  }
+
+  private evaluate(now: number, threshold: number, speed: number): -1 | 0 | 1 {
+    const last = this.samples[this.samples.length - 1];
+    if (!last || this.samples.length < 2) return 0;
+    for (let index = 0; index < this.samples.length - 1; index += 1) {
+      const start = this.samples[index];
+      const dx = last.x - start.x;
+      const dy = last.y - start.y;
+      if (Math.abs(dx) < threshold || Math.abs(dx) < Math.abs(dy) * SWIPE_DOMINANCE) continue;
+      const elapsed = Math.max((last.at - start.at) / 1000, 1 / 60);
+      if (Math.abs(dx) / elapsed < speed) continue;
+      let path = 0;
+      for (let step = index + 1; step < this.samples.length; step += 1) path += Math.abs(this.samples[step].x - this.samples[step - 1].x);
+      if (Math.abs(dx) < path * SWIPE_STRAIGHTNESS) continue;
+      const direction: -1 | 1 = dx > 0 ? 1 : -1;
+      this.samples = [last];
+      const previous = this.lastFired;
+      if (previous) {
+        const since = now - previous.at;
+        if (since < (previous.direction === direction ? SWIPE_SAME_DIRECTION_MS : SWIPE_RETURN_SUPPRESS_MS)) return 0;
+      }
+      this.lastFired = { at: now, direction };
+      return direction;
+    }
+    return 0;
+  }
+}
+
+function swipeEvent(direction: -1 | 0 | 1, mirrorX: boolean): AirHandGestureId | null {
+  if (direction === 0) return null;
+  return (mirrorX ? direction < 0 : direction > 0) ? "swipe_right" : "swipe_left";
 }
 
 class ClickIntentDetector {
@@ -449,9 +490,15 @@ function holdDuration(sensitivity: GestureSensitivity): number {
 }
 
 function swipeThreshold(sensitivity: GestureSensitivity): number {
-  if (sensitivity === "responsive") return 0.09;
+  if (sensitivity === "responsive") return 0.08;
   if (sensitivity === "deliberate") return 0.15;
-  return 0.12;
+  return 0.11;
+}
+
+function swipeSpeed(sensitivity: GestureSensitivity): number {
+  if (sensitivity === "responsive") return 0.45;
+  if (sensitivity === "deliberate") return 0.7;
+  return 0.55;
 }
 
 function point(landmarks: NormalizedLandmark[], index: number): Point | null {

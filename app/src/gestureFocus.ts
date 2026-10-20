@@ -5,6 +5,7 @@ import { clientDialogOwnsCommands } from "./keyboardShortcuts";
 
 const FOCUS_STEP = 0.055;
 const FOCUS_IDLE_MS = 2_500;
+const FOCUS_MAX_SPEED = 0.45;
 const FOCUS_ATTR = "data-gesture-focused";
 const TARGET_SELECTOR = "[data-gesture-focus], [data-surface-document]";
 
@@ -12,6 +13,8 @@ export function useGestureFocus(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
     let anchorX: number | null = null;
+    let lastX: number | null = null;
+    let lastAt = 0;
     let idleTimer = 0;
     const forget = () => {
       window.clearTimeout(idleTimer);
@@ -28,6 +31,7 @@ export function useGestureFocus(enabled: boolean): void {
       }
       if (state.pose !== "open_palm" || !state.palmPoint) {
         anchorX = null;
+        lastX = null;
         return;
       }
       if (clientDialogOwnsCommands()) {
@@ -35,6 +39,15 @@ export function useGestureFocus(enabled: boolean): void {
         return;
       }
       const x = state.palmPoint.x;
+      const now = performance.now();
+      const elapsed = (now - lastAt) / 1000;
+      const fast = lastX != null && elapsed > 0 && Math.abs(x - lastX) / elapsed > FOCUS_MAX_SPEED;
+      lastX = x;
+      lastAt = now;
+      if (fast) {
+        anchorX = null;
+        return;
+      }
       if (anchorX == null) {
         anchorX = x;
         return;

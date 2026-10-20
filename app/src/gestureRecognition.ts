@@ -21,6 +21,7 @@ export type GestureRecognitionState = Readonly<{
   pinchRatio: number | null;
   curls: FingerCurls | null;
   pose: AirHandPose;
+  cameraFps: number | null;
 }>;
 
 export type GestureDevicesView = Readonly<{
@@ -47,10 +48,12 @@ const INITIAL_STATE: GestureRecognitionState = Object.freeze({
   pinchRatio: null,
   curls: null,
   pose: "none",
+  cameraFps: null,
 });
 
 const IDLE_HAND = Object.freeze({ point: null, palmPoint: null, pinchRatio: null, curls: null, pose: "none", confidence: 0 }) satisfies Partial<GestureRecognitionState>;
 const STALE_FRAME_MS = 1_200;
+const CAMERA_RATE_WINDOW = 24;
 
 const HAND_CONNECTIONS: ReadonlyArray<readonly [number, number]> = [
   [0, 1], [1, 2], [2, 3], [3, 4],
@@ -78,6 +81,7 @@ class GestureRecognitionController {
   private lastOptions: GestureRecognitionOptions | null = null;
   private wanted: GestureRecognitionOptions | null = null;
   private lastFrameAt = 0;
+  private frameTimes: number[] = [];
   private watching = false;
 
   attachPreview = (canvas: HTMLCanvasElement | null): void => {
@@ -125,7 +129,7 @@ class GestureRecognitionController {
       this.publish({ ...IDLE_HAND, phase: "off", error: "" });
       return;
     }
-    this.publish({ phase: "requesting", error: "", point: null, pose: "none", confidence: 0 });
+    this.publish({ phase: "requesting", error: "", point: null, pose: "none", confidence: 0, cameraFps: null });
     try {
       const nativePermission = await window.octopusTransport?.cameraAccessStatus?.();
       if (generation !== this.generation) return;
@@ -222,6 +226,12 @@ class GestureRecognitionController {
     if (this.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && this.video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = this.video.currentTime;
       this.lastFrameAt = now;
+      this.frameTimes.push(now);
+      if (this.frameTimes.length > CAMERA_RATE_WINDOW) this.frameTimes.shift();
+      const cameraFps = this.frameTimes.length >= CAMERA_RATE_WINDOW / 2
+        ? Math.round((this.frameTimes.length - 1) * 1000 / (now - this.frameTimes[0]))
+        : null;
+      if (cameraFps !== this.state.cameraFps) this.publish({ cameraFps });
       let result: HandLandmarkerResult;
       try {
         result = landmarker.detectForVideo(this.video, now);
@@ -259,9 +269,10 @@ class GestureRecognitionController {
             confidence,
           });
         }
-      } else if (this.state.pose !== "none" || this.state.point || this.state.palmPoint) {
-        this.engine.reset();
-        this.publish(IDLE_HAND);
+      } else {
+        const event = this.engine.lost(now, options);
+        if (event) emitAirHandGesture(event, "camera");
+        if (this.state.pose !== "none" || this.state.point || this.state.palmPoint) this.publish(IDLE_HAND);
       }
     }
     this.drawPreview();
@@ -286,8 +297,13 @@ class GestureRecognitionController {
     context.clearRect(0, 0, canvas.width, canvas.height);
     const video = this.video;
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth) return;
+    const frameRatio = (video.videoWidth / video.videoHeight).toFixed(4);
+    const frame = canvas.parentElement;
+    if (frame && frame.style.getPropertyValue("--gesture-camera-ratio") !== frameRatio) {
+      frame.style.setProperty("--gesture-camera-ratio", frameRatio);
+    }
     const mirror = this.lastOptions?.mirrorX !== false;
-    const scale = Math.max(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
+    const scale = Math.min(canvas.width / video.videoWidth, canvas.height / video.videoHeight);
     const drawWidth = video.videoWidth * scale;
     const drawHeight = video.videoHeight * scale;
     const offsetX = (canvas.width - drawWidth) / 2;
@@ -338,8 +354,8 @@ class GestureRecognitionController {
         return HandLandmarker.createFromOptions(vision, {
           baseOptions: { delegate: "CPU", modelAssetPath: modelPath },
           minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5,
+          minHandPresenceConfidence: 0.4,
+          minTrackingConfidence: 0.3,
           numHands: 1,
           runningMode: "VIDEO",
         });
@@ -355,6 +371,7 @@ class GestureRecognitionController {
     this.lastFrameAt = 0;
     this.lastPublishedAt = 0;
     this.lastLandmarks = null;
+    this.frameTimes = [];
     this.engine.reset();
     if (this.video) {
       this.video.pause();
@@ -381,6 +398,7 @@ class GestureRecognitionController {
     const cached = this.coarse;
     const structural = state.phase !== cached.phase
       || state.pose !== cached.pose
+      || state.cameraFps !== cached.cameraFps
       || state.error !== cached.error
       || state.devices !== cached.devices
       || state.activeDeviceId !== cached.activeDeviceId;
@@ -410,6 +428,10 @@ class GestureRecognitionController {
 }
 
 const controller = new GestureRecognitionController();
+import.meta.hot?.dispose(() => {
+  controller.stop();
+  window.location.reload();
+});
 
 export function useGestureRecognitionState(): GestureRecognitionState {
   return useSyncExternalStore(controller.subscribe, controller.snapshot, () => INITIAL_STATE);

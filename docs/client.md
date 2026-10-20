@@ -255,6 +255,17 @@ commands. It includes camera selection, built-in mappings, custom gesture
 recording, and a preview. Camera access is required. Treat these controls as
 experimental, particularly across different cameras and lighting.
 
+A swipe is a quick sideways flick with an open hand or two fingers; by default
+left goes Back and right goes Forward. It is judged by the hand's speed and
+straightness, so a frame lost to motion blur or a hand leaving the camera at
+speed still counts, slow sideways movement steps gesture focus instead, and the
+hand returning after a swipe is not read as a swipe the other way. Held poses
+fire only while the hand stays still. While Settings is open, the preview names
+each recognized gesture and its command, and commands run once Settings is
+closed. The preview also measures how many frames per second the camera really
+delivers and warns when that is too few for swipes; a dim room or a phone used
+as a camera can drop to a handful.
+
 These gestures are client input, like keyboard shortcuts. The camera recognizer
 emits a local event, which selects a client command or moves a Home widget.
 Switching a tab or dragging a widget does not send an artifact through the

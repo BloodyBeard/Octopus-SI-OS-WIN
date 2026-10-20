@@ -16,7 +16,7 @@ import {
   type CameraPermission,
   type GestureRecognitionPhase,
 } from "../../gestureRecognition";
-import { airHandGestures, defaultAirHandGestureCommand, emitAirHandGesture, useGestureShortcutPreferences, useSetGestureShortcutPreferences, type AirHandGestureId, type GestureCommandId } from "../../gestureShortcuts";
+import { airHandGestures, defaultAirHandGestureCommand, emitAirHandGesture, subscribeAirHandGestures, useGestureShortcutPreferences, useSetGestureShortcutPreferences, type AirHandGestureId, type GestureCommandId } from "../../gestureShortcuts";
 import { OcButton, OcCard, OcEmptyState, OcGroup, OcSelect, OcSettingsRow, OcStatus, OcSwitch, OcTextField } from "../../design-system/components";
 import { appToast } from "../../toasts";
 
@@ -26,6 +26,8 @@ const RECORD_COUNTDOWN_STEP_MS = 700;
 const RECORD_CAPTURE_MS = 900;
 const RECORD_SAMPLE_MS = 40;
 const RECORD_MIN_SAMPLES = 6;
+const RECOGNIZED_GESTURE_MS = 2_200;
+const GESTURE_MIN_CAMERA_FPS = 15;
 const CURL_LABELS: Record<keyof FingerCurls, string> = {
   thumb: "Thumb",
   index: "Index",
@@ -188,12 +190,13 @@ export function GestureManager({ accessProfile }: { accessProfile: OctopusClient
             {preferences.enabled ? (
               <div className="gesture-preview-inline" ref={previewFrameRef}>
                 <canvas ref={inlineCanvasRef} />
-                <LivePoseBadge cameraLive={cameraLive} idleNote={previewNote(preferences.enabled, granted, devicesView.phase)} />
+                <LivePoseBadge cameraLive={cameraLive} idleNote={previewNote(preferences.enabled, granted, devicesView.phase)} mappings={preferences.mappings} />
                 {!cameraLive ? (
                   <span className="gesture-preview-note">{previewNote(preferences.enabled, granted, devicesView.phase)}</span>
                 ) : null}
               </div>
             ) : null}
+            {preferences.enabled && cameraLive ? <CameraRateNote /> : null}
           </div>
           <OcSettingsRow
             control={(
@@ -322,21 +325,55 @@ export function GestureManager({ accessProfile }: { accessProfile: OctopusClient
       {pip && preferences.enabled ? (
         <div className="gesture-preview-pip">
           <canvas ref={pipCanvasRef} />
-          <LivePoseBadge cameraLive={cameraLive} idleNote={previewNote(preferences.enabled, granted, devicesView.phase)} />
+          <LivePoseBadge cameraLive={cameraLive} idleNote={previewNote(preferences.enabled, granted, devicesView.phase)} mappings={preferences.mappings} />
         </div>
       ) : null}
     </OcGroup>
   );
 }
 
-function LivePoseBadge({ cameraLive, idleNote }: { cameraLive: boolean; idleNote: string }) {
+function LivePoseBadge({ cameraLive, idleNote, mappings }: { cameraLive: boolean; idleNote: string; mappings: Readonly<Record<AirHandGestureId, GestureCommandId>> }) {
   const recognition = useGestureRecognitionCoarseState();
+  const [recognized, setRecognized] = useState<AirHandGestureId | null>(null);
+  useEffect(() => {
+    let timer = 0;
+    const unsubscribe = subscribeAirHandGestures((gesture) => {
+      window.clearTimeout(timer);
+      setRecognized(gesture);
+      timer = window.setTimeout(() => setRecognized(null), RECOGNIZED_GESTURE_MS);
+    });
+    return () => {
+      unsubscribe();
+      window.clearTimeout(timer);
+    };
+  }, []);
+  const command = recognized ? mappings[recognized] : "none";
   return (
-    <div className="gesture-preview-badge">
+    <div className={`gesture-preview-badge${recognized ? " is-recognized" : ""}`}>
       <span className={`gesture-preview-dot is-${cameraLive ? "live" : "idle"}`} />
-      {cameraLive ? poseLabel(recognition.pose) : idleNote}
+      {recognized
+        ? `${gestureLabel(recognized)} → ${command === "none" ? "No action" : commandLabel(command)} · runs when Settings is closed`
+        : cameraLive ? poseLabel(recognition.pose) : idleNote}
     </div>
   );
+}
+
+function CameraRateNote() {
+  const { cameraFps } = useGestureRecognitionCoarseState();
+  if (cameraFps == null || cameraFps >= GESTURE_MIN_CAMERA_FPS) return null;
+  return (
+    <span className="gesture-camera-rate" role="status">
+      The camera is delivering {cameraFps} frames per second; swipes need at least {GESTURE_MIN_CAMERA_FPS}. More light usually brings the rate back, and a phone used as a camera slows down when it is hot.
+    </span>
+  );
+}
+
+function gestureLabel(gesture: AirHandGestureId): string {
+  return airHandGestures.find((candidate) => candidate.id === gesture)?.label ?? gesture;
+}
+
+function commandLabel(command: ClientCommandId): string {
+  return clientCommands.find((candidate) => candidate.id === command)?.label ?? command;
 }
 
 function GestureRecorder({
@@ -505,7 +542,7 @@ function recognitionLabel(phase: GestureRecognitionPhase): string {
 function poseLabel(pose: string): string {
   if (pose === "open_palm") return "Open palm";
   if (pose === "left_click") return "Finger fold";
-  if (pose === "mission_control") return "Two-finger swipe";
+  if (pose === "mission_control") return "Two fingers";
   if (pose === "fist") return "Fist";
   if (pose === "pinch") return "Pinch";
   if (pose === "aim") return "Aim";

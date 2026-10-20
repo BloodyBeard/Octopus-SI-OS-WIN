@@ -764,8 +764,8 @@
 .gesture-preview-inline {
   position: relative;
   overflow: hidden;
-  aspect-ratio: 16 / 10;
-  max-height: 300px;
+  width: 100%;
+  aspect-ratio: var(--gesture-camera-ratio, 1.7778);
   border: 1px solid var(--color-token-border);
   border-radius: 12px;
   background: var(--color-token-main-surface-primary, #181818);
@@ -816,6 +816,17 @@
   color: var(--color-token-text-secondary);
 }
 
+.gesture-preview-badge.is-recognized {
+  color: var(--color-token-text-primary);
+}
+
+.gesture-camera-rate {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-token-text-secondary);
+}
+
 .gesture-preview-dot {
   width: 6px;
   height: 6px;
@@ -834,7 +845,7 @@
   z-index: 60;
   overflow: hidden;
   width: 220px;
-  aspect-ratio: 16 / 10;
+  aspect-ratio: var(--gesture-camera-ratio, 1.7778);
   border: 1px solid var(--color-token-border);
   border-radius: 14px;
   background: var(--color-token-main-surface-primary, #181818);

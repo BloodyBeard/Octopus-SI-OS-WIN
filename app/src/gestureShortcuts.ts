@@ -20,8 +20,8 @@ export const airHandGestures: readonly { id: AirHandGestureId; label: string; de
   { id: "open_palm", label: "Open palm", detail: "A stable open-palm pose" },
   { id: "left_click", label: "Finger fold", detail: "Index folded while the supporting fingers stay closed" },
   { id: "fist", label: "Fist", detail: "A stable closed-fist pose" },
-  { id: "swipe_left", label: "Swipe left", detail: "Two-finger space gesture moving left" },
-  { id: "swipe_right", label: "Swipe right", detail: "Two-finger space gesture moving right" },
+  { id: "swipe_left", label: "Swipe left", detail: "A quick sideways flick to the left, open hand or two fingers" },
+  { id: "swipe_right", label: "Swipe right", detail: "A quick sideways flick to the right, open hand or two fingers" },
 ];
 
 const DEFAULT_PREFERENCES: GestureShortcutPreferences = Object.freeze({
@@ -34,8 +34,8 @@ const DEFAULT_PREFERENCES: GestureShortcutPreferences = Object.freeze({
     open_palm: "none",
     left_click: "none",
     fist: "none",
-    swipe_left: "previous_surface",
-    swipe_right: "next_surface",
+    swipe_left: "navigate_back",
+    swipe_right: "navigate_forward",
   }),
   removedBuiltins: Object.freeze([]),
 });
