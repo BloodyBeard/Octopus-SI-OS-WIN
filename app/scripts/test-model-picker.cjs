@@ -8,7 +8,7 @@ const read=p=>fs.readFileSync(p,'utf8');
 const parse=(file,text)=>ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
 
 test('catalog order remains declared when selection and default flags change',()=>{
- const source=require('./projectionSource.cjs').projectionSource();
+ const source=require('./splitSource.cjs').projectionSource();
  const tree=parse('projection.cjs',source);
  const names=new Set(['providerModelCatalogRows','arrayValue','objectOrEmpty','stringValue']);
  const functions=tree.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.has(n.name.text)).map(n=>n.getText(tree)).join('\n');

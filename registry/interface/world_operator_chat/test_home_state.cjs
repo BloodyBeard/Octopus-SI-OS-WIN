@@ -1,19 +1,8 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const moduleApi = require("node:module");
-const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
 const { homeStateClientContext, renderHomeState } = require("./home-state.cjs");
-
-const sourcePath = path.join(__dirname, "client.cjs");
-const loaded = { exports: {} };
-vm.runInNewContext(`${fs.readFileSync(sourcePath, "utf8")}\nmodule.exports.__home_state_test = { operatorMessagePayload, operatorTurnClientContext };`, {
-  Buffer, __dirname, __filename: sourcePath, clearTimeout, console, module: loaded, process,
-  require: moduleApi.createRequire(sourcePath), setTimeout,
-});
-const { operatorMessagePayload, operatorTurnClientContext } = loaded.exports.__home_state_test;
+const { operatorMessagePayload, operatorTurnClientContext } = require("./client/operatorMessages.cjs");
 
 const now = Date.parse("2026-10-19T09:00:00Z");
 const projections = {

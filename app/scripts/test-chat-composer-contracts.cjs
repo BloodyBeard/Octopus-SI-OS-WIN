@@ -5,7 +5,7 @@ const path = require("node:path");
 const appRoot = path.resolve(__dirname, "..");
 
 function source(relativePath) {
-  return fs.readFileSync(path.join(appRoot, relativePath), "utf8");
+  return require("./splitSource.cjs").readSource(path.join(appRoot, relativePath));
 }
 
 function sourceBetween(value, startMarker, endMarker) {

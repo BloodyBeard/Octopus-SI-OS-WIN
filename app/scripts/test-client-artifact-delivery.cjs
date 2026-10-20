@@ -3,7 +3,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { createRequire } = require('node:module');
 const { test } = require('node:test');
 const { submitClientInterfaceArtifact, createClientArtifactStreamStore } = require('../electron/clientArtifacts.cjs');
 const { createProjectionStore } = require('../electron/projection.cjs');
@@ -127,8 +126,7 @@ test('durable attachment recovery preserves the client stage until payload bindi
   await Promise.all([fs.mkdir(durable), fs.mkdir(blobsRoot), fs.writeFile(sourcePath, 'selected file')]);
   const attachment = { name: 'proof.txt', label: 'attachment.file', type: 'text/plain', size: 13, lastModified: 0,
     payloadPath: sourcePath, contentHash: crypto.createHash('sha256').update('selected file').digest('hex') };
-  const file = path.join(__dirname, '../../registry/interface/world_operator_chat/client.cjs');
-  const api = Function('require', 'module', '__dirname', `${await fs.readFile(file, 'utf8')}\nreturn { planOperatorAttachments, materializeAttachments };`)(createRequire(file), { exports: {} }, path.dirname(file));
+  const api = require('../../registry/interface/world_operator_chat/client/operatorMessages.cjs');
   const plans = await api.planOperatorAttachments(durable, [attachment]);
   await api.materializeAttachments(plans);
   const renamed = await api.planOperatorAttachments(durable, [{ ...attachment, name: 'another name.txt' }]);
@@ -258,8 +256,7 @@ test('artifact delivery publishes complete bytes and refuses corrupt existing id
   assert.equal(delivered, 12);
   assert.deepEqual(await fs.readFile(destination), damaged);
   assert.deepEqual(await fs.readdir(path.dirname(destination)), [path.basename(destination)]);
-  const operatorPath = path.join(__dirname, '../../registry/interface/world_operator_chat/client.cjs');
-  const writeControl = Function('require', 'module', '__dirname', `${await fs.readFile(operatorPath, 'utf8')}\nreturn writeContentAddressedPayload;`)(createRequire(operatorPath), { exports: {} }, path.dirname(operatorPath));
+  const { writeContentAddressedPayload: writeControl } = require('../../registry/interface/world_operator_chat/client/operatorMessages.cjs');
   const control = await writeControl(root, 'stop', Buffer.from('immutable control'));
   await fs.writeFile(control, 'changed control');
   await assert.rejects(writeControl(root, 'stop', Buffer.from('immutable control')), /stable message identity/);

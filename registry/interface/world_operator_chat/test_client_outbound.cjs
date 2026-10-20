@@ -7,39 +7,23 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 
 const sourcePath = path.join(__dirname, "client.cjs");
-const source = `${fs.readFileSync(sourcePath, "utf8")}\nmodule.exports.__outbound_test = { readConfig, interfaceSocketPath, interfaceSocketIdentity, waitForInterfaceSocket, readLedgerOperatorRows, prepareOperatorPayloadArtifactBindings, assertPayloadInputCycleReady, assertPreparedOperatorPayloadSelection, readOrCreateOperatorMessageIntent, operatorMessageRequestDigest, assertProviderModelCatalogActiveRoute, existingRunSubmission, exactOutboundRuntime, ledgerChangeHubs, operatorChatLiveActivityPayload, operatorChatLiveEventEndsTurn, providerAccountOperationError, providerAccountTurnError, providerOperationRequestCoordinates, readOpenOperatorTurnStreamTail, selectOperatorTurnStreamEvents, selectedProviderDescriptorContent, streamIdentityHash, watchLedgerChange };`;
-const loaded = { exports: {} };
-vm.runInNewContext(source, {
-  Buffer,
-  __dirname,
-  __filename: sourcePath,
-  clearTimeout,
-  console,
-  module: loaded,
-  process,
-  require: moduleApi.createRequire(sourcePath),
-  setTimeout,
-});
-
-const {
-  assertProviderModelCatalogActiveRoute,
-  existingRunSubmission,
-  exactOutboundRuntime,
-  ledgerChangeHubs,
-  operatorChatLiveActivityPayload,
-  operatorChatLiveEventEndsTurn,
-  providerAccountOperationError,
-  providerAccountTurnError,
-  providerOperationRequestCoordinates,
-  readOpenOperatorTurnStreamTail,
-  selectOperatorTurnStreamEvents,
-  selectedProviderDescriptorContent,
-  streamIdentityHash,
-  watchLedgerChange,
-} = loaded.exports.__outbound_test;
+const { readConfig, validateArtifactReadProjection } = require("./client/roots.cjs");
+const { interfaceSocketPath, interfaceSocketIdentity } = require("./client/topologyPlan.cjs");
+const { waitForInterfaceSocket } = require("./client/publication.cjs");
+const { readLedgerOperatorRows } = require("./client/artifactBatches.cjs");
+const { assertPayloadInputCycleReady, assertPreparedOperatorPayloadSelection, prepareOperatorPayloadArtifactBindings,
+  selectedProviderDescriptorContent } = require("./client/operatorTurns.cjs");
+const { operatorMessageRequestDigest, readOrCreateOperatorMessageIntent } = require("./client/messageAdmission.cjs");
+const { assertProviderModelCatalogActiveRoute, providerOperationRequestCoordinates } = require("./client/providerRoutes.cjs");
+const { existingRunSubmission } = require("./client/conversation.cjs");
+const { exactOutboundRuntime } = require("./client/values.cjs");
+const { ledgerChangeHubs } = require("./client/constants.cjs");
+const { operatorChatLiveActivityPayload, operatorChatLiveEventEndsTurn } = require("./client/liveEvents.cjs");
+const { providerAccountOperationError, providerAccountTurnError } = require("./client/providerObservations.cjs");
+const { readOpenOperatorTurnStreamTail, selectOperatorTurnStreamEvents, streamIdentityHash } = require("./client/turnStreams.cjs");
+const { watchLedgerChange } = require("./client/liveCursors.cjs");
 const {
   assertGenericOperatorChatArtifactAllowed,
   loginProviderAccount,
@@ -63,22 +47,15 @@ const SUMMARY_ARTIFACT = "interface.artifact.output:task-summary";
 const CONTINUATION_ARTIFACT = "coder.worktree.snapshot:task-continuation";
 
 test("full client configuration validates the explicit artifact projection contract", async () => {
-  const canonical = await loaded.exports.__outbound_test.readConfig();
+  const canonical = await readConfig();
   assert.deepEqual(Array.from(canonical.artifact_read_projection.excluded_root_fields), ["session_context", "codex_continuity"]);
   assert.equal(canonical.artifact_read_projection.max_source_bytes, 268435456);
-  const nativeRequire = moduleApi.createRequire(sourcePath), nativeFs = nativeRequire("node:fs/promises");
   for (const contract of [undefined, null, {}, { ...canonical.artifact_read_projection, schema_version: 2 },
     { ...canonical.artifact_read_projection, max_source_bytes: 0 }, { ...canonical.artifact_read_projection, max_projected_bytes: -1 },
     { ...canonical.artifact_read_projection, extra: true }, { ...canonical.artifact_read_projection, excluded_root_fields: ["x", "x"] },
     { ...canonical.artifact_read_projection, excluded_root_fields: [" x "] }, { ...canonical.artifact_read_projection, json_object_labels: undefined },
     { ...canonical.artifact_read_projection, json_object_labels: ["turn.stream"] }]) {
-    const config = { ...canonical, artifact_read_projection: contract }, unit = { exports: {} };
-    vm.runInNewContext(source, { Buffer, __dirname, __filename: sourcePath, clearTimeout, console, module: unit, process, setTimeout,
-      require: id => id === "node:fs/promises" ? { ...nativeFs, readFile: async file => {
-        assert.equal(file, path.join(__dirname, "client.json")); return JSON.stringify(config);
-      } } : nativeRequire(id),
-    });
-    await assert.rejects(unit.exports.__outbound_test.readConfig(), /artifact_read_projection/);
+    assert.throws(() => validateArtifactReadProjection(contract), /artifact_read_projection/);
   }
 });
 
@@ -144,6 +121,7 @@ test("native compaction projects as non-terminal activity", () => {
   const activity = operatorChatLiveActivityPayload("turn.context.compaction", config, payload);
   assert.equal(activity.eventKind, "compaction");
   assert.equal(activity.text, "");
+  assert.equal(operatorChatLiveActivityPayload("interface.artifact.output", config, { text: "Done." }).eventKind, "message");
   assert.equal(operatorChatLiveEventEndsTurn({
     config,
     eventKind: activity.eventKind,
@@ -611,6 +589,9 @@ test("turn control uses the exact operator socket without a projection read", as
   const server = await listenForInterface(root, interfaceId);
   t.after(async () => { await closeServer(server); await fs.promises.rm(root, { recursive: true, force: true }); });
   let handed = null;
+  await assert.rejects(submitOperatorTurnControl({ octopusHome: () => root }, {
+    interfaceId, runId, action: "pause", controlId: "control_test_00", timeoutMs: 1_000,
+  }), /must be 'interrupt', 'resume', or 'stop'/);
   const outcome = await submitOperatorTurnControl({
     octopusHome: () => root,
     clientArtifactsRoot: () => path.join(root, "interface-hand-in", interfaceId, "client"),
@@ -918,7 +899,7 @@ function closeServer(server) {
 
 test("interface socket replacement wait refuses a live prior listener until its generation changes", async (t) => {
   const root = await fs.promises.mkdtemp("/tmp/octo-socket-");
-  const { interfaceSocketPath, interfaceSocketIdentity, waitForInterfaceSocket: wait } = loaded.exports.__outbound_test;
+  const wait = waitForInterfaceSocket;
   assert.equal(await interfaceSocketIdentity(root, ACTIVE_CLIENT), null);
   let server = await listenForInterface(root, ACTIVE_CLIENT);
   t.after(async () => { await closeServer(server); await fs.promises.rm(root, { recursive: true, force: true }); });
@@ -2232,7 +2213,9 @@ test("ordinary existing submission hands into its active client without topology
   assert.equal(writerCalls, 1);
   assert.equal(handed.length, 3);
   await fs.promises.writeFile(retainedCall + ".result", "checked");
-  delete require.cache[require.resolve(sourcePath)];
+  for (const cached of Object.keys(require.cache)) {
+    if (cached === sourcePath || cached.startsWith(path.join(__dirname, "client") + path.sep)) delete require.cache[cached];
+  }
   const resumed = await require(sourcePath).submitOperatorTurn(options, nextRequest);
   const reauthored = JSON.parse(await fs.promises.readFile(runPath, "utf8"));
   assert.equal(resumed.clientWrites.length, 1);
@@ -2791,7 +2774,7 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
   const config = JSON.parse(fs.readFileSync(path.join(__dirname, "client.json"), "utf8"));
   const run = activeRun();
   run.status = "idle";
-  const ready = loaded.exports.__outbound_test.assertPayloadInputCycleReady;
+  const ready = assertPayloadInputCycleReady;
   const provider = run.interface_state[ACTIVE_PROVIDER];
   provider.authoring_generation = 7;
   provider.pending_handoff = { terminal: true };
@@ -2836,8 +2819,8 @@ test("rearmed idle payload staging preserves inherited refs, explicit clearing a
     },
   };
   fs.writeFileSync(sidecarPath, JSON.stringify(sidecar));
-  const { prepareOperatorPayloadArtifactBindings: prepare, assertPreparedOperatorPayloadSelection: check,
-    readOrCreateOperatorMessageIntent: intent, operatorMessageRequestDigest: digest } = loaded.exports.__outbound_test;
+  const [prepare, check, intent, digest] = [prepareOperatorPayloadArtifactBindings, assertPreparedOperatorPayloadSelection,
+    readOrCreateOperatorMessageIntent, operatorMessageRequestDigest];
   const request = { providerModel: "gpt-5.6-sol" };
   const resolved = { clientSurfaceRole: "home", providerReference: "world_provider_codex" };
   const input = { config, request, existingRunDocument: document, artifactRoot: path.join(root, "artifacts"),
@@ -2918,7 +2901,7 @@ test("operator ledger pages stop reading at their page while retaining exact rep
   };
   try {
     const input = { afterSeq: -1, cursor: { offset: 0, seq: null }, interfaceId: runtime().interface, runId: runtime().run, limit: 2, movementsPath: file };
-    const read = loaded.exports.__outbound_test.readLedgerOperatorRows;
+    const read = readLedgerOperatorRows;
     const first = await read(input);
     assert.equal(JSON.stringify(first.rows.map(row => row.seq)), "[0,1]");
     assert.ok(requestedBytes <= 64 * 1024, `bounded first page requested ${requestedBytes} bytes of ${bytes.length}`);

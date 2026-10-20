@@ -1,9 +1,6 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createRequire } = require("node:module");
-const vm = require("node:vm");
 
 function maintenanceFixture(registryRoot, runsRoot, original = {}) {
   const terminal = "interface.artifact.output", input = "memory.experience.input", outcome = "memory.capture.outcome", library = "artifact-system-library";
@@ -130,19 +127,17 @@ function maintenanceFixture(registryRoot, runsRoot, original = {}) {
 module.exports = { maintenanceFixture };
 
 if (require.main === module) {
-  const test = require("node:test"), filename = path.join(__dirname, "client.cjs"), loaded = { exports: {} };
-  vm.runInNewContext(`${fs.readFileSync(filename, "utf8")}\nmodule.exports = { plannedAdditionalRunWrites };`, {
-    Buffer, __dirname, __filename: filename, clearTimeout, console, module: loaded, process, require: createRequire(filename), setTimeout,
-  });
+  const test = require("node:test"), { plannedAdditionalRunWrites } = require("./client/topologyPlan.cjs");
   const registry = path.join(os.tmpdir(), "octopus-maintenance-guard-registry"), runs = path.join(os.tmpdir(), "octopus-maintenance-guard-runs");
-  const guard = (plan) => loaded.exports.plannedAdditionalRunWrites(plan, runs, registry);
+  const guard = (plan) => plannedAdditionalRunWrites(plan, runs, registry);
   const changeSource = (plan, change) => { const source = JSON.parse(plan.run_record_content); change(source, source.interface_state[plan.model_interface_id].maintenance_observer); plan.run_record_content = JSON.stringify(source); };
   test("retained declaration decode needs neither a live source frontier nor current companion bytes", () => {
     const { decodeMaintenanceDeclaration } = require("./maintenance-client.cjs"), plan = maintenanceFixture(registry, runs);
     const source = JSON.parse(plan.run_record_content); source.active_checkpoints = [];
     const decoded = decodeMaintenanceDeclaration({ ...plan, interface_writes: [], run_writes: [] }, source);
     assert.equal(decoded.observer.record.id, "observer_run"); assert.equal(decoded.projection.record.id, "projection_run");
-    assert.throws(() => decodeMaintenanceDeclaration(plan, { ...source, ee: "foreign_ee" }), /exact source/);
+    assert.equal(decodeMaintenanceDeclaration(plan, { ...source, ee: "moved_ee" }).observer.record.id, "observer_run");
+    assert.throws(() => decodeMaintenanceDeclaration(plan, { ...source, worker: "foreign_worker" }), /exact source/);
     delete source.interface_state[plan.model_interface_id].maintenance_observer;
     assert.equal(decodeMaintenanceDeclaration(plan, source), null);
     delete source.interface_state; assert.equal(decodeMaintenanceDeclaration(plan, source), null);
@@ -204,7 +199,7 @@ if (require.main === module) {
   test("maintenance guard rejects changed identity, scope, routes, authority and exact planned bytes", () => {
     const edits = [
       (p) => changeSource(p, (_, d) => { d.source_provider_interface = "foreign_provider"; }),
-      (p) => changeSource(p, (_, d) => { d.ee = "foreign_ee"; }),
+      (p) => changeSource(p, (_, d) => { d.source_client_interface = "foreign_client"; }),
       (p) => changeSource(p, (_, d) => { d.projection_run.worker_interface = "foreign_worker"; }),
       (p) => changeSource(p, (source) => { source.checkpoints[0].outbound_interface_bindings.at(-1).config.artifact_policy.names.push("turn.completed"); }),
       (p) => changeSource(p, (_, d) => { d.collection_entries_root = path.join(registry, "artifact", "another", "entries"); }),

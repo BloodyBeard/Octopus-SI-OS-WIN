@@ -91,14 +91,16 @@ async function nativeAdoptionContract(root) {
   const providerBytes = await fs.readFile(providerPath), catalogBytes = await fs.readFile(catalogPath);
   const hash = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
   const replyPath = path.join(root, "native-plan.json"), planner = path.join(owner, "packages/bin/topology");
-  const clientSource = path.resolve(__dirname, "../../registry/interface/world_operator_chat/client.cjs");
-  const config = JSON.parse(await fs.readFile(path.join(path.dirname(clientSource), "client.json")));
+  const packageSource = path.resolve(__dirname, "../../registry/interface/world_operator_chat");
+  await fs.cp(packageSource, owner, { recursive: true, filter: (from) => {
+    const relative = path.relative(packageSource, from);
+    return !relative || relative === "client" || relative.startsWith(`client${path.sep}`) || (relative.endsWith(".cjs") && !relative.includes(path.sep));
+  } });
+  const config = JSON.parse(await fs.readFile(path.join(packageSource, "client.json")));
   config.executables.topology_planner = "owner://packages/bin/topology";
   await json(path.join(owner, "client.json"), config); await fs.mkdir(path.dirname(planner), { recursive: true });
   await fs.writeFile(planner, `#!${process.execPath}\nlet text='';process.stdin.on('data',chunk=>text+=chunk);process.stdin.on('end',()=>{if(process.argv[2]!=='--plan-native-adoption')process.exit(64);JSON.parse(text);console.log(require('node:fs').readFileSync(${JSON.stringify(replyPath)},'utf8'))});\n`, { mode: 0o700 });
-  const module = { exports: {} };
-  Function("require", "module", "__dirname", await fs.readFile(clientSource, "utf8"))(require("node:module").createRequire(clientSource), module, owner);
-  const client = module.exports;
+  const client = require(path.join(owner, "client.cjs"));
   const nextCatalog = `${JSON.stringify({ text: "updated exact catalog" })}\n`, nextProvider = `${JSON.stringify({ id: provider, declaration: 2 })}\n`;
   const planned = { status: "planned", run_id: runId, provider_interface_id: provider, source_movement_seq: 8240, reason: null,
     writes: [{path:catalogPath,content:nextCatalog,expected_before_hash:hash(catalogBytes),tag:"catalog"},

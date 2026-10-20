@@ -5,7 +5,7 @@ const ts = require("typescript");
 const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
 const root = path.resolve(__dirname, "..");
-const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const read = (file) => require("./splitSource.cjs").readSource(path.join(root, file));
 const record = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 const text = (value) => typeof value === "string" ? value : "";
 
@@ -348,7 +348,7 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   assert.equal(model.commandActivityModel({ ...yielded, eventData: { ...yielded.eventData, tool: "renamed.tool", arguments: { command: "completely different" } } }).phase, "running");
   assert.equal(activities.activityIsActive({ ...native(undefined, "started"), eventKind: "dynamic_tool", eventData: { status: "started", body: { unrelated: true } } }), true);
 
-  const compactSource = require("./projectionSource.cjs").projectionSource();
+  const compactSource = require("./splitSource.cjs").projectionSource();
   const markers = functions(compactSource, ["clientEventHasProcessOutput"], { objectOrEmpty: record });
   assert.equal(markers.clientEventHasProcessOutput(failed.eventData), true);
   assert.equal(markers.clientEventHasProcessOutput({ body: { unrelated: "value" } }), false);

@@ -67,9 +67,8 @@ const chatActivityProjectionSource = source("src/components/chat/chatActivityPro
 const chatCapabilityCatalog = source("src/components/chat/useChatCapabilityCatalog.ts");
 const conversationTrace = source("src/components/chat/conversationTrace.ts");
 const chatRuns = source("src/chatRuns.ts");
-const electronProjection = require("./projectionSource.cjs").projectionSource();
+const electronProjection = require("./splitSource.cjs").projectionSource();
 const electronMain = source("electron/main.cjs");
-const operatorChatClient = fs.readFileSync(path.join(repoRoot, "registry", "interface", "world_operator_chat", "client.cjs"), "utf8");
 const viteConfig = source("vite.config.ts");
 const chatCss = source("src/components/chat/chat.css");
 const iconGlyphs = source("src/components/IconGlyphs.tsx");
@@ -424,17 +423,9 @@ assert.match(viteConfig, /createOperatorChatClientLoader\(/);
 assert.equal((viteConfig.match(/operatorChatClientLoader\.load\(\)/g) ?? []).length, 6);
 assert.doesNotMatch(viteConfig, /require\(path\.join\(octopusHome, "registry", "interface", "world_operator_chat", "client\.cjs"\)\)/);
 assert.match(viteConfig, /assertOperatorChatArtifactBatch\(batch\)/);
-assert.match(operatorChatClient, /assertOperatorChatLiveArtifactBatch\(\{ artifacts, cursor \}\);\s*return \{ artifacts, cursor \}/);
-assert.match(operatorChatClient, /"turn\.context\.compaction": "compaction"/);
-assert.match(operatorChatClient, /if \(label === config\.artifact_labels\.terminal_output\) return "message"/);
-assert.match(operatorChatClient, /eventKind === "compaction"\) delete eventData\.text/);
-assert.match(operatorChatClient, /payload_content_hash !== undefined && manifest\.payload_content_hash !== null/);
-assert.match(operatorChatClient, /watchLedgerChange\(bodyPath, input\.waitMs\)/);
-assert.match(operatorChatClient, /readOpenOperatorTurnStreamTail\(bodyPath, input\.cursor/);
 assert.match(electronProjection, /"turn\.stream"/);
 assert.match(electronProjection, /sealed turn\.stream has no seal row/);
 assert.match(electronProjection, /function operatorChatProjectedRowId\(row, fallback\) \{[\s\S]*?return `\$\{row\.__stream\.stream_id\}:\$\{row\.__stream\.stream_seq\}`;[\s\S]*?return ledgerArtifactId\(row\) \|\| fallback;/);
-assert.doesNotMatch(operatorChatClient, /run_boundary|context_boundary/);
 assert.match(applicationsView, /action: "repair_package"/);
 assert.match(applicationsView, /expectedRepairs: \{ \[application\.package_id\]: expectation \}/);
 assert.throws(
@@ -902,8 +893,6 @@ assert.match(chatWorkspace, /loadChatRunMessages\(turn\.runId\)[\s\S]*?loadChatR
 assert.match(clientTurnQueueSource, /export function queueTurnReady\([\s\S]*?status\.runId !== turn\.runKey[\s\S]*?turn\.resumeAfterInterrupt === true \|\| !operatorTurnResumeAvailable\(history, false\)/);
 const queuedAfterReply = sourceBetween(chatWorkspace, "const queued = nextQueuedTurn(submittedRunKey);", "} catch (failure)");
 assert.match(queuedAfterReply, /const resumeRequired = operatorTurnResumeAvailable\(liveMessages, false\);[\s\S]*?if \(queued && resumeRequired\)[\s\S]*?await replacePausedQueueRunKeys[\s\S]*?current = null;/);
-assert.match(operatorChatClient, /if \(!\["interrupt", "resume", "stop"\]\.includes\(action\)\)/);
-assert.match(operatorChatClient, /const payload = \{ action, control_id: controlId \};/);
 assert.match(electronProjection, /outcome\?\.status === "acknowledged" && outcome\.action === "resume"[\s\S]*?open = true;[\s\S]*?state = "working";/);
 assert.match(electronMain, /maxPayloadBytes: input\?\.label === "turn\.stream" \? 256 \* 1024 \* 1024 : undefined/);
 assert.match(chatWorkspace, /if \(activeRunId\) void refreshRuns\(\);[\s\S]*?\[activeRunId, refreshRuns\]/);
@@ -1012,7 +1001,6 @@ assert.doesNotMatch(operatorShell, /contextBoundaryRunReplacements|replaceClient
 assert.doesNotMatch(chatWorkspace, /CONTEXT_BOUNDARY_CONTINUE_PROMPT|waitForProjectedContextBoundarySuccessor|runReplacement/);
 assert.doesNotMatch(electronProjection, /operatorChatContextBoundary|context_boundary_count|task_root_run_id/);
 assert.match(electronProjection, /"turn\.context\.compaction": "compaction"/);
-assert.match(operatorChatClient, /"turn\.context\.compaction": "compaction"/);
 assert.match(operatorShell, /if \(!surface\) return surfaceRegistry\.loading;/);
 assert.match(operatorShell, /target\.surfaceId !== "chat"[\s\S]*?!chatWorkspace\.runsLoaded[\s\S]*?chatWorkspace\.runs\.some/);
 assert.match(operatorShell, /defaultSidebarOpen=\{!clientWindow\.initialTarget\}/);

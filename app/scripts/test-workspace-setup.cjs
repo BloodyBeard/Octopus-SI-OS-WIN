@@ -1741,7 +1741,7 @@ function fixtureMovement(seq, workspace, label, fromInterface, toKind) {
 async function verifyTerminalBootstrapBoundary() {
   const [mainSource, operatorClientSource] = await Promise.all([
     fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../../registry/interface/world_operator_chat/client.cjs"), "utf8"),
+    Promise.resolve(require("./splitSource.cjs").operatorChatClientSource()),
   ]);
   const runtimeInitialization = mainSource.match(
     /async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/,

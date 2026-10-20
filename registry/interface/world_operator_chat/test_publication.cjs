@@ -1,11 +1,9 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const { createRequire } = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const vm = require("node:vm");
 const { createStoragePublisher, publishClientWrites } = require("./publication.cjs");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-client-publication-"));
@@ -101,24 +99,27 @@ test("conditioned batches retain every dependency and reject unsupported effects
 });
 
 test("client commit and message-admission helpers thread the declared installed executable", async () => {
-  const filename = path.join(__dirname, "client.cjs"), loaded = { exports: {} }, calls = [];
-  const source = `${fs.readFileSync(filename, "utf8")}\nrunOperatorRevisionCommand = publicationTransport; module.exports = { ...module.exports, commitClientWrites, writeOperatorMessageAdmission };`;
-  vm.runInNewContext(source, { Buffer, __dirname, __filename: filename, clearTimeout, console,
-    module: loaded, process, require: createRequire(filename), setTimeout,
-    publicationTransport: async (binary, mode, { writes }) => {
-      calls.push({ binary, mode });
-      return { receipts: writes.map(applied), error: null };
-    },
-  });
-  const options = { installationRoot: () => root, registryRoot: () => path.join(root, "registry") };
-  await loaded.exports.commitClientWrites([write("direct")], options);
-  await loaded.exports.writeOperatorMessageAdmission(options, path.join(root, "admission.json"), null, { message_id: "m1" });
-  const publisher = await loaded.exports.loadStoragePublisher(options);
-  assert.deepEqual(Object.keys(publisher), ["publishFiles", "snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"]);
-  assert.equal(calls.length, 2);
-  await publisher.publishFiles([write("factory")]);
   const declared = JSON.parse(fs.readFileSync(path.join(__dirname, "client.json"), "utf8")).executables.topology_planner;
-  assert.deepEqual(calls, Array(3).fill({ binary: path.join(root, declared), mode: "--publish-files" }));
+  const planner = path.join(root, declared), log = path.join(root, "planner-calls.jsonl");
+  fs.mkdirSync(path.dirname(planner), { recursive: true });
+  fs.writeFileSync(planner, `#!/usr/bin/env node
+const crypto = require("node:crypto"), fs = require("node:fs");
+const hash = ${hash}, applied = ${applied};
+const request = JSON.parse(fs.readFileSync(0, "utf8"));
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ binary: process.argv[1], mode: process.argv[2] }) + "\\n");
+process.stdout.write(JSON.stringify({ receipts: request.writes.map(applied), error: null }));
+`, { mode: 0o755 });
+  const calls = () => fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
+  const { commitClientWrites, loadStoragePublisher } = require("./client/publication.cjs");
+  const { writeOperatorMessageAdmission } = require("./client/messageAdmission.cjs");
+  const options = { installationRoot: () => root, registryRoot: () => path.join(root, "registry") };
+  await commitClientWrites([write("direct")], options);
+  await writeOperatorMessageAdmission(options, path.join(root, "admission.json"), null, { message_id: "m1" });
+  const publisher = await loadStoragePublisher(options);
+  assert.deepEqual(Object.keys(publisher), ["publishFiles", "snapshotDirectory", "publishDirectoryMoves", "reclaimDirectory"]);
+  assert.equal(calls().length, 2);
+  await publisher.publishFiles([write("factory")]);
+  assert.deepEqual(calls(), Array(3).fill({ binary: planner, mode: "--publish-files" }));
 });
 
 const directoryPreimage = inode => ({ identity: { device: 4, inode }, mode: 0o755, digest_algorithm: "sha256", entries: [] });

@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const { test } = require('node:test');
 
-const { projectionSource } = require('./projectionSource.cjs');
+const { projectionSource } = require('./splitSource.cjs');
 const source = projectionSource();
 const tree = ts.createSourceFile('projection.cjs', source, ts.ScriptTarget.Latest, true);
 const declarations = new Map();

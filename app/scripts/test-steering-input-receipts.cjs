@@ -6,7 +6,7 @@ const ts = require("typescript");
 const app = path.resolve(__dirname, "..");
 
 function extract(file, names, constants = {}) {
-  const source = file.endsWith(path.join("electron", "projection.cjs")) ? require("./projectionSource.cjs").projectionSource() : fs.readFileSync(file, "utf8");
+  const source = require("./splitSource.cjs").readSource(file);
   const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const declarations = new Map();
   function visit(node) {

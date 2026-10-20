@@ -8,7 +8,7 @@ const ts = require("typescript");
 const { WebSocketServer } = require("ws");
 const { captureArtifactDelivery } = require("../electron/interfaceTransport.cjs");
 const root = path.resolve(__dirname, "../..");
-function source(file) { return fs.readFileSync(path.join(root, file), "utf8"); }
+function source(file) { return require("./splitSource.cjs").readSource(path.join(root, file)); }
 function declaration(file, name) {
   const ast = ts.createSourceFile(file, source(file), ts.ScriptTarget.Latest, true);
   let found;

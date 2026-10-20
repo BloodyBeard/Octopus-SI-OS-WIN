@@ -6,7 +6,7 @@ const ts = require("typescript");
 const { modelServiceTiers, validateModelServiceTier } = require("../electron/providerModelTiers.cjs");
 
 function functions(file, names, scope = {}) {
-  const source = file === "electron/projection.cjs" ? require("./projectionSource.cjs").projectionSource() : fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+  const source = file === "electron/projection.cjs" ? require("./splitSource.cjs").projectionSource() : fs.readFileSync(path.join(__dirname, "..", file), "utf8");
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const selected = [];
   const visit = (node) => {

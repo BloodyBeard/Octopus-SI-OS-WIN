@@ -1,15 +1,9 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
 const path = require("node:path");
-const { createRequire } = require("node:module");
 const test = require("node:test");
-const vm = require("node:vm");
 
-const filename = path.join(__dirname, "client.cjs"), loaded = { exports: {} };
-vm.runInNewContext(`${fs.readFileSync(filename, "utf8")}\nmodule.exports = { plannedClientWrite, plannedArtifactOwner, safeSegment, operatorPublications, assertPublicationExpansion };`, {
-  Buffer, __dirname, __filename: filename, clearTimeout, console, module: loaded, process, require: createRequire(filename), setTimeout,
-});
-const { plannedClientWrite, plannedArtifactOwner, safeSegment, operatorPublications, assertPublicationExpansion } = loaded.exports;
+const { plannedClientWrite, plannedArtifactOwner, operatorPublications, assertPublicationExpansion } = require("./client/topologyPlan.cjs");
+const { safeSegment } = require("./client/values.cjs");
 const registry = path.resolve(__dirname, "../../..");
 const topologyOwner = "artifact-code-mode-topology__system_code_mode__project_preflight_66cb898c4b507fb5de287d0d217df62d";
 const write = (id) => ({ path: path.join(registry, "artifact", id, "artifact.json"), content: JSON.stringify({ id, schema_version: 1 }), tag: `artifact:${id}`, expected_before_hash: null });
