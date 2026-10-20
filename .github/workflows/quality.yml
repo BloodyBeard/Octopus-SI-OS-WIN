@@ -50,6 +50,7 @@ jobs:
           node scripts/test-steering-input-receipts.cjs
           node scripts/test-chat-receipt-state.cjs
           node scripts/test-chat-message-projection.cjs
+          node scripts/test-chat-message-list.cjs
           node scripts/test-command-activity.cjs
 
       - name: Client package and lifecycle contracts

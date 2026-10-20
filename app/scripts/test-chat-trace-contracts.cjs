@@ -884,56 +884,11 @@ assert.doesNotMatch(chatWorkspace, /Interface provenance projection is not ready
 assert.match(chatCapabilityCatalog, /capabilityCatalogScopeRef\.current !== scope/);
 assert.doesNotMatch(chatCapabilityCatalog, /let cancelled = false;\s*setExecutionContextsLoaded\(false\);\s*setInterfaceRolesById\(null\);/);
 
-assert.match(messageList, /kind\.movePath \?\? kind\.move_path/);
-assert.match(messageList, /path: activityFileChangePath\(change\)/);
 assert.match(messageList, /flex w-full min-w-0 flex-col items-stretch/);
-assert.match(messageList, /effectiveActiveMessageCount === 0 && emptyState === "new-task"/);
-assert.match(messageList, /streamKey=\{streaming \? message\.id : undefined\} streaming=\{streaming\}/);
-assert.match(messageList, /const MemoizedChatTurn = memo\(ChatTurn, chatTurnPropsEqual\);/);
-assert.match(messageList, /const turns = useStableTurns\(renderMessages, activityPresentation === "conversation"\);/);
-assert.match(messageList, /projectionValueEqual\(previous\.eventData, next\.eventData\)/);
-assert.doesNotMatch(messageList, /previous\.id\.startsWith\("stream:"\)/);
-assert.match(messageList, /className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pb-4"/);
-assert.match(messageList, /glyph=\{dynamicToolGlyph\(presentation\)\}/);
-assert.doesNotMatch(messageList, /name="plugins" \/>[\s\S]{0,180}\$\{lifecycle === "active" \? "Calling" : "Called"\}/);
-assert.match(
-  messageList,
-  /const reasoningStreaming = kind === "reasoning_delta";[\s\S]*?streamKey=\{reasoningStreaming \? message\.id : undefined\}[\s\S]*?streaming=\{reasoningStreaming\}[\s\S]*?variant="reasoning"/,
-);
-assert.match(
-  messageList,
-  /if \(kind === "commentary" \|\| kind === "commentary_delta"\)[\s\S]*?const commentaryStreaming = kind === "commentary_delta";[\s\S]*?streamKey=\{commentaryStreaming \? message\.id : undefined\}[\s\S]*?streaming=\{commentaryStreaming\}/,
-);
-assert.match(messageList, /\{!streaming && message\.terminal !== false \? \([\s\S]*?<MessageActions/);
-assert.doesNotMatch(messageList, /message\.latencyMs \? formatLatency/);
-assert.match(messageList, /readThreadRestoreState\(conversationId\)/);
-assert.match(messageList, /key=\{conversationId \|\| "new-task"\}/);
-assert.match(messageList, /initialRestoreState=\{initialVirtualizerRestoreState\}/);
-const presentationScrollEffectStart = messageList.indexOf("    if (skipNextPresentationScrollRef.current) {");
-const presentationScrollEffectEnd = messageList.indexOf("  }, [presentationMessageCount]);", presentationScrollEffectStart);
-assert.notEqual(presentationScrollEffectStart, -1);
-assert.notEqual(presentationScrollEffectEnd, -1);
-assert.doesNotMatch(
-  messageList.slice(presentationScrollEffectStart, presentationScrollEffectEnd),
-  /setReverseScrollDistance\(/,
-  "streaming deltas must not fight user scrolling with an imperative scroll-to-latest",
-);
-assert.doesNotMatch(messageList, /const presentationSignal = useMemo/);
-assert.match(messageList, /flushSync\(\(\) => setMeasuredHeightsByKey\(next\)\)/);
-assert.match(messageList, /const turnKeyByElementRef = useRef\(new Map<Element, string>\(\)\)/);
-assert.match(messageList, /if \(!virtualized\) \{[\s\S]*?<MeasuredVirtualTurn/);
-assert.match(messageList, /distanceFromBottomAnchoredToTurn\(\{/);
-assert.match(messageList, /aria-hidden[\s\S]*?h-\[calc\(var\(--thread-scroll-padding-bottom\)-var\(--spacing\)\*4\)\]/);
-assert.match(messageList, /className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pb-4"[\s\S]*?data-thread-scroll-footer="true"/);
 assert.match(source("src/components/voice/HomeAgentActivityView.tsx"), /<ChatView[\s\S]*?workspace=\{workspace\}/);
-assert.match(messageList, /turnInProgress=\{responseStreaming && isLatestTurn\}/);
 assert.doesNotMatch(source("src/components/chat/CollapsibleMessageBody.tsx"), /motion|maxHeight:.*contentHeight/);
-assert.doesNotMatch(messageList, /className="sticky bottom-0 z-10 mt-auto w-full pb-4" data-thread-scroll-footer="true" ref=\{footerRef\}/);
 assert.match(chatView, /if \(chat\.loadingMessages\) \{[\s\S]*?<OctopusLoadingState className="surface-content-loading-state" label="Loading task"/);
 assert.doesNotMatch(chatView, /emptyState=\{chat\.loadingMessages/);
-assert.doesNotMatch(messageList, /TaskOpeningIndicator/);
-assert.match(messageList, /eventString\(data\.source\) === "model_safety_buffering"/);
-assert.match(messageList, /No action is required\. Octopus will keep waiting for the response\./);
 assert.match(surfaceHost, /surface\.rendererKind === "builtin\.chat" \|\| surface\.rendererKind === "builtin\.voice"[\s\S]*?<OctopusLoadingState className="surface-content-loading-state"/);
 
 assert.doesNotMatch(operatorShell, /secondaryNewTaskTransitioning|secondary-chat:/);
@@ -1075,7 +1030,6 @@ assert.match(operatorShellState, /open: state\.open && tabs\.length > 0/);
 assert.match(taskActionsMenu, /OPEN_CLIENT_TASK_ACTIONS_MENU_EVENT[\s\S]*?subscribeOpenClientTaskActionsMenu/);
 assert.match(source("src/components/shell/AppShell.tsx"), /<TaskActionsController[\s\S]*?onOpenChatInNewWindow=\{onOpenChatInNewWindow\}/);
 assert.match(taskActionsController, /export function TaskActionsController\([\s\S]*?subscribeOpenClientTaskActionsMenu[\s\S]*?setMenu\(\(previous\)/);
-assert.match(messageList, /distanceFromTop = list \? Math\.max\(0, list\.scrollHeight - list\.clientHeight \+ list\.scrollTop\) : 0/);
 assert.match(chatCss, /--thread-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ var\(--spacing\) \* 8\)/);
 assert.match(chatCss, /\.chat-thread-top-fade\[data-app-shell-main-content-top-fade="visible"\]/);
 assert.doesNotMatch(chatView, /RunEnvironmentView|TaskContextPopover|chat-environment-panel/);
@@ -1170,7 +1124,7 @@ async function verifyTranscriptLayout() {
     useShouldReduceMotion: () => reducedMotion,
     Glyph: ({ name }) => React.createElement("span", { "data-glyph": name }),
     CadencedShimmerText: ({ children, className, active }) => React.createElement("span", { className, "data-active": Boolean(active) }, children),
-    MessageContent: ({ text }) => React.createElement("p", null, text),
+    MessageContent: ({ text, streaming, streamKey, variant }) => React.createElement("p", { "data-variant": variant, "data-streaming": streaming ? "true" : undefined, "data-stream-key": streamKey }, text),
     MessageTooltip: ({ children, label, onActivate }) => React.createElement("span", { "data-tooltip-target": label?.props?.children, "data-activates-file": Boolean(onActivate), onClick: onActivate }, children),
     readProjection: async (method, params) => { assert.equal(method, "projection.artifact.bytes.read"); artifactReads.push(params); return artifactResponse; },
     appToast: { warning: (error) => artifactErrors.push(error) },
@@ -1206,7 +1160,7 @@ async function verifyTranscriptLayout() {
   }
   assert.match(parseWorkingPatch("not a diff", "report.md", "update").error, /one recorded file diff/);
   assert.ok(parseWorkingPatch("--- a\n+++ a\n@@ -1 +1 @@\n-old\n+new\n--- b\n+++ b\n@@ -1 +1 @@\n-old\n+new\n", "a", "update").error);
-  const events = renderModule(messageList, ["AssistantEventContent", "ConversationNotice", "TraceReadTarget", "traceReadArtifactReference", "decodeJsonArtifactPayload", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult"], { ...scope, ...turn,
+  const events = renderModule(messageList, ["AssistantEventContent", "ConversationNotice", "TraceReadTarget", "traceReadArtifactReference", "decodeJsonArtifactPayload", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult", "reasoningBody"], { ...scope, ...turn,
     McpResourceSurface: ({ message }) => React.createElement("section", { "data-mcp-tool": message.eventData.tool }) });
   const fileActivity = renderModule(messageList, ["FileChangeActivity", "activityPathLabel"], {
     ...scope,
@@ -1346,6 +1300,7 @@ async function verifyTranscriptLayout() {
     const buffering = (id, showBufferingUi) => message(id, "warning", "Checking response safety", { source: "model_safety_buffering", showBufferingUi });
     await render([operation, buffering("quiet", false), buffering("shown", true)], true);
     assert.equal((container.textContent.match(/Checking response safety/g) ?? []).length, 1);
+    assert.equal((container.textContent.match(/No action is required\. Octopus will keep waiting for the response\./g) ?? []).length, 1);
     await render([operation, buffering("shown", true)], false, finalResponse, false);
     assert.doesNotMatch(container.textContent, /Checking response safety/);
     const callUpdate = (index, failed) => message(`flaky-${index}`, "dynamic_tool", "", { tool: "run_list", call_id: "flaky", status: failed ? "failed" : "completed",
@@ -1372,6 +1327,13 @@ async function verifyTranscriptLayout() {
     await render([message("mcp", "mcp_tool", "", { server: "github", tool: "search", status: "completed" })], false);
     await click(query(".octopus-agent-activity-toggle"));
     assert.equal(container.querySelector(".vertical-scroll-fade-mask"), null);
+    assert.ok(query('[data-mcp-tool="search"]'), "MCP calls render through the MCP surface");
+    assert.doesNotMatch(container.textContent, /Called|Calling/);
+    for (const [kind, streaming] of [["reasoning_delta", true], ["reasoning", false]]) {
+      await React.act(async () => root.render(React.createElement(events.AssistantEventContent, { message: message("thought", kind, "Comparing totals"), toolPresentations: {} })));
+      const body = query('p[data-variant="reasoning"]');
+      assert.deepEqual([body.textContent, body.dataset.streaming, body.dataset.streamKey], ["Comparing totals", streaming ? "true" : undefined, streaming ? "thought" : undefined], kind);
+    }
     await React.act(async () => root.render(React.createElement(turn.TurnActivity, { activities: [{ ...operation, eventData: { ...operation.eventData, status: "started" } }],
       startedAtMs: 1, presentation: "conversation", toolPresentations: {}, renderActivity: (item) => React.createElement(events.AssistantEventContent, { message: item, toolPresentations: {} }) })));
     assert.equal(query(".octopus-turn-activity").dataset.state, "working", "an unstated turn follows its active work");

@@ -237,7 +237,6 @@ export function ChatMessageList({
   const scrollFrameRef = useRef<number | null>(null);
   const observedMessageCountRef = useRef(presentationMessageCount);
   const initialSnapshotRestoredRef = useRef(emptyState !== "loading-task");
-  const skipNextPresentationScrollRef = useRef(true);
   const headerEdgeScrolledRef = useRef<boolean | null>(null);
   const initialThreadRestoreState = readThreadRestoreState(conversationId);
   const initialVirtualizerRestoreState = initialThreadRestoreState.virtualizedTurns;
@@ -310,7 +309,6 @@ export function ChatMessageList({
     touchStartRef.current = null;
     observedMessageCountRef.current = hasInitialSnapshot ? presentationMessageCount : 0;
     initialSnapshotRestoredRef.current = hasInitialSnapshot;
-    skipNextPresentationScrollRef.current = true;
     setActiveUserMessageId("");
     setVirtualRevealRequest(null);
     setScrolledFromLatest(restoreDistance > 0);
@@ -340,7 +338,6 @@ export function ChatMessageList({
     lastScrollDistanceRef.current = restoreDistance;
     observedMessageCountRef.current = presentationMessageCount;
     initialSnapshotRestoredRef.current = true;
-    skipNextPresentationScrollRef.current = true;
     setScrolledFromLatest(restoreDistance > 0);
     setShowScrollToLatest(restoreDistance > THREAD_SCROLL_LATEST_BUTTON_THRESHOLD_PX);
     const list = listRef.current;
@@ -448,10 +445,6 @@ export function ChatMessageList({
   useEffect(() => {
     const list = listRef.current;
     if (!list) return;
-    if (skipNextPresentationScrollRef.current) {
-      skipNextPresentationScrollRef.current = false;
-      return;
-    }
     if (!initialSnapshotRestoredRef.current) return;
     const previousCount = observedMessageCountRef.current;
     observedMessageCountRef.current = presentationMessageCount;
