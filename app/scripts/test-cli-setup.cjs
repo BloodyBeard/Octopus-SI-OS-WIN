@@ -282,7 +282,7 @@ process.on('SIGTERM',()=>server.close(()=>{fs.rmSync(state,{recursive:true,force
   });
   const packageState = () => inspectLocalPackageInstallation({ ...first.packageRoots, packageId: "cli.fixture" });
   await fs.mkdir(first.packageRoots.activeRegistryRoot, { recursive: true });
-  first.packageRoots.publication = require("./support/native-publication.cjs").nativePublication();
+  first.packageRoots.publication = second.packageRoots.publication = require("./support/native-publication.cjs").nativePublication();
   await installLocalPackages({ ...first.packageRoots, operationId: "cli_fixture_install_001", packageIds: ["cli.fixture"], expectedSourceDigests: { "cli.fixture": (await packageState()).source_digest } });
   await json(active, { ...original, config: { model: "selected" } });
   await json(source, { ...original, contract: 2 });
