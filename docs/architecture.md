@@ -350,7 +350,10 @@ sequenceDiagram
 
 Every arrow that says "movement recorded" is one row in
 `ledger/movements.jsonl`. If the tool room had refused the call, that would be
-a row too - a typed `DeliveryRefused`, not a silent drop.
+a row too - a typed `DeliveryRefused`, not a silent drop. If the provider can
+no longer read its own state in the Home run, it neither loops nor goes quiet:
+the failure reaches the chat as `turn.error` through the run's standing route,
+and only a run with no provable route gets no arrival at all.
 
 ## How policy is formed
 

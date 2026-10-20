@@ -430,7 +430,7 @@ impl PendingHandoff {
 mod context_publication;
 mod pending_delivery;
 mod standing_routes;
-pub use standing_routes::open_standing_handoff_before;
+pub use standing_routes::{open_standing_handoff_before, standing_route_admits_only};
 mod result_inputs;
 pub use result_inputs::{prepare_provider_result_input_retirement, prepare_provider_result_input_revision};
 mod output_connections;
