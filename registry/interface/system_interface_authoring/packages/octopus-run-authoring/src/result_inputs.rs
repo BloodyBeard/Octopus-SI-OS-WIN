@@ -75,46 +75,7 @@ pub(super) fn saved_attempt_config(
     Ok(actual)
 }
 
-pub fn prepare_provider_result_input_retirement(
-    path: PathBuf,
-    current: &[u8],
-    writer: &CheckedRunWriter,
-    checkpoints: &[CheckpointId],
-) -> Result<CheckedRunEdit, String> {
-    prepare_definition_edit(path, current, writer, checkpoints, None)
-}
-
-pub fn prepare_provider_result_input_revision(
-    path: PathBuf,
-    current: &[u8],
-    writer: &CheckedRunWriter,
-    checkpoints: &[CheckpointId],
-    context: &[ArtifactBinding],
-) -> Result<CheckedRunEdit, String> {
-    prepare_definition_edit(path, current, writer, checkpoints, Some(context))
-}
-
-fn prepare_definition_edit(
-    path: PathBuf,
-    current: &[u8],
-    writer: &CheckedRunWriter,
-    checkpoints: &[CheckpointId],
-    context: Option<&[ArtifactBinding]>,
-) -> Result<CheckedRunEdit, String> {
-    let value = definition_value(current, writer, checkpoints, context)?;
-    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
-    let generation = value["interface_state"][writer.owner.as_str()]["authoring_generation"]
-        .as_u64()
-        .ok_or("result retirement has no authoring generation")?;
-    CheckedRunEdit::prepare(
-        path,
-        current,
-        value,
-        format!("provider-run-authoring:{}:{generation}", record.id),
-    )
-}
-
-fn definition_value(
+pub(crate) fn definition_value(
     current: &[u8],
     writer: &CheckedRunWriter,
     checkpoints: &[CheckpointId],

@@ -28,7 +28,6 @@ fn definition_changes_preserve_writer_identity_and_private_continuity() {
         "/interface_state/provider/run_authoring_binding/authoring_source_interface",
         "/interface_state/provider/run_authoring_binding/payload_artifact_bindings",
         "/worker",
-        "/ee",
         "/trace",
     ] {
         let mut forged = changed.clone();

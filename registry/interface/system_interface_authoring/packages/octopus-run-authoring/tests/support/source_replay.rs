@@ -636,15 +636,15 @@ async fn outstanding_results_preserve_context_and_require_exact_consumption() {
     let next_input = published.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, alternate, &published.id)).unwrap();
     let published_bytes = std::fs::read(&fixture.handoff.run_path).unwrap();
     let writer = declared_provider_run_writer(&published, &"provider".into(), &profile).unwrap();
-    let retirement = prepare_provider_result_input_retirement(fixture.handoff.run_path.clone(), &published_bytes, &writer, &[pinned.id.clone()]).unwrap();
+    let retirement = prepare_definition_edit(fixture.handoff.run_path.clone(), &published_bytes, &writer, &[pinned.id.clone()], None).unwrap();
     let retired = RunRecord::from_bytes(retirement.content.as_bytes()).unwrap();
     assert!(retired.checkpoint(&pinned.id).is_none());
     assert_eq!(provider_context_bindings(&retired, &"provider".into()).unwrap(), provider_context_bindings(&published, &"provider".into()).unwrap());
     assert_eq!(persisted_pending_handoff(&retired, &"provider".into()).unwrap(), persisted_pending_handoff(&published, &"provider".into()).unwrap());
     result_inputs::validate_saved(&fixture.handoff.ctx, &published, &retired, &fixture.handoff.config).unwrap();
     let future = provider_context_bindings(&published, &"provider".into()).unwrap();
-    let revision = prepare_provider_result_input_revision(fixture.handoff.run_path.clone(), &published_bytes, &writer,
-        &[pinned.id.clone()], &future).unwrap();
+    let revision = prepare_definition_edit(fixture.handoff.run_path.clone(), &published_bytes, &writer,
+        &[pinned.id.clone()], Some(&future)).unwrap();
     let revised = RunRecord::from_bytes(revision.content.as_bytes()).unwrap();
     let revised_config = attempt_config(&revised, &fixture.handoff.config).unwrap();
     assert_eq!(revised_config.checkpoints.iter().find(|cp|cp.name == receipt.name).unwrap().static_artifact_bindings, [catalogue.id.clone()]);
@@ -655,8 +655,8 @@ async fn outstanding_results_preserve_context_and_require_exact_consumption() {
     result_inputs::validate_saved(&fixture.handoff.ctx, &published, &revised, &fixture.handoff.config).unwrap();
     let mut wrong_rights = future.clone();
     wrong_rights[0].access.delete = true;
-    assert!(prepare_provider_result_input_revision(fixture.handoff.run_path.clone(), &published_bytes, &writer,
-        &[pinned.id.clone()], &wrong_rights).is_err());
+    assert!(prepare_definition_edit(fixture.handoff.run_path.clone(), &published_bytes, &writer,
+        &[pinned.id.clone()], Some(&wrong_rights)).is_err());
     assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), published_bytes);
     fixture.edge(&published_bytes, &next_input.id, &input_file, "provider".into(), MovementKind::InterfaceOutbound);
     fixture.handoff.source_movement_seq = fixture.rows.len() as u64 - 1;
@@ -1717,4 +1717,24 @@ async fn a_terminal_call_rides_one_write_until_its_result_is_consumed() {
     assert!(current_context_artifacts(&consumed, &fixture.handoff.config).unwrap().contains(&call_id),
         "the consuming write publishes the call");
     result_inputs::validate_saved(&fixture.handoff.ctx, &record, &consumed, &fixture.handoff.config).unwrap();
+}
+
+fn prepare_definition_edit(
+    path: PathBuf,
+    current: &[u8],
+    writer: &CheckedRunWriter,
+    checkpoints: &[CheckpointId],
+    context: Option<&[ArtifactBinding]>,
+) -> Result<CheckedRunEdit, String> {
+    let value = result_inputs::definition_value(current, writer, checkpoints, context)?;
+    let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
+    let generation = value["interface_state"][writer.owner.as_str()]["authoring_generation"]
+        .as_u64()
+        .ok_or("result retirement has no authoring generation")?;
+    CheckedRunEdit::prepare(
+        path,
+        current,
+        value,
+        format!("provider-run-authoring:{}:{generation}", record.id),
+    )
 }
