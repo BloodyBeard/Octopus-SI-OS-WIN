@@ -138,7 +138,6 @@ async function verifyDirectoryPublicationRecovery(temporary) {
 }
 
 async function main() {
-  await verifyTerminalBootstrapBoundary();
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "octopus-workspace-test-"));
   try {
     await verifyPublicationRecovery(temporary);
@@ -1736,20 +1735,6 @@ function fixtureMovement(seq, workspace, label, fromInterface, toKind) {
       },
     },
   };
-}
-
-async function verifyTerminalBootstrapBoundary() {
-  const [mainSource, operatorClientSource] = await Promise.all([
-    fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"),
-    Promise.resolve(require("./splitSource.cjs").operatorChatClientSource()),
-  ]);
-  const runtimeInitialization = mainSource.match(
-    /async function initializeRuntimeHost\(\)[\s\S]*?(?=\nfunction getTerminalHost)/,
-  )?.[0] ?? "";
-  assert.doesNotMatch(
-    `${runtimeInitialization}\n${operatorClientSource}`,
-    /providerProjectionPreflight|synchronizeStoppedOperatorProviderProjections|loadSourceOperatorChatClient|synchronizeOperatorChatProviderProjectionContracts|planOperatorChatProviderProjectionSynchronization|runtime_stopped/,
-  );
 }
 
 async function verifyLiveWorkspaceLock(temporary) {

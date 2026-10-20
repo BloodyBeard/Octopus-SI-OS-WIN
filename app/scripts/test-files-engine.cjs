@@ -6,7 +6,6 @@ const { test } = require("node:test");
 const ts = require("typescript");
 const app = path.resolve(__dirname, "..");
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
-const walk = (node, visit) => { visit(node); ts.forEachChild(node, (child) => walk(child, visit)); };
 const supportPath = path.join(app, "src/components/files/fileSupport.ts");
 const support = evaluate(fs.readFileSync(supportPath, "utf8"), supportPath, { "@octopus/files-diffs": { EXTENSION_TO_FILE_FORMAT: { ts: "typescript", txt: "text" } } });
 const adoptedFilesHosts = [];
@@ -39,11 +38,6 @@ test("Files adapters use the public renderer, editor and shared theme registry",
   const edit = await import("@octopus/files-diffs/edit");
   for (const name of ["CodeView", "Virtualizer", "VirtualizedFile", "registerCustomTheme"]) assert.equal(typeof renderer[name], "function", name);
   assert.equal(typeof edit.Editor, "function");
-  for (const name of ["FilesPierreEditor.tsx", "FilesReadonlyViewer.tsx"]) {
-    const source = fs.readFileSync(path.join(app, "src/components/files", name), "utf8");
-    assert.doesNotMatch(source, /engine\/(editor|renderer|metrics)|appInitial_/);
-    assert.match(source, /settings\/octopusDiffThemes/);
-  }
   for (const raw of ["", "α😀\r\n", "a\nb", "a\r\nb", "ab", "ba"]) assert.equal(support.fileContentHash(raw), sha(raw));
 }));
 
@@ -161,11 +155,6 @@ function hookHost(createRef = () => ({})) {
 test("readonly adapter preserves raw file identity, upstream file/virtualizer ownership, theme/metrics updates and cleanup without an edit callback", async () => {
   const metrics = support;
   const filename = path.join(app, "src/components/files/FilesReadonlyViewer.tsx"), source = fs.readFileSync(filename, "utf8");
-  const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  walk(parsed, (node) => {
-    if (ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly) assert.ok(!/engine\/editor/.test(node.moduleSpecifier.text));
-    if (ts.isIdentifier(node)) assert.ok(!["onChange", "createEditor", "onItemEditChange", "CodeView", "appInitial_otn"].includes(node.text), node.text);
-  });
   const nodes = {}, views = [], virtualizers = [], observers = [], events = [], registrations = [];
   const rootHost = hookHost((node) => { const name = node.props["data-review-file-source-metrics-probe"] !== undefined ? "probe" : node.props["data-review-path"] ? "content" : "root"; return nodes[name] ??= { name }; });
   class Virtualizer {
@@ -203,6 +192,7 @@ test("readonly adapter preserves raw file identity, upstream file/virtualizer ow
     }
     mountChild();
     const first = views[0]; assert.ok(adoptedFilesHosts.includes(first.initial.fileContainer));
+    assert.ok(!["createEditor", "onChange", "onItemEditChange"].some((key) => key in first.options), "a readonly view wires no editing");
     const nativeHost = {}; first.options.onPostRender(nativeHost, first, "mount"); assert.equal(adoptedFilesHosts.at(-1), nativeHost);
     const adoptedCount = adoptedFilesHosts.length; first.options.onPostRender(nativeHost, first, "unmount"); assert.equal(adoptedFilesHosts.length, adoptedCount);
     assert.equal(first.initial.file.contents, props.value); assert.equal(sha(first.initial.file.contents), sha(props.value));
@@ -271,6 +261,7 @@ test("editable adapter separates document identity, fresh callbacks, shared them
     props.onViewStateChange = (view) => scrolls.push({ ...view, fresh: true }); host.update();
     nodes[0].dispatchEvent(new Event("scroll")); assert.equal(scrolls.at(-1).fresh, true);
     const first = views[0], item = first.items[0], edited = { ...item.file, contents: original + "X" };
+    assert.deepEqual(first.options.theme, { dark: "octopus-codex-dark-codex", light: "octopus-codex-light-codex" }, "the editor names themes through the shared registry");
     const nativeHost = { shadowRoot: { querySelector: () => ({ setAttribute(name, value) { assert.equal(name, "aria-label"); assert.equal(value, props.label); } }) } };
     first.options.onPostRender(nativeHost, first, "mount"); assert.equal(adoptedFilesHosts.at(-1), nativeHost);
     const adoptedCount = adoptedFilesHosts.length; first.options.onPostRender(nativeHost, first, "unmount"); assert.equal(adoptedFilesHosts.length, adoptedCount);

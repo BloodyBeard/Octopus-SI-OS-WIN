@@ -28,7 +28,12 @@ function visit(node) {
 visit(workspace); assert.equal(declarations.length, names.size); assert.equal(observerBranches.length, 2);
 const gate = Function("input", `with(input){${compile(declarations.join("\n"))}return {canSubmit,canQueue,submitBlockReason};}`);
 const capabilities = load("components/chat/chatWorkspaceCapabilities.ts", { "./taskAccess": load("components/chat/taskAccess.ts") });
-const chatDraftKey = Function(compile(source("components/chat/useChatDraftState.ts").match(/export function chatDraftKey[\s\S]*?\n}/)[0].replace("export ", "")) + "return chatDraftKey;")();
+const { chatDraftKey } = (() => {
+  const module = { exports: {} };
+  const bundled = require("esbuild").buildSync({ entryPoints: [path.join(app, "src/components/chat/useChatDraftState.ts")], bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent", external: ["react", "react-dom"] });
+  Function("require", "module", "exports", bundled.outputFiles[0].text)(require, module, module.exports);
+  return module.exports;
+})();
 const model = { model: "model", showInPicker: true, supportedReasoningEfforts: ["low"], defaultReasoningEffort: "low", serviceTiers: [{ id: "priority", name: "Fast" }] };
 const provider = { id: "provider", model: "model", models: [model] };
 const catalogReads = [], usageReads = [], contextReads = [], traces = [];

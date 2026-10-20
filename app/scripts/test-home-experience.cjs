@@ -332,6 +332,7 @@ test("opening Home activity retains the Home component and unsent draft", async 
     const draft = view.container.querySelector("textarea");
     draft.value = "Draft kept during call";
     assert.deepEqual([...toolbar.querySelectorAll("button")].map(node => node.getAttribute("aria-label")), ["Activity", "Home widgets"]);
+    assert.ok(view.container.querySelector("[data-home-activity]") === null, "the Home chat mounts only in activity mode");
     await click(button(toolbar, "Activity"));
     assert.equal(button(toolbar, "Activity").getAttribute("aria-expanded"), "true");
     assert.equal(view.container.querySelector("textarea"), draft);
@@ -346,6 +347,7 @@ test("opening Home activity retains the Home component and unsent draft", async 
     assert.equal(view.container.querySelector("aside, .home-view-transition__activity, .home-view-transition__layout"), null);
     assert.equal(button(toolbar, "Home widgets"), undefined);
     await click(button(toolbar, "Activity"));
+    assert.ok(view.container.querySelector("[data-home-activity]") === null);
     await click(button(toolbar, "Home widgets"));
     assert.equal(homeProps.widgetsOpen, true);
     assert.equal(button(toolbar, "Activity").getAttribute("aria-expanded"), "false");

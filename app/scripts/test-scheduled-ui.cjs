@@ -1,14 +1,13 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const ts = require("typescript");
 const { test, after, afterEach } = require("node:test");
 const { build } = require("esbuild");
 const { JSDOM } = require("jsdom");
 const React = require("react");
 const { act } = React;
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { pretendToBeVisual: true, url: "http://localhost" });
-for (const name of ["window", "document", "navigator", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Element", "Node", "Event", "KeyboardEvent", "MutationObserver"]) global[name] = name === "window" ? dom.window : dom.window[name];
+for (const name of ["window", "document", "navigator", "HTMLElement", "HTMLInputElement", "HTMLTextAreaElement", "Element", "Node", "Event", "KeyboardEvent", "MutationObserver", "CustomEvent"]) global[name] = name === "window" ? dom.window : dom.window[name];
 global.IS_REACT_ACT_ENVIRONMENT = true;
 global.getComputedStyle = dom.window.getComputedStyle;
 global.requestAnimationFrame = dom.window.requestAnimationFrame.bind(dom.window);
@@ -26,8 +25,8 @@ after(() => dom.window.close());
 
 const appRoot = path.resolve(__dirname, "..");
 const compiled = build({
-  stdin: { contents: 'import "./src/components/icon-glyphs/shell"; export * from "./src/components/task/TasksViewSwitcher"; export * from "./src/components/scheduled/ScheduledWorkspace"; export * from "./src/components/scheduled/ScheduledSidebar"; export * from "./src/components/scheduled/LiveScheduledView";', resolveDir: appRoot, loader: "tsx" },
-  bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent", loader: { ".css": "empty" },
+  stdin: { contents: 'import "./src/components/icon-glyphs/shell"; export * from "./src/components/task/TasksViewSwitcher"; export * from "./src/components/scheduled/ScheduledWorkspace"; export * from "./src/components/scheduled/ScheduledSidebar"; export * from "./src/components/scheduled/LiveScheduledView"; export { Sidebar } from "./src/components/Sidebar";', resolveDir: appRoot, loader: "tsx" },
+  bundle: true, platform: "node", format: "cjs", write: false, logLevel: "silent", loader: { ".css": "empty", ".png": "dataurl", ".svg": "dataurl" },
   external: ["react", "react-dom", "react/jsx-runtime"],
   plugins: [{ name: "schedule-fixture", setup(builder) {
     builder.onResolve({ filter: /projectionClient$|projectionLive$/ }, ({ path: imported }) => ({ path: imported.endsWith("projectionClient") ? "projection" : "live", namespace: "fixture" }));
@@ -42,13 +41,13 @@ const compiled = build({
 }).then(({ outputFiles }) => { const module = { exports: {} }; Function("module", "exports", "require", outputFiles[0].text)(module, module.exports, require); return module.exports; });
 
 function sidebarChrome(ui) {
-  const source = ts.createSourceFile("Sidebar.tsx", fs.readFileSync(path.join(appRoot, "src/components/Sidebar.tsx"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const declarations = source.statements.filter((node) => ts.isFunctionDeclaration(node) && ["Sidebar", "moveSidebarFocus"].includes(node.name?.text)).map((node) => node.getText(source).replace(/^export /, "")).join("\n");
-  const code = ts.transpileModule(declarations, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-  const Chrome = Function("require", "exports", "useState", "useEffect", "useAppErrorToast", "TasksViewSwitcher", "ScheduledSidebar", "TaskNavigation", `${code}; return Sidebar;`)(require, {}, React.useState, React.useEffect, () => {}, ui.TasksViewSwitcher, ui.ScheduledSidebar, ({ archivedView }) => React.createElement("div", { "data-task-navigation": archivedView ? "archived" : "tasks" }));
+  const projectWorkspace = { projects: [], rootEeId: "", homeRunId: "", homeInterfaceId: "", rootContext: null, rootAllowedChildTemplateIds: [], templates: [], status: "", loading: false, pending: false, error: "",
+    updatePresentation() {}, async createProject() {}, async createAgentTemplate() { return { agentId: "", workerInterfaceId: "" }; } };
   return function Navigation() {
     const [surface, setSurface] = React.useState("scheduled");
-    return React.createElement(Chrome, { accessProfile: "live", navigationSection: "tasks", activeSurfaceId: surface, activeChatRunId: "", chatRuns: [], runtimeHost: { home: "fixture" }, surfaceErrors: [], onSurfaceChange: setSurface, onAgentProjectFilterEeIdChange() {} });
+    return React.createElement(ui.Sidebar, { accessProfile: "live", navigationSection: "tasks", activeSurfaceId: surface, activeChatRunId: "", chatRuns: [], chatRunsLoading: false, homeRunId: "", runtimeHost: { home: "fixture" }, surfaceErrors: [], surfaces: [],
+      agentPinnedChatIds: [], agentChatOrderIds: [], agentProjectFilterEeId: "", agentProjectWorkspace: projectWorkspace, agentExecutionContexts: [], agentDefinitions: [], agentProviderInterfaces: [], agentModelsLoading: false, agentModelError: "",
+      async onRefreshAgentModels() {}, onSurfaceChange: setSurface, onSelectChat() {}, onNewChat() {}, onAgentPinnedChatIdsChange() {}, onAgentChatOrderIdsChange() {}, onAgentProjectFilterEeIdChange() {}, onSearch() {} });
   };
 }
 
@@ -100,9 +99,9 @@ test("Triggers keeps navigation, selection, search and authoring in one workspac
   assert.deepEqual(f.reads, ["projection.scheduled_interfaces.list"]);
   const switcher = host.querySelector('[aria-label="Tasks views"]');
   assert.equal(button(switcher, "Triggers").getAttribute("aria-pressed"), "true");
-  await click(button(switcher, "All tasks")); assert.ok(host.querySelector('[data-task-navigation="tasks"]'));
+  await click(button(switcher, "All tasks")); assert.match(host.querySelector("nav").textContent, /Tasks\s*No tasks yet/); assert.ok(host.querySelector("[data-scheduled-sidebar]") === null);
   await click(button(switcher, "Triggers")); assert.ok(host.querySelector("[data-scheduled-sidebar]"));
-  await click(button(switcher, "Archived tasks")); assert.ok(host.querySelector('[data-task-navigation="archived"]'));
+  await click(button(switcher, "Archived tasks")); assert.match(host.querySelector("nav").textContent, /Archived\s*No archived tasks/);
   await click(button(switcher, "Triggers")); assert.equal(host.querySelector('[aria-label="Tasks views"]'), switcher);
   assert.equal(host.querySelectorAll("[data-scheduled-landing] [data-automation-card]").length, 6);
   assert.equal(host.querySelector("[data-scheduled-sidebar] h2").textContent, "Triggers");

@@ -173,7 +173,6 @@ test("visible conversation coordinates include only exposed task or Home text pa
   assert.deepEqual(visible({...secondary, secondaryHomeViewMode:"voice"}), []);
   assert.deepEqual(visible({...secondary, secondaryPaneOpen:false}), []);
   assert.deepEqual(visible({...secondary, settingsOpen:true}), []);
-  assert.match(fs.readFileSync(path.join(appRoot, "src/components/shell/HomeSurface.tsx"), "utf8"), /homeViewMode === "activity"[\s\S]*?activityOpen \? \([\s\S]*?<HomeActivityContent/);
 });
 
 test("visible focused chats persist reads without new Inbox attention; unfocused arrivals still notify", async () => {

@@ -81,7 +81,10 @@ function verifyAssets() {
   }
   for (const pack of ['shell', 'navigation', 'worker', 'voice', 'settings']) load('src/components/icon-glyphs/' + pack + '.tsx');
   const registered = Object.assign({}, ...registrations.map(({ pack }) => pack));
-  const apiNames = [...read('src/components/IconGlyphs.tsx').split('type GlyphPackName')[0].matchAll(/\| "([^"]+)"/g)].map(match => match[1]).sort();
+  const glyphFile = path.join(app, 'src/components/IconGlyphs.tsx');
+  const program = ts.createProgram([glyphFile], { jsx: ts.JsxEmit.ReactJSX, noEmit: true, noResolve: true, types: [] });
+  const glyphName = program.getSourceFile(glyphFile).statements.find(node => ts.isTypeAliasDeclaration(node) && node.name.text === 'GlyphName');
+  const apiNames = program.getTypeChecker().getTypeAtLocation(glyphName.name).types.map(type => type.value).sort();
   assert.deepEqual(Object.keys(registered).sort(), apiNames, 'Every GlyphName registers once');
   assert.equal(registrations.length, 6, 'Six lazy pack owners remain');
   for (const name of apiNames) {
@@ -116,7 +119,9 @@ function verifyAssets() {
   assert.deepEqual([...usedShapes].sort(), Object.keys(notices.shapes).sort(), 'Only active licensed shapes are vendored');
   for (const name of ['home','tasks','dashboardRail','inbox','applicationsRail','driversRail']) assert.notEqual(renderToStaticMarkup(registered[name].node), renderToStaticMarkup(registered[name+'Filled'].node), name + ': selected state distinct');
   for (const name of ['resume','play','stop']) assert.match(renderToStaticMarkup(registered[name].node), /fill="currentColor"/);
-  assert.match(read('src/components/worker-environment/RunEnvironmentBrowserSurfaces.tsx'), /assets\/browser-cursor\.png/);
+  const { metafile } = require('esbuild').buildSync({ entryPoints: ['src/components/worker-environment/RunEnvironmentBrowserSurfaces.tsx'], absWorkingDir: app, bundle: true, write: false, metafile: true, outdir: 'browser-surface', logLevel: 'silent',
+    loader: { '.css': 'empty', '.svg': 'dataurl', '.png': 'file' }, external: ['react', 'react-dom', 'react/jsx-runtime', 'motion/react', '@pierre/diffs', '@pierre/diffs/*', 'shiki', '@shikijs/*', 'mermaid', 'katex'] });
+  assert.ok(metafile.inputs['src/assets/browser-cursor.png'], 'The browser surface draws the model cursor from the shipped cursor asset');
   const primitives = load('src/components/icon-glyphs/geometric-primitives.tsx');
   assert.notEqual(primitives.roundedCrossPath(10,10,6.5), primitives.roundedCrossPath(15,15,4), 'Cross parameters control dimensions');
   assert.notEqual(primitives.cubicCirclePath(10,10,7,3.8), primitives.cubicCirclePath(12,12,4,2.2), 'Circle parameters control dimensions');
