@@ -943,16 +943,7 @@ assert.match(operatorShell, /const secondaryPaneTabStripVisible = secondaryPaneU
 assert.match(operatorShell, /glyph: target\.surfaceId === "chat" \? "chat"[\s\S]*?showWhenSingle: true,/);
 assert.match(chatView, /headerMode === "pane" \? <ChatThreadHeader[\s\S]*?mode=\{headerMode\}/);
 assert.match(chatView, /<WorkspacePaneHeaderActions>[\s\S]*?<ChatThreadHeaderActions/);
-assert.match(chatThreadHeader, /dispatchOpenClientTaskActionsMenu\(activeRun\.runId, event\.currentTarget\)/);
-assert.match(chatThreadHeader, /export function ChatThreadHeaderActions[\s\S]*?aria-label="Task actions"/);
-assert.match(chatThreadHeader, /onPointerDown=\{mode === "pane" \? compactTab\?\.onPointerDown : undefined\}/);
-assert.doesNotMatch(chatThreadHeader, /name="chat"/);
-assert.match(chatThreadHeader, /data-task-summary-trigger="true"[\s\S]*?name="taskSummary"/);
-assert.doesNotMatch(chatThreadHeader, /data-task-summary-trigger="true"[\s\S]{0,500}?name="viewAll"/);
-assert.match(chatThreadHeader, /className="app-titlebar-action no-drag"\s*data-state=\{summaryOpen \? "open" : "closed"\}\s*data-task-summary-trigger="true"/, "header actions share the titlebar action hover");
 assert.equal((chatThreadHeader.match(/chat-thread-header-action-slot no-drag pointer-events-auto flex shrink-0 items-center gap-px/g) ?? []).length, 3);
-assert.match(chatThreadHeader, /summaryDisplayMode === "overlay" \? "Toggle summary" : "Toggle pinned summary"/);
-assert.match(chatThreadHeader, /<OcPopover[\s\S]*?align="end"[\s\S]*?className="task-summary-popover"[\s\S]*?open=\{summaryOpen\}[\s\S]*?placement="bottom"/);
 assert.match(shellGlyphs, /taskSummary:/);
 assert.match(shellGlyphs, /taskSummary: \{\s*viewBox: "0 0 20 20"/);
 assert.match(shellGlyphs, /taskPlan:/);

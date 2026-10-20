@@ -53,6 +53,7 @@ jobs:
           node scripts/test-chat-message-list.cjs
           node scripts/test-chat-workspace.cjs
           node scripts/test-message-tooltip.cjs
+          node scripts/test-chat-thread-header.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
 
