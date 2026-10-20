@@ -464,10 +464,10 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   }
   for (const href of ["javascript:alert(1)", "//remote.test/file", "file://remote.test/file", "/report%00.md", "/bad%zz.md"]) {
     await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: `[Blocked](${href})`, onOpenFile: noop })));
-    assert.equal(document.querySelector("a"), null);
+    assert.ok(document.querySelector("a") === null);
   }
   await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: "[Report](/workspace/report.md)" })));
-  assert.equal(document.querySelector("a"), null, "a surface without a Files owner does not navigate a local link");
+  assert.ok(document.querySelector("a") === null, "a surface without a Files owner does not navigate a local link");
   await act(async () => host.render(React.createElement(messageContent.MessageContent, { text: "[Website](https://example.com/)" })));
   const externalClick = new window.MouseEvent("click", { bubbles: true, cancelable: true });
   await act(async () => document.querySelector("a").dispatchEvent(externalClick));
@@ -493,7 +493,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     assert.equal(1_000 + delayOf(items[2]), 2_000 + delayOf(items[2].querySelector(".octopus-markdown-fade-in")), "the held item appears with its first word");
     await streamed("1. First item\n2. `artifact.*` second\n3. Third", false);
     assert.deepEqual([...document.querySelectorAll("li")], items, "completing the reply keeps the streamed markdown mounted");
-    assert.equal(document.querySelector("[data-markdown-animated], .octopus-markdown-fade-in"), null);
+    assert.ok(document.querySelector("[data-markdown-animated], .octopus-markdown-fade-in") === null);
   } finally {
     Object.defineProperty(performance, "now", { configurable: true, value: realNow });
   }
@@ -517,12 +517,12 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
     onDelete: (id) => queueActions.push(["delete", id]), onEdit: (id) => queueActions.push(["edit", id]),
     onSendNow: (id) => queueActions.push(["steer", id]), onRetry: (id) => queueActions.push(["retry", id]), onReorder: noop, onResume: noop };
   await act(async () => host.render(React.createElement(queueComponent, queueProps)));
-  assert.equal(document.querySelector(".composer-queue-status"), null);
-  assert.equal(document.querySelector('[aria-label="Reorder queued message"]'), null);
+  assert.ok(document.querySelector(".composer-queue-status") === null);
+  assert.ok(document.querySelector('[aria-label="Reorder queued message"]') === null);
   await act(async () => document.querySelector('[aria-label="Steer with queued message"]').click());
   await act(async () => document.querySelector('[aria-label="Queued message actions"]').click());
   await act(async () => document.querySelector('[aria-label="Queued message actions"]').click());
-  assert.equal(document.querySelector('[role="menu"]'), null, "More toggles shut");
+  assert.ok(document.querySelector('[role="menu"]') === null, "More toggles shut");
   await keydown(document.querySelector('[aria-label="Queued message actions"]'), "ArrowDown");
   assert.equal(document.activeElement.getAttribute("data-text-value"), "Edit message");
   assert.equal((await keydown(document.activeElement, "Tab")).defaultPrevented, true);
@@ -534,15 +534,15 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(document.querySelector('[aria-label="Retry queued message"]').disabled, true);
   assert.match(document.querySelector(".composer-queue-error").textContent, /Exact refusal/);
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, paused: true, messages: [{ ...item("row"), status: "unknown" }] })));
-  assert.equal(document.querySelector('[aria-label="Retry queued message"]'), null);
-  assert.equal(document.querySelector('[data-message-status="unknown"] [aria-label="Queued message actions"]'), null);
+  assert.ok(document.querySelector('[aria-label="Retry queued message"]') === null);
+  assert.ok(document.querySelector('[data-message-status="unknown"] [aria-label="Queued message actions"]') === null);
   assert.equal(document.querySelector(".composer-queue-paused button").disabled, true);
   await act(async () => document.querySelector('[aria-label="Remove unconfirmed message locally"]').click());
   assert.deepEqual(queueActions.at(-1), ["delete", "row"]);
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, messages: [{ ...item("row"), text: "# **Review** `answer`" }] })));
   assert.equal(document.querySelector(".composer-queue-message strong").textContent, "Review");
   assert.equal(document.querySelector(".composer-queue-message code").textContent, "answer");
-  assert.equal(document.querySelector(".composer-queue-message h1"), null);
+  assert.ok(document.querySelector(".composer-queue-message h1") === null);
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, messages: [{ ...item("row"), text: "```js\nconst answer = 42;\n```" }] })));
   assert.equal(document.querySelector(".composer-queue-message").textContent, "const answer = 42;");
   let releasedPreview;
@@ -563,13 +563,13 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, messages: exitRows.slice(1) })));
   const departing = document.querySelector('.composer-queue-motion[inert]');
   assert.ok(departing, "a nonlast row remains mounted for its exit");
-  assert.equal(document.querySelector('[role="menu"]'), null);
+  assert.ok(document.querySelector('[role="menu"]') === null);
   assert.ok([...departing.querySelectorAll("button")].every((button) => button.disabled));
   const actionCount = queueActions.length;
   await act(async () => departing.querySelector("button").click());
   assert.equal(queueActions.length, actionCount);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 280)); });
-  assert.equal(document.querySelector('.composer-queue-motion[inert]'), null);
+  assert.ok(document.querySelector('.composer-queue-motion[inert]') === null);
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, messages: [] })));
   const exitingRail = document.querySelector('[data-composer-rail-item="exiting"]');
   assert.ok(exitingRail, "last-row removal keeps the outer rail mounted for its own exit");
@@ -577,13 +577,13 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.ok(exitingRail.querySelector('.composer-queue-motion[inert]'), "the last row participates in the propagated exit");
   assert.ok([...exitingRail.querySelectorAll("button")].every((button) => button.disabled));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 420)); });
-  assert.equal(document.querySelector('.composer-queue-surface'), null);
+  assert.ok(document.querySelector('.composer-queue-surface') === null);
   reduceQueueMotion = true;
   await act(async () => host.render(React.createElement(queueComponent, queueProps)));
   assert.equal(document.querySelector('.composer-queue-surface').getAttribute("data-reduced-motion"), "true");
   await act(async () => host.render(React.createElement(queueComponent, { ...queueProps, messages: [] })));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
-  assert.equal(document.querySelector('.composer-queue-surface'), null, "reduced motion does not wait for full rail or row duration");
+  assert.ok(document.querySelector('.composer-queue-surface') === null, "reduced motion does not wait for full rail or row duration");
   reduceQueueMotion = false;
   const commands = load("src/clientActions.ts");
   let sendShortcut = "enter";
@@ -623,13 +623,13 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.ok(document.querySelector('[role="menu"]'));
   assert.equal(document.activeElement.getAttribute("data-text-value"), "Queue message", "keyboard entry skips disabled Send now");
   await keydown(document.activeElement, "Escape");
-  assert.equal(document.querySelector('[role="menu"]'), null); assert.equal(document.activeElement, pendingSend);
+  assert.ok(document.querySelector('[role="menu"]') === null); assert.equal(document.activeElement, pendingSend);
   await act(async () => pendingSend.dispatchEvent(new window.MouseEvent("contextmenu", { bubbles: true, cancelable: true })));
   const pendingQueueButton = document.querySelector('[data-text-value="Queue message"]');
   assert.equal(pendingQueueButton.disabled, false);
   await act(async () => pendingQueueButton.click()); assert.equal(queued, 2); assert.equal(sends, 1);
   await act(async () => host.render(React.createElement(composer, { ...props, text: "" })));
-  assert.equal(document.querySelector('button[aria-label="Send"]'), null); assert.ok(document.querySelector('button[aria-label="Stop"]'));
+  assert.ok(document.querySelector('button[aria-label="Send"]') === null); assert.ok(document.querySelector('button[aria-label="Stop"]'));
   const primary = () => document.querySelector(".composer-primary-action");
   const tooltipFor = async (button) => {
     const measure = window.HTMLElement.prototype.getBoundingClientRect;

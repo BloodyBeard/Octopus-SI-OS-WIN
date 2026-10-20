@@ -416,7 +416,7 @@ test("sign-in copy completion belongs to the current URL and mounted attempt", a
   const settle = async (callback) => React.act(async () => { callback(); await tick(); });
   const assertUnchanged = () => {
     assert.equal(document.querySelector(".chatgpt-signin-copy").textContent, "Copy sign-in link");
-    assert.equal(document.querySelector('[role="alert"]'), null);
+    assert.ok(document.querySelector('[role="alert"]') === null);
   };
   try {
     await render("https://example.test/first"); await copy();
@@ -430,7 +430,7 @@ test("sign-in copy completion belongs to the current URL and mounted attempt", a
     assert.match(document.querySelector('[role="alert"]').textContent, /Current clipboard failed/);
     await copy(); await settle(() => pending[4].resolve());
     assert.equal(document.querySelector(".chatgpt-signin-copy").textContent, "Copied");
-    assert.equal(document.querySelector('[role="alert"]'), null);
+    assert.ok(document.querySelector('[role="alert"]') === null);
     await copy(); await React.act(async () => root.unmount()); mounted = false;
     await settle(() => pending[5].reject(new Error("Unmounted clipboard failed")));
     assert.equal(document.getElementById("root").childElementCount, 0);

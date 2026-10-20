@@ -18,7 +18,13 @@ globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 globalThis.IntersectionObserver = class { observe() {} unobserve() {} disconnect() {} };
 w.matchMedia = () => ({ matches: true, addEventListener() {}, removeEventListener() {} });
 w.HTMLElement.prototype.scrollIntoView = function () { this.dataset.scrolled = "true"; };
-w.HTMLElement.prototype.getBoundingClientRect = function () { return { x: 0, y: 0, left: 0, top: 0, right: 1024, bottom: 768, width: 1024, height: 768 }; };
+w.HTMLElement.prototype.getBoundingClientRect = function () {
+  if (this.classList.contains("chat-tooltip")) {
+    const left = Number.parseFloat(this.style.left) - 50, top = Number.parseFloat(this.style.top);
+    return { x: left, y: top, left, top, right: left + 100, bottom: top + 20, width: 100, height: 20 };
+  }
+  return { x: 0, y: 0, left: 0, top: 0, right: 1024, bottom: 768, width: 1024, height: 768 };
+};
 const capture = new WeakMap();
 w.HTMLElement.prototype.setPointerCapture = function (id) { capture.set(this, id); };
 w.HTMLElement.prototype.hasPointerCapture = function (id) { return capture.get(this) === id; };
@@ -69,7 +75,7 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   await React.act(() => root.render(React.createElement(Harness))); await flush();
   const header = document.getElementById("header"), content = document.getElementById("retained");
   assert.equal(header.querySelectorAll(".workspace-surface-pane-header").length, 1);
-  assert.equal(document.querySelector(".workspace-surface-pane .workspace-surface-pane-header"), null);
+  assert.ok(document.querySelector(".workspace-surface-pane .workspace-surface-pane-header") === null);
   assert.equal(header.querySelector(".pane-tabs-scroll .workspace-pane-tab-add"), null);
   const add = () => header.querySelector('.workspace-pane-tab-add button[aria-label="New tab"]');
   await click(add()); await flush();
@@ -101,7 +107,7 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   await click(document.querySelector('.workspace-pane-launcher-item[aria-label="Terminal"]')); await flush();
   assert.deepEqual(actions, ["terminal"]);
   assert.equal(header.querySelector('[role="tab"][aria-selected="true"]').textContent, "Terminal");
-  assert.equal(document.querySelector(".workspace-pane-launcher"), null);
+  assert.ok(document.querySelector(".workspace-pane-launcher") === null);
   assert.equal(content.closest("[hidden]"), null);
   assert.equal(geometry(content, { emulatedSize: null }).visible, true);
   await click(add()); await click(header.querySelector('[aria-label="Close New tab tab"]')); await flush();
@@ -110,7 +116,7 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   await click(add());
   await React.act(() => document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
   await flush();
-  assert.equal(document.querySelector(".workspace-pane-launcher"), null);
+  assert.ok(document.querySelector(".workspace-pane-launcher") === null);
   assert(document.activeElement === content.closest(".workspace-surface-pane-content"));
   assert.equal(content.value, "unsaved text"); assert.equal(mounts, 1);
   const selected = header.querySelector('[role="tab"][aria-selected="true"]');
@@ -158,7 +164,7 @@ test("the Tools launcher exposes overflow actions and an explicit empty projecti
   const root = createRoot(document.getElementById("root"));
   await React.act(() => root.render(React.createElement(WorkspacePaneLauncher, { actions, onAction: id => selected.push(id) })));
   assert.equal(document.querySelectorAll(".workspace-pane-launcher-item").length, 6);
-  assert.equal(document.querySelector('.workspace-pane-launcher-item[aria-label="Surface 0"]'), null);
+  assert.ok(document.querySelector('.workspace-pane-launcher-item[aria-label="Surface 0"]') === null);
   await click(document.querySelector('.workspace-pane-launcher-item[aria-haspopup="menu"]')); await flush();
   const menu = document.querySelector('[role="menu"][aria-label="More tools"]');
   assert(menu);

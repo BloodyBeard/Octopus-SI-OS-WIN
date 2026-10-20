@@ -260,6 +260,6 @@ test("bounded System and World labels preserve full grapheme-safe identities and
     assert.equal(document.querySelector('[role="tooltip"]').textContent, full);
     assert.ok(document.querySelector('[role="tooltip"]').classList.contains("is-shell"));
     assert.ok(document.querySelector('[role="tooltip"] .dashboard-tooltip-label'));
-    assert.equal(document.querySelector('[role="tooltip"]').closest("svg"), null);
+    assert.ok(document.querySelector('[role="tooltip"]').closest("svg") === null);
   } finally { await React.act(async () => root.unmount()); dom.window.close(); }
 });

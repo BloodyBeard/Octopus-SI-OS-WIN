@@ -114,7 +114,7 @@ test("page loaders show only the centered logo until the catalog settles", async
     assert.equal(status.getAttribute("aria-busy"), "true");
     assert.equal(container.textContent, "");
     assert.equal(status.querySelector(".octopus-loading-logo").style.width, "56px");
-    assert.equal(container.querySelector("header, input, h1"), null);
+    assert.ok(container.querySelector("header, input, h1") === null);
   };
   try { expectLogo(fallback.container, "surface-loading-state"); } finally { await fallback.close(); }
   const incidents = [];

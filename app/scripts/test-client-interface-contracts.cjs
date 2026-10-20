@@ -261,13 +261,13 @@ test("Settings keeps window history without a sidebar toggle, and native history
   const backButton = host.querySelector('[aria-label="Back"]');
   const hover = () => backButton.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true }));
   await act(async () => hover());
-  assert.equal(document.querySelector('[role="tooltip"]'), null);
+  assert.ok(document.querySelector('[role="tooltip"]') === null);
   await act(async () => new Promise((resolve) => setTimeout(resolve, 220)));
   assert.equal(document.querySelector('[role="tooltip"] kbd').textContent, "⌘⌥←");
   assert.equal(document.querySelector('[role="tooltip"]').dataset.side, "bottom");
   assert.equal(backButton.hasAttribute("title"), false);
   await act(async () => backButton.dispatchEvent(new window.MouseEvent("pointerdown", { bubbles: true })));
-  assert.equal(document.querySelector('[role="tooltip"]'), null, "Tooltip closes even when the titlebar button stops bubbling");
+  assert.ok(document.querySelector('[role="tooltip"]') === null, "Tooltip closes even when the titlebar button stops bubbling");
   await act(async () => backButton.click());
   host.querySelector('[aria-label="Forward"]').click();
   assert.deepEqual([back, forward, toggled], [1, 0, 0]);
@@ -314,14 +314,14 @@ test("Dashboard title menu selects views, keeps extensions and pins, and restore
   await act(async () => key(document.activeElement, "ArrowDown"));
   assert.equal(document.activeElement.textContent, "Registry");
   await act(async () => document.activeElement.click());
-  assert.deepEqual(selected, ["registry"]); assert.equal(document.querySelector('[role="menu"]'), null);
+  assert.deepEqual(selected, ["registry"]); assert.ok(document.querySelector('[role="menu"]') === null);
   await act(async () => root.render(React.createElement(DashboardViewMenu, { ...props, activeSurfaceId: "extension" })));
   await act(async () => trigger.click());
   await act(async () => document.querySelector('[role="menuitem"]').click());
   assert.deepEqual(pins, [["extension"]]);
   await act(async () => trigger.click());
   await act(async () => key(document.activeElement, "Escape"));
-  assert.equal(document.querySelector('[role="menu"]'), null); assert.equal(document.activeElement, trigger);
+  assert.ok(document.querySelector('[role="menu"]') === null); assert.equal(document.activeElement, trigger);
 });
 
 test("provider validation waits for a successful registry read and leaves repair to an explicit selection", async () => {
@@ -390,7 +390,7 @@ test("opening Settings from Account preserves the destination's initial focus", 
   await act(async () => host.querySelector("button").click());
   await act(async () => document.querySelector('[role="menuitem"]').click());
   assert.equal(document.activeElement, host.querySelector("input"));
-  assert.equal(document.querySelector('[role="menu"]'), null);
+  assert.ok(document.querySelector('[role="menu"]') === null);
   await act(async () => host.querySelector("button").click());
   await act(async () => document.querySelector('[role="menuitem"]').click());
   assert.equal(document.activeElement, host.querySelector("input"));

@@ -217,7 +217,7 @@ test("a secondary Triggers pane retains its own list without replacing the prima
   assert.ok(document.querySelector('[role="dialog"] [data-scheduled-sidebar] [role=listitem] > [role=button]'));
   await click(document.querySelector('[role="dialog"] [data-scheduled-sidebar] [role=listitem] > [role=button]'));
   assert.equal(detail(host).querySelector("[data-automation-card] .truncate").textContent, "Task 0");
-  assert.equal(document.querySelector('[role="dialog"]'), null);
+  assert.ok(document.querySelector('[role="dialog"]') === null);
 });
 
 test("one-shot deadlines retain their kind and exact timestamp through editing", async () => {

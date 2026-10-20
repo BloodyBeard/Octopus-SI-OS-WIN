@@ -115,12 +115,12 @@ window.octopusTransport = {
   assert.equal(expanded.style.width, "800px");
   await click('button[aria-label="Download image"]'); assert.deepEqual(Buffer.from(saves.at(-1).bytes), image.content); assert.equal(saves.at(-1).filename, file.name);
   await React.act(async () => expanded.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
-  assert.equal(document.querySelector('[role="dialog"]'), null); assert.equal(document.activeElement, trigger);
+  assert.ok(document.querySelector('[role="dialog"]') === null); assert.equal(document.activeElement, trigger);
 
   let pending, removals = 0;
   preview = () => new Promise((resolve) => { pending = resolve; });
   await render({ attachment: file, scope: { ...scope, runId: "run-b" } });
-  assert.equal(container.querySelector("img"), null, "changed admission retires the old bytes immediately");
+  assert.ok(container.querySelector("img") === null, "changed admission retires the old bytes immediately");
   await render({ attachment: { ...file }, scope: { ...scope, runId: "run-b" } });
   assert.equal(imageReads, 2, "stream updates preserve an in-flight read"); assert.deepEqual(revoked, [created[0]]);
   await render({ attachment: pdf.file, onRemove: () => removals++ });
@@ -132,10 +132,10 @@ window.octopusTransport = {
   await render({ attachment: staged, scope: { ...scope, artifactId: undefined, pending: true } });
   assert.equal(imageReads, beforePending); assert.equal(container.querySelector('[role="status"]').getAttribute("aria-label"), "image.png: Preparing image");
   preview = async () => { throw new Error("Not admitted"); }; await render({ attachment: file, scope });
-  assert.equal(container.textContent, "Failed"); assert.equal(container.querySelector("img"), null);
+  assert.equal(container.textContent, "Failed"); assert.ok(container.querySelector("img") === null);
   const beforeFailure = imageReads;
   for (let index = 0; index < 8; index++) await render({ attachment: { ...file }, scope: { ...scope } });
-  assert.equal(imageReads, beforeFailure, "failed previews do not poll or retry"); assert.equal(container.querySelector(".chat-attachment-retry"), null);
+  assert.equal(imageReads, beforeFailure, "failed previews do not poll or retry"); assert.ok(container.querySelector(".chat-attachment-retry") === null);
   preview = async () => local; await render({ attachment: file, scope: { ...scope, artifactId: "changed" } });
   await React.act(async () => container.querySelector("img").dispatchEvent(new window.Event("error")));
   assert.match(container.querySelector(".chat-attachment-card").title, /could not be decoded/);
@@ -170,12 +170,12 @@ window.octopusTransport = {
   await click('button[aria-label="Close preview"]');
   const office = fixture("original.docx", "application/octet-stream", "original office binary");
   response = office.bytes; await render({ attachment: office.file, scope }); await click(".chat-attachment-file-button", container);
-  assert.equal(document.querySelector('[role="dialog"]'), null); assert.deepEqual(Buffer.from(opens.at(-1).bytes), office.content);
+  assert.ok(document.querySelector('[role="dialog"]') === null); assert.deepEqual(Buffer.from(opens.at(-1).bytes), office.content);
   response = new Promise((resolve) => { pending = resolve; });
   await render({ attachment: pdf.file, scope }); await click(".chat-attachment-file-button", container);
   const openCount = opens.length; await render({ attachment: office.file, scope: { ...scope, runId: "run-b" } });
   await React.act(async () => pending(pdf.bytes));
-  assert.equal(document.querySelector('[role="dialog"]'), null); assert.equal(opens.length, openCount, "retired file reads cannot open another object");
+  assert.ok(document.querySelector('[role="dialog"]') === null); assert.equal(opens.length, openCount, "retired file reads cannot open another object");
 
   const messageSource = ts.createSourceFile("messages.tsx", read("src/components/chat/ChatMessageList.tsx"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const functions = messageSource.statements.filter((node) => ts.isFunctionDeclaration(node) && ["UserMessage", "MessageAttachments"].includes(node.name?.text)).map((node) => node.getText(messageSource)).join("\n");
@@ -199,7 +199,7 @@ window.octopusTransport = {
   assert.equal(document.querySelector(".chat-attachment-lightbox img").alt, "second.png"); assert.equal(imageReads, galleryReads);
   await React.act(async () => document.querySelector(".chat-attachment-lightbox").dispatchEvent(new window.KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })));
   assert.equal(document.querySelector(".chat-attachment-lightbox img").alt, "image.png"); await click('button[aria-label="Close image preview"]');
-  await renderMessage(""); assert.equal(container.querySelector("[data-user-message-bubble]"), null); assert.equal(container.querySelectorAll(".chat-attachment-card").length, 8);
+  await renderMessage(""); assert.ok(container.querySelector("[data-user-message-bubble]") === null); assert.equal(container.querySelectorAll(".chat-attachment-card").length, 8);
   let finishEdit, editFailure, branches = 0, editCount = 0;
   const editProps = { message, steerable: true, onEditUserMessage: async () => { branches++; return true; },
     onSteerUserMessage: () => { editCount++; return new Promise((resolve, reject) => { finishEdit = resolve; editFailure = reject; }); } };
@@ -212,7 +212,7 @@ window.octopusTransport = {
     field.dispatchEvent(new window.Event('input', { bubbles: true }));
   });
   assert.equal(editAction().textContent, 'Send to current reply');
-  assert.equal(container.querySelector('.chat-user-message-editor-note'), null, 'same-task editing does not request reattachment');
+  assert.ok(container.querySelector('.chat-user-message-editor-note') === null, 'same-task editing does not request reattachment');
   await React.act(async () => editAction().click()); assert.equal(editAction().disabled, true);
   await React.act(async () => finishEdit(false)); assert.equal(container.querySelector('textarea').value, 'My revised request');
   await React.act(async () => editAction().click());
@@ -223,10 +223,10 @@ window.octopusTransport = {
   assert.equal(branches, 0); assert.equal(editCount, 2);
   await click('.chat-user-message-editor-actions button:first-child'); await click('button[aria-label="Edit current reply"]');
   await React.act(async () => editAction().click()); await React.act(async () => finishEdit(true));
-  assert.equal(container.querySelector('textarea'), null, 'only accepted edits close the editor');
+  assert.ok(container.querySelector('textarea') === null, 'only accepted edits close the editor');
   editProps.steerable = false; await editRender(); await click('button[aria-label="Edit in new task"]');
   editProps.steerable = true; await editRender(); assert.equal(editAction().textContent, 'Continue in new task');
-  await React.act(async () => editAction().click()); assert.equal(branches, 1); assert.equal(container.querySelector('textarea'), null);
+  await React.act(async () => editAction().click()); assert.equal(branches, 1); assert.ok(container.querySelector('textarea') === null);
   await React.act(async () => tree.render(React.createElement(ChatAttachmentStrip, { attachments: [{ ...file, file: local }, { ...pdf.file, file: new Blob([pdf.content], { type: pdf.file.type }) }], onRemove: () => {} })));
   assert.ok(container.querySelector(".is-image.is-compact")); assert.ok(container.querySelector(".is-file-card")); assert.equal(container.querySelectorAll(".chat-attachment-scroll").length, 1);
   await React.act(async () => tree.unmount());
