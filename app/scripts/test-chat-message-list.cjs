@@ -296,3 +296,20 @@ test("returning to a long task shows the same turns at their measured heights", 
   await show({ messages: turns(60, "r"), conversationId: "restored" });
   assert.deepEqual(mountedTurnKeys(), shown);
 });
+
+test("a docked summary shifts the thread and its composer together and tells wide blocks how far", async () => {
+  const messages = [user("u1", "Hello"), answer("a1", "Hi")];
+  const shifted = () => [list().firstElementChild, query('[data-thread-scroll-footer="true"]')];
+  await show({ messages, contentX: -158, conversationId: "shift" });
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  for (const element of shifted()) {
+    assert.equal(element.style.transform, "translateX(-158px)");
+    assert.equal(element.style.getPropertyValue("--thread-wide-block-inline-shift"), "158px");
+  }
+  await show({ messages, contentX: 0, conversationId: "shift" });
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  for (const element of shifted()) {
+    assert.match(element.style.transform || "none", /^(none|translateX\(0px\))$/);
+    assert.equal(element.style.getPropertyValue("--thread-wide-block-inline-shift"), "0px");
+  }
+});
