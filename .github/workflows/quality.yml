@@ -1,7 +1,10 @@
 name: quality
 
 on:
-  push: {}
+  push:
+    paths-ignore:
+      - "docs/**"
+      - "README.md"
   workflow_dispatch: {}
 
 permissions:
@@ -12,9 +15,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  client:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,6 +120,21 @@ jobs:
           node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/engine-mode.test.cjs
           node registry/worker_environment_kind/browser_session/packages/octopus-browser-session-env/native/tests/standard-history.test.cjs
 
+      - name: Public source boundary
+        run: node app/scripts/check-public-source.cjs
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -128,27 +146,77 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Public source boundary
-        run: node app/scripts/check-public-source.cjs
-
       - name: Workspace check (fail-closed, no degraded compile)
         run: cargo check --workspace --all-targets --keep-going
 
-      - name: Policy formation and ledger proof contracts
+      - name: Policy, ledger proof, runtime checkpoint and Home binding contracts
         run: |
-          cargo test -p octopus-policy --lib
-          cargo test -p octopus-ledger-index --lib
-
-      - name: Heart — runtime checkpoint and exactly-once contracts
-        run: cargo test -p octopus-runtime --lib
+          cargo test --locked -p octopus-policy -p octopus-ledger-index -p octopus-runtime --lib
+          cargo test --locked -p octopus-operator-chat-client --lib real_registry_home_plan_exports_authoring_and_exact_policy_requirements
+          cargo test --locked -p octopus-model-context-render --test instructions
 
       - name: File publication contracts
         run: cargo test --locked -p octopus-file-storage --lib publication::tests -- --test-threads=1
 
-      - name: Home bindings and instruction context
+  native-client:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      OCTOPUS_NATIVE_NODE_HEADERS: ${{ github.workspace }}/app/build/node-v24.15.0/include/node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install client dependencies without native rebuild
+        working-directory: app
+        run: npm ci --ignore-scripts
+
+      - name: Prepare pinned client native headers
         run: |
-          cargo test -p octopus-operator-chat-client --lib real_registry_home_plan_exports_authoring_and_exact_policy_requirements
-          cargo test -p octopus-model-context-render --test instructions
+          mkdir -p app/build
+          curl -fL https://nodejs.org/download/release/v24.15.0/node-v24.15.0-headers.tar.gz -o app/build/node-v24.15.0-headers.tar.gz
+          printf '%s  %s\n' 9a9250039fef572d0bcc110ac5e78055faf5604421211d2d5f578ebc5a34e703 app/build/node-v24.15.0-headers.tar.gz | shasum -a 256 -c -
+          tar -xzf app/build/node-v24.15.0-headers.tar.gz -C app/build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache the pinned managed provider executable
+        uses: actions/cache@v4
+        with:
+          path: registry/interface/world_provider_codex/packages/bin
+          key: managed-codex-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/release.json', 'registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs') }}
+
+      - name: Build the topology planner and input intake life
+        run: cargo build --locked -p octopus-operator-chat-client --bin octopus-operator-chat-topology -p octopus-provider-codex --bin octopus-input-intake-life
+
+      - name: Client native installation and terminal contracts
+        run: |
+          node app/native/build.cjs
+          node app/scripts/test-local-packages.cjs
+          node app/scripts/test-client-setup.cjs
+          npm --prefix app run test:cli
+
+      - name: Prepare the declared managed provider executable
+        run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$PWD/registry/interface/world_provider_codex/packages/bin"
+
+      - name: Package and fresh Home setup through the real topology planner
+        run: |
+          mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
+          install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
+          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology
+          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology
 
   native-contracts:
     runs-on: macos-latest
@@ -184,41 +252,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Client native installation and terminal contracts
-        run: |
-          cargo build --locked -p octopus-operator-chat-client --bin octopus-operator-chat-topology
-          node app/native/build.cjs
-          node app/scripts/test-local-packages.cjs
-          node app/scripts/test-client-setup.cjs
-          npm --prefix app run test:cli
-
       - name: Install declared OCR verifier executable
         run: brew install tesseract
 
-      - name: Package verifier and retained artifact delivery contracts
-        run: cargo test --locked -p octopus-app-server --lib --test worker_interface_cross_run_fan_out
-
-      - name: Home admission, stop and provider recovery
+      - name: Package verifier, Home admission, provider recovery and voice contracts
         run: |
+          cargo test --locked -p octopus-app-server -p octopus-operator-chat-client -p octopus-run-authoring -p octopus-provider-codex -p octopus-realtime-signaling --lib
+          cargo test --locked -p octopus-app-server --test worker_interface_cross_run_fan_out
           cargo test --locked -p octopus-operator-chat-client --test conditioned_publication
-          cargo test -p octopus-operator-chat-client --lib
           cargo test --locked -p octopus-operator-chat-client --test run_composition input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results
-          cargo test -p octopus-run-authoring --lib
-          cargo test -p octopus-provider-codex --lib
-
-      - name: Voice lifecycle and evidence contracts
-        run: cargo test -p octopus-realtime-signaling --lib
-
-      - name: Prepare the declared managed provider executable
-        run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$PWD/registry/interface/world_provider_codex/packages/bin"
-
-      - name: Package and fresh Home setup through the real topology planner
-        run: |
-          cargo build --locked -p octopus-operator-chat-client --bin octopus-operator-chat-topology -p octopus-provider-codex --bin octopus-input-intake-life
-          mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
-          install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
-          node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology
-          node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology
 
   tool-continuations:
     runs-on: macos-latest
