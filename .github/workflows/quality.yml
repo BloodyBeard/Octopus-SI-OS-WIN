@@ -226,13 +226,10 @@ jobs:
       - name: Build the client filesystem module
         run: node app/native/build.cjs
 
-      - name: Client native installation and terminal contracts
+      - name: Client setup and terminal contracts
         run: |
-          node app/scripts/test-local-packages.cjs & packages=$!
-          { node app/scripts/test-client-setup.cjs && npm --prefix app run test:cli; } & terminal=$!
-          wait $packages; packages_status=$?
-          wait $terminal; terminal_status=$?
-          test $packages_status -eq 0 -a $terminal_status -eq 0
+          node app/scripts/test-client-setup.cjs
+          npm --prefix app run test:cli
 
   package-closure:
     runs-on: macos-latest
@@ -286,15 +283,16 @@ jobs:
       - name: Prepare the declared managed provider executable
         run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$PWD/registry/interface/world_provider_codex/packages/bin"
 
-      - name: Package and fresh Home setup through the real topology planner
+      - name: Local package lifecycle and fresh Home setup through the real topology planner
         run: |
           mkdir -p registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin
           install -m 755 target/debug/octopus-input-intake-life registry/interface/world_provider_codex/packages/octopus-provider-codex/intake/life-bin/octopus-input-intake-life
+          node app/scripts/test-local-packages.cjs & packages=$!
           node app/scripts/test-local-package-closure.cjs --topology-binary target/debug/octopus-operator-chat-topology & topology=$!
           node app/scripts/test-local-package-closure.cjs --bounded-agent-preset target/debug/octopus-operator-chat-topology & preset=$!
-          wait $topology; topology_status=$?
-          wait $preset; preset_status=$?
-          test $topology_status -eq 0 -a $preset_status -eq 0
+          wait $packages
+          wait $topology
+          wait $preset
 
   native-contracts:
     runs-on: macos-latest
