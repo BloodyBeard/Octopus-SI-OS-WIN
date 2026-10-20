@@ -661,8 +661,7 @@ fn read_pending_result(
             .as_deref()
             .ok_or("code mode result has no correlation")?,
     )?;
-    let pending: PreparedCall = read_record(&root.join(format!("{hash}.pending.json")))?;
-    pending.validate()?;
+    let pending = read_prepared_call(&root.join(format!("{hash}.pending.json")))?;
     if let ResultCarrier::FormedInvocation {
         source_movement_seq,
     } = carrier
@@ -903,8 +902,7 @@ pub fn prepared_call_for_output(
             .as_deref()
             .ok_or("owner output has no immutable pending correlation")?,
     )?;
-    let pending: PreparedCall = read_record(&root.join(format!("{key}.pending.json")))?;
-    pending.validate()?;
+    let pending = read_prepared_call(&root.join(format!("{key}.pending.json")))?;
     if pending.digest != key
         || pending.formation() != formation
         || pending.formation().worker_environment_id != worker
@@ -934,14 +932,26 @@ pub fn prepared_calls(root: &Path) -> Result<Vec<PreparedCall>, String> {
             .to_str()
             .is_some_and(|s| s.ends_with(".pending.json"))
         {
-            let call: PreparedCall = read_record(&entry.path())?;
-            call.validate()?;
+            let path = entry.path();
+            let (digest, bytes) = match known_prepared_call(&path)? {
+                Some(digest) => (digest, None),
+                None => {
+                    let fingerprint = record_fingerprint(&path)?;
+                    let bytes = read_record_bytes(&path)?;
+                    let digest = prepared_call_from(&bytes)?.digest;
+                    if let Some(fingerprint) = fingerprint.filter(|_| record_fingerprint(&path).is_ok_and(|after| after == fingerprint)) {
+                        remember_prepared_call(path.clone(), fingerprint, digest.clone())?;
+                    }
+                    (digest, Some(bytes))
+                }
+            };
             if !root
-                .join(format!("{}.accepted.json", call.digest))
+                .join(format!("{digest}.accepted.json"))
                 .try_exists()
                 .map_err(|e| e.to_string())?
             {
-                pending.push(call);
+                let bytes = match bytes { Some(bytes) => bytes, None => read_record_bytes(&path)? };
+                pending.push(prepared_call_from(&bytes)?);
             }
         }
     }
@@ -1275,6 +1285,81 @@ pub fn validate_directory(path: &Path) -> Result<(), String> {
 pub fn read_record<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&read_record_bytes(path)?)
         .map_err(|e| format!("code mode immutable record is malformed: {e}"))
+}
+
+fn read_prepared_call(path: &Path) -> Result<PreparedCall, String> {
+    prepared_call_from(&read_record_bytes(path)?)
+}
+
+type ValidatedCalls = (std::collections::HashMap<ContentHash, String>, std::collections::VecDeque<ContentHash>);
+
+fn validated_calls() -> Result<std::sync::MutexGuard<'static, ValidatedCalls>, String> {
+    static VALIDATED: std::sync::OnceLock<std::sync::Mutex<ValidatedCalls>> = std::sync::OnceLock::new();
+    VALIDATED.get_or_init(Default::default).lock().map_err(|_| "code mode validated record index is poisoned".to_string())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RecordFingerprint {
+    device: u64,
+    inode: u64,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(unix)]
+fn record_fingerprint(path: &Path) -> Result<Option<RecordFingerprint>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("code mode record {}: {e}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > RECORD_BYTES as u64 { return Ok(None); }
+    Ok(Some(RecordFingerprint {
+        device: metadata.dev(), inode: metadata.ino(), len: metadata.len(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()), changed: (metadata.ctime(), metadata.ctime_nsec()),
+    }))
+}
+
+#[cfg(not(unix))]
+fn record_fingerprint(_: &Path) -> Result<Option<RecordFingerprint>, String> {
+    Ok(None)
+}
+
+type PreparedCallFingerprints = (std::collections::HashMap<PathBuf, (RecordFingerprint, String)>, std::collections::VecDeque<PathBuf>);
+
+fn prepared_call_fingerprints() -> Result<std::sync::MutexGuard<'static, PreparedCallFingerprints>, String> {
+    static KNOWN: std::sync::OnceLock<std::sync::Mutex<PreparedCallFingerprints>> = std::sync::OnceLock::new();
+    KNOWN.get_or_init(Default::default).lock().map_err(|_| "code mode prepared call index is poisoned".to_string())
+}
+
+fn known_prepared_call(path: &Path) -> Result<Option<String>, String> {
+    let Some(fingerprint) = record_fingerprint(path)? else { return Ok(None); };
+    Ok(prepared_call_fingerprints()?.0.get(path).filter(|(known, _)| *known == fingerprint).map(|(_, digest)| digest.clone()))
+}
+
+fn remember_prepared_call(path: PathBuf, fingerprint: RecordFingerprint, digest: String) -> Result<(), String> {
+    let mut known = prepared_call_fingerprints()?;
+    if known.0.insert(path.clone(), (fingerprint, digest)).is_none() {
+        known.1.push_back(path);
+        if known.1.len() > 4096 {
+            if let Some(oldest) = known.1.pop_front() { known.0.remove(&oldest); }
+        }
+    }
+    Ok(())
+}
+
+fn prepared_call_from(bytes: &[u8]) -> Result<PreparedCall, String> {
+    let call: PreparedCall = serde_json::from_slice(bytes)
+        .map_err(|e| format!("code mode immutable record is malformed: {e}"))?;
+    let content = ContentHash::of_bytes(bytes);
+    if validated_calls()?.0.contains_key(&content) { return Ok(call); }
+    call.validate()?;
+    let mut validated = validated_calls()?;
+    if validated.0.insert(content, call.digest.clone()).is_none() {
+        validated.1.push_back(content);
+        if validated.1.len() > 4096 {
+            if let Some(oldest) = validated.1.pop_front() { validated.0.remove(&oldest); }
+        }
+    }
+    Ok(call)
 }
 
 fn read_record_bytes(path: &Path) -> Result<Vec<u8>, String> {
@@ -1952,8 +2037,7 @@ pub(crate) fn decode_application(
     let (_, key) =
         application_locator(envelope)?.ok_or("no immutable application continuation identity")?;
     let application = pending_application(root, &key)?;
-    let pending: PreparedCall = read_record(&root.join(format!("{key}.pending.json")))?;
-    pending.validate()?;
+    let pending = read_prepared_call(&root.join(format!("{key}.pending.json")))?;
     let captured = envelope
         .read_artifact_bounded(MANIFEST_BYTES, RECORD_BYTES as u64)
         .map_err(|e| e.to_string())?;
@@ -2273,8 +2357,7 @@ impl ContinuationContext {
             read_record(&self.root.join(format!("{key}.app-result-admitted.json")))?;
         let payload: Value =
             read_record(&self.root.join(format!("{key}.app-result-payload.json")))?;
-        let pending: PreparedCall = read_record(&self.root.join(format!("{key}.pending.json")))?;
-        pending.validate()?;
+        let pending = read_prepared_call(&self.root.join(format!("{key}.pending.json")))?;
         if retirement.decision_artifact != decision.artifact
             || witness.source_movement_seq <= decision.source_seq
         {
@@ -2738,8 +2821,7 @@ pub fn retained_continuation_formation(
         root.join(format!("{}.wake-admitted.json", read_ready(input)?.identity()?))
     } else {
         let (pending, suffix) = if let Some((_, key)) = application_locator(input)? {
-            let pending: PreparedCall = read_record(&root.join(format!("{key}.pending.json")))?;
-            pending.validate()?;
+            let pending = read_prepared_call(&root.join(format!("{key}.pending.json")))?;
             let suffix = if label == "operator.approval.response" { "decision-admitted" } else { "app-result-admitted" };
             (pending, suffix)
         } else {

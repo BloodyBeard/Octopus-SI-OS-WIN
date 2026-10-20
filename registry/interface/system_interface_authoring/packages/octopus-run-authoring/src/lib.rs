@@ -230,7 +230,7 @@ enum UniqueArrivalCoordinate {
 struct ProviderLedgerEvidenceIndex {
     interface: InterfaceId,
     movements_path: PathBuf,
-    decoder: DurableMovementDecoder,
+    ledger: Arc<ledger_rows::LedgerRows>,
     max_row_bytes: u64,
     spotlight: Option<LedgerSqliteReader>,
     byte_offset: u64,
@@ -254,6 +254,8 @@ struct ProviderLedgerEvidenceIndex {
     coordinate_outbounds: HashMap<RuntimeCoordinateKey, Vec<IndexedOutboundArtifact>>,
     coordinate_marks: HashMap<(String, RuntimeCoordinateKey, String, String), UniqueEvidence>,
     retained_delivery: pending_delivery::Ledger,
+    ledger_file: Option<ledger_rows::LedgerFile>,
+    tail: Option<(u64, ContentHash)>,
 }
 
 type ContextPublications = BTreeMap<String, BTreeSet<u64>>;
@@ -474,6 +476,7 @@ mod authoring_attempt;
 use authoring_attempt::*;
 mod evidence_index;
 use evidence_index::*;
+mod ledger_rows;
 mod profile;
 pub use profile::*;
 mod topology;

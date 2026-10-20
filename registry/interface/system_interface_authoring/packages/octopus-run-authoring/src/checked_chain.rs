@@ -46,7 +46,7 @@ pub trait CheckedRunEvidenceReader {
         let observed = last_segment.map_or(after_seq, |sequence| sequence.saturating_sub(1));
         for sequence in 0..=observed {
             let row = self.admitted_movement(sequence)?.ok_or("checked writer evidence interval is incomplete")?;
-            if detached_writer_starts_at(self, &row, path, record, before, &hash, writers)? {
+            if detached_writer_starts_at(self, ledger_rows::OutboundRow::of(&row).as_ref(), path, record, before, &hash, writers)? {
                 return sequence.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
             }
         }
@@ -62,7 +62,8 @@ pub trait CheckedRunEvidenceReader {
 
 pub struct FileCheckedRunReader<'a> {
     pub(crate) evidence: &'a CheckedRunEvidence<'a>,
-    pub(crate) decoder: DurableMovementDecoder,
+    pub(crate) rows: Arc<ledger_rows::LedgerRows>,
+    pub(crate) ledger: ledger_rows::LedgerFile,
     pub(crate) reader: std::io::BufReader<std::fs::File>,
     pub(crate) next_seq: u64,
     pub(crate) snapshot_bytes: u64,
@@ -71,33 +72,82 @@ pub struct FileCheckedRunReader<'a> {
 
 impl<'a> FileCheckedRunReader<'a> {
     pub fn open(evidence: &'a CheckedRunEvidence<'a>, after_seq: Option<u64>) -> Result<Self, String> {
-    if [evidence.max_control_frame_bytes,evidence.max_manifest_bytes,evidence.max_payload_bytes].contains(&0)
-        || [&evidence.movements_path,&evidence.ledger_index_path,&evidence.blobs_dir].iter().any(|path| !path.is_absolute()) {
-        return Err("checked authoring requires explicit bounded owner evidence paths".into());
-    }
-        let decoder = DurableMovementDecoder::for_log(&evidence.movements_path);
+        if [evidence.max_control_frame_bytes,evidence.max_manifest_bytes,evidence.max_payload_bytes].contains(&0)
+            || [&evidence.movements_path,&evidence.ledger_index_path,&evidence.blobs_dir].iter().any(|path| !path.is_absolute()) {
+            return Err("checked authoring requires explicit bounded owner evidence paths".into());
+        }
+        let rows = ledger_rows::LedgerRows::shared(evidence.movements_path);
         let file = std::fs::File::open(&evidence.movements_path).map_err(|e| e.to_string())?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut sequence = 0u64;
-    if let (Some(after_seq), Ok(index)) = (after_seq, LedgerSqliteReader::open(&evidence.ledger_index_path)) {
-        if let Ok(Some(range)) = index.movement_row_range(after_seq) {
-            let length = reader.get_ref().metadata().map_err(|e| e.to_string())?.len();
-            if range.end_offset <= length && range.start_offset < range.end_offset && range.end_offset - range.start_offset <= evidence.max_control_frame_bytes {
-                reader.seek(std::io::SeekFrom::Start(range.start_offset)).map_err(|e| e.to_string())?;
-                let valid = match read_bounded_ledger_row(&mut reader,evidence.max_control_frame_bytes)? {
-                    BoundedLedgerRow::Complete(row) => decoder.decode(&row,after_seq as usize).is_ok_and(|movement| movement.seq.0 == after_seq),
-                    _ => false,
-                };
-                if valid && reader.stream_position().map_err(|e| e.to_string())? == range.end_offset {
-                    sequence = after_seq.checked_add(1).ok_or("checked authoring sequence overflow")?;
-                } else {
-                    reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-                }
+        let ledger = ledger_rows::LedgerFile::of(&file)?;
+        let mut reader = Self { evidence, rows, ledger, reader: std::io::BufReader::new(file), next_seq: 0, snapshot_bytes: 0, provider_context: None };
+        if let Some(after_seq) = after_seq {
+            if !reader.resume_indexed(after_seq)? && !reader.resume_spotlight(after_seq)? {
+                reader.project_through(after_seq)?;
             }
         }
+        Ok(reader)
     }
 
-        Ok(Self { evidence, decoder, reader, next_seq: sequence, snapshot_bytes: 0, provider_context: None })
+    fn resume_spotlight(&mut self, after_seq: u64) -> Result<bool, String> {
+        let Ok(index) = LedgerSqliteReader::open(&self.evidence.ledger_index_path) else { return Ok(false); };
+        let Ok(Some(range)) = index.movement_row_range(after_seq) else { return Ok(false); };
+        let rows = self.rows.clone();
+        self.resume(after_seq, range.start_offset, range.end_offset,
+            |row| rows.decoder.decode(row, after_seq as usize).is_ok_and(|movement| movement.seq.0 == after_seq))
+    }
+
+    pub(crate) fn project_through(&mut self, last: u64) -> Result<(), String> {
+        let known = self.rows.known(self.ledger)?.min(last.checked_add(1).ok_or("checked authoring sequence overflow")?);
+        if let Some(resume) = known.checked_sub(1).filter(|resume| self.next_seq <= *resume) {
+            self.resume_indexed(resume)?;
+        }
+        while self.next_seq <= last {
+            let seq = self.next_seq;
+            let start = self.reader.stream_position().map_err(|e| e.to_string())?;
+            let row = match read_bounded_ledger_row(&mut self.reader, self.evidence.max_control_frame_bytes)? {
+                BoundedLedgerRow::Complete(row) => row,
+                BoundedLedgerRow::Partial | BoundedLedgerRow::Eof => {
+                    self.reader.seek(std::io::SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            };
+            let (movement, _) = self.rows.decoder.decode_projection(&row, seq as usize).map_err(|e| e.to_string())?;
+            if movement.seq.0 != seq { return Err("checked authoring evidence ledger has a sequence gap".into()); }
+            self.note(seq, start, &row, &movement)?;
+            self.next_seq = seq.checked_add(1).ok_or("checked authoring sequence overflow")?;
+        }
+        Ok(())
+    }
+
+    fn note(&self, seq: u64, start: u64, row: &[u8], movement: &Movement) -> Result<(), String> {
+        self.rows.note(self.ledger, seq, ledger_rows::LedgerRow {
+            start, end: start.checked_add(row.len() as u64).ok_or("checked authoring offset overflow")?,
+            digest: ContentHash::of_bytes(row), outbound: ledger_rows::OutboundRow::of(movement),
+        })
+    }
+
+    pub(crate) fn resume_indexed(&mut self, seq: u64) -> Result<bool, String> {
+        let Some(row) = self.rows.row(self.ledger, seq)? else { return Ok(false); };
+        if self.resume(seq, row.start, row.end, |bytes| ContentHash::of_bytes(bytes) == row.digest)? { return Ok(true); }
+        self.rows.forget()?;
+        Ok(false)
+    }
+
+    fn resume(&mut self, seq: u64, start: u64, end: u64, proves: impl FnOnce(&[u8]) -> bool) -> Result<bool, String> {
+        let length = self.reader.get_ref().metadata().map_err(|e| e.to_string())?.len();
+        if end > length || start >= end || end - start > self.evidence.max_control_frame_bytes { return Ok(false); }
+        self.reader.seek(std::io::SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        let valid = match read_bounded_ledger_row(&mut self.reader, self.evidence.max_control_frame_bytes)? {
+            BoundedLedgerRow::Complete(row) => proves(&row),
+            _ => false,
+        };
+        if valid && self.reader.stream_position().map_err(|e| e.to_string())? == end {
+            self.next_seq = seq.checked_add(1).ok_or("checked authoring sequence overflow")?;
+            return Ok(true);
+        }
+        self.reader.seek(std::io::SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+        self.next_seq = 0;
+        Ok(false)
     }
 
     pub(crate) fn with_provider_context(mut self, ctx: &InterfaceLiftContext) -> Self { self.provider_context = Some(ctx.clone()); self }
@@ -146,12 +196,14 @@ impl CheckedRunEvidenceReader for FileCheckedRunReader<'_> {
     }
     fn movement(&mut self, seq: u64) -> Result<Option<Movement>, String> {
         if seq != self.next_seq { return Err("checked authoring reader lost its exact cursor".into()); }
+        let start = self.reader.stream_position().map_err(|e| e.to_string())?;
         let row = match read_bounded_ledger_row(&mut self.reader, self.evidence.max_control_frame_bytes)? {
             BoundedLedgerRow::Complete(row) => row,
             BoundedLedgerRow::Partial | BoundedLedgerRow::Eof => return Ok(None),
         };
-        let movement = self.decoder.decode(&row, seq as usize).map_err(|e| e.to_string())?;
+        let movement = self.rows.decode(&row, seq)?;
         if movement.seq.0 != seq { return Err("checked authoring evidence ledger has a sequence gap".into()); }
+        self.note(seq, start, &row, &movement)?;
         self.next_seq = seq.checked_add(1).ok_or("checked authoring sequence overflow")?;
         Ok(Some(movement))
     }
@@ -718,27 +770,24 @@ pub(crate) fn observed_run_evidence_start(
             }
         }
     }
-    let mut reader = FileCheckedRunReader::open(evidence, None)?;
-    let mut first = None;
-    let mut last_segment = None;
-    while reader.next_seq < upper {
-        let seq = reader.next_seq;
-        let Some(row) = reader.movement(seq)? else { break; };
-        if let Some(current) = snapshot(&row) {
-            if current == hash {
-                first.get_or_insert(seq);
-                last_segment = first;
-            } else { first = None; }
+    let mut prefix = ledger_rows::outbound_prefix(evidence, upper)?;
+    let candidates = prefix.matching(|row| row.run_snapshot(&record.id).is_some())?;
+    let mut earliest = None;
+    for seq in candidates.into_iter().rev() {
+        match prefix.verified(seq)?.run_snapshot(&record.id) {
+            Some(current) if current == hash => earliest = Some(seq),
+            Some(_) if earliest.is_some() => break,
+            _ => {},
         }
     }
-    Ok(last_segment.map_or(after_seq, |seq| seq.saturating_sub(1)))
+    Ok(earliest.map_or(after_seq, |seq| seq.saturating_sub(1)))
 }
 
 pub(crate) fn detached_writer_starts_at(
-    reader: &mut (impl CheckedRunEvidenceReader + ?Sized), call: &Movement, path: &Path,
+    reader: &mut (impl CheckedRunEvidenceReader + ?Sized), call: Option<&ledger_rows::OutboundRow>, path: &Path,
     record: &RunRecord, before: &[u8], before_hash: &str, writers: &[CheckedRunWriter],
 ) -> Result<bool, String> {
-    if call.kind != MovementKind::InterfaceOutbound { return Ok(false); }
+    let Some(call) = call else { return Ok(false); };
     let Some(writer) = writers.iter().find(|writer| call.from == Endpoint::Interface(writer.source.clone())
         && call.to == Endpoint::Interface(writer.door.clone())) else { return Ok(false); };
     let (manifest, payload) = reader.artifact(call.artifact.as_ref().ok_or("observed writer call has no artifact")?)?;
@@ -749,7 +798,7 @@ pub(crate) fn detached_writer_starts_at(
     { return Ok(false); }
     let ordered: writer_run::OrderedArguments = serde_json::from_value(artifact.arguments).map_err(|error| error.to_string())?;
     if !ordered.targets(path) { return Ok(false); }
-    let runtime = call.runtime().ok_or("observed writer call has no admitted coordinate")?;
+    let runtime = call.runtime.as_ref().ok_or("observed writer call has no admitted coordinate")?;
     let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
         .ok_or("observed writer call has no admitted writer snapshot")?;
     let snapshot = reader.snapshot(&hash)?;
@@ -787,19 +836,25 @@ pub(crate) fn concurrent_writer_evidence_start(
     if let Some(sequences) = indexed {
         for seq in sequences {
             let row = reader.admitted_movement(seq)?.ok_or("checked writer evidence interval is incomplete")?;
-            if detached_writer_starts_at(&mut reader, &row, path, record, before, &before_hash, writers)? {
+            if detached_writer_starts_at(&mut reader, ledger_rows::OutboundRow::of(&row).as_ref(), path, record, before, &before_hash, writers)? {
                 return seq.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
             }
         }
-    } else {
-        while reader.next_seq < upper {
-            let seq = reader.next_seq;
-            let row = reader.movement(seq)?.ok_or("checked writer evidence interval is incomplete")?;
-            if detached_writer_starts_at(&mut reader, &row, path, record, before, &before_hash, writers)? {
-                return seq.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
-            }
+        return Ok(first);
+    }
+    let mut prefix = ledger_rows::outbound_prefix(evidence, upper)?;
+    let candidates = prefix.matching(|row| writers.iter().any(|writer| row.writes_through(writer)))?;
+    for seq in candidates {
+        let row = prefix.verified(seq)?;
+        let writer = writers.iter().find(|writer| row.writes_through(writer)).ok_or("indexed writer call lost its declared writer")?;
+        if let Some(artifact) = row.artifact.as_ref() {
+            if ledger_rows::writer_call_excluded(evidence, artifact, writer, &before_hash)? { continue; }
+        }
+        if detached_writer_starts_at(&mut reader, Some(&row), path, record, before, &before_hash, writers)? {
+            return seq.checked_sub(1).ok_or("observed writer call has no earlier evidence boundary".into());
         }
     }
+    if prefix.available < upper { return Err("checked writer evidence interval is incomplete".into()); }
     Ok(first)
 }
 

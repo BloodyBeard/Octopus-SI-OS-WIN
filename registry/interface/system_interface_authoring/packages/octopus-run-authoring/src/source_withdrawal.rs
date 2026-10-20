@@ -336,7 +336,7 @@ fn validate_absence(ctx: &InterfaceLiftContext, record: &RunRecord, proof: &With
             BoundedLedgerRow::Eof => break,
             BoundedLedgerRow::Partial => return Err("withdrawal requires a complete durable ledger boundary".into()),
         };
-        let movement = reader.decoder.decode(&row, reader.next_seq as usize).map_err(|error| error.to_string())?;
+        let movement = reader.rows.decoder.decode(&row, reader.next_seq as usize).map_err(|error| error.to_string())?;
         if movement.seq.0 != reader.next_seq || rejects_old_movement(&movement, record, proof) {
             return Err("withdrawal lost its ledger prefix or the output already reached an edge".into());
         }

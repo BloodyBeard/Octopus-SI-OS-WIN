@@ -14,12 +14,12 @@ impl ProviderHandoffSession {
             movements_path: movements_path.clone(),
             writer_history: Arc::new(Mutex::new(BTreeMap::new())),
             writer_call_generations: Arc::new(Mutex::new(writer_run::WriterCallIndex::default())),
-            evidence: Arc::new(Mutex::new(ProviderLedgerEvidenceIndex::with_spotlight(
+            evidence: ProviderLedgerEvidenceIndex::shared(
                 ctx.interface.clone(),
                 movements_path,
                 limits.max_control_frame_bytes.max(1024),
                 &ctx.ledger_index_path,
-            ))),
+            ),
         })
     }
 
@@ -117,7 +117,7 @@ impl ProviderLedgerEvidenceIndex {
         let retained_delivery = pending_delivery::Ledger::new(interface.clone(), movements_path.clone(), max_row_bytes);
         Self {
             interface,
-            decoder: DurableMovementDecoder::for_log(&movements_path),
+            ledger: if movements_path.as_os_str().is_empty() { ledger_rows::LedgerRows::detached(&movements_path) } else { ledger_rows::LedgerRows::shared(&movements_path) },
             movements_path,
             max_row_bytes,
             spotlight: None,
@@ -142,7 +142,48 @@ impl ProviderLedgerEvidenceIndex {
             coordinate_outbounds: HashMap::new(),
             coordinate_marks: HashMap::new(),
             retained_delivery,
+            ledger_file: None,
+            tail: None,
         }
+    }
+
+    pub(crate) fn shared(
+        interface: InterfaceId,
+        movements_path: PathBuf,
+        max_row_bytes: u64,
+        ledger_index_path: &Path,
+    ) -> Arc<Mutex<Self>> {
+        type Shared = Vec<((InterfaceId, PathBuf, PathBuf, u64), Arc<Mutex<ProviderLedgerEvidenceIndex>>)>;
+        static SHARED: std::sync::OnceLock<Mutex<Shared>> = std::sync::OnceLock::new();
+        let key = (interface.clone(), movements_path.clone(), ledger_index_path.to_path_buf(), max_row_bytes);
+        let mut shared = SHARED.get_or_init(Default::default).lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(position) = shared.iter().position(|(known, _)| *known == key) {
+            let (known, index) = shared.remove(position);
+            if index.try_lock().is_ok_and(|index| index.reusable()) {
+                shared.push((known, index.clone()));
+                return index;
+            }
+        }
+        let index = Arc::new(Mutex::new(Self::with_spotlight(interface, movements_path, max_row_bytes, ledger_index_path)));
+        shared.push((key, index.clone()));
+        if shared.len() > 16 { shared.remove(0); }
+        index
+    }
+
+    fn reusable(&self) -> bool {
+        if self.poison.is_some() || self.through_seq.is_some() { return false; }
+        let Ok(metadata) = std::fs::metadata(&self.movements_path) else { return false; };
+        if metadata.len() < self.byte_offset.max(self.observed_len)
+            || self.ledger_file.is_some_and(|file| file != ledger_rows::LedgerFile::from_metadata(&metadata)) {
+            return false;
+        }
+        if self.byte_offset == 0 { return true; }
+        let Some((start, digest)) = self.tail else { return false; };
+        let Ok(length) = usize::try_from(self.byte_offset - start) else { return false; };
+        let mut row = vec![0; length];
+        std::fs::File::open(&self.movements_path)
+            .and_then(|mut file| file.seek(std::io::SeekFrom::Start(start)).and_then(|_| file.read_exact(&mut row)))
+            .is_ok_and(|_| ContentHash::of_bytes(&row) == digest)
     }
 
     pub(crate) fn with_spotlight(
@@ -173,14 +214,15 @@ impl ProviderLedgerEvidenceIndex {
     }
 
     pub(crate) fn catch_up_unpoisoned(&mut self) -> Result<(), String> {
-        let length = std::fs::metadata(&self.movements_path)
+        let metadata = std::fs::metadata(&self.movements_path)
             .map_err(|error| {
                 format!(
                     "provider ledger index cannot stat '{}': {error}",
                     self.movements_path.display()
                 )
-            })?
-            .len();
+            })?;
+        let length = metadata.len();
+        self.ledger_file.get_or_insert(ledger_rows::LedgerFile::from_metadata(&metadata));
         let watermark = self.byte_offset.max(self.observed_len);
         if length < watermark {
             return Err(format!(
@@ -243,6 +285,7 @@ impl ProviderLedgerEvidenceIndex {
         self.byte_offset = progress.durable_end_offset;
         self.observed_len = self.observed_len.max(progress.durable_end_offset);
         self.next_seq = progress.watermark;
+        self.tail = None;
         Ok(true)
     }
 
@@ -282,7 +325,7 @@ impl ProviderLedgerEvidenceIndex {
             if row.last() != Some(&b'\n') {
                 return None;
             }
-            let movement = self.decoder.decode(&row, indexed.seq as usize).ok()?;
+            let movement = self.ledger.decode(&row, indexed.seq).ok()?;
             if movement.seq.0 != indexed.seq {
                 return None;
             }
@@ -302,14 +345,15 @@ impl ProviderLedgerEvidenceIndex {
         })?;
         file.seek(std::io::SeekFrom::Start(self.byte_offset))
             .map_err(|error| format!("provider ledger index seek failed: {error}"))?;
+        let ledger_file = ledger_rows::LedgerFile::of(&file)?;
         let mut reader = std::io::BufReader::new(file);
         loop {
             if self.through_seq.is_some_and(|last| self.next_seq > last) { return Ok(()); }
             match read_bounded_ledger_row(&mut reader, self.max_row_bytes)? {
                 BoundedLedgerRow::Complete(row) => {
                     let movement = self
-                        .decoder
-                        .decode(&row, self.next_seq as usize)
+                        .ledger
+                        .decode(&row, self.next_seq)
                         .map_err(|error| {
                         format!(
                             "provider ledger index encountered malformed movement at byte {}: {error}",
@@ -323,10 +367,16 @@ impl ProviderLedgerEvidenceIndex {
                         ));
                     }
                     self.note(&movement)?;
+                    let start = self.byte_offset;
                     self.byte_offset = self
                         .byte_offset
                         .checked_add(row.len() as u64)
                         .ok_or_else(|| "provider ledger byte watermark overflowed".to_string())?;
+                    let digest = ContentHash::of_bytes(&row);
+                    self.tail = Some((start, digest));
+                    self.ledger.note(ledger_file, self.next_seq, ledger_rows::LedgerRow {
+                        start, end: self.byte_offset, digest, outbound: ledger_rows::OutboundRow::of(&movement),
+                    })?;
                     self.observed_len = self.observed_len.max(self.byte_offset);
                     self.next_seq = self.next_seq.checked_add(1).ok_or_else(|| {
                         "provider ledger sequence watermark overflowed".to_string()

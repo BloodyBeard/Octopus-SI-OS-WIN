@@ -5,7 +5,7 @@ use octopus_ledger_index::{ArrivalDedupIndex, RetainedArrivalState};
 pub(super) struct Ledger {
     interface: InterfaceId,
     path: PathBuf,
-    decoder: DurableMovementDecoder,
+    ledger: Arc<ledger_rows::LedgerRows>,
     max_row_bytes: u64,
     offset: u64,
     observed_length: u64,
@@ -20,7 +20,7 @@ impl Ledger {
     pub(super) fn new(interface: InterfaceId, path: PathBuf, max_row_bytes: u64) -> Self {
         Self {
             interface,
-            decoder: DurableMovementDecoder::for_log(&path),
+            ledger: if path.as_os_str().is_empty() { ledger_rows::LedgerRows::detached(&path) } else { ledger_rows::LedgerRows::shared(&path) },
             path,
             max_row_bytes,
             offset: 0,
@@ -52,9 +52,8 @@ impl Ledger {
                 BoundedLedgerRow::Eof => return Ok(()),
             };
             let movement = self
-                .decoder
-                .decode(&row, self.index.watermark() as usize)
-                .map_err(|error| error.to_string())?;
+                .ledger
+                .decode(&row, self.index.watermark())?;
             if movement.seq.0 != self.index.watermark() {
                 return Err("retained output ledger is not contiguous".into());
             }
