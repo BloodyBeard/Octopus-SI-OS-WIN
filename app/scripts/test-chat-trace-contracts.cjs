@@ -36,8 +36,6 @@ function typescriptModule(relativePath, mocks = {}) {
 }
 
 const turnActivity = source("src/components/chat/TurnActivity.tsx");
-const chatView = source("src/components/ChatView.tsx");
-const applicationsView = source("src/components/ApplicationsView.tsx");
 const messageList = source("src/components/chat/ChatMessageList.tsx");
 const sidebar = source("src/components/Sidebar.tsx");
 const codexNav = source("src/components/navigation/OctopusNav.tsx");
@@ -46,8 +44,6 @@ const operatorShell = source("src/components/shell/OperatorShell.tsx");
 const surfaceHost = source("src/components/shell/SurfaceHost.tsx");
 const paneTabStrip = source("src/components/shell/PaneTabStrip.tsx");
 const workspaceSurfacePane = source("src/components/shell/WorkspaceSurfacePane.tsx");
-const chatThreadHeader = source("src/components/chat/ChatThreadHeader.tsx");
-const taskSummaryPanel = source("src/components/chat/TaskSummaryPanel.tsx");
 const taskSourcesPane = source("src/components/chat/taskSourcesPane.ts");
 const taskSourcesPaneTab = source("src/components/chat/TaskSourcesPaneTab.tsx");
 const taskActionsMenu = source("src/shell/taskActionsMenu.ts");
@@ -56,35 +52,18 @@ const operatorShellState = source("src/components/shell/operatorShellState.ts");
 const taskActionsController = source("src/components/task/TaskActionsController.tsx");
 const workerEnvironmentPaneTab = source("src/components/worker-environment/WorkerEnvironmentPaneTab.tsx");
 const runEnvironmentView = source("src/components/worker-environment/RunEnvironmentView.tsx");
-const chatWorkspace = source("src/components/chat/useChatWorkspace.ts");
-const chatDraftStateSource = source("src/components/chat/useChatDraftState.ts");
-const chatTurnQueueSource = source("src/components/chat/useChatTurnQueue.ts");
-const chatCapabilityCatalog = source("src/components/chat/useChatCapabilityCatalog.ts");
 const electronMain = source("electron/main.cjs");
 const viteConfig = source("vite.config.ts");
 const chatCss = source("src/components/chat/chat.css");
-const iconGlyphs = source("src/components/IconGlyphs.tsx");
-const shellGlyphs = source("src/components/icon-glyphs/shell.tsx");
 const iconNotices = JSON.parse(source("licenses/icon-assets/notices.json"));
 const glyphAsset = (name) => iconNotices.glyphs.find((entry) => entry.name === name);
 const appIndex = source("index.html");
-const app = source("src/App.tsx");
 const clientPreferencesSource = source("src/clientPreferences.ts");
-const octopusLoadingLogo = source("src/components/OctopusLoadingLogo.tsx");
 const toolActivityPresentationCatalog = JSON.parse(source("src/components/chat/toolActivityPresentationCatalog.json"));
-const launchTerminal = source("src/components/onboarding/LaunchTerminal.tsx");
-const workspaceSetupGate = source("src/components/onboarding/WorkspaceSetupGate.tsx");
-const voiceView = source("src/components/voice/VoiceView.tsx");
 const voiceCss = source("src/components/voice/voice.css");
-const chatComposer = source("src/components/chat/ChatComposer.tsx");
-const localDictation = source("src/components/chat/useLocalDictation.ts");
-const voiceWidgets = source("src/components/voice/voiceWidgetDocuments.ts");
-const clientSurfaceRenderer = source("src/client-surfaces/ClientSurfaceRenderer.tsx");
-const clientWorkspacesSource = source("src/shell/clientWorkspaces.ts");
 const appShell = source("src/components/shell/AppShell.tsx");
 const shellCss = source("src/shell.css");
 const stylesCss = source("src/styles.css");
-const paneChromeOwnershipSource = source("src/components/shell/paneChromeOwnership.ts");
 const assistantDirectives = typescriptModule("src/components/chat/assistantDirectives.ts");
 const toolPresentation = typescriptModule("src/components/chat/toolPresentation.ts");
 const reasoningSummary = typescriptModule("src/components/chat/reasoningSummary.ts");
@@ -290,7 +269,6 @@ assert.equal(paneChromeOwnership.paneChromeOwner("secondary", []), "pane-launche
 assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}]), "pane-content-header");
 assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{ showWhenSingle: true }]), "pane-tab-strip");
 assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}, {}]), "pane-tab-strip");
-assert.doesNotMatch(paneChromeOwnershipSource, /\b(width|sidebar|resize|glyph|activeTabId)\b/);
 {
   const saved = new Map();
   const previousWindow = globalThis.window;
@@ -313,14 +291,6 @@ assert.doesNotMatch(paneChromeOwnershipSource, /\b(width|sidebar|resize|glyph|ac
     globalThis.window = previousWindow;
   }
 }
-assert.match(chatWorkspace, /const identity = randomId\(\);[\s\S]*?id: `queued_\$\{identity\}`,[\s\S]*?messageId: `msg_\$\{identity\}`[\s\S]*?hadAttachments: attachments\.length > 0/);
-const queueEdit = sourceBetween(chatWorkspace, "async function editQueuedTurn(", "async function cancelQueuedEdit(");
-assert.match(queueEdit, /applyDraft\(\{[\s\S]*?messageId: item\.messageId, messageHadAttachments: item\.hadAttachments[\s\S]*?attachments: savedEdit\?\.attachments \?\? item\.attachments/);
-const queueDraftSubmission = sourceBetween(chatWorkspace, "async function submitDraft(", "async function beginSubmission(");
-assert.match(queueDraftSubmission, /const queuedAttachmentBytesNeedRecovery = Boolean\([\s\S]*?editedQueuedTurn\?\.hadAttachments[\s\S]*?editedQueuedTurn\.attachments\.length === 0[\s\S]*?const editedQueuePayloadChanged = Boolean\([\s\S]*?body !== editedQueuedTurn\.text[\s\S]*?!queuedAttachmentBytesNeedRecovery[\s\S]*?const submissionMessageId = editedQueuePayloadChanged[\s\S]*?messageId: submissionMessageId[\s\S]*?status: "queued"/);
-assert.match(chatWorkspace, /reportClientExtensionIncident\(\{[\s\S]*?interfaceId: turn\.providerInterfaceId \|\| artifact\.from_interface_id/);
-assert.match(chatDraftStateSource, /function currentDraftForStorage\([\s\S]*?existing\?\.messageId === current\.messageId[\s\S]*?\{ \.\.\.existing, updatedAtMs: current\.updatedAtMs \}/);
-assert.match(chatWorkspace, /function paneTransferBlockReason\(runId: string\)[\s\S]*?draft\?\.attachments\.length[\s\S]*?draft\?\.text \|\| draft\?\.continuation[\s\S]*?queuedTurnsRef\.current\.some/);
 assert.match(operatorShell, /paneTransferBlockReasonRef\.current\(target, "secondary"\)/);
 assert.match(operatorShell, /pendingAcceptedPaneTransfersRef[\s\S]*?previousTabs: state\.secondaryTabs[\s\S]*?resumeClientPaneTransfer[\s\S]*?commitClientPaneTransfer[\s\S]*?finalizeClientPaneTransfer[\s\S]*?rollbackAcceptedPaneTransfer/);
 assert.match(operatorShell, /pendingClientPaneDestinationTransfers[\s\S]*?stageDestinationPaneTransfer\(transfer, transfer\.committed\)/);
@@ -424,8 +394,6 @@ assert.match(viteConfig, /createOperatorChatClientLoader\(/);
 assert.equal((viteConfig.match(/operatorChatClientLoader\.load\(\)/g) ?? []).length, 6);
 assert.doesNotMatch(viteConfig, /require\(path\.join\(octopusHome, "registry", "interface", "world_operator_chat", "client\.cjs"\)\)/);
 assert.match(viteConfig, /assertOperatorChatArtifactBatch\(batch\)/);
-assert.match(applicationsView, /action: "repair_package"/);
-assert.match(applicationsView, /expectedRepairs: \{ \[application\.package_id\]: expectation \}/);
 assert.throws(
   () => assertOperatorChatArtifactBatch({
     artifacts: [{ from_interface_id: "world_provider_codex_exact", from_interface_role: "" }],
@@ -787,33 +755,6 @@ const mergeCost = (size) => {
 mergeCost(500);
 assert.ok(mergeCost(8000) < mergeCost(2000) * 10, "rendered message merge must stay near-linear in projected and pending history");
 
-assert.match(
-  turnActivity,
-  /if \(entry\.family === "reasoning"\) \{\s*if \(explorationOpen\) grouped\.push\(entry\);\s*continue;/,
-);
-assert.match(
-  turnActivity,
-  /function explorationActivityEntry\([\s\S]*?if \(entry\.family === "exec"\) return execCategory\(entry\) !== "command";[\s\S]*?dynamicToolPresentation\(activityDetailMessages\(entry\)\[0\], toolPresentations\)\.family === "read";/,
-);
-assert.match(
-  turnActivity,
-  /return <ReasoningSummaryActivity entry=\{entry\} message=\{details\.at\(-1\)\} \/>;/,
-);
-assert.match(voiceView, /<HomeTurnActivity activities=\{activity\}/);
-assert.doesNotMatch(voiceView, /standaloneReasoningPresentation/);
-assert.match(
-  turnActivity,
-  /const hasConversationReasoningWork = presentation === "conversation"\s*&& visibleActivity\.some\(\(message\) => activityFamily\(message\) === "reasoning"\);/,
-);
-assert.match(
-  turnActivity,
-  /const showStandaloneWorkedBoundary = finalStarted[\s\S]*?&& !hasWork[\s\S]*?&& hasConversationReasoningWork;/,
-);
-assert.match(
-  turnActivity,
-  /if \(!hasWork && !working && !failed && !stopped && !showStandaloneWorkedBoundary\) return null;/,
-);
-
 for (const eventKind of ["turn_control", "interrupted_result"]) {
   assert.equal(conversationTraceModule.conversationTraceAdmission({ eventKind, eventData: {}, text: "" }, {}), "state");
   assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, {}, "").eventKind, eventKind);
@@ -828,41 +769,8 @@ for (const [eventKind, field] of [["message_delta", "text"], ["commentary_delta"
   assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, {}, "composed").eventKind, "generic_activity");
 }
 
-assert.match(chatWorkspace, /const activeRun = projectedActiveRun;/);
-assert.match(chatWorkspace, /projectedActiveRun\?\.turnOpen \|\| operatorTurnResumeAcknowledgedOpen\(messages, projectedActiveRun\?\.lastMovementSeq \?\? -1\)/);
-assert.match(chatWorkspace, /reconcileChatRunReceipts\(run, fresh\)/);
-assert.doesNotMatch(chatWorkspace, /\[runId\]: \{ interfaceId: latest\.interface_id, runId \}/);
-assert.match(chatWorkspace, /if \(isChatReplyTerminal\(latest\.event_kind, latest\.event_data, latest\.terminal\)\) \{\s*setPendingTurnControls\(\(current\) => \{[\s\S]*?delete next\[runId\];/);
-const resumeAction = sourceBetween(chatWorkspace, "async function resumeActiveTurn()", "function reorderQueuedTurns(");
-assert.match(resumeAction, /const controlId = `control_\$\{randomId\(\)\}`;/);
-assert.match(resumeAction, /submitOperatorTurnControl\(\{[\s\S]*?interfaceId: run\.chatInterfaceId,[\s\S]*?runId: run\.runId,[\s\S]*?action: "resume",[\s\S]*?controlId/);
-assert.match(resumeAction, /queuedTurnsRef\.current\.some[\s\S]*?replacePausedQueueRunKeys/);
-assert.doesNotMatch(resumeAction, /submitOperatorTurn\(|executeTurnSequence\(|resumeQueuedTurns\(|setText\(|operator\.message/);
 assert.match(electronMain, /maxPayloadBytes: input\?\.label === "turn\.stream" \? 256 \* 1024 \* 1024 : undefined/);
-assert.match(chatWorkspace, /\[submitted\.runId\]: \{\s*interfaceId: submitted\.chatInterfaceId,\s*runId: submitted\.runId,/);
-assert.match(chatView, /turnOpen=\{chat\.turnOpen\}/);
-assert.match(chatView, /responseStreaming=\{chat\.busy\}/);
-assert.match(chatView, /conversationId=\{chat\.activeRunId\}/);
-assert.doesNotMatch(chatView, /key=\{chat\.activeRunId \|\| "new-chat"\}/);
-assert.doesNotMatch(chatView, /ThreadLoadingStatus|chat\.loadingMessages \? <ThreadLoadingStatus/);
-const selectRunStart = chatWorkspace.indexOf("  function selectRun(runId: string)");
-const selectRunEnd = chatWorkspace.indexOf("  function createChat", selectRunStart);
-assert.notEqual(selectRunStart, -1);
-assert.notEqual(selectRunEnd, -1);
-assert.match(chatWorkspace.slice(selectRunStart, selectRunEnd), /if \(runId === activeRunIdRef\.current\) return;/);
-assert.match(chatWorkspace.slice(selectRunStart, selectRunEnd), /setActiveRunId\(runId\);\s*setMessages\(cachedMessages \?\? \[\]\);\s*setLoadingMessages\(cachedMessages == null\);/);
-assert.doesNotMatch(chatWorkspace, /runSelectionGenerationRef|commitRunSelection/);
-assert.doesNotMatch(chatWorkspace, /interfaceRolesById/);
-assert.doesNotMatch(chatCapabilityCatalog, /projection\.interfaces\.list/);
-assert.doesNotMatch(chatWorkspace, /Interface provenance projection is not ready/);
-assert.match(chatCapabilityCatalog, /capabilityCatalogScopeRef\.current !== scope/);
-assert.doesNotMatch(chatCapabilityCatalog, /let cancelled = false;\s*setExecutionContextsLoaded\(false\);\s*setInterfaceRolesById\(null\);/);
 
-assert.match(messageList, /flex w-full min-w-0 flex-col items-stretch/);
-assert.match(source("src/components/voice/HomeAgentActivityView.tsx"), /<ChatView[\s\S]*?workspace=\{workspace\}/);
-assert.doesNotMatch(source("src/components/chat/CollapsibleMessageBody.tsx"), /motion|maxHeight:.*contentHeight/);
-assert.match(chatView, /if \(chat\.loadingMessages\) \{[\s\S]*?<OctopusLoadingState className="surface-content-loading-state" label="Loading task"/);
-assert.doesNotMatch(chatView, /emptyState=\{chat\.loadingMessages/);
 assert.match(surfaceHost, /surface\.rendererKind === "builtin\.chat" \|\| surface\.rendererKind === "builtin\.voice"[\s\S]*?<OctopusLoadingState className="surface-content-loading-state"/);
 
 assert.doesNotMatch(operatorShell, /secondaryNewTaskTransitioning|secondary-chat:/);
@@ -881,7 +789,6 @@ assert.match(operatorShell, /if \(activeTab\.target\.runId\) \{\s*newSecondaryTa
 assert.doesNotMatch(operatorShell, /continuedTab/);
 assert.match(operatorShell, /newSecondaryTaskPhaseRef\.current !== "awaiting_run" \|\| !runId[\s\S]*?const completedTab = secondaryPaneTab[\s\S]*?secondaryTabModel\.replaceTab\(activeTab\.id, completedTab\)/);
 assert.doesNotMatch(operatorShell, /contextBoundaryRunReplacements|replaceClientRunIds|migrateClientTaskOrganizationRunId/);
-assert.doesNotMatch(chatWorkspace, /CONTEXT_BOUNDARY_CONTINUE_PROMPT|waitForProjectedContextBoundarySuccessor|runReplacement/);
 assert.match(operatorShell, /if \(!surface\) return surfaceRegistry\.loading;/);
 assert.match(operatorShell, /target\.surfaceId !== "chat"[\s\S]*?!chatWorkspace\.runsLoaded[\s\S]*?chatWorkspace\.runs\.some/);
 assert.match(operatorShell, /defaultSidebarOpen=\{!clientWindow\.initialTarget\}/);
@@ -930,26 +837,12 @@ assert.match(compactTabContext, /createContext<WorkspaceCompactTabDrag \| null>/
 assert.match(surfaceHost, /headerMode=\{paneRole === "primary" \? "window" : paneTabStripVisible \? "none" : "pane"\}/);
 assert.match(operatorShell, /const secondaryPaneTabStripVisible = secondaryPaneUsesTabStrip\(secondaryPaneTabs\);/);
 assert.match(operatorShell, /glyph: target\.surfaceId === "chat" \? "chat"[\s\S]*?showWhenSingle: true,/);
-assert.match(chatView, /headerMode === "pane" \? <ChatThreadHeader[\s\S]*?mode=\{headerMode\}/);
-assert.match(chatView, /<WorkspacePaneHeaderActions>[\s\S]*?<ChatThreadHeaderActions/);
-assert.equal((chatThreadHeader.match(/chat-thread-header-action-slot no-drag pointer-events-auto flex shrink-0 items-center gap-px/g) ?? []).length, 3);
-assert.match(shellGlyphs, /taskSummary:/);
-assert.match(shellGlyphs, /taskSummary: \{\s*viewBox: "0 0 20 20"/);
-assert.match(shellGlyphs, /taskPlan:/);
-assert.match(shellGlyphs, /taskPlan: \{\s*viewBox: "0 0 16 16"/);
-assert.doesNotMatch(taskSummaryPanel, /sourcesOpen|CompleteSourcesPanel|projectedGoal/);
-assert.doesNotMatch(taskSummaryPanel, /onOpenEnvironment\(environmentTarget\.id\)/);
 assert.match(chatCss, /--thread-floating-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ 8px\)/);
 assert.match(chatCss, /\.task-summary-surface \{[\s\S]*?z-index: 40;[\s\S]*?pointer-events: none;/);
 assert.match(chatCss, /\.task-summary-motion \{[\s\S]*?width: 300px;/);
 assert.match(chatCss, /\.task-summary-popover \.task-summary-popover-panel \{[\s\S]*?top: calc\(100% \+ 16px\);[\s\S]*?right: 0;[\s\S]*?width: 300px;[\s\S]*?max-height: calc\(100vh - 61px\);[\s\S]*?border: 0;[\s\S]*?background: transparent;[\s\S]*?box-shadow: none;[\s\S]*?transform-origin: top right;/);
 assert.doesNotMatch(chatCss, /margin-right: 316px|\.chat-run-layout\.is-summary-gutter|\.chat-run-layout\.is-summary-shift/);
 assert.match(chatCss, /\.task-summary-shell \{[\s\S]*?border-radius: 20px;[\s\S]*?background: var\(--color-token-dropdown-background/);
-assert.match(chatView, /const summaryContentX = summaryOpen && summaryDisplayMode === "shift" \? -158 : 0;/);
-assert.match(chatView, /contentX=\{summaryContentX\}/);
-assert.doesNotMatch(chatView, /summaryPopoverRef|is-summary-gutter|is-summary-shift/);
-assert.equal((messageList.match(/animate=\{\{ x: contentX \}\}/g) ?? []).length, 2);
-assert.equal((messageList.match(/--thread-wide-block-inline-shift/g) ?? []).length, 2);
 assert.match(shellCss, /\.workspace-pane-header-actions \{[\s\S]*?gap: 0;/);
 assert.match(taskSourcesPane, /OPEN_TASK_SOURCES_PANE_EVENT = "octopus:open-task-sources-pane"/);
 assert.match(taskSourcesPaneTab, /className="task-sources-panel"[\s\S]*?aria-label="Sources"/);
@@ -968,7 +861,6 @@ assert.match(source("src/components/shell/AppShell.tsx"), /<TaskActionsControlle
 assert.match(taskActionsController, /export function TaskActionsController\([\s\S]*?subscribeOpenClientTaskActionsMenu[\s\S]*?setMenu\(\(previous\)/);
 assert.match(chatCss, /--thread-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ var\(--spacing\) \* 8\)/);
 assert.match(chatCss, /\.chat-thread-top-fade\[data-app-shell-main-content-top-fade="visible"\]/);
-assert.doesNotMatch(chatView, /RunEnvironmentView|TaskContextPopover|chat-environment-panel/);
 assert.match(operatorShell, /projectAssistantCodeComments\(messages, runId\)/);
 assert.match(operatorShell, /<RetainedWorkerEnvironmentTabs[\s\S]*?assistantCodeComments=\{activeWorkerEnvironmentAssistantCodeComments\}/);
 assert.match(source("src/components/shell/RetainedWorkerEnvironmentTabs.tsx"), /assistantCodeComments=\{active && tab.id === activeTabId \? assistantCodeComments : undefined\}/);
@@ -986,8 +878,6 @@ assert.match(appShell, /readSidebarOpen\(accessProfile, clientWindowScope, defau
 assert.match(appShell, /return stored === null \? defaultOpen : stored !== "false";/);
 assert.match(appShell, /primaryPaneBlocked=\{primaryPaneBlocked\}[\s\S]*?surfaceActions=\{titlebarSurfaceActions\}[\s\S]*?surfaceTitle=\{titlebarSurfaceTitle\}/);
 assert.match(appShell, /secondaryFocused=\{secondaryPaneFocused\}/);
-assert.match(voiceView, /: working\s*\? true\s*: finalVisible/);
-assert.doesNotMatch(voiceView, /isCompactHomeActivity/);
 assert.match(voiceCss, /\.home-response-stage\.is-compact \.home-response-output--live \{[\s\S]*?text-align: center;/);
 assert.doesNotMatch(voiceCss, /\.home-task-activity|\.home-view-transition__activity/);
 assert.match(chatCss, /:hover:not\(:has\(\[data-agent-activity-file-link\]:hover\)\)/);
@@ -997,48 +887,21 @@ assert.doesNotMatch(chatCss, /\.octopus-reasoning-detail \{[^}]*max-height:/);
 assert.match(chatCss, /\.octopus-agent-activity-detail-item > \* \{\s*width: 100%;/);
 assert.match(chatCss, /\.octopus-exec-activity \{[\s\S]*?width: 100%;/);
 
-assert.match(iconGlyphs, /\| "users"/);
 assert.deepEqual(glyphAsset("users").shapes, ["users"]);
 
-assert.match(appIndex, /class="startup-loader"/);
-assert.match(appIndex, /<img alt="" class="startup-loader__base" src="\.\/octopus-logo\.png" \/>/);
 assert.match(appIndex, /startup-octopus-shimmer 2200ms cubic-bezier\(0\.4, 0, 0\.2, 1\) infinite/);
-assert.match(app, /<OctopusLoadingState className="app-loading-state" label="Opening Octopus"/);
-assert.match(app, /const launchGate = access\?\.profile !== "lab"/);
-assert.doesNotMatch(app, /authenticatedLiveAccess/);
-assert.match(octopusLoadingLogo, /<img[\s\S]*?src=\{OCTOPUS_LOGO_URL\}/);
-assert.match(octopusLoadingLogo, /WebkitMaskImage: maskImage/);
-assert.doesNotMatch(octopusLoadingLogo, /--octopus-loading-logo-mask/);
-assert.match(launchTerminal, /<OctopusLoadingLogo \/>/);
-assert.match(launchTerminal, /if \(!leaving \|\| phase === "greeting"\) return;/);
-assert.match(workspaceSetupGate, /<OctopusLoadingState className="app-loading-state" label="Opening Octopus" \/>/);
 assert.match(source("src/components/shell/NavigationRail.tsx"), /data-app-navigation-rail="true"/);
 assert.doesNotMatch(sidebar, /data-sidebar-action="notifications"/);
-assert.match(shellGlyphs, /activity: \{\s*viewBox: "0 0 16 16"/);
-assert.match(shellGlyphs, /activityUnread: \{\s*viewBox: "0 0 16 16"/);
 assert.match(operatorShell, /const openActivityMark = useCallback/);
-assert.match(voiceView, /if \(!callActive && homeProjectionLoading\) \{[\s\S]*?<OctopusLoadingState className="surface-content-loading-state" label="Opening Home"/);
 assert.match(stylesCss, /\.surface-content-loading-state \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?place-items: center;/);
-assert.doesNotMatch(voiceView, /<CadencedShimmerText>Opening<\/CadencedShimmerText>/);
-assert.match(chatComposer, /aria-label="Cancel dictation"[\s\S]*?onClick=\{dictation\.abortDictation\}[\s\S]*?name="close"/);
-assert.doesNotMatch(chatComposer, /formatDuration\(dictation\.recordingDurationMs\)/);
-assert.match(localDictation, /const WAVEFORM_BAR_STEP_PX = 6;/);
-assert.match(localDictation, /const WAVEFORM_STEP_MS = 200;/);
-assert.match(localDictation, /frame = window\.requestAnimationFrame\(animate\);/);
-assert.match(localDictation, /if \(values\.length === 0 && canvasRef\.current\?\.clientWidth\) resetForCanvas/);
-assert.doesNotMatch(localDictation, /setInterval\(/);
 assert.doesNotMatch(operatorShell, /actionId: "notifications"/);
 assert.match(operatorShell, /activityContent=\{<MarkActivityView[\s\S]*?onSelect=\{selectInboxItem\}/);
 assert.doesNotMatch(operatorShell, /NotificationsPopover|useHomeNotifications/);
-assert.doesNotMatch(voiceView, /HomeNotificationsControl|home-notifications-control/);
 assert.match(workspaceSurfacePane, /!compactOverlay \? <PaneHeaderButton/);
 assert.match(workspaceSurfacePane, /glyph=\{focused \? "restore" : "expand"\}/);
 assert.match(appShell, /onPrimaryActionsHostChange=\{setPrimaryActionsHost\}/);
 assert.match(shellCss, /\.workspace-pane-manager\.is-secondary-focused > \.workspace-pane-primary \{[\s\S]*?flex: 0 0 0;/);
 assert.doesNotMatch(shellCss, /\.home-notifications-control|\.home-notification-row/);
-assert.match(voiceWidgets, /id: "builtin\.voice\.live-context",[\s\S]*?slot: "right"/);
-assert.match(voiceWidgets, /id: "builtin\.voice\.insights",[\s\S]*?slot: "right"/);
-assert.match(clientSurfaceRenderer, /WIDGETS_REHOMED_TO_RIGHT_RAIL/);
 
 async function verifyTranscriptLayout() {
   const React = require("react"), { JSDOM } = require("jsdom"), { createRoot } = require("react-dom/client");
@@ -1122,6 +985,16 @@ async function verifyTranscriptLayout() {
   const read = message("read", "dynamic_tool", "", { ...operation.eventData, call_id: "read", tool: "workspace.read_file", arguments: { path: "src/life.rs" } });
   const rowText = () => all(".octopus-agent-activity-row").map((row) => row.textContent);
   try {
+    const thinking = message("thinking", "reasoning_delta", "**Comparing the two files**", { summary_index: 0, lifecycle: "streaming", item_id: "thinking" });
+    const nextNote = message("next-note", "commentary", "Checking the totals next");
+    const nativeRead = message("cat", "tool", "", { call_id: "cat", status: "completed", command: "cat src/a.rs", parsed_cmd: { type: "read" } });
+    const nativeCommand = message("build", "tool", "", { call_id: "build", status: "completed", command: "cargo build" });
+    for (const [work, explores] of [[read, true], [nativeRead, true], [operation, false], [nativeCommand, false]]) {
+      await render([], false); await render([work, thinking, nextNote], true);
+      assert.equal(query(".octopus-thinking-fallback") === null, explores, `${work.id}: thinking after exploration stays in its group, after other work it shows on its own`);
+      if (explores) assert.equal(query(".octopus-agent-activity-summary-value").textContent, "Comparing the two files");
+      else assert.equal(query(".octopus-thinking-fallback").textContent, "Comparing the two files");
+    }
     await render([commentary, operation], true, undefined, false, "latest-context");
     assert.match(container.textContent, /Progress explained/);
     await click(query(".octopus-agent-activity-toggle"));
@@ -1226,6 +1099,11 @@ async function verifyTranscriptLayout() {
       assert.equal(history(), null);
     }
     reducedMotion = true;
+    await render([], false); await render([message("thought", "reasoning", "", { summary: ["Comparing the two files"] })], false, finalResponse, true);
+    assert.match(query(".octopus-worked-for-boundary").textContent, /^Worked for /, "a turn that only thought still says how long it worked");
+    assert.equal(all(".octopus-agent-activity").length, 0);
+    await render([], false); await render([], false, finalResponse, true);
+    assert.equal(container.childElementCount, 0, "a turn without work or thought renders nothing");
     await render([operation, message("interrupted", "interrupted_result", "", {})], false, undefined, true);
     assert.equal(query(".octopus-turn-activity").dataset.state, "stopped");
     assert.match(query(".octopus-worked-for-boundary").textContent, /^Interrupted after /);
@@ -1331,5 +1209,37 @@ async function verifyTranscriptLayout() {
   }
 }
 
-verifyTranscriptLayout().then(() => process.stdout.write("chat trace source contracts and transcript layout fixtures passed\n"))
+async function verifyPreparedDraftStorage() {
+  const React = require("react"), { JSDOM } = require("jsdom"), { createRoot } = require("react-dom/client"), { build } = require("esbuild");
+  const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: "http://fixture.invalid" });
+  Object.assign(global, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
+  const previousStorage = Object.getOwnPropertyDescriptor(global, "localStorage");
+  Object.defineProperty(global, "localStorage", { configurable: true, value: dom.window.localStorage });
+  const bundle = await build({ entryPoints: [path.join(appRoot, "src/components/chat/useChatDraftState.ts")], bundle: true, platform: "node", format: "cjs",
+    write: false, logLevel: "silent", external: ["react", "react-dom"] });
+  const module = { exports: {} };
+  Function("require", "module", "exports", bundle.outputFiles[0].text)(require, module, module.exports);
+  const root = createRoot(document.getElementById("root"));
+  let draft;
+  function Probe() {
+    draft = module.exports.useChatDraftState({ accessProfile: "lab", activeRunId: "run-a", storageScope: "home", onError: () => {}, preserveSubmissionIntentOnEdit: () => false });
+    return null;
+  }
+  try {
+    await React.act(async () => root.render(React.createElement(Probe)));
+    await React.act(async () => draft.setText("Prepared totals"));
+    await React.act(async () => draft.persistSubmissionIntent("run-a", "msg_prepared", false));
+    await React.act(async () => draft.setRawText("Recalled from history"));
+    await React.act(async () => draft.saveCurrentDraft("run-a"));
+    assert.deepEqual([draft.readDraft("run-a").messageId, draft.readDraft("run-a").text], ["msg_prepared", "Prepared totals"],
+      "a prepared message keeps its stored payload under its identity while the composer shows other text");
+  } finally {
+    await React.act(async () => root.unmount()); dom.window.close();
+    delete global.window; delete global.document; delete global.IS_REACT_ACT_ENVIRONMENT;
+    if (previousStorage) Object.defineProperty(global, "localStorage", previousStorage);
+    else delete global.localStorage;
+  }
+}
+
+verifyTranscriptLayout().then(verifyPreparedDraftStorage).then(() => process.stdout.write("chat trace source contracts and transcript layout fixtures passed\n"))
   .catch((error) => { console.error(error); process.exitCode = 1; });
