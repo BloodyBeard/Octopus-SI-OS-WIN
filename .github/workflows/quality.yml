@@ -51,6 +51,7 @@ jobs:
           node scripts/test-chat-receipt-state.cjs
           node scripts/test-chat-message-projection.cjs
           node scripts/test-chat-message-list.cjs
+          node scripts/test-chat-workspace.cjs
           node scripts/test-command-activity.cjs
 
       - name: Client package and lifecycle contracts
