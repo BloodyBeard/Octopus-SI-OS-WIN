@@ -470,6 +470,7 @@ impl ProviderOutputHandoff {
             items,
             terminal: false,
             context_publication: None,
+            deferred_publication: false,
             source_without_context: self.failed_source,
             settlement_of: None,
             dispatch_fenced: true,

@@ -763,7 +763,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
         validate_pending_items_are_active(&authored, &writer.owner, &next)?;
         let publication = previous.as_ref().is_some_and(|prior|context_publication::is_publication_completion(prior, &next));
         if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next)) {
-            if prior.context_publication.is_some() && !publication { return Ok(false); }
+            if prior.publication_unfinished() && !publication { return Ok(false); }
             if !all_admitted(index, prior, &record, &writer.owner, transition.call.seq.0)? { return Ok(false); }
             for item in &prior.items {
                 if replay.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {
@@ -786,7 +786,8 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
     }
     for source in candidates.keys() {
         let Some(pending) = completed.get(source) else { return Ok(false); };
-        if !pending.terminal || pending.context_publication.is_some()
+        if !pending.terminal || pending.publication_unfinished()
+            || (pending.deferred_publication && previous.as_ref() == Some(pending))
             || !all_admitted(index, pending, &record, &writer.owner, before_seq)? { return Ok(false); }
         for item in &pending.items {
             if replay.artifact(&pending_ref(item)?)?.0.label != item.artifact_label {

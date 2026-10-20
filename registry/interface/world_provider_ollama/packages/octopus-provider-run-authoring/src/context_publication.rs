@@ -3,6 +3,8 @@ use super::*;
 pub(super) fn is_publication_completion(before: &PendingHandoff, after: &PendingHandoff) -> bool {
     before.context_publication.is_some()
         && after.context_publication.is_none()
+        && !before.deferred_publication
+        && !after.deferred_publication
         && before.source_movement_seq == after.source_movement_seq
         && before.items == after.items
         && before.terminal == after.terminal
@@ -17,7 +19,7 @@ impl ProviderOutputHandoff {
         self.reconcile_checked_run_state(state).await?;
         let record = RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?;
         let Some(pending) = pending_handoff(&record, &self.config.provider_interface)? else { return Ok(()); };
-        if pending.context_publication.is_none() { return Ok(()); }
+        if pending.context_publication.is_none() || pending.deferred_publication { return Ok(()); }
         if self.pending_handoff_evidence(&pending)?.iter().any(Option::is_none) {
             return Err("provider context publication precedes its admitted output artifacts".into());
         }

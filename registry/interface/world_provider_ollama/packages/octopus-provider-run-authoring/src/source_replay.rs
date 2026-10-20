@@ -93,7 +93,7 @@ impl ProviderOutputHandoff {
                     context_publication::is_publication_completion(prior, &next)
                         && prior.source_without_context == next.source_without_context);
                 if let Some(prior) = previous.as_ref().filter(|prior| !source_withdrawal::follows(prior, &next)) {
-                    if prior.context_publication.is_some() && !publication {
+                    if prior.publication_unfinished() && !publication {
                         return Err("completed input handoff was superseded before context publication".into());
                     }
                     self.admitted_replay_handoff_before(prior, transition.call.seq.0)?;
@@ -113,7 +113,7 @@ impl ProviderOutputHandoff {
                 return Err("completed input chain differs from the current pending handoff".into());
             }
             let Some(completed) = sources.get(&sequence) else { return Ok(None); };
-            if !completed.terminal || completed.context_publication.is_some() {
+            if !completed.terminal || completed.publication_unfinished() {
                 return Err("earlier exact input has no completed terminal handoff".into());
             }
             self.admitted_replay_handoff(completed)?;
@@ -225,7 +225,7 @@ impl ProviderOutputHandoff {
                 .ok_or("checked source replay lost its pending handoff")?;
             if let Some(previous) = previous.as_ref() {
                 if previous.items != next.items && !source_withdrawal::follows(previous, &next) {
-                    if previous.context_publication.is_some() {
+                    if previous.publication_unfinished() {
                         return Err("provider handoff was superseded before its context was published".into());
                     }
                     self.admitted_replay_handoff_before(previous, transition.call.seq.0)?;
@@ -330,7 +330,7 @@ impl ProviderOutputHandoff {
             return Err("completed input handoff changed its admitted EE".into());
         }
         let carries_context = !self.source_is_context_free(pending.source_movement_seq)?;
-        if carries_context && pending.context_publication.is_some() {
+        if carries_context && pending.publication_unfinished() {
             return Err("completed context-bearing input has unfinished context publication".into());
         }
         Ok(carries_context)

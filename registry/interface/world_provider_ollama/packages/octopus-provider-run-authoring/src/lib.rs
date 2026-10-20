@@ -401,6 +401,8 @@ struct PendingHandoff {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     context_publication: Option<Vec<ArtifactId>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deferred_publication: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     source_without_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settlement_of: Option<ArtifactRef>,
@@ -413,6 +415,10 @@ struct PendingHandoff {
 }
 
 impl PendingHandoff {
+    fn publication_unfinished(&self) -> bool {
+        self.context_publication.is_some() && !self.deferred_publication
+    }
+
     fn with_standing_items(&self) -> Self {
         let mut pending = self.clone();
         pending.items = std::mem::take(&mut pending.standing);
@@ -6136,6 +6142,17 @@ impl ProviderOutputHandoff {
             })),
             result_reader: Arc::new(tokio::sync::Mutex::new(result_reader)),
         };
+        if let Some(target) = persisted_pending_handoff(&current_record, &handoff.config.provider_interface)?
+            .filter(|pending| pending.deferred_publication)
+            .map(|pending| handoff.pending_handoff_evidence(&pending).map(|evidence| (pending, evidence)))
+            .transpose()?
+            .filter(|(_, evidence)| evidence.iter().all(Option::is_some))
+            .and_then(|(pending, _)| pending.context_publication)
+        {
+            let mut state = handoff.state.try_lock()
+                .map_err(|_| "new handoff state is already borrowed".to_string())?;
+            for id in target { append_artifact(&mut state.context_artifacts, id); }
+        }
         if !coauthor_chain.is_empty() && consumed_templates[0].role != RunAuthoringCheckpointRole::ResultInput {
             let mut state = handoff.state.try_lock()
                 .map_err(|_| "new handoff state is already borrowed".to_string())?;
@@ -6673,7 +6690,7 @@ impl ProviderOutputHandoff {
             && self.checked_settlement_output.is_none()
             && persisted_pending_handoff(&record, &self.config.provider_interface)?.is_some_and(|pending| {
                 pending.withdrawal.is_none()
-                    && pending.context_publication.is_none()
+                    && !pending.publication_unfinished()
                     && if pending.terminal {
                         pending.source_movement_seq < self.source_movement_seq
                     } else {
@@ -6779,7 +6796,7 @@ impl ProviderOutputHandoff {
         state.session_snapshot_head = next_session_snapshot_head;
         active.publish_admitted_context(&mut state).await?;
         if refresh_context {
-            state.context_artifacts = current_context_artifacts(
+            state.context_artifacts = active.published_context_artifacts(
                 &RunRecord::from_bytes(&state.run_record_bytes).map_err(|error| error.to_string())?, &active.config,
             )?;
         }
@@ -7374,7 +7391,7 @@ impl ProviderOutputHandoff {
         let attempt = self.recover_authoring_attempt(&record, &state.run_record_bytes)?;
         if let AuthoringAttemptRecovery::OtherSource(owner) = attempt {
             if let Some(pending) = persisted_pending_handoff(&record, &self.config.provider_interface)?
-                .filter(|pending| owner > self.source_movement_seq && pending.context_publication.is_none()) {
+                .filter(|pending| owner > self.source_movement_seq && !pending.publication_unfinished()) {
                 let completed = if pending.source_movement_seq == self.source_movement_seq && pending.terminal {
                     validate_pending_items_are_active(&record, &self.config.provider_interface, &pending)?;
                     Some((ProviderSourceRecovery::Completed, self.admitted_replay_handoff(&pending)?))
@@ -7733,7 +7750,7 @@ impl ProviderOutputHandoff {
         &self, state: &mut HandoffState, current: &RunRecord, chain: &[CheckedRunTransition],
     ) -> Result<(), String> {
         if self.result_input_template()?.is_some() {
-            let current = current_context_artifacts(current, &self.config)?;
+            let current = self.published_context_artifacts(current, &self.config)?;
             return reattach_unpublished_context_inputs(state, self.source_movement_seq, current);
         }
         let mut next = state.clone();
@@ -7766,7 +7783,7 @@ impl ProviderOutputHandoff {
                 continue;
             };
             let authored_config = config_from_persisted_profile(&authored, &self.config.provider_interface, &profile)?;
-            let visible = current_context_artifacts(&authored, &authored_config)?
+            let visible = self.published_context_artifacts(&authored, &authored_config)?
                 .into_iter().collect::<BTreeSet<_>>();
             pending.items.retain(|item| visible.contains(&item.artifact_id)
                 && self.context_output_labels.contains(&item.artifact_label));
@@ -7843,7 +7860,7 @@ impl ProviderOutputHandoff {
             .map(|pending| pending.with_standing_items()) else {
             return Ok(());
         };
-        let visible = current_context_artifacts(current, &self.config)?.into_iter().collect::<BTreeSet<_>>();
+        let visible = self.published_context_artifacts(current, &self.config)?.into_iter().collect::<BTreeSet<_>>();
         pending.items.retain(|item| visible.contains(&item.artifact_id)
             && self.context_output_labels.contains(&item.artifact_label));
         if pending.items.is_empty() { return Ok(()); }
@@ -7851,6 +7868,16 @@ impl ProviderOutputHandoff {
             return Err("published context has no admitted provider output evidence".into());
         }
         self.restore_pending_context_with_publications(state, current, &pending, publications)
+    }
+
+    fn published_context_artifacts(&self, record: &RunRecord, config: &RunAuthoringConfig) -> Result<Vec<ArtifactId>, String> {
+        let deferred = persisted_pending_handoff(record, &config.provider_interface)?.filter(|pending| pending.deferred_publication);
+        match deferred {
+            Some(pending) if self.pending_handoff_evidence(&pending)?.iter().all(Option::is_some) => {
+                effective_context_artifacts(record, config)
+            }
+            _ => current_context_artifacts(record, config),
+        }
     }
 
     fn restore_pending_context(
@@ -7908,7 +7935,7 @@ impl ProviderOutputHandoff {
     ) -> Result<(), String> {
         if pending.source_movement_seq != self.source_movement_seq && self.result_input_template()?.is_some() {
             let inputs = take_unpublished_context_inputs(state, self.source_movement_seq)?;
-            state.context_artifacts = current_context_artifacts(record, &self.config)?;
+            state.context_artifacts = self.published_context_artifacts(record, &self.config)?;
             restore_consumed_context_inputs(state, inputs)?;
             return Ok(());
         }
@@ -8022,7 +8049,7 @@ impl ProviderOutputHandoff {
             head.covered_fingerprint =
                 session_artifacts_fingerprint(&context.artifacts[..head.covered_artifact_count])?;
         }
-        state.context_artifacts = current_context_artifacts(record, &self.config)?;
+        state.context_artifacts = self.published_context_artifacts(record, &self.config)?;
         if self.source_carries_context {
             // A prior publication predates this invocation's admitted read bindings.
             // Keep those static sources available to tools without inserting their
@@ -8795,7 +8822,12 @@ impl ProviderOutputHandoff {
                 .checkpoints
                 .extend(carrier.verified_inputs.iter().cloned());
         }
-        let consumed_result_input = result_inputs::prepare(self, &record, outputs, &mut next_topology)?;
+        let deferred_publication = terminal && outputs.iter().any(|output| {
+            !output.output_checkpoint.result_receiving.is_empty() && context_artifacts.contains(&output.identity.artifact.id)
+        });
+        let consumed_result_input = result_inputs::prepare(
+            self, &record, outputs, terminal.then_some(context_artifacts), &mut next_topology,
+        )?;
         let mut next_config = self.config.clone();
         next_config.checkpoints = next_topology.checkpoints.clone();
         next_config.validate(&self.config.provider_interface, &self.config.run)?;
@@ -8857,6 +8889,10 @@ impl ProviderOutputHandoff {
         }).collect::<Result<Vec<_>, _>>();
         let artifact_bindings = bind(&live_context)?;
         let mandatory_role_bindings = bind(&mandatory_role_artifacts)?;
+        let result_context = deferred_publication.then(|| target_context.iter().map(|id| {
+            existing_bindings.iter().find(|binding| &binding.id == id).cloned()
+                .unwrap_or_else(|| ArtifactBinding { id: id.clone(), access: Default::default() })
+        }).collect::<Vec<_>>());
         let authoring_call = self
             .config
             .checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringCall)?;
@@ -8971,7 +9007,7 @@ impl ProviderOutputHandoff {
                 &artifact_bindings,
             )?;
         }
-        result_inputs::materialize(root, &record, &self.config, &next_config, &batch_prefix, consumed_result_input.as_ref())?;
+        result_inputs::materialize(root, &record, &self.config, &next_config, &batch_prefix, consumed_result_input.as_ref(), result_context.as_deref())?;
         let interface_state = root
             .get_mut("interface_state")
             .and_then(serde_json::Value::as_object_mut)
@@ -9023,6 +9059,7 @@ impl ProviderOutputHandoff {
             items: pending_items,
             terminal,
             context_publication: (live_context != target_context).then_some(target_context),
+            deferred_publication,
             source_without_context: self.failed_source,
             settlement_of: None,
             dispatch_fenced: true,
@@ -12431,6 +12468,30 @@ fn current_context_artifacts(
         .into_iter().map(|binding| binding.id).collect())
 }
 
+fn effective_context_bindings(
+    record: &RunRecord,
+    templates: &[RunAuthoringCheckpoint],
+    provider: &InterfaceId,
+) -> Result<Vec<ArtifactBinding>, String> {
+    let current = current_context_bindings(record, templates)?;
+    let Some(target) = persisted_pending_handoff(record, provider)?
+        .filter(|pending| pending.deferred_publication)
+        .and_then(|pending| pending.context_publication)
+    else {
+        return Ok(current);
+    };
+    Ok(target.into_iter().map(|id| current.iter().find(|binding| binding.id == id).cloned()
+        .unwrap_or(ArtifactBinding { id, access: Default::default() })).collect())
+}
+
+fn effective_context_artifacts(
+    record: &RunRecord,
+    config: &RunAuthoringConfig,
+) -> Result<Vec<ArtifactId>, String> {
+    Ok(effective_context_bindings(record, &config.checkpoints, &config.provider_interface)?
+        .into_iter().map(|binding| binding.id).collect())
+}
+
 fn current_mandatory_role_artifacts(
     record: &RunRecord,
     config: &RunAuthoringConfig,
@@ -12495,6 +12556,15 @@ fn persisted_pending_handoff(
             if pending.items.is_empty() {
                 return Err(format!(
                     "provider run '{}' pending_handoff contains no items",
+                    record.id.as_str()
+                ));
+            }
+            if pending.deferred_publication
+                && (!pending.terminal || pending.context_publication.is_none()
+                    || pending.withdrawal.is_some() || pending.settlement_of.is_some())
+            {
+                return Err(format!(
+                    "provider run '{}' pending_handoff defers a publication outside a terminal call",
                     record.id.as_str()
                 ));
             }
@@ -16007,6 +16077,7 @@ mod tests {
         let pending = PendingHandoff {
             source_movement_seq: 41,
             context_publication: None,
+            deferred_publication: false,
             source_without_context: false,
             settlement_of: None,
             dispatch_fenced: true,
@@ -19399,6 +19470,7 @@ mod tests {
         let pending = PendingHandoff {
             source_movement_seq: 17,
             context_publication: None,
+            deferred_publication: false,
             source_without_context: false,
             settlement_of: None,
             dispatch_fenced: true,

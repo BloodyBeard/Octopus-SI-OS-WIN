@@ -333,15 +333,20 @@ sequenceDiagram
    and runs the tool's declared process inside the room, under the authority
    the descriptor declares.
 6. **Result.** The result returns as an artifact through the same contract and
-   the provider continues.
+   the provider continues. The write that carried the call armed that call's
+   door and a one-shot wait for this result, with the call already in the
+   wait's context, so the result enters it directly and needs no write of its
+   own.
 7. **Reply.** The model emits text. That artifact lands on the checkpoint bound
    to the chat interface; the client renders it. The turn is over.
 8. **Turn boundary.** Within the turn, the provider's outputs ride the standing
    routes its last write left; it records which of them it delivered in its
-   own private journal. At the end of the turn it writes the run once, the
-   same way anything else in the system changes: a file-write tool call
-   against the run record, in a room whose path covers it. That write installs
-   the turn's context and the next routes. **The path is the permission.**
+   own private journal. It writes the run once at the end of the turn and once
+   for each tool call that waits for a result, the same way anything else in
+   the system changes: a file-write tool call against the run record, in a room
+   whose path covers it. A write installs the context gathered so far and the
+   next routes; a call joins the run's context in the write that consumes its
+   result. **The path is the permission.**
 
 Every arrow that says "movement recorded" is one row in
 `ledger/movements.jsonl`. If the tool room had refused the call, that would be

@@ -1601,3 +1601,72 @@ fn a_tool_call_write_arms_only_its_own_result_door() {
     assert_eq!(author("answer", json!({"text":"no call"}), RunAuthoringCheckpointRole::ProviderArtifactOutput), [1, 1],
         "a write without a call keeps every result door armed");
 }
+
+#[tokio::test]
+async fn a_terminal_call_rides_one_write_until_its_result_is_consumed() {
+    let mut fixture = CompletedInputReplayFixture::new();
+    let h = &mut fixture.handoff;
+    h.run_path = h.run_path.canonicalize().unwrap();
+    h.ctx.root_slots.insert("run_records_root".into(), h.run_path.parent().unwrap().to_path_buf());
+    h.granted_mark_outcomes.insert("tool.result.received".into());
+    let door = vec![AuthoredInterfaceBinding::all("result_room".into())];
+    {
+        let tool = h.config.checkpoints.iter_mut().find(|cp| cp.role == RunAuthoringCheckpointRole::ProviderToolOutput).unwrap();
+        tool.outbound_interface_bindings = door.clone();
+        tool.result_receiving.insert("read".into(), serde_json::from_value(serde_json::json!({
+            "mark":"tool.result.received","artifact_label":"read.result","verifier":"result_correspondence","params":{}
+        })).unwrap());
+    }
+    h.bound_topology.checkpoints = h.config.checkpoints.clone();
+    let mut seed: serde_json::Value = serde_json::from_slice(&std::fs::read(&h.run_path).unwrap()).unwrap();
+    seed["interface_state"]["provider"][RUN_AUTHORING_BINDING] = serde_json::to_value(&h.bound_topology).unwrap();
+    seed["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "tool").unwrap()["outbound_interface_bindings"] =
+        serde_json::to_value(door).unwrap();
+    let initial = serde_json::to_vec(&seed).unwrap();
+    std::fs::write(&h.run_path, &initial).unwrap();
+    h.state.try_lock().unwrap().run_record_bytes = initial.clone();
+    fixture.rows.clear();
+    let input_file = fixture.input_file.clone();
+    fixture.edge(&initial, &"input".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+    let call = fixture.output(true, true, true);
+    assert!(call.pending_handoff.deferred_publication && call.pending_handoff.context_publication.is_some());
+    let call_id = call.pending_handoff.items[0].artifact_id.clone();
+    let record = fixture.reload_definition();
+    let receipt = fixture.handoff.config.checkpoints.iter().find(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput).unwrap().clone();
+    assert!(!receipt.static_artifact_bindings.contains(&call_id), "the awaited call is context, not hidden evidence");
+    let receiving = record.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &receipt, &record.id)).unwrap().clone();
+    assert!(receiving.artifact_bindings.iter().any(|binding| binding.id == call_id));
+    assert!(!provider_context_bindings(&record, &"provider".into()).unwrap().iter().any(|binding| binding.id == call_id));
+    let written = std::fs::read(&fixture.handoff.run_path).unwrap();
+    {
+        let mut state = fixture.handoff.state.try_lock().unwrap().clone();
+        state.run_record_bytes = written.clone();
+        fixture.handoff.publish_admitted_context(&mut state).await.unwrap();
+        assert_eq!(state.run_record_bytes, written, "a deferred publication takes no write of its own");
+    }
+    let correlation = receipt.required_verified_artifacts[0].params["correlation_id"].as_str().unwrap().to_string();
+    let result = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("received"), "read.result",
+        &serde_json::to_vec(&serde_json::json!({"label":"read.result","tool":"read","correlation_id":correlation,"ok":true,"body":{}})).unwrap()).unwrap();
+    let source = fixture.rows.len() as u64;
+    fixture.edge(&written, &receiving.id, &result, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = source;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    fixture.handoff.state.try_lock().unwrap().run_record_bytes = written.clone();
+    assert_eq!(fixture.handoff.recover_source().await.unwrap(), ProviderSourceRecovery::Process);
+    assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), written, "a synchronous result needs no bridge write");
+    assert!(fixture.handoff.state.try_lock().unwrap().context_artifacts.contains(&call_id));
+    let reply = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("reply"), "reply", br#"{"text":"read done"}"#).unwrap();
+    let mut context = fixture.handoff.state.try_lock().unwrap().context_artifacts.clone();
+    append_artifact(&mut context, artifact_identity(&result, &fixture.handoff.var_dir).unwrap().artifact.id);
+    let next = fixture.handoff.author_run_with_bindings(&written, &context, &[PreparedHandoff {
+        identity:artifact_identity(&reply, &fixture.handoff.var_dir).unwrap(),
+        output_checkpoint:fixture.handoff.config.checkpoint_for_role(RunAuthoringCheckpointRole::ProviderArtifactOutput).unwrap().clone(),
+        verified_inputs:Vec::new(),
+    }], true, None, false, true, &[]).unwrap();
+    let consumed = RunRecord::from_bytes(next.content.as_bytes()).unwrap();
+    assert!(!next.pending_handoff.deferred_publication);
+    assert!(consumed.checkpoint(&receiving.id).is_none());
+    assert!(current_context_artifacts(&consumed, &fixture.handoff.config).unwrap().contains(&call_id),
+        "the consuming write publishes the call");
+    result_inputs::validate_saved(&fixture.handoff.ctx, &record, &consumed, &fixture.handoff.config).unwrap();
+}
