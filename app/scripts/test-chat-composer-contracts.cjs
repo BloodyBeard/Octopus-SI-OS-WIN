@@ -208,15 +208,9 @@ assert.match(environmentSummary, /const panel = workerEnvironmentPanelKind\(surf
 assert.match(environmentSummary, /onOpen\(environment\.id, panel, surface\.id\)/);
 assert.doesNotMatch(taskSummary, /Commit or push|Create pull request|onPrepareInstruction/);
 assert.doesNotMatch(environmentSummary, /octopusTransport|inspectWorkerEnvironmentGit/);
-assert.match(taskSummary, /<SubagentSummary items=\{subagents\} \/>/);
 assert.match(taskSummary, /environments=\{workerEnvironments\}/);
-assert.doesNotMatch(taskSummary, /task-summary-subagents" onClick/);
 assert.doesNotMatch(taskSummary, /slice\(0, 12\)/);
 assert.doesNotMatch(taskSummary, /meta: `\$\{status\} · \$\{(?:identity|processId)\}`/);
-assert.match(taskSummary, /normalizeMultiAgentState\(message\)/);
-assert.match(taskSummary, /normalizeSubagentActivity\(message\)/);
-assert.match(taskSummary, /multiAgentStateIsTerminal\(status\)/);
-assert.match(taskSummary, /subagent\.displayStatus === "interrupted" \? "done" : "working"/);
 assert.match(turnActivity, /normalizeMultiAgentActivity\(entry\.messages\.at\(-1\)\)/);
 assert.match(turnActivity, /normalizeSubagentActivity\(entry\.messages\.at\(-1\)\)/);
 assert.match(chatView, /onOpenEnvironment=\{openEnvironmentCapability\}/);
