@@ -32,6 +32,7 @@ enum Seam {
     BeforeWrite,
     InstalledBeforeAck,
     AdmittedBeforeSave,
+    StandingRoute,
     None,
 }
 struct Boundary {
@@ -62,6 +63,9 @@ impl Boundary {
             content: ContentHash::from_hex(item["artifact_content_hash"].as_str().unwrap())
                 .unwrap(),
         };
+        self.admit(artifact)
+    }
+    fn admit(&self, artifact: ArtifactRef) -> Vec<ProviderHandoffOutcome> {
         let ledger = self.root.join("admissions.json");
         let mut rows: Vec<ArtifactRef> = if ledger.exists() {
             serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap()
@@ -110,6 +114,9 @@ impl EmissionHandoff for Boundary {
             _ => panic!("unexpected projection"),
         };
         assert_eq!(target.as_str(), "home");
+        if matches!(seam, Seam::StandingRoute) {
+            return Ok(self.admit(identity).remove(0));
+        }
         let mut record = self.read();
         let generation = record["generation"].as_u64().unwrap() + 1;
         record["generation"] = json!(generation);
@@ -277,5 +284,25 @@ async fn admitted_identity_with_another_route_cannot_remove_or_reemit_pending_wo
     .contains("source or route"));
     assert_eq!(restored.state.pending.len(), 1);
     assert_eq!(handoffs[&7].read()["generation"], 1);
+    assert_eq!(handoffs[&7].count(), 1);
+}
+
+#[tokio::test]
+async fn standing_route_admission_settles_pending_work_without_a_record_handoff() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = setup(root.path());
+    delegation(&mut store);
+    let handoffs = BTreeMap::from([(
+        7,
+        Boundary {
+            root: root.path().into(),
+            fail: Mutex::new(Seam::StandingRoute),
+        },
+    )]);
+    flush(root.path(), &InterfaceId::new("voice"), &mut store, &handoffs)
+        .await
+        .unwrap();
+    assert!(store.state.pending.is_empty());
+    assert_eq!(handoffs[&7].read()["generation"], 0);
     assert_eq!(handoffs[&7].count(), 1);
 }

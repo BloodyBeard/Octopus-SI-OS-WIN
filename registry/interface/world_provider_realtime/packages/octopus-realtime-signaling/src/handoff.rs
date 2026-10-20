@@ -367,6 +367,7 @@ fn recovered_admission(
     });
     match (matches, item) {
         (0, None) => Ok(false),
+        (1, None) => Ok(true),
         (1, Some(item)) => {
             let batch = record
                 .pending_handoff
