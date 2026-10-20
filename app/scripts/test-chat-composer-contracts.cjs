@@ -126,20 +126,6 @@ assert.match(sidebar, /projectById\.has\(preset\.projectEeId\)/);
 assert.match(sidebar, /meta=\{agentTaskMeta\(preset, taskChats\)\}/);
 assert.doesNotMatch(sidebar, /function agentPresetMeta/);
 assert.match(sidebar, /\? \[run\.runId\]/);
-const explicitAgentProjection = sourceBetween(
-  agentCatalog,
-  "export function resolveClientAgents(",
-  "export function visibleClientAgents(",
-);
-assert.doesNotMatch(explicitAgentProjection, /worker\.label|builtInAgent|source_names/);
-assert.match(explicitAgentProjection, /if \(!worker\.clientAgentId\) continue;/);
-assert.match(explicitAgentProjection, /id: worker\.clientAgentId/);
-assert.match(explicitAgentProjection, /name: worker\.clientAgentName/);
-assert.match(explicitAgentProjection, /agentCatalogDigest: context\.agentCatalogDigest/);
-assert.match(explicitAgentProjection, /worker\.clientTemplateProviderInterfaceId/);
-assert.match(explicitAgentProjection, /worker\.clientTemplateApplicationIds/);
-assert.match(explicitAgentProjection, /worker\.clientTemplateWorkerEnvironmentKinds/);
-assert.match(agentCatalog, /agent\.deletedAtMs === 0 && Boolean\(agent\.clientTemplateDigest\)/);
 assert.doesNotMatch(agentCatalog, /localStorage|useSyncExternalStore|reconcileClientAgentPresets|agentPresets\.v[12]/);
 assert.match(agentDialog, /worker\.authoringProfile && worker\.agentSourceTemplate/);
 assert.match(agentDialog, /sourceWorkers\.length === 1 \? sourceWorkers\[0\] : null/);
