@@ -118,7 +118,7 @@ function fakeHost() {
     seq: 2,
     runs: [runRow("run-1")],
     messages: { "run-1": [messageRow("run-1", 1, "user", "Draft the report"), messageRow("run-1", 2, "assistant", "Here is the report.")] },
-    reads: [], turns: [], steers: [], controls: [], waiters: new Set(), holdMessages: null, failNextTurn: null, recoverNextTurn: false,
+    workers: [{ id: "worker.test" }], reads: [], turns: [], steers: [], controls: [], waiters: new Set(), holdMessages: null, failNextTurn: null, recoverNextTurn: false,
     run: (runId) => host.runs.find((run) => run.run_id === runId),
     changed(kind) { if (currentHost === host) for (const listener of [...projectionListeners]) listener({ kind }); },
     append(runId, role, text, extra = {}) {
@@ -145,7 +145,8 @@ function fakeHost() {
         case "projection.operator.chat.messages":
           if (host.holdMessages) await host.holdMessages;
           return { messages: structuredClone(host.messages[request.params.run_id] ?? []) };
-        case "projection.operator.chat.contexts": return { contexts: [{ ee_id: "ee.root", is_os_root: true, display_name: "Root", workers: [{ id: "worker.test", label: "Worker", provider_interface_ids: [provider.id], interface_policy: { [provider.id]: { models: ["model-a"] } } }] }] };
+        case "projection.operator.chat.contexts": return { contexts: [{ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1",
+          workers: host.workers.map((worker) => ({ label: worker.id, provider_interface_ids: [provider.id], interface_policy: { [provider.id]: { models: ["model-a"] } }, ...worker })) }] };
         case "projection.worker_environments.list": return { worker_environments: [] };
         case "projection.tools.list": return { tools: [] };
         case "projection.operator.providers.status": return { providers: [] };
@@ -165,8 +166,13 @@ function fakeHost() {
       return new Promise((resolve) => host.waiters.add(() => { const next = batch(); if (next) resolve(next); return Boolean(next); }));
     },
     submitChatTurn: async (request) => {
+      if (host.holdTurn) await host.holdTurn;
       host.turns.push(structuredClone(request));
-      const runId = request.runId;
+      const runId = request.runId || "run-new";
+      if (!request.runId) {
+        host.runs.push(runRow(runId, { title: request.text, ee_id: request.eeId, worker_interface_id: request.workerInterfaceId }));
+        host.messages[runId] = [];
+      }
       if (host.failNextTurn) {
         const { failure, admitted } = host.failNextTurn;
         host.failNextTurn = null;
@@ -235,6 +241,47 @@ test("refreshing models re-reads the provider catalog only in the live client", 
     await settle();
     assert.equal(catalogReads - before, refreshes, profile);
   }
+});
+
+const writerAgent = {
+  client_agent_id: "agent-writer", client_agent_name: "Writer", client_agent_icon: "default", client_agent_created_at_ms: 1, client_agent_updated_at_ms: 1,
+  client_agent_deleted_at_ms: 0, agent_source_template: true, client_template_digest: "template-1", client_template_provider_interface_id: provider.id,
+  client_template_provider_model: "model-a", client_template_reasoning_effort: "medium", client_template_application_ids: [], client_template_worker_environment_kinds: [],
+};
+
+test("a new task adopts the one Agent matching the Home defaults, starts as submitting and moves to the run the host creates", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  let admit;
+  host.holdTurn = new Promise((resolve) => { admit = resolve; });
+  const view = await mount(host, "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
+  assert.deepEqual([view.current.agentPresetId, view.current.eeId, view.current.workerInterfaceId, view.current.providerModel], ["agent-writer", "ee.root", "worker.test", "model-a"]);
+  void view.current.submit();
+  await until(() => working(view).length === 1, "no pending reply");
+  assert.equal(working(view)[0].eventData.work_status, "submitting");
+  assert.equal(view.current.activeRunId, "");
+  admit();
+  await until(() => host.turns.length === 1 && view.current.activeRunId === "run-new", () => `the new run was not adopted: ${view.current.activeRunId}`);
+  assert.deepEqual([host.turns[0].runId, host.turns[0].eeId, host.turns[0].workerInterfaceId, host.turns[0].providerModel, host.turns[0].text],
+    [undefined, "ee.root", "worker.test", "model-a", "Draft the plan"]);
+  host.reply("run-new", "Plan drafted.");
+  await until(() => !view.current.busy && view.current.runs.some((run) => run.runId === "run-new"), "the new task never settled");
+});
+
+test("without an Agent on the Home worker a new task waits for the operator to choose one", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test" }, { id: "worker.writer", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  const view = await mount(host, "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.submitBlockReason === "Choose an Agent before sending.", () => `unexpected block: ${view.current.submitBlockReason}`);
+  assert.equal(view.current.canSubmit, false);
+  view.current.setAgentPresetId("agent-writer");
+  await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
+  assert.deepEqual([view.current.agentPresetId, view.current.eeId, view.current.workerInterfaceId], ["agent-writer", "ee.root", "worker.writer"]);
 });
 
 test("a live client refreshes task status from ledger changes and ignores stale status", { timeout: 15_000 }, async () => {

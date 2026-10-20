@@ -174,9 +174,7 @@ const agentReadiness = sourceBetween(
 assert.match(agentReadiness, /selectedClientAgent\.projectEeId === eeId/);
 assert.match(agentReadiness, /selectedClientAgent\.workerInterfaceId === workerInterfaceId/);
 assert.doesNotMatch(agentReadiness, /providerInterfaceId|reasoningEffort|applicationIds|driverNames/);
-assert.match(workspace, /&& clientAgentSelectionReady/);
 assert.match(workspace, /const admissibleAgents = agentPresets\.filter\(\(agent\) => !clientAgentSelectionFailure\(agent\)\);/);
-assert.match(workspace, /if \(matchingAgent\) \{[\s\S]*?setAgentPresetId\(matchingAgent\.id\);[\s\S]*?setNewTaskTargetResolutionBlocked\(false\);/);
 assert.doesNotMatch(workspace, /This draft does not identify one current Agent|The selected project exposes no complete Agent/);
 assert.match(sourceBetween(workspace, "async function submit(", "async function resolvePausedQueueSubmission("), /if \(!activeRunIdRef\.current && !executionContextReady\) \{\s*return;\s*\}/);
 assert.doesNotMatch(workspace, /if \(selectedExecutionContext\.workers\.some\(\(worker\) => worker\.id === workerInterfaceId\)\) return;/);
