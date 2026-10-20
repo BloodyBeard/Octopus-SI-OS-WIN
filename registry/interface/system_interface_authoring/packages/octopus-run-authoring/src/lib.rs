@@ -468,8 +468,6 @@ mod checked_chain;
 pub use checked_chain::*;
 mod authoring_result;
 pub use authoring_result::*;
-mod operator_request;
-pub use operator_request::*;
 mod checked_edit;
 pub use checked_edit::*;
 mod authoring_attempt;

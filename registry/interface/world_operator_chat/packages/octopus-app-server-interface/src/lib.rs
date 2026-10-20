@@ -5,6 +5,8 @@ pub mod control_socket;
 pub use control_socket::interface_control_socket_path_from_root;
 
 pub mod input_artifact;
+pub mod owner_operator_request;
+pub use owner_operator_request::*;
 pub use input_artifact::{
     INTERFACE_INPUT_SOURCE_ARTIFACT_FIELD, InterfaceInputArtifactBody,
     store_interface_input_artifact, store_interface_input_artifact_body, store_json_artifact,

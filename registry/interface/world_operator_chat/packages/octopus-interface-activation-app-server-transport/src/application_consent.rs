@@ -836,7 +836,7 @@ impl ConsentAuthority {
         let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
         let request_value = result.body.as_ref().and_then(|body| body.get("operator_request"))
             .ok_or("selected consent return lost its original pending request")?;
-        let pending_request: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(request_value.clone()).map_err(string_error)?;
+        let pending_request: octopus_app_server_interface::OwnerOperatorRequest = serde_json::from_value(request_value.clone()).map_err(string_error)?;
         pending_request.validate_bound_files(&intake.metadata)?;
         let mut writers = vec![selected.provider_writer.clone()];
         writers.extend(selected.owner_writer.clone());
@@ -1510,7 +1510,7 @@ impl ConsentAuthority {
         octopus_run_authoring::validate_selected_return_reads(&reply.metadata, &selected.selected_artifacts)?;
         let pending = reader.admitted(&request.request)?;
         let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
-        let pending: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(result.body.as_ref()
+        let pending: octopus_app_server_interface::OwnerOperatorRequest = serde_json::from_value(result.body.as_ref()
             .and_then(|body| body.get("operator_request")).cloned().ok_or("Home final lost its immutable pending operation")?).map_err(string_error)?;
         self.validate_selected_return_rows(&reply.record, selected, &request, &pending.original.door_interface)?;
         let expected = if decision == ConsentDecision::Accept { &selected.approved } else { &selected.declined };
@@ -2139,7 +2139,7 @@ impl ConsentLiveOwner {
                 if let Some(selected) = &request.selected_return {
                     let pending = reader.admitted(&request.request)?;
                     let result: ToolResultArtifact = serde_json::from_slice(&pending.payload).map_err(string_error)?;
-                    let owner_request: octopus_run_authoring::OwnerOperatorRequest = serde_json::from_value(
+                    let owner_request: octopus_app_server_interface::OwnerOperatorRequest = serde_json::from_value(
                         result.body.and_then(|body| body.get("operator_request").cloned()).ok_or("selected publication lost its pending request")?).map_err(string_error)?;
                     self.controller.authority.validate_selected_return_rows(&intake.record, selected, request, &owner_request.original.door_interface)?;
                     selected_checkpoint = Some(if let Some(response) = response {

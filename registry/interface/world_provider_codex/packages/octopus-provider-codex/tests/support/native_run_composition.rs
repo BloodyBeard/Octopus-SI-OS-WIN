@@ -236,7 +236,7 @@ fn native_publication_composition_validates_private_scope_and_stages_inline_cont
     assert!(!reused.descriptor_writes.iter().any(|write| write.path.file_name().is_some_and(|name| name == "octopus_os.json")));
     let (mut affordances, _) = exact_affordances(&request);
     affordances.config.defaults = Some(RunDefaults {
-        client_template_interface_id:None, output_selection:None, ee_id:request.ee_id.clone(),
+        client_template_interface_id:None, output_selection:None, ee_id:Some(request.ee_id.clone()),
         worker_template_interface_id:request.worker_template_interface_id.clone(), provider_interface_id:request.provider_interface_id.clone(),
         model:request.model.clone(), reasoning_effort:request.reasoning_effort.clone(), service_tier:None,
         authoring:request.authoring.clone(), worker_environment_kinds:request.selected_worker_environment_kinds.clone(),
@@ -427,7 +427,7 @@ fn creation_uses_admitted_coordinates_after_the_authoring_frontier_advances() {
             artifact_send_tool:Some("artifact.send".into()), roots:Some(request.roots.clone()),
             defaults:Some(RunDefaults {
                 client_template_interface_id:None,
-                output_selection:None, ee_id:request.ee_id, worker_template_interface_id:request.worker_template_interface_id,
+                output_selection:None, ee_id:Some(request.ee_id), worker_template_interface_id:request.worker_template_interface_id,
                 provider_interface_id:request.provider_interface_id, model:request.model, reasoning_effort:request.reasoning_effort,
                 service_tier:None,
                 authoring:request.authoring, worker_environment_kinds:request.selected_worker_environment_kinds,

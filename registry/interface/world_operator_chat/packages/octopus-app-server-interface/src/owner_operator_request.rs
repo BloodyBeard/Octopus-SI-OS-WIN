@@ -1,6 +1,7 @@
-use super::*;
-
-pub use octopus_app_server_interface::{OperatorPermissionDecision, OperatorPermissionPersistence, OperatorPermissionResponse};
+use octopus_interfaces::InterfaceId;
+use octopus_ledger::ArtifactRef;
+use sha2::{Digest, Sha256};
+use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -12,11 +13,11 @@ pub struct ApplicationOperatorRequest {
     pub scope: AppScope,
     pub application: ApplicationTarget,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_policy: Option<octopus_app_server_interface::application_consent_contract::NativeAppPolicy>,
+    pub native_policy: Option<crate::application_consent_contract::NativeAppPolicy>,
     pub approval_scope: String,
     pub resume: ResumeCall,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_offer: Option<octopus_app_server_interface::OperatorPermissionOffer>,
+    pub permission_offer: Option<crate::OperatorPermissionOffer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -152,8 +153,8 @@ impl ApplicationOperatorRequest {
             }
         }
         if let Some(offer) = &self.permission_offer {
-            use octopus_app_server_interface::{OperatorPermissionDecision, OperatorPermissionPersistence};
-            use octopus_app_server_interface::application_consent_contract::NativeAppPolicyDecision;
+            use crate::{OperatorPermissionDecision, OperatorPermissionPersistence};
+            use crate::application_consent_contract::NativeAppPolicyDecision;
             offer.validate()?;
             let native = self.native_policy.as_ref().ok_or_else(|| application_request_error("permission offer has no original native policy data"))?;
             if native.target.bundle_id != self.application.bundle_id || native.target.bundle_path != self.application.bundle_path
@@ -213,7 +214,7 @@ pub struct BrowserUploadOperatorRequest {
     pub upload: BrowserUploadSubject,
     pub resume: ResumeCall,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_offer: Option<octopus_app_server_interface::OperatorPermissionOffer>,
+    pub permission_offer: Option<crate::OperatorPermissionOffer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -249,12 +250,12 @@ pub struct BrowserHistoryOperatorRequest {
     pub approval_scope: String,
     pub history: BrowserHistorySubject,
     pub resume: ResumeCall,
-    pub permission_offer: octopus_app_server_interface::OperatorPermissionOffer,
+    pub permission_offer: crate::OperatorPermissionOffer,
 }
 
 impl BrowserHistoryOperatorRequest {
     pub fn validate(&self) -> Result<(), String> {
-        use octopus_app_server_interface::OperatorPermissionPersistence;
+        use crate::OperatorPermissionPersistence;
         self.permission_offer.validate()?;
         let exact = |value: &str| !value.is_empty() && value.trim() == value && value.len() <= 4096 && !value.contains('\0');
         let hex = |value: &str, length: usize| value.len() == length && value.bytes().all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v));
@@ -305,8 +306,8 @@ pub struct OwnerOperatorRequest {
     pub original: OriginalCall,
     pub scope: AppScope,
     pub resume: ResumeCall,
-    pub permission_offer: Option<octopus_app_server_interface::OperatorPermissionOffer>,
-    pub(crate) native_policy: Option<octopus_app_server_interface::application_consent_contract::NativeAppPolicy>,
+    pub permission_offer: Option<crate::OperatorPermissionOffer>,
+    pub(crate) native_policy: Option<crate::application_consent_contract::NativeAppPolicy>,
     pub(crate) subject: OwnerApprovalSubject,
 }
 
@@ -457,8 +458,8 @@ impl OwnerOperatorRequest {
         params
     }
 
-    pub fn parse_operator_response(&self, value: serde_json::Value) -> Result<octopus_app_server_interface::OperatorPermissionResponse, String> {
-        let response: octopus_app_server_interface::OperatorPermissionResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    pub fn parse_operator_response(&self, value: serde_json::Value) -> Result<crate::OperatorPermissionResponse, String> {
+        let response: crate::OperatorPermissionResponse = serde_json::from_value(value).map_err(|e| e.to_string())?;
         response.validate(&self.request_id, &self.call_id, self.permission_offer.as_ref())?;
         Ok(response)
     }

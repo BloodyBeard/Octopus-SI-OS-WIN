@@ -1773,7 +1773,7 @@ impl ContinuationContext {
 #[serde(deny_unknown_fields)]
 pub struct PendingApplication {
     pub pending_digest: String,
-    pub request: octopus_run_authoring::OwnerOperatorRequest,
+    pub request: octopus_app_server_interface::OwnerOperatorRequest,
     pub operator_interface: InterfaceId,
     pub request_artifact: ArtifactRef,
 }
@@ -1785,7 +1785,7 @@ pub struct ApplicationDecision {
     pub call_id: String,
     pub decision: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_persistence: Option<octopus_run_authoring::OperatorPermissionPersistence>,
+    pub selected_persistence: Option<octopus_app_server_interface::OperatorPermissionPersistence>,
     pub artifact: ArtifactRef,
     pub source_seq: u64,
     pub metadata_hash: String,
@@ -1850,7 +1850,7 @@ impl ContinuationContext {
         let Some(request) = result.body.as_ref().and_then(|v| v.get("operator_request")) else {
             return Ok(None);
         };
-        let request: octopus_run_authoring::OwnerOperatorRequest =
+        let request: octopus_app_server_interface::OwnerOperatorRequest =
             serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
         request.validate()?;
         request.validate_bound_files(envelope.metadata().map_err(|e| e.to_string())?)?;
@@ -1981,7 +1981,7 @@ pub(crate) fn decode_application(
     let suffix = if is_decision {
         let response = application.request.parse_operator_response(payload.get("operator_approval_response")
             .cloned().ok_or("missing exact application response wrapper")?)?;
-        use octopus_run_authoring::OperatorPermissionDecision;
+        use octopus_app_server_interface::OperatorPermissionDecision;
         let (decision, mark, verifier) = match response.decision {
             OperatorPermissionDecision::Accept => ("accept", "operator.approval", "operator_approval"),
             OperatorPermissionDecision::Decline => ("decline", "operator.input.provided", "operator_input"),

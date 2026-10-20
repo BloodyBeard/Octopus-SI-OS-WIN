@@ -80,6 +80,7 @@ octopus-core = { path = "../octopus-codex-core", optional = true }
 octopus-exec = { package = "octopus-exec-substrate", path = "../../../../../registry/worker_environment_kind/process_session/packages/octopus-exec-substrate", optional = true }
 octopus-app-server-transport = { path = "../octopus-app-server-transport", optional = true }
 toml = { version = "0.9.5", optional = true }
+octopus-app-server-interface = { path = "../../../world_operator_chat/packages/octopus-app-server-interface" }
 
 [dev-dependencies]
 json-patch.workspace = true
@@ -87,5 +88,4 @@ octopus-app-server = { path = "../../../../../crates/octopus-app-server" }
 octopus-system-room-env = { path = "../../../../../registry/worker_environment_kind/system_room/packages/octopus-system-room-env" }
 toml = "0.9.5"
 octopus-world-terminal-client = { path = "../../../world_terminal/packages/octopus-world-terminal-client" }
-octopus-app-server-interface = { path = "../../../world_operator_chat/packages/octopus-app-server-interface" }
 tempfile = "3.23.0"
