@@ -1106,7 +1106,8 @@ function topItems(values: string[], kind: "worker" | "interface" | "binding"): T
     interface: ["no interface"],
     binding: ["no binding"],
   }[kind];
-  return (values.length ? values : fallback).slice(0, 2).map((value) => ({
+  const unique = [...new Set(values)];
+  return (unique.length ? unique : fallback).slice(0, 2).map((value) => ({
     label: value,
     tone: value.startsWith("no ") ? "gray" : kind === "interface" ? "blue" : kind === "binding" ? "purple" : "gray",
   }));
