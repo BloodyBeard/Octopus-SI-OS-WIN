@@ -804,8 +804,6 @@ assert.match(
   turnActivity,
   /if \(entry\.family === "reasoning"\) \{\s*if \(explorationOpen\) grouped\.push\(entry\);\s*continue;/,
 );
-assert.match(turnActivity, /grouped\.push\(entry\);\s*explorationOpen = explorationActivityEntry\(entry, toolPresentations\);/);
-assert.match(turnActivity, /const flush = \(\) => \{\s*explorationOpen = false;/);
 assert.match(
   turnActivity,
   /function explorationActivityEntry\([\s\S]*?if \(entry\.family === "exec"\) return execCategory\(entry\) !== "command";[\s\S]*?dynamicToolPresentation\(activityDetailMessages\(entry\)\[0\], toolPresentations\)\.family === "read";/,
@@ -816,10 +814,6 @@ assert.match(
 );
 assert.match(voiceView, /<HomeTurnActivity activities=\{activity\}/);
 assert.doesNotMatch(voiceView, /standaloneReasoningPresentation/);
-assert.match(turnActivity, /const startingTask = syntheticSubmitting[\s\S]*?&& !hasWork[\s\S]*?&& !response/);
-assert.match(turnActivity, /aria-live="polite"[\s\S]*?role="status"[\s\S]*?<CadencedShimmerText active>Starting your task<\/CadencedShimmerText>/);
-assert.match(turnActivity, /const showWorkedForBoundary = statusBoundaryVisible\s*&& \(hasWork \|\| failed \|\| stopped \|\| showStandaloneWorkedBoundary\);[\s\S]*?\{showWorkedForBoundary \? \([\s\S]*?<WorkedForBoundary[\s\S]*?\{showWorkedForBoundary && \(hasWork \|\| showThinkingFallback\) \? <ActivityGap \/> : null\}/);
-assert.match(turnActivity, /Worked for \{formatElapsed\(elapsed\)\}/);
 assert.match(
   turnActivity,
   /const hasConversationReasoningWork = presentation === "conversation"\s*&& visibleActivity\.some\(\(message\) => activityFamily\(message\) === "reasoning"\);/,
@@ -832,23 +826,6 @@ assert.match(
   turnActivity,
   /if \(!hasWork && !working && !failed && !stopped && !showStandaloneWorkedBoundary\) return null;/,
 );
-assert.match(turnActivity, /if \(message\.eventKind === "interrupted_result"\) return true;/);
-assert.match(turnActivity, /const \[historyDisclosureState, setHistoryDisclosureState\] = useState<DisclosureState>\("collapsed"\);/);
-assert.match(turnActivity, /const historyExpanded = historyDisclosureState === "opening" \|\| historyDisclosureState === "expanded";/);
-assert.match(turnActivity, /const historyFullyExpanded = historyDisclosureState === "expanded";/);
-assert.match(turnActivity, /if \(historyExpanded\) \{\s*setHistoryDisclosureState\(reducedMotion \? "collapsed" : "closing"\);/);
-assert.match(turnActivity, /if \(historyDisclosureState === "closing" \|\| reducedMotion\) \{\s*setHistoryDisclosureState\("expanded"\);/);
-assert.match(turnActivity, /setHistoryDisclosureState\("opening"\);[\s\S]*?requestAnimationFrame[\s\S]*?current === "opening" \? "expanded" : current/);
-assert.match(turnActivity, /\{historyDisclosureState !== "collapsed" \? \([\s\S]*?animate=\{historyFullyExpanded \? \{ height: "auto", opacity: 1 \} : \{ height: 0, opacity: 0 \}\}/);
-assert.match(turnActivity, /aria-hidden=\{!historyFullyExpanded\}[\s\S]*?inert=\{!historyFullyExpanded \|\| undefined\}/);
-assert.match(turnActivity, /onAnimationComplete=\{\(\) => \{\s*setHistoryDisclosureState\(\(current\) => current === "closing" \? "collapsed" : current\);/);
-assert.doesNotMatch(turnActivity, /setHistoryExpanded|useState\(false\);\s*const \[, setClock\]/);
-assert.match(turnActivity, /\{finalStarted \? <ActivityGap \/> : null\}/);
-assert.doesNotMatch(turnActivity, /preserveDisclosurePosition/);
-assert.match(turnActivity, /!turnFinished \|\| !isSafetyBufferingWarning\(message\)/);
-assert.match(turnActivity, /record\(message\.eventData\)\.showBufferingUi === true/);
-assert.match(turnActivity, /entry\.tone = strongerActivityTone\(entry\.tone, activityTone\(\[message\]\)\);/);
-assert.doesNotMatch(turnActivity, /entry\.tone = activityTone\(entry\.messages\);/);
 
 for (const eventKind of ["turn_control", "interrupted_result"]) {
   assert.equal(conversationTraceModule.conversationTraceAdmission({ eventKind, eventData: {}, text: "" }, {}), "state");
@@ -948,12 +925,8 @@ assert.match(messageList, /if \(!virtualized\) \{[\s\S]*?<MeasuredVirtualTurn/);
 assert.match(messageList, /distanceFromBottomAnchoredToTurn\(\{/);
 assert.match(messageList, /aria-hidden[\s\S]*?h-\[calc\(var\(--thread-scroll-padding-bottom\)-var\(--spacing\)\*4\)\]/);
 assert.match(messageList, /className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pb-4"[\s\S]*?data-thread-scroll-footer="true"/);
-assert.doesNotMatch(turnActivity, /`Called \$\{label\}`/);
-assert.match(turnActivity, /if \(entry\.family === "mcp" \|\| entry\.family === "hooks"\) return "plugins";/);
-assert.match(turnActivity, /return dynamicToolGlyph\(presentation\);/);
 assert.match(source("src/components/voice/HomeAgentActivityView.tsx"), /<ChatView[\s\S]*?workspace=\{workspace\}/);
 assert.match(messageList, /turnInProgress=\{responseStreaming && isLatestTurn\}/);
-assert.match(turnActivity, /turnInProgress \?\? \(/);
 assert.doesNotMatch(source("src/components/chat/CollapsibleMessageBody.tsx"), /motion|maxHeight:.*contentHeight/);
 assert.doesNotMatch(messageList, /className="sticky bottom-0 z-10 mt-auto w-full pb-4" data-thread-scroll-footer="true" ref=\{footerRef\}/);
 assert.match(chatView, /if \(chat\.loadingMessages\) \{[\s\S]*?<OctopusLoadingState className="surface-content-loading-state" label="Loading task"/);
@@ -1130,8 +1103,6 @@ assert.match(voiceCss, /\.home-response-stage\.is-compact \.home-response-output
 assert.doesNotMatch(voiceCss, /\.home-task-activity|\.home-view-transition__activity/);
 assert.match(chatCss, /:hover:not\(:has\(\[data-agent-activity-file-link\]:hover\)\)/);
 assert.match(chatCss, /--color-token-conversation-header: color-mix\(in oklab, var\(--color-token-foreground\) 30%, transparent\);/);
-assert.doesNotMatch(turnActivity, /octopus-agent-activity-viewport vertical-scroll-fade-mask/);
-assert.doesNotMatch(turnActivity, /octopus-reasoning-detail vertical-scroll-fade-mask/);
 assert.doesNotMatch(chatCss, /\.octopus-agent-activity-viewport \{[^}]*max-height:/);
 assert.doesNotMatch(chatCss, /\.octopus-reasoning-detail \{[^}]*max-height:/);
 assert.match(chatCss, /\.octopus-agent-activity-detail-item > \* \{\s*width: 100%;/);
@@ -1188,6 +1159,7 @@ async function verifyTranscriptLayout() {
   Object.defineProperty(global, "navigator", { configurable: true, value: dom.window.navigator });
   Object.assign(global, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true });
   const frames = new Map(), completions = [], artifactReads = [], artifactErrors = [];
+  let reducedMotion = true;
   let artifactResponse;
   let frameId = 0;
   window.requestAnimationFrame = (callback) => (frames.set(++frameId, callback), frameId);
@@ -1195,7 +1167,7 @@ async function verifyTranscriptLayout() {
   const scope = {
     ...React, ...toolPresentation, ...reasoningSummary, ...conversationTraceModule,
     ...typescriptModule("src/components/chat/subagentActivity.ts"), ...typescriptModule("src/components/chat/commandActivityModel.ts"),
-    useShouldReduceMotion: () => true,
+    useShouldReduceMotion: () => reducedMotion,
     Glyph: ({ name }) => React.createElement("span", { "data-glyph": name }),
     CadencedShimmerText: ({ children, className, active }) => React.createElement("span", { className, "data-active": Boolean(active) }, children),
     MessageContent: ({ text }) => React.createElement("p", null, text),
@@ -1234,7 +1206,8 @@ async function verifyTranscriptLayout() {
   }
   assert.match(parseWorkingPatch("not a diff", "report.md", "update").error, /one recorded file diff/);
   assert.ok(parseWorkingPatch("--- a\n+++ a\n@@ -1 +1 @@\n-old\n+new\n--- b\n+++ b\n@@ -1 +1 @@\n-old\n+new\n", "a", "update").error);
-  const events = renderModule(messageList, ["AssistantEventContent", "TraceReadTarget", "traceReadArtifactReference", "decodeJsonArtifactPayload", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult"], { ...scope, ...turn });
+  const events = renderModule(messageList, ["AssistantEventContent", "ConversationNotice", "TraceReadTarget", "traceReadArtifactReference", "decodeJsonArtifactPayload", "WebSearchActivity", "StructuredActivity", "activityLifecycle", "activityLifecycleFromStatus", "eventString", "eventRecord", "eventArray", "eventJson", "dynamicToolResult"], { ...scope, ...turn,
+    McpResourceSurface: ({ message }) => React.createElement("section", { "data-mcp-tool": message.eventData.tool }) });
   const fileActivity = renderModule(messageList, ["FileChangeActivity", "activityPathLabel"], {
     ...scope,
     InlineUnifiedDiff: ({ diff }) => React.createElement("pre", null, diff),
@@ -1331,6 +1304,7 @@ async function verifyTranscriptLayout() {
     assert.deepEqual(all(".octopus-agent-activity-toggle").map((node) => [node.getAttribute("aria-label"), node.getAttribute("aria-expanded")]), [["Thought", "false"]]);
     await click(query(".octopus-agent-activity-toggle"));
     assert.equal(query(".octopus-reasoning-detail").textContent, "Then comparing");
+    assert.equal(container.querySelector(".vertical-scroll-fade-mask"), null);
     assert.doesNotMatch(container.textContent, /RAW|Checking files/);
     await renderLedger([message("timed", "reasoning", "", { summary: ["Done"], started_at_ms: 1_000, completed_at_ms: 4_000 })], false);
     assert.match(query(".octopus-agent-activity-toggle").getAttribute("aria-label"), /^Thought for \S/);
@@ -1338,6 +1312,73 @@ async function verifyTranscriptLayout() {
     assert.equal(query(".octopus-agent-activity-summary-value").textContent, "Thinking");
     assert.equal(query(".octopus-reasoning-detail").textContent, "Scanning", "active reasoning opens without a click");
     await render([], false);
+    await render([message("pending", "event", "", { work_status: "submitting" })], true);
+    assert.equal(query(".octopus-turn-activity").dataset.state, "starting");
+    assert.equal(query('[role="status"][aria-live="polite"]').textContent, "Starting your task");
+    await render([message("pending", "event", "", { work_status: "submitting" }), operation], true);
+    assert.notEqual(query(".octopus-turn-activity").dataset.state, "starting");
+    const finalResponse = { ...assistantDelta, eventData: { ...assistantDelta.eventData, phase: "final_answer" } };
+    const historyToggle = () => query(".octopus-worked-for-toggle");
+    const history = () => query(".octopus-turn-history");
+    for (const motion of [true, false]) {
+      reducedMotion = motion;
+      await render([], false); await render([operation], false, finalResponse, true);
+      assert.match(historyToggle().textContent, /^Worked for /);
+      assert.equal(history(), null, "settled history mounts collapsed");
+      await React.act(async () => historyToggle().click());
+      assert.equal(historyToggle().getAttribute("aria-expanded"), "true");
+      if (!motion) assert.equal(history().getAttribute("aria-hidden"), "true", "opening history stays hidden until its frame");
+      await settle();
+      assert.equal(history().getAttribute("aria-hidden"), "false");
+      assert.equal(history().hasAttribute("inert"), false);
+      await React.act(async () => historyToggle().click());
+      assert.equal(historyToggle().getAttribute("aria-expanded"), "false");
+      if (!motion) assert.equal(history().getAttribute("aria-hidden"), "true", "closing history animates out before it unmounts");
+      await settle();
+      assert.equal(history(), null);
+    }
+    reducedMotion = true;
+    await render([operation, message("interrupted", "interrupted_result", "", {})], false, undefined, true);
+    assert.equal(query(".octopus-turn-activity").dataset.state, "stopped");
+    assert.match(query(".octopus-worked-for-boundary").textContent, /^Interrupted after /);
+    await render([operation, message("stop", "turn_control", "", { action: "stop", status: "acknowledged" })], false, undefined, true);
+    assert.match(query(".octopus-worked-for-boundary").textContent, /^You stopped after /);
+    const buffering = (id, showBufferingUi) => message(id, "warning", "Checking response safety", { source: "model_safety_buffering", showBufferingUi });
+    await render([operation, buffering("quiet", false), buffering("shown", true)], true);
+    assert.equal((container.textContent.match(/Checking response safety/g) ?? []).length, 1);
+    await render([operation, buffering("shown", true)], false, finalResponse, false);
+    assert.doesNotMatch(container.textContent, /Checking response safety/);
+    const callUpdate = (index, failed) => message(`flaky-${index}`, "dynamic_tool", "", { tool: "run_list", call_id: "flaky", status: failed ? "failed" : "completed",
+      ok: !failed, arguments: {}, _activity_origin: { interface_role: "provider" } });
+    await render([{ ...callUpdate(0, true), error: true }, callUpdate(1, false)], false);
+    assert.equal(query(".octopus-agent-activity").dataset.state, "error", "a later successful update keeps the call's failure tone");
+    const updateCost = async (count) => {
+      const updates = Array.from({ length: count }, (_, index) => callUpdate(index, index === 0));
+      let best = Infinity;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await render([], false);
+        const started = process.hrtime.bigint();
+        await render(updates, false);
+        best = Math.min(best, Number(process.hrtime.bigint() - started));
+      }
+      return best;
+    };
+    await updateCost(200);
+    assert.ok(await updateCost(2_400) < await updateCost(600) * 10, "coalescing repeated updates of one call stays near-linear");
+    await render([message("mcp", "mcp_tool", "", { server: "github", tool: "search", status: "completed" })], false);
+    assert.ok(query('.octopus-agent-activity-header [data-glyph="plugins"]'), "MCP calls carry the plugin mark");
+    await render([message("mcp-live", "mcp_tool", "", { server: "github", tool: "search", status: "in_progress" })], true);
+    assert.ok(query('.octopus-agent-activity-header [data-glyph="plugins"]'), "an MCP call in flight carries the plugin mark");
+    await render([message("mcp", "mcp_tool", "", { server: "github", tool: "search", status: "completed" })], false);
+    await click(query(".octopus-agent-activity-toggle"));
+    assert.equal(container.querySelector(".vertical-scroll-fade-mask"), null);
+    await React.act(async () => root.render(React.createElement(turn.TurnActivity, { activities: [{ ...operation, eventData: { ...operation.eventData, status: "started" } }],
+      startedAtMs: 1, presentation: "conversation", toolPresentations: {}, renderActivity: (item) => React.createElement(events.AssistantEventContent, { message: item, toolPresentations: {} }) })));
+    assert.equal(query(".octopus-turn-activity").dataset.state, "working", "an unstated turn follows its active work");
+    await render([operation], false, finalResponse, false);
+    const finalGap = query(".octopus-turn-activity").lastElementChild;
+    assert.equal(finalGap.getAttribute("aria-hidden"), "true");
+    assert.match(finalGap.getAttribute("style"), /--conversation-item-gap/);
     const artifactId = `docs.guide.md:${"a".repeat(64)}`;
     const artifactMessage = { ...message("artifact", "dynamic_tool", "", { tool: "artifact.read", call_id: "artifact", status: "completed", arguments: { id: artifactId }, _activity_origin: { interface_role: "provider" } }), artifactId: "receipt:exact-read", runId: "run-test", interfaceId: "provider-test" };
     const readResult = { tool: "artifact.read", call_id: "artifact", ok: true, body: { result: "artifact_read", id: artifactId, text: "Historical content", artifact_size_bytes: 18, offset_bytes: 0, bytes_read: 18, truncated: false } };
