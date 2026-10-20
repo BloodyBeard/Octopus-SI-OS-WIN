@@ -38,7 +38,9 @@
       "system_worker_planner",
       "system_web_search",
       "system_room",
-      "world_operator_chat"
+      "world_operator_chat",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "browser.navigate",

@@ -61,7 +61,9 @@
       "system_web_search",
       "system_room",
       "system_remote_exec",
-      "system_gui"
+      "system_gui",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "coder.apply_patch",

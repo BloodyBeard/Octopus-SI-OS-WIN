@@ -36,7 +36,9 @@
       "system_coder_env",
       "system_workspace_env",
       "system_worker_coder",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "coder.apply_patch",

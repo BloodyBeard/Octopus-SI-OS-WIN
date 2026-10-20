@@ -1,7 +1,13 @@
 {
   "id": "system_worker_client_maintenance",
   "ceiling": {
-    "interfaces": ["system_worker_client_maintenance", "system_client_maintenance", "world_provider_codex"],
+    "interfaces": [
+      "system_worker_client_maintenance",
+      "system_client_maintenance",
+      "world_provider_codex",
+      "system_service_input",
+      "system_worker_memory_observer"
+    ],
     "tools": [],
     "wek": [],
     "mark_outcomes": [],

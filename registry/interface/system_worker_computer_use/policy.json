@@ -43,7 +43,9 @@
       "system_room",
       "world_operator_chat",
       "system_code_mode",
-      "system_browser"
+      "system_browser",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "gui.control",

@@ -15,7 +15,9 @@
       "system_context",
       "world_cron",
       "world_provider_realtime",
-      "system_memory"
+      "system_memory",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "workspace.apply_patch",

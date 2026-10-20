@@ -40,7 +40,9 @@
       "system_context",
       "system_worker_flash",
       "system_worker_planner",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "artifact.list",

@@ -37,7 +37,9 @@
       "system_interface_authoring",
       "system_worker_memory_consolidation",
       "system_memory",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "memory.search",

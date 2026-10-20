@@ -36,7 +36,8 @@
       "system_memory",
       "system_interface_authoring",
       "system_room",
-      "system_context_memory_projection"
+      "system_context_memory_projection",
+      "system_service_input"
     ],
     "tools": [
       "memory.search",

@@ -85,6 +85,16 @@ impl Fixture {
                 .unwrap(),
             );
         }
+        for (file, pointer) in [
+            ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+            ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"),
+            ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces"),
+        ] {
+            let mut value: Value =
+                serde_json::from_slice(&std::fs::read(root.path().join(file)).unwrap()).unwrap();
+            value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("system_service_input"));
+            support::write(root.path(), file, value);
+        }
         let descriptor = request
             .roots
             .registry_root

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_intent() {
     for legacy in [false, true] {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = tempfile::Builder::new().prefix("oct").tempdir_in("/tmp").unwrap();
     let root = temp.path().canonicalize().unwrap();
     let mut request = if legacy { support::client_fixture(&root) } else { support::fixture(&root) };
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../..");
@@ -32,6 +32,15 @@ async fn exact_intake_composition_rearms_only_owned_edges_and_retains_crash_inte
             serde_json::from_slice(&std::fs::read(source.join("registry").join(relative)).unwrap())
                 .unwrap();
         support::write(&request.roots.registry_root, relative, value);
+    }
+    for (file, pointer) in [
+        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"),
+        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces"),
+    ] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(root.join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("system_service_input"));
+        support::write(&root, file, value);
     }
     let path = request
         .roots

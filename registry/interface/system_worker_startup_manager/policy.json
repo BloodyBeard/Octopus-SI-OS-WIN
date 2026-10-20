@@ -37,7 +37,9 @@
       "system_worker_planner",
       "system_worker_memory",
       "system_worker_flash",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "artifact.list",

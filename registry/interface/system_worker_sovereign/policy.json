@@ -46,7 +46,9 @@
       "system_worker_coder_max",
       "system_worker_memory",
       "system_worker_computer_use",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "artifact.list",

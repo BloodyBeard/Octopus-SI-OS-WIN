@@ -37,7 +37,9 @@
       "system_workspace_env",
       "system_worker_planner",
       "system_worker_reviewer",
-      "system_room"
+      "system_room",
+      "system_service_input",
+      "system_worker_memory_observer"
     ],
     "tools": [
       "coder.read_file",
