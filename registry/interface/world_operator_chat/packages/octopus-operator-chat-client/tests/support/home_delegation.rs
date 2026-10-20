@@ -299,7 +299,7 @@ async fn home_accepts_independent_task_terminal_and_error_returns_through_real_a
             log.read_from(Seq(0))
                 .iter()
                 .any(|m| m.kind == MovementKind::InterfaceOutbound
-                    && m.to == Endpoint::Interface(task.provider_interface_id.clone().into()))
+                    && m.to == Endpoint::Interface(task.receive_interface_id.clone().into()))
         );
     }
     let second = InterfaceArtifactFile::write(

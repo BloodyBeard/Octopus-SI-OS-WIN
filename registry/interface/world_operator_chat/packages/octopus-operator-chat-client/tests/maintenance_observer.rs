@@ -396,6 +396,16 @@ fn enable_intake(root: &Path) {
     provider["interface_driver_config"]["private_config"]["session_snapshot_labels"] =
         json!(["interface.artifact.output", "interface.context.updated"]);
     std::fs::write(path, serde_json::to_vec(&provider).unwrap()).unwrap();
+    for (file, pointer) in [
+        ("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces"),
+        ("registry/interface/system_worker_template/policy.json", "/ceiling/interfaces"),
+    ] {
+        let path = root.join(file);
+        let mut value = read(&path);
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("system_service_input"));
+        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
 }
 
 mod movement_gate {
@@ -982,7 +992,7 @@ mod movement_gate {
                             reference.id.as_str().starts_with(&format!("{label}:"))
                         })
                 })
-                .unwrap();
+                .unwrap_or_else(|| panic!("no '{label}' artifact was delivered to '{id}'"));
             InterfaceArtifactFile::new(
                 self.root
                     .join("ledger/blobs")

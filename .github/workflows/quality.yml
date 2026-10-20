@@ -175,7 +175,7 @@ jobs:
           cargo test --locked -p octopus-operator-chat-client --test conditioned_publication
           cargo test -p octopus-operator-chat-client --lib
           cargo test --locked -p octopus-operator-chat-client --test run_composition input_revision_cli_preserves_payload_intent_and_requires_checked_writer_results
-          cargo test -p octopus-provider-run-authoring --lib
+          cargo test -p octopus-run-authoring --lib
           cargo test -p octopus-provider-codex --lib
 
       - name: Voice lifecycle and evidence contracts

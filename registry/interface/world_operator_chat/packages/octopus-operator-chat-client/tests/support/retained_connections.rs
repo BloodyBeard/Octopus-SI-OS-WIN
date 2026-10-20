@@ -22,6 +22,10 @@ fn client_continuation_retains_exact_peer_but_removes_selected_capability() {
             std::fs::write(&edit.path, &edit.content).unwrap();
         }
     };
+    let provider_path = registry.join("interface/world_provider_ollama/interface.json");
+    let mut provider: Value = serde_json::from_slice(&std::fs::read(&provider_path).unwrap()).unwrap();
+    provider["interface_driver_config"]["private_config"].as_object_mut().unwrap().remove("input_intake");
+    write(provider_path, &provider);
     let mut request: OperatorChatPlanRequest = serde_json::from_value(json!({
         "registry_root":registry,"ee_instances_root":ee,"run_records_root":dir.path().join("runs"),"interface_private_state_root":dir.path().join("private"),"write_hash_algorithm":"sha256",
         "chat_id":"retained_peer","provider_interface_id":"world_provider_ollama",
