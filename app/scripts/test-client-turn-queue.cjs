@@ -616,7 +616,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await keydown(document.activeElement, "Enter"); assert.equal(queued, 1); assert.equal(sends, 1);
   await act(async () => host.render(React.createElement(composer, { ...props, canSubmit: false, canSteer: false, isSubmitting: true })));
   const pendingSend = document.querySelector('button[aria-label="Send"]');
-  assert.equal(pendingSend.disabled, false); assert.equal(pendingSend.getAttribute("aria-disabled"), "true");
+  assert.equal(pendingSend.disabled, false); assert.equal(pendingSend.getAttribute("aria-disabled"), "true"); assert.equal(pendingSend.getAttribute("aria-busy"), "true");
   pendingSend.focus(); assert.equal(document.activeElement, pendingSend);
   await act(async () => pendingSend.click()); assert.equal(sends, 1);
   await act(async () => pendingSend.dispatchEvent(new window.KeyboardEvent("keydown", { key: "F10", shiftKey: true, bubbles: true, cancelable: true })));
@@ -630,6 +630,39 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await act(async () => pendingQueueButton.click()); assert.equal(queued, 2); assert.equal(sends, 1);
   await act(async () => host.render(React.createElement(composer, { ...props, text: "" })));
   assert.equal(document.querySelector('button[aria-label="Send"]'), null); assert.ok(document.querySelector('button[aria-label="Stop"]'));
+  const primary = () => document.querySelector(".composer-primary-action");
+  const tooltipFor = async (button) => {
+    const measure = window.HTMLElement.prototype.getBoundingClientRect;
+    window.HTMLElement.prototype.getBoundingClientRect = () => ({ x: 100, y: 100, left: 100, top: 100, right: 200, bottom: 120, width: 100, height: 20 });
+    try { return await openTooltip(button); } finally { window.HTMLElement.prototype.getBoundingClientRect = measure; }
+  };
+  const openTooltip = async (button) => {
+    await act(async () => { button.dispatchEvent(new window.MouseEvent("pointermove", { bubbles: true })); await new Promise((resolve) => setTimeout(resolve, 260)); });
+    const text = document.querySelector('[role="tooltip"]')?.textContent ?? "";
+    await act(async () => button.dispatchEvent(new window.MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body })));
+    return text;
+  };
+  await act(async () => primary().click()); assert.equal(stops, 1, "an empty composer on an open turn stops it");
+  await act(async () => host.render(React.createElement(composer, { ...props, text: "", interruptPending: true })));
+  assert.deepEqual([primary().getAttribute("aria-label"), primary().getAttribute("aria-busy"), primary().getAttribute("aria-disabled")], ["Stop", "true", "true"]);
+  await act(async () => primary().click()); assert.equal(stops, 1, "a pending stop is not sent twice");
+  let resumes = 0;
+  const resumable = { ...props, text: "", turnOpen: false, resumeAvailable: true, onResume: () => resumes++, canSubmit: false, submitBlockReason: "Type a message or attach a file." };
+  await act(async () => host.render(React.createElement(composer, resumable)));
+  assert.equal(primary().getAttribute("aria-label"), "Resume");
+  await act(async () => primary().click()); assert.deepEqual([resumes, sends], [1, 1]);
+  await act(async () => host.render(React.createElement(composer, { ...resumable, submitBlockReason: "The runtime is unavailable. Your message has not been sent." })));
+  assert.equal(primary().getAttribute("aria-disabled"), "true");
+  await act(async () => primary().click()); assert.equal(resumes, 1, "a blocked resume does nothing");
+  assert.equal(await tooltipFor(primary()), "The runtime is unavailable. Your message has not been sent.");
+  await act(async () => host.render(React.createElement(composer, { ...resumable, text: "Continue with totals", canSubmit: true, submitBlockReason: "" })));
+  assert.equal(primary().getAttribute("aria-label"), "Send", "a typed message replaces Resume with Send");
+  await act(async () => host.render(React.createElement(composer, { ...props, editingQueuedTurn: true })));
+  assert.equal(primary().getAttribute("aria-label"), "Save queued message");
+  await act(async () => host.render(React.createElement(composer, { ...props, turnOpen: false, canSubmit: false, submitBlockReason: "Task history is still loading." })));
+  assert.equal(primary().getAttribute("aria-label"), "Send");
+  assert.equal(primary().disabled, true);
+  assert.equal(await tooltipFor(primary().parentElement), "Task history is still loading.");
   for (sendShortcut of ["enter", "cmd-if-multiline", "cmd-always"]) {
     let normal = 0; queued = 0;
     const shortcutProps = { ...props, canSubmit: false, onKeyDown: () => normal++ };
