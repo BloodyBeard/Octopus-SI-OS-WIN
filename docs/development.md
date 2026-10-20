@@ -148,7 +148,10 @@ npm run test:chat-trace-contracts
 ```
 
 The [quality workflow](../.github/workflows/quality.yml) lists the broader checks
-and platform dependencies. Source/type checks and contract tests do not prove a
+and platform dependencies. It runs Rust contracts through `cargo nextest`, one
+process per test; [`.config/nextest.toml`](../.config/nextest.toml) runs the
+Code Mode, process session and file publication tests one at a time.
+Source/type checks and contract tests do not prove a
 fresh packaged setup, a real model reply, or physical device permissions.
 
 For the terminal client, `npm --prefix app run test:cli` checks transcript,
