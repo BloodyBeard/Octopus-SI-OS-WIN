@@ -2480,10 +2480,10 @@ fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin
     assert!(octopus_run_authoring::validate_admitted_run_writer(&snapshot, detached_input.metadata().unwrap(), coauthor).is_err());
     let mut foreign_writer = coauthor.clone(); foreign_writer.source = InterfaceId::new("system_foreign_writer");
     assert!(octopus_run_authoring::validate_admitted_run_writer(&detached_bytes, detached_input.metadata().unwrap(), &foreign_writer).is_err());
-    detached["interface_state"][coauthor.owner.as_str()]["run_authoring_binding"]["writer_run"]["initial_record"]["ee"] = json!("ee_foreign_writer");
-    let foreign_bytes = serde_json::to_vec_pretty(&detached).unwrap();
-    detached_input.metadata.as_mut().unwrap().runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(&foreign_bytes).to_hex());
-    assert!(octopus_run_authoring::validate_admitted_run_writer(&foreign_bytes, detached_input.metadata().unwrap(), coauthor).is_err());
+    detached["interface_state"][coauthor.owner.as_str()]["run_authoring_binding"]["writer_run"]["initial_record"]["ee"] = json!("ee_writer_elsewhere");
+    let elsewhere_bytes = serde_json::to_vec_pretty(&detached).unwrap();
+    detached_input.metadata.as_mut().unwrap().runtime.as_mut().unwrap().run_record_hash = Some(ContentHash::of_bytes(&elsewhere_bytes).to_hex());
+    octopus_run_authoring::validate_admitted_run_writer(&elsewhere_bytes, detached_input.metadata().unwrap(), coauthor).unwrap();
     if matches!(case, FrontierCase::Coauthor) {
         room.release_room(&formation).await.unwrap();
         admission.door.lock().await.context.owner_cancel().cancel();
@@ -3840,7 +3840,7 @@ impl FrontierAdmission {
     async fn provider_progress(&self, sequence:u64) -> Result<(),String> {
         let handoff = self.provider_handoff()?.ok_or("provider has no actual original owner output")?;
         let artifact = InterfaceArtifactFile::write(self.provider.context.var_dir.join("progress"),"provider.fixture.progress",&serde_json::to_vec(&json!({"sequence":sequence})).unwrap()).map_err(|e| e.to_string())?;
-        let outcome = handoff.hand(octopus_run_authoring::ProviderEmission { artifact,route:octopus_run_authoring::ProviderEmissionRoute::ClientProjection }).await?;
+        let outcome = handoff.hand_final(octopus_run_authoring::ProviderEmission { artifact,route:octopus_run_authoring::ProviderEmissionRoute::ClientProjection }).await?;
         if !matches!(outcome,octopus_run_authoring::ProviderHandoffOutcome::Admitted{..}) { return Err(format!("actual provider rearm was not admitted: {outcome:?}")); }
         Ok(())
     }
