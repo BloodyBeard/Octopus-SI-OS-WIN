@@ -4,6 +4,7 @@
   "handler_config": {"operation": "process_list"},
   "process": {
     "bin": "target/debug/octopus-coder-exec-tool",
+    "interrupted_effect_recovery": "reinvoke_exact_artifact",
     "inherit_env": ["HOME", "PATH"],
     "authority": {
       "read_root_slots": ["registry_worker_environment_kind_root", "repo_root"],

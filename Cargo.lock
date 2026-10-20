@@ -7027,6 +7027,7 @@ name = "octopus-git-sandbox-substrate"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
  "dirs",
  "dunce",
@@ -8037,8 +8038,11 @@ name = "octopus-system-workspace-env"
 version = "0.1.0"
 dependencies = [
  "octopus-descriptors",
+ "octopus-git-sandbox-substrate",
  "octopus-process-session-tool-runtime",
  "octopus-system-coder-env",
+ "octopus-worker-env",
+ "tempfile",
  "tokio",
 ]
 

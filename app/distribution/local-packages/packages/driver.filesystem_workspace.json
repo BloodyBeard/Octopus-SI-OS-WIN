@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.filesystem_workspace",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "product_kind": "driver",
   "product_id": "filesystem_workspace",
   "release_status": "optional",

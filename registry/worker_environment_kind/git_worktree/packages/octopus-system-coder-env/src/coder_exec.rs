@@ -50,6 +50,8 @@ async fn execute(
 pub(crate) async fn start_command(
     ctx: &ToolHandlerContext,
     call: &ToolCall,
+    call_identity: &str,
+    inherited_env: &std::collections::BTreeSet<String>,
     config: &CoderHandlerConfig,
     manager: &octopus_git_sandbox::GitWorktreeProcessManager,
     worker_environment_id: &WorkerEnvironmentId,
@@ -134,14 +136,16 @@ pub(crate) async fn start_command(
             sandbox_mode,
             argv,
             cwd.as_path().to_path_buf(),
-            std::collections::BTreeMap::from([
-                ("HOME".to_string(), home),
-                ("PATH".to_string(), path),
-            ]),
+            inherited_env
+                .iter()
+                .filter_map(|name| std::env::var(name).ok().map(|value| (name.clone(), value)))
+                .chain([("HOME".to_string(), home), ("PATH".to_string(), path)])
+                .collect(),
             tty,
             yield_time_ms,
             max_output_bytes,
             limits,
+            Some(call_identity),
         )
         .await
         .map_err(|reason| ToolHandlerError::Execution {
@@ -154,6 +158,7 @@ pub(crate) async fn start_command(
 pub(crate) async fn write_stdin(
     ctx: &ToolHandlerContext,
     call: &ToolCall,
+    call_identity: &str,
     config: &CoderHandlerConfig,
     manager: &octopus_git_sandbox::GitWorktreeProcessManager,
     worker_environment_id: &WorkerEnvironmentId,
@@ -202,6 +207,7 @@ pub(crate) async fn write_stdin(
             chars.as_bytes(),
             yield_time_ms,
             max_output_bytes,
+            Some(call_identity),
         )
         .await
         .map_err(|reason| ToolHandlerError::Execution {
@@ -214,6 +220,7 @@ pub(crate) async fn write_stdin(
 pub(crate) async fn process_signal(
     ctx: &ToolHandlerContext,
     call: &ToolCall,
+    call_identity: &str,
     config: &CoderHandlerConfig,
     manager: &octopus_git_sandbox::GitWorktreeProcessManager,
     worker_environment_id: &WorkerEnvironmentId,
@@ -234,6 +241,7 @@ pub(crate) async fn process_signal(
             &process_id,
             yield_time_ms,
             max_output_bytes,
+            Some(call_identity),
         )
         .await
         .map_err(|reason| ToolHandlerError::Execution {
@@ -246,6 +254,7 @@ pub(crate) async fn process_signal(
 pub(crate) async fn process_terminate(
     ctx: &ToolHandlerContext,
     call: &ToolCall,
+    call_identity: &str,
     config: &CoderHandlerConfig,
     manager: &octopus_git_sandbox::GitWorktreeProcessManager,
     worker_environment_id: &WorkerEnvironmentId,
@@ -259,6 +268,7 @@ pub(crate) async fn process_terminate(
             &process_id,
             yield_time_ms,
             max_output_bytes,
+            Some(call_identity),
         )
         .await
         .map_err(|reason| ToolHandlerError::Execution {
@@ -277,6 +287,10 @@ pub(crate) async fn process_list(
     let processes = manager
         .list(worker_environment_id)
         .await
+        .map_err(|reason| ToolHandlerError::Execution {
+            tool_id: call.tool_id.clone(),
+            reason,
+        })?
         .into_iter()
         .map(|process| {
             Ok(serde_json::json!({

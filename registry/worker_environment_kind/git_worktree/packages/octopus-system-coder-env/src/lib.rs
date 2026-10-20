@@ -34,6 +34,7 @@ const REPO_ROOT_SLOT: &str = "repo_root";
 const WORKTREE_ROOT_SLOT: &str = "worktree_root";
 const WORKSPACE_ROOT_SLOT: &str = "workspace_root";
 const GIT_COMMON_ROOT_SLOT: &str = "git_common_root";
+const INTERFACE_LOCAL_IPC_ROOT_SLOT: &str = "interface_local_ipc_root";
 const NEUTRAL_TOOL_CALL_LABEL: &str = "tool.call";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -159,6 +160,7 @@ impl SystemCoderEnv {
         git_common_root: PathBuf,
         worktree_state_root: PathBuf,
         handler: Arc<dyn ToolHandler>,
+        process_store: Option<octopus_git_sandbox::GitWorktreeProcessStore>,
     ) -> Result<Self, String> {
         let repo_root = AbsPath::new(&repo_root)
             .map_err(|error| format!("system_coder_env repo root failed closed: {error}"))?
@@ -187,7 +189,9 @@ impl SystemCoderEnv {
                 worktree_state_root,
             },
             handler,
-            process_manager: Arc::new(octopus_git_sandbox::GitWorktreeProcessManager::new()),
+            process_manager: Arc::new(octopus_git_sandbox::GitWorktreeProcessManager::new(
+                process_store,
+            )),
             floor_runner: Arc::new(FloorRunner::default()),
             rooms: tokio::sync::Mutex::new(BTreeMap::new()),
         })
@@ -197,6 +201,7 @@ impl SystemCoderEnv {
         interface: InterfaceId,
         workspace_root: PathBuf,
         handler: Arc<dyn ToolHandler>,
+        process_store: Option<octopus_git_sandbox::GitWorktreeProcessStore>,
     ) -> Result<Self, String> {
         let workspace_root = AbsPath::new(&workspace_root)
             .map_err(|error| format!("system_workspace_env root failed closed: {error}"))?
@@ -206,7 +211,9 @@ impl SystemCoderEnv {
             interface,
             room: CoderRoom::Direct { workspace_root },
             handler,
-            process_manager: Arc::new(octopus_git_sandbox::GitWorktreeProcessManager::new()),
+            process_manager: Arc::new(octopus_git_sandbox::GitWorktreeProcessManager::new(
+                process_store,
+            )),
             floor_runner: Arc::new(FloorRunner::default()),
             rooms: tokio::sync::Mutex::new(BTreeMap::new()),
         })
@@ -226,6 +233,7 @@ impl SystemCoderEnv {
             env.root_slot(GIT_COMMON_ROOT_SLOT)?.to_path_buf(),
             worktree_state_root,
             handler,
+            process_store(env)?,
         )
     }
 
@@ -237,6 +245,7 @@ impl SystemCoderEnv {
             env.interface.clone(),
             env.root_slot(WORKSPACE_ROOT_SLOT)?.to_path_buf(),
             handler,
+            process_store(env)?,
         )
     }
 
@@ -244,6 +253,7 @@ impl SystemCoderEnv {
         &self,
         descriptor: ToolDescriptor,
         input: InterfaceInvocationEnvelope,
+        source_movement_seq: u64,
         formation: WorkerEnvironmentFormation,
         kind: WorkerEnvKindSpec,
         io: &ToolProcessIo,
@@ -269,6 +279,7 @@ impl SystemCoderEnv {
             .execute_tool_call(
                 decoded.scope,
                 decoded.call,
+                &format!("movement:{source_movement_seq}"),
                 &descriptor,
                 &formation,
                 &kind,
@@ -291,6 +302,7 @@ impl SystemCoderEnv {
         &self,
         scope: CoderInvocationScope,
         mut call: ToolCall,
+        call_identity: &str,
         descriptor: &ToolDescriptor,
         formation: &WorkerEnvironmentFormation,
         kind: &WorkerEnvKindSpec,
@@ -342,23 +354,6 @@ impl SystemCoderEnv {
                 "branch_deleted": true,
                 "worktree_deleted": true
             })));
-        }
-        if matches!(
-            handler_config.operation,
-            CoderOperation::WriteStdin
-                | CoderOperation::ProcessSignal
-                | CoderOperation::ProcessTerminate
-        ) && !self
-            .rooms
-            .lock()
-            .await
-            .contains_key(&formation.worker_environment_id)
-        {
-            return Err(format!(
-                "worker environment '{}' has no active room for process continuation",
-                formation.worker_environment_id
-            )
-            .into());
         }
         if !self
             .rooms
@@ -453,6 +448,8 @@ impl SystemCoderEnv {
             CoderOperation::StartCommand => coder_exec::start_command(
                 &ctx,
                 &call,
+                call_identity,
+                &descriptor.process.inherit_env,
                 &handler_config,
                 &self.process_manager,
                 &formation.worker_environment_id,
@@ -464,6 +461,7 @@ impl SystemCoderEnv {
             CoderOperation::ProcessSignal => coder_exec::process_signal(
                 &ctx,
                 &call,
+                call_identity,
                 &handler_config,
                 &self.process_manager,
                 &formation.worker_environment_id,
@@ -473,6 +471,7 @@ impl SystemCoderEnv {
             CoderOperation::ProcessTerminate => coder_exec::process_terminate(
                 &ctx,
                 &call,
+                call_identity,
                 &handler_config,
                 &self.process_manager,
                 &formation.worker_environment_id,
@@ -490,6 +489,7 @@ impl SystemCoderEnv {
             CoderOperation::WriteStdin => coder_exec::write_stdin(
                 &ctx,
                 &call,
+                call_identity,
                 &handler_config,
                 &self.process_manager,
                 &formation.worker_environment_id,
@@ -612,6 +612,7 @@ impl ToolProcessHandler for SystemCoderEnv {
             self.receive(
                 invocation.descriptor,
                 invocation.envelope,
+                invocation.source_movement_seq,
                 formation,
                 kind,
                 &io,
@@ -691,9 +692,6 @@ impl ToolProcessHandler for SystemCoderEnv {
             if let Err(error) = self.floor_runner.quiesce().await {
                 errors.push(error);
             }
-            if let Err(error) = self.process_manager.release_all().await {
-                errors.push(error);
-            }
             if errors.is_empty() {
                 Ok(())
             } else {
@@ -703,7 +701,24 @@ impl ToolProcessHandler for SystemCoderEnv {
     }
 }
 
+fn process_store(
+    env: &ToolProcessEnvironment,
+) -> Result<Option<octopus_git_sandbox::GitWorktreeProcessStore>, String> {
+    let (Some(durable), Some(sockets)) = (
+        env.durable_var_dir.as_deref(),
+        env.root_slots.get(INTERFACE_LOCAL_IPC_ROOT_SLOT),
+    ) else {
+        return Ok(None);
+    };
+    let keeper = std::env::current_exe()
+        .map_err(|error| format!("persistent process keeper executable is unavailable: {error}"))?;
+    octopus_git_sandbox::GitWorktreeProcessStore::new(durable, sockets, keeper).map(Some)
+}
+
 async fn run_coder_tool_process(handler: Arc<dyn ToolHandler>) -> Result<(), String> {
+    if let Some(spec) = octopus_git_sandbox::persistent_process_keeper_spec(std::env::args_os()) {
+        return octopus_git_sandbox::run_persistent_process_keeper(spec).await;
+    }
     let env = ToolProcessEnvironment::from_env()?;
     let process = Arc::new(SystemCoderEnv::load_from_process_environment(
         &env, handler,
@@ -712,6 +727,9 @@ async fn run_coder_tool_process(handler: Arc<dyn ToolHandler>) -> Result<(), Str
 }
 
 async fn run_workspace_tool_process(handler: Arc<dyn ToolHandler>) -> Result<(), String> {
+    if let Some(spec) = octopus_git_sandbox::persistent_process_keeper_spec(std::env::args_os()) {
+        return octopus_git_sandbox::run_persistent_process_keeper(spec).await;
+    }
     let env = ToolProcessEnvironment::from_env()?;
     let process = Arc::new(SystemCoderEnv::load_direct_from_process_environment(
         &env, handler,

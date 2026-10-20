@@ -23,6 +23,7 @@ octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
 octopus-sandbox-base = { package = "octopus-sandbox-substrate", path = "../../../process_session/packages/octopus-sandbox-substrate" }
 octopus-applypatch = { path = "../octopus-applypatch" }
 octopus-file-system = { path = "../../../process_session/packages/octopus-file-system" }
+base64 = "0.22.1"
 blake3.workspace = true
 serde.workspace = true
 

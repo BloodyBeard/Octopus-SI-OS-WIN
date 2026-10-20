@@ -10,7 +10,8 @@
   },
   "process": {
     "bin": "target/debug/octopus-workspace-exec-tool",
-    "inherit_env": ["HOME", "PATH"],
+    "interrupted_effect_recovery": "reinvoke_exact_artifact",
+    "inherit_env": ["HOME", "OCTOPUS_HOME", "PATH"],
     "authority": {
       "read_root_slots": ["registry_worker_environment_kind_root", "workspace_root"],
       "write_root_slots": ["workspace_root"], "executable_root_slots": ["workspace_root"],

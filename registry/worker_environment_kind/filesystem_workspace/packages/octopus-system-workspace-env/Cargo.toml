@@ -22,3 +22,9 @@ tokio = { workspace = true }
 octopus-descriptors = { path = "../../../../../crates/octopus-descriptors" }
 octopus-system-coder-env = { path = "../../../git_worktree/packages/octopus-system-coder-env" }
 octopus-tool-door-runtime = { package = "octopus-process-session-tool-runtime", path = "../../../process_session/packages/octopus-process-session-tool-runtime" }
+
+[dev-dependencies]
+octopus-git-sandbox = { package = "octopus-git-sandbox-substrate", path = "../../../git_worktree/packages/octopus-git-sandbox-substrate" }
+octopus-worker-env = { path = "../../../../../crates/octopus-worker-env" }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

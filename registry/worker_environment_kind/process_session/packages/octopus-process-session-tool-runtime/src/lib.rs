@@ -1417,6 +1417,7 @@ impl ToolProcessIo {
 }
 
 pub async fn run_tool_process(handler: Arc<dyn ToolProcessHandler>) -> Result<(), String> {
+    seal_inherited_descriptors();
     let environment = ToolProcessEnvironment::from_env()?;
     let host_io_limits = environment.host_io_limits;
     let input_root = environment.var_dir.join("invocations");
@@ -1537,6 +1538,20 @@ pub async fn run_tool_process(handler: Arc<dyn ToolProcessHandler>) -> Result<()
         (Ok(()), Ok(())) => Ok(()),
     }
 }
+
+#[cfg(unix)]
+fn seal_inherited_descriptors() {
+    let ceiling = unsafe { libc::getdtablesize() }.clamp(3, 65_536);
+    for descriptor in 3..ceiling {
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+            unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn seal_inherited_descriptors() {}
 
 async fn finish_tool_process_output_writer(
     output_task: &mut Option<tokio::task::JoinHandle<Result<(), String>>>,
@@ -3454,6 +3469,13 @@ impl ToolProcessBrokerHost {
             }
         };
         if let Err(error) =
+            quiesce_orphaned_generation_owners(&generation_root, &active_generations).await
+        {
+            return ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable {
+                error,
+            });
+        }
+        if let Err(error) =
             reconcile_tool_process_generations(&generation_root, &active_generations)
         {
             return ToolProcessBrokerInvocation::Outcome(ToolProcessBrokerResult::Unavailable {
@@ -4192,6 +4214,9 @@ impl ToolProcessBrokerState {
             }
         }
         if !self.processes.contains_key(&process_key) {
+            if let Err(error) = quiesce_orphaned_generation_owner(ctx, &process_key).await {
+                return ToolProcessBrokerResult::Unavailable { error };
+            }
             let arguments_for_spawn = effective_declaration
                 .authority
                 .has_argument_paths()
@@ -6104,6 +6129,80 @@ fn signal_tool_process_group(process_group_id: i32, _signal: i32) -> Result<(), 
     Err(format!(
         "tool process group {process_group_id} cannot be signalled on this platform"
     ))
+}
+
+async fn quiesce_orphaned_generation_owner(
+    ctx: &InterfaceLiftContext,
+    process_key: &ToolProcessKey,
+) -> Result<(), String> {
+    let generation = tool_process_generation_root(ctx)?
+        .join(tool_process_generation_key_from_process_key(process_key)?);
+    quiesce_orphaned_generation(&generation).await
+}
+
+async fn quiesce_orphaned_generation_owners(
+    root: &Path,
+    active: &BTreeSet<String>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "tool process generation root '{}' cannot be read: {error}",
+                root.display()
+            ));
+        }
+    };
+    let mut orphaned = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "tool process generation root '{}' contains an unreadable entry: {error}",
+                root.display()
+            )
+        })?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()) && !active.contains(&name) {
+            orphaned.push(entry.path());
+        }
+    }
+    orphaned.sort();
+    for generation in orphaned {
+        quiesce_orphaned_generation(&generation).await?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn quiesce_orphaned_generation(generation: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(generation) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(format!(
+                "tool process generation '{}' is not a regular directory",
+                generation.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "tool process generation '{}' cannot be inspected: {error}",
+                generation.display()
+            ));
+        }
+    }
+    let Some(record) = read_tool_process_owner_record(generation)? else {
+        return Ok(());
+    };
+    quiesce_tool_process_owner_generation(generation, &record).await
+}
+
+#[cfg(not(unix))]
+async fn quiesce_orphaned_generation(_generation: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn read_tool_process_owner_record(
