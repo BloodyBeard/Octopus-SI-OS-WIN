@@ -137,7 +137,7 @@ async function immutableClientAction(row) {
   );
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Client action payload must be UTF-8 JSON.");
-  const { parseClientAction } = await import("./clientActionSemantics.mjs");
+  const { parseClientAction } = await import("../clientActionSemantics.mjs");
   return parseClientAction(JSON.parse(text));
 }
 
