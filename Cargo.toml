@@ -30,6 +30,15 @@ notify = "8.2"
 incremental = false
 debug = 0
 
+[profile.dev.package.blake3]
+opt-level = 3
+
+[profile.dev.package.jsonschema]
+opt-level = 3
+
+[profile.dev.package.serde_json]
+opt-level = 3
+
 [profile.test]
 incremental = false
 debug = 0

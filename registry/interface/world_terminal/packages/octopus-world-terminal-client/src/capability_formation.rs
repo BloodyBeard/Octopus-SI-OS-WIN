@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use octopus_descriptors::{
-    ArtifactId, EeId, EeTemplateId, InterfaceId, ToolId, WorkerEnvironmentKindId,
+    ArtifactId, DescriptorName, EeId, EeTemplateId, InterfaceId, ToolId, WorkerEnvironmentKindId,
 };
 use octopus_ee::{EeInstance, EeInstancePolicyNarrowing, EeTemplateDescriptor};
 use octopus_interfaces::{
-    InterfaceDescriptor, InterfaceRuntimeDisposition, form_interface_runtime_disposition,
-    scan_worker_interface_policies,
+    InterfaceDescriptor, InterfaceRuntimeDisposition, WorkerInterfacePolicyScan,
+    form_interface_runtime_disposition, scan_worker_interface_policies,
 };
 use octopus_policy::{
     CapSet, CopyLineage, FormationPin, FormedInterfacePolicy, WorkerInterfacePolicy,
@@ -157,13 +157,81 @@ pub fn form_capability_topology(
     registry_root: &Path,
     request: &CapabilityFormationRequest,
 ) -> Result<FormedCapabilityTopology, CapabilityFormationError> {
-    let interface_root = registry_root.join("interface");
-    let loaded_interfaces =
-        octopus_descriptors::loader::load_kind::<InterfaceDescriptor>(&interface_root)
-            .map_err(|error| registry_error("interface", error))?;
+    CapabilityRegistry::load(registry_root).form(request)
+}
+
+pub struct CapabilityRegistry {
+    registry_root: PathBuf,
+    interfaces: Result<(Vec<(DescriptorName, InterfaceDescriptor)>, WorkerInterfacePolicyScan), String>,
+    tools: Result<Vec<ToolDescriptor>, String>,
+    ee_templates: Result<BTreeMap<EeTemplateId, EeTemplateDescriptor>, String>,
+    worker_environment_kinds: Result<BTreeMap<WorkerEnvironmentKindId, WorkerEnvKindSpec>, String>,
+}
+
+impl CapabilityRegistry {
+    pub fn load(registry_root: &Path) -> Self {
+        let interface_root = registry_root.join("interface");
+        let interfaces = octopus_descriptors::loader::load_kind::<InterfaceDescriptor>(&interface_root)
+            .map(|loaded| {
+                let scan = scan_worker_interface_policies(&interface_root, &loaded);
+                (loaded, scan)
+            })
+            .map_err(|error| error.to_string());
+        let tools = octopus_tool_registry::load_tool_descriptors(registry_root)
+            .map(|loaded| loaded.into_iter().map(|(_, descriptor)| descriptor).collect())
+            .map_err(|error| error.to_string());
+        let ee_templates = octopus_descriptors::loader::load_kind::<EeTemplateDescriptor>(
+            &registry_root.join("ee_template"),
+        )
+        .map(|loaded| {
+            loaded
+                .into_iter()
+                .map(|(_, descriptor)| (descriptor.id.clone(), descriptor))
+                .collect()
+        })
+        .map_err(|error| error.to_string());
+        let worker_environment_kinds =
+            WorkerEnvKindRegistry::load_from_dir(&registry_root.join("worker_environment_kind"))
+                .map(|registry| {
+                    registry
+                        .head_specs()
+                        .map(|kind| (kind.worker_environment_kind_id.clone(), (*kind).clone()))
+                        .collect()
+                })
+                .map_err(|error| error.to_string());
+        Self {
+            registry_root: registry_root.to_path_buf(),
+            interfaces,
+            tools,
+            ee_templates,
+            worker_environment_kinds,
+        }
+    }
+
+    pub fn registry_root(&self) -> &Path {
+        &self.registry_root
+    }
+
+    pub fn form(
+        &self,
+        request: &CapabilityFormationRequest,
+    ) -> Result<FormedCapabilityTopology, CapabilityFormationError> {
+        form_from_registry(self, request)
+    }
+}
+
+fn form_from_registry(
+    registry: &CapabilityRegistry,
+    request: &CapabilityFormationRequest,
+) -> Result<FormedCapabilityTopology, CapabilityFormationError> {
+    let interface_root = registry.registry_root.join("interface");
+    let (loaded_interfaces, policy_scan) = registry
+        .interfaces
+        .as_ref()
+        .map_err(|error| registry_error("interface", error))?;
     let interfaces = loaded_interfaces
         .iter()
-        .map(|(_, descriptor)| (descriptor.id.clone(), descriptor.clone()))
+        .map(|(_, descriptor)| (descriptor.id.clone(), descriptor))
         .collect::<BTreeMap<_, _>>();
     let worker = interfaces.get(&request.worker).ok_or_else(|| {
         contract(format!(
@@ -171,7 +239,6 @@ pub fn form_capability_topology(
             request.worker.as_str()
         ))
     })?;
-    let policy_scan = scan_worker_interface_policies(&interface_root, &loaded_interfaces);
     if let Some(reason) = policy_scan.refusals.get(&request.worker) {
         return Err(contract(format!(
             "worker interface '{}' policy is refused: {reason}",
@@ -185,12 +252,13 @@ pub fn form_capability_topology(
         ))
     })?;
 
-    let tool_descriptors = octopus_tool_registry::load_tool_descriptors(registry_root)
+    let tool_descriptors = registry
+        .tools
+        .as_ref()
         .map_err(|error| registry_error("tool", error))?;
     let tools = tool_descriptors
-        .into_iter()
-        .map(|(_, descriptor)| descriptor)
-        .chain(request.planned_tools.iter().cloned())
+        .iter()
+        .chain(&request.planned_tools)
         .map(|descriptor| (ToolId::new(descriptor.id.as_str()), descriptor))
         .collect::<BTreeMap<_, _>>();
     let mut copy_lineage = CopyLineage::default();
@@ -209,8 +277,11 @@ pub fn form_capability_topology(
         }
     }
 
-    let ee_templates = load_ee_templates(registry_root)?;
-    let ee_chain = resolve_ee_chain(request, &ee_templates)?;
+    let ee_templates = registry
+        .ee_templates
+        .as_ref()
+        .map_err(|error| registry_error("ee_template", error))?;
+    let ee_chain = resolve_ee_chain(request, ee_templates)?;
     ensure_worker_admitted_by_ee_chain(
         worker,
         &ee_chain,
@@ -289,16 +360,13 @@ pub fn form_capability_topology(
         interface_policies.insert(interface_id.clone(), policy);
     }
 
-    let wek_registry =
-        WorkerEnvKindRegistry::load_from_dir(&registry_root.join("worker_environment_kind"))
-            .map_err(|error| CapabilityFormationError::Registry {
-                surface: "worker_environment_kind",
-                reason: error.to_string(),
-            })?;
-    let worker_environment_kinds = wek_registry
-        .head_specs()
-        .map(|kind| (kind.worker_environment_kind_id.clone(), (*kind).clone()))
-        .collect::<BTreeMap<_, _>>();
+    let worker_environment_kinds = registry
+        .worker_environment_kinds
+        .as_ref()
+        .map_err(|error| CapabilityFormationError::Registry {
+            surface: "worker_environment_kind",
+            reason: error.clone(),
+        })?;
 
     let mut tool_bindings = BTreeMap::<InterfaceId, ToolCapabilityBinding>::new();
     let mut routed_tools = BTreeSet::new();
@@ -328,13 +396,13 @@ pub fn form_capability_topology(
             tool_id,
             tool,
             &formed.context.wek,
-            &worker_environment_kinds,
+            worker_environment_kinds,
         )?;
         let binding =
             tool_bindings
                 .entry(owner.id.clone())
                 .or_insert_with(|| ToolCapabilityBinding {
-                    interface: owner.clone(),
+                    interface: InterfaceDescriptor::clone(owner),
                     tools: Vec::new(),
                     worker_environment_kinds: Vec::new(),
                     sidecars: Vec::new(),
@@ -415,7 +483,7 @@ pub fn form_capability_topology(
             worker_relays.insert(
                 interface.id.clone(),
                 WorkerRelayCapabilityBinding {
-                    interface: interface.clone(),
+                    interface: InterfaceDescriptor::clone(interface),
                     role_artifacts: policy_scan
                         .policies
                         .get(&interface.id)
@@ -737,19 +805,6 @@ pub fn resolve_live_ee_policy_chain(
     }
     chain.reverse();
     Ok(chain)
-}
-
-fn load_ee_templates(
-    registry_root: &Path,
-) -> Result<BTreeMap<EeTemplateId, EeTemplateDescriptor>, CapabilityFormationError> {
-    let loaded = octopus_descriptors::loader::load_kind::<EeTemplateDescriptor>(
-        &registry_root.join("ee_template"),
-    )
-    .map_err(|error| registry_error("ee_template", error))?;
-    Ok(loaded
-        .into_iter()
-        .map(|(_, descriptor)| (descriptor.id.clone(), descriptor))
-        .collect())
 }
 
 fn resolve_ee_chain<'a>(

@@ -15,13 +15,14 @@ pub(crate) fn plan_operator_chat_topology_files(
     request: &OperatorChatPlanRequest,
     preserve_existing_writers: bool,
 ) -> Result<OperatorChatPlan, String> {
-    plan_operator_chat_topology_files_for_source(request, preserve_existing_writers, None)
+    plan_operator_chat_topology_files_for_source(request, preserve_existing_writers, None, None)
 }
 
 pub(crate) fn plan_operator_chat_topology_files_for_source(
     request: &OperatorChatPlanRequest,
     preserve_existing_writers: bool,
     native_metadata: Option<&octopus_ledger::InvocationMetadata>,
+    selected_worker: Option<(CapabilityRegistry, run_composition::current_run::CurrentWorkerPlanning)>,
 ) -> Result<OperatorChatPlan, String> {
     let chat_id = safe_segment(&request.chat_id, "chat_id")?;
     let cycle = safe_segment(&request.cycle, "cycle")?;
@@ -60,14 +61,21 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
     if retain_current_capabilities && request.existing_run_record.is_none() {
         return Err("retained capability planning requires its existing record".into());
     }
+    let (capabilities, selected_worker) = match selected_worker {
+        Some((capabilities, worker)) if retain_current_capabilities && capabilities.registry_root() == registry_root => (capabilities, Some(worker)),
+        Some(_) => return Err("a selected current worker requires retained planning over its own registry".into()),
+        None => (CapabilityRegistry::load(registry_root), None),
+    };
     let current_worker = if retain_current_capabilities {
         let existing = request.existing_run_record.as_ref().ok_or("retained capability planning requires its existing record")?;
         let current = RunRecord::from_bytes(&serde_json::to_vec(existing).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-        Some(run_composition::current_run::form_current_worker(registry_root, ee_policy_root, &current,
-            selection.chat_interface_id.as_deref().ok_or("existing-run planning has no client owner")?, &chat_id)?)
+        let client = selection.chat_interface_id.as_deref().ok_or("existing-run planning has no client owner")?;
+        Some(match selected_worker {
+            Some(worker) => worker.for_selection(&capabilities, ee_policy_root, &current, client, &chat_id)?,
+            None => run_composition::current_run::form_current_worker(&capabilities, ee_policy_root, &current, client, &chat_id)?,
+        })
     } else { None };
-    let topology = if let Some(current) = &current_worker { current.topology.clone() } else { form_capability_topology(
-        registry_root,
+    let topology = if let Some(current) = &current_worker { current.topology.clone() } else { capabilities.form(
         &CapabilityFormationRequest::from_live_chain(
             InterfaceId::new(&selection.worker_choice_interface),
             chain.iter().cloned(),
@@ -439,7 +447,7 @@ pub(crate) fn plan_operator_chat_topology_files_for_source(
     } else { run_record_content };
     let (run_record_content, mut maintenance_runs) = maintenance_attachment::wire(
         maintenance_attachment::AttachmentRequest {
-            registry_root,
+            capabilities: &capabilities,
             ee_instances_root: ee_policy_root,
             run_records_root: request.run_records_root.as_deref(),
             interface_private_state_root: request.interface_private_state_root.as_deref(),

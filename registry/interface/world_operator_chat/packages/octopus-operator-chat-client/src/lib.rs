@@ -12,7 +12,7 @@ use octopus_policy::{
 use octopus_runtime::run_record::{ArtifactBinding, RunRecord};
 use octopus_tool_registry::{ToolDescriptor, load_tool_descriptor_from_dir};
 use octopus_world_terminal_client::{
-    CapabilityFormationRequest, FormedCapabilityTopology, form_capability_topology,
+    CapabilityFormationRequest, CapabilityRegistry, FormedCapabilityTopology, form_capability_topology,
     resolve_live_ee_policy_chain,
 };
 use sha2::{Digest, Sha256};

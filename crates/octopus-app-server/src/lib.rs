@@ -31,7 +31,7 @@ pub use artifact_arrival::{
 mod context_artifact_cache;
 mod registry_reference_graph;
 pub use registry_reference_graph::{
-    RegistryCandidateValidation, RegistryCandidateWrite, RegistryValidationIssue,
+    RegistryCandidateStage, RegistryCandidateValidation, RegistryCandidateWrite, RegistryValidationIssue,
     RegistryValidationRoots, RegistryValidationStage, registry_tool_output_sources,
     registry_worker_policy_issues, validate_registry_candidate, validate_registry_candidate_with_inspector,
 };

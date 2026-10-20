@@ -69,6 +69,16 @@ pub(crate) struct CurrentWorkerPlanning {
     pub tools: BTreeMap<String, ToolDescriptor>,
     pub retained_doors: BTreeSet<String>,
     selected_tools: Vec<SelectedToolSeed>,
+    formed_for: (PathBuf, PathBuf, RunRecord, String, String),
+}
+
+impl CurrentWorkerPlanning {
+    pub(crate) fn for_selection(self, capabilities: &CapabilityRegistry, ee_root: &Path, current: &RunRecord, client: &str, chat_id: &str) -> Result<Self, String> {
+        if self.formed_for != (capabilities.registry_root().to_path_buf(), ee_root.to_path_buf(), current.clone(), client.to_string(), chat_id.to_string()) {
+            return Err("selected current worker was formed for another registry, run or client".into());
+        }
+        Ok(self)
+    }
 }
 
 fn current_nested_tools(
@@ -185,9 +195,10 @@ fn current_nested_tools(
     Ok(selected)
 }
 
-pub(crate) fn form_current_worker(registry_root: &Path, ee_root: &Path, current: &RunRecord, client: &str, chat_id: &str) -> Result<CurrentWorkerPlanning, String> {
+pub(crate) fn form_current_worker(capabilities: &CapabilityRegistry, ee_root: &Path, current: &RunRecord, client: &str, chat_id: &str) -> Result<CurrentWorkerPlanning, String> {
+    let registry_root = capabilities.registry_root();
     let chain = resolve_live_ee_policy_chain(ee_root, &current.ee).map_err(|e|e.to_string())?;
-    let mut topology = form_capability_topology(registry_root, &CapabilityFormationRequest::from_live_chain(current.worker.clone(), chain)).map_err(|e|e.to_string())?;
+    let mut topology = capabilities.form(&CapabilityFormationRequest::from_live_chain(current.worker.clone(), chain)).map_err(|e|e.to_string())?;
     let policy: WorkerInterfacePolicy = serde_json::from_slice(&std::fs::read(registry_root.join("interface").join(current.worker.as_str()).join("policy.json")).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
     let state = json!(current.interface_state.get(&InterfaceId::new(client)).ok_or("current worker has no client owner")?);
     let provider = exact_field(&state,"provider_runtime_interface")?;
@@ -261,10 +272,16 @@ pub(crate) fn form_current_worker(registry_root: &Path, ee_root: &Path, current:
     projected.retain(|_,binding|!binding.tools.is_empty());
     topology.granted_tools=tools.keys().map(octopus_descriptors::ToolId::new).collect();
     topology.tool_bindings=projected;
-    Ok(CurrentWorkerPlanning {topology,policy,tools,retained_doors,selected_tools})
+    Ok(CurrentWorkerPlanning {topology,policy,tools,retained_doors,selected_tools,
+        formed_for:(registry_root.to_path_buf(),ee_root.to_path_buf(),current.clone(),client.to_string(),chat_id.to_string())})
 }
 
 pub fn current_selection(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId) -> Result<Option<CurrentRunSelection>, String> {
+    Ok(current_selection_with_worker(roots, current, provider)?.map(|(selection, _)| selection))
+}
+
+fn current_selection_with_worker(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId)
+    -> Result<Option<(CurrentRunSelection, (CapabilityRegistry, CurrentWorkerPlanning))>, String> {
     let clients = current.interface_state.iter().filter(|(_, state)| state.get("provider_runtime_interface").and_then(Value::as_str) == Some(provider.as_str())
         && state.contains_key("client_surface_role")).collect::<Vec<_>>();
     let [(client, _)] = clients.as_slice() else {
@@ -275,21 +292,23 @@ pub fn current_selection(roots: &CompositionRoots, current: &RunRecord, provider
     let profile: OctopusOsAuthoringProfile = parse(value.get("authoring_profile").ok_or("current client has no exact authoring profile")?)?;
     let config = load_client_config(&roots.registry_root.join("interface"))?;
     let chat_id = client.as_str().strip_prefix(&config.run.interface_prefix).ok_or("current client differs from its declared identity")?;
-    let tools=form_current_worker(&roots.registry_root,&roots.ee_instances_root,current,client.as_str(),chat_id)?.selected_tools;
+    let capabilities = CapabilityRegistry::load(&roots.registry_root);
+    let worker=form_current_worker(&capabilities,&roots.ee_instances_root,current,client.as_str(),chat_id)?;
+    let tools=worker.selected_tools.clone();
     if profile.selected_tools.iter().any(|tool| !tools.contains(tool)) {
         return Err("current explicit tool selection is not completely represented by its installed bindings".into());
     }
-    Ok(Some(CurrentRunSelection {
+    Ok(Some((CurrentRunSelection {
         selected_tools: tools, selected_worker_environment_kinds: profile.selected_worker_environment_kinds,
         door_host_slots: profile.door_host_slots, external_inputs: profile.external_inputs, external_relays: profile.external_relays,
         model_outputs: profile.model_outputs, context_artifact_bindings: profile.context_artifact_bindings,
         payload_artifact_bindings: profile.payload_artifact_bindings,
-    }))
+    }, (capabilities, worker))))
 }
 
 fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, key: &str, selection: CurrentRunSelection,
     publications: Vec<octopus_context_collections::CollectionSelection>, native_metadata: Option<&InvocationMetadata>) -> Result<(AuthoredCurrentRun, Vec<crate::publication_selection::PublicationSelectionEvidence>), String> {
-    let previous = current_selection(roots, current, provider)?.ok_or("this run has no client selection owner; supply its exact authored future record")?;
+    let (previous, selected_worker) = current_selection_with_worker(roots, current, provider)?.ok_or("this run has no client selection owner; supply its exact authored future record")?;
     let clients = current.interface_state.iter().filter(|(_, state)| state.get("provider_runtime_interface").and_then(Value::as_str) == Some(provider.as_str())
         && state.contains_key("client_surface_role")).collect::<Vec<_>>();
     let [(client, state)] = clients.as_slice() else { return Err("current run has no unique client planning owner".into()); };
@@ -313,7 +332,7 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
         conversation: parse(&json!({"ledger_offset":state["ledger_offset"], "artifact_bindings":state["conversation_artifact_bindings"],
             "pinned_artifact_bindings":state["pinned_artifact_bindings"], "pinned_context_items":state["pinned_context_items"], "continued_from":state["continued_from"]}))?,
     };
-    let plan = plan_operator_chat_topology_files_for_source(&request, true, native_metadata)?;
+    let plan = plan_operator_chat_topology_files_for_source(&request, true, native_metadata, Some(selected_worker))?;
     let selected = &plan.authoring_profile;
     retain_selection(&previous.selected_tools, &selected.selected_tools, "tools")?;
     retain_selection(&previous.selected_worker_environment_kinds, &selected.selected_worker_environment_kinds, "worker environment kinds")?;
@@ -520,7 +539,7 @@ fn plan_current_run_amendment_with_source(roots: &CompositionRoots, current: &Ru
         for ((tool, _), (current_inputs, future_inputs)) in retained_tools.iter().zip(&bridge_inputs) {
             let (inputs, result) = if index < publication_index {current_inputs} else {future_inputs};
             for input in inputs {
-                let grant = octopus_app_server::spine_root::inspect_registry_run_grant(&view.registry_root, &view.ee_instances_root, selected, input)?;
+                let grant = view.run_grant(selected, input)?;
                 if !grant.tools.iter().any(|id|id==tool) || grant.hard_blocked_tools.iter().any(|id|id==tool) {
                     return Err(format!("publication step {index} removes the actual formed bridge tool '{tool}'"));
                 }

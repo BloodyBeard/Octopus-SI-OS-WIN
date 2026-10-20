@@ -430,14 +430,13 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
     let suffix = &suffix[..24];
     let chain = resolve_live_ee_policy_chain(&roots.ee_instances_root, &EeId::new(&request.ee_id))
         .map_err(|e| e.to_string())?;
-    let mut topology = form_capability_topology(
-        &roots.registry_root,
-        &CapabilityFormationRequest::from_live_chain(
+    let capabilities = CapabilityRegistry::load(&roots.registry_root);
+    let mut topology = capabilities
+        .form(&CapabilityFormationRequest::from_live_chain(
             InterfaceId::new(&request.worker_template_interface_id),
             chain.iter().cloned(),
-        ),
-    )
-    .map_err(|e| e.to_string())?;
+        ))
+        .map_err(|e| e.to_string())?;
     let provider = resolve_provider(
         &interface_root,
         &request.provider_interface_id,
@@ -722,7 +721,7 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
     } else { identity.worker_interface_id.clone() };
     let (run_content, mut run_writes) = maintenance_attachment::wire(
         maintenance_attachment::AttachmentRequest {
-            registry_root: &roots.registry_root,
+            capabilities: &capabilities,
             ee_instances_root: &roots.ee_instances_root,
             run_records_root: Some(&roots.run_records_root),
             interface_private_state_root: Some(&roots.interface_private_state_root),

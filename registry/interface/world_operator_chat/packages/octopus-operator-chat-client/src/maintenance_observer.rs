@@ -84,6 +84,7 @@ pub fn plan_maintenance_observer(
     request: &MaintenanceObserverRequest,
     source_run: &RunRecord,
     source_writes: &[PlannedClientWrite],
+    capabilities: &CapabilityRegistry,
 ) -> Result<MaintenanceObserverPlan, String> {
     let cfg = &request.config;
     if cfg.schema_version != 1 {
@@ -284,14 +285,15 @@ pub fn plan_maintenance_observer(
     let run_id = format!("run_memory_observer_{suffix}");
     let chain = resolve_live_ee_policy_chain(&request.roots.ee_instances_root, &source_run.ee)
         .map_err(|e| e.to_string())?;
-    let topology = form_capability_topology(
-        registry,
-        &CapabilityFormationRequest::from_live_chain(
+    if capabilities.registry_root() != registry.as_path() {
+        return Err("maintenance capabilities were loaded from another registry root".into());
+    }
+    let topology = capabilities
+        .form(&CapabilityFormationRequest::from_live_chain(
             InterfaceId::new(&cfg.worker_template_interface_id),
             chain.iter().cloned(),
-        ),
-    )
-    .map_err(|e| e.to_string())?;
+        ))
+        .map_err(|e| e.to_string())?;
     let mut provider = resolve_provider(
         &interface_root,
         &request.source_provider_choice_interface_id,

@@ -616,10 +616,25 @@ pub fn validate_registry_candidate(
     validate_registry_candidate_with_inspector(roots, writes, |_, _| Ok(()))
 }
 
+pub struct RegistryCandidateStage<'a> {
+    pub roots: &'a RegistryValidationRoots,
+    snapshot: &'a Result<crate::spine_root::LoadedRegistrySnapshot, String>,
+}
+
+impl RegistryCandidateStage<'_> {
+    pub fn run_grant(
+        &self,
+        record: &octopus_runtime::run_record::RunRecord,
+        checkpoint: &octopus_descriptors::CheckpointId,
+    ) -> Result<octopus_interfaces::GrantProjection, String> {
+        crate::spine_root::prospective_run_grant(record, checkpoint, || self.snapshot.as_ref().map_err(Clone::clone))
+    }
+}
+
 pub fn validate_registry_candidate_with_inspector(
     roots: &RegistryValidationRoots,
     writes: &[RegistryCandidateWrite],
-    mut inspect: impl FnMut(usize, &RegistryValidationRoots) -> Result<(), String>,
+    mut inspect: impl FnMut(usize, &RegistryCandidateStage<'_>) -> Result<(), String>,
 ) -> Result<RegistryCandidateValidation, String> {
     let mut targets = BTreeSet::new();
     for write in writes {
@@ -656,11 +671,12 @@ pub fn validate_registry_candidate_with_inspector(
         }
     }
     let mut view = CandidateView::new(roots)?;
-    let mut stages = vec![view.inspect(0, None)?];
+    let (stage, snapshot) = view.inspect(0, None)?;
+    let mut stages = vec![stage];
     let prospective = RegistryValidationRoots {
         registry_root:view.root.join("registry"), ee_instances_root:view.root.join("ee"), run_records_root:view.root.join("runs"),
     };
-    inspect(0, &prospective)?;
+    inspect(0, &RegistryCandidateStage { roots: &prospective, snapshot: &snapshot })?;
     for (index, write) in writes.iter().enumerate() {
         let path = view.root.join(roots.relative_target(&write.path)?);
         view.materialize_parent(&path)?;
@@ -677,8 +693,9 @@ pub fn validate_registry_candidate_with_inspector(
         if relative.starts_with("runs") {
             view.refresh_run_record(&path)?;
         }
-        stages.push(view.inspect(index + 1, Some(&relative))?);
-        inspect(index + 1, &prospective)?;
+        let (stage, snapshot) = view.inspect(index + 1, Some(&relative))?;
+        stages.push(stage);
+        inspect(index + 1, &RegistryCandidateStage { roots: &prospective, snapshot: &snapshot })?;
     }
     let baseline = stages[0].issues.iter().cloned().collect::<BTreeSet<_>>();
     let existing = stages[0].available.iter().cloned().collect::<BTreeSet<_>>();
@@ -968,7 +985,7 @@ impl CandidateView {
         &mut self,
         after_write: usize,
         changed: Option<&Path>,
-    ) -> Result<RegistryValidationStage, String> {
+    ) -> Result<(RegistryValidationStage, Result<crate::spine_root::LoadedRegistrySnapshot, String>), String> {
         let registry = self.root.join("registry");
         let packages = RegistryPackages::load(&registry)?;
         let mut issues = packages
@@ -980,6 +997,13 @@ impl CandidateView {
                 checkpoint: None,
                 reason: self.original_paths(reason),
             })
+            .collect::<Vec<_>>();
+        let available_packages = packages
+            .graph
+            .available
+            .iter()
+            .filter(|node| packages.graph.is_available(node))
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let changed_subject = changed.map(|path| {
             let parts = path.components().collect::<Vec<_>>();
@@ -1020,11 +1044,11 @@ impl CandidateView {
             .map(|record| format!("run/{}", record.id))
             .collect::<BTreeSet<_>>();
         let mut available_ee = BTreeSet::new();
-        match crate::spine_root::validate_registry_run_contracts(
-            &registry,
-            &self.root.join("ee"),
-            &records,
-        ) {
+        let ee_root = self.root.join("ee");
+        let snapshot = crate::spine_root::LoadedRegistrySnapshot::load_from_packages(packages, &ee_root);
+        match snapshot.as_ref().map_err(Clone::clone).and_then(|snapshot| {
+            crate::spine_root::validate_registry_run_contracts(snapshot, &registry, &ee_root, &records)
+        }) {
             Ok((faults, dependencies, ee)) => {
                 self.snapshot_failed = false;
                 available_ee = ee;
@@ -1052,18 +1076,14 @@ impl CandidateView {
         issues.extend(self.record_issues.values().cloned());
         issues.extend(self.run_issues.iter().cloned());
         issues.sort();
-        Ok(RegistryValidationStage {
-            after_write,
-            issues,
-            available: packages
-                .graph
-                .available
-                .iter()
-                .filter(|node| packages.graph.is_available(node))
-                .map(ToString::to_string)
-                .chain(available_ee)
-                .collect(),
-        })
+        Ok((
+            RegistryValidationStage {
+                after_write,
+                issues,
+                available: available_packages.into_iter().chain(available_ee).collect(),
+            },
+            snapshot,
+        ))
     }
 
     fn original_paths(&self, value: &str) -> String {

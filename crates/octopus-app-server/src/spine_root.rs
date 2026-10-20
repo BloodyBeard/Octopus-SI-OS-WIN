@@ -44,7 +44,7 @@ use crate::registry_reference_graph::{
 mod commit;
 
 #[derive(Clone, Debug)]
-struct LoadedRegistrySnapshot {
+pub(crate) struct LoadedRegistrySnapshot {
     interfaces_loaded: Vec<(DescriptorName, InterfaceDescriptor)>,
     interfaces_by_id: BTreeMap<InterfaceId, InterfaceDescriptor>,
     interface_dispositions: BTreeMap<InterfaceId, InterfaceRuntimeDisposition>,
@@ -326,6 +326,14 @@ pub fn inspect_registry_run_grant(
     record: &octopus_runtime::run_record::RunRecord,
     checkpoint: &octopus_descriptors::CheckpointId,
 ) -> Result<octopus_interfaces::GrantProjection, String> {
+    prospective_run_grant(record, checkpoint, || LoadedRegistrySnapshot::load(registry_root, ee_instances_root))
+}
+
+pub(crate) fn prospective_run_grant<S: std::borrow::Borrow<LoadedRegistrySnapshot>>(
+    record: &octopus_runtime::run_record::RunRecord,
+    checkpoint: &octopus_descriptors::CheckpointId,
+    snapshot: impl FnOnce() -> Result<S, String>,
+) -> Result<octopus_interfaces::GrantProjection, String> {
     if !record.active_checkpoints.contains(checkpoint) { return Err("prospective grant requires an active checkpoint".into()); }
     let checkpoint = record.checkpoint(checkpoint).ok_or("prospective checkpoint is absent")?;
     let interfaces = record.active_checkpoints.iter().filter_map(|id|record.checkpoint(id))
@@ -334,11 +342,12 @@ pub fn inspect_registry_run_grant(
     let access = checkpoint.artifact_bindings.iter().map(|binding|(binding.id.clone(),binding.access)).collect();
     let query = RunGrantQuery {run:&record.id,checkpoint:&checkpoint.id,ee:&record.ee,worker:&record.worker,epoch:checkpoint.epoch,
         authored_interfaces:&interfaces,artifact_bindings:&artifacts,artifact_access:&access,required_verified_artifacts:&checkpoint.required_verified_artifacts};
-    let snapshot = LoadedRegistrySnapshot::load(registry_root,ee_instances_root)?;
-    snapshot.form_run_contract(&query).map(|(_,_,grant)|grant)
+    let snapshot = snapshot()?;
+    snapshot.borrow().form_run_contract(&query).map(|(_,_,grant)|grant)
 }
 
 pub(crate) fn validate_registry_run_contracts(
+    snapshot: &LoadedRegistrySnapshot,
     registry_root: &Path,
     ee_instances_root: &Path,
     records: &[octopus_runtime::run_record::RunRecord],
@@ -350,7 +359,6 @@ pub(crate) fn validate_registry_run_contracts(
     ),
     String,
 > {
-    let snapshot = LoadedRegistrySnapshot::load(registry_root, ee_instances_root)?;
     let mut issues = Vec::new();
     let available_ee = snapshot
         .ee_tree
@@ -1076,9 +1084,18 @@ impl LoadedRegistrySnapshot {
     }
 
     fn load(registry_root: &Path, ee_instances_dir: &Path) -> Result<Self, String> {
-        let mut ee_instances = load_persisted_ee_instances(ee_instances_dir)?;
+        let ee_instances = load_persisted_ee_instances(ee_instances_dir)?;
         let packages = RegistryPackages::load(registry_root)
             .map_err(|error| format!("artifact-arrival registry read failed: {error}"))?;
+        Self::from_packages(packages, ee_instances)
+    }
+
+    pub(crate) fn load_from_packages(packages: RegistryPackages, ee_instances_dir: &Path) -> Result<Self, String> {
+        let ee_instances = load_persisted_ee_instances(ee_instances_dir)?;
+        Self::from_packages(packages, ee_instances)
+    }
+
+    fn from_packages(packages: RegistryPackages, mut ee_instances: PersistedEeInstances) -> Result<Self, String> {
         let (ee_tree, _, mut topology_issues) = registry_ee_state(
             &packages.ee_templates,
             &packages.graph,

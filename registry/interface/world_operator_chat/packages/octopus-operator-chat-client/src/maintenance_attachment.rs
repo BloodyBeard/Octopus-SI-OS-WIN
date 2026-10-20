@@ -12,7 +12,7 @@ struct Selection {
 }
 
 pub(super) struct AttachmentRequest<'a> {
-    pub registry_root: &'a Path,
+    pub capabilities: &'a CapabilityRegistry,
     pub ee_instances_root: &'a Path,
     pub run_records_root: Option<&'a Path>,
     pub interface_private_state_root: Option<&'a Path>,
@@ -55,7 +55,7 @@ pub(super) fn wire(
         .map_err(|e| format!("client maintenance_observer selection: {e}"))?;
     selection_component(&selection.template_interface_id, "maintenance template")?;
     selection_component(&selection.config_file, "maintenance configuration file")?;
-    let owner = request.registry_root.join("interface").join(&selection.template_interface_id);
+    let owner = request.capabilities.registry_root().join("interface").join(&selection.template_interface_id);
     for path in [&owner, &owner.join(&selection.config_file)] {
         if std::fs::symlink_metadata(path).map_err(|e| e.to_string())?.file_type().is_symlink() {
             return Err("maintenance selection cannot follow a symlink".into());
@@ -69,7 +69,7 @@ pub(super) fn wire(
         return Err("maintenance configuration belongs to a different selected worker template".into());
     }
     let roots = CompositionRoots {
-        registry_root: request.registry_root.to_path_buf(),
+        registry_root: request.capabilities.registry_root().to_path_buf(),
         ee_instances_root: request.ee_instances_root.to_path_buf(),
         run_records_root: request.run_records_root
             .ok_or("maintenance attachment requires explicit run_records_root")?.to_path_buf(),
@@ -88,7 +88,7 @@ pub(super) fn wire(
         source_input_labels,
         config,
         write_hash_algorithm: request.write_hash_algorithm,
-    }, &record, writes)?;
+    }, &record, writes, request.capabilities)?;
     if !observer.source_required_artifact_bindings.is_empty() {
         return Err("maintenance source requires artifact bindings absent from its authored context".into());
     }
@@ -181,7 +181,7 @@ fn validate_retained(existing: &Value, declaration: &Value, identity: &PlannedId
 }
 
 fn retain_source_ceiling(request: &AttachmentRequest<'_>, relay: &str, writes: &mut [PlannedClientWrite]) -> Result<(), String> {
-    let root = request.registry_root.join("interface");
+    let root = request.capabilities.registry_root().join("interface");
     let descriptor = load_interface_descriptor(&root, relay)?;
     if descriptor.id.as_str() != relay || descriptor.interface_type != octopus_interfaces::InterfaceType::System {
         return Err("accepted maintenance relay is not its exact System interface".into());

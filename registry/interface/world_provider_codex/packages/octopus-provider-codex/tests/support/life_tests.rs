@@ -324,7 +324,6 @@
         let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         serde_json::to_writer(&mut file, movement).unwrap();
         std::io::Write::write_all(&mut file, b"\n").unwrap();
-        file.sync_all().unwrap();
         drop(file);
         sync_ledger_index(path);
     }

@@ -30,7 +30,7 @@ pub use account_items::{
     RateLimitSnapshotItem, RateLimitWindowItem, SpendLimitItem, rate_limit_snapshots_from_payload,
 };
 pub use capability_formation::{
-    CapabilityFormationError, CapabilityFormationRequest, CapabilitySidecarRequirement,
+    CapabilityFormationError, CapabilityFormationRequest, CapabilityRegistry, CapabilitySidecarRequirement,
     FormedCapabilityTopology, FormedToolCapability, LiveEePolicyLayer, ToolCapabilityBinding,
     WorkerRelayCapabilityBinding, form_capability_topology, resolve_live_ee_policy_chain,
     resolve_live_ee_template_chain,

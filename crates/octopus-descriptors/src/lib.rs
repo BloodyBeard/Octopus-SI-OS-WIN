@@ -120,16 +120,16 @@ fn write_canonical_json(value: &serde_json::Value, out: &mut Vec<u8>) {
             out.push(b']');
         }
         serde_json::Value::Object(members) => {
-            let mut keys = members.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
+            let mut entries = members.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
             out.push(b'{');
-            for (index, key) in keys.into_iter().enumerate() {
+            for (index, (key, member)) in entries.into_iter().enumerate() {
                 if index > 0 {
                     out.push(b',');
                 }
                 write_canonical_json_string(key, out);
                 out.push(b':');
-                write_canonical_json(&members[key], out);
+                write_canonical_json(member, out);
             }
             out.push(b'}');
         }
@@ -137,9 +137,7 @@ fn write_canonical_json(value: &serde_json::Value, out: &mut Vec<u8>) {
 }
 
 fn write_canonical_json_string(text: &str, out: &mut Vec<u8>) {
-    let encoded = serde_json::to_vec(&serde_json::Value::String(text.to_string()))
-        .expect("a JSON string always serializes");
-    out.extend_from_slice(&encoded);
+    serde_json::to_writer(&mut *out, text).expect("a JSON string always serializes");
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
