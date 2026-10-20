@@ -125,7 +125,7 @@ test('widget controls use actual extension receipts, exact document revisions an
   window.localStorage.clear();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'octopus-widget-controls-'));
   const store = require('../electron/clientExtensions.cjs').createClientExtensionStore({ root });
-  t.after(async () => { store.close(); delete window.octopusTransport; await fs.rm(root, { recursive: true, force: true }); });
+  t.after(async () => { await store.close(); delete window.octopusTransport; await fs.rm(root, { recursive: true, force: true }); });
   const bundled = require('esbuild').buildSync({ stdin: { contents: 'export * from "./src/client-surfaces/homeWidgetControls"; export {materializeClientExtensions} from "./src/extensions/useClientExtensions";', resolveDir: path.resolve(__dirname, '..') }, bundle: true, platform: 'node', format: 'cjs', write: false, external: ['react'], loader: { '.css': 'empty' }, define: { 'import.meta.env.DEV': 'false' } });
   const module = { exports: {} }; Function('module', 'exports', 'require', bundled.outputFiles[0].text)(module, module.exports, require);
   const { applyHomeWidgetAction, materializeClientExtensions, homeWidgetHiddenKey } = module.exports;

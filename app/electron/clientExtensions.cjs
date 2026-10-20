@@ -745,6 +745,7 @@ function createClientExtensionStore(options) {
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = null;
     closeWatcher();
+    return withExtensionStateLock(root, async () => {});
   }
 
   return {
