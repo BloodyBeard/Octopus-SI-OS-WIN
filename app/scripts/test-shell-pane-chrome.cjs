@@ -32,7 +32,7 @@ w.HTMLElement.prototype.releasePointerCapture = function () { capture.delete(thi
 const { createRoot } = require("react-dom/client");
 const { useMotionValue } = require("motion/react");
 const compiled = build({
-  stdin: { contents: "import './src/components/icon-glyphs/shell'; export * from './src/components/shell/WorkspaceSurfacePane'; export * from './src/components/shell/paneTabs'; export * from './src/components/shell/WorkspacePaneManager'; export * from './src/components/shell/WindowPaneControls'; export * from './src/components/shell/PanelResizeHandle'; export * from './src/components/shell/useClientPaneWindowDrag';", resolveDir: path.resolve(__dirname, ".."), loader: "tsx" },
+  stdin: { contents: "import './src/components/icon-glyphs/shell'; export * from './src/components/shell/WorkspaceSurfacePane'; export * from './src/components/shell/WorkspacePaneHeaderActions'; export * from './src/components/shell/paneTabs'; export * from './src/components/shell/WorkspacePaneManager'; export * from './src/components/shell/WindowPaneControls'; export * from './src/components/shell/PanelResizeHandle'; export * from './src/components/shell/useClientPaneWindowDrag';", resolveDir: path.resolve(__dirname, ".."), loader: "tsx" },
   bundle: true, platform: "node", format: "cjs", write: false, loader: { ".css": "empty" }, external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime", "motion/react"], logLevel: "silent",
 }).then(result => { const module = { exports: {} }; Function("require", "module", "exports", result.outputFiles[0].text)(require, module, module.exports); return module.exports; });
 const errors = [];
@@ -42,15 +42,19 @@ const flush = async () => React.act(async () => { await new Promise(resolve => s
 after(() => { assert.deepEqual(errors, []); dom.window.close(); });
 
 test("the window header owns pane tabs and the Tools surface retains content, selection and focus", async () => {
-  const { WorkspaceSurfacePane, WorkspacePaneManager, WindowPaneControlsProvider, useClientPaneWindowDrag, usePaneTabs } = await compiled;
-  const actions = [], closed = [], reorders = [], transfers = [];
+  const { WorkspaceSurfacePane, WorkspacePaneManager, WindowPaneControlsProvider, WorkspacePaneHeaderActions, useClientPaneWindowDrag, usePaneTabs } = await compiled;
+  const actions = [], closed = [], reorders = [], transfers = [], focusChanges = [];
   window.octopusTransport = { onClientPaneDragState: () => () => {}, beginClientPaneDrag: async () => {}, finishClientPaneDrag: async () => {}, cancelClientPaneDrag: async () => {} };
   const browserSource = ts.createSourceFile("browser.tsx", fs.readFileSync(path.join(__dirname, "../src/components/worker-environment/RunEnvironmentBrowserSurfaces.tsx"), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const geometrySource = browserSource.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "nativeBrowserGeometry");
   assert(geometrySource);
   const geometry = Function("window", ts.transpileModule(`${geometrySource.getText(browserSource)}\nreturn nativeBrowserGeometry;`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText)(window);
   let mounts = 0;
-  function Content() { React.useEffect(() => { mounts++; }, []); return React.createElement("input", { id: "retained", defaultValue: "unsaved text" }); }
+  function Content() {
+    React.useEffect(() => { mounts++; }, []);
+    return React.createElement(React.Fragment, null, React.createElement("input", { id: "retained", defaultValue: "unsaved text" }),
+      React.createElement(WorkspacePaneHeaderActions, null, React.createElement("button", { id: "surface-action", type: "button" }, "Share")));
+  }
   function Harness() {
     const width = useMotionValue(0);
     const model = usePaneTabs({ tabs: [{ id: "a", title: "Files", glyph: "folder", showWhenSingle: true }, { id: "b", title: "Terminal", glyph: "terminal", showWhenSingle: true }], activeTabId: "a" });
@@ -60,12 +64,12 @@ test("the window header owns pane tabs and the Tools surface retains content, se
       primary: "Primary", secondaryOpen: true, secondaryFocused: false, secondaryWidthPercent: 40, resolvedWidthMotion: width,
       onOpenChange() {}, onSecondaryFocusedChange() {}, onSecondaryWidthPercentChange() {},
       secondary: React.createElement(WorkspaceSurfacePane, {
-        controlsInWindowHeader: true, activeTabId, tabs, focused: false,
+        controlsInWindowHeader: true, activeTabId, tabs, focused: false, onFocusedChange: (next) => focusChanges.push(next),
         addActions: [{ id: "files", title: "Files", glyph: "folder" }, { id: "terminal", title: "Terminal", glyph: "terminal", shortcut: "⌃`" }],
         onNewTab() { model.openTab({ id: crypto.randomUUID(), title: "New tab", glyph: "browser", launcher: true, showWhenSingle: true }); },
         onAddAction(id) { actions.push(id); model.openTab(tabs.find(tab => tab.id === (id === "files" ? "a" : "b")), activeTabId); },
         canNativeDrag: tab => !tab.launcher,
-        onClose() { closed.push("pane"); }, onFocusedChange() {}, onTabSelect: select,
+        onClose() { closed.push("pane"); }, onTabSelect: select,
         onTabClose(id) { closed.push(id); model.closeTab(id); },
         onCloseOtherTabs() {}, onCloseTabsToRight() {}, onTabReorder: (...ids) => reorders.push(ids), onTabWindowPointerDown: (tab, event) => drag(tab.id, event),
       }, React.createElement(Content)),
@@ -77,6 +81,14 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   assert.equal(header.querySelectorAll(".workspace-surface-pane-header").length, 1);
   assert.ok(document.querySelector(".workspace-surface-pane .workspace-surface-pane-header") === null);
   assert.equal(header.querySelector(".pane-tabs-scroll .workspace-pane-tab-add"), null);
+  const controls = header.querySelector('[data-pane-manager-controls="true"]');
+  assert.ok(controls.dataset.paneManagerId);
+  assert.equal(header.querySelector("#surface-action").closest(".workspace-pane-header-actions") !== null, true, "a surface's header actions render in the window header");
+  assert.ok(!document.querySelector(".workspace-surface-pane-content #surface-action"));
+  const focus = header.querySelector(".workspace-surface-focus");
+  assert.equal(focus.getAttribute("aria-label"), "Focus this workspace");
+  await click(focus);
+  assert.deepEqual(focusChanges, [true]);
   const add = () => header.querySelector('.workspace-pane-tab-add button[aria-label="New tab"]');
   await click(add()); await flush();
   assert(document.getElementById("retained") === content);
@@ -126,6 +138,9 @@ test("the window header owns pane tabs and the Tools surface retains content, se
   assert.equal(closed.length, 4);
   assert.equal(closed.at(-1), "a");
   assert.equal(document.activeElement.getAttribute("aria-label"), "Terminal");
+  const closedBefore = closed.length;
+  await React.act(() => header.querySelector('[role="tab"][aria-label="Terminal"]').dispatchEvent(new w.MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }))); await flush();
+  assert.deepEqual(closed.slice(closedBefore), ["b"], "a middle click closes the tab");
   await React.act(() => root.unmount());
   delete window.octopusTransport;
 });
