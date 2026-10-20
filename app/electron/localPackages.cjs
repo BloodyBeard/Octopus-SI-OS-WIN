@@ -23,6 +23,7 @@ const TRANSACTION_PUBLICATION_TEMP = /^\.\.(?:cleanup\.[A-Za-z0-9_-]{8,96}|prepa
 const CLEANUP_PUBLICATION_FILE = /^\.cleanup\.([A-Za-z0-9_-]{8,96})\.json$/;
 const CLEANUP_TRANSACTION_ROOT = /^\.cleanup\.([A-Za-z0-9_-]{8,96})\.[a-f0-9]{12}$/;
 const DIGEST = /^[a-f0-9]{64}$/;
+const PACKAGE_IO_CONCURRENCY = 8;
 const MAX_CONFIGURATION_BYTES = 2 * 1024 * 1024;
 const MAX_RESOLUTION_BYTES = 16 * 1024 * 1024;
 const INTERFACE_IMPORT_PREFIX = "interface://";
@@ -38,6 +39,8 @@ const REGISTRY_KINDS = new Set([
 ]);
 const SOURCE_EXCLUDES = new Set([".DS_Store", ".git", "__pycache__", "node_modules", "target"]);
 const sourceSnapshotCache = new Map();
+const validatedReceiptDocuments = new WeakMap();
+const validatedPackagePublications = new WeakMap();
 const configurationValidators = new Map();
 const packageMutationGuards = new Map();
 
@@ -2167,11 +2170,11 @@ async function installResolvedPackages(roots, entries, operation) {
           phase: "copying",
           percent: totalFiles ? Math.round(copiedFiles / totalFiles * 70) : 70,
         });
-      }, roots, journalPath, journal);
-      const staged = await snapshotDirectory(stage);
-      if (staged.digest !== move.digest) throw new Error(`staged owner '${move.target}' does not match its source`);
-      journal.moves[index].state = "staged";
-      await writeJournal(journalPath, journal);
+      }, roots, journalPath, journal, async () => {
+        const staged = await snapshotDirectory(stage);
+        if (staged.digest !== move.digest) throw new Error(`staged owner '${move.target}' does not match its source`);
+        journal.moves[index].state = "staged";
+      });
     }
     for (const candidate of pending) {
       await verifyPackageDefinition(candidate.entry);
@@ -2185,9 +2188,9 @@ async function installResolvedPackages(roots, entries, operation) {
     for (const [index, move] of journal.moves.entries()) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
-      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
-      journal.moves[index].state = "materialized";
-      await writeJournal(journalPath, journal);
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`, [journal.publications[`stage:${index}`].moves[0].expected], () => {
+        journal.moves[index].state = "materialized";
+      });
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
         packageId: move.package_id,
@@ -2381,11 +2384,11 @@ async function repairResolvedPackages(roots, entries, operation) {
           phase: "copying",
           percent: totalFiles ? Math.round(copiedFiles / totalFiles * 55) : 55,
         });
-      }, roots, journalPath, journal);
-      const staged = await snapshotDirectory(stage);
-      if (staged.digest !== move.digest) throw new Error(`staged repair owner '${move.target}' does not match its authored content`);
-      journal.moves[index].state = "staged";
-      await writeJournal(journalPath, journal);
+      }, roots, journalPath, journal, async () => {
+        const staged = await snapshotDirectory(stage);
+        if (staged.digest !== move.digest) throw new Error(`staged repair owner '${move.target}' does not match its authored content`);
+        journal.moves[index].state = "staged";
+      });
     }
     for (const candidate of pending) {
       await verifyPackageDefinition(candidate.entry);
@@ -2401,7 +2404,10 @@ async function repairResolvedPackages(roots, entries, operation) {
       const stage = resolveTransactionPath(roots, move.stage);
       const target = resolveTransactionPath(roots, move.target);
       const backup = resolveTransactionPath(roots, move.backup);
-      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
+      const staged = journal.publications[`stage:${index}`].moves[0].expected;
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`, move.previous_digest === null ? [staged] : [undefined, staged], () => {
+        journal.moves[index].state = "materialized";
+      });
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
         packageId: move.package_id,
@@ -2409,8 +2415,6 @@ async function repairResolvedPackages(roots, entries, operation) {
         phase: "materializing",
         percent: Math.round(57 + index / journal.moves.length * 34),
       });
-      journal.moves[index].state = "materialized";
-      await writeJournal(journalPath, journal);
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
         packageId: move.package_id,
@@ -2624,9 +2628,9 @@ async function removeResolvedPackages(roots, entries, operation) {
     for (const [index, move] of journal.moves.entries()) {
       const target = resolveTransactionPath(roots, move.target);
       const backup = resolveTransactionPath(roots, move.backup);
-      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`);
-      journal.moves[index].state = "backed_up";
-      await writeJournal(journalPath, journal);
+      await publishPackageMoves(roots, journalPath, journal, `commit:${index}`, undefined, () => {
+        journal.moves[index].state = "backed_up";
+      });
       reportProgress(operation.onProgress, {
         operationId: operation.operationId,
         packageId: move.package_id,
@@ -2852,11 +2856,16 @@ async function retireUncommittedPackageTransaction(roots, journalPath, original)
 }
 
 function parseTransaction(value, file) {
+  validateTransactionDocument(value, file);
+  return structuredClone(value);
+}
+
+function validateTransactionDocument(value, file) {
   if (!validatePackageTransaction(value)) {
     throw schemaError(`local package transaction ${file}`, validatePackageTransaction.errors);
   }
-  for (const receipt of value.receipts) parseReceipt(receipt, file);
-  for (const receipt of value.previous_receipts ?? []) parseReceipt(receipt, file);
+  for (const receipt of value.receipts) validateReceiptDocument(receipt, file);
+  for (const receipt of value.previous_receipts ?? []) validateReceiptDocument(receipt, file);
   for (const [label, receipts] of [
     ["receipts", value.receipts],
     ["previous_receipts", value.previous_receipts ?? []],
@@ -2869,7 +2878,6 @@ function parseTransaction(value, file) {
   } else {
     validateInstallRemoveJournalContract(value);
   }
-  return structuredClone(value);
 }
 
 function validateInstallRemoveJournalContract(journal) {
@@ -3011,6 +3019,13 @@ function validateRepairJournalContract(journal) {
 }
 
 function parseReceipt(value, file) {
+  validateReceiptDocument(value, file);
+  return structuredClone(value);
+}
+
+function validateReceiptDocument(value, file) {
+  const validated = validatedReceiptDocuments.get(value);
+  if (validated !== undefined && validated === JSON.stringify(value)) return;
   if (!validatePackageReceipt(value)) throw schemaError(`local package receipt ${file}`, validatePackageReceipt.errors);
   const members = new Set();
   for (const member of value.members) {
@@ -3048,7 +3063,7 @@ function parseReceipt(value, file) {
       digest: snapshotDigest(receiptSourceFiles(member)) })) }) !== value.source_digest) {
     throw new Error(`local package receipt '${value.package_id}' source baseline does not match its source digest`);
   }
-  return structuredClone(value);
+  validatedReceiptDocuments.set(value, JSON.stringify(value));
 }
 
 function validateReceiptMaterialization(member, packageId) {
@@ -3190,51 +3205,69 @@ async function copySnapshot(snapshot, targetRoot, onFile) {
   for (const relativeDirectory of snapshot.directories.filter(Boolean)) {
     await fs.mkdir(path.join(targetRoot, relativeDirectory), { mode: 0o755 });
   }
-  for (const file of snapshot.files) {
-    const source = await fs.open(file.path, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
-    try {
-      const before = await source.stat();
-      if (!before.isFile()) throw new Error(`local package source is not a regular file: ${file.path}`);
-      const content = await hashFileHandle(source);
-      const stat = await source.stat();
-      if (!stat.isFile() || stat.size !== (file.input_size ?? file.size) || content.size !== stat.size
-        || (stat.mode & 0o777) !== (file.input_mode ?? file.mode) || content.sha256 !== (file.input_sha256 ?? file.sha256)
-        || before.mtimeMs !== stat.mtimeMs || before.ctimeMs !== stat.ctimeMs) {
-        throw new Error(`local package source changed while copying '${file.path}'`);
-      }
-      if (file.configuration_input) {
-        const input = file.configuration_input;
-        const current = await fs.lstat(input.path);
-        if (!current.isFile() || current.isSymbolicLink() || current.size !== input.size || (current.mode & 0o777) !== input.mode
-          || sha256Bytes(await fs.readFile(input.path)) !== input.sha256) throw new Error(`package configuration changed while copying '${input.path}'`);
-      }
-      const target = path.join(targetRoot, file.relative_path);
-      if (file.body === undefined) {
-        const parent = await fs.open(path.dirname(target), fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW);
-        try { require("./nativeFiles.cjs").cloneFile(source.fd, parent.fd, path.basename(target)); }
-        finally { await parent.close(); }
-      }
-      const handle = await fs.open(target, file.body === undefined ? fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW : "wx", file.mode);
-      try {
-        if (file.body !== undefined) await handle.writeFile(file.body);
-        const installed = await handle.stat();
-        if (!installed.isFile() || installed.nlink !== 1 || installed.dev === stat.dev && installed.ino === stat.ino) {
-          throw new Error(`local package copy is not isolated: ${target}`);
-        }
-        await handle.chmod(file.mode);
-        await handle.sync();
-      } finally { await handle.close(); }
-      const after = await source.stat();
-      if (after.size !== stat.size || after.mode !== stat.mode || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
-        throw new Error(`local package source changed while copying '${file.path}'`);
-      }
-    } finally { await source.close(); }
+  await boundedEach(snapshot.files, async (file) => {
+    await copySnapshotFile(file, targetRoot);
     onFile();
-  }
+  });
   for (const relativeDirectory of [...snapshot.directories].sort((left, right) => right.length - left.length)) {
     await syncDirectory(path.join(targetRoot, relativeDirectory));
   }
   await syncDirectory(path.dirname(targetRoot));
+}
+
+async function copySnapshotFile(file, targetRoot) {
+  const source = await fs.open(file.path, fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW);
+  try {
+    const before = await source.stat();
+    if (!before.isFile()) throw new Error(`local package source is not a regular file: ${file.path}`);
+    const content = await hashFileHandle(source);
+    const stat = await source.stat();
+    if (!stat.isFile() || stat.size !== (file.input_size ?? file.size) || content.size !== stat.size
+      || (stat.mode & 0o777) !== (file.input_mode ?? file.mode) || content.sha256 !== (file.input_sha256 ?? file.sha256)
+      || before.mtimeMs !== stat.mtimeMs || before.ctimeMs !== stat.ctimeMs) {
+      throw new Error(`local package source changed while copying '${file.path}'`);
+    }
+    if (file.configuration_input) {
+      const input = file.configuration_input;
+      const current = await fs.lstat(input.path);
+      if (!current.isFile() || current.isSymbolicLink() || current.size !== input.size || (current.mode & 0o777) !== input.mode
+        || sha256Bytes(await fs.readFile(input.path)) !== input.sha256) throw new Error(`package configuration changed while copying '${input.path}'`);
+    }
+    const target = path.join(targetRoot, file.relative_path);
+    if (file.body === undefined) {
+      const parent = await fs.open(path.dirname(target), fsSync.constants.O_RDONLY | fsSync.constants.O_DIRECTORY | fsSync.constants.O_NOFOLLOW);
+      try { require("./nativeFiles.cjs").cloneFile(source.fd, parent.fd, path.basename(target)); }
+      finally { await parent.close(); }
+    }
+    const handle = await fs.open(target, file.body === undefined ? fsSync.constants.O_RDONLY | fsSync.constants.O_NOFOLLOW : "wx", file.mode);
+    try {
+      if (file.body !== undefined) await handle.writeFile(file.body);
+      const installed = await handle.stat();
+      if (!installed.isFile() || installed.nlink !== 1 || installed.dev === stat.dev && installed.ino === stat.ino) {
+        throw new Error(`local package copy is not isolated: ${target}`);
+      }
+      await handle.chmod(file.mode);
+      await handle.sync();
+    } finally { await handle.close(); }
+    const after = await source.stat();
+    if (after.size !== stat.size || after.mode !== stat.mode || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs) {
+      throw new Error(`local package source changed while copying '${file.path}'`);
+    }
+  } finally { await source.close(); }
+}
+
+async function boundedEach(items, operation) {
+  const failures = [];
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(PACKAGE_IO_CONCURRENCY, items.length) }, async () => {
+    while (!failures.length && next < items.length) {
+      const index = next;
+      next += 1;
+      try { await operation(items[index], index); }
+      catch (error) { failures.push({ index, error }); }
+    }
+  }));
+  if (failures.length) throw failures.reduce((first, failure) => failure.index < first.index ? failure : first).error;
 }
 
 async function hashFileHandle(handle) {
@@ -3311,6 +3344,8 @@ function validatePackagePublications(roots, journal) {
   }
   for (const [key, publication] of Object.entries(journal.publications)) {
     const coordinates = packageMoveCoordinates(roots, journal, key);
+    const content = JSON.stringify([packagePublicationId(journal, key), coordinates, publication]);
+    if (validatedPackagePublications.get(publication) === content) continue;
     if (publication.moves.length !== coordinates.length) throw new Error("Package publication has a different owner movement set");
     for (const [index, movement] of publication.moves.entries()) {
       const [source, destination, digest] = coordinates[index];
@@ -3332,10 +3367,11 @@ function validatePackagePublications(roots, journal) {
         || receipt.outcome === "applied" && receipt.error !== null
         || index && receipt.plan_hash !== publication.receipts[0].plan_hash) throw new Error("Package publication receipt differs from its original owner movement");
     }
+    validatedPackagePublications.set(publication, content);
   }
 }
 
-async function publishPackageMoves(roots, journalPath, journal, key, retained) {
+async function publishPackageMoves(roots, journalPath, journal, key, retained, applied) {
   const publisher = packagePublisher(roots);
   if (!journal.publications[key]) {
     const moves = [];
@@ -3347,13 +3383,10 @@ async function publishPackageMoves(roots, journalPath, journal, key, retained) {
     journal.publications[key] = { moves, receipts: [] };
     validatePackagePublications(roots, journal);
     await writeJournal(journalPath, journal);
-  }
-  validatePackagePublications(roots, journal);
+  } else validatePackagePublications(roots, journal);
   const publication = journal.publications[key];
   try {
     publication.receipts = await publisher.publishDirectoryMoves(packagePublicationId(journal, key), publication.moves);
-    await writeJournal(journalPath, journal);
-    return publication.receipts;
   } catch (error) {
     if (Array.isArray(error.publicationReceipts)) {
       publication.receipts = error.publicationReceipts;
@@ -3362,6 +3395,9 @@ async function publishPackageMoves(roots, journalPath, journal, key, retained) {
     }
     throw error;
   }
+  if (applied) await applied();
+  else await writeJournal(journalPath, journal);
+  return publication.receipts;
 }
 
 async function reclaimPackagePublication(roots, publication, index) {
@@ -3375,12 +3411,12 @@ async function discardPackageDirectory(roots, journalPath, journal, key, expecte
   await reclaimPackagePublication(roots, journal.publications[key], 0);
 }
 
-async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onFile, roots, journalPath, journal) {
+async function stagePackageSnapshot(snapshot, stage, transactionRoot, index, onFile, roots, journalPath, journal, applied) {
   const preparation = path.join(transactionRoot, `owner-${index}`);
   await copySnapshot(snapshot, preparation, onFile);
   if ((await snapshotDirectory(preparation)).digest !== snapshot.digest) throw new Error(`package preparation changed before staging '${stage}'`);
   if (await pathExists(stage)) throw new Error(`package stage appeared during preparation '${stage}'`);
-  await publishPackageMoves(roots, journalPath, journal, `stage:${index}`);
+  await publishPackageMoves(roots, journalPath, journal, `stage:${index}`, undefined, applied);
 }
 
 async function verifyMaterializedMoves(roots, moves) {
@@ -3535,7 +3571,7 @@ async function finishPackageCleanup(roots, file) {
 }
 
 async function writeJournal(file, journal) {
-  parseTransaction(journal, file);
+  validateTransactionDocument(journal, file);
   await writeJsonAtomic(file, journal, 0o600);
 }
 
