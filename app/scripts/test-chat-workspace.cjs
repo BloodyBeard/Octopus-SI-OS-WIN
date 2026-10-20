@@ -651,17 +651,19 @@ for (const profile of ["live", "lab"]) {
   });
 }
 
-test("a live reply that ends the turn releases a stop that was never acknowledged", { timeout: 15_000 }, async () => {
-  const host = fakeHost();
-  const view = await openTask(host, "live");
-  await type(view, "Add totals");
-  void view.current.submit();
-  await until(() => view.current.turnOpen, "turn never opened");
-  await view.current.interruptActiveTurn();
-  await until(() => view.current.turnControlPending, "the stop is not pending");
-  host.reply("run-1", "Totals added.");
-  await until(() => !view.current.busy && !view.current.turnOpen && !view.current.turnControlPending, () => `the reply did not release the stop: ${JSON.stringify({ busy: view.current.busy, open: view.current.turnOpen, pending: view.current.turnControlPending })}`);
-});
+for (const profile of ["live", "lab"]) {
+  test(`a reply that ends the turn releases a stop that was never acknowledged (${profile})`, { timeout: 15_000 }, async () => {
+    const host = fakeHost();
+    const view = await openTask(host, profile);
+    await type(view, "Add totals");
+    void view.current.submit();
+    await until(() => view.current.turnOpen, "turn never opened");
+    await view.current.interruptActiveTurn();
+    await until(() => view.current.turnControlPending, "the stop is not pending");
+    host.reply("run-1", "Totals added.");
+    await until(() => !view.current.busy && !view.current.turnOpen && !view.current.turnControlPending, () => `the reply did not release the stop: ${JSON.stringify({ busy: view.current.busy, open: view.current.turnOpen, pending: view.current.turnControlPending })}`);
+  });
+}
 
 test("stopping the first turn of a new task reaches the run the host created before the task list shows it", { timeout: 15_000 }, async () => {
   const host = fakeHost();
@@ -864,13 +866,27 @@ test("only Home's provider is preferred for new Agents, and the catalog reports 
   assert.deepEqual(homeless.current.declaredProviderInterfaces.filter((candidate) => candidate.preferred), []);
 });
 
-test("a Home default adopts no Agent that could not start the task or whose Worker Environments differ", { timeout: 15_000 }, async () => {
-  for (const worker of [{ id: "worker.test", ...writerAgent, interface_policy: policy(["model-b"]) }, { id: "worker.test", ...writerAgent, drivers, client_template_worker_environment_kinds: ["system_shell"] }]) {
-    const view = await mount(capableHost([rootContext([worker])]), "lab");
-    await type(view, "Draft the plan");
-    await until(() => view.current.submitBlockReason === "Choose an Agent before sending.", () => `unexpected block: ${view.current.submitBlockReason}`);
-    assert.deepEqual([view.current.agentPresetId, view.current.workerInterfaceId], ["", ""]);
-  }
+test("a Home default adopts no Agent that could not start the task", { timeout: 15_000 }, async () => {
+  const view = await mount(capableHost([rootContext([{ id: "worker.test", ...writerAgent, interface_policy: policy(["model-b"]) }])]), "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.submitBlockReason === "Choose an Agent before sending.", () => `unexpected block: ${view.current.submitBlockReason}`);
+  assert.deepEqual([view.current.agentPresetId, view.current.workerInterfaceId], ["", ""]);
+});
+
+test("a Home default adopts its Agent and then takes that Agent's applications and Worker Environments", { timeout: 15_000 }, async () => {
+  const worker = { id: "worker.test", ...writerAgent, applications: [notesApp, mailApp], drivers,
+    client_template_application_ids: ["app.notes"], client_template_worker_environment_kinds: ["system_shell"] };
+  const host = capableHost([rootContext([worker])]);
+  const view = await mount(host, "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.canSubmit, () => `the Home Agent was not adopted: ${view.current.submitBlockReason}`);
+  assert.deepEqual([view.current.agentPresetId, view.current.workerInterfaceId, view.current.applicationIds, view.current.driverNames],
+    ["agent-writer", "worker.test", ["app.notes"], ["system_shell"]]);
+  void view.current.submit();
+  await until(() => host.turns.length === 1, "the task was not created");
+  assert.deepEqual([host.turns[0].workerInterfaceId, host.turns[0].selectedWorkerEnvironmentKinds], ["worker.test", ["system_shell"]]);
+  host.reply("run-new", "Drafted.");
+  await until(() => !view.current.busy, "the new task never settled");
 });
 
 test("a live task connects only applications its Agent's template provides", { timeout: 15_000 }, async () => {

@@ -156,7 +156,7 @@ type TurnControlTarget = {
   runId: string;
 };
 
-type PendingTurnControls = Record<string, { action: "resume" | "stop"; controlId: string }>;
+type PendingTurnControls = Record<string, { action: "resume" | "stop"; controlId: string; afterMovementSeq: number }>;
 
 export function useChatWorkspace(
   accessProfile: OctopusClientAccessProfile,
@@ -450,10 +450,12 @@ export function useChatWorkspace(
     const projectedIds = new Set(messages.map((message) => message.id));
     setPendingSteeringMessages((current) => current.filter((entry) => !projectedIds.has(entry.message.id)));
     setPendingTurnControls((current) => {
-      const settledRunIds = Object.keys(current).filter((runId) => messages.some((message) => (
-        message.runId === runId && message.eventKind === "turn_control"
-        && eventString(message.eventData?.control_id) === current[runId].controlId
-        && ["acknowledged", "failed"].includes(eventString(message.eventData?.status))
+      const settledRunIds = Object.keys(current).filter((runId) => messages.some((message) => message.runId === runId && (
+        message.eventKind === "turn_control"
+          && eventString(message.eventData?.control_id) === current[runId].controlId
+          && ["acknowledged", "failed"].includes(eventString(message.eventData?.status))
+        || message.movementSeq > current[runId].afterMovementSeq
+          && isChatReplyTerminal(message.eventKind, message.eventData, message.terminal)
       )));
       if (!settledRunIds.length) return current;
       const next = { ...current };
@@ -950,8 +952,6 @@ export function useChatWorkspace(
       providerModel,
       reasoningEffort,
       serviceTier,
-      applicationIds,
-      driverNames,
     );
     if (matchingAgent) {
       setAgentPresetId(matchingAgent.id);
@@ -2601,6 +2601,13 @@ export function useChatWorkspace(
     }
   }
 
+  function knownMovementSeq(runId: string) {
+    return Math.max(
+      projectedRunsRef.current.find((run) => run.runId === runId)?.lastMovementSeq ?? -1,
+      ...(messageCacheRef.current.get(runId) ?? []).map((message) => message.movementSeq),
+    );
+  }
+
   function clearPendingTurnControl(runId: string, controlId: string) {
     setPendingTurnControls((current) => {
       if (current[runId]?.controlId !== controlId) return current;
@@ -2614,7 +2621,8 @@ export function useChatWorkspace(
     const target = activeTurnControlTarget;
     if (!target || pendingTurnControlsRef.current[target.runId]) return;
     const controlId = `control_${randomId()}`;
-    setPendingTurnControls((current) => ({ ...current, [target.runId]: { action: "stop", controlId } }));
+    const afterMovementSeq = knownMovementSeq(target.runId);
+    setPendingTurnControls((current) => ({ ...current, [target.runId]: { action: "stop", controlId, afterMovementSeq } }));
     setError("");
     try {
       const result = await submitOperatorTurnControl({
@@ -2650,7 +2658,8 @@ export function useChatWorkspace(
     ) return;
     const runKey = chatDraftKey(run.runId);
     const controlId = `control_${randomId()}`;
-    setPendingTurnControls((current) => ({ ...current, [run.runId]: { action: "resume", controlId } }));
+    const afterMovementSeq = knownMovementSeq(run.runId);
+    setPendingTurnControls((current) => ({ ...current, [run.runId]: { action: "resume", controlId, afterMovementSeq } }));
     setError("");
     let bridgeAttempted = false;
     try {
@@ -3106,8 +3115,6 @@ function exactClientAgentConfiguration(
   providerModel: string,
   reasoningEffort: string,
   serviceTier: string | undefined,
-  applicationIds: readonly string[],
-  driverNames: readonly string[],
 ): ClientAgentDefinition | null {
   if (!projectEeId || !workerInterfaceId || !providerInterfaceId) return null;
   const matches = agents.filter((agent) => (
@@ -3117,8 +3124,6 @@ function exactClientAgentConfiguration(
     && agent.providerModel === providerModel
     && agent.reasoningEffort === reasoningEffort
     && (agent.serviceTier ?? "") === (serviceTier ?? "")
-    && sameStringSelection(agent.applicationIds, applicationIds)
-    && sameStringSelection(agent.driverNames, driverNames)
   ));
   return matches.length === 1 ? matches[0] : null;
 }
@@ -3133,12 +3138,6 @@ function clientAgentForRun(
     && agent.workerInterfaceId === workerInterfaceId
   ));
   return projectedCandidates.length === 1 ? projectedCandidates[0] : null;
-}
-
-function sameStringSelection(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  const rightValues = new Set(right);
-  return left.every((value) => rightValues.has(value));
 }
 
 function sameAttachmentSelection(
