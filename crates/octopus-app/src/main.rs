@@ -18,8 +18,17 @@ mod doctor;
 mod ee_state_migration;
 mod ledger_writer;
 mod registry_install;
+mod runtime_control;
 mod runtime_instance;
 pub use daemon::run_daemon;
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 fn installed_source_registry_root(
     installation_root: &Path,
@@ -131,21 +140,63 @@ async fn forward_interface_activation_arrivals(
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args.next();
     if args.next().is_some() {
         return usage();
     }
     match command.as_deref() {
-        Some("up") => up().await,
+        Some("up") => run_up(),
         Some("down") => down(),
-        Some("doctor") => doctor().await,
+        Some("restart") => restart(),
+        Some("doctor") => block_on(doctor())?,
         Some("migrate-ee-instance-schema") => migrate_ee_instance_schema(),
         Some("project-ee-policies") => project_ee_policies(),
         _ => usage(),
     }
+}
+
+fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Box<dyn std::error::Error>> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(future))
+}
+
+fn run_up() -> Result<(), Box<dyn std::error::Error>> {
+    let restart = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let outcome = runtime.block_on(up(restart.clone()));
+    drop(runtime);
+    outcome?;
+    if restart.load(std::sync::atomic::Ordering::SeqCst) {
+        return start_again();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn start_again() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::process::CommandExt;
+    let executable = std::env::current_exe()?;
+    eprintln!(
+        "octopus: stopped cleanly; starting again from {}",
+        executable.display()
+    );
+    let error = std::process::Command::new(&executable).arg("up").exec();
+    Err(format!(
+        "the stopped runtime could not start again from '{}': {error}",
+        executable.display()
+    )
+    .into())
+}
+
+#[cfg(not(unix))]
+fn start_again() -> Result<(), Box<dyn std::error::Error>> {
+    Err("restarting the runtime in place requires Unix process replacement".into())
 }
 
 #[cfg(unix)]
@@ -176,6 +227,14 @@ fn survive_terminal_hangup(log: &Path) -> Result<(), Box<dyn std::error::Error>>
         .append(true)
         .mode(0o600)
         .open(log)?;
+    let inherited = rustix::fs::fstat(rustix::stdio::stdout())?;
+    if rustix::fs::FileType::from_raw_mode(inherited.st_mode) == rustix::fs::FileType::RegularFile
+        && inherited.st_nlink == 0
+    {
+        rustix::stdio::dup2_stdout(&output)?;
+        rustix::stdio::dup2_stderr(&output)?;
+        output.write_all(b"octopus: started again in place; the previous instance's output file is gone, so the runtime writes here\n")?;
+    }
     let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     tokio::spawn(async move {
         while hangup.recv().await.is_some() {
@@ -203,7 +262,8 @@ async fn shutdown_signal() {
 fn usage() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("octopus");
     eprintln!("  up      boot the OS: synchronize the registry, open state, wake every interface");
-    eprintln!("  down    stop the running instance cleanly");
+    eprintln!("  down    stop the running instance cleanly through its control socket");
+    eprintln!("  restart stop the running instance cleanly and start it again from its own executable");
     eprintln!("  doctor  scan the active registry and declared life probes without booting");
     eprintln!("  migrate-ee-instance-schema");
     eprintln!("  project-ee-policies");
@@ -245,33 +305,90 @@ fn migrate_ee_instance_schema() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn control_request(
+    octopus_home: &Path,
+    request: runtime_control::RuntimeControlRequest,
+) -> Result<Option<runtime_control::RuntimeControlStatus>, Box<dyn std::error::Error>> {
+    match runtime_control::request(octopus_home, request)? {
+        runtime_control::Answer::Status(status) => Ok(Some(status)),
+        runtime_control::Answer::Unreachable(error) => match runtime_instance::observe(octopus_home) {
+            Ok(None) => Ok(None),
+            Ok(Some(record)) => Err(format!(
+                "octopus pid {} in phase '{}' does not answer its control socket '{}': {error}",
+                record.pid,
+                record.phase,
+                runtime_control::socket_path(octopus_home).display()
+            )
+            .into()),
+            Err(observe_error) => Err(format!(
+                "no runtime answers the control socket '{}' ({error}), and the instance lock cannot be observed: {observe_error}",
+                runtime_control::socket_path(octopus_home).display()
+            )
+            .into()),
+        },
+    }
+}
+
 fn down() -> Result<(), Box<dyn std::error::Error>> {
     let octopus_home = octopus_home_dir();
     let mut boot = boot_report::BootReport::new();
     boot.banner("octopus");
     boot.stage("home", octopus_home.display());
-    let Some(record) = runtime_instance::observe(&octopus_home)? else {
+    let Some(status) = control_request(&octopus_home, runtime_control::RuntimeControlRequest::Stop)? else {
         boot.stage("instance", "not running");
         return Ok(());
     };
     boot.stage(
         "instance",
-        format_args!("pid {} · phase {}", record.pid, record.phase),
+        format_args!("pid {} · phase {}", status.pid, status.phase),
     );
-    runtime_instance::interrupt(record.pid)?;
-    boot.stage("signal", "SIGTERM delivered");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while runtime_instance::observe(&octopus_home)?.is_some() {
-        if std::time::Instant::now() >= deadline {
-            return Err(format!("octopus pid {} did not stop within 10s", record.pid).into());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    boot.done("stopped", format_args!("· pid {}", record.pid));
+    boot.stage("control", "stop accepted");
+    runtime_control::await_departure(
+        &octopus_home,
+        std::time::Instant::now() + std::time::Duration::from_secs(60),
+    )?;
+    boot.done("stopped", format_args!("· pid {}", status.pid));
     Ok(())
 }
 
-async fn up() -> Result<(), Box<dyn std::error::Error>> {
+fn restart() -> Result<(), Box<dyn std::error::Error>> {
+    let octopus_home = octopus_home_dir();
+    let mut boot = boot_report::BootReport::new();
+    boot.banner("octopus");
+    boot.stage("home", octopus_home.display());
+    let Some(previous) = control_request(&octopus_home, runtime_control::RuntimeControlRequest::Restart)? else {
+        return Err(format!(
+            "no Octopus runtime is running for Home '{}'; start it with octopus up",
+            octopus_home.display()
+        )
+        .into());
+    };
+    boot.stage(
+        "instance",
+        format_args!("pid {} · phase {}", previous.pid, previous.phase),
+    );
+    boot.stage("control", "restart accepted");
+    let ready = runtime_control::await_successor(
+        &octopus_home,
+        previous.started_at_unix_ms,
+        std::time::Instant::now() + std::time::Duration::from_secs(300),
+        |status| boot.stage("instance", format_args!("pid {} · phase {}", status.pid, status.phase)),
+    )?;
+    boot.done(
+        "restarted",
+        format_args!(
+            "· pid {} · phase {} · started {} (previously pid {}, started {})",
+            ready.pid,
+            ready.phase,
+            ready.started_at_unix_ms,
+            previous.pid,
+            previous.started_at_unix_ms
+        ),
+    );
+    Ok(())
+}
+
+async fn up(restart: Arc<std::sync::atomic::AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     let octopus_home = octopus_home_dir();
     let mut boot = boot_report::BootReport::new();
     boot.banner("octopus");
@@ -285,6 +402,13 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
     });
     let mut runtime_instance = runtime_instance::RuntimeInstance::acquire(&octopus_home)?;
     survive_terminal_hangup(&octopus_home.join("state").join("runtime-instance").join("output.log"))?;
+    let runtime_control = runtime_control::RuntimeControl::bind(&octopus_home)?;
+    boot.stage("control", runtime_control.path().display());
+    let _runtime_control_task = AbortOnDrop(tokio::spawn(runtime_control.serve(
+        octopus_home.clone(),
+        cancel.clone(),
+        restart,
+    )));
     if cancel.is_cancelled() {
         return Ok(());
     }
@@ -554,7 +678,7 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
             boot.done(
                 "ready",
                 format_args!(
-                    "· durable {} · octopus down stops cleanly",
+                    "· durable {} · octopus down stops it · octopus restart restarts it",
                     durable_root.display()
                 ),
             );

@@ -152,37 +152,15 @@ pub fn observe(
     }
 }
 
-#[cfg(unix)]
-pub fn interrupt(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let status = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(format!("pid {pid} refused the terminate signal").into());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-pub fn interrupt(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    if !status.success() {
-        return Err(format!("pid {pid} refused the stop request").into());
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-pub fn interrupt(pid: u32) -> Result<(), Box<dyn std::error::Error>> {
-    Err(format!("stopping pid {pid} is not supported on this platform").into())
+pub fn read_current(
+    octopus_home: &Path,
+) -> Result<RuntimeInstanceRecord, Box<dyn std::error::Error>> {
+    read_record(
+        &octopus_home
+            .join("state")
+            .join("runtime-instance")
+            .join("state.json"),
+    )
 }
 
 fn read_record(path: &Path) -> Result<RuntimeInstanceRecord, Box<dyn std::error::Error>> {
