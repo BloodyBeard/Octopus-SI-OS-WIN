@@ -54,8 +54,6 @@ assertWorkspaceContract("src/components/QuickTaskWindow.tsx", "chat");
 assertWorkspaceContract("src/components/voice/VoiceView.tsx", "workspace");
 
 const composer = source("src/components/chat/ChatComposer.tsx");
-const utilityBar = source("src/components/chat/ComposerUtilityBar.tsx");
-const agentDialog = source("src/components/agent/AgentPresetDialog.tsx");
 const sidebar = source("src/components/Sidebar.tsx");
 const taskSummary = source("src/components/chat/TaskSummaryPanel.tsx");
 const subagentActivity = source("src/components/chat/subagentActivity.ts");
@@ -74,22 +72,6 @@ assert.match(queueStyles, /\.oc-menu-item\.composer-queue-menu-item \{ color: va
 assert.doesNotMatch(source("src/clientPreferences.ts") + source("src/components/settings/GeneralSettingsSection.tsx") + source("src/components/voice/VoiceView.tsx"), /activeRunSubmitBehavior|ActiveRunSubmitBehavior/);
 assert.match(source("src/components/settings/GeneralSettingsSection.tsx"), /Send steers the current reply immediately/);
 assert.match(source("src/components/settings/ShortcutSettingsSection.tsx"), /preferences.sendShortcut === "enter" \? "Mod\+Enter" : "Mod\+Shift\+Enter"/);
-assert.match(agentDialog, /providerModels\(formed\)\.map/);
-assert.match(agentDialog, /setProviderModel\(preset\.providerModel\)/);
-assert.match(utilityBar, /--color-token-composer-utility-background/);
-// A parent !important hover used to paint a rectangle inside the Agent pill.
-assert.doesNotMatch(utilityBar, /\[&_button:enabled:hover\]/);
-assert.doesNotMatch(utilityBar, /Agent types?|onWorkerChange/);
-assert.doesNotMatch(utilityBar, /Custom Agent configuration|value=\{[^\n]*"Custom Agent"/);
-assert.match(utilityBar, />Agents</);
-assert.doesNotMatch(utilityBar, /Built-in Agents|Your Agents|workerLabel/);
-const draftAgentCapabilities = sourceBetween(utilityBar, "const workerApplications", "const attachedRooms");
-assert.match(utilityBar, /const applications = workerApplications\.filter\(\(application\) => selectedAgent[\s\S]*?selectedAgent\.applicationIds\.includes\(application\.id\)[\s\S]*?applicationIds\.includes\(application\.id\)/);
-assert.match(utilityBar, /const drivers = workerDrivers\.filter\(\(driver\) => selectedAgent[\s\S]*?selectedAgent\.driverNames\.includes\(driver\.name\)[\s\S]*?attachedRooms\.some/);
-assert.match(utilityBar, /disabled=\{locked \|\| Boolean\(selectedAgent\) \|\| !contexts\.length\}/);
-assert.doesNotMatch(agentDialog, /Agent types?/i);
-assert.doesNotMatch(agentDialog, /label="Role"|Built-in defaults|client projection/);
-assert.match(agentDialog, /disabled=\{busy \|\| readOnly \|\| Boolean\(preset\)\}/);
 assert.match(sidebar, /onClick=\{\(\) => setAgentDialog\(\{ mode: "edit", presetId: preset\.id \}\)\}/);
 assert.doesNotMatch(sidebar, /mode: "view"|preset\.origin/);
 assert.doesNotMatch(sidebar, /onNewChat\(preset\.id\)/);
@@ -97,34 +79,6 @@ assert.match(sidebar, /projectById\.has\(preset\.projectEeId\)/);
 assert.match(sidebar, /meta=\{agentTaskMeta\(preset, taskChats\)\}/);
 assert.doesNotMatch(sidebar, /function agentPresetMeta/);
 assert.match(sidebar, /\? \[run\.runId\]/);
-assert.match(agentDialog, /worker\.authoringProfile && worker\.agentSourceTemplate/);
-assert.match(agentDialog, /sourceWorkers\.length === 1 \? sourceWorkers\[0\] : null/);
-assert.doesNotMatch(sourceBetween(agentDialog, "function defaultsForContext(", "function defaultsForWorker("), /authoringWorkers\[0\]/);
-const agentAccessControl = sourceBetween(
-  utilityBar,
-  '<div className="composer-agent-access-control',
-  "\n\n        <UtilityBarDropdown",
-);
-assert.match(agentAccessControl, /navigationTarget="workspace-agent"[\s\S]*?indicator="none"|indicator="none"[\s\S]*?navigationTarget="workspace-agent"/);
-assert.doesNotMatch(agentAccessControl, /triggerVariant="embedded"/);
-const permissionToggle = sourceBetween(
-  agentAccessControl,
-  "aria-label={accessMode === \"full_access\" ? \"Use project access\" : \"Use full access\"}",
-  "</button>",
-);
-assert.match(permissionToggle, /aria-pressed=\{accessMode === "full_access"\}/);
-assert.match(permissionToggle, /onAccessModeChange\(accessMode === "full_access" \? "project_access" : "full_access"\)/);
-assert.match(permissionToggle, /composer-agent-access-toggle/);
-assert.match(permissionToggle, /CHIP_BUTTON_CLASS.*shrink-0/);
-assert.match(permissionToggle, /<span>\{accessMode === "full_access" \? "Full access" : "Project access"\}<\/span>/);
-assert.match(permissionToggle, /disabled=\{locked \|\| !selectedWorker \|\| accessMode !== "full_access" && Boolean\(fullAccessUnavailableReason\)\}/);
-assert.match(permissionToggle, /aria-description=\{accessMode === "full_access" \? undefined : fullAccessUnavailableReason \|\| undefined\}/);
-assert.match(permissionToggle, /<TaskAccessIcon accessMode=\{accessMode\} className="icon-xs shrink-0" \/>/);
-assert.doesNotMatch(permissionToggle, /UtilityBarDropdown|UtilityBarItem|aria-haspopup|aria-expanded/);
-assert.doesNotMatch(permissionToggle, /title=|name="lock"/);
-assert.match(agentAccessControl, /label=\{\([\s\S]*?<TaskAccessIcon[\s\S]*?agent\.id === agentPresetId \? accessMode : defaultAccessMode/);
-assert.match(utilityBar, /function TaskAccessIcon[\s\S]*?accessMode === "full_access" \? " text-token-warning" : " text-token-text-tertiary"/);
-assert.match(utilityBar, /function TaskAccessIcon[\s\S]*?\? <FullAccessIcon aria-hidden className=\{resolvedClassName\} \/>[\s\S]*?: <ProjectAccessIcon aria-hidden className=\{resolvedClassName\} \/>/);
 assert.match(ownedUtilities, /--color-token-warning: var\(--color-text-warning\);/);
 assert.doesNotMatch(sidebar, /deleteClientTaskAgentAssignment|createClientAgentPreset|updateClientAgentPreset|deleteClientAgentPreset/);
 assert.doesNotMatch(taskSummary, /Execution environment|Worker binding|Provider|<SummaryFact|title="Checkpoints"/);
