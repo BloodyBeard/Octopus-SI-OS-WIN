@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ContextRefresh {
+pub(crate) struct ContextRefresh {
     source_thread: String,
     source_shape: String,
     source_static: String,
@@ -155,7 +155,7 @@ pub(super) struct CurrentNativeContext<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct NativeHistoryRetirement {
+pub(crate) struct NativeHistoryRetirement {
     pub source_thread: String,
     pub source_generation: u64,
     pub replacement_thread: String,
@@ -166,7 +166,7 @@ pub(super) struct NativeHistoryRetirement {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct NativeHistoryProof {
+pub(crate) struct NativeHistoryProof {
     pub thread_id: String,
     pub context_generation: u64,
     thread_shape: String,

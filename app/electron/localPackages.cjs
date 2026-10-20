@@ -149,9 +149,10 @@ async function inspectLocalPackageCatalog(options) {
   }
   const library = await loadLocalPackageLibrary(roots);
   const packages = [];
+  const snapshots = new Map();
   for (const entry of library.packages) {
     try {
-      const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true });
+      const source = await snapshotPackageSource(roots, entry.manifest, { fresh: true, snapshots });
       const state = await readPackageState(roots, entry.manifest, source);
       packages.push(packageCatalogRecord(entry, source, state));
     } catch (error) {
@@ -1623,9 +1624,7 @@ async function snapshotPackageSource(roots, manifest, options = {}) {
   for (const member of orderedMembers(manifest.members)) {
     const sourceDirectory = memberPath(roots.sourceRegistryRoot, member);
     await requirePlainDirectory(path.dirname(sourceDirectory), path.dirname(sourceDirectory));
-    const snapshot = await snapshotDirectory(sourceDirectory, {
-      cacheKey: options.fresh ? "" : `${roots.sourceRegistryRoot}\0${memberKey(member)}`,
-    });
+    const snapshot = await snapshotSourceMember(roots, member, sourceDirectory, options);
     validateMemberDataPaths(member, snapshot);
     members.push({ ...member, source_directory: sourceDirectory, ...await projectMemberConfiguration(snapshot, member.configuration) });
   }
@@ -1644,6 +1643,16 @@ async function snapshotPackageSource(roots, manifest, options = {}) {
     members,
     fileCount: members.reduce((total, member) => total + member.files.length, 0),
   };
+}
+
+function snapshotSourceMember(roots, member, sourceDirectory, options) {
+  const passed = options.snapshots?.get(sourceDirectory);
+  if (passed) return passed;
+  const snapshot = snapshotDirectory(sourceDirectory, {
+    cacheKey: options.fresh ? "" : `${roots.sourceRegistryRoot}\0${memberKey(member)}`,
+  });
+  options.snapshots?.set(sourceDirectory, snapshot);
+  return snapshot;
 }
 
 async function assertApplicationInterfaceImportClosure(manifest, members, roots, options) {
@@ -1675,9 +1684,7 @@ async function assertApplicationInterfaceImportClosure(manifest, members, roots,
         if (member.registry_kind !== "interface" || !externalOwners.has(member.owner)) continue;
         const sourceDirectory = memberPath(roots.sourceRegistryRoot, member);
         await requirePlainDirectory(path.dirname(sourceDirectory), path.dirname(sourceDirectory));
-        const snapshot = await snapshotDirectory(sourceDirectory, {
-          cacheKey: options.fresh ? "" : `${roots.sourceRegistryRoot}\0${memberKey(member)}`,
-        });
+        const snapshot = await snapshotSourceMember(roots, member, sourceDirectory, options);
         interfaceMembers.set(member.owner, { ...member, source_directory: sourceDirectory, ...snapshot });
       }
     }

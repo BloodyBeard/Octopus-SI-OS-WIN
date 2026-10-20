@@ -4,7 +4,7 @@ use octopus_app_server_interface::{OperatorPermissionDecision as AppDecision, Op
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(transparent)]
-pub(super) struct ToolOperatorRequest(octopus_app_server_interface::OwnerOperatorRequest);
+pub(crate) struct ToolOperatorRequest(octopus_app_server_interface::OwnerOperatorRequest);
 
 impl std::ops::Deref for ToolOperatorRequest {
     type Target = octopus_app_server_interface::OwnerOperatorRequest;
@@ -13,7 +13,7 @@ impl std::ops::Deref for ToolOperatorRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
-pub(super) enum ToolOperatorPhase {
+pub(crate) enum ToolOperatorPhase {
     AwaitingOperator,
     AwaitingResume {
         operator_artifact: ArtifactRef,
@@ -25,7 +25,7 @@ pub(super) enum ToolOperatorPhase {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct ToolOperatorContinuity {
+pub(crate) struct ToolOperatorContinuity {
     pub request: ToolOperatorRequest,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payload_artifact_bindings: Vec<ArtifactRef>,

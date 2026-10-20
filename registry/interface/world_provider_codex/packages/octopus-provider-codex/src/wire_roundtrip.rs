@@ -267,11 +267,7 @@ fn turn_error_payload_fields_are_pinned() {
     );
 
     let dir = tempfile::tempdir().unwrap();
-    let terminal = materialize_terminal_turn_error(
-        &dir.path().join("emitted"),
-        "Codex turn failed: Your access token could not be refreshed because your refresh token was revoked.",
-        None,
-    )
+    let terminal = materialize_terminal_turn_error_payload(&dir.path().join("emitted"), "Codex turn failed: Your access token could not be refreshed because your refresh token was revoked.", None, serde_json::Value::Null)
     .expect("terminal turn.error materializes");
     let manifest = terminal.read_manifest().expect("manifest reads");
     assert_eq!(manifest.label, TURN_ERROR_LABEL);
