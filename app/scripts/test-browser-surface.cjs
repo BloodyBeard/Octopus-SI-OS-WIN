@@ -305,7 +305,7 @@ async function rendererChecks(mode = "owned") {
   const visualViewport = { offsetLeft: 0, offsetTop: 0, width: dom.window.innerWidth, height: dom.window.innerHeight }; Object.defineProperty(dom.window, "visualViewport", { value: visualViewport });
   dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({ x: pageLeft, y: 100, left: pageLeft, top: 100, right: pageLeft + 640, bottom: 580, width: 640, height: 480 });
   const styles = dom.window.document.createElement("style");
-  styles.textContent = fs.readFileSync(path.join(__dirname, "../src/components/worker-environment/worker-environment.css"), "utf8").match(/\.we-browser-(?:find|body(?:\.has-native-view(?: > \.we-browser-find)?)?) \{[^}]*\}/g).join("\n");
+  styles.textContent = fs.readFileSync(path.join(__dirname, "../src/components/worker-environment/worker-environment.css"), "utf8");
   dom.window.document.head.append(styles);
   let nativeAttached = false;
   if (mode === "owned") {
