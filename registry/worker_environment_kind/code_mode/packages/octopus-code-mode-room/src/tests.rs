@@ -2651,7 +2651,14 @@ fn routed_frontiers_use_actual_runtime_and_file_write(case: FrontierCase) -> Pin
             .is_err()
     );
     let recovered = admission.provider_handoff().unwrap().unwrap();
-    assert!(matches!(recovered.recover_source().await.unwrap(), octopus_run_authoring::ProviderSourceRecovery::Interrupted { .. }));
+    let boundary = admission.deliveries.lock().unwrap().iter().rev()
+        .find(|d| d.from.as_str() == "world_provider_test" && d.to.as_str() == "world_provider_projection_test")
+        .map(|d| super::continuation::artifact_ref(&d.file).unwrap()).unwrap();
+    let ledger = admission.door.lock().await.len();
+    let (recovery, replayed) = recovered.recover_source_with_outcomes().await.unwrap();
+    assert_eq!(recovery, octopus_run_authoring::ProviderSourceRecovery::Completed);
+    assert!(matches!(replayed.as_slice(), [octopus_run_authoring::ProviderHandoffOutcome::Admitted { artifact, .. }] if *artifact == boundary), "{replayed:?}");
+    assert_eq!(admission.door.lock().await.len(), ledger);
     let retained = octopus_runtime::run_record::RunRecord::from_bytes(&std::fs::read(&run_path).unwrap()).unwrap();
     assert_eq!(octopus_run_authoring::payload_artifact_bindings(&retained, &InterfaceId::new("world_provider_test")).unwrap(), vec![input_ref.clone()]);
     assert!(retained.checkpoints.iter().filter(|cp| retained.active_checkpoints.contains(&cp.id) && cp.inbound_interface() == Some(&InterfaceId::new("world_provider_input_test"))).all(|cp| cp.artifact_bindings.iter().any(|binding| binding.id == input_ref.id && binding.access.read)));
