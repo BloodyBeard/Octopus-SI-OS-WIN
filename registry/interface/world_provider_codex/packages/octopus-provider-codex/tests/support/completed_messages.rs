@@ -44,9 +44,13 @@ fn completed_message_identity_refuses_unknown_or_ambiguous_terminal_ownership() 
             {"type":"agentMessage", "id":"second", "text":"answer", "phase":"final_answer"}
         ]),
         serde_json::json!([{"type":"agentMessage", "id":"", "text":"answer", "phase":"final_answer"}]),
-        serde_json::json!([{"type":"agentMessage", "id":"empty", "text":"", "phase":"final_answer"}]),
     ] {
         let turn = serde_json::from_value(serde_json::json!({"id":"turn-a", "status":"completed", "items":items})).unwrap();
         assert!(matches!(completed_turn_final_message(&turn), Err(InterfaceDriverError::FailedClosed(_))));
     }
+    let silent: octopus_appserver_proto::Turn = serde_json::from_value(serde_json::json!({
+        "id":"turn-a", "status":"completed", "itemsView":"full",
+        "items":[{"type":"agentMessage", "id":"empty", "text":"", "phase":"final_answer"}]
+    })).unwrap();
+    assert_eq!(completed_turn_final_message(&silent).unwrap(), ("empty", ""));
 }
