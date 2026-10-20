@@ -5006,6 +5006,10 @@ function stringValue(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function formatError(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function workerEnvironmentWindowTarget(value) {
   const request = objectOrEmpty(value);
   const workerEnvironmentId = stringValue(request.workerEnvironmentId);
