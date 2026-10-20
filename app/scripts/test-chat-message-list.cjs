@@ -184,6 +184,7 @@ test("the composer floats over the thread and reserves its own height at the bot
   assert.ok(footer.querySelector("#composer"));
   assert.equal(list().firstElementChild.contains(footer), false, "the composer is not part of the scrolled content");
   assert.ok(footer.classList.contains("absolute") && footer.classList.contains("bottom-0") && !footer.classList.contains("sticky"));
+  assert.ok(!list().classList.contains("relative"), "the floating composer is placed by the thread layout, not by the scroll container");
   const reserve = list().firstElementChild.lastElementChild;
   assert.equal(reserve.getAttribute("aria-hidden"), "true");
   assert.match(reserve.className, /--thread-scroll-padding-bottom/);

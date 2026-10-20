@@ -70,6 +70,10 @@ jobs:
           node scripts/test-chat-surfaces.cjs
           node scripts/test-operator-shell.cjs
           node scripts/test-sidebar.cjs
+          node scripts/test-stylesheet-contracts.cjs
+          node scripts/test-browser-surface.cjs
+          node scripts/test-resume-glyph-parity.cjs
+          node scripts/test-client-catalog-cycle.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
 

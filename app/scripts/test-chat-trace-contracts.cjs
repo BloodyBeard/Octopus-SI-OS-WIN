@@ -37,14 +37,9 @@ function typescriptModule(relativePath, mocks = {}) {
 
 const turnActivity = source("src/components/chat/TurnActivity.tsx");
 const messageList = source("src/components/chat/ChatMessageList.tsx");
-const chatCss = source("src/components/chat/chat.css");
 const iconNotices = JSON.parse(source("licenses/icon-assets/notices.json"));
 const glyphAsset = (name) => iconNotices.glyphs.find((entry) => entry.name === name);
-const appIndex = source("index.html");
 const toolActivityPresentationCatalog = JSON.parse(source("src/components/chat/toolActivityPresentationCatalog.json"));
-const voiceCss = source("src/components/voice/voice.css");
-const shellCss = source("src/shell.css");
-const stylesCss = source("src/styles.css");
 const assistantDirectives = typescriptModule("src/components/chat/assistantDirectives.ts");
 const toolPresentation = typescriptModule("src/components/chat/toolPresentation.ts");
 const reasoningSummary = typescriptModule("src/components/chat/reasoningSummary.ts");
@@ -737,36 +732,9 @@ for (const [eventKind, field] of [["message_delta", "text"], ["commentary_delta"
 
 
 
-assert.match(chatCss, /\.octopus-agent-activity-toggle \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;/);
-assert.match(source("src/components/shell/paneTabs.css"), /\.pane-tab-title-text\.is-overflowing \{[\s\S]*?mask-image: linear-gradient/);
-assert.match(chatCss, /--thread-floating-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ 8px\)/);
-assert.match(chatCss, /\.task-summary-surface \{[\s\S]*?z-index: 40;[\s\S]*?pointer-events: none;/);
-assert.match(chatCss, /\.task-summary-motion \{[\s\S]*?width: 300px;/);
-assert.match(chatCss, /\.task-summary-popover \.task-summary-popover-panel \{[\s\S]*?top: calc\(100% \+ 16px\);[\s\S]*?right: 0;[\s\S]*?width: 300px;[\s\S]*?max-height: calc\(100vh - 61px\);[\s\S]*?border: 0;[\s\S]*?background: transparent;[\s\S]*?box-shadow: none;[\s\S]*?transform-origin: top right;/);
-assert.doesNotMatch(chatCss, /margin-right: 316px|\.chat-run-layout\.is-summary-gutter|\.chat-run-layout\.is-summary-shift/);
-assert.match(chatCss, /\.task-summary-shell \{[\s\S]*?border-radius: 20px;[\s\S]*?background: var\(--color-token-dropdown-background/);
-assert.match(shellCss, /\.workspace-pane-header-actions \{[\s\S]*?gap: 0;/);
-assert.match(chatCss, /--thread-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ var\(--spacing\) \* 8\)/);
-assert.match(chatCss, /\.chat-thread-top-fade\[data-app-shell-main-content-top-fade="visible"\]/);
-assert.match(shellCss, /\.workspace-surface-pane-header \{[\s\S]*?-webkit-app-region: drag;/);
-assert.match(source("src/components/shell/paneTabs.css"), /\.pane-tabs \{[\s\S]*?-webkit-app-region: no-drag;/);
-assert.match(shellCss, /\.workspace-surface-pane\.has-tab-strip \.workspace-surface-pane-content \.surface-titlebar-spacer \{\s*display: none;/);
-assert.doesNotMatch(shellCss, /\.workspace-pane-compact-tab|\.workspace-surface-pane\.has-compact-tab/);
-assert.match(voiceCss, /\.home-response-stage\.is-compact \.home-response-output--live \{[\s\S]*?text-align: center;/);
-assert.doesNotMatch(voiceCss, /\.home-task-activity|\.home-view-transition__activity/);
-assert.match(chatCss, /:hover:not\(:has\(\[data-agent-activity-file-link\]:hover\)\)/);
-assert.match(chatCss, /--color-token-conversation-header: color-mix\(in oklab, var\(--color-token-foreground\) 30%, transparent\);/);
-assert.doesNotMatch(chatCss, /\.octopus-agent-activity-viewport \{[^}]*max-height:/);
-assert.doesNotMatch(chatCss, /\.octopus-reasoning-detail \{[^}]*max-height:/);
-assert.match(chatCss, /\.octopus-agent-activity-detail-item > \* \{\s*width: 100%;/);
-assert.match(chatCss, /\.octopus-exec-activity \{[\s\S]*?width: 100%;/);
 
 assert.deepEqual(glyphAsset("users").shapes, ["users"]);
 
-assert.match(appIndex, /startup-octopus-shimmer 2200ms cubic-bezier\(0\.4, 0, 0\.2, 1\) infinite/);
-assert.match(stylesCss, /\.surface-content-loading-state \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?place-items: center;/);
-assert.match(shellCss, /\.workspace-pane-manager\.is-secondary-focused > \.workspace-pane-primary \{[\s\S]*?flex: 0 0 0;/);
-assert.doesNotMatch(shellCss, /\.home-notifications-control|\.home-notification-row/);
 
 async function verifyTranscriptLayout() {
   const React = require("react"), { JSDOM } = require("jsdom"), { createRoot } = require("react-dom/client");
@@ -890,8 +858,6 @@ async function verifyTranscriptLayout() {
     assert.ok(query(".structured-activity-body") === null, "closed operation details cannot retain padding");
     await click(query(".structured-activity .octopus-agent-activity-toggle"));
     assert.match(query(".structured-activity-body").textContent, /Arguments\{\}Result[\s\S]*count/);
-    const bodyRule = sourceBetween(chatCss, ".octopus-agent-activity-body {", "}");
-    assert.doesNotMatch(bodyRule, /padding|margin|gap|height/, "the animated shell must carry no fixed block spacing");
     await click(query(".structured-activity .octopus-agent-activity-toggle"));
     assert.ok(query(".structured-activity-body") === null, "closed operation content unmounts after transition");
     const settledRows = rowText();

@@ -7,26 +7,6 @@ function source(relativePath) {
   return require("./splitSource.cjs").readSource(path.join(appRoot, relativePath));
 }
 
-function sourceBetween(value, startMarker, endMarker) {
-  const start = value.indexOf(startMarker);
-  assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
-  const end = value.indexOf(endMarker, start + startMarker.length);
-  assert.notEqual(end, -1, `missing source marker: ${endMarker}`);
-  return value.slice(start, end);
-}
-
-const messageList = source("src/components/chat/ChatMessageList.tsx");
-const foundation = source("src/foundation.css");
-const ownedUtilities = source("src/owned-utilities.css");
-const queueStyles = source("src/components/chat/queue.css");
-assert.match(queueStyles, /\.composer-primary-action \{\s*background-color: var\(--color-background-composer-primary\);\s*color: var\(--color-text-composer-primary\);/);
-assert.match(queueStyles, /\.composer-primary-action:focus-visible \{ outline-color: var\(--color-background-composer-primary\);/);
-assert.match(queueStyles, /\.composer-queue-action \{[^}]*border-radius: 9999px;/);
-assert.match(queueStyles, /\.composer-queue-action\.is-icon \{[^}]*border-radius: var\(--radius-lg\);/);
-assert.match(queueStyles, /\.oc-menu-item\.composer-queue-menu-item \{ color: var\(--color-text-description\);/);
-assert.match(ownedUtilities, /--color-token-warning: var\(--color-text-warning\);/);
-assert.doesNotMatch(messageList + sourceBetween(source("src/components/chat/chat.css"), ".octopus-chat-scroll {", "\n}"), /thread-scroll-container relative h-full|position:\s*relative/);
-assert.doesNotMatch(foundation, /\*\s*\{\s*scroll-behavior:\s*smooth;/);
 
 async function verifyTemplateFiles() {
   const ts = require("typescript");
