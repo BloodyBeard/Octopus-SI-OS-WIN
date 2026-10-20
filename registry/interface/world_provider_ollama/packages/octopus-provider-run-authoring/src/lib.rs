@@ -9522,19 +9522,29 @@ async fn send_authoring_manifest(
             control_root,
             &config.authoring_source_interface,
         );
-    tokio::time::timeout(timeout, async move {
+    let mut unavailable = None;
+    tokio::time::timeout(timeout, async {
       loop {
         if ctx.cancel.is_cancelled() {
             return Err("interface authoring hand-in was cancelled".into());
         }
-        let stream = tokio::net::UnixStream::connect(&socket)
-            .await
-            .map_err(|error| {
-                format!(
+        let stream = match tokio::net::UnixStream::connect(&socket).await {
+            Ok(stream) => stream,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound) => {
+                unavailable = Some(error.to_string());
+                tokio::select! {
+                    _ = ctx.cancel.cancelled() => return Err("interface authoring hand-in was cancelled".into()),
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
                     "interface authoring socket '{}' cannot be connected: {error}",
                     socket.display()
-                )
-            })?;
+                ));
+            }
+        };
         let (mut ws, _) = tokio_tungstenite::client_async("ws://localhost/rpc", stream)
             .await
             .map_err(|error| format!("interface authoring websocket upgrade failed: {error}"))?;
@@ -9564,11 +9574,16 @@ async fn send_authoring_manifest(
       }
     })
     .await
-    .map_err(|_| {
-        format!(
+    .map_err(|_| match &unavailable {
+        Some(error) => format!(
+            "interface authoring socket '{}' stayed unavailable for {}ms: {error}",
+            socket.display(),
+            config.result_timeout_ms
+        ),
+        None => format!(
             "interface authoring hand-in timed out after {}ms",
             config.result_timeout_ms
-        )
+        ),
     })?
 }
 

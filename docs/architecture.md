@@ -448,7 +448,9 @@ JSON, wakes every interface mentioned on a live binding, and each interface
 catches up on its own movements from its own cursor. The cursor is written to
 disk when the interface settles one of its own movements; reading past other
 interfaces' movements stays in memory, so a busy ledger does not make every
-live interface flush the disk on every append. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
+live interface flush the disk on every append. Interfaces wake in no promised
+order: one that hands work to a sibling still waking up waits for it, within
+the hand-in's declared timeout. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
 loss to be repaired with leases and retries.
 
 A restart does not end the work in flight either. A tool call the restart cut

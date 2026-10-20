@@ -9,9 +9,19 @@ async fn authoring_retains_exact_request_while_registry_changes() {
     let socket = octopus_app_server_interface::interface_control_socket_path_from_root(
         control.path(), &handoff.config.authoring_source_interface);
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let listener = tokio::net::UnixListener::bind(socket).unwrap();
     let manifest = std::fs::read(fixture.input_file.manifest_path()).unwrap();
     let original_run = std::fs::read(&handoff.run_path).unwrap();
+    let late = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap().into_text().unwrap().as_bytes(), manifest);
+        socket.send(WsMessage::Text(serde_json::to_string(&DeliveryVerdict::Admitted { seq: 41 }).unwrap().into())).await.unwrap();
+        listener
+    };
+    let (result, listener) = tokio::join!(handoff.send_authoring_manifest(&manifest), late);
+    assert_eq!(result.unwrap(), DeliveryVerdict::Admitted { seq: 41 });
     for terminal in [DeliveryVerdict::Admitted { seq: 42 }, DeliveryVerdict::refused(
         octopus_ledger::RefusedReason::Policy, serde_json::json!({"message":"revoked"}))] {
         let serve = async {
