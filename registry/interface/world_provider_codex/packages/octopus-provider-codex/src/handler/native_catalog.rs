@@ -185,6 +185,7 @@ pub(crate) fn validate_recovered_reseed_coordinates(
     Ok(())
 }
 
+#[derive(Clone)]
 pub(crate) struct ThreadAcquisition<'a> {
     pub(crate) recovered: Option<&'a CodexContinuityState>,
     pub(crate) retired_history: Option<&'a NativeHistoryProof>,

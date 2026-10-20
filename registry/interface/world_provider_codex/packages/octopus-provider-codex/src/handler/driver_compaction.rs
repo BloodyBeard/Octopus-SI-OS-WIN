@@ -36,15 +36,7 @@ impl CodexAppServerInterfaceDriver {
                 thread_id: thread_id.to_string(),
             },
         };
-        {
-            let client = self.client.lock().await;
-            if !matches!(&*client, AppServerClient::Spawn(_)) {
-                return Err(InterfaceDriverError::FailedClosed(
-                    "Codex compact dispatch evidence only supports the exact local process transport"
-                        .to_string(),
-                ));
-            }
-        }
+        self.require_local_process_transport("compact").await?;
         context
             .sink
             .admit_app_server_dispatch(&request, None)
