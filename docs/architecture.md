@@ -346,7 +346,9 @@ sequenceDiagram
    the system changes: a file-write tool call against the run record, in a room
    whose path covers it. A write installs the context gathered so far and the
    next routes; a call joins the run's context in the write that consumes its
-   result. **The path is the permission.**
+   result. If the room cannot report whether a write landed, the target's own
+   content decides; a write that did not land is void and is authored again.
+   **The path is the permission.**
 
 Every arrow that says "movement recorded" is one row in
 `ledger/movements.jsonl`. If the tool room had refused the call, that would be

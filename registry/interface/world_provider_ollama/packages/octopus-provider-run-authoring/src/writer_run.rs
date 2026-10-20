@@ -452,6 +452,7 @@ pub(super) fn consume_result(
         .completed
         .values()
         .any(|(seq, _)| *seq == movement.seq.0)
+        || history.voided.contains_key(&movement.seq.0)
     {
         Ok(true)
     } else {
@@ -977,7 +978,7 @@ impl OrderedArguments {
         snapshot: &[u8],
         result: &ToolResultArtifact,
         max_payload_bytes: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<OrderedTargetEffect, String> {
         let [advance, edit] = self.writes.as_slice() else {
             return Err("ordered result lost its two exact writes".into());
         };
@@ -1073,14 +1074,32 @@ impl OrderedArguments {
             return Err("ordered writer Run was not advanced".into());
         }
         match body.writes[1].outcome.as_str() {
-            "applied" if result.ok => Ok(true),
-            "refused" if !result.ok && body.writes[1].error.is_some() => Ok(false),
-            _ => Err(
-                "ordered target effect remains uncertain; no retry is authorized by this receipt"
-                    .into(),
-            ),
+            "applied" if result.ok => Ok(OrderedTargetEffect::Applied),
+            "refused" if !result.ok && body.writes[1].error.is_some() => Ok(OrderedTargetEffect::Refused),
+            "uncertain" if !result.ok && body.writes[1].error.is_some() => Ok(OrderedTargetEffect::Uncertain),
+            _ => Err("ordered target write has no exact outcome".into()),
         }
     }
+
+    fn target_hashes(&self, maximum: u64) -> Result<(String, String), String> {
+        let edit = self.writes.get(1).ok_or("ordered call target absent")?;
+        Ok((ContentHash::of_bytes(edit.before(maximum)?.as_bytes()).to_hex(), edit.after_hash()))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OrderedTargetEffect {
+    Applied,
+    Refused,
+    Uncertain,
+}
+
+#[derive(Clone)]
+struct UnresolvedTarget {
+    seq: u64,
+    args: OrderedArguments,
+    call: Movement,
+    result: Movement,
 }
 
 #[derive(Clone)]
@@ -1092,6 +1111,8 @@ pub(super) struct WriterHistory {
     completed: BTreeMap<String, (u64, bool)>,
     applied_calls: BTreeMap<String, u64>,
     last_applied_target: Option<(u64, Vec<u8>)>,
+    unresolved: Option<UnresolvedTarget>,
+    voided: BTreeMap<u64, u64>,
     cursor: Option<(u64, u64, ContentHash)>,
 }
 
@@ -1127,6 +1148,8 @@ fn history(
         completed: BTreeMap::new(),
         applied_calls: BTreeMap::new(),
         last_applied_target: None,
+        unresolved: None,
+        voided: BTreeMap::new(),
         cursor: None,
     });
     if saved.binding.run != binding.run || saved.binding.initial_record != binding.initial_record || saved.binding.initial_record_format != binding.initial_record_format {
@@ -1237,6 +1260,10 @@ fn history(
             let args: OrderedArguments =
                 serde_json::from_value(call.arguments).map_err(|e| e.to_string())?;
             let (before, _) = args.checked_call(&declared, &snapshot, &target_path, limits.max_payload_bytes)?;
+            if current.unresolved.is_some() {
+                let observed = ContentHash::of_bytes(&before).to_hex();
+                resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed)?;
+            }
             let before = RunRecord::from_bytes(&before).map_err(|e| e.to_string())?;
             if owner_config(&before, &declared)?
                 .writer_run
@@ -1298,31 +1325,19 @@ fn history(
             {
                 return Err("writer result correlation or label differs".into());
             }
-            let applied = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes)?;
-            let call_seq = call.seq.0;
-            if applied {
-                let transition = CheckedRunTransition {
-                    writer: declared.clone(),
-                    before: args.writes[1].before(limits.max_payload_bytes)?.into_bytes(),
-                    after: args.writes[1].content(limits.max_payload_bytes)?.into_bytes(),
-                    call,
-                    result: movement.clone(),
-                };
-                validate_checked_owner_transition(&transition)?;
-                generated_artifacts::validate_generated_transition(&mut reader, &transition)?;
-                validate_verified_input_transition(&mut reader, &transition)?;
-                input_revision::validate_rearm_evidence(&mut reader, &transition, &target_path)?;
-                current.last_applied_target = Some((seq, transition.after));
-            }
+            let effect = args.checked_result(&declared, metadata, &snapshot, &result, limits.max_payload_bytes)?;
             current.current = args.writes[0].content(limits.max_payload_bytes)?.into_bytes();
-            let hash = args.writes[1].after_hash();
-            if applied {
-                current.applied_calls.insert(hash.clone(), call_seq);
-            }
-            if current.completed.insert(hash, (seq, applied)).is_some() {
-                return Err("writer repeated an already resolved target attempt".into());
+            let attempt = UnresolvedTarget { seq, args, call, result: movement.clone() };
+            if effect == OrderedTargetEffect::Uncertain {
+                current.unresolved = Some(attempt);
+            } else {
+                settle_target_attempt(&mut current, &mut reader, &declared, &target_path, limits.max_payload_bytes, attempt, effect)?;
             }
         }
+    }
+    if current.unresolved.is_some() {
+        let observed = ContentHash::of_bytes(&std::fs::read(&target_path).map_err(|e| e.to_string())?).to_hex();
+        resolve_target_attempt(&mut current, &mut reader, &declared, &target_path, &config.provider_interface, limits.max_payload_bytes, &observed)?;
     }
     if let Some(start) = last_start {
         reader
@@ -1342,6 +1357,66 @@ fn history(
     }
     *saved = current.clone();
     Ok(current)
+}
+
+fn settle_target_attempt(
+    current: &mut WriterHistory,
+    reader: &mut impl CheckedRunEvidenceReader,
+    declared: &CheckedRunWriter,
+    target_path: &Path,
+    maximum: u64,
+    attempt: UnresolvedTarget,
+    effect: OrderedTargetEffect,
+) -> Result<(), String> {
+    let UnresolvedTarget { seq, args, call, result } = attempt;
+    let call_seq = call.seq.0;
+    let applied = match effect {
+        OrderedTargetEffect::Applied => true,
+        OrderedTargetEffect::Refused => false,
+        OrderedTargetEffect::Uncertain => return Err("ordered target attempt was settled while uncertain".into()),
+    };
+    let hash = args.writes[1].after_hash();
+    if applied {
+        let transition = CheckedRunTransition {
+            writer: declared.clone(),
+            before: args.writes[1].before(maximum)?.into_bytes(),
+            after: args.writes[1].content(maximum)?.into_bytes(),
+            call,
+            result,
+        };
+        validate_checked_owner_transition(&transition)?;
+        generated_artifacts::validate_generated_transition(reader, &transition)?;
+        validate_verified_input_transition(reader, &transition)?;
+        input_revision::validate_rearm_evidence(reader, &transition, target_path)?;
+        current.last_applied_target = Some((seq, transition.after));
+        current.applied_calls.insert(hash.clone(), call_seq);
+    }
+    if current.completed.insert(hash, (seq, applied)).is_some() {
+        return Err("writer repeated an already resolved target attempt".into());
+    }
+    Ok(())
+}
+
+fn resolve_target_attempt(
+    current: &mut WriterHistory,
+    reader: &mut impl CheckedRunEvidenceReader,
+    declared: &CheckedRunWriter,
+    target_path: &Path,
+    provider: &InterfaceId,
+    maximum: u64,
+    observed: &str,
+) -> Result<(), String> {
+    let Some(attempt) = current.unresolved.take() else { return Ok(()) };
+    let (before, after) = attempt.args.target_hashes(maximum)?;
+    if observed == after {
+        return settle_target_attempt(current, reader, declared, target_path, maximum, attempt, OrderedTargetEffect::Applied);
+    }
+    if observed != before {
+        return Err("ordered target effect remains uncertain; its target moved to content neither attempt state proves".into());
+    }
+    let writer = RunRecord::from_bytes(attempt.args.writes[0].content(maximum)?.as_bytes()).map_err(|e| e.to_string())?;
+    current.voided.insert(attempt.seq, target(&writer, provider)?.generation);
+    Ok(())
 }
 
 pub(super) fn success_evidence(
@@ -1564,10 +1639,12 @@ impl ProviderOutputHandoff {
             }
             if let Some(previous) = &selected {
                 let previous: &Attempt = previous;
-                if history(&self.ctx, &self.session.writer_history, &self.config)?
-                    .completed
-                    .get(&previous.authored.after_hash)
-                    .is_none_or(|(_, ok)| *ok)
+                let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
+                if !progress.voided.values().any(|generation| *generation == previous.generation)
+                    && progress
+                        .completed
+                        .get(&previous.authored.after_hash)
+                        .is_none_or(|(_, ok)| *ok)
                 {
                     return Err("writer recovery has an unexplained overlapping attempt".into());
                 }
@@ -1615,18 +1692,21 @@ impl ProviderOutputHandoff {
             .checked_add(Duration::from_millis(self.config.result_timeout_ms))
             .ok_or("writer deadline overflow")?;
         let mut planned = authored.clone();
-        let mut known: Option<(String, InterfaceArtifactFile, OrderedArguments)> = None;
+        let mut known: Option<(String, InterfaceArtifactFile, OrderedArguments, u64)> = None;
         loop {
             if Instant::now() >= deadline {
                 return Err("provider ordered file write awaits its admitted result".into());
             }
             let progress = history(&self.ctx, &self.session.writer_history, &self.config)?;
-            if known.as_ref().is_none_or(|(after_hash, _, _)| *after_hash != planned.after_hash) {
+            if known.as_ref().is_none_or(|(after_hash, _, _, generation)| {
+                *after_hash != planned.after_hash || progress.voided.values().any(|voided| voided == generation)
+            }) {
                 known = self
                     .writer_attempts(correlation_generation(&self.config.run, &planned.correlation_id)?)?
                     .into_iter()
-                    .find(|a| a.authored.after_hash == planned.after_hash)
-                    .map(|a| (planned.after_hash.clone(), a.manifest, a.args));
+                    .find(|a| a.authored.after_hash == planned.after_hash
+                        && !progress.voided.values().any(|voided| *voided == a.generation))
+                    .map(|a| (planned.after_hash.clone(), a.manifest, a.args, a.generation));
             }
             if let Some((_, true)) = progress.completed.get(&planned.after_hash) {
                 state.run_record_bytes = planned.content.as_bytes().to_vec();
@@ -1635,7 +1715,7 @@ impl ProviderOutputHandoff {
                 return Ok(AuthoredRunInstallOutcome::Installed);
             }
             if let Some((_, false)) = progress.completed.get(&planned.after_hash) {
-                let (_, _, args) = known.as_ref().ok_or("refused ordered write lost its private call")?;
+                let (_, _, args, _) = known.as_ref().ok_or("refused ordered write lost its private call")?;
                 let before_content = args.writes[1].before(maximum)?;
                 let before = before_content.as_bytes();
                 let remaining = deadline
@@ -1670,7 +1750,7 @@ impl ProviderOutputHandoff {
                 }
                 continue;
             }
-            let manifest = if let Some((_, manifest, _)) = &known {
+            let manifest = if let Some((_, manifest, _, _)) = &known {
                 manifest.clone()
             } else {
                 if progress.pending.is_some() {
@@ -1717,7 +1797,7 @@ impl ProviderOutputHandoff {
                     &serde_json::to_vec(&call).map_err(|e| e.to_string())?,
                 )
                 .map_err(|e| e.to_string())?;
-                known = Some((planned.after_hash.clone(), manifest.clone(), call.arguments));
+                known = Some((planned.after_hash.clone(), manifest.clone(), call.arguments, generation));
                 manifest
             };
             if progress.pending.is_none() {

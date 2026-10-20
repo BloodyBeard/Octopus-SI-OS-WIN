@@ -1168,6 +1168,7 @@ fn checked_run_file_chain_with_reader(
     }
     let mut calls: BTreeMap<(InterfaceId, String), Candidate> = BTreeMap::new();
     let mut transitions = Vec::new();
+    let mut uncertain = Vec::new();
     let mut observations = Vec::new();
     let mut sequence = first_seq;
     loop {
@@ -1244,9 +1245,15 @@ fn checked_run_file_chain_with_reader(
             let Some(candidate) = calls.remove(&(writer.owner.clone(), correlation)) else { continue; };
             if candidate.writer != *writer { return Err("checked run result came from a different declared writer".into()); }
             if let Some(ordered) = &candidate.ordered {
-                if !ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes())? { continue; }
+                let effect = ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes())?;
+                if effect == writer_run::OrderedTargetEffect::Refused { continue; }
                 let prospective = apply_run_json_patch(&candidate.before,&candidate.arguments.patch,&candidate.arguments.expected_after_hash, candidate.arguments.json_format)?.into_bytes();
                 let transition = CheckedRunTransition {writer:candidate.writer,before:candidate.before,after:prospective,call:candidate.call,result:movement};
+                if effect == writer_run::OrderedTargetEffect::Uncertain {
+                    if uncertain.len() >= 1024 { return Err("checked uncertain transitions exceed their evidence bound".into()); }
+                    uncertain.push(transition);
+                    continue;
+                }
                 generated_artifacts::validate_generated_transition(reader,&transition)?;
                 input_artifacts::validate_input_transition(reader, &transition)?;
                 validate_verified_input_transition(reader,&transition)?;
@@ -1297,6 +1304,15 @@ fn checked_run_file_chain_with_reader(
         if by_before.insert(ContentHash::of_bytes(&transition.before).to_hex(), transition).is_some() {
             return Err("checked authoring transitions branch or exceed their evidence bound".into());
         }
+    }
+    let mut unproven = BTreeSet::new();
+    for transition in uncertain {
+        let before = ContentHash::of_bytes(&transition.before).to_hex();
+        if by_before.contains_key(&before) { continue; }
+        if !unproven.insert(before.clone()) {
+            return Err("checked uncertain transitions branch from one snapshot".into());
+        }
+        by_before.insert(before, transition);
     }
     let mut hash = start.clone();
     let mut current = before.to_vec();
@@ -1358,12 +1374,19 @@ fn checked_run_file_chain_with_reader(
         if transition.call.seq.0 <= previous_call {
             return Err("checked authoring chain has reversed effect causality".into());
         }
+        if unproven.remove(&hash) {
+            generated_artifacts::validate_generated_transition(reader, &transition)?;
+            input_artifacts::validate_input_transition(reader, &transition)?;
+            validate_verified_input_transition(reader, &transition)?;
+            input_revision::validate_rearm_evidence(reader, &transition, path)?;
+            source_withdrawal::validate_evidence(reader, &transition)?;
+        }
         hash = ContentHash::of_bytes(&transition.after).to_hex();
         current = transition.after.clone();
         previous_call = transition.call.seq.0;
         chain.push(transition);
     }
-    if observed_sequence.is_some_and(|sequence| by_before.get(&end).is_some_and(|next| next.result.seq.0 <= sequence)) {
+    if observed_sequence.is_some_and(|sequence| !unproven.contains(&end) && by_before.get(&end).is_some_and(|next| next.result.seq.0 <= sequence)) {
         return Err("observed run snapshot was already withdrawn by a checked effect".into());
     }
     // One receipt proves its exact file effect. Later coauthor state requires

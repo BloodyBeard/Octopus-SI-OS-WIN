@@ -83,7 +83,12 @@ fn private_directory(parent: &File, name: &std::ffi::OsStr) -> io::Result<Option
         return Err(invalid("publication history requires a real private coordination directory"));
     }
     let directory = native::child(parent, name, true)?;
-    if FileIdentity::of(&directory.metadata()?)? != state.identity || native::state(parent, name)? != state {
+    let reopened = native::state(parent, name)?;
+    if FileIdentity::of(&directory.metadata()?)? != state.identity
+        || reopened.identity != state.identity
+        || reopened.kind != state.kind
+        || reopened.mode != state.mode
+    {
         return Err(invalid("publication history directory changed identity"));
     }
     Ok(Some(directory))
