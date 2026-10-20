@@ -17,6 +17,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 const PROBE_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const CLIENT_DOCTOR_REPORT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 const PROBE_CONCURRENCY: usize = 8;
 
 struct ProbeJob {
@@ -320,8 +321,8 @@ async fn run_client_doctor(
     };
     let (status, stdout, stderr) = tokio::join!(
         wait,
-        drain_bounded_output(stdout),
-        drain_bounded_output(stderr)
+        drain_bounded_output(stdout, CLIENT_DOCTOR_REPORT_LIMIT_BYTES),
+        drain_bounded_output(stderr, PROBE_OUTPUT_LIMIT_BYTES)
     );
     let stdout = stdout?;
     let stderr = stderr?;
@@ -673,8 +674,8 @@ async fn run_probe(job: &ProbeJob) -> Result<(), String> {
     };
     let (status, stdout, stderr) = tokio::join!(
         wait,
-        drain_bounded_output(stdout),
-        drain_bounded_output(stderr)
+        drain_bounded_output(stdout, PROBE_OUTPUT_LIMIT_BYTES),
+        drain_bounded_output(stderr, PROBE_OUTPUT_LIMIT_BYTES)
     );
     let stdout = stdout?;
     let stderr = stderr?;
@@ -692,7 +693,7 @@ async fn run_probe(job: &ProbeJob) -> Result<(), String> {
     Err(format!("exited with {status}: {diagnostic}"))
 }
 
-async fn drain_bounded_output<R>(mut reader: R) -> Result<Vec<u8>, String>
+async fn drain_bounded_output<R>(mut reader: R, limit: usize) -> Result<Vec<u8>, String>
 where
     R: AsyncRead + Unpin,
 {
@@ -708,15 +709,14 @@ where
             break;
         }
         observed = observed.saturating_add(read);
-        if retained.len() < PROBE_OUTPUT_LIMIT_BYTES {
-            let available = PROBE_OUTPUT_LIMIT_BYTES - retained.len();
+        if retained.len() < limit {
+            let available = limit - retained.len();
             retained.extend_from_slice(&buffer[..read.min(available)]);
         }
     }
-    if observed > PROBE_OUTPUT_LIMIT_BYTES {
+    if observed > limit {
         return Err(format!(
-            "doctor probe emitted {observed} bytes, exceeding the {} byte ceiling",
-            PROBE_OUTPUT_LIMIT_BYTES
+            "doctor probe emitted {observed} bytes, exceeding the {limit} byte ceiling"
         ));
     }
     Ok(retained)
