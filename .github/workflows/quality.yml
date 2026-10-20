@@ -65,6 +65,9 @@ jobs:
           node scripts/test-home-view.cjs
           node scripts/test-composer-dictation.cjs
           node scripts/test-application-repair.cjs
+          node scripts/test-chat-provider-catalog.cjs
+          node scripts/test-composer-agent-controls.cjs
+          node scripts/test-chat-surfaces.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
 
