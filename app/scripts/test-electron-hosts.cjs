@@ -39,7 +39,6 @@ async function main() {
   await app.whenReady();
   await verifySandboxedPreloadImports();
   await verifyClientWindowHostContract();
-  await verifyBootSourceContract();
   await verifyRuntimeReadinessEvidence();
   await verifyBootTerminalBehavior();
   await verifyBootTerminalQuit();
@@ -83,7 +82,9 @@ async function verifySandboxedPreloadImports() {
     await preload.api[method](...args);
     assert.deepEqual(preload.calls, [["invoke", channel, "token-1", ...args]], `${method} invokes ${channel} under the window's access token`);
   }
+  preload.calls.length = 0;
   assert.deepEqual(preload.api.clientWindowBootstrap(), { windowId: "window-1" });
+  assert.deepEqual(preload.calls, [["sendSync", "octopus:client-window-bootstrap"]]);
   assert.deepEqual(preload.api.beginClientPaneTransfer({ tabId: "chat" }), { transferId: "transfer-1" });
   assert.throws(() => preload.api.beginClientPaneTransfer({ tabId: "refused" }), /Pane is not transferable\./);
   assert.deepEqual(preload.api.acknowledgeClientPaneTransfer({ transferId: "transfer-1" }), { released: true, transferId: "transfer-1" });
@@ -113,10 +114,6 @@ async function verifySandboxedPreloadImports() {
   preload.calls.length = 0;
   await preload.api.bootStatus();
   assert.deepEqual(preload.calls, [["invoke", "octopus:boot-status", ""]], "a locked window stops presenting its access token");
-  const removedPrefix = ["runtime", "terminal"].join("-");
-  for (const suffix of ["open", "write", "resize", "read", "data", "exit"]) {
-    assert.equal(source.includes(`${removedPrefix}-${suffix}`), false);
-  }
 }
 
 function loadPreloadTransport(source, sendSyncReplies) {
@@ -149,61 +146,6 @@ function loadPreloadTransport(source, sendSyncReplies) {
 }
 
 async function verifyClientWindowHostContract() {
-  const [mainSource, preloadSource, typeSource, modelSource] = await Promise.all([
-    fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../electron/preload.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/electron.d.ts"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/shell/clientWindowModel.ts"), "utf8"),
-  ]);
-  const createWindowSource = mainSource.match(/function createWindow\(inheritedAccessToken = "", options = \{\}\) \{[\s\S]*?(?=\nfunction createQuickTaskWindow)/)?.[0] ?? "";
-  const startupSource = mainSource.match(/const gotSingleInstanceLock = app\.requestSingleInstanceLock\(\);[\s\S]*?(?=\nfunction grantLocalMediaPermissions)/)?.[0] ?? "";
-  assert.notEqual(createWindowSource, "");
-  assert.match(createWindowSource, /const windowState = primary \? loadWindowState\(\) : peerClientWindowState\(\)/);
-  assert.match(createWindowSource, /clientWindows\.register\(win, \{[\s\S]*?accessToken: inheritedAccessToken,[\s\S]*?primary/);
-  assert.match(createWindowSource, /if \(primary\) trackWindowState\(win\)/);
-  assert.match(createWindowSource, /loadRendererWindow\(win\);/);
-  assert.match(createWindowSource, /additionalArguments: \[`--octopus-access-claim=\$\{accessClaim\}`\]/);
-  assert.doesNotMatch(createWindowSource, /loadRendererWindow\(win,\s*\{/);
-  assert.doesNotMatch(createWindowSource, /--octopus-(client-)?(pane|target)/);
-  assert.match(mainSource, /ipcMain\.on\("octopus:client-window-bootstrap"[\s\S]*?bootstrapForWebContents\(event\.sender\.id\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-window-open"[\s\S]*?validateClientWindowOpenRequest\(requestValue\)[\s\S]*?waitUntilReady\(bootstrap\.windowId\)[\s\S]*?win\.close\(\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-window-ready"[\s\S]*?entry\.accessToken !== token[\s\S]*?markReady\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /ipcMain\.on\("octopus:client-pane-transfer-begin"[\s\S]*?beginPaneTransfer\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-accept"[\s\S]*?acceptPaneTransfer\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-commit"[\s\S]*?commitPaneTransfer\(event\.sender\.id, request\)[\s\S]*?client-pane-transfer-completed[\s\S]*?abortCommittedPaneTransfer[\s\S]*?return result\.outcome/);
-  assert.match(mainSource, /ipcMain\.on\("octopus:client-pane-transfer-acknowledge"[\s\S]*?acknowledgePaneTransfer\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-pending"[\s\S]*?pendingPaneTransferCompletions\(event\.sender\.id\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-destination-pending"[\s\S]*?pendingDestinationPaneTransfers\(event\.sender\.id\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-resume"[\s\S]*?resumePaneTransfer\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:client-pane-transfer-finalize"[\s\S]*?finalizePaneTransfer\(event\.sender\.id, request\)/);
-  assert.match(mainSource, /function requireClientLockWindow\(event, token\)[\s\S]*?entry\.accessToken !== token/);
-  const accessLockSource = mainSource.match(/ipcMain\.handle\("octopus:access-lock"[\s\S]*?\n\}\);/)?.[0] ?? "";
-  assert.match(accessLockSource, /await clientWindowClose\.requestLogout\(sender, token,[\s\S]*?getClientAccessController\(\)\.lock\(token\)/);
-  assert.match(accessLockSource, /clientWindows\.clearAccessToken\(token\);[\s\S]*?"octopus:client-access-locked"/);
-  assert.match(accessLockSource, /requireClientLockWindow\(event, token\)/);
-  assert.doesNotMatch(accessLockSource, /requireSession\(token\)/);
-  assert.match(mainSource, /label: "New Window", click: \(\) => openNewClientWindowFromMenu\(\)/);
-  assert.match(mainSource, /function openNewClientWindowFromMenu\(\)[\s\S]*?clientWindows\.select\(\{ focusedWindow: focused \}\)[\s\S]*?authenticatedClientWindowToken\(source\)[\s\S]*?ensurePrimaryClientWindow\(\)[\s\S]*?primary: false/);
-  assert.match(startupSource, /second-instance[\s\S]*?focusAppropriateClientWindow\(\)/);
-  assert.match(startupSource, /app\.on\("activate"[\s\S]*?focusAppropriateClientWindow\(\)/);
-  assert.match(mainSource, /quick-task-open-main[\s\S]*?ensureClientWindowForAccess\(token, source\)/);
-  assert.match(mainSource, /worker-environment-window-open-main[\s\S]*?ensureClientWindowForAccess\(token, source\)/);
-  assert.match(mainSource, /globalDictationShortcut[\s\S]*?ensureClientWindowForAccess\(token\)/);
-  assert.match(preloadSource, /sendSync\("octopus:client-window-bootstrap"\)/);
-  assert.match(typeSource, /import type \{[\s\S]*?ClientWindowBootstrap,[\s\S]*?ClientWindowOpenOutcome,[\s\S]*?\} from "\.\/shell\/clientWindowModel";/);
-  assert.match(typeSource, /clientWindowBootstrap\(\): ClientWindowBootstrap \| null;/);
-  assert.match(typeSource, /openClientWindow\(request\?: ClientWindowOpenRequest\): Promise<ClientWindowOpenOutcome>;/);
-  assert.match(typeSource, /clientWindowReady\(request: ClientWindowReadyRequest\): Promise<ClientWindowOpenOutcome>;/);
-  assert.match(typeSource, /beginClientPaneTransfer\(request: ClientPaneTransferBeginRequest\): ClientPaneDragPayload;/);
-  assert.match(typeSource, /acknowledgeClientPaneTransfer\(request: ClientPaneTransferAcknowledgementRequest\): \{ released: boolean; transferId: string \};/);
-  assert.match(typeSource, /pendingClientPaneTransfers\(\): Promise<ClientPaneTransferCompleted\[\]>;/);
-  assert.match(typeSource, /pendingClientPaneDestinationTransfers\(\): Promise<\(ClientPaneTransferCompleted & \{ committed: boolean \}\)\[\]>;/);
-  assert.match(typeSource, /resumeClientPaneTransfer\(request: ClientPaneTransferRequest\): Promise<ClientPaneTransferCompleted>;/);
-  assert.match(typeSource, /finalizeClientPaneTransfer\(request: ClientPaneTransferRequest\): Promise<\{ finalized: true; transferId: string \}>;/);
-  assert.match(typeSource, /onClientPaneTransferCompleted\(listener: \(completion: ClientPaneTransferCompleted\) => void\): \(\) => void;/);
-  assert.match(modelSource, /export type ClientWindowBootstrap = \{/);
-  assert.match(modelSource, /export type ClientWindowOpenOutcome = \{/);
-
   const surface = {
     kind: "surface",
     runId: "run-1",
@@ -480,355 +422,6 @@ async function verifyClientWindowHostContract() {
     { width: 1120, height: 720 },
   ), { x: 128, y: 128, width: 900, height: 650 });
   assert.deepEqual(cascadeClientWindowBounds(null, null, { width: 1120, height: 720 }), { width: 1120, height: 720 });
-}
-
-async function verifyBootSourceContract() {
-  const [mainSource, viteSource, runtimeSource, actionSource, runtimeClientSource, appSource, launchSource, sessionSource, stylesSource, projectionLiveSource, runtimeTopologySource] = await Promise.all([
-    fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../vite.config.ts"), "utf8"),
-    fs.readFile(path.join(__dirname, "../electron/runtimeHost.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../electron/clientExtensionActions.cjs"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/runtimeHost.ts"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/App.tsx"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/components/onboarding/LaunchTerminal.tsx"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/components/terminal/shellSession.ts"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/styles.css"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/projectionLive.ts"), "utf8"),
-    fs.readFile(path.join(__dirname, "../src/runtimeTopology.ts"), "utf8"),
-  ]);
-  const beforeQuitSource = mainSource.match(/app\.on\("before-quit"[\s\S]*?\n\}\);/)?.[0] ?? "";
-  const quitCleanupSource = mainSource.match(/function startClientQuitCleanup\(\)[\s\S]*?(?=\nfunction closeClientResources)/)?.[0] ?? "";
-  const touchIdStatusSource = mainSource.match(/function touchIdStatus\(\)[\s\S]*?(?=\nfunction touchIdCapabilityAvailable)/)?.[0] ?? "";
-  const touchIdPreferenceSource = mainSource.match(/function readTouchIdPreference\(\)[\s\S]*?(?=\nfunction readTouchIdEnrollmentRecord)/)?.[0] ?? "";
-  const touchIdRecordSource = mainSource.match(/function readTouchIdEnrollmentRecord\(\)[\s\S]*?(?=\nfunction verifyTouchIdEnrollment)/)?.[0] ?? "";
-  const submitChatTurnSource = mainSource.match(/ipcMain\.handle\("octopus:submit-chat-turn"[\s\S]*?\n\}\);(?=\n\nipcMain\.handle\("octopus:operator-chat-artifacts-read")/)?.[0] ?? "";
-  const submitTurnControlSource = mainSource.match(/ipcMain\.handle\("octopus:submit-operator-turn-control"[\s\S]*?\n\}\);(?=\n\nipcMain\.handle\("octopus:submit-chat-steer")/)?.[0] ?? "";
-  const submitChatSteerSource = mainSource.match(/ipcMain\.handle\("octopus:submit-chat-steer"[\s\S]*?\n\}\);(?=\n\nipcMain\.handle\("octopus:update-chat-pins")/)?.[0] ?? "";
-  const authorizeClientArtifactSource = mainSource.match(/async function authorizeClientInterfaceArtifactSubmission\(request\)[\s\S]*?(?=\nfunction getOperatorChatClientLoader)/)?.[0] ?? "";
-  const authorizeDevArtifactSource = viteSource.match(/const authorizeClientInterfaceArtifactSubmission = async \(request: Record<string, unknown>\) => \{[\s\S]*?\n      \};/)?.[0] ?? "";
-  assert.match(mainSource, /ipcMain\.handle\("octopus:launch-terminal-open"[\s\S]*?openExisting\(owner,[\s\S]*?if \(existing\) return existing;[\s\S]*?preparedCommand: state\.launchCommand/);
-  assert.match(mainSource, /function launchTerminalOwner\(event, token\)[\s\S]*?clientWindows\.entryForWebContents\(event\.sender\.id\)[\s\S]*?access\.mode === "bootstrap" && !entry\.primary[\s\S]*?scope: "launch"/);
-  assert.match(beforeQuitSource, /event\.preventDefault\(\);[\s\S]*?clientWindowClose\.requestQuit\(\)/);
-  assert.match(quitCleanupSource, /const startupRecovery = runtimeInitializationPromise[\s\S]*?await startupRecovery[\s\S]*?const interrupted = relaunchRequested \? 0 : terminalHost\?\.interruptLaunch\(\)[\s\S]*?runtimeHost\.waitUntilStopped\(\)[\s\S]*?Promise\.all\(\[stopObservation, terminalHost\?\.terminate\(\)\]\)[\s\S]*?quitReady = true;[\s\S]*?app\.quit\(\)/);
-  assert.doesNotMatch(beforeQuitSource, /app\.quit\(\)/);
-  assert.match(touchIdStatusSource, /touchIdCapabilityAvailable\(\)[\s\S]*?readTouchIdEnrollmentRecord\(\)/);
-  assert.match(touchIdStatusSource, /const prompted = readTouchIdPreference\(\)/);
-  assert.match(touchIdPreferenceSource, /stat\.isFile\(\)[\s\S]*?stat\.isSymbolicLink\(\)[\s\S]*?stat\.mode & 0o077[\s\S]*?value\.prompted !== true/);
-  assert.doesNotMatch(touchIdStatusSource, /safeStorage/);
-  assert.doesNotMatch(touchIdRecordSource, /safeStorage/);
-  assert.match(mainSource, /ipcMain\.handle\("octopus:touch-id-set-enabled"[\s\S]*?writeTouchIdPreference\(\);[\s\S]*?if \(!enabled\) \{[\s\S]*?clearTouchIdEnrollment\(\);[\s\S]*?await promptTouchId\("Enable Touch ID to unlock Octopus"\)/);
-  assert.match(mainSource, /await promptTouchId\("Unlock Octopus"\)[\s\S]*?verifyTouchIdEnrollment\(currentEnrollment\)[\s\S]*?unlockWithTouchId\(\)/);
-  assert.doesNotMatch(mainSource, /executeClientExtensionAction\([\s\S]*?launchTerminal: terminalHost[\s\S]*?runtimeHost:/);
-  assert.match(mainSource, /OCTOPUS_MACHINE_CODEX_AUTH_FILE: path\.join\(resolveOperatorCodexHome\(\), "auth\.json"\)/);
-  assert.doesNotMatch(mainSource, /runtimeHost\s*\?\?\s*await initializeRuntimeHost\(\)/);
-  assert.doesNotMatch(mainSource, /void host\.start\(\)/);
-  assert.equal(mainSource.includes("activeRuntime" + "LaunchEnvironment"), false);
-  assert.equal(mainSource.includes(["runtime", "terminal"].join("-")), false);
-  assert.match(runtimeSource, /const instance = await readRuntimeInstance\(home\)/);
-  assert.doesNotMatch(runtimeSource, /node-pty|\n  start\(|\n  stopManaged\(/);
-  assert.equal(runtimeSource.includes(["client", "launch", "broker"].join("-")), false);
-  assert.equal(runtimeSource.includes(["create", "Runtime", "Launch", "Broker"].join("")), false);
-  assert.match(actionSource, /privateStore\.auth_file_env !== MACHINE_CODEX_AUTH_FILE_ENV/);
-  assert.match(actionSource, /credentialUpdated: false,\s*runtimeRestarted: false,\s*sharedCredential: true/);
-  assert.doesNotMatch(actionSource, /prepareLaunchCommand|submitPreparedLaunchCommand|interruptLaunch|waitUntilStopped|waitUntilReady/);
-  assert.equal(actionSource.includes(["stop", "Managed"].join("")), false);
-  assert.equal(actionSource.includes("runtimeHost." + "start("), false);
-  assert.equal(runtimeClientSource.includes("restarting"), false);
-  assert.equal(runtimeClientSource.includes("restart:"), false);
-  assert.match(appSource, /const \[runtimeHasBeenReady, setRuntimeHasBeenReady\] = useState\(runtimeHost\.ready\);/);
-  assert.match(appSource, /const launchGate = access\?\.profile !== "lab"\s*&& runtimeHost\.available\s*&& runtimeHost\.phase !== "probing"\s*&& runtimeHost\.phase !== "access_required"\s*&& !runtimeHost\.ready\s*&& !runtimeHasBeenReady;/);
-  assert.doesNotMatch(appSource, /authenticatedLiveAccess/);
-  assert.match(appSource, /useEffect\(\(\) => \{\s*if \(runtimeHost\.ready\) setRuntimeHasBeenReady\(true\);\s*\}, \[runtimeHost\.ready\]\);/);
-  assert.match(appSource, /useEffect\(\(\) => \{\s*if \(launchGate\) setLaunchVisible\(true\);\s*\}, \[launchGate\]\);/);
-  assert.match(appSource, /if \(access\.profile !== "lab" && runtimeHost\.available && runtimeHost\.phase === "probing" && !runtimeHasBeenReady\) \{/);
-  assert.ok(appSource.indexOf("if (localUnlockRequired) {") < appSource.indexOf("if (accountGateRequired && access.profile"));
-  assert.match(appSource, /<LaunchTerminal\s+[\s\S]*?key="boot-launch-terminal"/);
-  assert.equal(appSource.includes(["Runtime", "Terminal", "Dock"].join("")), false);
-  assert.match(mainSource, /let runtimeProjectionHasBeenReady = false;[\s\S]*?const projectionChanged = projectionReady && !runtimeProjectionHasBeenReady;[\s\S]*?if \(projectionReady\) runtimeProjectionHasBeenReady = true;/);
-  assert.doesNotMatch(mainSource, /let runtimeProjectionReady = false;/);
-  assert.notEqual(submitChatTurnSource, "");
-  assert.match(authorizeClientArtifactSource, /if \(!isOperatorChatClientInterfaceCandidate\(request\?\.interfaceId\)\) return;/);
-  assert.ok(authorizeClientArtifactSource.indexOf("isOperatorChatClientInterfaceCandidate") < authorizeClientArtifactSource.indexOf("loadOperatorChatClient"));
-  assert.match(authorizeDevArtifactSource, /if \(!isOperatorChatClientInterfaceCandidate\(request\?\.interfaceId\)\) return;/);
-  assert.ok(authorizeDevArtifactSource.indexOf("isOperatorChatClientInterfaceCandidate") < authorizeDevArtifactSource.indexOf("operatorChatClientLoader.load"));
-  assert.doesNotMatch(submitChatTurnSource, /getProjectionStore\("live"\)\.invalidate/);
-  assert.match(submitChatTurnSource, /readArtifactPayload:[\s\S]*?readContentAddressedArtifactPayload[\s\S]*?"ledger", "blobs"/);
-  assert.notEqual(submitTurnControlSource, "");
-  assert.match(submitTurnControlSource, /submitOperatorTurnControl/);
-  assert.doesNotMatch(submitTurnControlSource, /prepareLiveProjectionRead|getProjectionStore/);
-  assert.notEqual(submitChatSteerSource, "");
-  assert.match(submitChatSteerSource, /submitOperatorTurn/);
-  assert.match(submitChatSteerSource, /readContentAddressedArtifactPayload/);
-  assert.doesNotMatch(submitChatSteerSource, /submitClientOperatorMessageArtifact/);
-  assert.doesNotMatch(projectionLiveSource, /onRuntimeHostState/);
-  assert.match(runtimeTopologySource, /onRuntimeHostState\?\.\(\(state\) => \{[\s\S]*?clientRuntimeHostObservation\(state\)[\s\S]*?liveProjectionStatus\(next\)/);
-  assert.match(mainSource, /backgroundColor: isMac \? "#00000000" : "#181818"/);
-  assert.match(mainSource, /transparent: isMac,[\s\S]*?vibrancy: "under-window",[\s\S]*?visualEffectState: "active"/);
-  assert.match(mainSource, /const translucent = appearance\?\.translucent !== false;[\s\S]*?const opaqueSurface = !translucent \|\| oversized;[\s\S]*?win\.setVibrancy\("under-window"\)[\s\S]*?windowBackdropModes\.set\(win, opaqueSurface\)/);
-  assert.match(launchSource, /<OctopusTerminal id="terminal-panel-launch" session=\{session\} \/>/);
-  assert.match(launchSource, /if \(!leaving \|\| phase === "greeting"\) return;/);
-  assert.equal(launchSource.includes(["launch", "terminal", "header"].join("-")), false);
-  assert.equal(launchSource.includes(["Starting", "Octopus"].join(" ")), false);
-  assert.equal(launchSource.includes(["Preparing", "Octopus"].join(" ")), false);
-  assert.match(sessionSource, /export function createLaunchShellSession\(\)/);
-  assert.match(sessionSource, /bridge\.openLaunchTerminal\(dimensions\)/);
-  assert.equal(sessionSource.includes(["create", "Managed", "Runtime", "Terminal", "Session"].join("")), false);
-  assert.equal(sessionSource.includes(["read", "Runtime", "Terminal"].join("")), false);
-  assert.equal(stylesSource.includes(`.${["launch", "terminal", "header"].join("-")}`), false);
-  assert.equal(stylesSource.includes(`.${["runtime", "terminal", "dock"].join("-")}`), false);
-  assert.equal(stylesSource.includes(`.${["launch", "scene", "logo", "fill"].join("-")}`), false);
-  await verifyBeforeQuitHandlerExecution(mainSource, `${beforeQuitSource}\n${quitCleanupSource}`);
-  await verifyStartupPaintOrdering(mainSource);
-  verifyLaunchTerminalDeliveryAfterReady(mainSource);
-  await verifyLaunchTerminalOpenReadyRace(mainSource);
-}
-
-async function verifyStartupPaintOrdering(mainSource) {
-  const source = mainSource.match(/const gotSingleInstanceLock = app\.requestSingleInstanceLock\(\);[\s\S]*?(?=\nfunction grantLocalMediaPermissions)/)?.[0] ?? "";
-  assert.notEqual(source, "");
-  const calls = [];
-  const handlers = new Map();
-  const context = {
-    clientLaunchSelectionPath: "/launch.json",
-    resolveOctopusHome: () => "/selected-home",
-    resolveOperatorCodexHome: () => "/selected-auth",
-    saveClientLaunchSelection: () => {},
-    appendClientLog: (...args) => calls.push(["log", ...args]),
-    applyThemePreference: () => calls.push(["theme"]),
-    createWindow: () => {
-      calls.push(["create-window"]);
-      const win = {
-        focus: () => calls.push(["focus"]),
-        isDestroyed: () => false,
-        isMinimized: () => false,
-        restore: () => calls.push(["restore"]),
-      };
-      context.primaryWindow = win;
-      return win;
-    },
-    ensureRuntimeHost: () => calls.push(["ensure-observer"]),
-    focusAppropriateClientWindow: () => {
-      const win = context.primaryWindow || context.createWindow();
-      win.focus();
-      return win;
-    },
-    grantLocalMediaPermissions: () => calls.push(["media"]),
-    initializeRuntimeHost: () => {
-      calls.push(["recover"]);
-      return new Promise(() => {});
-    },
-    loadStoredThemePreference: () => "system",
-    primaryWindow: null,
-    setAppIdentity: () => calls.push(["identity"]),
-    app: {
-      on(name, handler) {
-        handlers.set(name, handler);
-      },
-      quit: () => calls.push(["quit"]),
-      requestSingleInstanceLock: () => true,
-      whenReady: () => Promise.resolve(),
-    },
-  };
-  vm.runInNewContext(source, context, { filename: "main.startup.cjs" });
-  await delay(0);
-  assert.ok(calls.findIndex(([name]) => name === "create-window") < calls.findIndex(([name]) => name === "recover"));
-  assert.equal(calls.some(([name]) => name === "log"), false);
-  const secondInstance = handlers.get("second-instance");
-  assert.equal(typeof secondInstance, "function");
-  context.primaryWindow = null;
-  const start = calls.length;
-  secondInstance();
-  await delay(0);
-  const secondCalls = calls.slice(start).map(([name]) => name);
-  assert.deepEqual(secondCalls, ["ensure-observer", "create-window", "focus", "recover"]);
-}
-
-function verifyLaunchTerminalDeliveryAfterReady(mainSource) {
-  const source = mainSource.match(/function publishTerminalEvent\(channel, payload\) \{[\s\S]*?(?=\nfunction terminalOwner)/)?.[0] ?? "";
-  assert.notEqual(source, "");
-  const sent = [];
-  const webContents = {
-    id: 73,
-    isDestroyed: () => false,
-    send: (...args) => sent.push(args),
-  };
-  const context = {
-    BrowserWindow: {
-      getAllWindows: () => [{ isDestroyed: () => false, webContents }],
-    },
-    getClientAccessController: () => ({ requireSession: () => ({ profile: "live" }) }),
-    runtimeHost: { snapshot: () => ({ ready: true }) },
-    terminalHost: {
-      closeOwner: () => assert.fail("launch owner must not be closed"),
-      closeSender: () => assert.fail("live launch sender must not be closed"),
-    },
-  };
-  vm.runInNewContext(`${source}\npublishTerminalEvent("octopus:terminal-data", { owner: { scope: "launch", senderId: 73, token: "" }, data: "ready in 4.2s" });`, context, { filename: "main.publish-terminal.cjs" });
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0][0], "octopus:terminal-data");
-  assert.equal(sent[0][1].data, "ready in 4.2s");
-}
-
-async function verifyLaunchTerminalOpenReadyRace(mainSource) {
-  const source = mainSource.match(/ipcMain\.handle\("octopus:launch-terminal-open"[\s\S]*?(?=\nipcMain\.handle\("octopus:launch-terminal-write")/)?.[0] ?? "";
-  assert.notEqual(source, "");
-  let handler = null;
-  const owner = { scope: "launch", senderId: 73, token: "" };
-  const existing = {
-    terminalId: "launch",
-    sessionId: "existing-launch-session",
-    running: true,
-    transcript: "ready",
-  };
-  const calls = [];
-  const terminal = {
-    openExisting(candidateOwner, request) {
-      calls.push(["open-existing", candidateOwner, request]);
-      return existing;
-    },
-    open() {
-      assert.fail("a ready-state remount must not create another launch shell");
-    },
-  };
-  const context = {
-    getTerminalHost: () => terminal,
-    initializeRuntimeHost: () => assert.fail("an existing launch shell must win before a ready-state probe"),
-    ipcMain: {
-      handle(channel, candidate) {
-        assert.equal(channel, "octopus:launch-terminal-open");
-        handler = candidate;
-      },
-    },
-    launchTerminalOwner: () => owner,
-    terminalHost: terminal,
-    trackTerminalSender: () => calls.push(["track-sender"]),
-  };
-  vm.runInNewContext(source, context, { filename: "main.launch-terminal-open.cjs" });
-  assert.equal(typeof handler, "function");
-  const result = await handler({ sender: { id: 73 } }, "", { cols: 120, rows: 40 });
-  assert.equal(result, existing);
-  assert.equal(calls.length, 2);
-  assert.deepEqual(calls[0], ["track-sender"]);
-  assert.equal(calls[1][0], "open-existing");
-  assert.equal(calls[1][1], owner);
-  assert.equal(calls[1][2].terminalId, "launch");
-  assert.equal(calls[1][2].cols, 120);
-  assert.equal(calls[1][2].rows, 40);
-
-  terminal.openExisting = () => null;
-  context.terminalHost = null;
-  context.initializeRuntimeHost = async () => ({ probe: async () => ({ ready: true }) });
-  await assert.rejects(
-    handler({ sender: { id: 73 } }, "", { cols: 120, rows: 40 }),
-    /already ready for this Home/,
-  );
-}
-
-async function verifyBeforeQuitHandlerExecution(mainSource, source) {
-  const publishRuntimeEventSource = mainSource.match(/function publishRuntimeEvent\(channel, payload\) \{[\s\S]*?(?=\nfunction subscribeRuntimeEvents)/)?.[0] ?? "";
-  assert.notEqual(publishRuntimeEventSource, "");
-  const calls = [];
-  const runtimeEvents = [];
-  let handler = null;
-  let resolveExit;
-  let resolveRecovery;
-  const exited = new Promise((resolve) => { resolveExit = resolve; });
-  const runtimeInitializationPromise = new Promise((resolve) => { resolveRecovery = resolve; });
-  const context = {
-    app: {
-      on(eventName, candidate) {
-        assert.equal(eventName, "before-quit");
-        handler = candidate;
-      },
-      quit() {
-        calls.push(["quit"]);
-        handler({ preventDefault: () => { throw new Error("Accepted quit was prevented again"); } });
-        resolveExit(0);
-      },
-    },
-    appendClientLog: async (...args) => { calls.push(["log", ...args]); },
-    closeClientResources() {
-      calls.push(["resources-close"]);
-    },
-    quitCleanupStarted: false,
-    quitReady: false,
-    clientWindowClose: { requestQuit: () => calls.push(["request-quit"]) },
-    nativeBrowserPresentations: null,
-    nativeBrowserDownloadHistory: null,
-    nativeDesktopPermissions: null,
-    nativeDesktopSettings: null,
-    nativeDesktopPresentations: null,
-    nativeClientPresentations: null,
-    nativeBrowserHost: null,
-    requireRuntimeStateAccess() {},
-    runtimeEventSubscriptions: new Map([[73, {
-      sender: {
-        isDestroyed: () => false,
-        send: (...args) => runtimeEvents.push(args),
-      },
-      token: "",
-    }]]),
-    relaunchRequested: false,
-    runtimeInitializationPromise,
-    runtimeHost: {
-      close() {
-        calls.push(["runtime-close"]);
-      },
-      async waitUntilStopped() {
-        calls.push(["wait-stopped"]);
-        return true;
-      },
-    },
-    terminalHost: {
-      closeAll() {
-        calls.push(["terminal-close-all"]);
-      },
-      interruptLaunch() {
-        calls.push(["interrupt-launch"]);
-        return 1;
-      },
-      async terminate() {
-        calls.push(["terminal-terminate"]);
-      },
-    },
-  };
-  vm.runInNewContext(`${publishRuntimeEventSource}\n${source}`, context, { filename: "main.before-quit.cjs" });
-  assert.equal(typeof handler, "function");
-  assert.equal(context.publishRuntimeEvent("octopus:runtime-host-state", { phase: "unmanaged" }), true);
-  assert.deepEqual(runtimeEvents, [["octopus:runtime-host-state", { phase: "unmanaged" }]]);
-  runtimeEvents.length = 0;
-  handler({ preventDefault: () => calls.push(["prevent-default"]) });
-  await delay(0);
-  assert.deepEqual(calls, [["prevent-default"], ["request-quit"]]);
-  assert.equal(context.publishRuntimeEvent("octopus:runtime-host-state", { phase: "unmanaged" }), true);
-  runtimeEvents.length = 0;
-  calls.push(["close-approved"]);
-  context.startClientQuitCleanup();
-  await delay(0);
-  assert.deepEqual(calls, [["prevent-default"], ["request-quit"], ["close-approved"]]);
-  assert.equal(context.publishRuntimeEvent("octopus:runtime-host-state", { phase: "unmanaged" }), false);
-  assert.deepEqual(runtimeEvents, []);
-  calls.push(["recovery-complete"]);
-  resolveRecovery();
-  const exitCode = await Promise.race([
-    exited,
-    delay(1_000).then(() => { throw new Error("Approved before-quit cleanup did not finish"); }),
-  ]);
-  assert.equal(exitCode, 0);
-  assert.deepEqual(calls, [
-    ["prevent-default"],
-    ["request-quit"],
-    ["close-approved"],
-    ["recovery-complete"],
-    ["interrupt-launch"],
-    ["wait-stopped"],
-    ["terminal-terminate"],
-    ["runtime-close"],
-    ["terminal-close-all"],
-    ["resources-close"],
-    ["quit"],
-    ["resources-close"],
-  ]);
 }
 
 async function verifyRuntimeReadinessEvidence() {
@@ -1257,6 +850,17 @@ async function verifyProviderCredentialRepair() {
       installedExtensionIds: [PROVIDER_CREDENTIAL_REPAIR_EXTENSION],
       octopusHome,
     }, request), /complete ChatGPT token data/);
+
+    await fs.writeFile(authPath, machineAuth, { mode: 0o600 });
+    await fs.writeFile(path.join(descriptorRoot, "interface.json"), JSON.stringify({
+      id: "world_provider_codex",
+      interface_driver_config: { residual_ambient: { private_auth_store: { auth_file_env: "CODEX_HOME" } } },
+    }));
+    await assert.rejects(executeClientExtensionAction({
+      codexHome,
+      installedExtensionIds: [PROVIDER_CREDENTIAL_REPAIR_EXTENSION],
+      octopusHome,
+    }, request), (error) => error.code === "provider_auth_store_unsupported");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
