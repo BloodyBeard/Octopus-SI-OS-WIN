@@ -610,6 +610,7 @@ fn template_for_call(
     reference: ArtifactRef,
     payload: &[u8],
     config: &RunAuthoringConfig,
+    call_in_context: bool,
 ) -> Result<RunAuthoringCheckpoint, String> {
     let call: octopus_tool_handlers::ToolCallArtifact = serde_json::from_slice(payload)
         .map_err(|error| format!("result receiving call is malformed: {error}"))?;
@@ -622,7 +623,10 @@ fn template_for_call(
         .ok_or("result receiving call has no correlation")?;
     non_empty_string(&correlation_id, "result receiving call correlation")?;
     let mut required = contract.clone();
-    let static_artifact_bindings = result_static_bindings(config, None, &reference);
+    let mut static_artifact_bindings = result_static_bindings(config, None, &reference);
+    if call_in_context {
+        static_artifact_bindings.retain(|id| id != &reference.id);
+    }
     required.params = serde_json::to_value(Correspondence {
         call_artifact: reference,
         tool: call.tool,
@@ -666,6 +670,7 @@ pub(super) fn prepare(
     handoff: &ProviderOutputHandoff,
     record: &RunRecord,
     outputs: &[PreparedHandoff],
+    terminal_context: Option<&[ArtifactId]>,
     topology: &mut BoundRunAuthoringTopology,
 ) -> Result<Option<CheckpointId>, String> {
     let consumed = handoff
@@ -724,6 +729,7 @@ pub(super) fn prepare(
                 .read_payload_bytes()
                 .map_err(|error| error.to_string())?,
             &handoff.config,
+            terminal_context.is_some_and(|context| context.contains(&output.identity.artifact.id)),
         )?;
         if !handoff
             .granted_mark_outcomes
@@ -756,6 +762,7 @@ pub(super) fn materialize(
     next: &RunAuthoringConfig,
     prefix: &str,
     consumed: Option<&CheckpointId>,
+    deferred_context: Option<&[ArtifactBinding]>,
 ) -> Result<(), String> {
     if consumed.is_none()
         && !next.checkpoints.iter().any(|template| {
@@ -765,10 +772,14 @@ pub(super) fn materialize(
     {
         return Ok(());
     }
-    let current =
-        RunRecord::from_bytes(&serde_json::to_vec(root).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-    let context = current_context_bindings(&current, &config.checkpoints)?;
+    let context = match deferred_context {
+        Some(context) => context.to_vec(),
+        None => current_context_bindings(
+            &RunRecord::from_bytes(&serde_json::to_vec(root).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?,
+            &config.checkpoints,
+        )?,
+    };
     let mut rows = Vec::new();
     let mut ids = Vec::new();
     for template in next.checkpoints.iter().filter(|template| {
@@ -777,16 +788,15 @@ pub(super) fn materialize(
     }) {
         let call = correspondence(template)?;
         let mut bindings = context.clone();
-        if bindings
+        if !bindings
             .iter()
             .any(|binding| binding.id == call.call_artifact.id)
         {
-            return Err("result receiving call is already in the future input context".into());
+            bindings.push(ArtifactBinding {
+                id: call.call_artifact.id,
+                access: Default::default(),
+            });
         }
-        bindings.push(ArtifactBinding {
-            id: call.call_artifact.id,
-            access: Default::default(),
-        });
         let bindings = bindings
             .iter()
             .map(serde_json::to_value)
@@ -854,14 +864,18 @@ pub(super) fn validate_transition(
         let [checkpoint] = added.as_slice() else {
             return Err("result call has no unique receiving checkpoint".into());
         };
-        let mut expected = provider_context_bindings(after, &config.provider_interface)?;
-        expected.push(ArtifactBinding {
-            id: call.call_artifact.id.clone(),
-            access: Default::default(),
-        });
+        provider_context_bindings(after, &config.provider_interface)?;
+        let context = effective_context_bindings(after, &old.checkpoints, &config.provider_interface)?;
+        let mut expected = context.clone();
+        if !expected.iter().any(|binding| binding.id == call.call_artifact.id) {
+            expected.push(ArtifactBinding {
+                id: call.call_artifact.id.clone(),
+                access: Default::default(),
+            });
+        }
         if matches != 1
             || checkpoint.artifact_bindings != expected
-            || template.static_artifact_bindings != result_static_bindings(&old, None, &call.call_artifact)
+            || template.static_artifact_bindings != result_static_bindings(&old, Some(&context), &call.call_artifact)
             || checkpoint.epoch.0 != 0
             || before.checkpoint(&checkpoint.id).is_some()
         {
@@ -914,6 +928,8 @@ pub(super) fn validate_saved(
         let [output] = outputs.as_slice() else {
             return Err("saved result input lost its declared output".into());
         };
+        let call_in_context = effective_context_bindings(after, &old.checkpoints, &config.provider_interface)?
+            .iter().any(|binding| binding.id == reference.id);
         let expected = template_for_call(
             output,
             reference,
@@ -921,6 +937,7 @@ pub(super) fn validate_saved(
                 .read_payload_bytes()
                 .map_err(|error| error.to_string())?,
             &old,
+            call_in_context,
         )?;
         if expected != *template {
             return Err("saved result input changed its exact original call".into());
@@ -1064,11 +1081,14 @@ pub(super) fn validate_checked(
             &call.call_artifact,
             &item.manifest_relative_path,
         )?;
+        let call_in_context = effective_context_bindings(&after, &config.checkpoints, &config.provider_interface)?
+            .iter().any(|binding| binding.id == call.call_artifact.id);
         let expected = template_for_call(
             output,
             call.call_artifact.clone(),
             &payload,
             &config,
+            call_in_context,
         )?;
         if expected != *template {
             return Err("checked result input changed its original call".into());

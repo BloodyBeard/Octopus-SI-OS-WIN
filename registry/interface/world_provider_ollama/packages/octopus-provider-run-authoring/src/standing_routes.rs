@@ -419,6 +419,36 @@ fn append_journal(ctx: &InterfaceLiftContext, record: &RunRecord, line: &Journal
         .map_err(|error| error.to_string())
 }
 
+pub fn standing_route_admits_only(
+    record: &RunRecord,
+    provider: &InterfaceId,
+    artifact_label: &str,
+) -> Result<(), String> {
+    let deliverers = record
+        .active_checkpoints
+        .iter()
+        .filter_map(|id| record.checkpoint(id))
+        .filter(|checkpoint| checkpoint.inbound_interface() == Some(provider) && delivers(checkpoint, artifact_label))
+        .collect::<Vec<_>>();
+    match deliverers.as_slice() {
+        [checkpoint]
+            if checkpoint.required_verified_artifacts.is_empty()
+                && checkpoint
+                    .interface_binding
+                    .as_ref()
+                    .and_then(|binding| policy_names(&binding.config.artifact_policy))
+                    .is_some_and(|names| names.contains(artifact_label)) =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "run '{}' has no single standing route admitting '{artifact_label}' from '{}'",
+            record.id.as_str(),
+            provider.as_str()
+        )),
+    }
+}
+
 pub fn open_standing_handoff_before(
     ctx: &InterfaceLiftContext,
     record: &RunRecord,
@@ -470,6 +500,7 @@ impl ProviderOutputHandoff {
             items,
             terminal: false,
             context_publication: None,
+            deferred_publication: false,
             source_without_context: self.failed_source,
             settlement_of: None,
             dispatch_fenced: true,

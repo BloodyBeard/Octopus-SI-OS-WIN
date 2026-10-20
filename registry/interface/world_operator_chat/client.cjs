@@ -1478,71 +1478,6 @@ async function submitOperatorTurnControl(options, request) {
   };
 }
 
-async function resumeRestartInterruptedTurns(options, request) {
-  const config = await readConfig();
-  const octopusHome = absolutePath(options.octopusHome(), "octopusHome");
-  const afterSeq = integerAtLeast(request?.afterSeq ?? -1, -1, "afterSeq");
-  const runtimeStartedAtMs = integerAtLeast(request?.runtimeStartedAtMs, 1, "runtimeStartedAtMs");
-  const readArtifactPayload = requiredFunction(options.readArtifactPayload, "readArtifactPayload");
-  const submit = requiredFunction(options.submitTurnControl, "submitTurnControl");
-  const { DatabaseSync } = require("node:sqlite");
-  const database = new DatabaseSync(path.join(octopusHome, "ledger", "ledger-index.sqlite"), { readOnly: true });
-  let watermark;
-  let interruptions;
-  try {
-    database.exec("PRAGMA query_only = ON");
-    watermark = decimalSafeInteger(
-      String(database.prepare("SELECT value FROM index_meta WHERE key = 'watermark'").get()?.value ?? ""),
-      "ledger index watermark",
-    );
-    const labels = database.prepare("SELECT DISTINCT artifact_label FROM movements WHERE seq > ? AND seq < ? AND kind = 'InterfaceOutbound'").all(afterSeq, watermark)
-      .map((row) => String(row.artifact_label ?? ""))
-      .filter((label) => label && operatorChatLiveEventKind(label, config, {}) === "interrupted_result");
-    const later = database.prepare(
-      "SELECT 1 FROM movements WHERE runtime_run = ? AND seq > ? AND seq < ? AND (from_id = ? OR to_id = ?) LIMIT 1",
-    );
-    const turnInput = database.prepare(
-      `SELECT recorded_at_unix_ms FROM movements WHERE runtime_run = ? AND seq < ? AND kind = 'InterfaceOutbound'
-        AND from_id = ? AND to_id = ? ORDER BY seq DESC LIMIT 1`,
-    );
-    interruptions = labels.flatMap((label) => database.prepare(
-      `SELECT seq, from_id, to_id, artifact_id, artifact_label, artifact_content, runtime_run, recorded_at_unix_ms FROM movements
-        WHERE seq > ? AND seq < ? AND kind = 'InterfaceOutbound' AND to_kind = 'interface'
-          AND artifact_label = ? AND runtime_interface = to_id
-        ORDER BY seq ASC`,
-    ).all(afterSeq, watermark, label))
-      .filter((row) => !later.get(String(row.runtime_run), Number(row.seq), watermark, String(row.to_id), String(row.to_id)))
-      .filter((row) => {
-        const input = turnInput.get(String(row.runtime_run), Number(row.seq), String(row.to_id), String(row.from_id));
-        return Number(row.recorded_at_unix_ms) >= runtimeStartedAtMs
-          && Number.isSafeInteger(Number(input?.recorded_at_unix_ms)) && Number(input.recorded_at_unix_ms) < runtimeStartedAtMs;
-      });
-  } finally {
-    database.close();
-  }
-  const resumed = [];
-  const failed = [];
-  for (const row of interruptions) {
-    const manifestHash = contentHashHex(row.artifact_content, "indexed movement artifact_content");
-    const { payload } = await readArtifactPayload({ artifactId: String(row.artifact_id), manifestHash, label: String(row.artifact_label) });
-    if (!payload || typeof payload !== "object" || payload.native_terminal_status !== "interrupted"
-      || payload.result_origin !== "native_turn_completion" || payload.native_terminal_input_context !== true) continue;
-    const request = {
-      interfaceId: safeSegment(row.to_id, "interrupted chat interface"),
-      runId: safeSegment(row.runtime_run, "interrupted run"),
-      action: "resume",
-      controlId: `control_restart_${Number(row.seq)}`,
-    };
-    try {
-      const result = await submit(request);
-      resumed.push({ runId: result.runId, interfaceId: result.interfaceId, controlId: result.controlId, interruptedSeq: Number(row.seq) });
-    } catch (error) {
-      failed.push({ runId: request.runId, interruptedSeq: Number(row.seq), error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return { watermark, resumed, failed };
-}
-
 async function assertGenericOperatorChatArtifactAllowed(request) {
   const config = await readConfig();
   const interfaceId = safeSegment(request?.interfaceId, "interfaceId");
@@ -8111,7 +8046,6 @@ module.exports = {
   releaseOperatorTaskWorkerEnvironments,
   submitOperatorTurn,
   submitOperatorTurnControl,
-  resumeRestartInterruptedTurns,
   requestComposerPrediction: (options, request) => require("./composer-predictions.cjs").requestComposerPrediction({
     ...options, withRunLock: withOperatorRunAuthoringLock, withTopologyLock: withOperatorWorkspaceTopologyLock,
     waitForInterface: waitForInterfaceSocket,

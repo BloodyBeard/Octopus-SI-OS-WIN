@@ -127,10 +127,20 @@ async fn native_terminal_handoff_cases() {
                     let label=incoming.artifact.read_manifest().unwrap().label;
                     let pending=&current_record.interface_state[&gate_ctx.interface]["pending_handoff"];
                     let items=pending["items"].as_array().unwrap();
-                    assert_eq!(items.len(),if ack_bootstrap || with_answer || count==2 || label==TURN_INTERRUPTED_RESULT_LABEL {1}else{2});
-                    assert_eq!(pending["terminal"],ack_bootstrap || items.last().unwrap()["artifact_label"]==TURN_INTERRUPTED_RESULT_LABEL);
-                    let item=items.iter().find(|item|item["artifact_label"]==label).unwrap();
-                    let cp=current_record.checkpoint(&serde_json::from_value(item["checkpoint"]["id"].clone()).unwrap()).unwrap();
+                    let (cp,standing)=match items.iter().find(|item|item["artifact_label"]==label) {
+                        Some(item) => {
+                            assert_eq!(items.len(),if ack_bootstrap || with_answer || count==2 || label==TURN_INTERRUPTED_RESULT_LABEL {1}else{2});
+                            assert_eq!(pending["terminal"],ack_bootstrap || items.last().unwrap()["artifact_label"]==TURN_INTERRUPTED_RESULT_LABEL);
+                            (current_record.checkpoint(&serde_json::from_value(item["checkpoint"]["id"].clone()).unwrap()).unwrap(),false)
+                        }
+                        None => {
+                            let standing=current_record.checkpoints.iter().filter(|cp|current_record.active_checkpoints.contains(&cp.id)
+                                && cp.id.as_str().contains("_standing_") && cp.inbound_interface()==Some(&gate_ctx.interface)
+                                && cp.interface_binding.as_ref().unwrap().admits(&label)).collect::<Vec<_>>();
+                            let [route]=standing.as_slice() else { panic!("'{label}' rides neither a pending item nor one standing route") };
+                            (*route,true)
+                        }
+                    };
                     let mut row=edge(&gate_ctx,&current,cp,&incoming.artifact,MovementKind::InterfaceArrival,current_record.worker.clone());
                     let scope=retain(gate_ctx,&incoming,&row);
                     if (phase==2 && label==TURN_INTERRUPTED_RESULT_LABEL) || (!ack_bootstrap && with_answer && phase==0 && label=="turn.completed") {
@@ -139,12 +149,16 @@ async fn native_terminal_handoff_cases() {
                     let mut metadata=row.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();metadata.delivery_scope_seq=scope;row.invocation_metadata=Some(metadata.into());
                     let seq=append(&gate_ctx,row);
                     let payload:serde_json::Value=serde_json::from_slice(&incoming.artifact.read_payload_bytes().unwrap()).unwrap_or(json!({}));
-                    if let Some(continuity)=payload.get("codex_continuity") { assert_eq!(continuity["context_generation"],current_record.interface_state[&gate_ctx.interface]["context_generation"]); }
+                    if let Some(continuity)=payload.get("codex_continuity") {
+                        let persisted=&current_record.interface_state[&gate_ctx.interface]["context_generation"];
+                        if standing { assert!(continuity["context_generation"].as_u64().unwrap()>=persisted.as_u64().unwrap()); }
+                        else { assert_eq!(&continuity["context_generation"],persisted); }
+                    }
                     if label==TURN_INTERRUPTED_RESULT_LABEL { assert_eq!(payload["source_artifact"],json!(expected_source)); }
                     delivered.push((label,cache_artifact(&gate_ctx,&incoming.artifact),seq));
                     if let Some(retained)=incoming.retained {retained.reply.send(Ok(octopus_ledger::ArtifactDelivery::Complete {verdict:DeliveryVerdict::Admitted{seq}})).unwrap();}
                     else {incoming.verdict_tx.unwrap().send(DeliveryVerdict::Admitted{seq}).unwrap();}
-                    if phase==3 || phase==22 { break; }
+                    if phase==3 || phase==22 || (standing && delivered_before+delivered.len()==count) { break; }
                 }
             }}
             delivered

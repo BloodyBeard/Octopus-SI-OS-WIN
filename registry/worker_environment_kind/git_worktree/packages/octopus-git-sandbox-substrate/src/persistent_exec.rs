@@ -2,8 +2,13 @@ use octopus_descriptors::ProcessSandboxMode;
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use octopus_exec::{
     Environment, ExecOutputStream, ExecParams, ExecProcess, ExecProcessEvent,
@@ -11,6 +16,14 @@ use octopus_exec::{
 };
 use octopus_util_pathuri::PathUri;
 use octopus_worker_env::{AbsPath, ProjectedSandbox, WorkerEnvironmentId};
+
+pub const PERSISTENT_PROCESS_KEEPER_FLAG: &str = "--octopus-persistent-process-keeper";
+const KEEPER_SPEC_SCHEMA_VERSION: u32 = 1;
+const KEEPER_FRAME_BYTES: u64 = 8 * 1024 * 1024;
+const KEEPER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const KEEPER_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60);
+const DELIVERED_PROCESS_RETENTION: Duration = Duration::from_secs(300);
+const UNDELIVERED_PROCESS_RETENTION: Duration = Duration::from_secs(3600);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitWorktreeProcessLimits {
@@ -89,34 +102,777 @@ pub struct GitWorktreeProcessInfo {
     pub cwd: AbsPath,
 }
 
+#[derive(Clone, Debug)]
+pub struct GitWorktreeProcessStore {
+    registry: PathBuf,
+    sockets: PathBuf,
+    keeper: PathBuf,
+}
+
+impl GitWorktreeProcessStore {
+    pub fn new(durable_state: &Path, sockets: &Path, keeper: PathBuf) -> Result<Self, String> {
+        let registry = durable_state.join("persistent-processes");
+        private_directory(&registry)?;
+        if !sockets.is_absolute() || !keeper.is_absolute() {
+            return Err("persistent process sockets and keeper must be absolute paths".to_string());
+        }
+        Ok(Self {
+            registry,
+            sockets: sockets.to_path_buf(),
+            keeper,
+        })
+    }
+
+    fn spec_path(&self, process_id: &str) -> PathBuf {
+        self.registry.join(format!("{process_id}.json"))
+    }
+
+    fn specs(&self, worker_environment_id: &WorkerEnvironmentId) -> Result<Vec<KeeperSpec>, String> {
+        let entries = std::fs::read_dir(&self.registry).map_err(|error| {
+            format!(
+                "persistent process registry '{}' cannot be read: {error}",
+                self.registry.display()
+            )
+        })?;
+        let mut specs = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|error| format!("persistent process registry entry is unreadable: {error}"))?
+                .path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let spec = match KeeperSpec::read(&path) {
+                Ok(spec) => spec,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "persistent process record '{}' is unreadable: {error}",
+                        path.display()
+                    ));
+                }
+            };
+            if spec.worker_environment_id == worker_environment_id.as_str() {
+                specs.push(spec);
+            }
+        }
+        specs.sort_by(|left, right| left.process_id.cmp(&right.process_id));
+        Ok(specs)
+    }
+
+    fn spec(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        process_id: &str,
+    ) -> Result<KeeperSpec, String> {
+        let missing = || {
+            format!(
+                "worker environment '{}' has no persistent process '{}'",
+                worker_environment_id, process_id
+            )
+        };
+        if !valid_process_id(process_id) {
+            return Err(missing());
+        }
+        let spec = match KeeperSpec::read(&self.spec_path(process_id)) {
+            Ok(spec) => spec,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(missing()),
+            Err(error) => {
+                return Err(format!(
+                    "persistent process record '{}' is unreadable: {error}",
+                    process_id
+                ));
+            }
+        };
+        if spec.worker_environment_id != worker_environment_id.as_str() {
+            return Err(missing());
+        }
+        Ok(spec)
+    }
+
+    fn forget(&self, spec: &KeeperSpec) {
+        for path in [
+            spec.socket.clone(),
+            self.spec_path(&spec.process_id),
+            delivered_marker(&self.spec_path(&spec.process_id)),
+        ] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 pub struct GitWorktreeProcessManager {
-    next_process_id: AtomicU64,
-    processes: tokio::sync::Mutex<ProcessTable>,
-    activity: Arc<tokio::sync::Notify>,
+    store: Option<GitWorktreeProcessStore>,
+    starts: tokio::sync::Mutex<()>,
 }
 
-#[derive(Default)]
-struct ProcessTable {
-    by_environment: BTreeMap<WorkerEnvironmentId, ProcessEnvironment>,
+impl GitWorktreeProcessManager {
+    pub fn new(store: Option<GitWorktreeProcessStore>) -> Self {
+        Self {
+            store,
+            starts: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    fn store(&self) -> Result<&GitWorktreeProcessStore, String> {
+        self.store.as_ref().ok_or_else(|| {
+            "persistent processes require formation-scoped durable state and an interface-local IPC root"
+                .to_string()
+        })
+    }
+
+    pub async fn start(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        sandbox: &ProjectedSandbox,
+        sandbox_mode: ProcessSandboxMode,
+        mut argv: Vec<String>,
+        cwd: PathBuf,
+        mut env: BTreeMap<String, String>,
+        tty: bool,
+        wait_ms: u64,
+        max_output_bytes: usize,
+        limits: GitWorktreeProcessLimits,
+        call: Option<&str>,
+    ) -> Result<GitWorktreeProcessPoll, String> {
+        limits.validate()?;
+        validate_poll_output_ceiling(max_output_bytes)?;
+        let store = self.store()?;
+        let _start = self.starts.lock().await;
+        let specs = store.specs(worker_environment_id)?;
+        if let Some(call) = call
+            && let Some(spec) = specs
+                .iter()
+                .find(|spec| spec.start_call.as_deref() == Some(call))
+        {
+            return poll_keeper(
+                store,
+                spec,
+                KeeperRequest::Poll {
+                    call: Some(call.to_string()),
+                    input: String::new(),
+                    wait_ms,
+                    max_output_bytes,
+                },
+            )
+            .await;
+        }
+        if argv.is_empty() || argv.iter().any(String::is_empty) {
+            return Err("persistent coder process argv must contain non-empty strings".to_string());
+        }
+        let cwd = AbsPath::new(&cwd)
+            .map_err(|error| format!("persistent coder process cwd is invalid: {error}"))?;
+        sandbox
+            .authorize_read(&cwd)
+            .map_err(|error| format!("persistent coder process cwd is denied: {error}"))?;
+        resolve_persistent_process_program(&mut argv, &env, cwd.as_path())?;
+        let argv = crate::sandboxed_worktree_process_argv(sandbox, sandbox_mode, &cwd, argv)
+            .map_err(|error| format!("persistent coder sandbox floor failed: {error}"))?;
+        let owned = specs
+            .iter()
+            .filter(|spec| !delivered_marker(&store.spec_path(&spec.process_id)).exists())
+            .count();
+        if owned >= limits.max_processes_per_worker_environment {
+            return Err(format!(
+                "worker environment '{}' already owns the descriptor maximum of {} persistent processes",
+                worker_environment_id, limits.max_processes_per_worker_environment
+            ));
+        }
+        env.insert("TMPDIR".to_string(), cwd.as_str().to_string());
+        env.insert("TMP".to_string(), cwd.as_str().to_string());
+        env.insert("TEMP".to_string(), cwd.as_str().to_string());
+        let identity = new_process_identity(worker_environment_id)?;
+        let spec = KeeperSpec {
+            schema_version: KEEPER_SPEC_SCHEMA_VERSION,
+            worker_environment_id: worker_environment_id.as_str().to_string(),
+            process_id: format!("coder-process-{identity}"),
+            start_call: call.map(str::to_string),
+            argv,
+            cwd: cwd.as_path().to_path_buf(),
+            env,
+            tty,
+            socket: store.sockets.join(format!("p-{identity}.sock")),
+            max_buffered_output_bytes: limits.max_buffered_output_bytes,
+            max_buffered_output_events: limits.max_buffered_output_events,
+            max_input_bytes: limits.max_input_bytes,
+            process_timeout_ms: duration_ms(limits.process_timeout)?,
+            cleanup_timeout_ms: duration_ms(limits.cleanup_timeout)?,
+        };
+        let spec_path = store.spec_path(&spec.process_id);
+        spec.write_new(&spec_path)?;
+        if let Err(error) = spawn_keeper(store, &spec, &spec_path).await {
+            store.forget(&spec);
+            return Err(error);
+        }
+        poll_keeper(
+            store,
+            &spec,
+            KeeperRequest::Poll {
+                call: call.map(str::to_string),
+                input: String::new(),
+                wait_ms,
+                max_output_bytes,
+            },
+        )
+        .await
+    }
+
+    pub async fn write_and_poll(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        process_id: &str,
+        input: &[u8],
+        wait_ms: u64,
+        max_output_bytes: usize,
+        call: Option<&str>,
+    ) -> Result<GitWorktreeProcessPoll, String> {
+        validate_poll_output_ceiling(max_output_bytes)?;
+        let store = self.store()?;
+        let spec = store.spec(worker_environment_id, process_id)?;
+        if input.len() > spec.max_input_bytes {
+            return Err(format!(
+                "persistent coder stdin contains {} bytes, exceeding the descriptor-owned {} byte ceiling",
+                input.len(),
+                spec.max_input_bytes
+            ));
+        }
+        poll_keeper(
+            store,
+            &spec,
+            KeeperRequest::Poll {
+                call: call.map(str::to_string),
+                input: BASE64.encode(input),
+                wait_ms,
+                max_output_bytes,
+            },
+        )
+        .await
+    }
+
+    pub async fn interrupt_and_poll(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        process_id: &str,
+        wait_ms: u64,
+        max_output_bytes: usize,
+        call: Option<&str>,
+    ) -> Result<GitWorktreeProcessPoll, String> {
+        validate_poll_output_ceiling(max_output_bytes)?;
+        let store = self.store()?;
+        let spec = store.spec(worker_environment_id, process_id)?;
+        poll_keeper(
+            store,
+            &spec,
+            KeeperRequest::Interrupt {
+                call: call.map(str::to_string),
+                wait_ms,
+                max_output_bytes,
+            },
+        )
+        .await
+    }
+
+    pub async fn terminate_and_poll(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        process_id: &str,
+        wait_ms: u64,
+        max_output_bytes: usize,
+        call: Option<&str>,
+    ) -> Result<GitWorktreeProcessPoll, String> {
+        validate_poll_output_ceiling(max_output_bytes)?;
+        let store = self.store()?;
+        let spec = store.spec(worker_environment_id, process_id)?;
+        poll_keeper(
+            store,
+            &spec,
+            KeeperRequest::Terminate {
+                call: call.map(str::to_string),
+                wait_ms,
+                max_output_bytes,
+            },
+        )
+        .await
+    }
+
+    pub async fn list(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+    ) -> Result<Vec<GitWorktreeProcessInfo>, String> {
+        let store = self.store()?;
+        let mut listed = Vec::new();
+        for spec in store.specs(worker_environment_id)? {
+            if delivered_marker(&store.spec_path(&spec.process_id)).exists() {
+                continue;
+            }
+            let cwd = AbsPath::new(&spec.cwd)
+                .map_err(|error| format!("persistent process cwd is invalid: {error}"))?;
+            let info = match ask_keeper(&spec, &KeeperRequest::Info).await {
+                Ok(KeeperResponse::Info(info)) => info,
+                Ok(KeeperResponse::Refused { error }) => InfoWire::failed(error),
+                Ok(_) => InfoWire::failed("persistent process keeper answered Info with another frame".to_string()),
+                Err(KeeperFailure::Gone(error)) => {
+                    store.forget(&spec);
+                    InfoWire::failed(error)
+                }
+                Err(KeeperFailure::Failed(error)) => InfoWire::failed(error),
+            };
+            listed.push(GitWorktreeProcessInfo {
+                process_id: spec.process_id.clone(),
+                running: info.running,
+                exited: info.exited,
+                exit_code: info.exit_code,
+                closed: info.closed,
+                timed_out: info.timed_out,
+                failure: info.failure,
+                continuation_available: info.continuation_available,
+                pending_output_bytes: info.pending_output_bytes,
+                next_source_seq: info.next_source_seq,
+                tty: spec.tty,
+                cwd,
+            });
+        }
+        Ok(listed)
+    }
+
+    pub async fn release(
+        &self,
+        worker_environment_id: &WorkerEnvironmentId,
+        cleanup_timeout: Option<Duration>,
+    ) -> Result<(), String> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let mut failures = Vec::new();
+        for spec in store.specs(worker_environment_id)? {
+            if let Some(declared) = cleanup_timeout
+                && duration_ms(declared)? != spec.cleanup_timeout_ms
+            {
+                failures.push(format!(
+                    "worker environment '{}' cleanup timeout differs from persistent process '{}'",
+                    worker_environment_id, spec.process_id
+                ));
+                continue;
+            }
+            match ask_keeper(&spec, &KeeperRequest::Release).await {
+                Ok(KeeperResponse::Released) | Err(KeeperFailure::Gone(_)) => store.forget(&spec),
+                Ok(KeeperResponse::Refused { error }) | Err(KeeperFailure::Failed(error)) => {
+                    failures.push(error)
+                }
+                Ok(_) => failures.push(format!(
+                    "persistent process '{}' keeper answered release with another frame",
+                    spec.process_id
+                )),
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
 }
 
-#[derive(Default)]
-struct ProcessEnvironment {
-    processes: BTreeMap<String, Arc<ManagedProcess>>,
-    starts_in_flight: usize,
-    releasing: bool,
-    max_processes: Option<usize>,
-    cleanup_timeout: Option<Duration>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeeperSpec {
+    schema_version: u32,
+    worker_environment_id: String,
+    process_id: String,
+    start_call: Option<String>,
+    argv: Vec<String>,
+    cwd: PathBuf,
+    env: BTreeMap<String, String>,
+    tty: bool,
+    socket: PathBuf,
+    max_buffered_output_bytes: usize,
+    max_buffered_output_events: usize,
+    max_input_bytes: usize,
+    process_timeout_ms: u64,
+    cleanup_timeout_ms: u64,
+}
+
+impl KeeperSpec {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let spec: Self = serde_json::from_slice(&std::fs::read(path)?)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if spec.schema_version != KEEPER_SPEC_SCHEMA_VERSION || !valid_process_id(&spec.process_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "persistent process record has an unsupported schema or identity",
+            ));
+        }
+        Ok(spec)
+    }
+
+    fn write_new(&self, path: &Path) -> Result<(), String> {
+        use std::io::Write;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(|error| {
+            format!(
+                "persistent process record '{}' cannot be created: {error}",
+                path.display()
+            )
+        })?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("persistent process record cannot be written: {error}"))?;
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("persistent process registry cannot be synced: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum KeeperRequest {
+    Poll {
+        call: Option<String>,
+        input: String,
+        wait_ms: u64,
+        max_output_bytes: usize,
+    },
+    Interrupt {
+        call: Option<String>,
+        wait_ms: u64,
+        max_output_bytes: usize,
+    },
+    Terminate {
+        call: Option<String>,
+        wait_ms: u64,
+        max_output_bytes: usize,
+    },
+    Info,
+    Release,
+}
+
+impl KeeperRequest {
+    fn identity(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::Poll { call, .. } => call.as_deref().map(|call| ("poll", call)),
+            Self::Interrupt { call, .. } => call.as_deref().map(|call| ("interrupt", call)),
+            Self::Terminate { call, .. } => call.as_deref().map(|call| ("terminate", call)),
+            Self::Info | Self::Release => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum KeeperResponse {
+    Poll(PollWire),
+    Info(InfoWire),
+    Released,
+    Refused { error: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChunkWire {
+    seq: u64,
+    stream: ExecOutputStream,
+    byte_offset: usize,
+    end_of_event: bool,
+    bytes: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PollWire {
+    chunks: Vec<ChunkWire>,
+    next_seq: u64,
+    running: bool,
+    exited: bool,
+    exit_code: Option<i32>,
+    exit_seq: Option<u64>,
+    closed: bool,
+    close_seq: Option<u64>,
+    continuation_available: bool,
+    timed_out: bool,
+    failure: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InfoWire {
+    running: bool,
+    exited: bool,
+    exit_code: Option<i32>,
+    closed: bool,
+    timed_out: bool,
+    failure: Option<String>,
+    continuation_available: bool,
+    pending_output_bytes: usize,
+    next_source_seq: u64,
+}
+
+impl InfoWire {
+    fn failed(error: String) -> Self {
+        Self {
+            running: false,
+            exited: false,
+            exit_code: None,
+            closed: false,
+            timed_out: false,
+            failure: Some(error),
+            continuation_available: false,
+            pending_output_bytes: 0,
+            next_source_seq: 0,
+        }
+    }
+}
+
+enum KeeperFailure {
+    Gone(String),
+    Failed(String),
+}
+
+async fn ask_keeper(
+    spec: &KeeperSpec,
+    request: &KeeperRequest,
+) -> Result<KeeperResponse, KeeperFailure> {
+    let mut stream = match tokio::net::UnixStream::connect(&spec.socket).await {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Err(KeeperFailure::Gone(format!(
+                "persistent process '{}' lost its keeper before its outcome was delivered; its outcome cannot be established",
+                spec.process_id
+            )));
+        }
+        Err(error) => {
+            return Err(KeeperFailure::Failed(format!(
+                "persistent process '{}' keeper cannot be reached: {error}",
+                spec.process_id
+            )));
+        }
+    };
+    let exchange = async {
+        let mut frame = serde_json::to_vec(request).map_err(|error| error.to_string())?;
+        frame.push(b'\n');
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|error| format!("keeper request cannot be sent: {error}"))?;
+        let mut line = String::new();
+        tokio::io::BufReader::new((&mut stream).take(KEEPER_FRAME_BYTES))
+            .read_line(&mut line)
+            .await
+            .map_err(|error| format!("keeper response cannot be read: {error}"))?;
+        serde_json::from_str::<KeeperResponse>(&line)
+            .map_err(|error| format!("keeper response is malformed: {error}"))
+    };
+    tokio::time::timeout(KEEPER_CONNECTION_TIMEOUT, exchange)
+        .await
+        .map_err(|_| {
+            KeeperFailure::Failed(format!(
+                "persistent process '{}' keeper did not answer in time",
+                spec.process_id
+            ))
+        })?
+        .map_err(|error| {
+            KeeperFailure::Failed(format!("persistent process '{}': {error}", spec.process_id))
+        })
+}
+
+async fn poll_keeper(
+    store: &GitWorktreeProcessStore,
+    spec: &KeeperSpec,
+    request: KeeperRequest,
+) -> Result<GitWorktreeProcessPoll, String> {
+    let response = match ask_keeper(spec, &request).await {
+        Ok(response) => response,
+        Err(KeeperFailure::Gone(error)) => {
+            store.forget(spec);
+            return Err(error);
+        }
+        Err(KeeperFailure::Failed(error)) => return Err(error),
+    };
+    let poll = match response {
+        KeeperResponse::Poll(poll) => poll,
+        KeeperResponse::Refused { error } => return Err(error),
+        KeeperResponse::Info(_) | KeeperResponse::Released => {
+            return Err(format!(
+                "persistent process '{}' keeper answered a poll with another frame",
+                spec.process_id
+            ));
+        }
+    };
+    let chunks = poll
+        .chunks
+        .into_iter()
+        .map(|chunk| {
+            Ok(GitWorktreeProcessChunk {
+                seq: chunk.seq,
+                stream: chunk.stream,
+                byte_offset: chunk.byte_offset,
+                end_of_event: chunk.end_of_event,
+                bytes: BASE64
+                    .decode(chunk.bytes)
+                    .map_err(|error| format!("keeper output chunk is not base64: {error}"))?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(GitWorktreeProcessPoll {
+        process_id: spec.process_id.clone(),
+        chunks,
+        next_seq: poll.next_seq,
+        running: poll.running,
+        exited: poll.exited,
+        exit_code: poll.exit_code,
+        exit_seq: poll.exit_seq,
+        closed: poll.closed,
+        close_seq: poll.close_seq,
+        continuation_available: poll.continuation_available,
+        timed_out: poll.timed_out,
+        failure: poll.failure,
+        tty: spec.tty,
+        cwd: AbsPath::new(&spec.cwd)
+            .map_err(|error| format!("persistent process cwd is invalid: {error}"))?,
+    })
+}
+
+async fn spawn_keeper(
+    store: &GitWorktreeProcessStore,
+    spec: &KeeperSpec,
+    spec_path: &Path,
+) -> Result<(), String> {
+    let log_path = spec_path.with_extension("log");
+    let log = {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&log_path)
+            .map_err(|error| format!("persistent process keeper log cannot be opened: {error}"))?
+    };
+    let mut command = tokio::process::Command::new(&store.keeper);
+    command
+        .arg(PERSISTENT_PROCESS_KEEPER_FLAG)
+        .arg(spec_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(log)
+        .kill_on_drop(false);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "persistent process keeper '{}' failed to start: {error}",
+            store.keeper.display()
+        )
+    })?;
+    let deadline = tokio::time::Instant::now() + KEEPER_READY_TIMEOUT;
+    loop {
+        if tokio::net::UnixStream::connect(&spec.socket).await.is_ok() {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("persistent process keeper cannot be observed: {error}"))?
+        {
+            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            return Err(format!(
+                "persistent process keeper exited with {status} before it was ready: {}",
+                detail.trim().chars().rev().take(2048).collect::<String>().chars().rev().collect::<String>()
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.start_kill();
+            return Err("persistent process keeper did not become ready in time".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn delivered_marker(spec_path: &Path) -> PathBuf {
+    spec_path.with_extension("delivered")
+}
+
+fn valid_process_id(process_id: &str) -> bool {
+    process_id
+        .strip_prefix("coder-process-")
+        .is_some_and(|identity| identity.len() == 16 && identity.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn new_process_identity(worker_environment_id: &WorkerEnvironmentId) -> Result<String, String> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(worker_environment_id.as_str().as_bytes());
+    hasher.update(&now.to_le_bytes());
+    hasher.update(&std::process::id().to_le_bytes());
+    hasher.update(&SEQUENCE.fetch_add(1, Ordering::SeqCst).to_le_bytes());
+    Ok(hasher.finalize().to_hex()[..16].to_string())
+}
+
+fn duration_ms(duration: Duration) -> Result<u64, String> {
+    u64::try_from(duration.as_millis()).map_err(|_| "persistent process duration overflowed".to_string())
+}
+
+fn private_directory(path: &Path) -> Result<(), String> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(|error| {
+        format!(
+            "persistent process registry '{}' cannot be created: {error}",
+            path.display()
+        )
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "persistent process registry '{}' is not a real directory",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+pub fn persistent_process_keeper_spec(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let _program = arguments.next();
+    if arguments.next()?.to_str()? != PERSISTENT_PROCESS_KEEPER_FLAG {
+        return None;
+    }
+    let spec = PathBuf::from(arguments.next()?);
+    arguments.next().is_none().then_some(spec)
 }
 
 struct ManagedProcess {
     process: Arc<dyn ExecProcess>,
     state: tokio::sync::Mutex<ManagedProcessState>,
-    poll_lock: tokio::sync::Mutex<()>,
     notify: tokio::sync::Notify,
-    tty: bool,
-    cwd: AbsPath,
-    max_input_bytes: usize,
 }
 
 struct ManagedProcessState {
@@ -143,594 +899,280 @@ struct PendingChunk {
     source_complete: bool,
 }
 
-impl Default for GitWorktreeProcessManager {
-    fn default() -> Self {
-        Self::new()
-    }
+struct Keeper {
+    spec: KeeperSpec,
+    spec_path: PathBuf,
+    managed: Arc<ManagedProcess>,
+    activity: Arc<tokio::sync::Notify>,
+    requests: tokio::sync::Mutex<Option<(&'static str, String, KeeperResponse)>>,
+    delivered: AtomicBool,
+    released: AtomicBool,
+    closed_at: std::sync::Mutex<Option<tokio::time::Instant>>,
+    stop: tokio::sync::Notify,
 }
 
-impl GitWorktreeProcessManager {
-    pub fn new() -> Self {
-        Self {
-            next_process_id: AtomicU64::new(1),
-            processes: tokio::sync::Mutex::new(ProcessTable::default()),
-            activity: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-
-    pub async fn start(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        sandbox: &ProjectedSandbox,
-        sandbox_mode: ProcessSandboxMode,
-        mut argv: Vec<String>,
-        cwd: PathBuf,
-        mut env: BTreeMap<String, String>,
-        tty: bool,
-        wait_ms: u64,
-        max_output_bytes: usize,
-        limits: GitWorktreeProcessLimits,
-    ) -> Result<GitWorktreeProcessPoll, String> {
-        limits.validate()?;
-        validate_poll_output_ceiling(max_output_bytes)?;
-        if argv.is_empty() || argv.iter().any(String::is_empty) {
-            return Err("persistent coder process argv must contain non-empty strings".to_string());
-        }
-        let cwd = AbsPath::new(&cwd)
-            .map_err(|error| format!("persistent coder process cwd is invalid: {error}"))?;
-        sandbox
-            .authorize_read(&cwd)
-            .map_err(|error| format!("persistent coder process cwd is denied: {error}"))?;
-        resolve_persistent_process_program(&mut argv, &env, cwd.as_path())?;
-        let argv = crate::sandboxed_worktree_process_argv(sandbox, sandbox_mode, &cwd, argv)
-            .map_err(|error| format!("persistent coder sandbox floor failed: {error}"))?;
-        self.reserve_start(worker_environment_id, &limits).await?;
-
-        env.insert("TMPDIR".to_string(), cwd.as_str().to_string());
-        env.insert("TMP".to_string(), cwd.as_str().to_string());
-        env.insert("TEMP".to_string(), cwd.as_str().to_string());
-        let ordinal = self
-            .next_process_id
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(1)
-            })
-            .map_err(|_| "persistent coder process id space exhausted".to_string());
-        let ordinal = match ordinal {
-            Ok(ordinal) => ordinal,
-            Err(error) => {
-                return match self.cancel_start(worker_environment_id).await {
-                    Ok(()) => Err(error),
-                    Err(cleanup_error) => Err(format!(
-                        "{error}; persistent process reservation cleanup failed: {cleanup_error}"
-                    )),
-                };
-            }
-        };
-        let process_id = format!("coder-process-{ordinal:016x}");
-        let process = match start_exec_process(&process_id, argv, &cwd, env, tty).await {
-            Ok(process) => process,
-            Err(error) => {
-                return match self.cancel_start(worker_environment_id).await {
-                    Ok(()) => Err(error),
-                    Err(cleanup_error) => Err(format!(
-                        "{error}; persistent process reservation cleanup failed: {cleanup_error}"
-                    )),
-                };
-            }
-        };
-        let events = process.subscribe_events();
-        let managed = Arc::new(ManagedProcess {
-            process,
-            state: tokio::sync::Mutex::new(ManagedProcessState::new(
-                limits.max_buffered_output_bytes,
-                limits.max_buffered_output_events,
-            )),
-            poll_lock: tokio::sync::Mutex::new(()),
-            notify: tokio::sync::Notify::new(),
-            tty,
-            cwd: cwd.clone(),
-            max_input_bytes: limits.max_input_bytes,
-        });
-        spawn_event_collector(Arc::clone(&managed), events, Arc::clone(&self.activity));
-        spawn_process_timeout(
-            Arc::clone(&managed),
-            limits.process_timeout,
-            Arc::clone(&self.activity),
-        );
-        let releasing = match self
-            .commit_start(worker_environment_id, &process_id, Arc::clone(&managed))
-            .await
-        {
-            Ok(releasing) => releasing,
-            Err(error) => {
-                let _ = managed.process.terminate().await;
-                return Err(error);
-            }
-        };
-        if releasing {
-            let _ = managed.process.terminate().await;
-            return Err(format!(
-                "worker environment '{}' began release while persistent process '{}' was starting",
-                worker_environment_id, process_id
-            ));
-        }
-        self.poll_managed(
-            worker_environment_id,
-            &process_id,
-            Arc::clone(&managed),
-            wait_ms,
-            max_output_bytes,
+pub async fn run_persistent_process_keeper(spec_path: PathBuf) -> Result<(), String> {
+    let spec = KeeperSpec::read(&spec_path).map_err(|error| {
+        format!(
+            "persistent process record '{}' is unreadable: {error}",
+            spec_path.display()
         )
-        .await
+    })?;
+    match std::fs::symlink_metadata(&spec.socket) {
+        Ok(_) => std::fs::remove_file(&spec.socket)
+            .map_err(|error| format!("stale keeper socket cannot be removed: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("keeper socket cannot be inspected: {error}")),
     }
-
-    pub async fn write_and_poll(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        input: &[u8],
-        wait_ms: u64,
-        max_output_bytes: usize,
-    ) -> Result<GitWorktreeProcessPoll, String> {
-        validate_poll_output_ceiling(max_output_bytes)?;
-        let managed = self
-            .managed_process(worker_environment_id, process_id)
-            .await?;
-        let _poll = managed.poll_lock.lock().await;
-        if managed.state.lock().await.releasing {
-            return Err(format!(
-                "worker environment '{}' is releasing and cannot continue process '{}'",
-                worker_environment_id, process_id
-            ));
+    let listener = tokio::net::UnixListener::bind(&spec.socket).map_err(|error| {
+        format!(
+            "keeper socket '{}' cannot be bound: {error}",
+            spec.socket.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&spec.socket, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("keeper socket cannot be made private: {error}"))?;
+    }
+    let cwd = AbsPath::new(&spec.cwd).map_err(|error| format!("keeper cwd is invalid: {error}"))?;
+    let process = match start_exec_process(
+        &spec.process_id,
+        spec.argv.clone(),
+        &cwd,
+        spec.env.clone(),
+        spec.tty,
+    )
+    .await
+    {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = std::fs::remove_file(&spec.socket);
+            return Err(error);
         }
-        if input.len() > managed.max_input_bytes {
-            return Err(format!(
-                "persistent coder stdin contains {} bytes, exceeding the descriptor-owned {} byte ceiling",
-                input.len(),
-                managed.max_input_bytes
-            ));
-        }
-        if !input.is_empty() {
-            let response = managed
-                .process
-                .write(input.to_vec())
-                .await
-                .map_err(|error| format!("persistent coder stdin write failed: {error}"))?;
-            if response.status != WriteStatus::Accepted {
-                return Err(format!(
-                    "persistent coder stdin write was not accepted: {:?}",
-                    response.status
-                ));
+    };
+    let events = process.subscribe_events();
+    let managed = Arc::new(ManagedProcess {
+        process,
+        state: tokio::sync::Mutex::new(ManagedProcessState::new(
+            spec.max_buffered_output_bytes,
+            spec.max_buffered_output_events,
+        )),
+        notify: tokio::sync::Notify::new(),
+    });
+    let activity = Arc::new(tokio::sync::Notify::new());
+    spawn_event_collector(Arc::clone(&managed), events, Arc::clone(&activity));
+    spawn_process_timeout(
+        Arc::clone(&managed),
+        Duration::from_millis(spec.process_timeout_ms),
+        Arc::clone(&activity),
+    );
+    let keeper = Arc::new(Keeper {
+        spec,
+        spec_path,
+        managed,
+        activity,
+        requests: tokio::sync::Mutex::new(None),
+        delivered: AtomicBool::new(false),
+        released: AtomicBool::new(false),
+        closed_at: std::sync::Mutex::new(None),
+        stop: tokio::sync::Notify::new(),
+    });
+    let stop = keeper.stop.notified();
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            _ = &mut stop => break,
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                if keeper.retention_expired().await {
+                    break;
+                }
+            }
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(|error| format!("keeper socket stopped accepting: {error}"))?;
+                let keeper = Arc::clone(&keeper);
+                tokio::spawn(async move {
+                    if let Err(error) = keeper.answer(stream).await {
+                        eprintln!("persistent process keeper request failed: {error}");
+                    }
+                });
             }
         }
-        self.poll_managed_locked(
-            worker_environment_id,
-            process_id,
-            Arc::clone(&managed),
-            wait_ms,
-            max_output_bytes,
-        )
-        .await
+    }
+    let _ = std::fs::remove_file(&keeper.spec.socket);
+    for path in [keeper.spec_path.clone(), delivered_marker(&keeper.spec_path), keeper.spec_path.with_extension("log")] {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+impl Keeper {
+    async fn retention_expired(&self) -> bool {
+        let closed = self.managed.state.lock().await.closed;
+        if !closed {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let closed_at = {
+            let mut closed_at = self
+                .closed_at
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *closed_at.get_or_insert(now)
+        };
+        let retention = if self.delivered.load(Ordering::SeqCst) {
+            DELIVERED_PROCESS_RETENTION
+        } else {
+            UNDELIVERED_PROCESS_RETENTION
+        };
+        now.duration_since(closed_at) >= retention
     }
 
-    pub async fn interrupt(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-    ) -> Result<(), String> {
-        let managed = self
-            .managed_process(worker_environment_id, process_id)
-            .await?;
-        let response = managed
-            .process
-            .signal(ProcessSignal::Interrupt)
+    async fn answer(&self, stream: tokio::net::UnixStream) -> Result<(), String> {
+        let (reader, mut writer) = stream.into_split();
+        let mut line = String::new();
+        tokio::io::BufReader::new(reader.take(KEEPER_FRAME_BYTES))
+            .read_line(&mut line)
             .await
-            .map_err(|error| format!("persistent coder interrupt failed: {error}"))?;
-        if !response.delivered {
-            return Err(format!(
-                "persistent coder process '{}' is not running",
-                process_id
-            ));
+            .map_err(|error| format!("keeper request cannot be read: {error}"))?;
+        let response = match serde_json::from_str::<KeeperRequest>(&line) {
+            Ok(request) => self.respond(request).await,
+            Err(error) => KeeperResponse::Refused {
+                error: format!("keeper request is not a strict frame: {error}"),
+            },
+        };
+        let mut bytes = serde_json::to_vec(&response).map_err(|error| error.to_string())?;
+        bytes.push(b'\n');
+        writer
+            .write_all(&bytes)
+            .await
+            .map_err(|error| format!("keeper response cannot be written: {error}"))?;
+        let _ = writer.shutdown().await;
+        if self.released.load(Ordering::SeqCst) {
+            self.stop.notify_one();
         }
         Ok(())
     }
 
-    pub async fn interrupt_and_poll(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        wait_ms: u64,
-        max_output_bytes: usize,
-    ) -> Result<GitWorktreeProcessPoll, String> {
-        validate_poll_output_ceiling(max_output_bytes)?;
-        let managed = self
-            .managed_process(worker_environment_id, process_id)
-            .await?;
-        let _poll = managed.poll_lock.lock().await;
-        if managed.state.lock().await.releasing {
-            return Err(format!(
-                "worker environment '{}' is releasing and cannot interrupt process '{}'",
-                worker_environment_id, process_id
-            ));
+    async fn respond(&self, request: KeeperRequest) -> KeeperResponse {
+        match request {
+            KeeperRequest::Info => return KeeperResponse::Info(self.info().await),
+            KeeperRequest::Release => return self.release().await,
+            _ => {}
         }
-        let response = managed
-            .process
-            .signal(ProcessSignal::Interrupt)
-            .await
-            .map_err(|error| format!("persistent coder interrupt failed: {error}"))?;
-        if !response.delivered {
-            return Err(format!(
-                "persistent coder process '{}' is not running",
-                process_id
-            ));
-        }
-        self.poll_managed_locked(
-            worker_environment_id,
-            process_id,
-            Arc::clone(&managed),
-            wait_ms,
-            max_output_bytes,
-        )
-        .await
-    }
-
-    pub async fn terminate_and_poll(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        wait_ms: u64,
-        max_output_bytes: usize,
-    ) -> Result<GitWorktreeProcessPoll, String> {
-        validate_poll_output_ceiling(max_output_bytes)?;
-        let managed = self
-            .managed_process(worker_environment_id, process_id)
-            .await?;
-        let _poll = managed.poll_lock.lock().await;
+        let mut last = self.requests.lock().await;
+        if let Some((operation, call)) = request.identity()
+            && let Some((retained_operation, retained_call, response)) = last.as_ref()
+            && *retained_operation == operation
+            && retained_call == call
         {
-            let state = managed.state.lock().await;
-            if state.releasing {
-                return Err(format!(
-                    "worker environment '{}' is releasing and cannot terminate process '{}'",
-                    worker_environment_id, process_id
-                ));
-            }
-            if state.exited || state.closed {
-                return Err(format!(
-                    "persistent coder process '{}' is not running",
-                    process_id
-                ));
-            }
+            return response.clone();
         }
-        managed
-            .process
-            .terminate()
-            .await
-            .map_err(|error| format!("persistent coder terminate failed: {error}"))?;
-        self.poll_managed_locked(
-            worker_environment_id,
-            process_id,
-            Arc::clone(&managed),
-            wait_ms,
-            max_output_bytes,
-        )
-        .await
-    }
-
-    pub async fn list(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-    ) -> Vec<GitWorktreeProcessInfo> {
-        let processes = {
-            let table = self.processes.lock().await;
-            table
-                .by_environment
-                .get(worker_environment_id)
-                .map(|environment| {
-                    environment
-                        .processes
-                        .iter()
-                        .map(|(process_id, managed)| (process_id.clone(), Arc::clone(managed)))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+        let identity = request
+            .identity()
+            .map(|(operation, call)| (operation, call.to_string()));
+        let response = match self.perform(request).await {
+            Ok(poll) => KeeperResponse::Poll(poll),
+            Err(error) => KeeperResponse::Refused { error },
         };
-        let mut listed = Vec::with_capacity(processes.len());
-        for (process_id, managed) in processes {
-            let state = managed.state.lock().await;
-            listed.push(GitWorktreeProcessInfo {
-                process_id,
-                running: !state.exited && !state.closed,
-                exited: state.exited,
-                exit_code: state.exit_code,
-                closed: state.closed,
-                timed_out: state.timed_out,
-                failure: state.failure.clone(),
-                continuation_available: !state.closed || state.pending_bytes > 0,
-                pending_output_bytes: state.pending_bytes,
-                next_source_seq: state.next_expected_seq,
-                tty: managed.tty,
-                cwd: managed.cwd.clone(),
-            });
+        if let KeeperResponse::Poll(poll) = &response
+            && poll.closed
+            && !poll.continuation_available
+            && !self.delivered.swap(true, Ordering::SeqCst)
+        {
+            let _ = std::fs::write(delivered_marker(&self.spec_path), b"");
         }
-        listed
+        if let Some((operation, call)) = identity {
+            *last = Some((operation, call, response.clone()));
+        }
+        response
     }
 
-    pub async fn release(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        cleanup_timeout: Option<Duration>,
-    ) -> Result<(), String> {
-        let cleanup_timeout = {
-            let mut table = self.processes.lock().await;
-            let Some(environment) = table.by_environment.get_mut(worker_environment_id) else {
-                return Ok(());
-            };
-            if let (Some(declared), Some(owned)) = (cleanup_timeout, environment.cleanup_timeout) {
-                if declared != owned {
+    async fn perform(&self, request: KeeperRequest) -> Result<PollWire, String> {
+        let managed = &self.managed;
+        let (wait_ms, max_output_bytes) = match request {
+            KeeperRequest::Poll {
+                input,
+                wait_ms,
+                max_output_bytes,
+                ..
+            } => {
+                let input = BASE64
+                    .decode(input)
+                    .map_err(|error| format!("keeper stdin frame is not base64: {error}"))?;
+                if input.len() > self.spec.max_input_bytes {
                     return Err(format!(
-                        "worker environment '{}' cleanup timeout differs from its persistent process declaration",
-                        worker_environment_id
+                        "persistent coder stdin contains {} bytes, exceeding the descriptor-owned {} byte ceiling",
+                        input.len(),
+                        self.spec.max_input_bytes
                     ));
                 }
-            }
-            let resolved = cleanup_timeout.or(environment.cleanup_timeout).ok_or_else(|| {
-                format!(
-                    "worker environment '{}' has no descriptor-owned persistent process cleanup timeout",
-                    worker_environment_id
-                )
-            })?;
-            if resolved.is_zero() {
-                return Err("persistent coder cleanup timeout must be positive".to_string());
-            }
-            environment.releasing = true;
-            resolved
-        };
-        self.activity.notify_one();
-        match tokio::time::timeout(
-            cleanup_timeout,
-            self.release_marked_environment(worker_environment_id),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(format!(
-                "worker environment '{}' persistent process closure was not proven within {} ms",
-                worker_environment_id,
-                cleanup_timeout.as_millis()
-            )),
-        }
-    }
-
-    pub async fn release_all(&self) -> Result<(), String> {
-        let worker_environment_ids = self
-            .processes
-            .lock()
-            .await
-            .by_environment
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut failures = Vec::new();
-        for worker_environment_id in worker_environment_ids {
-            if let Err(error) = self.release(&worker_environment_id, None).await {
-                failures.push(error);
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "persistent coder process quiesce failed: {}",
-                failures.join("; ")
-            ))
-        }
-    }
-
-    async fn reserve_start(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        limits: &GitWorktreeProcessLimits,
-    ) -> Result<(), String> {
-        let mut table = self.processes.lock().await;
-        let environment = table
-            .by_environment
-            .entry(worker_environment_id.clone())
-            .or_default();
-        if environment.releasing {
-            return Err(format!(
-                "worker environment '{}' is releasing and cannot start a persistent process",
-                worker_environment_id
-            ));
-        }
-        if let Some(max_processes) = environment.max_processes {
-            if max_processes != limits.max_processes_per_worker_environment {
-                return Err(format!(
-                    "worker environment '{}' received inconsistent persistent process count ceilings",
-                    worker_environment_id
-                ));
-            }
-        }
-        if let Some(cleanup_timeout) = environment.cleanup_timeout {
-            if cleanup_timeout != limits.cleanup_timeout {
-                return Err(format!(
-                    "worker environment '{}' received inconsistent persistent cleanup timeouts",
-                    worker_environment_id
-                ));
-            }
-        }
-        let owned_processes = environment
-            .processes
-            .len()
-            .checked_add(environment.starts_in_flight)
-            .ok_or_else(|| {
-                format!(
-                    "worker environment '{}' persistent process count overflowed",
-                    worker_environment_id
-                )
-            })?;
-        if owned_processes >= limits.max_processes_per_worker_environment {
-            return Err(format!(
-                "worker environment '{}' already owns the descriptor maximum of {} persistent processes",
-                worker_environment_id, limits.max_processes_per_worker_environment
-            ));
-        }
-        environment.max_processes = Some(limits.max_processes_per_worker_environment);
-        environment.cleanup_timeout = Some(limits.cleanup_timeout);
-        environment.starts_in_flight += 1;
-        Ok(())
-    }
-
-    async fn cancel_start(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-    ) -> Result<(), String> {
-        let mut table = self.processes.lock().await;
-        let environment = table
-            .by_environment
-            .get_mut(worker_environment_id)
-            .ok_or_else(|| {
-                format!(
-                    "worker environment '{}' lost its persistent process reservation",
-                    worker_environment_id
-                )
-            })?;
-        if environment.starts_in_flight == 0 {
-            return Err(format!(
-                "worker environment '{}' persistent process reservation underflowed",
-                worker_environment_id
-            ));
-        }
-        environment.starts_in_flight -= 1;
-        if environment.starts_in_flight == 0
-            && environment.processes.is_empty()
-            && !environment.releasing
-        {
-            table.by_environment.remove(worker_environment_id);
-        }
-        drop(table);
-        self.activity.notify_one();
-        Ok(())
-    }
-
-    async fn commit_start(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        managed: Arc<ManagedProcess>,
-    ) -> Result<bool, String> {
-        let mut table = self.processes.lock().await;
-        let environment = table
-            .by_environment
-            .get_mut(worker_environment_id)
-            .ok_or_else(|| {
-                format!(
-                    "worker environment '{}' lost its persistent process reservation",
-                    worker_environment_id
-                )
-            })?;
-        if environment.starts_in_flight == 0 {
-            return Err(format!(
-                "worker environment '{}' persistent process reservation underflowed",
-                worker_environment_id
-            ));
-        }
-        environment.starts_in_flight -= 1;
-        if environment.processes.contains_key(process_id) {
-            return Err(format!(
-                "persistent coder process id '{}' collided inside worker environment '{}'",
-                process_id, worker_environment_id
-            ));
-        }
-        environment
-            .processes
-            .insert(process_id.to_string(), managed);
-        let releasing = environment.releasing;
-        drop(table);
-        self.activity.notify_one();
-        Ok(releasing)
-    }
-
-    async fn release_marked_environment(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-    ) -> Result<(), String> {
-        let processes = loop {
-            let notified = self.activity.notified();
-            let state = {
-                let table = self.processes.lock().await;
-                let Some(environment) = table.by_environment.get(worker_environment_id) else {
-                    return Ok(());
-                };
-                if environment.starts_in_flight == 0 {
-                    Some(environment.processes.values().cloned().collect::<Vec<_>>())
-                } else {
-                    None
-                }
-            };
-            if let Some(processes) = state {
-                break processes;
-            }
-            notified.await;
-        };
-        for managed in &processes {
-            managed.state.lock().await.releasing = true;
-            managed.notify.notify_one();
-        }
-        for managed in &processes {
-            let _ = managed.process.terminate().await;
-        }
-        loop {
-            let notified = self.activity.notified();
-            let all_closed = {
-                let mut all_closed = true;
-                for managed in &processes {
-                    if !managed.state.lock().await.closed {
-                        all_closed = false;
-                        break;
+                if !input.is_empty() {
+                    if managed.state.lock().await.releasing {
+                        return Err(format!(
+                            "persistent process '{}' is releasing and cannot accept input",
+                            self.spec.process_id
+                        ));
+                    }
+                    let response = managed
+                        .process
+                        .write(input)
+                        .await
+                        .map_err(|error| format!("persistent coder stdin write failed: {error}"))?;
+                    if response.status != WriteStatus::Accepted {
+                        return Err(format!(
+                            "persistent coder stdin write was not accepted: {:?}",
+                            response.status
+                        ));
                     }
                 }
-                all_closed
-            };
-            if all_closed {
-                break;
+                (wait_ms, max_output_bytes)
             }
-            notified.await;
-        }
-        self.processes
-            .lock()
-            .await
-            .by_environment
-            .remove(worker_environment_id);
-        Ok(())
-    }
-
-    async fn poll_managed(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        managed: Arc<ManagedProcess>,
-        wait_ms: u64,
-        max_output_bytes: usize,
-    ) -> Result<GitWorktreeProcessPoll, String> {
-        let _poll = managed.poll_lock.lock().await;
-        self.poll_managed_locked(
-            worker_environment_id,
-            process_id,
-            Arc::clone(&managed),
-            wait_ms,
-            max_output_bytes,
-        )
-        .await
-    }
-
-    async fn poll_managed_locked(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        managed: Arc<ManagedProcess>,
-        wait_ms: u64,
-        max_output_bytes: usize,
-    ) -> Result<GitWorktreeProcessPoll, String> {
+            KeeperRequest::Interrupt {
+                wait_ms,
+                max_output_bytes,
+                ..
+            } => {
+                let response = managed
+                    .process
+                    .signal(ProcessSignal::Interrupt)
+                    .await
+                    .map_err(|error| format!("persistent coder interrupt failed: {error}"))?;
+                if !response.delivered {
+                    return Err(format!(
+                        "persistent coder process '{}' is not running",
+                        self.spec.process_id
+                    ));
+                }
+                (wait_ms, max_output_bytes)
+            }
+            KeeperRequest::Terminate {
+                wait_ms,
+                max_output_bytes,
+                ..
+            } => {
+                {
+                    let state = managed.state.lock().await;
+                    if state.exited || state.closed {
+                        return Err(format!(
+                            "persistent coder process '{}' is not running",
+                            self.spec.process_id
+                        ));
+                    }
+                }
+                managed
+                    .process
+                    .terminate()
+                    .await
+                    .map_err(|error| format!("persistent coder terminate failed: {error}"))?;
+                (wait_ms, max_output_bytes)
+            }
+            KeeperRequest::Info | KeeperRequest::Release => {
+                return Err("keeper control frame is not a poll".to_string());
+            }
+        };
+        validate_poll_output_ceiling(max_output_bytes)?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
         loop {
             let terminal = {
@@ -747,90 +1189,76 @@ impl GitWorktreeProcessManager {
                 break;
             }
         }
-        let (poll, remove) = {
-            let mut state = managed.state.lock().await;
-            let chunks = state.drain(max_output_bytes);
-            let continuation_available = !state.closed || state.pending_bytes > 0;
-            let poll = GitWorktreeProcessPoll {
-                process_id: process_id.to_string(),
-                chunks,
-                next_seq: state.next_expected_seq,
-                running: !state.exited && !state.closed,
-                exited: state.exited,
-                exit_code: state.exit_code,
-                exit_seq: state.exit_seq,
-                closed: state.closed,
-                close_seq: state.close_seq,
-                continuation_available,
-                timed_out: state.timed_out,
-                failure: state.failure.clone(),
-                tty: managed.tty,
-                cwd: managed.cwd.clone(),
-            };
-            (poll, state.closed && state.pending_bytes == 0)
-        };
-        if remove {
-            self.remove_if_same(worker_environment_id, process_id, &managed)
-                .await;
-        }
-        Ok(poll)
-    }
-
-    async fn managed_process(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-    ) -> Result<Arc<ManagedProcess>, String> {
-        let table = self.processes.lock().await;
-        let environment = table
-            .by_environment
-            .get(worker_environment_id)
-            .ok_or_else(|| {
-                format!(
-                    "worker environment '{}' has no persistent process '{}'",
-                    worker_environment_id, process_id
-                )
-            })?;
-        if environment.releasing {
-            return Err(format!(
-                "worker environment '{}' is releasing and cannot continue process '{}'",
-                worker_environment_id, process_id
-            ));
-        }
-        environment
-            .processes
-            .get(process_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "worker environment '{}' has no persistent process '{}'",
-                    worker_environment_id, process_id
-                )
+        let mut state = managed.state.lock().await;
+        let chunks = state
+            .drain(max_output_bytes)
+            .into_iter()
+            .map(|chunk| ChunkWire {
+                seq: chunk.seq,
+                stream: chunk.stream,
+                byte_offset: chunk.byte_offset,
+                end_of_event: chunk.end_of_event,
+                bytes: BASE64.encode(chunk.bytes),
             })
+            .collect();
+        Ok(PollWire {
+            chunks,
+            next_seq: state.next_expected_seq,
+            running: !state.exited && !state.closed,
+            exited: state.exited,
+            exit_code: state.exit_code,
+            exit_seq: state.exit_seq,
+            closed: state.closed,
+            close_seq: state.close_seq,
+            continuation_available: !state.closed || state.pending_bytes > 0,
+            timed_out: state.timed_out,
+            failure: state.failure.clone(),
+        })
     }
 
-    async fn remove_if_same(
-        &self,
-        worker_environment_id: &WorkerEnvironmentId,
-        process_id: &str,
-        managed: &Arc<ManagedProcess>,
-    ) {
-        let mut table = self.processes.lock().await;
-        let mut remove_environment = false;
-        if let Some(environment) = table.by_environment.get_mut(worker_environment_id) {
-            if environment
-                .processes
-                .get(process_id)
-                .is_some_and(|current| Arc::ptr_eq(current, managed))
-            {
-                environment.processes.remove(process_id);
-            }
-            remove_environment = environment.processes.is_empty()
-                && environment.starts_in_flight == 0
-                && !environment.releasing;
+    async fn info(&self) -> InfoWire {
+        let state = self.managed.state.lock().await;
+        InfoWire {
+            running: !state.exited && !state.closed,
+            exited: state.exited,
+            exit_code: state.exit_code,
+            closed: state.closed,
+            timed_out: state.timed_out,
+            failure: state.failure.clone(),
+            continuation_available: !state.closed || state.pending_bytes > 0,
+            pending_output_bytes: state.pending_bytes,
+            next_source_seq: state.next_expected_seq,
         }
-        if remove_environment {
-            table.by_environment.remove(worker_environment_id);
+    }
+
+    async fn release(&self) -> KeeperResponse {
+        self.managed.state.lock().await.releasing = true;
+        self.managed.notify.notify_one();
+        let _ = self.managed.process.terminate().await;
+        let closed = tokio::time::timeout(
+            Duration::from_millis(self.spec.cleanup_timeout_ms),
+            async {
+                loop {
+                    let notified = self.activity.notified();
+                    if self.managed.state.lock().await.closed {
+                        return;
+                    }
+                    notified.await;
+                }
+            },
+        )
+        .await;
+        match closed {
+            Ok(()) => {
+                self.released.store(true, Ordering::SeqCst);
+                KeeperResponse::Released
+            }
+            Err(_) => KeeperResponse::Refused {
+                error: format!(
+                    "persistent process '{}' closure was not proven within {} ms",
+                    self.spec.process_id, self.spec.cleanup_timeout_ms
+                ),
+            },
         }
     }
 }
@@ -1148,63 +1576,7 @@ fn executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octopus_exec::{
-        ByteChunk, ExecProcessFuture, ProcessOutputChunk, ReadResponse, SignalResponse,
-        TerminateResponse, WriteResponse,
-    };
-
-    struct NeverClosingProcess {
-        process_id: ProcessId,
-        wake: tokio::sync::watch::Sender<u64>,
-    }
-
-    impl ExecProcess for NeverClosingProcess {
-        fn process_id(&self) -> &ProcessId {
-            &self.process_id
-        }
-
-        fn subscribe_wake(&self) -> tokio::sync::watch::Receiver<u64> {
-            self.wake.subscribe()
-        }
-
-        fn subscribe_events(&self) -> ExecProcessEventReceiver {
-            ExecProcessEventReceiver::empty()
-        }
-
-        fn read(
-            &self,
-            _after_seq: Option<u64>,
-            _max_bytes: Option<usize>,
-            _wait_ms: Option<u64>,
-        ) -> ExecProcessFuture<'_, ReadResponse> {
-            Box::pin(async {
-                Ok(ReadResponse {
-                    chunks: Vec::new(),
-                    next_seq: 1,
-                    exited: false,
-                    exit_code: None,
-                    closed: false,
-                    failure: None,
-                })
-            })
-        }
-
-        fn write(&self, _chunk: Vec<u8>) -> ExecProcessFuture<'_, WriteResponse> {
-            Box::pin(async {
-                Ok(WriteResponse {
-                    status: WriteStatus::Accepted,
-                })
-            })
-        }
-
-        fn signal(&self, _signal: ProcessSignal) -> ExecProcessFuture<'_, SignalResponse> {
-            Box::pin(async { Ok(SignalResponse { delivered: true }) })
-        }
-
-        fn terminate(&self) -> ExecProcessFuture<'_, TerminateResponse> {
-            Box::pin(async { Ok(TerminateResponse { running: true }) })
-        }
-    }
+    use octopus_exec::{ByteChunk, ProcessOutputChunk};
 
     #[test]
     fn collector_orders_output_exit_late_output_and_close_in_one_sequence() {
@@ -1288,151 +1660,5 @@ mod tests {
             }))
         );
         assert!(event_overflow.failure.unwrap().contains("event ceiling"));
-    }
-
-    #[tokio::test]
-    async fn release_timeout_retains_process_ownership_without_fake_closure() {
-        let manager = GitWorktreeProcessManager::new();
-        let worker_environment_id = WorkerEnvironmentId::derive(b"release-timeout-test");
-        let (wake, _) = tokio::sync::watch::channel(0);
-        let managed = Arc::new(ManagedProcess {
-            process: Arc::new(NeverClosingProcess {
-                process_id: ProcessId::new("never-closes"),
-                wake,
-            }),
-            state: tokio::sync::Mutex::new(ManagedProcessState::new(16, 16)),
-            poll_lock: tokio::sync::Mutex::new(()),
-            notify: tokio::sync::Notify::new(),
-            tty: false,
-            cwd: AbsPath::new(Path::new("/")).unwrap(),
-            max_input_bytes: 16,
-        });
-        manager.processes.lock().await.by_environment.insert(
-            worker_environment_id.clone(),
-            ProcessEnvironment {
-                processes: BTreeMap::from([("opaque".to_string(), managed)]),
-                starts_in_flight: 0,
-                releasing: false,
-                max_processes: Some(1),
-                cleanup_timeout: Some(Duration::from_millis(10)),
-            },
-        );
-        let error = manager
-            .release(&worker_environment_id, None)
-            .await
-            .expect_err("closure without a Closed event must fail");
-        assert!(error.contains("closure was not proven"));
-        assert!(
-            manager
-                .processes
-                .lock()
-                .await
-                .by_environment
-                .contains_key(&worker_environment_id)
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn manager_continues_one_sandboxed_process_and_closes_with_ordered_output() {
-        for mode in [ProcessSandboxMode::Enforced, ProcessSandboxMode::Disabled] {
-            exercise_process_continuation(mode).await;
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    async fn exercise_process_continuation(sandbox_mode: ProcessSandboxMode) {
-        let root = tempfile::tempdir().unwrap();
-        let cwd = AbsPath::new(root.path()).unwrap();
-        let sandbox = ProjectedSandbox::from_parts(
-            vec![cwd.clone()],
-            Vec::new(),
-            vec![AbsPath::new(Path::new("/")).unwrap()],
-            octopus_worker_env::NetworkCeiling::Denied,
-        );
-        let worker_environment_id = WorkerEnvironmentId::derive(b"persistent-manager-test");
-        let manager = GitWorktreeProcessManager::new();
-        let limits = GitWorktreeProcessLimits {
-            max_processes_per_worker_environment: 2,
-            max_buffered_output_bytes: 1024,
-            max_buffered_output_events: 128,
-            max_input_bytes: 128,
-            process_timeout: Duration::from_secs(5),
-            cleanup_timeout: Duration::from_secs(2),
-        };
-        let first = manager
-            .start(
-                &worker_environment_id,
-                &sandbox,
-                sandbox_mode,
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "printf ready; IFS= read line; printf %s \"$line\"".to_string(),
-                ],
-                cwd.as_path().to_path_buf(),
-                BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
-                false,
-                100,
-                1024,
-                limits,
-            )
-            .await
-            .unwrap();
-        assert!(!first.process_id.contains(worker_environment_id.as_str()));
-        let process_id = first.process_id.clone();
-        let listed = manager.list(&worker_environment_id).await;
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].process_id, process_id);
-        assert!(listed[0].running);
-        let second = manager
-            .write_and_poll(&worker_environment_id, &process_id, b"done\n", 2000, 1024)
-            .await
-            .unwrap();
-        let bytes = first
-            .chunks
-            .iter()
-            .chain(second.chunks.iter())
-            .flat_map(|chunk| chunk.bytes.iter().copied())
-            .collect::<Vec<_>>();
-        assert_eq!(bytes, b"readydone");
-        assert_eq!(second.exit_code, Some(0));
-        assert!(second.closed);
-        assert!(!second.continuation_available);
-
-        let running = manager
-            .start(
-                &worker_environment_id,
-                &sandbox,
-                sandbox_mode,
-                vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "printf running; sleep 30".to_string(),
-                ],
-                cwd.as_path().to_path_buf(),
-                BTreeMap::from([("PATH".to_string(), "/usr/bin:/bin".to_string())]),
-                false,
-                100,
-                1024,
-                GitWorktreeProcessLimits {
-                    max_processes_per_worker_environment: 2,
-                    max_buffered_output_bytes: 1024,
-                    max_buffered_output_events: 128,
-                    max_input_bytes: 128,
-                    process_timeout: Duration::from_secs(35),
-                    cleanup_timeout: Duration::from_secs(2),
-                },
-            )
-            .await
-            .unwrap();
-        let terminated = manager
-            .terminate_and_poll(&worker_environment_id, &running.process_id, 2000, 1024)
-            .await
-            .unwrap();
-        assert!(terminated.exited);
-        assert!(terminated.closed);
-        assert!(!terminated.continuation_available);
-        manager.release(&worker_environment_id, None).await.unwrap();
     }
 }

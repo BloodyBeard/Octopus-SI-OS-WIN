@@ -6046,7 +6046,40 @@ async fn record_invalid_provider_context(
     if author_failed_provider_source(ctx, descriptor, handoff_session, run, turn, &message, false).await? {
         return Ok(());
     }
-    Err(message)
+    if let Err(error) = hand_failure_into_standing_route(ctx, run, turn.seq, &message).await {
+        tracing::warn!(
+            interface = ctx.interface.as_str(),
+            run = run.as_str(),
+            seq = turn.seq,
+            error = %error,
+            "codex failed provider source has no proven standing route into its run"
+        );
+        return Err(message);
+    }
+    Ok(())
+}
+
+async fn hand_failure_into_standing_route(
+    ctx: &InterfaceLiftContext,
+    run: &RunId,
+    source_movement_seq: u64,
+    message: &str,
+) -> Result<(), String> {
+    let path = ctx.root_slot("run_records_root")?.join(format!("{}.json", run.as_str()));
+    let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&path, ctx.required_host_io_limits()?.max_payload_bytes)
+        .map_err(|error| format!("provider run '{}' current record cannot be read: {error}", run.as_str()))?;
+    let record = octopus_runtime::run_record::RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
+    if record.id != *run {
+        return Err(format!("provider run record '{}' names run '{}'", run.as_str(), record.id.as_str()));
+    }
+    octopus_provider_run_authoring::standing_route_admits_only(&record, &ctx.interface, crate::handler::TURN_ERROR_LABEL)?;
+    match ctx.hand_arrival(materialize_failed_source_error(ctx, source_movement_seq, message)?, Vec::new()).await? {
+        octopus_ledger::DeliveryVerdict::Admitted { .. } => Ok(()),
+        octopus_ledger::DeliveryVerdict::Refused { reason, detail } => Err(format!(
+            "its turn.error was refused as '{}': {detail}",
+            reason.as_str()
+        )),
+    }
 }
 
 fn materialize_failed_source_error(
@@ -6268,7 +6301,26 @@ async fn restore_completed_provider_sources(
     for (run, source) in session.completed_source_candidates(ctx)? {
         let turn = replay_provider_source(ctx, &run, source)?.ok_or("completed result source lost its original admitted input")?;
         let pinned = ctx.pinned_run_record_bytes(&turn.envelope)?;
-        let handoff = wait_for_provider_handoff(ctx, descriptor, session, &run, &turn.envelope, source, &pinned).await?;
+        let handoff = match wait_for_provider_handoff(ctx, descriptor, session, &run, &turn.envelope, source, &pinned).await {
+            Ok(handoff) => handoff,
+            Err(error) if ctx.cancel.is_cancelled() => return Err(error),
+            Err(error) => {
+                let message = format!(
+                    "codex run contract cannot be read for its completed turn (movement seq {source}): {error}"
+                );
+                if let Err(unreported) = hand_failure_into_standing_route(ctx, &run, source, &message).await {
+                    tracing::warn!(
+                        interface = ctx.interface.as_str(),
+                        run = run.as_str(),
+                        seq = source,
+                        error = %message,
+                        unreported = %unreported,
+                        "completed provider source has an unreadable run contract"
+                    );
+                }
+                continue;
+            }
+        };
         if let Some(intent) = handoff.pending_source_intent().await? {
             let continuity = crate::handler::stopped_result::intent_control_continuity(descriptor, &turn.envelope, intent, &handoff.current_session_context_artifacts().await)
                 .map_err(|error| error.to_string())?;

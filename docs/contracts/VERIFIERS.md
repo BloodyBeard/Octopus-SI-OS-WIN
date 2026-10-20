@@ -172,7 +172,11 @@ artifacts from one model reply: the client-bound checkpoint with no
 requirements, and the room-bound checkpoint with a format verifier. The reply
 text never reaches the room-bound checkpoint, because no requirement there
 names it. A tool call that fails the check is a `VerificationFailed` row on
-that route only. The client branch does not suffer.
+that route only. The provider write that carries a tool call arms the
+one-shot wait for its result with the call already in that wait's context.
+Every provider write keeps each result door armed: the doors a run's active
+checkpoints pin are what keep their tools in the formed grant. The client
+branch does not suffer.
 
 ## 6. Coordination between runs
 

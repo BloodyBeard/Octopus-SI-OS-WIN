@@ -491,7 +491,7 @@ impl ProviderOutputHandoff {
                 if next != prior {
                     let publication = next.as_ref().is_some_and(|next|
                         context_publication::is_publication_completion(pending, next));
-                    if pending.context_publication.is_some() && !publication {
+                    if pending.publication_unfinished() && !publication {
                         return Err("completed settlement was superseded before publication".into());
                     }
                     self.admitted_replay_handoff_before(pending, transition.call.seq.0)?;
@@ -512,7 +512,7 @@ impl ProviderOutputHandoff {
             }
             selected = Some(next);
         }
-        if selected.as_ref().is_some_and(|pending| pending.context_publication.is_some()) {
+        if selected.as_ref().is_some_and(|pending| pending.publication_unfinished()) {
             return Err("completed settlement has unfinished publication".into());
         }
         evidence.ok_or("completed settlement has no exact checked predecessor".into())

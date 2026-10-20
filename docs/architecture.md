@@ -333,19 +333,29 @@ sequenceDiagram
    and runs the tool's declared process inside the room, under the authority
    the descriptor declares.
 6. **Result.** The result returns as an artifact through the same contract and
-   the provider continues.
+   the provider continues. The write that carried the call armed a one-shot
+   wait for this result, with the call already in the wait's context, and kept
+   every result door armed, so the result enters directly, needs no write of
+   its own, and the next step can still call any tool the grant reaches.
 7. **Reply.** The model emits text. That artifact lands on the checkpoint bound
    to the chat interface; the client renders it. The turn is over.
 8. **Turn boundary.** Within the turn, the provider's outputs ride the standing
    routes its last write left; it records which of them it delivered in its
-   own private journal. At the end of the turn it writes the run once, the
-   same way anything else in the system changes: a file-write tool call
-   against the run record, in a room whose path covers it. That write installs
-   the turn's context and the next routes. **The path is the permission.**
+   own private journal. It writes the run once at the end of the turn and once
+   for each tool call that waits for a result, the same way anything else in
+   the system changes: a file-write tool call against the run record, in a room
+   whose path covers it. A write installs the context gathered so far and the
+   next routes; a call joins the run's context in the write that consumes its
+   result. If the room cannot report whether a write landed, the target's own
+   content decides; a write that did not land is void and is authored again.
+   **The path is the permission.**
 
 Every arrow that says "movement recorded" is one row in
 `ledger/movements.jsonl`. If the tool room had refused the call, that would be
-a row too - a typed `DeliveryRefused`, not a silent drop.
+a row too - a typed `DeliveryRefused`, not a silent drop. If the provider can
+no longer read its own state in the Home run, it neither loops nor goes quiet:
+the failure reaches the chat as `turn.error` through the run's standing route,
+and only a run with no provable route gets no arrival at all.
 
 ## How policy is formed
 
@@ -438,16 +448,31 @@ JSON, wakes every interface mentioned on a live binding, and each interface
 catches up on its own movements from its own cursor. The cursor is written to
 disk when the interface settles one of its own movements; reading past other
 interfaces' movements stays in memory, so a busy ledger does not make every
-live interface flush the disk on every append. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
+live interface flush the disk on every append. An interface whose life dies,
+even before it is ready, is lifted again with backoff; the runtime log says
+when it falls into coma and when it wakes. Interfaces wake in no promised
+order: one that hands work to a sibling still waking up waits for it, within
+the hand-in's declared timeout. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
 loss to be repaired with leases and retries.
 
-A restart does not end the work in flight either. A tool call the restart cut
-off reports an unknown effect instead of running twice. The provider closes
-the turn it was in honestly, as interrupted, and the client then resumes that
-turn the way the Resume control does, with the interrupted call's result in
-its context; a turn the operator stopped stays stopped. The runtime also
-outlives the terminal that launched it, so relaunching the client never stops
-it.
+A restart does not end the work in flight either. A command a room started
+keeps running in its own keeper process, outside the tool process and the
+runtime; the call that was waiting on it is re-delivered after the restart and
+receives the command's own output and exit code, exactly once per call. Only an
+effect that truly cannot be established is reported as unknown, never run
+twice. The provider continues the turn the restart cut off by itself: it starts
+the next native turn on the same thread with the late result in context, the
+way the Resume control does, without any client attached. A turn the operator
+stopped stays stopped. The runtime also outlives the terminal that launched it,
+so relaunching the client never stops it.
+
+Stopping and restarting the runtime is a path, not a signal. A running runtime
+listens on `state/runtime-instance/control.sock` in its Home; `octopus down`
+asks it to stop and `octopus restart` asks it to stop cleanly and start again
+as itself. Whoever can reach that path may stop or restart the runtime: the
+operator's terminal, or a run whose room grants it. A room cannot signal the
+runtime's processes, and a command started from a room cannot launch a second
+runtime, because it would inherit the room's sandbox.
 
 There is no recovery subsystem. This follows from intent, obligation, and
 memory living in files rather than in a running loop.

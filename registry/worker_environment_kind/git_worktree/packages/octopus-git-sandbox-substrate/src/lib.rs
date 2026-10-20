@@ -7,7 +7,9 @@ mod worktree_exec;
 
 pub use persistent_exec::{
     GitWorktreeProcessChunk, GitWorktreeProcessInfo, GitWorktreeProcessLimits,
-    GitWorktreeProcessManager, GitWorktreeProcessPoll, resolve_persistent_process_program,
+    GitWorktreeProcessManager, GitWorktreeProcessPoll, GitWorktreeProcessStore,
+    PERSISTENT_PROCESS_KEEPER_FLAG, persistent_process_keeper_spec,
+    resolve_persistent_process_program, run_persistent_process_keeper,
 };
 pub use process_exec::{
     FAMILY_PROCESS_EXEC, GIT_COMMON_ROOT_SLOT, GitWorktreeEvidence, GitWorktreeEvidenceLimits,

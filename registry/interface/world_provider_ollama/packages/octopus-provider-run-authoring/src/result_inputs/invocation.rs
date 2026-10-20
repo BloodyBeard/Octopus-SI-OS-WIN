@@ -71,7 +71,7 @@ fn bindings(
     call: &Correspondence,
     source: &input_artifacts::InputArtifactBinding,
 ) -> Result<(Vec<ArtifactBinding>, Vec<ArtifactId>), String> {
-    let mut context = current_context_bindings(record, &config.checkpoints)?;
+    let mut context = effective_context_bindings(record, &config.checkpoints, &config.provider_interface)?;
     let evidence = result_static_bindings(config, Some(&context), &call.call_artifact);
     read_binding(&mut context, &call.call_artifact)?;
     Ok((source.read_bindings(context)?, evidence))
@@ -715,6 +715,15 @@ impl ProviderOutputHandoff {
         };
         if !checkpoint_record_matches_template(checkpoint, &original, &current.id) {
             return Err("result invocation no longer has its admitted receiving contract".into());
+        }
+        let awaited = correspondence(&original)?;
+        if awaited.invocation.is_none()
+            && persisted_pending_handoff(&current, &self.config.provider_interface)?.is_some_and(|pending| {
+                pending.deferred_publication
+                    && pending.items.iter().any(|item| item.artifact_id == awaited.call_artifact.id)
+            })
+        {
+            return Ok(None);
         }
         let config = attempt_config(&current, &self.config)?;
         let mut active = self.clone();

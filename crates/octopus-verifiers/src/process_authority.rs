@@ -23,11 +23,14 @@ pub struct ProcessAuthority {
     readable_exact: BTreeSet<PathBuf>,
     writable_exact: BTreeSet<PathBuf>,
     executable_exact: BTreeSet<PathBuf>,
+    executable_links: BTreeSet<PathBuf>,
     allow_network: bool,
     allow_local_ipc: bool,
     allow_application_launch: bool,
     allow_sandbox_delegation: bool,
 }
+
+const MAX_SEARCH_PATH_LINKS: usize = 40;
 
 #[derive(Clone, Debug)]
 pub struct PreparedProcess {
@@ -112,11 +115,17 @@ impl ProcessAuthority {
             readable_exact,
             writable_exact,
             executable_exact,
+            executable_links: BTreeSet::new(),
             allow_network,
             allow_local_ipc,
             allow_application_launch,
             allow_sandbox_delegation,
         })
+    }
+
+    fn with_executable_links(mut self, links: BTreeSet<PathBuf>) -> Self {
+        self.executable_links = links;
+        self
     }
 
     pub fn prepare(
@@ -479,8 +488,10 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             environment,
         )?);
         let search_path = environment.get("PATH").map(OsString::as_os_str);
+        let mut executable_links = BTreeSet::new();
         for command in &self.executable_commands {
             executable.insert(resolve_executable(command, &repository_root, search_path)?);
+            executable_links.extend(search_path_links(command, search_path)?);
         }
         let has_argument_paths = !self.read_argument_paths.is_empty()
             || !self.write_argument_paths.is_empty()
@@ -524,7 +535,8 @@ impl ProcessAuthoritySpecExecution for ProcessAuthoritySpec {
             self.allow_application_launch,
             self.allow_sandbox_delegation,
             self.sandbox_mode,
-        )?;
+        )?
+        .with_executable_links(executable_links);
         Ok(ResolvedProcessAuthority {
             authority,
             root_slots,
@@ -974,6 +986,62 @@ pub fn resolve_required_repository_file(
     Ok(resolved)
 }
 
+fn search_path_links(
+    declared: &str,
+    search_path: Option<&OsStr>,
+) -> Result<BTreeSet<PathBuf>, String> {
+    let declared = declared.trim();
+    let path = Path::new(declared);
+    let mut links = BTreeSet::new();
+    if path.is_absolute() || path.components().count() != 1 {
+        return Ok(links);
+    }
+    let Some(mut current) = search_path.and_then(|search_path| {
+        std::env::split_paths(search_path)
+            .map(|root| root.join(path))
+            .find(|candidate| executable_file(candidate))
+    }) else {
+        return Ok(links);
+    };
+    for _ in 0..MAX_SEARCH_PATH_LINKS {
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "process executable link '{}' cannot be inspected: {error}",
+                current.display()
+            )
+        })?;
+        if !metadata.file_type().is_symlink() {
+            return Ok(links);
+        }
+        let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
+            return Err(format!(
+                "process executable link '{}' has no parent directory",
+                current.display()
+            ));
+        };
+        let parent = std::fs::canonicalize(parent).map_err(|error| {
+            format!(
+                "process executable link directory '{}' cannot be canonicalized: {error}",
+                parent.display()
+            )
+        })?;
+        if links.is_empty() && current.is_absolute() {
+            links.insert(current.clone());
+        }
+        links.insert(parent.join(name));
+        let target = std::fs::read_link(&current).map_err(|error| {
+            format!(
+                "process executable link '{}' cannot be read: {error}",
+                current.display()
+            )
+        })?;
+        current = parent.join(target);
+    }
+    Err(format!(
+        "process executable '{declared}' resolves through more than {MAX_SEARCH_PATH_LINKS} symbolic links"
+    ))
+}
+
 fn executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
@@ -1117,6 +1185,15 @@ fn prepare_macos(
         &mut policy,
         "file-read-metadata file-test-existence",
         ancestors,
+    )?;
+    let mut executable_links = authority.executable_links.clone();
+    add_macos_lexical_aliases(&mut executable_links);
+    let mut link_metadata = path_ancestors(&executable_links);
+    link_metadata.extend(executable_links);
+    append_macos_exact_access(
+        &mut policy,
+        "file-read-metadata file-test-existence",
+        link_metadata,
     )?;
     let mut executable_paths = authority.executable.clone();
     executable_paths.insert(executable.clone());
@@ -2520,5 +2597,61 @@ mod native_path_tests {
         let profile = std::fs::read_to_string(&prepared.args[1]).expect("prepared profile");
         assert!(profile.contains("process-exec (with no-sandbox)\n(literal \"/usr/bin/sandbox-exec\")"));
         assert!(profile.contains("lsopen"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod search_path_link_tests {
+    use super::*;
+
+    #[test]
+    fn search_path_symlink_runs_by_name_while_its_neighbours_stay_hidden() {
+        let root = tempfile::tempdir().expect("temporary root");
+        let base = root.path().canonicalize().expect("canonical root");
+        let links = base.join("links");
+        let profiles = base.join("profiles");
+        for directory in [&links, &profiles] {
+            std::fs::create_dir_all(directory).expect("test directory");
+        }
+        for name in ["octopus-linked-probe", "octopus-neighbour"] {
+            std::os::unix::fs::symlink("/usr/bin/true", links.join(name)).expect("command link");
+        }
+        let spec = ProcessAuthoritySpec {
+            executable_commands: BTreeSet::from(["octopus-linked-probe".to_string()]),
+            ..ProcessAuthoritySpec::default()
+        };
+        let environment = BTreeMap::from([("PATH".to_string(), links.clone().into_os_string())]);
+        let resolved = spec
+            .resolve(
+                &base,
+                &BTreeMap::new(),
+                &environment,
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+            )
+            .expect("search path authority");
+        assert_eq!(
+            resolved.authority.executable_links,
+            BTreeSet::from([links.join("octopus-linked-probe")])
+        );
+        let run = |command: &str| {
+            let prepared = resolved
+                .authority
+                .prepare("/usr/bin/env", &[OsString::from(command)], Path::new("/"), None, &profiles)
+                .expect("sandboxed env");
+            std::process::Command::new(&prepared.program)
+                .args(&prepared.args)
+                .env_clear()
+                .envs(&prepared.environment)
+                .env("PATH", &links)
+                .current_dir("/")
+                .status()
+                .expect("sandboxed env execution")
+                .success()
+        };
+        assert!(run("octopus-linked-probe"));
+        assert!(!run("octopus-neighbour"));
     }
 }

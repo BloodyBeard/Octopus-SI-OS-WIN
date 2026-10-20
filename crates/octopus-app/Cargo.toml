@@ -26,7 +26,7 @@ octopus-interfaces = { path = "../octopus-interfaces" }
 octopus-runtime = { path = "../octopus-runtime" }
 octopus-ee = { path = "../octopus-ee" }
 octopus-app-server = { path = "../octopus-app-server" }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-std", "io-util", "process", "signal", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "io-std", "io-util", "net", "process", "signal", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 octopus-interface-transport = { path = "../octopus-interface-transport" }
 octopus-interface-projection = { path = "../octopus-interface-projection" }
@@ -35,7 +35,7 @@ fs2 = "0.4"
 notify.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["stdio"] }
+rustix = { version = "1", features = ["fs", "process", "stdio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net"] }

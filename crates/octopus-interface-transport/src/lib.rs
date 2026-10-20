@@ -160,6 +160,7 @@ pub struct InterfaceActivationReconciler {
     life_exit_rx: tokio::sync::mpsc::UnboundedReceiver<InterfaceLifeEvent>,
     next_lift_id: u64,
     failures: BTreeMap<InterfaceId, String>,
+    live: bool,
 }
 
 struct CachedResolvedInterfaceLife {
@@ -186,6 +187,11 @@ enum InterfaceLifeEvent {
     Retry {
         interface: InterfaceId,
         lift_id: u64,
+    },
+    Readiness {
+        interface: InterfaceId,
+        lift_id: u64,
+        outcome: Result<(), String>,
     },
 }
 
@@ -265,7 +271,15 @@ impl InterfaceActivationReconciler {
             life_exit_rx,
             next_lift_id: 0,
             failures: BTreeMap::new(),
+            live: false,
         }
+    }
+
+    fn record_failure(&mut self, interface: &InterfaceId, failure: &str) {
+        if self.live && self.failures.get(interface).map(String::as_str) != Some(failure) {
+            eprintln!("interface '{}' is in coma: {failure}", interface.as_str());
+        }
+        self.failures.insert(interface.clone(), failure.to_string());
     }
 
     fn resolve_interface_life(
@@ -361,7 +375,7 @@ impl InterfaceActivationReconciler {
                     "bound interface activation is invalid"
                 );
                 let failure = format!("interface activation is invalid: {error}");
-                self.failures.insert(interface.clone(), failure.clone());
+                self.record_failure(&interface, &failure);
                 failures.push(format!("interface '{}': {failure}", interface.as_str()));
                 continue;
             }
@@ -371,7 +385,7 @@ impl InterfaceActivationReconciler {
                     self.stop_life(&interface).await;
                     if activation_scan.enabled.contains(&interface) {
                         let failure = "activated interface has no life descriptor".to_string();
-                        self.failures.insert(interface.clone(), failure.clone());
+                        self.record_failure(&interface, &failure);
                         failures.push(format!("interface '{}': {failure}", interface.as_str()));
                     } else {
                         self.failures.remove(&interface);
@@ -386,7 +400,7 @@ impl InterfaceActivationReconciler {
                         "active interface life descriptor is unavailable"
                     );
                     let failure = format!("life descriptor is unavailable: {error}");
-                    self.failures.insert(interface.clone(), failure.clone());
+                    self.record_failure(&interface, &failure);
                     failures.push(format!("interface '{}': {failure}", interface.as_str()));
                     continue;
                 }
@@ -409,7 +423,7 @@ impl InterfaceActivationReconciler {
                         "active interface life root coordinates are unavailable"
                     );
                     let failure = format!("root coordinates are unavailable: {error}");
-                    self.failures.insert(interface.clone(), failure.clone());
+                    self.record_failure(&interface, &failure);
                     failures.push(format!("interface '{}': {failure}", interface.as_str()));
                     continue;
                 }
@@ -437,7 +451,7 @@ impl InterfaceActivationReconciler {
                             "active interface life fingerprint is unavailable"
                         );
                         let failure = format!("life fingerprint is unavailable: {error}");
-                        self.failures.insert(interface.clone(), failure.clone());
+                        self.record_failure(&interface, &failure);
                         failures.push(format!("interface '{}': {failure}", interface.as_str()));
                         continue;
                     }
@@ -461,6 +475,7 @@ impl InterfaceActivationReconciler {
                 .filter(|_| !fingerprint_changed)
                 .map(|lifted| lifted.restart_attempt)
                 .unwrap_or(0);
+            let after_coma = self.live.then(|| self.failures.get(&interface).cloned()).flatten();
             self.stop_life(&interface).await;
             let config = resolved.config;
             let descriptor_snapshot = resolved.interface_descriptor;
@@ -524,6 +539,23 @@ impl InterfaceActivationReconciler {
                     lift_id,
                 });
             });
+            let mut readiness_rx = Some(readiness_rx);
+            if let Some(previous) = after_coma {
+                eprintln!(
+                    "interface life '{}' is lifted again after coma (restart attempt {restart_attempt}): {previous}",
+                    interface.as_str()
+                );
+                if let Some(receiver) = readiness_rx.take() {
+                    let events = self.life_exit_tx.clone();
+                    let interface = interface.clone();
+                    tokio::spawn(async move {
+                        let outcome = receiver
+                            .await
+                            .unwrap_or_else(|_| Err("readiness channel closed".to_string()));
+                        let _ = events.send(InterfaceLifeEvent::Readiness { interface, lift_id, outcome });
+                    });
+                }
+            }
             self.lifted.insert(
                 interface,
                 LiftedInterfaceLife {
@@ -534,7 +566,7 @@ impl InterfaceActivationReconciler {
                     started_at: Instant::now(),
                     restart_attempt,
                     retry_not_before: None,
-                    readiness: Some(readiness_rx),
+                    readiness: readiness_rx,
                 },
             );
         }
@@ -705,6 +737,7 @@ impl InterfaceActivationReconciler {
     }
 
     pub async fn run(mut self) {
+        self.live = true;
         let mut roots = match self.watch_roots() {
             Ok(roots) => roots,
             Err(error) => {
@@ -814,11 +847,22 @@ impl InterfaceActivationReconciler {
                                 .is_some_and(|lifted| lifted.lift_id == lift_id);
                             if current {
                                 if let Err(error) = self.reconcile_once().await {
-                                    tracing::warn!(
-                                        interface = interface.as_str(),
-                                        error = %error,
-                                        "completed interface life could not be lifted again"
+                                    eprintln!(
+                                        "interface life '{}' could not be lifted again: {error}",
+                                        interface.as_str()
                                     );
+                                }
+                            }
+                        }
+                        InterfaceLifeEvent::Readiness { interface, lift_id, outcome } => {
+                            if self.lifted.get(&interface).is_some_and(|lifted| lifted.lift_id == lift_id) {
+                                match outcome {
+                                    Ok(()) => {
+                                        if self.failures.remove(&interface).is_some() {
+                                            eprintln!("interface '{}' woke from coma", interface.as_str());
+                                        }
+                                    }
+                                    Err(error) => self.record_failure(&interface, &format!("failed before readiness: {error}")),
                                 }
                             }
                         }
@@ -1609,6 +1653,90 @@ mod interface_life_switch_tests {
         );
         assert!(events.is_empty());
         assert!(reconciler.lifted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn life_failed_before_initial_readiness_is_lifted_again_by_its_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let iface_dir = root.join("registry").join("interface").join("test_flaky");
+        let durable_root = root.join("durable");
+        std::fs::create_dir_all(&iface_dir).unwrap();
+        std::fs::create_dir_all(durable_root.join("blobs")).unwrap();
+        let var_dir = root.join("home").join("interfaces").join("test_flaky");
+        std::fs::create_dir_all(&var_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&var_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::write(iface_dir.join("interface.json"), serde_json::json!({
+            "id": "test_flaky", "interface_type": "system", "role": "system",
+            "direction": "bidirectional", "source_names": ["test_flaky"], "interface_driver_ref": "test_flaky"
+        }).to_string()).unwrap();
+        std::fs::write(iface_dir.join("activation.json"), serde_json::json!({
+            "schema_version": 1, "interface": "test_flaky",
+            "activations": [{"activation_driver_ref": "test_flaky", "enabled": true, "config": {}}]
+        }).to_string()).unwrap();
+        let marker = var_dir.join("failed-once");
+        let payload = var_dir.join("payload.json");
+        std::fs::write(&payload, br#"{"text":"lifted again"}"#).unwrap();
+        let manifest = var_dir.join("emission.manifest.json");
+        std::fs::write(&manifest, serde_json::json!({"label": "interface.output", "payload_path": payload}).to_string()).unwrap();
+        let ready = serde_json::json!({"kind": "ready"}).to_string();
+        let arrival = serde_json::json!({
+            "kind": "arrival", "request_id": null, "artifact_manifest_path": manifest, "evidence": []
+        }).to_string();
+        std::fs::write(iface_dir.join("life.json"), serde_json::json!({
+            "processes": [{
+                "bin": "/bin/sh",
+                "io_limits": {"max_control_frame_bytes": 65536, "max_stderr_bytes": 65536,
+                    "max_manifest_bytes": 65536, "max_payload_bytes": 1048576},
+                "args": ["-c", format!(
+                    "if [ -e '{0}' ]; then printf '%s\\n' \"$1\" \"$2\"; IFS= read -r ignored; else : > '{0}'; exit 3; fi",
+                    marker.display()), "octopus-test", ready, arrival],
+                "authority": {
+                    "read_root_slots": [], "write_root_slots": [], "executable_root_slots": [],
+                    "read_paths": [], "write_paths": [marker], "executable_paths": ["/bin/sh"],
+                    "executable_commands": [], "read_env_paths": [], "write_env_paths": [],
+                    "executable_env_paths": [], "allow_network": false, "allow_local_ipc": false
+                },
+                "read_handles": []
+            }]
+        }).to_string()).unwrap();
+        let runs_dir = durable_root.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::write(root.join("home").join("host.json"), serde_json::json!({
+            "host_manifest_version": 1,
+            "root_refs": {"repo_root": root.to_str().unwrap(), "run_records_root": runs_dir.to_str().unwrap()}
+        }).to_string()).unwrap();
+        std::fs::write(runs_dir.join("run_flaky.json"), serde_json::json!({
+            "id": "run_flaky", "ee": "ee_test", "worker": "system_worker_test",
+            "trace": "trace:run_flaky", "status": "idle",
+            "checkpoints": [{
+                "id": "c1", "run": "run_flaky", "trace": "trace:run_flaky:c1", "epoch": 0,
+                "interface_binding": octopus_runtime::AuthoredInterfaceBinding::all(InterfaceId::new("test_flaky")),
+                "outbound_interface_bindings": []
+            }],
+            "active_checkpoints": ["c1"]
+        }).to_string()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<InterfaceActivationArrival>(4);
+        let cancel = CancellationToken::new();
+        let handle = prepare_interface_activation_reconciler(
+            root.join("registry"), root.to_path_buf(), tx, tokio::sync::mpsc::channel(4).0,
+            cancel.clone(), root.join("home"), Some(durable_root), None,
+        ).await.unwrap();
+        assert!(handle.initial_failures.contains_key(&InterfaceId::new("test_flaky")));
+        assert!(marker.exists());
+        let reconciler_task = tokio::spawn(handle.reconciler.run());
+        let arrival = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a life that failed before initial readiness must be lifted again by its retry")
+            .expect("intake open");
+        assert_eq!(arrival.interface.as_str(), "test_flaky");
+        assert_eq!(arrival.artifact.read_payload_bytes().unwrap(), br#"{"text":"lifted again"}"#);
+        cancel.cancel();
+        reconciler_task.await.unwrap();
     }
 
     #[tokio::test]

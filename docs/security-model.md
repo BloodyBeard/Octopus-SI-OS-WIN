@@ -27,7 +27,11 @@ verifiers, and interface processes start with a cleared environment. With the
 default `sandbox_mode: "enforced"`, they run inside a deny-by-default macOS
 sandbox (`sandbox-exec`). Each receives only the root
 slots, paths, executables, environment names, and network or local-IPC access
-its descriptor declares. The launching code writes that sandbox profile to a
+its descriptor declares. A command declared by name is found through the
+declared `PATH` and runs only from its canonical file; the name it was found
+under and each symbolic link on the way get metadata access only, so the
+process can call it by that name without reading what sits around it. The
+launching code writes that sandbox profile to a
 private file, and every profile denies writes to the pending profile files in
 its location, so a process with broad write authority still cannot rewrite
 them. A file tool whose path arrives in its arguments is

@@ -21,6 +21,7 @@ type ProviderSpec = {
   key?: { env: string; label: string; header?: string; prefix?: string };
   base_url?: { env: string; label: string };
   model?: { env: string; label: string; slug: string; display_name: string };
+  cli?: { commands: string[]; env: string[]; home_read: string[]; home_write: string[] };
 };
 
 type Spec = { schema_version: 1; template_interface: string; providers: ProviderSpec[] };
@@ -44,7 +45,7 @@ const EFFORT_DESCRIPTIONS: Record<Effort, string> = {
   xhigh: "Extra high reasoning depth for complex problems",
   max: "Maximum reasoning depth for the hardest problems",
 };
-const ADAPTERS = new Set(["anthropic", "azure", "google", "openai-chat", "openai-responses"]);
+const ADAPTERS = new Set(["anthropic", "azure", "claude-cli", "google", "openai-chat", "openai-responses"]);
 const CODEX_ONLY_PRIVATE_CONFIG = ["provider_operations", "web_search"];
 const CODEX_NATIVE_SEARCH_TOOLS = ["web.search", "web.extract"];
 const CODEX_ONLY_OVERRIDES = [/^model_context_window=/, /^model_auto_compact_token_limit=/];
@@ -208,6 +209,7 @@ function descriptor(spec: ProviderSpec, template: any, rows: ModelRow[], adapter
     credential_owner_interface: spec.interface,
     ...(spec.registry_entry ? { registry_entry: spec.registry_entry } : {}),
     ...(spec.model ? { model_env: spec.model.env } : {}),
+    ...(spec.cli ? { bridge_env_names: spec.cli.env } : {}),
     allow_private_network: spec.local === true || spec.allow_private_network === true,
     ...(adapter === "anthropic" ? { cache_retention: "short" } : {}),
     limits: {
@@ -256,6 +258,12 @@ function life(spec: ProviderSpec, template: any) {
       ...authority.executable_root_subpaths,
       { root_slot: "registry_interface_root", relative_path: BRIDGE_SUBPATH },
     ];
+    if (spec.cli) {
+      process.inherit_env = [...process.inherit_env, ...spec.cli.env.filter((name) => !process.inherit_env.includes(name))];
+      authority.executable_commands = [...authority.executable_commands, ...spec.cli.commands];
+      authority.read_env_subpaths = [...authority.read_env_subpaths, ...spec.cli.home_read.map((relative_path) => ({ env: "HOME", relative_path }))];
+      authority.write_env_subpaths = [...(authority.write_env_subpaths ?? []), ...spec.cli.home_write.map((relative_path) => ({ env: "HOME", relative_path }))];
+    }
   }
   return out;
 }
@@ -327,7 +335,8 @@ for (const provider of spec.providers) {
   const seed = entry ? providerConfigSeed(entry) : undefined;
   const adapter = provider.adapter ?? seed?.adapter;
   if (!ADAPTERS.has(adapter)) throw new Error(`${provider.interface}: adapter ${adapter} is not served by the bridge`);
-  if (!provider.key && !provider.local) throw new Error(`${provider.interface}: a remote provider needs a key field`);
+  if (!provider.key && !provider.local && !provider.cli) throw new Error(`${provider.interface}: a remote provider needs a key field or a signed-in CLI`);
+  if (provider.cli && provider.key) throw new Error(`${provider.interface}: a CLI provider keeps its sign-in inside the CLI`);
   const baseUrl = provider.base_url ? "" : seed?.baseUrl;
   if (!provider.base_url && !baseUrl) throw new Error(`${provider.interface}: no base URL`);
   const rows = provider.model ? setupModel(provider) : registryModels(provider, seed);
