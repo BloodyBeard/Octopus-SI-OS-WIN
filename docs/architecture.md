@@ -455,13 +455,24 @@ order: one that hands work to a sibling still waking up waits for it, within
 the hand-in's declared timeout. A stopped interface loses nothing; an unread result is an ordinary consequence of the architecture, not a
 loss to be repaired with leases and retries.
 
-A restart does not end the work in flight either. A tool call the restart cut
-off reports an unknown effect instead of running twice. The provider closes
-the turn it was in honestly, as interrupted, and the client then resumes that
-turn the way the Resume control does, with the interrupted call's result in
-its context; a turn the operator stopped stays stopped. The runtime also
-outlives the terminal that launched it, so relaunching the client never stops
-it.
+A restart does not end the work in flight either. A command a room started
+keeps running in its own keeper process, outside the tool process and the
+runtime; the call that was waiting on it is re-delivered after the restart and
+receives the command's own output and exit code, exactly once per call. Only an
+effect that truly cannot be established is reported as unknown, never run
+twice. The provider continues the turn the restart cut off by itself: it starts
+the next native turn on the same thread with the late result in context, the
+way the Resume control does, without any client attached. A turn the operator
+stopped stays stopped. The runtime also outlives the terminal that launched it,
+so relaunching the client never stops it.
+
+Stopping and restarting the runtime is a path, not a signal. A running runtime
+listens on `state/runtime-instance/control.sock` in its Home; `octopus down`
+asks it to stop and `octopus restart` asks it to stop cleanly and start again
+as itself. Whoever can reach that path may stop or restart the runtime: the
+operator's terminal, or a run whose room grants it. A room cannot signal the
+runtime's processes, and a command started from a room cannot launch a second
+runtime, because it would inherit the room's sandbox.
 
 There is no recovery subsystem. This follows from intent, obligation, and
 memory living in files rather than in a running loop.

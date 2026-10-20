@@ -2570,59 +2570,7 @@ function startClientQuitCleanup() {
   });
 }
 
-const restartResume = { home: "", afterSeq: -1, watcher: null, timer: null, running: false, again: false };
-
-function watchRestartInterruptions() {
-  const octopusHome = resolveOctopusHome();
-  if (restartResume.home !== octopusHome) {
-    restartResume.watcher?.close();
-    Object.assign(restartResume, { home: octopusHome, afterSeq: -1, watcher: null });
-    try {
-      restartResume.watcher = fs.watch(path.join(octopusHome, "ledger"), () => scheduleRestartResume());
-    } catch (error) {
-      void appendClientLog("error", "runtime.restart_resume.watch_failed", { message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  scheduleRestartResume();
-}
-
-function scheduleRestartResume() {
-  if (restartResume.timer) return;
-  restartResume.timer = setTimeout(() => { restartResume.timer = null; void resumeRestartInterruptions(); }, 1_000);
-}
-
-async function resumeRestartInterruptions() {
-  if (restartResume.running) { restartResume.again = true; return; }
-  restartResume.running = true;
-  const octopusHome = restartResume.home;
-  try {
-    if (!runtimeHost || !(await runtimeHost.probe()).ready) return;
-    const instance = JSON.parse(await fs.promises.readFile(path.join(octopusHome, "state", "runtime-instance", "state.json"), "utf8"));
-    const client = await getOperatorChatClientLoader().load();
-    const outcome = await client.resumeRestartInterruptedTurns({
-      octopusHome: () => octopusHome,
-      readArtifactPayload: (input) => readContentAddressedArtifactPayload({ ...input, blobsRoot: path.join(octopusHome, "ledger", "blobs") }),
-      submitTurnControl: (request) => client.submitOperatorTurnControl({
-        octopusHome: () => octopusHome,
-        clientArtifactsRoot: (interfaceId) => path.join(octopusHome, "interface-hand-in", interfaceId, "client"),
-        handInArtifact: (input) => handInArtifact({ ...input, octopusHome }),
-      }, request),
-    }, { afterSeq: restartResume.afterSeq, runtimeStartedAtMs: instance.started_at_unix_ms });
-    if (restartResume.home === octopusHome) restartResume.afterSeq = Math.max(restartResume.afterSeq, outcome.watermark - 1);
-    for (const row of outcome.resumed) void appendClientLog("info", "runtime.restart_resume.sent", row);
-    for (const row of outcome.failed) void appendClientLog("error", "runtime.restart_resume.failed", row);
-  } catch (error) {
-    void appendClientLog("error", "runtime.restart_resume.failed", { message: error instanceof Error ? error.message : String(error) });
-  } finally {
-    restartResume.running = false;
-    if (restartResume.again) { restartResume.again = false; scheduleRestartResume(); }
-  }
-}
-
 function closeClientResources() {
-  restartResume.watcher?.close();
-  clearTimeout(restartResume.timer);
-  restartResume.timer = null;
   chatgptSignIn?.dispose();
   clearGlobalDictationShortcut();
   cdpViewerManager?.closeAll();
@@ -2701,7 +2649,6 @@ function ensureRuntimeHost() {
     const projectionChanged = projectionReady && !runtimeProjectionHasBeenReady;
     if (projectionReady) runtimeProjectionHasBeenReady = true;
     if (projectionChanged) projectionStores.get("live")?.invalidate(false);
-    if (projectionReady) watchRestartInterruptions();
     publishRuntimeEvent("octopus:runtime-host-state", state);
   });
   host.observe();

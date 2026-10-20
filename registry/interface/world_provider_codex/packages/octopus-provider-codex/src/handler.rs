@@ -3532,6 +3532,24 @@ struct RecoveredToolContinuation {
     activity_already_admitted: bool,
 }
 
+struct CutTurnContinuation {
+    context: String,
+    activity: CodexTurnOutput,
+    activity_already_admitted: bool,
+}
+
+enum NativeTerminalCheck {
+    Open,
+    Closed,
+    CutByProcessDeath(CodexTurnOutput),
+}
+
+impl NativeTerminalCheck {
+    fn settled(&self) -> bool {
+        !matches!(self, Self::Open)
+    }
+}
+
 enum ThreadAction {
     Reuse { thread_id: String },
     Mint,
@@ -6382,6 +6400,7 @@ impl CodexAppServerInterfaceDriver {
             )?;
         }
         let mut recovered_tool_continuation = None;
+        let mut cut_turn_continuation = None;
         let mut recovered_operator_continuation = None;
         let interrupted_result_recovery = matches!(
             (
@@ -6567,14 +6586,30 @@ impl CodexAppServerInterfaceDriver {
                     if state.context_generation != context_generation {
                         return Err(InterfaceDriverError::FailedClosed("cold tool result has stale source context generation".into()));
                     }
-                    if self.complete_native_terminal_result(
+                    match self.complete_native_terminal_result(
                         turn_context, state, None,
                         CodexTurnOutput::dynamic_tool_completed_after_interrupt(
                             self.native_tool_namespace()?.name, result.tool.clone(), result.correlation_id.clone().ok_or_else(|| InterfaceDriverError::FailedClosed("cold result lost its correlation".into()))?,
                             state.thread_id.clone(), pending_turn_id(pending).to_string(), result.ok, result.body.clone(), result.error.clone(),
                         ), interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
                         CodexTurnOutput::interrupted_result_closed("tool_result", result.correlation_id.clone().ok_or_else(|| InterfaceDriverError::FailedClosed("cold result lost its correlation".into()))?, state.thread_id.clone(), pending_turn_id(pending).to_string(), result.ok, &effective_source_artifact),
-                    ).await? { return Ok(()); }
+                        native_pending_operation(pending)?.is_none(),
+                    ).await? {
+                        NativeTerminalCheck::Closed => return Ok(()),
+                        NativeTerminalCheck::CutByProcessDeath(activity) => {
+                            cut_turn_continuation = Some(CutTurnContinuation {
+                                context: cut_turn_context(
+                                    &current_session_context, &effective_source_artifact, state, &result.tool,
+                                    &effective_manifest_label, &effective_request_bytes, self.model_result_projection()?,
+                                )?,
+                                activity,
+                                activity_already_admitted: interrupted_after_artifact
+                                    .as_deref()
+                                    .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                            });
+                        }
+                        NativeTerminalCheck::Open => {}
+                    }
                     let CodexPendingContinuity::DynamicTool {
                         native_operation: _,
                         turn_id,
@@ -6608,7 +6643,7 @@ impl CodexAppServerInterfaceDriver {
                             }
                             NativeStep::Wait { .. } => return Err(InterfaceDriverError::FailedClosed("recovered effect cannot become a new wait".into())),
                         }
-                    } else {
+                    } else if cut_turn_continuation.is_none() {
                     let namespace = self.native_tool_namespace()?.name;
                     recovered_tool_continuation = Some(RecoveredToolContinuation {
                         item: recovered_function_call_output(
@@ -6786,13 +6821,29 @@ impl CodexAppServerInterfaceDriver {
                     if state.context_generation != context_generation {
                         return Err(InterfaceDriverError::FailedClosed("cold interface result has stale source context generation".into()));
                     }
-                    if self.complete_native_terminal_result(
+                    match self.complete_native_terminal_result(
                         turn_context, state, None,
                         CodexTurnOutput::interface_operation_completed_after_interrupt(
                             result.operation.clone(), result.correlation_id.clone(), state.thread_id.clone(), pending_turn_id(pending).to_string(), result.ok, result.value.clone(),
                         ), interrupted_after_artifact.as_deref() == Some(TURN_DYNAMIC_TOOL_CALL_LABEL),
                         CodexTurnOutput::interrupted_result_closed("interface_operation_result", result.correlation_id.clone(), state.thread_id.clone(), pending_turn_id(pending).to_string(), result.ok, &effective_source_artifact),
-                    ).await? { return Ok(()); }
+                        true,
+                    ).await? {
+                        NativeTerminalCheck::Closed => return Ok(()),
+                        NativeTerminalCheck::CutByProcessDeath(activity) => {
+                            cut_turn_continuation = Some(CutTurnContinuation {
+                                context: cut_turn_context(
+                                    &current_session_context, &effective_source_artifact, state, &result.operation,
+                                    &effective_manifest_label, &effective_request_bytes, self.model_result_projection()?,
+                                )?,
+                                activity,
+                                activity_already_admitted: interrupted_after_artifact
+                                    .as_deref()
+                                    .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                            });
+                        }
+                        NativeTerminalCheck::Open => {}
+                    }
                     let CodexPendingContinuity::InterfaceOperation {
                         turn_id,
                         call_id,
@@ -6804,31 +6855,33 @@ impl CodexAppServerInterfaceDriver {
                             "validated recovered interface result has interface-operation state"
                         )
                     };
-                    recovered_tool_continuation = Some(RecoveredToolContinuation {
-                        item: recovered_function_call_output(
-                            call_id,
-                            recovered_result_output(interface_operation_response_content(
-                                result, &effective_source_artifact, self.model_result_projection()?,
-                            )?)?,
-                        ),
-                        activity: CodexTurnOutput::interface_operation_completed(
-                            operation.clone(),
-                            call_id.clone(),
-                            recovered
-                                .as_ref()
-                                .expect("recovered interface continuity exists")
-                                .thread_id
-                                .clone(),
-                            turn_id.clone(),
-                            result.ok,
-                            result.value.clone(),
-                        ),
-                        activity_already_admitted: interrupted_after_artifact
-                            .as_deref()
-                            .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
-                    });
+                    if cut_turn_continuation.is_none() {
+                        recovered_tool_continuation = Some(RecoveredToolContinuation {
+                            item: recovered_function_call_output(
+                                call_id,
+                                recovered_result_output(interface_operation_response_content(
+                                    result, &effective_source_artifact, self.model_result_projection()?,
+                                )?)?,
+                            ),
+                            activity: CodexTurnOutput::interface_operation_completed(
+                                operation.clone(),
+                                call_id.clone(),
+                                recovered
+                                    .as_ref()
+                                    .expect("recovered interface continuity exists")
+                                    .thread_id
+                                    .clone(),
+                                turn_id.clone(),
+                                result.ok,
+                                result.value.clone(),
+                            ),
+                            activity_already_admitted: interrupted_after_artifact
+                                .as_deref()
+                                .is_some_and(|label| label != PROVIDER_TRANSPORT_DISPATCH_LABEL),
+                        });
+                    }
                 }
-                if recovered_tool_continuation.is_none() {
+                if recovered_tool_continuation.is_none() && cut_turn_continuation.is_none() {
                     return Err(InterfaceDriverError::FailedClosed(
                         "interface operation result has no live structured pending request"
                             .to_string(),
@@ -6938,7 +6991,7 @@ impl CodexAppServerInterfaceDriver {
             && !thread_compact_requested
             && peer_message.as_ref().is_none_or(|peer| peer.action != PeerAction::Queue)
             && recovered_turn_start_dispatches.is_empty();
-        let turn_input = if recovered_tool_continuation.is_some() {
+        let turn_input = if recovered_tool_continuation.is_some() || cut_turn_continuation.is_some() {
             Vec::new()
         } else {
             provider_input.into_turn_input()?
@@ -6950,7 +7003,9 @@ impl CodexAppServerInterfaceDriver {
                 ThreadAcquisition {
                     recovered: recovered.as_ref(),
                     retired_history: None,
-                    require_exact_resume: thread_compact_requested || resume_control_id.is_some(),
+                    require_exact_resume: thread_compact_requested
+                        || resume_control_id.is_some()
+                        || cut_turn_continuation.is_some(),
                     context_generation: invocation_context_generation,
                     input_changes_context,
                     model: Some(model.clone()),
@@ -7127,6 +7182,8 @@ impl CodexAppServerInterfaceDriver {
 
         let additional_context = if let Some(context) = resumed_additional_context {
             context
+        } else if let Some(cut) = cut_turn_continuation.as_ref() {
+            native_turn_context(Some(cut.context.clone()), obligations_grant_block)
         } else if recovered_tool_continuation.is_some() || resume_control_id.is_some() {
             BTreeMap::new()
         } else {
@@ -7134,6 +7191,7 @@ impl CodexAppServerInterfaceDriver {
         };
         if !thread_compact_requested
             && recovered_tool_continuation.is_none()
+            && cut_turn_continuation.is_none()
             && resume_control_id.is_none()
             && lifecycle_prompt_event.is_none()
             && !lifecycle_start_resumed
@@ -7185,7 +7243,7 @@ impl CodexAppServerInterfaceDriver {
                 return Ok(());
             }
         }
-        if first_turn_of_run && recovered_tool_continuation.is_none() {
+        if first_turn_of_run && recovered_tool_continuation.is_none() && cut_turn_continuation.is_none() {
             self.emit_hooks_catalog(&sink).await?;
         }
         if let Some(continuation) = recovered_tool_continuation.as_ref()
@@ -7227,7 +7285,7 @@ impl CodexAppServerInterfaceDriver {
                 self.bound_service_tier()?,
                 reasoning_summary,
                 additional_context,
-                if resume_control_id.is_some() {
+                if resume_control_id.is_some() || cut_turn_continuation.is_some() {
                     TURN_TRIGGER_RESUME_INTERRUPTED_TASK
                 } else if recovered_tool_continuation.is_some() {
                     TURN_TRIGGER_TOOL_RESULT_RECOVERY
@@ -7264,9 +7322,12 @@ impl CodexAppServerInterfaceDriver {
             )));
         }
         let turn_id = turn_response.turn.id;
-        if let Some(continuation) = recovered_tool_continuation {
-            if !continuation.activity_already_admitted && !live_stream_rules.enabled() {
-                sink.send(continuation.activity)?;
+        if let Some((activity, activity_already_admitted)) = recovered_tool_continuation
+            .map(|continuation| (continuation.activity, continuation.activity_already_admitted))
+            .or(cut_turn_continuation.map(|cut| (cut.activity, cut.activity_already_admitted)))
+        {
+            if !activity_already_admitted && !live_stream_rules.enabled() {
+                sink.send(activity)?;
             }
             if first_turn_of_run {
                 self.emit_hooks_catalog(&sink).await?;
@@ -7465,9 +7526,10 @@ impl CodexAppServerInterfaceDriver {
         activity: CodexTurnOutput,
         activity_already_admitted: bool,
         mut closure: CodexTurnOutput,
-    ) -> Result<bool, InterfaceDriverError> {
+        continue_cut_turn: bool,
+    ) -> Result<NativeTerminalCheck, InterfaceDriverError> {
         let Some(exact_pending) = recovered.pending.as_ref().filter(|pending| interrupted_pending_has_external_result(pending)) else {
-            return Ok(false);
+            return Ok(NativeTerminalCheck::Open);
         };
         if recovered.interrupted_pending.is_some() || recovered.native_terminal.is_some()
             || recovered.provider_interface != *context.sink.provider_interface
@@ -7479,8 +7541,12 @@ impl CodexAppServerInterfaceDriver {
         let turn_id = pending_turn_id(exact_pending);
         let Some(terminal) = read_exact_terminal_turn(&handle, &self.next_request_id, &recovered.thread_id, turn_id)
             .await.map_err(InterfaceDriverError::FailedClosed)? else {
-            return Ok(false);
+            return Ok(NativeTerminalCheck::Open);
         };
+        if continue_cut_turn && terminal.exact_turn(&recovered.thread_id, Some(turn_id))?.status == TurnStatus::Interrupted {
+            let events = take_native_terminal_events(&mut *self.client.lock().await, &terminal, &recovered.thread_id, turn_id)?;
+            return Ok(NativeTerminalCheck::CutByProcessDeath(activity.with_native_terminal_events(events)));
+        }
         context.sink.bind_live_stream(&recovered.thread_id, turn_id)?;
         let events = take_native_terminal_events(&mut *self.client.lock().await, &terminal, &recovered.thread_id, turn_id)?;
         let (retired, retained) = interrupted_continuity(Some(recovered.clone())).map_err(InterfaceDriverError::FailedClosed)?;
@@ -7506,7 +7572,7 @@ impl CodexAppServerInterfaceDriver {
             (!activity_already_admitted).then_some(activity), activity_already_admitted,
             closure.with_native_terminal_events(events),
         )?;
-        Ok(true)
+        Ok(NativeTerminalCheck::Closed)
     }
 
     async fn resume_tool_result(
@@ -7641,7 +7707,8 @@ impl CodexAppServerInterfaceDriver {
                 pending.thread_id.clone(), pending.turn_id.clone(), result.ok, result.body.clone(), result.error.clone(),
             ), interrupted_activity_already_admitted,
             CodexTurnOutput::interrupted_result_closed("tool_result", correlation_id.to_string(), pending.thread_id.clone(), pending.turn_id.clone(), result.ok, context.source_artifact),
-        ).await? { return Ok(true); }
+            false,
+        ).await?.settled() { return Ok(true); }
         if let Some(operation) = recovered.and_then(|state| state.pending.as_ref()).map(native_pending_operation).transpose()?.flatten() {
             let receipt = serde_json::to_value(&result).map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
             match operation.advance(&receipt).map_err(InterfaceDriverError::FailedClosed)? {
@@ -7859,7 +7926,8 @@ impl CodexAppServerInterfaceDriver {
                 result.operation.clone(), result.correlation_id.clone(), pending.thread_id.clone(), pending.turn_id.clone(), result.ok, result.value.clone(),
             ), interrupted_activity_already_admitted,
             CodexTurnOutput::interrupted_result_closed("interface_operation_result", result.correlation_id.clone(), pending.thread_id.clone(), pending.turn_id.clone(), result.ok, context.source_artifact),
-        ).await? { return Ok(true); }
+            false,
+        ).await?.settled() { return Ok(true); }
         context
             .sink
             .send(CodexTurnOutput::interface_operation_completed(
@@ -15185,6 +15253,30 @@ pub(crate) fn recovered_failed_result_source(
     Ok(matched)
 }
 
+fn cut_turn_context(
+    session: &[SessionContextArtifact],
+    input: &ArtifactRef,
+    cut: &CodexContinuityState,
+    call: &str,
+    label: &str,
+    payload: &[u8],
+    projection: ModelResultProjection,
+) -> Result<String, InterfaceDriverError> {
+    let payload: serde_json::Value = serde_json::from_slice(payload).map_err(|error| {
+        InterfaceDriverError::Protocol(format!("cut turn result {} is not JSON: {error}", input.id.as_str()))
+    })?;
+    let mut assembled = AssembledContext::default();
+    append_assembled_context(&mut assembled, Some(label), &payload, input.id.as_str(), input, projection)?;
+    let result = assembled.conversation.join("\n\n");
+    let heading = format!(
+        "Your previous turn ended when the process running it stopped, before the result of its {call} call reached you. That result has since arrived:"
+    );
+    Ok(match resumed_model_context(session, input, cut, projection)? {
+        Some(earlier) => format!("{earlier}\n\n{heading}\n{result}"),
+        None => format!("{heading}\n{result}"),
+    })
+}
+
 fn resumed_model_context(
     session: &[SessionContextArtifact],
     input: &ArtifactRef,
@@ -16449,6 +16541,7 @@ pub fn into_interface_driver_with_config(
 mod tests {
     use super::*;
     include!("../tests/support/context_refresh.rs");
+    include!("../tests/support/cut_turn_continuation.rs");
     include!("../tests/support/steering_compatibility.rs");
     include!("../tests/support/pending_history.rs");
     include!("../tests/support/recovery_call_ownership.rs");
@@ -22619,7 +22712,8 @@ while IFS= read -r _; do :; done
                         context, &recovered, (!cold).then_some(&pending),
                         CodexTurnOutput::dynamic_tool_completed_after_interrupt("formed_interfaces".into(), result.tool.clone(), "call-a".into(), "thread-a".into(), "turn-a".into(), result.ok, result.body.clone(), result.error.clone()),
                         false, CodexTurnOutput::interrupted_result_closed("tool_result", "call-a".into(), "thread-a".into(), "turn-a".into(), result.ok, &source.artifact),
-                    )).await.unwrap();
+                        false,
+                    )).await.unwrap().map(|checked| checked.settled());
                     if !terminal_case {
                         if mode == "live" { assert!(!checked.unwrap()); } else { assert!(checked.is_err(), "{mode}"); }
                         assert_eq!(emit.continuity_snapshot().unwrap(), original);
