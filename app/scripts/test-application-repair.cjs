@@ -36,6 +36,11 @@ const container = document.getElementById("root");
 const root = createRoot(container);
 after(() => { root.unmount(); w.close(); });
 const settle = (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms));
+async function until(predicate, label) {
+  for (const deadline = Date.now() + 5000; !predicate(); await settle(20)) {
+    if (Date.now() > deadline) assert.fail(label());
+  }
+}
 const digest = (letter) => letter.repeat(64);
 const application = (id, extra = {}) => ({
   id, name: `Application ${id}`, description: "Keeps notes", category: "connector", developer: "Octopus", version: "1.0.0", icon: "", logo: "", logo_dark: "", logo_data_url: "",
@@ -58,20 +63,16 @@ test("repairing a stale or receipt-less application asks the host to repair exac
     mutateOctopusOsWorkspace: async (request) => { mutations.push(structuredClone(request)); return { status: "complete" }; },
   }, { get: (target, name) => target[name] ?? (typeof name === "string" && name.startsWith("on") ? () => () => {} : () => new Promise(() => {})) });
   root.render(React.createElement(ApplicationsView, { accessProfile: "live", searchFocusTick: 0 }));
-  await settle(80);
-  const repair = (name) => {
-    const button = [...container.querySelectorAll("button")].find((candidate) => {
-      if (candidate.textContent !== "Repair") return false;
-      let card = candidate.parentElement;
-      while (card && !card.textContent.includes("Application ")) card = card.parentElement;
-      return card?.textContent.includes(name);
-    });
-    assert.ok(button, `${name} offers Repair: ${container.textContent.slice(0, 300)}`);
-    return button;
-  };
-  for (const name of ["Application stale", "Application missing"]) {
-    repair(name).click();
-    await settle(60);
+  const repairButton = (name) => [...container.querySelectorAll("button")].find((candidate) => {
+    if (candidate.textContent !== "Repair") return false;
+    let card = candidate.parentElement;
+    while (card && !card.textContent.includes("Application ")) card = card.parentElement;
+    return card?.textContent.includes(name);
+  });
+  for (const [index, name] of ["Application stale", "Application missing"].entries()) {
+    await until(() => repairButton(name), () => `${name} offers Repair: ${container.textContent.slice(0, 300)}`);
+    repairButton(name).click();
+    await until(() => mutations.length === index + 1, () => `${name} Repair reached the host`);
   }
   assert.deepEqual(mutations.map(({ operationId, ...request }) => request), [
     { action: "repair_package", packageIds: ["package.stale"], expectedRepairs: { "package.stale": { sourceDigest: digest("a"), installedDigest: digest("b"), receiptState: "stale", receiptDigest: digest("c") } } },
