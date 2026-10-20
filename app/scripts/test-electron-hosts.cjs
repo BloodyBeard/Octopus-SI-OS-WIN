@@ -55,29 +55,97 @@ async function verifySandboxedPreloadImports() {
   const source = await fs.readFile(path.join(__dirname, "../electron/preload.cjs"), "utf8");
   const imports = [...source.matchAll(/require\(\s*(["'])([^"']+)\1\s*\)/g)].map((match) => match[2]);
   assert.deepEqual(imports, ["electron"]);
-  assert.match(source, /openLaunchTerminal\(request\)[\s\S]*?invokeAccess\("octopus:launch-terminal-open", request\)/);
-  assert.match(source, /writeLaunchTerminal\(sessionId, data\)[\s\S]*?invokeAccess\("octopus:launch-terminal-write", sessionId, data\)/);
-  assert.match(source, /resizeLaunchTerminal\(sessionId, request\)[\s\S]*?invokeAccess\("octopus:launch-terminal-resize", sessionId, request\)/);
-  assert.match(source, /bootStatus\(\)[\s\S]*?invokeAccess\("octopus:boot-status"\)/);
-  assert.match(source, /clientWindowBootstrap\(\)[\s\S]*?sendSync\("octopus:client-window-bootstrap"\)/);
-  assert.match(source, /openClientWindow\(request\)[\s\S]*?invokeAccess\("octopus:client-window-open", request\)/);
-  assert.match(source, /clientWindowReady\(request\)[\s\S]*?invokeAccess\("octopus:client-window-ready", request\)/);
-  assert.match(source, /onClientAccessLocked\(listener\)[\s\S]*?ipcRenderer\.on\("octopus:client-access-locked", wrapped\)/);
-  assert.match(source, /beginClientPaneTransfer\(request\)[\s\S]*?beginClientPaneTransferSync\(request\)/);
-  assert.match(source, /acceptClientPaneTransfer\(request\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-accept", request\)/);
-  assert.match(source, /commitClientPaneTransfer\(request\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-commit", request\)/);
-  assert.match(source, /acknowledgeClientPaneTransfer\(request\)[\s\S]*?acknowledgeClientPaneTransferSync\(request\)/);
-  assert.match(source, /pendingClientPaneTransfers\(\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-pending"\)/);
-  assert.match(source, /pendingClientPaneDestinationTransfers\(\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-destination-pending"\)/);
-  assert.match(source, /resumeClientPaneTransfer\(request\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-resume", request\)/);
-  assert.match(source, /finalizeClientPaneTransfer\(request\)[\s\S]*?invokeAccess\("octopus:client-pane-transfer-finalize", request\)/);
-  assert.match(source, /onClientPaneTransferCompleted\(listener\)[\s\S]*?client-pane-transfer-completed/);
-  assert.match(source, /subscribeRuntimeEvent\("octopus:runtime-host-state", listener\)/);
-  assert.match(source, /submitOperatorTurnControl\(request\)[\s\S]*?invokeAccess\("octopus:submit-operator-turn-control", request\)/);
+  const preload = loadPreloadTransport(source, {
+    "octopus:access-inherit": (claim) => claim === "claim-1" ? "token-1" : "",
+    "octopus:client-window-bootstrap": () => ({ windowId: "window-1" }),
+    "octopus:client-pane-transfer-begin": (token, request) => token === "token-1" && request.tabId !== "refused"
+      ? { ok: true, value: { transferId: "transfer-1" } } : { ok: false, error: { message: "Pane is not transferable." } },
+    "octopus:client-pane-transfer-acknowledge": (token, request) => ({ ok: true, value: { released: true, transferId: request.transferId } }),
+  });
+  assert.equal(preload.name, "octopusTransport");
+  const request = { marker: "request" };
+  for (const [method, args, channel] of [
+    ["openLaunchTerminal", [request], "octopus:launch-terminal-open"],
+    ["writeLaunchTerminal", ["session-1", "ls\n"], "octopus:launch-terminal-write"],
+    ["resizeLaunchTerminal", ["session-1", request], "octopus:launch-terminal-resize"],
+    ["bootStatus", [], "octopus:boot-status"],
+    ["openClientWindow", [request], "octopus:client-window-open"],
+    ["clientWindowReady", [request], "octopus:client-window-ready"],
+    ["acceptClientPaneTransfer", [request], "octopus:client-pane-transfer-accept"],
+    ["commitClientPaneTransfer", [request], "octopus:client-pane-transfer-commit"],
+    ["pendingClientPaneTransfers", [], "octopus:client-pane-transfer-pending"],
+    ["pendingClientPaneDestinationTransfers", [], "octopus:client-pane-transfer-destination-pending"],
+    ["resumeClientPaneTransfer", [request], "octopus:client-pane-transfer-resume"],
+    ["finalizeClientPaneTransfer", [request], "octopus:client-pane-transfer-finalize"],
+    ["submitOperatorTurnControl", [request], "octopus:submit-operator-turn-control"],
+  ]) {
+    preload.calls.length = 0;
+    await preload.api[method](...args);
+    assert.deepEqual(preload.calls, [["invoke", channel, "token-1", ...args]], `${method} invokes ${channel} under the window's access token`);
+  }
+  assert.deepEqual(preload.api.clientWindowBootstrap(), { windowId: "window-1" });
+  assert.deepEqual(preload.api.beginClientPaneTransfer({ tabId: "chat" }), { transferId: "transfer-1" });
+  assert.throws(() => preload.api.beginClientPaneTransfer({ tabId: "refused" }), /Pane is not transferable\./);
+  assert.deepEqual(preload.api.acknowledgeClientPaneTransfer({ transferId: "transfer-1" }), { released: true, transferId: "transfer-1" });
+  const completions = [];
+  const stopCompletions = preload.api.onClientPaneTransferCompleted((completion) => completions.push(completion));
+  preload.emit("octopus:client-pane-transfer-completed", { transferId: "transfer-1" });
+  stopCompletions();
+  preload.emit("octopus:client-pane-transfer-completed", { transferId: "transfer-2" });
+  assert.deepEqual(completions, [{ transferId: "transfer-1" }]);
+  preload.calls.length = 0;
+  const hostStates = [];
+  const stopHostStates = preload.api.onRuntimeHostState((state) => hostStates.push(state));
+  preload.emit("octopus:runtime-host-state", { phase: "ready" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(hostStates, [{ phase: "ready" }]);
+  assert.deepEqual(preload.calls.map(([kind, channel, token]) => [kind, channel, token]), [
+    ["invoke", "octopus:runtime-events-unsubscribe", "token-1"], ["invoke", "octopus:runtime-events-subscribe", "token-1"],
+  ]);
+  stopHostStates();
+  assert.deepEqual(preload.calls.at(-1).slice(0, 3), ["invoke", "octopus:runtime-events-unsubscribe", "token-1"]);
+  const locks = [];
+  preload.api.onClientAccessLocked((status) => locks.push(status));
+  preload.calls.length = 0;
+  preload.emit("octopus:client-access-locked", { locked: true });
+  assert.deepEqual(locks, [{ locked: true }]);
+  assert.deepEqual(preload.calls, [["invoke", "octopus:runtime-events-unsubscribe", "token-1"]]);
+  preload.calls.length = 0;
+  await preload.api.bootStatus();
+  assert.deepEqual(preload.calls, [["invoke", "octopus:boot-status", ""]], "a locked window stops presenting its access token");
   const removedPrefix = ["runtime", "terminal"].join("-");
   for (const suffix of ["open", "write", "resize", "read", "data", "exit"]) {
     assert.equal(source.includes(`${removedPrefix}-${suffix}`), false);
   }
+}
+
+function loadPreloadTransport(source, sendSyncReplies) {
+  const calls = [];
+  const listeners = new Map();
+  let exposed = null;
+  const ipcRenderer = {
+    invoke: (channel, ...args) => { calls.push(["invoke", channel, ...args]); return Promise.resolve(null); },
+    sendSync: (channel, ...args) => { calls.push(["sendSync", channel, ...args]); return sendSyncReplies[channel]?.(...args); },
+    send: (channel, ...args) => { calls.push(["send", channel, ...args]); },
+    on: (channel, listener) => { listeners.set(channel, [...(listeners.get(channel) ?? []), listener]); },
+    removeListener: (channel, listener) => { listeners.set(channel, (listeners.get(channel) ?? []).filter((candidate) => candidate !== listener)); },
+  };
+  const electron = {
+    contextBridge: { exposeInMainWorld: (name, api) => { exposed = { name, api }; } },
+    ipcRenderer,
+    webFrame: { getZoomFactor: () => 1 },
+    webUtils: { getPathForFile: () => "" },
+  };
+  vm.runInNewContext(source, {
+    require: (id) => { assert.equal(id, "electron"); return electron; },
+    process: { argv: ["electron", "--octopus-access-claim=claim-1"] },
+    console, setTimeout, clearTimeout, setImmediate, URL, Error, Promise,
+  });
+  return {
+    ...exposed,
+    calls,
+    emit: (channel, ...args) => { for (const listener of listeners.get(channel) ?? []) listener({}, ...args); },
+  };
 }
 
 async function verifyClientWindowHostContract() {
@@ -441,7 +509,7 @@ async function verifyBootSourceContract() {
   assert.match(mainSource, /ipcMain\.handle\("octopus:launch-terminal-open"[\s\S]*?openExisting\(owner,[\s\S]*?if \(existing\) return existing;[\s\S]*?preparedCommand: state\.launchCommand/);
   assert.match(mainSource, /function launchTerminalOwner\(event, token\)[\s\S]*?clientWindows\.entryForWebContents\(event\.sender\.id\)[\s\S]*?access\.mode === "bootstrap" && !entry\.primary[\s\S]*?scope: "launch"/);
   assert.match(beforeQuitSource, /event\.preventDefault\(\);[\s\S]*?clientWindowClose\.requestQuit\(\)/);
-  assert.match(quitCleanupSource, /const startupRecovery = runtimeInitializationPromise[\s\S]*?await startupRecovery[\s\S]*?const interrupted = terminalHost\?\.interruptLaunch\(\)[\s\S]*?runtimeHost\.waitUntilStopped\(\)[\s\S]*?Promise\.all\(\[stopObservation, terminalHost\?\.terminate\(\)\]\)[\s\S]*?quitReady = true;[\s\S]*?app\.quit\(\)/);
+  assert.match(quitCleanupSource, /const startupRecovery = runtimeInitializationPromise[\s\S]*?await startupRecovery[\s\S]*?const interrupted = relaunchRequested \? 0 : terminalHost\?\.interruptLaunch\(\)[\s\S]*?runtimeHost\.waitUntilStopped\(\)[\s\S]*?Promise\.all\(\[stopObservation, terminalHost\?\.terminate\(\)\]\)[\s\S]*?quitReady = true;[\s\S]*?app\.quit\(\)/);
   assert.doesNotMatch(beforeQuitSource, /app\.quit\(\)/);
   assert.match(touchIdStatusSource, /touchIdCapabilityAvailable\(\)[\s\S]*?readTouchIdEnrollmentRecord\(\)/);
   assert.match(touchIdStatusSource, /const prompted = readTouchIdPreference\(\)/);
@@ -700,6 +768,7 @@ async function verifyBeforeQuitHandlerExecution(mainSource, source) {
       },
       token: "",
     }]]),
+    relaunchRequested: false,
     runtimeInitializationPromise,
     runtimeHost: {
       close() {
