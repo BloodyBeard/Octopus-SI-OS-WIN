@@ -1472,10 +1472,10 @@ impl FrontierAdmission {
             )
             .map_err(|e| e.to_string())?;
             let delivered = self.arrive(target.as_str(), &file).await;
-            if result.ok { delivered?; } else { assert!(delivered.is_err()); }
+            delivered?;
             if interleaved && provider_wins && !provider_writes_first {
                 let ctx = self.door.lock().await.context.clone();
-                failure_return_tests::rejected_write_waits_for_the_earlier_peer(self, &ctx, &source, &envelope, seq);
+                failure_return_tests::rejected_write_is_proven_by_its_admitted_failure(self, &ctx, &envelope, seq);
             }
             if interleaved { self.owner_write_completed.notify_one(); }
             seq

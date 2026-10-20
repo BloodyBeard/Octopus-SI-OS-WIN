@@ -1646,10 +1646,29 @@ fn consume_authoring_result_with_source(
     let source = source()?;
     let result: ToolResultArtifact = serde_json::from_value(payload).map_err(|e| e.to_string())?;
     let metadata = envelope.metadata().map_err(|e| e.to_string())?;
+    if !result.ok {
+        if result.correlation_id.as_deref() != Some(pending.correlation.as_str())
+            || result.tool != pending.tool
+            || result.label != pending.label
+            || result.label != captured.manifest.label
+            || result.body.is_some()
+            || result.error.is_none()
+            || source.from != Endpoint::Interface(pending.boundary.binding.inbound.interface.clone())
+            || !metadata
+                .checkpoint_admission
+                .as_ref()
+                .is_some_and(|a| a.complete && a.artifact_label == pending.label)
+            || metadata.verification_failure.is_some()
+            || !metadata.required_verified_artifacts.is_empty()
+        {
+            return Err("failed authoring result differs from its exact owner-prepared call".into());
+        }
+        return Ok(true);
+    }
     let mut boundary = pending.boundary.clone();
     let hash = envelope.runtime().map_err(|error| error.to_string())?.run_record_hash.as_deref()
         .ok_or("authoring result has no admitted snapshot")?;
-    if result.ok && hash != boundary.run_record_hash {
+    if hash != boundary.run_record_hash {
         let read = |hash: &str| -> Result<Vec<u8>, String> {
             let pin = ContentHash::from_hex(hash).ok_or("authoring result snapshot hash invalid")?;
             let bytes = octopus_interfaces::read_artifact_carrier_file_bounded(&ctx.owner_blobs_dir().join(hash), RECORD_BYTES as u64).map_err(|error| error.to_string())?;
@@ -1680,13 +1699,9 @@ fn consume_authoring_result_with_source(
                 .into(),
         );
     }
-    if result.ok {
-        let expected = json!({"result":"files_written","writes":[{"path":pending.path,"before_hash":pending.before,"after_hash":pending.after,"bytes":pending.bytes}]});
-        if result.error.is_some() || result.body.as_ref() != Some(&expected) {
-            return Err("authoring result differs from exact checked write evidence".into());
-        }
-    } else if result.error.is_none() {
-        return Err("failed authoring result has no error".into());
+    let expected = json!({"result":"files_written","writes":[{"path":pending.path,"before_hash":pending.before,"after_hash":pending.after,"bytes":pending.bytes}]});
+    if result.error.is_some() || result.body.as_ref() != Some(&expected) {
+        return Err("authoring result differs from exact checked write evidence".into());
     }
     Ok(true)
 }

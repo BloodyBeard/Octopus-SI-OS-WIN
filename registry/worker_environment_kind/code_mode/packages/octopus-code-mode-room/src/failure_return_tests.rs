@@ -3,12 +3,11 @@ use std::{future::Future, pin::Pin};
 use octopus_run_authoring::{CheckedRunEvidence, CheckedRunEvidenceReader, FileCheckedRunReader};
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact, ToolResultError};
 
-pub(super) fn rejected_write_waits_for_the_earlier_peer(
+pub(super) fn rejected_write_is_proven_by_its_admitted_failure(
     admission: &FrontierAdmission, ctx: &octopus_tool_door_runtime::InterfaceLiftContext,
-    source: &AdmittedDelivery, input: &InterfaceInvocationEnvelope, call_seq: u64,
+    input: &InterfaceInvocationEnvelope, call_seq: u64,
 ) {
-    use octopus_run_authoring::{CheckedRunEdit, CheckedRunError, CheckedRunWriter,
-        checked_failed_run_write, checked_declared_run_snapshot};
+    use octopus_run_authoring::{CheckedRunEdit, CheckedRunWriter, checked_failed_run_write};
     let call: ToolCallArtifact = serde_json::from_slice(&input.artifact_file.read_payload_bytes().unwrap()).unwrap();
     let peer = admission.deliveries.lock().unwrap().iter().rev()
         .find(|row| row.seq < call_seq && row.to.as_str() == "system_provider_file_test").cloned().unwrap();
@@ -34,24 +33,19 @@ pub(super) fn rejected_write_waits_for_the_earlier_peer(
         blobs_dir:ctx.owner_blobs_dir(),max_control_frame_bytes:limits.max_control_frame_bytes,
         max_manifest_bytes:limits.max_manifest_bytes,max_payload_bytes:limits.max_payload_bytes };
     let mut reader = FileCheckedRunReader::open(&evidence,Some(call_seq)).unwrap();
-    let mut refusal = None;
+    let mut failure = None;
     while let Some(row) = reader.movement(reader.next_sequence()).unwrap() {
         if row.seq.0 <= call_seq { continue; }
         assert!(row.from != octopus_ledger::Endpoint::Interface(coauthor.door.clone()), "peer receipt arrived before the pending proof");
-        if row.kind == octopus_ledger::MovementKind::DeliveryRefused && row.from == octopus_ledger::Endpoint::Interface(writer.door.clone()) {
-            refusal = Some(row);
+        assert!(row.kind != octopus_ledger::MovementKind::DeliveryRefused, "a standing return edge refused the failed write result");
+        if row.kind == octopus_ledger::MovementKind::InterfaceOutbound && row.from == octopus_ledger::Endpoint::Interface(writer.door.clone())
+            && row.to == octopus_ledger::Endpoint::Interface(writer.owner.clone()) {
+            failure = Some(row);
         }
     }
-    let refusal = refusal.unwrap();
-    assert!(peer.seq < call_seq && call_seq < refusal.seq.0);
-    let hash = refusal.runtime().unwrap().run_record_hash.as_ref().unwrap();
-    assert!(!ctx.owner_blobs_dir().join(hash).exists());
-    assert!(matches!(checked_failed_run_write(&evidence,&writer,&edit,call_seq,vec![coauthor.clone()]),
-        Err(CheckedRunError::AwaitingResults { call_sequences }) if call_sequences.contains(&peer.seq)));
-    let anchor = std::fs::read(ctx.owner_blobs_dir().join(source.metadata.runtime.as_ref().unwrap().run_record_hash.as_ref().unwrap())).unwrap();
-    assert!(source.seq < peer.seq);
-    assert!(matches!(checked_declared_run_snapshot(&evidence,&edit.path,&anchor,source.seq,hash,peer.seq,vec![writer,coauthor]),
-        Err(CheckedRunError::Invalid(error)) if error.contains("complete admitted checked file.write chain")));
+    let failure = failure.unwrap();
+    assert!(peer.seq < call_seq && call_seq < failure.seq.0);
+    assert_eq!(checked_failed_run_write(&evidence,&writer,&edit,call_seq,vec![coauthor]).unwrap(), Some(failure));
 }
 
 #[tokio::test]
@@ -479,26 +473,18 @@ pub(super) fn actual_refused_failure_return<'a>(
             movements_path: ctx.owner_movements_path(), ledger_index_path: ctx.owner_ledger_index_path(), blobs_dir: ctx.owner_blobs_dir(),
             max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes, max_payload_bytes: limits.max_payload_bytes,
         };
-        let refusal = |file: &InterfaceArtifactFile| {
-            let reference = super::super::continuation::artifact_ref(file).unwrap();
-            let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
-            let mut selected = None;
-            while let Some(movement) = reader.movement(reader.next_sequence()).unwrap() {
-                if movement.kind == octopus_ledger::MovementKind::DeliveryRefused && movement.artifact.as_ref() == Some(&reference) {
-                    assert!(matches!(movement.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict()),
-                        Some(octopus_ledger::DeliveryVerdict::Refused { reason: octopus_ledger::RefusedReason::CheckpointSpent, .. })));
-                    selected = Some(movement);
-                }
-            }
-            selected.unwrap()
-        };
-        let first_failure = failure_file(initial);
-        assert!(arrival(admission, &first_failure).await.is_err());
-        let closed = refusal(&first_failure);
-        let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "refused-failure-contract").unwrap();
+        let delivered_to_model = || admission.deliveries.lock().unwrap().iter().filter(|row|
+            row.from.as_str() == DOOR && row.to.as_str() == "world_provider_test" && row.file.read_manifest().unwrap().label == first.label)
+            .cloned().collect::<Vec<_>>();
+        let answered = delivered_to_model();
+        assert_eq!(answered.len(), 1);
+        let answered = answered[0].clone();
         let writes = admission.file_writes.load(Ordering::SeqCst);
-        handoff.reconcile_failure(&ctx, &mut reader, &closed).await.unwrap();
+        let closed = hand_owned_output(&ctx, &source, &handoff.callback(), failure_file(initial)).await.unwrap();
+        assert!(matches!(closed, DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::CheckpointSpent, detail }
+            if detail["recorded_result_movement_seq"] == json!(answered.seq)), "an answered call took a second result");
         assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+        assert_eq!(delivered_to_model().len(), 1);
 
         let next = envelope(&admission.root, 9001, "code_mode.run", json!({"script":"text('MUST_NOT_EXECUTE');", "yield_time_ms":20}));
         admission.model_call(&next.artifact_file).await.unwrap();
@@ -513,79 +499,52 @@ pub(super) fn actual_refused_failure_return<'a>(
             &config.resolve_owner_topology(&next.2).unwrap().coauthor.unwrap());
         records.activate(formation, next.0).unwrap();
         let second_file = failure_file(&next);
-        assert!(arrival(admission, &second_file).await.is_err());
-        let pending = refusal(&second_file);
-        let observed = reader.read_new_uncommitted_with_refusals_limit(256).unwrap();
-        assert!(observed.iter().any(|row| row.movement == pending), "owner reader skipped the recorded refusal");
-        let current_bytes = std::fs::read(&run_path).unwrap();
-        let current: Value = serde_json::from_slice(&current_bytes).unwrap();
-        assert!(!current["checkpoints"].as_array().unwrap().iter().any(|checkpoint|
-            checkpoint["id"] == json!(next.2.runtime().unwrap().checkpoint)));
-        let install = std::fs::read_dir(durable).unwrap().filter_map(|entry| {
-            let path = entry.unwrap().path();
-            path.file_name().unwrap().to_str().unwrap().ends_with(".installed.json").then(||
-                super::super::continuation::read_record::<super::super::continuation::InstalledHandoff>(&path).unwrap())
-        }).max_by_key(|record| record.result_seq).unwrap();
-        let anchor = octopus_run_authoring::generated_artifacts::read_movement(&evidence, install.result_seq).unwrap();
-        let anchor_runtime = anchor.runtime().unwrap();
-        let installed: Value = serde_json::from_slice(&std::fs::read(ctx.owner_blobs_dir().join(&install.after_hash)).unwrap()).unwrap();
-        let anchor_checkpoint = installed["checkpoints"].as_array().unwrap().iter()
-            .find(|checkpoint| checkpoint["id"] == json!(anchor_runtime.checkpoint)).unwrap();
-        assert!(current["checkpoints"].as_array().unwrap().contains(anchor_checkpoint));
-        assert!(current["active_checkpoints"].as_array().unwrap().contains(&json!(anchor_runtime.checkpoint)));
-        let writes = admission.file_writes.load(Ordering::SeqCst);
-        let mut wrong = pending.clone(); wrong.artifact.as_mut().unwrap().id = ArtifactId::new("foreign-failure");
-        assert!(handoff.reconcile_failure(&ctx, &mut reader, &wrong).await.is_err());
-        let mut changed = current.clone();
-        changed["active_checkpoints"].as_array_mut().unwrap().retain(|id| id != &json!(anchor_runtime.checkpoint));
-        std::fs::write(&run_path, serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
-        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.is_err());
-        std::fs::write(&run_path, &current_bytes).unwrap();
-        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
-        let generation = super::super::continuation::digest(&json!({
-            "before":octopus_ledger::ContentHash::of_bytes(&current_bytes).to_hex(),
-            "emission":super::super::continuation::artifact_ref(&second_file).unwrap().content.to_hex(),
-            "edge":config.resolve_owner_topology(&next.2).unwrap().model_output,
-            "source_seq":install.result_seq,
-        })).unwrap();
-        let proposal = durable.join(format!("{generation}.edit.json"));
-        let orphan = durable.join(format!("{generation}.authoring-result.json"));
-        assert!(!proposal.exists() && !orphan.exists());
-        super::super::continuation::create_record(&orphan, &json!({"correlation":"retained orphan"})).unwrap();
-        let orphan_bytes = std::fs::read(&orphan).unwrap();
-        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap_err()
-            .contains("authoring result has no durable edit proposal"));
-        assert_eq!(std::fs::read(&orphan).unwrap(), orphan_bytes);
-        assert_eq!(std::fs::read(&run_path).unwrap(), current_bytes);
-        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
-        assert!(!proposal.exists());
-        std::fs::remove_file(orphan).unwrap();
-        admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
-        assert!(handoff.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap_err()
-            .contains("fixture interrupted after checked owner installation"));
-        let writes = admission.file_writes.load(Ordering::SeqCst);
-        let restarted = actual_owner_handoff::OwnerHandoff::new();
-        restarted.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap();
-        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes + 1, "prepared return was rewritten before readiness");
-        let writes = admission.file_writes.load(Ordering::SeqCst);
-        restarted.reconcile_failure(&ctx, &mut reader, &pending).await.unwrap();
-        restarted.reconcile_failure(&ctx, &mut reader, &closed).await.unwrap();
         let mut native_source = admission.door.lock().await.output_source(next.0, &next.2, formation).unwrap();
         native_source.formation = None;
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        admission.reject_next_owner_arrival.store(true, Ordering::SeqCst);
+        let interrupted = hand_owned_output(&ctx, &native_source, &handoff.callback(), second_file.clone()).await;
+        assert!(format!("{interrupted:?}").contains("fixture interrupted after checked owner installation"), "{interrupted:?}");
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes + 1);
+        assert_eq!(delivered_to_model().len(), 1);
+        let restarted = actual_owner_handoff::OwnerHandoff::new();
         let callback = restarted.callback();
-        let verdict = hand_owned_output(&ctx, &native_source, &callback, second_file.clone()).await.unwrap();
-        assert!(octopus_tool_door_runtime::owner_contract_tests::hand_owned_invocation_failure(&ctx, &native_source, &callback)
-            .await.unwrap());
-        let delivered = admission.deliveries.lock().unwrap().iter().filter(|row|
-            row.from.as_str() == DOOR && row.to.as_str() == "world_provider_test" && row.file.read_manifest().unwrap().label == first.label)
-            .cloned().collect::<Vec<_>>();
+        let writes = admission.file_writes.load(Ordering::SeqCst);
+        let returned = hand_owned_output(&ctx, &native_source, &callback, second_file.clone()).await.unwrap();
+        assert!(matches!(returned, DeliveryVerdict::Admitted { .. }), "{returned:?}");
+        let delivered = delivered_to_model();
         assert_eq!(delivered.len(), 2);
         assert_eq!(delivered[0].file.read_payload_bytes().unwrap(), first_file.read_payload_bytes().unwrap());
-        assert_eq!(super::super::continuation::artifact_ref(&delivered[1].file).unwrap(), pending.artifact.unwrap());
         assert_eq!(delivered[1].file.read_payload_bytes().unwrap(), second_file.read_payload_bytes().unwrap());
+        let installed_writes = admission.file_writes.load(Ordering::SeqCst);
+        assert_eq!(installed_writes, writes + 1, "the prepared return was rewritten once before its delivery");
+        let verdict = hand_owned_output(&ctx, &native_source, &callback, second_file.clone()).await.unwrap();
         assert!(matches!(verdict, DeliveryVerdict::Refused { reason: octopus_interfaces::RefusedReason::CheckpointSpent, detail }
             if detail["recorded_result_movement_seq"] == json!(delivered[1].seq)));
-        assert_eq!(admission.file_writes.load(Ordering::SeqCst), writes);
+        assert!(octopus_tool_door_runtime::owner_contract_tests::hand_owned_invocation_failure(&ctx, &native_source, &callback)
+            .await.unwrap());
+
+        arrival(admission, &second_file).await.unwrap();
+        assert_eq!(delivered_to_model().len(), 2, "a standing return reached the model twice with one failure");
+        let looped = {
+            let reference = super::super::continuation::artifact_ref(&second_file).unwrap();
+            let mut reader = FileCheckedRunReader::open(&evidence, None).unwrap();
+            let mut selected = None;
+            while let Some(movement) = reader.movement(reader.next_sequence()).unwrap() {
+                if movement.kind == octopus_ledger::MovementKind::InterfaceOutbound && movement.artifact.as_ref() == Some(&reference)
+                    && movement.from == octopus_ledger::Endpoint::Interface(InterfaceId::new(DOOR))
+                    && movement.to == octopus_ledger::Endpoint::Interface(InterfaceId::new(DOOR)) {
+                    selected = Some(movement);
+                }
+            }
+            selected.unwrap()
+        };
+        let mut reader = octopus_tool_door_runtime::LedgerTailReader::open_named(&ctx, "refused-failure-contract").unwrap();
+        let mut wrong = looped.clone(); wrong.artifact.as_mut().unwrap().id = ArtifactId::new("foreign-failure");
+        assert!(restarted.reconcile_failure(&ctx, &mut reader, &wrong).await.is_err());
+        restarted.reconcile_failure(&ctx, &mut reader, &looped).await.unwrap();
+        assert_eq!(delivered_to_model().len(), 2);
+        assert_eq!(admission.file_writes.load(Ordering::SeqCst), installed_writes);
         assert!(room.rooms.lock().await.is_empty(), "failure recovery executed the admitted script");
     })
 }
