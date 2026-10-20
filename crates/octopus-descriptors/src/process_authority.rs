@@ -136,6 +136,49 @@ pub struct ProcessRootSubpathSpec {
 }
 
 impl ProcessAuthoritySpec {
+    /// Every right this authority grants is also granted by `original`.
+    pub fn narrows(&self, original: &ProcessAuthoritySpec) -> bool {
+        let paths = |copy: &[ProcessArgumentPathSpec], held: &[ProcessArgumentPathSpec]| {
+            copy.iter().all(|path| {
+                held.iter().any(|known| {
+                    known.pointer == path.pointer
+                        && path.within_root_slots.is_subset(&known.within_root_slots)
+                        && (!path.include_parent || known.include_parent)
+                })
+            })
+        };
+        let subpaths = |copy: &[ProcessEnvironmentSubpathSpec], held: &[ProcessEnvironmentSubpathSpec]| {
+            copy.iter().all(|path| held.contains(path))
+        };
+        (self.sandbox_mode == original.sandbox_mode || self.sandbox_mode == ProcessSandboxMode::Enforced)
+            && self.read_root_slots.is_subset(&original.read_root_slots)
+            && self.write_root_slots.is_subset(&original.write_root_slots)
+            && self.executable_root_slots.is_subset(&original.executable_root_slots)
+            && self.optional_read_root_slots.is_subset(&original.optional_read_root_slots)
+            && self.optional_write_root_slots.is_subset(&original.optional_write_root_slots)
+            && self.optional_executable_root_slots.is_subset(&original.optional_executable_root_slots)
+            && self.read_paths.is_subset(&original.read_paths)
+            && self.write_paths.is_subset(&original.write_paths)
+            && self.executable_paths.is_subset(&original.executable_paths)
+            && self.executable_root_subpaths.is_subset(&original.executable_root_subpaths)
+            && self.executable_commands.is_subset(&original.executable_commands)
+            && self.read_env_paths.is_subset(&original.read_env_paths)
+            && self.write_env_paths.is_subset(&original.write_env_paths)
+            && self.executable_env_paths.is_subset(&original.executable_env_paths)
+            && self.optional_read_env_paths.is_subset(&original.optional_read_env_paths)
+            && self.optional_write_env_paths.is_subset(&original.optional_write_env_paths)
+            && subpaths(&self.read_env_subpaths, &original.read_env_subpaths)
+            && subpaths(&self.write_env_subpaths, &original.write_env_subpaths)
+            && subpaths(&self.executable_env_subpaths, &original.executable_env_subpaths)
+            && paths(&self.read_argument_paths, &original.read_argument_paths)
+            && paths(&self.write_argument_paths, &original.write_argument_paths)
+            && paths(&self.executable_argument_paths, &original.executable_argument_paths)
+            && (!self.allow_network || original.allow_network)
+            && (!self.allow_local_ipc || original.allow_local_ipc)
+            && (!self.allow_application_launch || original.allow_application_launch)
+            && (!self.allow_sandbox_delegation || original.allow_sandbox_delegation)
+    }
+
     pub fn has_argument_paths(&self) -> bool {
         !self.read_argument_paths.is_empty()
             || !self.write_argument_paths.is_empty()

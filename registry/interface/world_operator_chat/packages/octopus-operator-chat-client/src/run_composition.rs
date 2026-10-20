@@ -756,19 +756,20 @@ pub fn plan_run_composition(request: &RunCompositionRequest) -> Result<RunCompos
         format!("run:{}", identity.run_id),
     )?;
     let mut updates = BTreeMap::new();
-    plan_ee_requirements(
+    let planned_descriptors = writes.iter().chain(&run_writes).collect::<Vec<_>>();
+    require_ee_admission(
         roots,
         &request.ee_id,
         &required_interface_ids,
         &required_tool_ids,
-        &mut updates,
+        &planned_descriptors,
     )?;
-    plan_ee_requirements(
+    require_ee_admission(
         roots,
         parent.ee.as_str(),
         &[receive_interface_id.clone()],
         &[],
-        &mut updates,
+        &planned_descriptors,
     )?;
     plan_policy_requirement(
         interface_root
@@ -1295,47 +1296,116 @@ fn plan_policy_requirement(
     Ok(())
 }
 
-fn plan_ee_requirements(
+fn planned_descriptor(
+    registry_root: &Path,
+    kind: &str,
+    file: &str,
+    id: &str,
+    planned: &[&PlannedClientWrite],
+) -> Result<Option<Value>, String> {
+    let path = registry_root.join(kind).join(id).join(file);
+    match planned.iter().rev().find(|write| write.path == path) {
+        Some(write) => serde_json::from_str(&write.content).map(Some).map_err(|e| e.to_string()),
+        None => match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| e.to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("{kind} '{id}' cannot be read: {error}")),
+        },
+    }
+}
+
+fn declared_original(kind: &str, id: &str, descriptor: &Value) -> Result<Option<String>, String> {
+    match descriptor.get("copy_of") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(original)) => Ok(Some(original.clone())),
+        Some(_) => Err(format!("{kind} '{id}' has a malformed copy_of")),
+    }
+}
+
+pub(crate) fn planned_copy_lineage(
+    registry_root: &Path,
+    interfaces: &[String],
+    tools: &[String],
+    planned: &[&PlannedClientWrite],
+) -> Result<octopus_policy::CopyLineage, String> {
+    let mut lineage = octopus_policy::CopyLineage::default();
+    for id in interfaces {
+        let Some(descriptor) = planned_descriptor(registry_root, "interface", "interface.json", id, planned)? else { continue };
+        if let Some(original) = declared_original("interface", id, &descriptor)? {
+            if planned_descriptor(registry_root, "interface", "interface.json", &original, planned)?.is_some() {
+                lineage.insert_interface(InterfaceId::new(id), InterfaceId::new(original));
+            }
+        }
+    }
+    for id in tools {
+        let Some(descriptor) = planned_descriptor(registry_root, "tool", "tool.json", id, planned)? else { continue };
+        let Some(original) = declared_original("tool", id, &descriptor)? else { continue };
+        let copy: ToolDescriptor = serde_json::from_value(descriptor).map_err(|e| format!("tool '{id}': {e}"))?;
+        let held = planned_descriptor(registry_root, "tool", "tool.json", &original, planned)?
+            .map(|value| serde_json::from_value::<ToolDescriptor>(value).map_err(|e| format!("tool '{original}': {e}")))
+            .transpose()?;
+        if held.is_some_and(|held| copy.never_wider_than(&held)) {
+            lineage.insert_tool(octopus_descriptors::ToolId::new(id), octopus_descriptors::ToolId::new(original));
+        } else {
+            lineage.insert_declared_tool(octopus_descriptors::ToolId::new(id), octopus_descriptors::ToolId::new(original));
+        }
+    }
+    Ok(lineage)
+}
+
+fn require_ee_admission(
     roots: &CompositionRoots,
     ee_id: &str,
     interfaces: &[String],
     tools: &[String],
-    drafts: &mut BTreeMap<PathBuf, PolicyDraft>,
+    planned: &[&PlannedClientWrite],
 ) -> Result<(), String> {
+    let lineage = planned_copy_lineage(&roots.registry_root, interfaces, tools, planned)?;
     let mut visited = BTreeSet::new();
     let mut cursor = ee_id.to_string();
     loop {
         safe_segment(&cursor, "EE instance")?;
         if !visited.insert(cursor.clone()) {
-            return Err("EE policy requirement chain cycles".into());
+            return Err("EE admission chain cycles".into());
         }
-        let path = roots.ee_instances_root.join(format!("{cursor}.json"));
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(roots.ee_instances_root.join(format!("{cursor}.json")))
+            .map_err(|e| e.to_string())?;
         let ee: EeInstance = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if ee.ee_id.as_str() != cursor {
-            return Err("EE policy requirement identity mismatch".into());
+            return Err("EE admission identity mismatch".into());
         }
         safe_segment(ee.template.as_str(), "EE template")?;
-        plan_policy_requirement(
-            roots
-                .registry_root
-                .join("ee_template")
-                .join(ee.template.as_str())
-                .join("ee_template.json"),
-            "/allowed_interfaces",
-            "/allowed_tools",
-            interfaces,
-            tools,
-            drafts,
-        )?;
-        plan_policy_requirement(
-            path,
-            "/policy_narrowing/allowed_interfaces",
-            "/policy_narrowing/allowed_tools",
-            interfaces,
-            tools,
-            drafts,
-        )?;
+        let template = parse_strict::<EeTemplateDescriptor>(
+            &std::fs::read(
+                roots
+                    .registry_root
+                    .join("ee_template")
+                    .join(ee.template.as_str())
+                    .join("ee_template.json"),
+            )
+            .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        for (label, layer) in [
+            (format!("EE template '{}'", template.id), template.as_policy_layer()),
+            (format!("EE '{cursor}'"), ee.policy_narrowing.as_policy_layer()),
+        ] {
+            if let Some(allowed) = &layer.interfaces {
+                for id in interfaces {
+                    if !lineage.admits_interface(allowed, &InterfaceId::new(id)) {
+                        return Err(format!("{label} does not admit interface '{id}' or its original"));
+                    }
+                }
+            }
+            for id in tools {
+                let tool = octopus_descriptors::ToolId::new(id);
+                if layer.tools.as_ref().is_some_and(|allowed| !lineage.admits_tool(allowed, &tool))
+                    || lineage.denies_tool(&layer.hard_blocks_tools, &tool)
+                {
+                    return Err(format!("{label} does not admit tool '{id}' or its original"));
+                }
+            }
+        }
         match ee.parent_ee {
             Some(parent) => cursor = parent.as_str().to_string(),
             None => break,

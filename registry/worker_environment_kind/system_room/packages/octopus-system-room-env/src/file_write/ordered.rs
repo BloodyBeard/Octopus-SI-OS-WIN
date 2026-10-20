@@ -60,7 +60,7 @@ impl Entry {
             }
             Self::Patch { path, patch, expected_before_content, expected_before_hash, expected_after_hash, json_format } => {
                 decoded = expected_before_content.decode(expected_before_hash, budget)?;
-                let content = apply_checked_json_patch(path, decoded.as_bytes(), patch, expected_after_hash, json_format.unwrap_or_default())?;
+                let content = apply_checked_json_patch(path, decoded.as_bytes(), patch, Some(expected_after_hash), json_format.unwrap_or_default())?;
                 (path, content, Some(decoded.as_str()), Some(expected_before_hash.as_str()))
             }
         };

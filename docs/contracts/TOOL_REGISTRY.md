@@ -53,6 +53,10 @@ registry/tool/<tool-id>/tool.json
   ownership: the tool's binary must be one the kind declares as its own.
 - `args_schema` - parsed and enforced by the door's code, not by the kernel.
 - `is_world_effect` - whether the tool crosses a World boundary.
+- `copy_of` - on a private copy, the tool it was copied from. An environment
+  that allows the original admits the copy only while it is never wider: the
+  same executable, handler and schema, under an authority the original's
+  covers. A block on the original always reaches the copy.
 
 Adding an operation over an existing binary is a JSON edit. Adding a new
 executable is package work inside the owning kind, outside any runtime decision

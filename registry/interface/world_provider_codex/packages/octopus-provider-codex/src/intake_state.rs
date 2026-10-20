@@ -250,12 +250,11 @@ fn validate_attempt_edge(
         || row.trace != original.trace
         || snapshot.trace != original.trace
         || snapshot.id != original.id
-        || snapshot.ee != original.ee
+        || snapshot.ee != runtime.ee
         || snapshot.worker != original.worker
         || snapshot.checkpoint(&checkpoint.id) != Some(*checkpoint)
         || !snapshot.active_checkpoints.contains(&checkpoint.id)
         || runtime.run != original.id
-        || runtime.ee != original.ee
         || runtime.worker != original.worker
         || runtime.interface != *to
         || runtime.checkpoint != checkpoint.id

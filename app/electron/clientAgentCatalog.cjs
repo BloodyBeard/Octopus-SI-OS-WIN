@@ -45,7 +45,7 @@ function planClientAgentTemplate({ operationId, projectEeId, sourceInterface, so
     workerInterfaceId,
     sourceWorkerInterfaceId: sourceId,
     agentId,
-    interface: { ...structuredClone(sourceInterface), id: workerInterfaceId },
+    interface: { ...structuredClone(sourceInterface), id: workerInterfaceId, copy_of: sourceInterface.copy_of ?? sourceId },
     policy: { ...structuredClone(sourcePolicy), id: workerInterfaceId },
     clientTemplate: { ...structuredClone(settings), worker_interface: workerInterfaceId, project_ee_id: projectEeId },
     profile: { ...structuredClone(sourceProfile), worker_choice_interface: workerInterfaceId },
@@ -62,7 +62,7 @@ function planClientAgentTemplate({ operationId, projectEeId, sourceInterface, so
   };
 }
 
-function appendExactAgentWorkerAdmission(document, field, sourceWorkerInterfaceId, workerInterfaceId, label) {
+function requireAgentSourceAdmission(document, field, sourceWorkerInterfaceId, label) {
   if (!Object.prototype.hasOwnProperty.call(document, field) || document[field] === null) return;
   if (
     !Array.isArray(document[field])
@@ -73,9 +73,6 @@ function appendExactAgentWorkerAdmission(document, field, sourceWorkerInterfaceI
   }
   if (!document[field].includes(sourceWorkerInterfaceId)) {
     throw new Error(`${label}.${field} does not admit exact source worker '${sourceWorkerInterfaceId}'`);
-  }
-  if (!document[field].includes(workerInterfaceId)) {
-    document[field] = [...document[field], workerInterfaceId].sort();
   }
 }
 
@@ -314,7 +311,7 @@ function exactObjectKeys(value, allowed, required, label) {
 
 module.exports = {
   planClientAgentTemplate,
-  appendExactAgentWorkerAdmission,
+  requireAgentSourceAdmission,
   CLIENT_AGENT_CATALOG_SCHEMA,
   clientAgentCatalogDigest,
   clientAgentCatalogPath,

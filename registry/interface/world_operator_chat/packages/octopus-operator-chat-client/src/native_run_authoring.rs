@@ -101,7 +101,7 @@ pub(super) fn plan(
     }).collect::<Vec<_>>();
     let config = context.config;
     let defaults = json!({
-        "ee_id":identity.ee_id,"worker_template_interface_id":identity.worker_choice_interface,
+        "worker_template_interface_id":identity.worker_choice_interface,
         "provider_interface_id":identity.provider_choice_interface,"model":context.provider.model,
         "reasoning_effort":context.provider.reasoning_effort,"service_tier":context.provider.service_tier,
         "authoring":{
@@ -332,7 +332,7 @@ fn plan_tool_contract_adoption(
         if next.id.as_str() != update.source_tool || next.interface.as_str() != update.source_interface {
             return Err("tool contract adoption source tool has another exact owner".into());
         }
-        next.id = ToolDescriptorId::new(&tool); next.interface = door.clone();
+        crate::copy_tool_descriptor(&mut next, &tool); next.interface = door.clone();
         let next = serde_json::to_value(next).map_err(|e|e.to_string())?;
         let path = registry.join("tool").join(&tool).join("tool.json");
         let (_, before) = adoption_document(&path, preimages)?;

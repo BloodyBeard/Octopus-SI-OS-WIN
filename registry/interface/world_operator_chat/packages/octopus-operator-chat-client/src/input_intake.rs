@@ -220,7 +220,7 @@ pub(crate) fn wire(
     };
     config.validate(&InterfaceId::new(&id))?;
     let declaration = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-    intake["id"] = json!(id);
+    crate::copy_json_descriptor(&mut intake, &id)?;
     intake["interface_driver_config"]["private_config"].as_object_mut()
         .ok_or("input intake template private config must be an object")?.remove("notification_action");
     intake["interface_driver_config"]["private_config"]["input_intake"] = declaration.clone();
@@ -251,7 +251,7 @@ pub(crate) fn wire(
         if relative == Path::new("interface.json") {
             let mut value: Value =
                 serde_json::from_str(&copy.content).map_err(|e| e.to_string())?;
-            value["id"] = json!(door);
+            crate::copy_json_descriptor(&mut value, &door)?;
             copy.content = pretty_json(&value)?;
         }
         push_json_write(
@@ -266,7 +266,7 @@ pub(crate) fn wire(
         .join(&identity.authoring_tool_id)
         .join("tool.json");
     let mut tool_descriptor = planned_json(writes, &original_tool)?;
-    tool_descriptor["id"] = json!(tool);
+    crate::copy_json_descriptor(&mut tool_descriptor, &tool)?;
     tool_descriptor["interface"] = json!(door);
     push_json_write(
         registry.join("tool").join(&tool).join("tool.json"),

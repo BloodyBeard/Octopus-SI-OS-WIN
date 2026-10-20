@@ -102,7 +102,6 @@ pub(super) fn validate_initial_history(
             .ok_or("initial writer preimage lost its provider")?;
         if original.id != record.id
             || original.worker != record.worker
-            || original.ee != record.ee
             || optional_u64(state, "authoring_generation")? != 0
             || optional_u64(state, "context_generation")? != 0
             || persisted_pending_handoff(&original, &writer.owner)?.is_some()
@@ -451,7 +450,7 @@ fn validate_static_revision_evidence(
             && checkpoint_record_matches_template(checkpoint, template, &record.id)
             && indexed_evidence_matches_checkpoint(source, template)
     }).collect::<Vec<_>>();
-    if original.id != record.id || original.ee != record.ee || original.worker != record.worker
+    if original.id != record.id || original.worker != record.worker
         || original.checkpoint(&checkpoint.id) != Some(checkpoint)
         || !original.active_checkpoints.contains(&checkpoint.id)
         || coordinate.checkpoint != checkpoint.id.as_str() || coordinate.epoch != checkpoint.epoch.0
@@ -734,7 +733,7 @@ fn completed_inputs<R: CheckedRunEvidenceReader + ?Sized>(
                 && checkpoint_record_matches_template(checkpoint, template, &pinned.id)
                 && indexed_evidence_matches_checkpoint(input, template)
         }).count();
-        if matches != 1 || pinned.id != record.id || pinned.ee != record.ee || pinned.worker != record.worker
+        if matches != 1 || pinned.id != record.id || pinned.worker != record.worker
             || coordinate.interface != writer.owner.as_str() || !pinned.active_checkpoints.contains(&checkpoint_id)
             || checkpoint.epoch.0 != coordinate.epoch
             || !artifact_refs_match_bindings(&input.artifact_binding_refs, &checkpoint.artifact_bindings) {

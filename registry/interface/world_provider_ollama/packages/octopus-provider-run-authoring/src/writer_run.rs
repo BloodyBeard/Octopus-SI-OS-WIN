@@ -165,7 +165,6 @@ impl WriterRunBinding {
         if self.run == record.id
             || initial.id != self.run
             || initial.worker != record.worker
-            || initial.ee != record.ee
             || target.run != record.id
             || target.provider != *provider
             || target.generation != 0
@@ -173,7 +172,7 @@ impl WriterRunBinding {
             || initial.active_checkpoints.len() != 2
         {
             return Err(
-                "separate writer declaration changed its exact run, EE, worker or initial boundary"
+                "separate writer declaration changed its exact run, worker or initial boundary"
                     .into(),
             );
         }
@@ -1383,6 +1382,7 @@ fn settle_target_attempt(
             after: args.writes[1].content(maximum)?.into_bytes(),
             call,
             result,
+            placement: false,
         };
         validate_checked_owner_transition(&transition)?;
         generated_artifacts::validate_generated_transition(reader, &transition)?;

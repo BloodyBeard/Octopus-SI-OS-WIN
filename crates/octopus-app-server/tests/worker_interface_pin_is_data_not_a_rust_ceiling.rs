@@ -266,6 +266,7 @@ async fn the_formation_pin_carries_the_worker_pin_ceiling_hash() {
         &embedded.existence_ee_id,
         &embedded.formation_source_hashes,
         &authored,
+        &octopus_policy::CopyLineage::default(),
     )
     .expect("the flash grant forms at the bootstrap root");
 

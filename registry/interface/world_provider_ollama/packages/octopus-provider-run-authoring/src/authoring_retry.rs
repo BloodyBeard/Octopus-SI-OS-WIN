@@ -26,7 +26,7 @@ fn failed_run_write_evidence(
     let envelope: FileWriteCallEnvelope = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
     if call.kind != MovementKind::InterfaceOutbound || call.from != Endpoint::Interface(writer.source.clone())
         || call.to != Endpoint::Interface(writer.door.clone()) || runtime.interface != writer.door
-        || runtime.run != intended.id || runtime.ee != intended.ee || runtime.worker != intended.worker
+        || runtime.run != intended.id || runtime.worker != intended.worker
         || manifest.label != writer.call_label || envelope.tool != writer.tool || envelope.correlation_id != edit.correlation_id
         || envelope.arguments.path != edit.path || envelope.arguments.patch != edit.patch
         || envelope.arguments.json_format != edit.json_format
@@ -49,7 +49,7 @@ fn failed_run_write_evidence(
             return Err("write failure does not prove an ordinary rejected file effect".into());
         }
         let runtime = movement.runtime().ok_or("failed write result has no run coordinate")?;
-        if runtime.ee != intended.ee || runtime.worker != intended.worker { return Err("failed write result changed its run scope".into()); }
+        if runtime.worker != intended.worker { return Err("failed write result changed its run worker".into()); }
         let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex).ok_or("failed write result has no pinned snapshot")?;
         let snapshot = if movement.kind == MovementKind::DeliveryRefused {
             let admitted = call.runtime().and_then(|runtime| runtime.run_record_hash.as_deref())
@@ -69,7 +69,7 @@ fn failed_run_write_evidence(
         if ContentHash::of_bytes(&snapshot) != hash { return Err("failed write result snapshot integrity mismatch".into()); }
         let record = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
         let checkpoint = record.checkpoint(&runtime.checkpoint).ok_or("failed write result checkpoint absent")?;
-        if record.id != intended.id || record.ee != intended.ee || record.worker != intended.worker
+        if record.id != intended.id || record.ee != runtime.ee || record.worker != intended.worker
             || !record.active_checkpoints.contains(&checkpoint.id) || checkpoint.epoch.0 != runtime.epoch
             || checkpoint.inbound_interface() != Some(&writer.door)
             || checkpoint.outbound_interfaces().collect::<Vec<_>>() != [&writer.owner] {
@@ -190,7 +190,7 @@ fn rejected_write_through(
     let mut reader =
         FileCheckedRunReader::open(&evidence, Some(authored.pending_handoff.source_movement_seq))?;
     let template = config.checkpoint_for_role(RunAuthoringCheckpointRole::AuthoringResult)?;
-    let mut pending: Option<(u64, bool, PathBuf, octopus_descriptors::EeId)> = None;
+    let mut pending: Option<(u64, bool, PathBuf)> = None;
     let mut rejected = None;
     loop {
         let seq = reader.next_seq;
@@ -209,7 +209,7 @@ fn rejected_write_through(
             if manifest.label != config.file_write_result_label { continue; }
             let result: ToolResultArtifact = serde_json::from_slice(&payload).map_err(|error| error.to_string())?;
             if result.correlation_id.as_deref() != Some(&authored.correlation_id) { continue; }
-            let Some((call_seq, exact, path, _)) = pending.take() else { continue; };
+            let Some((call_seq, exact, path)) = pending.take() else { continue; };
             if !exact { continue; }
             let writer = CheckedRunWriter {
                 owner: config.provider_interface.clone(), source: config.authoring_source_interface.clone(),
@@ -313,7 +313,6 @@ fn rejected_write_through(
                 movement.seq.0,
                 exact,
                 call.arguments.path,
-                runtime.ee.clone(),
             ));
         } else if result_edge && manifest.label == config.file_write_result_label {
             let result: ToolResultArtifact =
@@ -323,7 +322,7 @@ fn rejected_write_through(
             {
                 continue;
             }
-            let Some((call_seq, exact, call_path, call_ee)) = pending.take() else {
+            let Some((call_seq, exact, call_path)) = pending.take() else {
                 continue;
             };
             if !exact || result.ok {
@@ -352,8 +351,8 @@ fn rejected_write_through(
                 .canonicalize()
                 .map_err(|error| error.to_string())?
                 .join(format!("{}.json", config.run));
-            if call_path != path || call_ee != original.ee || runtime.ee != original.ee {
-                return Err("authoring rejection changed its original path or EE".into());
+            if call_path != path {
+                return Err("authoring rejection changed its original path".into());
             }
             if result.body.is_some()
                 || result.label != manifest.label
@@ -523,7 +522,6 @@ fn checked_edit_verification_failure_with_reader(
             return Err("checked failure has no unique declared requirement".into());
         };
         if record.id != original.id
-            || record.ee != original.ee
             || record.worker != original.worker
             || record.trace != original.trace
             || runtime.run != record.id
@@ -757,7 +755,6 @@ pub(super) fn rebase_authored_run(
     let actual = RunRecord::from_bytes(protected).map_err(|error| error.to_string())?;
     if original.id != actual.id
         || original.worker != actual.worker
-        || original.ee != actual.ee
         || original.trace != actual.trace
         || original.interface_state.get(&config.provider_interface)
             != actual.interface_state.get(&config.provider_interface)

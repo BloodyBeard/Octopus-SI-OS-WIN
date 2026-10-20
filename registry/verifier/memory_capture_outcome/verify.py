@@ -22,7 +22,9 @@ def verify(request):
     payload = json.loads(data)
     assert request["artifact_label"] == payload["label"] == "memory.capture.outcome" and payload["schema_version"] == 1, "outcome label mismatch"
     source = payload["source"]
-    assert source["run"] == params["source_run"] and source["ee"] == params["source_ee"] and source["provider_interface"] == params["provider_interface"], "outcome evidence source mismatch"
+    assert source["run"] == params["source_run"] and source["provider_interface"] == params["provider_interface"], "outcome evidence source mismatch"
+    observed_ee = source["ee"]
+    assert isinstance(observed_ee, str) and observed_ee and observed_ee.strip() == observed_ee, "outcome evidence has no observed EE"
     reference_key(source["terminal_artifact"])
     assert isinstance(source["terminal_source_movement_seq"], int), "original observer terminal movement absent"
     experience = payload["experience"]
@@ -85,7 +87,7 @@ def verify(request):
     for key in selected:
         body = by_ref[key]["payload"]["body"]
         memory, withdrawn, writes = body["memory"], body["withdrawn"], body["writes"]
-        assert isinstance(memory, dict) and memory["scope_ee_ids"] == [params["source_ee"]], "publication broadened source EE scope"
+        assert isinstance(memory, dict) and memory["scope_ee_ids"] == [observed_ee], "publication scope differs from the observed EE"
         assert isinstance(withdrawn, list) and isinstance(writes, list) and len(writes) == 1 + len(withdrawn), "publication receipt count mismatch"
         assert os.path.basename(writes[0]["path"]) == memory["id"] + ".json", "publication receipt names another entry"
         for receipt in writes:

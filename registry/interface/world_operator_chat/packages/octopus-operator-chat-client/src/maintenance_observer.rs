@@ -302,6 +302,7 @@ pub fn plan_maintenance_observer(
     )?;
     provider.interface = source_descriptor.clone();
     provider.interface.id = InterfaceId::new(&request.source_provider_choice_interface_id);
+    provider.interface.copy_of = None;
     let private = &mut provider
         .interface
         .interface_driver_config
@@ -445,7 +446,7 @@ pub fn plan_maintenance_observer(
         observer_run: run_id.clone(),
         projection_run: projection_run_id.clone(),
         source_run: source_run.id.to_string(),
-        source_ee: source_run.ee.to_string(),
+        source_ee: None,
         source_worker_interface: source_run.worker.to_string(),
         source_provider_interface: request.source_provider_interface_id.clone(),
         source_client_interface: request.source_client_interface_id.clone(),
@@ -494,6 +495,7 @@ pub fn plan_maintenance_observer(
         reader_interface,
         &selected_context,
         &request.roots.run_records_root,
+        source_run.id.as_str(),
         &mut writes,
     )?;
     let terminal_requirement = RequiredVerifiedArtifact {
@@ -507,7 +509,7 @@ pub fn plan_maintenance_observer(
         mark: octopus_descriptors::MarkId::new(&cfg.input_mark),
         artifact_label: OUTPUT_LABEL.into(),
         verifier: octopus_descriptors::VerifierId::new(&cfg.input_verifier),
-        params: json!({"stage":"projection","source_run":source_run.id,"source_ee":source_run.ee,
+        params: json!({"stage":"projection","source_run":source_run.id,
             "source_worker_interface":source_run.worker,"source_provider_interface":request.source_provider_interface_id,
             "source_client_interface":request.source_client_interface_id,"max_bytes":cfg.bounds.max_output_bytes}),
     };
@@ -579,6 +581,7 @@ pub fn plan_maintenance_observer(
             request,
             &identity,
             &projection,
+            source_run.ee.as_str(),
             &projection_id,
             &projection_worker_id,
             &experience_id,
@@ -600,12 +603,12 @@ pub fn plan_maintenance_observer(
             &request.source_client_interface_id,
         ],
     )?;
-    let declaration = json!({"schema_version":1,"run":run_id,"ee":source_run.ee,"worker_interface":worker_id,
+    let declaration = json!({"schema_version":1,"run":run_id,"worker_interface":worker_id,
         "provider_interface":identity.model_interface_id,"source_run":source_run.id,"source_worker_interface":source_run.worker,
         "source_provider_interface":request.source_provider_interface_id,"source_client_interface":request.source_client_interface_id,
         "source_relay_interface":relay_id,"projection_interface":projection_id,"experience_interface":experience_id,
         "terminal_label":cfg.terminal_label,"provider_output_labels":output_labels,"input_label":OUTPUT_LABEL,"outcome_interface":outcome_id,"capture_interface":capture_id,"outcome_label":OUTCOME_LABEL,
-        "projection_run":{"run":projection_run_id,"ee":source_run.ee,"worker_interface":projection_worker_id,
+        "projection_run":{"run":projection_run_id,"worker_interface":projection_worker_id,
             "provider_interface":projection_id,"initial_record":projection_initial,"initial_record_content":projection_content},
         "collection_source":cfg.collection_source,
         "collection_entries_root":entries_root,"publication_door_interface":publication_door,"publication_tool":publication_tool,
@@ -951,7 +954,7 @@ fn plan_projection(
             "projection template must declare the System bound-context-projection driver".into(),
         );
     }
-    descriptor["id"] = json!(id);
+    crate::copy_json_descriptor(&mut descriptor, id)?;
     descriptor["interface_driver_config"]["private_config"]["context_projection"] =
         json!(projection);
     push_json_write(
@@ -990,7 +993,7 @@ fn plan_relay(
     {
         return Err("maintenance relay template must be an inert System worker pin".into());
     }
-    descriptor["id"] = json!(id);
+    crate::copy_json_descriptor(&mut descriptor, id)?;
     let policy = json!({"id":id,"ceiling":{"interfaces":[],"tools":[],"wek":[],"mark_outcomes":[],"hard_blocked_tools":[],"artifact_verbs":["read"]},"role_artifacts":[]});
     push_json_write(
         registry.join("interface").join(id).join("interface.json"),
@@ -1012,6 +1015,7 @@ fn configure_reader_and_writer_roots(
     reader: &str,
     context: &[ArtifactBindingSeed],
     runs: &Path,
+    observed_run: &str,
     writes: &mut Vec<PlannedClientWrite>,
 ) -> Result<(), String> {
     let reader = identity
@@ -1026,6 +1030,7 @@ fn configure_reader_and_writer_roots(
         serde_json::from_slice(&planned_bytes(writes, &path)?).map_err(|e| e.to_string())?;
     descriptor["interface_driver_config"]["private_config"]["context_artifact_bindings"] =
         json!(context);
+    descriptor["interface_driver_config"]["private_config"]["observed_run"] = json!(observed_run);
     replace(writes, &path, &descriptor)?;
     let path = registry
         .join("interface")
@@ -1123,6 +1128,7 @@ fn plan_projection_run(
     request: &MaintenanceObserverRequest,
     observer: &PlannedIdentity,
     projection: &ContextProjectionConfig,
+    placement: &str,
     id: &str,
     worker: &str,
     experience: &str,
@@ -1166,7 +1172,7 @@ fn plan_projection_run(
                 let mut value: Value =
                     serde_json::from_str(&write.content).map_err(|e| e.to_string())?;
                 if name == Path::new("interface.json") {
-                    value["id"] = json!(to);
+                    crate::copy_json_descriptor(&mut value, to)?;
                     if to == &door {
                         value["interface_driver_config"]["host_slots"]["run_records_root"] = json!({"path":request.roots.run_records_root.join(format!("{}.json",projection.projection_run))});
                     }
@@ -1191,7 +1197,7 @@ fn plan_projection_run(
             .join("tool.json"),
     )?)
     .map_err(|e| e.to_string())?;
-    descriptor["id"] = json!(tool);
+    crate::copy_json_descriptor(&mut descriptor, &tool)?;
     descriptor["interface"] = json!(door);
     push_json_write(
         registry.join("tool").join(&tool).join("tool.json"),
@@ -1260,7 +1266,7 @@ fn plan_projection_run(
             run: ClientRunConfig {
                 interface_prefix: String::new(),
                 run_prefix: String::new(),
-                ee: projection.source_ee.clone(),
+                ee: String::new(),
                 worker: worker.into(),
                 tool_call_mark: request.config.authoring.tool_call_mark.clone(),
                 tool_call_verifier: request.config.authoring.tool_call_verifier.clone(),
@@ -1304,7 +1310,7 @@ fn plan_projection_run(
         mark: octopus_descriptors::MarkId::new(&request.config.outcome_mark),
         artifact_label: OUTCOME_LABEL.into(),
         verifier: octopus_descriptors::VerifierId::new(&request.config.outcome_verifier),
-        params: json!({"source_run":projection.source_run,"source_ee":projection.source_ee,"provider_interface":observer.model_interface_id,
+        params: json!({"source_run":projection.source_run,"provider_interface":observer.model_interface_id,
             "publication_tool":projection.publication_tool,"entries_root":request.roots.registry_root.join("artifact").join(&request.config.collection_source).join("entries"),
             "max_bytes":request.config.bounds.max_output_bytes}),
     };
@@ -1342,7 +1348,7 @@ fn plan_projection_run(
     let checkpoints=templates.iter().zip(&ids).map(|(template,cp)|json!({"id":cp,"run":projection.projection_run,"epoch":0,
         "trace":format!("trace:{}:{cp}",projection.projection_run),"interface_binding":template.interface_binding,
         "outbound_interface_bindings":template.outbound_interface_bindings,"artifact_bindings":[],"required_verified_artifacts":template.required_verified_artifacts})).collect::<Vec<_>>();
-    let record = json!({"id":projection.projection_run,"ee":projection.source_ee,"worker":worker,"status":"idle",
+    let record = json!({"id":projection.projection_run,"ee":placement,"worker":worker,"status":"idle",
         "trace":format!("trace:{}",projection.projection_run),"checkpoints":checkpoints,"active_checkpoints":ids,
         "interface_state":{id:{"context_generation":0,"authoring_generation":0,"frontier_checkpoint_ids":ids[2..],
             "run_authoring_binding":{"schema_version":2,"run":projection.projection_run,"worker":worker,"provider_interface":id,
@@ -1396,7 +1402,6 @@ pub fn wire_source_terminal_declaration(
         return Err("maintenance declaration requires schema 1".into());
     }
     let source_run = field("source_run")?;
-    let source_ee = field("ee")?;
     let source_worker = field("source_worker_interface")?;
     let source_provider = field("source_provider_interface")?;
     let source_client = field("source_client_interface")?;
@@ -1405,7 +1410,6 @@ pub fn wire_source_terminal_declaration(
     let terminal_label = field("terminal_label")?;
     for (name, id) in [
         ("source run", source_run),
-        ("source EE", source_ee),
         ("source worker", source_worker),
         ("source provider", source_provider),
         ("source client", source_client),
@@ -1441,12 +1445,9 @@ pub fn wire_source_terminal_declaration(
         );
     }
     let parsed = RunRecord::from_bytes(source_content.as_bytes()).map_err(|e| e.to_string())?;
-    if parsed.id.as_str() != source_run
-        || parsed.ee.as_str() != source_ee
-        || parsed.worker.as_str() != source_worker
-    {
+    if parsed.id.as_str() != source_run || parsed.worker.as_str() != source_worker {
         return Err(
-            "maintenance declaration cannot attach to a different source run/EE/worker".into(),
+            "maintenance declaration cannot attach to a different source run/worker".into(),
         );
     }
     let topology: BoundRunAuthoringTopology = serde_json::from_value(

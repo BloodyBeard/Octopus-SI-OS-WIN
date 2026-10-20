@@ -56,13 +56,21 @@ pub fn form_interface_policy(
     worker_layer: Option<&InterfacePolicyValues>,
     ee_layers: &[&InterfacePolicyValues],
 ) -> Result<FormedInterfacePolicy, String> {
+    form_narrowed_interface_policy(declaration, worker_layer.into_iter().collect::<Vec<_>>().as_slice(), ee_layers)
+}
+
+/// A copy admitted by its declared original is formed as a narrowing of it: the
+/// original's formed values join the copy's own boundary layers.
+pub fn form_narrowed_interface_policy(
+    declaration: &InterfacePolicyDeclaration,
+    boundary_extra: &[&InterfacePolicyValues],
+    ee_layers: &[&InterfacePolicyValues],
+) -> Result<FormedInterfacePolicy, String> {
     let mut boundary_layers = Vec::new();
     if !declaration.values.is_empty() {
         boundary_layers.push(&declaration.values);
     }
-    if let Some(worker_layer) = worker_layer {
-        boundary_layers.push(worker_layer);
-    }
+    boundary_layers.extend_from_slice(boundary_extra);
     let boundary = form_interface_policy_values(&declaration.variables, &boundary_layers)?;
     let mut context_layers = boundary_layers;
     context_layers.extend_from_slice(ee_layers);
@@ -484,6 +492,9 @@ impl<T: Ord + Clone> CapSet<T> {
     pub fn contains(&self, x: &T) -> bool {
         self.0.contains(x)
     }
+    pub fn retaining(&self, keep: impl Fn(&T) -> bool) -> Self {
+        Self(self.0.iter().filter(|x| keep(x)).cloned().collect())
+    }
     pub fn is_subset(&self, other: &Self) -> bool {
         self.0.is_subset(&other.0)
     }
@@ -593,12 +604,70 @@ pub struct FormedPolicy {
     pub pin: FormationPin,
 }
 
-fn apply_layer(acc: &mut ContextGrant, layer: &PolicyLayer) {
+/// POLICY.md §5 — a private copy of an interface or tool declares the descriptor
+/// it was copied from (`copy_of`). EE allowances admit a copy by its original only
+/// when that original exists and the copy is never wider than it; hard blocks
+/// reach every declared copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CopyLineage {
+    interfaces: BTreeMap<InterfaceId, InterfaceId>,
+    tools: BTreeMap<ToolId, ToolId>,
+    declared_tools: BTreeMap<ToolId, ToolId>,
+}
+
+impl CopyLineage {
+    pub fn insert_interface(&mut self, copy: InterfaceId, original: InterfaceId) {
+        self.interfaces.insert(copy, original);
+    }
+
+    pub fn insert_tool(&mut self, copy: ToolId, original: ToolId) {
+        self.declared_tools.insert(copy.clone(), original.clone());
+        self.tools.insert(copy, original);
+    }
+
+    pub fn insert_declared_tool(&mut self, copy: ToolId, original: ToolId) {
+        self.declared_tools.insert(copy, original);
+    }
+
+    pub fn interface_original(&self, interface: &InterfaceId) -> Option<&InterfaceId> {
+        self.interfaces.get(interface)
+    }
+
+    pub fn tool_original(&self, tool: &ToolId) -> Option<&ToolId> {
+        self.tools.get(tool)
+    }
+
+    pub fn admits_interface(&self, allowed: &CapSet<InterfaceId>, interface: &InterfaceId) -> bool {
+        allowed.contains(interface)
+            || self
+                .interface_original(interface)
+                .is_some_and(|original| allowed.contains(original))
+    }
+
+    pub fn admits_tool(&self, allowed: &CapSet<ToolId>, tool: &ToolId) -> bool {
+        allowed.contains(tool)
+            || self
+                .tool_original(tool)
+                .is_some_and(|original| allowed.contains(original))
+    }
+
+    pub fn denies_tool(&self, denied: &DenySet<ToolId>, tool: &ToolId) -> bool {
+        denied.contains(tool)
+            || self
+                .declared_tools
+                .get(tool)
+                .is_some_and(|original| denied.contains(original))
+    }
+}
+
+fn apply_layer(acc: &mut ContextGrant, layer: &PolicyLayer, lineage: &CopyLineage) {
     if let Some(t) = &layer.tools {
-        acc.tools = acc.tools.intersect(t);
+        acc.tools = acc.tools.retaining(|tool| lineage.admits_tool(t, tool));
     }
     if let Some(i) = &layer.interfaces {
-        acc.interfaces = acc.interfaces.intersect(i);
+        acc.interfaces = acc
+            .interfaces
+            .retaining(|interface| lineage.admits_interface(i, interface));
     }
     if let Some(k) = &layer.wek {
         acc.wek = acc.wek.intersect(k);
@@ -625,11 +694,30 @@ pub fn form_policy(
     bindings: &[PolicyLayer],
     pin: FormationPin,
 ) -> FormedPolicy {
+    form_policy_with_lineage(ceiling, ee_chain, bindings, pin, &CopyLineage::default())
+}
+
+pub fn form_policy_with_lineage(
+    ceiling: ContextGrant,
+    ee_chain: &[PolicyLayer],
+    bindings: &[PolicyLayer],
+    pin: FormationPin,
+    lineage: &CopyLineage,
+) -> FormedPolicy {
     let boundary = ceiling.clone();
     let mut acc = ceiling;
     for layer in ee_chain.iter().chain(bindings.iter()) {
-        apply_layer(&mut acc, layer);
+        apply_layer(&mut acc, layer, lineage);
     }
+    let denied_copies = boundary
+        .tools
+        .iter()
+        .filter(|tool| lineage.denies_tool(&acc.hard_blocks_tools, tool))
+        .cloned()
+        .collect::<Vec<_>>();
+    acc.hard_blocks_tools = acc
+        .hard_blocks_tools
+        .union(&DenySet::from_denied(denied_copies));
     acc.tools = acc.tools.without(&acc.hard_blocks_tools);
     FormedPolicy {
         boundary,
@@ -656,6 +744,40 @@ mod tests {
             artifact_verbs: CapSet::from_allowed(ArtifactVerb::ALL),
             artifact_access: Default::default(),
         }
+    }
+
+    #[test]
+    fn copies_are_admitted_by_their_original_and_never_wider_than_it() {
+        let mut lineage = CopyLineage::default();
+        lineage.insert_tool(ToolId::new("memory.save__a"), ToolId::new("memory.save"));
+        lineage.insert_declared_tool(ToolId::new("file.write__b"), ToolId::new("file.write"));
+        lineage.insert_interface(InterfaceId::new("system_memory_a"), InterfaceId::new("system_memory"));
+        let mut grant = ceiling(&["memory.save__a", "file.write__b"]);
+        grant.interfaces = CapSet::from_allowed([InterfaceId::new("system_memory_a")]);
+        let ee = PolicyLayer {
+            tools: Some(tools(&["memory.save", "file.write"])),
+            interfaces: Some(CapSet::from_allowed([InterfaceId::new("system_memory")])),
+            hard_blocks_tools: DenySet::from_denied([ToolId::new("file.write")]),
+            ..Default::default()
+        };
+        let formed = form_policy_with_lineage(grant, &[ee], &[], FormationPin::default(), &lineage);
+        assert!(formed.context.tools.contains(&ToolId::new("memory.save__a")));
+        assert!(!formed.context.tools.contains(&ToolId::new("file.write__b")), "a block on the original reaches every declared copy");
+        assert!(formed.context.interfaces.contains(&InterfaceId::new("system_memory_a")));
+
+        let copy: WorkerInterfacePolicy = serde_json::from_value(serde_json::json!({
+            "id": "system_worker_probe_a",
+            "ceiling": {"interfaces": ["system_memory_a", "world_extra"], "tools": ["memory.save__a", "shell.exec"], "wek": ["system_room", "process_session"]}
+        })).unwrap();
+        let original: WorkerInterfacePolicy = serde_json::from_value(serde_json::json!({
+            "id": "system_worker_probe",
+            "ceiling": {"interfaces": ["system_memory"], "tools": ["memory.save"], "wek": ["system_room"], "hard_blocked_tools": ["memory.save"]}
+        })).unwrap();
+        let narrowed = copy.narrowed_by(&original, &lineage);
+        assert_eq!(narrowed.ceiling.interfaces, vec![InterfaceId::new("system_memory_a")]);
+        assert_eq!(narrowed.ceiling.tools, vec![ToolId::new("memory.save__a")]);
+        assert_eq!(narrowed.ceiling.wek, vec![WorkerEnvironmentKindId::new("system_room")]);
+        assert_eq!(narrowed.ceiling.hard_blocked_tools, vec![ToolId::new("memory.save")]);
     }
 
     #[test]

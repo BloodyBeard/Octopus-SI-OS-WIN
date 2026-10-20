@@ -362,7 +362,7 @@ impl ProviderOutputHandoff {
             let item = &pending.items[index];
             if runtime.checkpoint != item.checkpoint.id || runtime.epoch != item.checkpoint.epoch { continue; }
             if runtime.interface != self.config.provider_interface || runtime.worker != record.worker
-                || runtime.ee != record.ee || movement.to != Endpoint::Interface(record.worker.clone())
+                || movement.to != Endpoint::Interface(record.worker.clone())
                 || !matches!(movement.invocation_metadata.as_ref().and_then(|metadata| metadata.delivery_verdict()), Some(DeliveryVerdict::Refused { .. }))
             {
                 return Err("pending refusal changed its exact interface or run scope".into());
@@ -372,7 +372,7 @@ impl ProviderOutputHandoff {
             let bytes = reader.snapshot(&hash)?;
             if ContentHash::of_bytes(&bytes) != hash { return Err("pending refusal snapshot integrity mismatch".into()); }
             let snapshot = RunRecord::from_bytes(&bytes).map_err(|error| error.to_string())?;
-            if snapshot.id != record.id || snapshot.worker != record.worker || snapshot.ee != record.ee
+            if snapshot.id != record.id || snapshot.worker != record.worker || snapshot.ee != runtime.ee
                 || persisted_pending_handoff(&snapshot, &self.config.provider_interface)?.as_ref() != Some(pending)
             {
                 return Err("pending refusal does not prove the current exact handoff".into());

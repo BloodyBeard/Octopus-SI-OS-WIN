@@ -12,7 +12,6 @@ pub struct SnapshotWindowBounds {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotSourceScope {
     pub run: String,
-    pub ee: String,
     pub worker: String,
     pub provider: String,
     pub client: String,
@@ -37,7 +36,7 @@ pub fn verify_terminal_source(
     artifact: &ArtifactRef,
     terminal_label: &str,
     scope: &SnapshotSourceScope,
-) -> Result<u64, String> {
+) -> Result<(u64, String), String> {
     let evidence = evidence(ctx)?;
     let mut current = received.clone();
     for _ in 0..8 {
@@ -58,7 +57,6 @@ pub fn verify_terminal_source(
             && current.to == Endpoint::Interface(InterfaceId::new(&scope.relay))
         {
             if runtime.run.as_str() != scope.run
-                || runtime.ee.as_str() != scope.ee
                 || runtime.worker.as_str() != scope.worker
                 || runtime.interface.as_str() != scope.relay
                 || metadata.verification_failure.is_some()
@@ -68,7 +66,7 @@ pub fn verify_terminal_source(
                     .is_some_and(|a| a.complete)
             {
                 return Err(
-                    "terminal origin differs from the exact source run/EE/worker/provider/relay"
+                    "terminal origin differs from the exact source run/worker/provider/relay"
                         .into(),
                 );
             }
@@ -103,7 +101,7 @@ pub fn verify_terminal_source(
                         .into(),
                 );
             }
-            return Ok(current.seq.0);
+            return Ok((current.seq.0, record.ee.to_string()));
         }
         let parent = metadata
             .source_movement_seq
@@ -179,7 +177,6 @@ fn source_entry_record(
     if !edge
         || movement.artifact.as_ref() != Some(&entry.source_artifact)
         || runtime.run.as_str() != scope.run
-        || runtime.ee.as_str() != scope.ee
         || runtime.worker.as_str() != scope.worker
         || record.id != runtime.run
         || record.ee != runtime.ee

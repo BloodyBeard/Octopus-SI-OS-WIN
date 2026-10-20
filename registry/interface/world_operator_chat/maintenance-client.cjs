@@ -13,17 +13,17 @@ function decodeMaintenanceDeclaration(plan, target) {
   }
   const [owner, state] = declarations[0];
   const d = object(state.maintenance_observer, "declaration");
-  fields(d, ["schema_version", "run", "ee", "worker_interface", "provider_interface", "source_run",
+  fields(d, ["schema_version", "run", "worker_interface", "provider_interface", "source_run",
     "source_worker_interface", "source_provider_interface", "source_client_interface", "source_relay_interface",
     "projection_interface", "experience_interface", "terminal_label", "input_label", "outcome_interface", "capture_interface", "outcome_label",
     "projection_run", "collection_source", "collection_entries_root", "publication_door_interface", "publication_tool",
-    "provider_output_labels", "initial_record", "initial_record_content", "lifecycle_ownership"]);
+    "provider_output_labels", "initial_record", "initial_record_content", "lifecycle_ownership"], ["ee"]);
   if (d.schema_version !== 1 || target.id !== plan.run_id || target.worker !== plan.worker_interface_id
-    || d.source_run !== target.id || d.ee !== target.ee || d.source_worker_interface !== target.worker
+    || d.source_run !== target.id || d.source_worker_interface !== target.worker
     || d.source_provider_interface !== owner || d.source_client_interface !== plan.chat_interface_id) {
-    fail("declaration differs from its exact source run/EE/worker/provider/client");
+    fail("declaration differs from its exact source run/worker/provider/client");
   }
-  for (const name of ["run", "ee", "worker_interface", "provider_interface", "source_run", "source_worker_interface",
+  for (const name of ["run", "worker_interface", "provider_interface", "source_run", "source_worker_interface",
     "source_provider_interface", "source_client_interface", "source_relay_interface", "projection_interface",
     "experience_interface", "outcome_interface", "capture_interface", "publication_door_interface"]) component(d[name], name);
   text(d.publication_tool, "publication tool");
@@ -34,9 +34,9 @@ function decodeMaintenanceDeclaration(plan, target) {
     fail("terminal and projected inputs must have distinct declared ownership");
   }
   const projection = object(d.projection_run, "projection run declaration");
-  fields(projection, ["run", "ee", "worker_interface", "provider_interface", "initial_record", "initial_record_content"]);
+  fields(projection, ["run", "worker_interface", "provider_interface", "initial_record", "initial_record_content"], ["ee"]);
   for (const name of ["run", "worker_interface", "provider_interface"]) component(projection[name], `projection ${name}`);
-  if (projection.ee !== target.ee || projection.provider_interface !== d.projection_interface) fail("projection identity differs");
+  if (projection.provider_interface !== d.projection_interface) fail("projection identity differs");
   distinct([target.id, d.run, projection.run], "run identities");
   distinct([target.worker, d.worker_interface, projection.worker_interface], "worker identities");
   distinct([owner, d.source_client_interface, d.source_relay_interface, d.projection_interface,
@@ -151,7 +151,7 @@ function plannedMaintenanceRuns(plan, target, registryRoot, createsCompanions) {
     fail("projection requires its declared System driver");
   }
   const config = object(projector.interface_driver_config?.private_config?.context_projection, "projection config");
-  for (const [key, value] of Object.entries({ schema_version: 1, observer_run: d.run, projection_run: projected.record.id, source_run: target.id, source_ee: target.ee,
+  for (const [key, value] of Object.entries({ schema_version: 1, observer_run: d.run, projection_run: projected.record.id, source_run: target.id,
     source_worker_interface: target.worker, source_provider_interface: owner, source_client_interface: d.source_client_interface,
     source_relay_interface: d.source_relay_interface, terminal_label: d.terminal_label, collection_source: collectionId, publication_tool: d.publication_tool })) {
     if (config[key] !== value) fail(`projection ${key} differs from its declaration`);
@@ -165,13 +165,13 @@ function plannedMaintenanceRuns(plan, target, registryRoot, createsCompanions) {
     || !same(projector.interface_driver_config.private_config.client_projection_output_labels, [d.input_label, d.outcome_label])) {
     fail("outcome projection changes its exact experience input or output labels");
   }
-  const sourceParams = { source_run: target.id, source_ee: target.ee, source_worker_interface: target.worker,
+  const sourceParams = { source_run: target.id, source_worker_interface: target.worker,
     source_provider_interface: owner, source_client_interface: d.source_client_interface };
   requirement(projectionInput, d.terminal_label, { stage: "terminal", source_provider_interface: owner });
   requirement(projectionOutput, d.input_label, { stage: "projection", ...sourceParams });
   requirement(observerInput, d.input_label, { stage: "projection", ...sourceParams });
   requirement(outcomeInput, d.terminal_label, { stage: "terminal", source_provider_interface: d.provider_interface });
-  requirement(captureOutput, d.outcome_label, { source_run: target.id, source_ee: target.ee,
+  requirement(captureOutput, d.outcome_label, { source_run: target.id,
     provider_interface: d.provider_interface, publication_tool: d.publication_tool, entries_root: entriesRoot });
   return [observer, projected];
 }
@@ -194,8 +194,8 @@ function recordInterfaces(record) {
     const writer = state.run_authoring_binding?.writer_run ?? state.writer_run;
     if (writer) {
       const initial = object(writer.initial_record, "private writer initial record");
-      if (initial.id !== writer.run || initial.ee !== record.ee || initial.worker !== record.worker
-        || initial.interface_state?.[owner]?.file_writer_target?.run !== record.id) fail("private writer changes its exact target/worker/EE");
+      if (initial.id !== writer.run || initial.worker !== record.worker
+        || initial.interface_state?.[owner]?.file_writer_target?.run !== record.id) fail("private writer changes its exact target/worker");
       edges(initial.checkpoints);
       for (const id of Object.keys(object(initial.interface_state, "private writer state"))) ids.add(component(id, "private writer owner"));
     }
@@ -245,7 +245,7 @@ function initial(declaration, name) {
   const record = object(declaration.initial_record, `${name} initial record`);
   const content = declaration.initial_record_content;
   if (typeof content !== "string" || !content.trim()) fail(`${name} initial bytes must be a nonempty string`);
-  if (record.id !== declaration.run || record.ee !== declaration.ee || record.worker !== declaration.worker_interface
+  if (record.id !== declaration.run || record.worker !== declaration.worker_interface
     || !same(JSON.parse(content), record)) fail(`${name} initial record changes its exact identity or bytes`);
   return { record, content };
 }
@@ -348,8 +348,8 @@ function component(value, name) {
   if (value.trim() !== value || value === "." || value === ".." || /[/\\\0]/.test(value)) fail(`${name} must be an exact path component`);
   return value;
 }
-function fields(value, keys) {
-  if (Object.keys(value).some((key) => !keys.includes(key)) || keys.some((key) => !Object.hasOwn(value, key))) fail("maintenance declaration has missing or unknown fields");
+function fields(value, keys, predecessors = []) {
+  if (Object.keys(value).some((key) => !keys.includes(key) && !predecessors.includes(key)) || keys.some((key) => !Object.hasOwn(value, key))) fail("maintenance declaration has missing or unknown fields");
 }
 function distinct(values, name) { if (new Set(values).size !== values.length) fail(`${name} must be distinct`); }
 function exactArray(value, name) {

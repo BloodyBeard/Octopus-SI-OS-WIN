@@ -66,7 +66,7 @@ pub(super) fn checked_source(reader: &mut impl CheckedRunEvidenceReader, after: 
     let edge = match movement.kind {
         MovementKind::InterfaceArrival => movement.from == Endpoint::Interface(owner.clone())
             && movement.to == Endpoint::Interface(after.worker.clone()) && inbound.interface == *owner
-            && runtime.interface == *owner && pinned.id == after.id && pinned.ee == after.ee && pinned.worker == after.worker,
+            && runtime.interface == *owner && pinned.id == after.id && pinned.worker == after.worker,
         MovementKind::InterfaceOutbound if emitted => {
             let active = pinned.active_checkpoints.iter().map(|id| pinned.checkpoint(id)
                 .ok_or("input artifact binding source has an absent active checkpoint")).collect::<Result<Vec<_>, _>>()?;

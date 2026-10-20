@@ -35,7 +35,8 @@
       "system_worker_memory_observer",
       "system_memory",
       "system_interface_authoring",
-      "system_room"
+      "system_room",
+      "system_context_memory_projection"
     ],
     "tools": [
       "memory.search",

@@ -98,7 +98,7 @@ function assertSourceTerminalRoute(source, d) {
 }
 
 function assertCurrentRecord(record, initial, provider, interfaces) {
-  if (record.id !== initial.id || record.ee !== initial.ee || record.worker !== initial.worker) fail("companion current Run changed identity or active EE");
+  if (record.id !== initial.id || record.worker !== initial.worker) fail("companion current Run changed identity");
   const state = object(record.interface_state, "companion private state");
   const topology = object(state[provider]?.run_authoring_binding, "companion current rearm topology");
   if (canonical(topology) !== canonical(initial.interface_state?.[provider]?.run_authoring_binding)) {

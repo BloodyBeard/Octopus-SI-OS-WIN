@@ -54,7 +54,7 @@
   "supported_worker_environment_kinds": [
     "system_room"
   ],
-  "description": "Write one or more files under this room's granted roots. A write supplies either complete bytes or an RFC 6902 JSON patch guarded by exact before/after content hashes. Every result carries path, before_hash, and after_hash evidence; readers validate file-domain semantics fail-closed. An explicit ordered=true batch carries an exact expected_before_content and expected_before_hash for each distinct path, with either content or a patch guarded by expected_after_hash, checks each preimage immediately before its effect, and stops at the first refusal. Applied, refused, uncertain and unattempted entries are durably recorded; failure details retain partial evidence. Reinvoking the exact artifact replays those receipts without reapplying committed entries. Ordered patch preimages may explicitly use a zlib_base64 object with exact decoded byte_count; the complete single stream, decoded hash, and aggregate preimage/postimage host limit are checked before effects. json_format explicitly selects pretty or compact canonical JSON for patches.",
+  "description": "Write one or more files under this room's granted roots. A write supplies either complete bytes or an RFC 6902 JSON patch guarded by the exact before content hash; an optional expected_after_hash also pins the result. Every result carries path, before_hash, and after_hash evidence; readers validate file-domain semantics fail-closed. An explicit ordered=true batch carries an exact expected_before_content and expected_before_hash for each distinct path, with either content or a patch guarded by expected_after_hash, checks each preimage immediately before its effect, and stops at the first refusal. Applied, refused, uncertain and unattempted entries are durably recorded; failure details retain partial evidence. Reinvoking the exact artifact replays those receipts without reapplying committed entries. Ordered patch preimages may explicitly use a zlib_base64 object with exact decoded byte_count; the complete single stream, decoded hash, and aggregate preimage/postimage host limit are checked before effects. json_format explicitly selects pretty or compact canonical JSON for patches.",
   "args_schema": {
     "type": "object",
     "properties": {
@@ -421,8 +421,7 @@
               "required": [
                 "path",
                 "patch",
-                "expected_before_hash",
-                "expected_after_hash"
+                "expected_before_hash"
               ],
               "properties": {
                 "expected_before_hash": {
@@ -487,8 +486,7 @@
         "required": [
           "path",
           "patch",
-          "expected_before_hash",
-          "expected_after_hash"
+          "expected_before_hash"
         ],
         "properties": {
           "expected_before_hash": {

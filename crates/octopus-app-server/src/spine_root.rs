@@ -14,8 +14,9 @@ use octopus_marks::{
     VerificationInput, VerifiedArtifactAdmission, VerifiedArtifactError,
 };
 use octopus_policy::{
-    ArtifactVerb, CapSet, ContextGrant, DenySet, FormationPin, FormedPolicy, InterfacePolicyGrant,
-    InterfacePolicyValues, WorkerInterfacePolicy, form_policy,
+    ArtifactVerb, CapSet, ContextGrant, CopyLineage, DenySet, FormationPin, FormedPolicy,
+    InterfacePolicyGrant, InterfacePolicyValues, PolicyLayer, WorkerInterfacePolicy,
+    form_policy_with_lineage,
 };
 use octopus_runtime::{
     GrantEpoch, InterfaceClass, RunGrantQuery, RunGrantResolution, RunGrantResolver, Runtime,
@@ -54,6 +55,7 @@ struct LoadedRegistrySnapshot {
     worker_environment_kinds: BTreeSet<WorkerEnvironmentKindId>,
     reference_graph: RegistryReferenceGraph,
     ee_tree: EeTree,
+    copy_lineage: CopyLineage,
     formation_source_hashes: BTreeMap<DescriptorName, DescriptorHash>,
     formation_source_bytes: BTreeMap<DescriptorName, Vec<u8>>,
     ee_instance_issues: Vec<String>,
@@ -583,7 +585,15 @@ impl LoadedRegistrySnapshot {
         String,
     > {
         self.validate_run_reference_closure(query)?;
-        let policy = self.worker_interface_policy(query.worker)?;
+        let declared = self.worker_interface_policy(query.worker)?;
+        let ee_layers = self
+            .ee_tree
+            .policy_layers(query.ee)
+            .map_err(|error| format!("run '{}' EE chain failed: {error}", query.run.as_str()))?;
+        let original = self.admitted_original(query.worker, &ee_layers);
+        let original_policy = original.as_ref().map(|original| self.worker_interface_policy(original)).transpose()?;
+        let narrowed = original_policy.map(|original| declared.narrowed_by(original, &self.copy_lineage));
+        let policy = narrowed.as_ref().unwrap_or(declared);
         let authored = crate::worker_policy::AuthoredBindings {
             interfaces: query.authored_interfaces,
             tool_ownership: &self.tool_ownership,
@@ -597,6 +607,7 @@ impl LoadedRegistrySnapshot {
             query.ee,
             &self.formation_source_hashes,
             &authored,
+            &self.copy_lineage,
         )
         .map_err(|e| {
             format!(
@@ -606,7 +617,18 @@ impl LoadedRegistrySnapshot {
                 query.worker.as_str()
             )
         })?;
-        self.form_interface_policy(&mut formed, query.ee, policy)?;
+        if let Some(original) = &original {
+            for source in [
+                crate::worker_policy::worker_interface_descriptor_name(original),
+                crate::worker_policy::interface_descriptor_source_name(original),
+            ] {
+                let hash = self.formation_source_hashes.get(&source).ok_or_else(|| {
+                    format!("original '{}' of worker '{}' has no formation source", original.as_str(), query.worker.as_str())
+                })?;
+                formed.pin.inputs.insert(source, *hash);
+            }
+        }
+        self.form_interface_policy(&mut formed, query.ee, policy, original_policy)?;
         let role_artifacts = self.pin_mandatory_role_artifacts(query, policy, &mut formed)?;
         let metadata_projection =
             self.metadata_projection_for_grant(query.worker, query.ee, &formed, &role_artifacts)?;
@@ -644,6 +666,21 @@ impl LoadedRegistrySnapshot {
             .iter()
             .map(|(_, descriptor)| descriptor.worker_environment_kind_id.clone())
             .collect();
+        let mut copy_lineage = CopyLineage::default();
+        for (_, descriptor) in &interfaces_loaded {
+            if let Some(original) = descriptor.copy_of.as_ref().filter(|original| interfaces_by_id.contains_key(*original)) {
+                copy_lineage.insert_interface(descriptor.id.clone(), original.clone());
+            }
+        }
+        for (_, descriptor) in &tool_descriptors_loaded {
+            let Some(original) = &descriptor.copy_of else { continue };
+            let original = ToolId::new(original.as_str());
+            if tool_descriptions.by_tool.get(&original).is_some_and(|known| descriptor.never_wider_than(known)) {
+                copy_lineage.insert_tool(ToolId::new(descriptor.id.as_str()), original);
+            } else {
+                copy_lineage.insert_declared_tool(ToolId::new(descriptor.id.as_str()), original);
+            }
+        }
         let mut formation_source_hashes = BTreeMap::new();
         let mut formation_source_bytes = BTreeMap::new();
         for (_, instance) in ee_tree.instances() {
@@ -709,6 +746,7 @@ impl LoadedRegistrySnapshot {
             worker_environment_kinds,
             reference_graph,
             ee_tree,
+            copy_lineage,
             formation_source_hashes,
             formation_source_bytes,
             ee_instance_issues,
@@ -828,17 +866,47 @@ impl LoadedRegistrySnapshot {
             .map(|_| ())
     }
 
+    /// A copy is admitted by its declared original when some layer of the run's EE
+    /// chain lists the original but not the copy itself.
+    fn admitted_original(&self, interface: &InterfaceId, layers: &[PolicyLayer]) -> Option<InterfaceId> {
+        let original = self.copy_lineage.interface_original(interface)?;
+        layers
+            .iter()
+            .any(|layer| layer.interfaces.as_ref().is_some_and(|allowed| !allowed.contains(interface) && allowed.contains(original)))
+            .then(|| original.clone())
+    }
+
     fn form_interface_policy(
         &self,
         formed: &mut FormedPolicy,
         ee: &EeId,
         worker_policy: &WorkerInterfacePolicy,
+        original_worker: Option<&WorkerInterfacePolicy>,
     ) -> Result<(), String> {
         let override_layers = self
             .ee_tree
             .interface_policy_override_layers(ee)
             .map_err(|error| format!("interface policy EE chain failed: {error}"))?;
+        let ee_layers = self
+            .ee_tree
+            .policy_layers(ee)
+            .map_err(|error| format!("interface policy EE chain failed: {error}"))?;
         validate_worker_interface_policy_scope(worker_policy, formed)?;
+        let worker_layers = std::iter::once(&worker_policy.ceiling.interface_policy)
+            .chain(original_worker.map(|original| &original.ceiling.interface_policy))
+            .collect::<Vec<_>>();
+        let interfaces = formed.boundary.interfaces.iter().chain(formed.context.interfaces.iter()).cloned().collect::<BTreeSet<_>>();
+        let mut originals = BTreeMap::new();
+        for interface in &interfaces {
+            if let Some(original) = self.admitted_original(interface, &ee_layers) {
+                let source = crate::worker_policy::interface_descriptor_source_name(&original);
+                let hash = self.formation_source_hashes.get(&source).ok_or_else(|| {
+                    format!("original '{}' of interface '{}' has no formation source", original.as_str(), interface.as_str())
+                })?;
+                formed.pin.inputs.insert(source, *hash);
+                originals.insert(interface.clone(), original);
+            }
+        }
 
         let mut boundary = InterfacePolicyGrant::new();
         for interface in formed.boundary.interfaces.iter() {
@@ -856,7 +924,8 @@ impl LoadedRegistrySnapshot {
             let (boundary_values, _) = form_interface_policy_for_interface(
                 interface,
                 &self.interfaces_by_id,
-                &worker_policy.ceiling.interface_policy,
+                &worker_layers,
+                originals.get(interface),
                 &override_layers,
                 false,
             )?;
@@ -873,7 +942,8 @@ impl LoadedRegistrySnapshot {
             let (_, context_values) = form_interface_policy_for_interface(
                 interface,
                 &self.interfaces_by_id,
-                &worker_policy.ceiling.interface_policy,
+                &worker_layers,
+                originals.get(interface),
                 &override_layers,
                 true,
             )?;
@@ -1064,11 +1134,12 @@ impl LoadedRegistrySnapshot {
             .ee_tree
             .policy_layers_omitting_instance_narrowing(ee, omitted_instance_narrowing)
             .map_err(|error| format!("EE '{}' policy chain failed: {error}", ee.as_str()))?;
-        let formed = form_policy(
+        let formed = form_policy_with_lineage(
             self.ee_policy_ceiling(),
             &layers,
             &[],
             FormationPin::default(),
+            &self.copy_lineage,
         );
         let allowed_root_slots = self
             .ee_tree
@@ -1132,13 +1203,14 @@ impl LoadedRegistrySnapshot {
             if !allowed_interfaces.contains(worker) {
                 continue;
             }
-            let mut formed = form_policy(
+            let mut formed = form_policy_with_lineage(
                 worker_policy.ceiling_grant(),
                 &ee_layers,
                 &[],
                 FormationPin::default(),
+                &self.copy_lineage,
             );
-            self.form_interface_policy(&mut formed, ee, worker_policy)?;
+            self.form_interface_policy(&mut formed, ee, worker_policy, None)?;
             workers.push(EeWorkerInterfacePolicyProjection {
                 worker_interface_id: worker.as_str().to_string(),
                 interface_policy: formed.context.interface_policy,
@@ -1193,7 +1265,8 @@ fn validate_worker_interface_policy_scope(
 fn form_interface_policy_for_interface(
     interface: &InterfaceId,
     by_id: &BTreeMap<InterfaceId, InterfaceDescriptor>,
-    worker_layer: &octopus_policy::InterfacePolicyOverrideLayer,
+    worker_layers: &[&octopus_policy::InterfacePolicyOverrideLayer],
+    original: Option<&InterfaceId>,
     override_layers: &[octopus_policy::InterfacePolicyOverrideLayer],
     apply_ee_overrides: bool,
 ) -> Result<(InterfacePolicyValues, InterfacePolicyValues), String> {
@@ -1203,17 +1276,35 @@ fn form_interface_policy_for_interface(
             interface.as_str()
         )
     })?;
+    let original_values = original
+        .map(|original| {
+            let declared = by_id.get(original).ok_or_else(|| {
+                format!("original '{}' of interface '{}' is not loaded", original.as_str(), interface.as_str())
+            })?;
+            octopus_policy::form_interface_policy_values(&declared.interface_policy.variables, &[&declared.interface_policy.values])
+        })
+        .transpose()?;
+    let boundary_extra = worker_layers
+        .iter()
+        .filter_map(|layer| layer.get(&exact.id).or_else(|| exact.copy_of.as_ref().and_then(|id| layer.get(id))))
+        .chain(original_values.as_ref())
+        .collect::<Vec<_>>();
     let ee_layers = if apply_ee_overrides {
         override_layers
             .iter()
-            .filter_map(|layer| layer.get(&exact.id))
+            .flat_map(|layer| {
+                [Some(&exact.id), exact.copy_of.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| layer.get(id))
+            })
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    let formed = octopus_policy::form_interface_policy(
+    let formed = octopus_policy::form_narrowed_interface_policy(
         &exact.interface_policy,
-        worker_layer.get(interface),
+        &boundary_extra,
         &ee_layers,
     )
     .map_err(|error| {

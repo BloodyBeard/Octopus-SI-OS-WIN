@@ -1983,13 +1983,14 @@ impl Runtime {
             .ok_or_else(|| changed("retained arrival run was removed".into()))?;
         let previous = run_record::RunRecord::from_bytes(&original.run_record.bytes)
             .map_err(|error| changed(error.to_string()))?;
-        if record.ee != original.ee || record.worker != original.worker
+        if record.worker != original.worker
             || record.trace != previous.trace
             || !record.active_checkpoints.contains(&original.checkpoint)
             || record.checkpoint(&original.checkpoint) != previous.checkpoint(&original.checkpoint) {
             return Err(changed("the original receiving checkpoint was removed or its contract changed".into()));
         }
         let mut current = original.clone();
+        current.ee = record.ee.clone();
         current.run_record = snapshot;
         Ok(current)
     }

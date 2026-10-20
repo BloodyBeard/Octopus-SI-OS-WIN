@@ -242,6 +242,7 @@ struct ProviderLedgerEvidenceIndex {
     session_metadata_poison: HashMap<(String, String), String>,
     context_metadata_poison: HashMap<(String, String, String), String>,
     latest_run_movement: HashMap<(String, String), u64>,
+    first_run_placements: HashMap<String, (u64, String)>,
     provider_run_arrivals: HashMap<(String, String, String), BTreeSet<u64>>,
     session_run_movements: HashMap<(String, String), BTreeSet<u64>>,
     session_provider_arrivals: HashMap<(String, String, String), BTreeSet<u64>>,
@@ -440,6 +441,7 @@ mod authoring_retry;
 mod failed_source;
 pub use failed_source::{payload_carries_session_context, FailedSourceHandoffError};
 mod writer_run;
+pub mod placement;
 pub use writer_run::{separate_writer_run, separate_owner_writer_run, owner_writer_binding, OwnerWriterEdit, OwnerWriterEvidence, WriterRunBinding};
 mod source_replay;
 mod source_settlement;
@@ -888,6 +890,7 @@ pub struct CheckedRunTransition {
     pub after: Vec<u8>,
     pub call: Movement,
     pub result: Movement,
+    pub placement: bool,
 }
 
 #[derive(Debug)]
@@ -1154,8 +1157,8 @@ fn checked_run_file_chain_with_reader(
     let original = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
     if let Some(after) = after {
         let target = RunRecord::from_bytes(after).map_err(|e| e.to_string())?;
-        if original.id != target.id || original.ee != target.ee || original.worker != target.worker {
-            return Err("checked authoring chain changed run, EE or worker".into());
+        if original.id != target.id || original.worker != target.worker {
+            return Err("checked authoring chain changed run or worker".into());
         }
     }
     validate_checked_run_writers(writers)?;
@@ -1170,6 +1173,7 @@ fn checked_run_file_chain_with_reader(
     let mut transitions = Vec::new();
     let mut uncertain = Vec::new();
     let mut observations = Vec::new();
+    let mut placement_candidates = Vec::new();
     let mut sequence = first_seq;
     loop {
         if before_seq.is_some_and(|end| sequence >= end) { break; }
@@ -1186,8 +1190,8 @@ fn checked_run_file_chain_with_reader(
                 .ok_or("checked historical outbound has no actual admission metadata")?;
             let runtime = metadata.runtime.as_ref().ok_or("checked historical outbound has no run coordinate")?;
             if runtime.run == original.id {
-                if runtime.ee != original.ee || runtime.worker != original.worker || metadata.verification_failure.is_some() {
-                    return Err("checked historical interval changed run scope or admitted failed evidence".into());
+                if runtime.worker != original.worker || metadata.verification_failure.is_some() {
+                    return Err("checked historical interval changed run worker or admitted failed evidence".into());
                 }
                 let hash = runtime.run_record_hash.as_deref().and_then(ContentHash::from_hex)
                     .ok_or("checked historical outbound has no pinned snapshot")?;
@@ -1196,12 +1200,17 @@ fn checked_run_file_chain_with_reader(
         }
         let source_writer = writers.iter().find(|w| movement.from == Endpoint::Interface(w.source.clone()) && movement.to == Endpoint::Interface(w.door.clone()));
         let result_writer = writers.iter().find(|w| movement.from == Endpoint::Interface(w.door.clone()) && movement.to == Endpoint::Interface(w.owner.clone()));
-        if source_writer.is_none() && result_writer.is_none() { continue; }
+        if source_writer.is_none() && result_writer.is_none() {
+            if selected_install.is_none() && movement.artifact.is_some() {
+                placement_candidates.push(movement);
+            }
+            continue;
+        }
         if source_writer.is_some() && observed_sequence.is_some_and(|sequence| movement.seq.0 >= sequence) { continue; }
         let metadata = movement.invocation_metadata.as_ref().and_then(|m| m.invocation()).ok_or("checked authoring evidence has no invocation metadata")?;
         let runtime = metadata.runtime.as_ref().ok_or("checked authoring evidence has no runtime coordinate")?;
-        if runtime.ee != original.ee || runtime.worker != original.worker || metadata.verification_failure.is_some() {
-            return Err("checked authoring evidence has another scope or a verification failure".into());
+        if runtime.worker != original.worker || metadata.verification_failure.is_some() {
+            return Err("checked authoring evidence has another worker or a verification failure".into());
         }
         let artifact = movement.artifact.as_ref().ok_or("checked authoring movement has no artifact")?;
         let (manifest, payload) = reader.artifact(artifact)?;
@@ -1209,7 +1218,7 @@ fn checked_run_file_chain_with_reader(
         let snapshot = reader.snapshot(&snapshot_hash)?;
         if ContentHash::of_bytes(&snapshot) != snapshot_hash { return Err("checked authoring snapshot failed integrity".into()); }
         let snapshot_record = RunRecord::from_bytes(&snapshot).map_err(|e| e.to_string())?;
-        if snapshot_record.id != runtime.run || snapshot_record.ee != original.ee || snapshot_record.worker != original.worker {
+        if snapshot_record.id != runtime.run || snapshot_record.ee != runtime.ee || snapshot_record.worker != original.worker {
             return Err("checked authoring snapshot differs from its movement scope".into());
         }
         if let Some(writer) = source_writer {
@@ -1248,7 +1257,7 @@ fn checked_run_file_chain_with_reader(
                 let effect = ordered.checked_result(writer,metadata,&snapshot,&result,reader.max_payload_bytes())?;
                 if effect == writer_run::OrderedTargetEffect::Refused { continue; }
                 let prospective = apply_run_json_patch(&candidate.before,&candidate.arguments.patch,&candidate.arguments.expected_after_hash, candidate.arguments.json_format)?.into_bytes();
-                let transition = CheckedRunTransition {writer:candidate.writer,before:candidate.before,after:prospective,call:candidate.call,result:movement};
+                let transition = CheckedRunTransition {writer:candidate.writer,before:candidate.before,after:prospective,call:candidate.call,result:movement,placement:false};
                 if effect == writer_run::OrderedTargetEffect::Uncertain {
                     if uncertain.len() >= 1024 { return Err("checked uncertain transitions exceed their evidence bound".into()); }
                     uncertain.push(transition);
@@ -1285,7 +1294,7 @@ fn checked_run_file_chain_with_reader(
                 || !snapshot_record.active_checkpoints.contains(&checkpoint.id) || candidate.call.seq >= movement.seq {
                 return Err("checked run result differs from its exact admitted write and prospective snapshot".into());
             }
-            let transition = CheckedRunTransition { writer: candidate.writer, before: candidate.before, after: prospective, call: candidate.call, result: movement };
+            let transition = CheckedRunTransition { writer: candidate.writer, before: candidate.before, after: prospective, call: candidate.call, result: movement, placement: false };
             if transitions.len() >= 1024 { return Err("checked authoring transitions exceed their evidence bound".into()); }
             generated_artifacts::validate_generated_transition(reader,&transition)?;
             input_artifacts::validate_input_transition(reader, &transition)?;
@@ -1319,7 +1328,17 @@ fn checked_run_file_chain_with_reader(
     let mut chain = Vec::new();
     let mut previous_call = after_seq;
     let mut connection_versions = BTreeMap::new();
+    let mut placement_edits: Option<Vec<placement::ProvenWrite>> = None;
     while hash != end {
+        if !by_before.contains_key(&hash) && !placement_candidates.is_empty() {
+            let edits = match &mut placement_edits {
+                Some(edits) => edits,
+                None => placement_edits.insert(placement::proven_writes(reader, path, &original.id, &placement_candidates)?),
+            };
+            if let Some(transition) = placement::transition_from(edits, &current, previous_call)? {
+                by_before.insert(hash.clone(), transition);
+            }
+        }
         let Some(transition) = by_before.remove(&hash) else {
             if let Some(config) = connection_config {
                 // These are validated endpoint bytes, never synthetic writer
@@ -1495,7 +1514,7 @@ pub fn checked_declared_run_install(
     }
     let transition = checked_run_install(&mut reader, path, install, &writers)?;
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
-    if before.id != record.id || before.ee != record.ee || before.worker != record.worker {
+    if before.id != record.id || before.worker != record.worker {
         return Err("checked installation changed its declared target scope".into());
     }
     validate_checked_owner_transition(&transition)?;
@@ -1662,8 +1681,8 @@ fn detached_writer_starts_at(
     let snapshot = reader.snapshot(&hash)?;
     if ContentHash::of_bytes(&snapshot) != hash { return Err("observed writer snapshot failed integrity".into()); }
     let declaration = RunRecord::from_bytes(&snapshot).map_err(|error| error.to_string())?;
-    if declaration.id != runtime.run || declaration.ee != record.ee || declaration.worker != record.worker
-        || runtime.ee != record.ee || runtime.worker != record.worker || runtime.interface != writer.door {
+    if declaration.id != runtime.run || declaration.ee != runtime.ee || declaration.worker != record.worker
+        || runtime.worker != record.worker || runtime.interface != writer.door {
         return Err("observed writer snapshot changed its exact admitted scope".into());
     }
     let (preimage, _) = ordered.checked_call(writer, &snapshot, path, reader.max_payload_bytes())?;
@@ -1905,15 +1924,17 @@ pub fn validate_unchanged_admitted_checkpoint(before: &[u8], after: &[u8], check
     let before = RunRecord::from_bytes(before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(after).map_err(|e| e.to_string())?;
     let original = before.checkpoint(checkpoint).ok_or("shared run input lost its original checkpoint")?;
-    if before.id != after.id || before.ee != after.ee || before.worker != after.worker || after.checkpoint(checkpoint) != Some(original) || !after.active_checkpoints.contains(checkpoint) {
+    if before.id != after.id || before.worker != after.worker || after.checkpoint(checkpoint) != Some(original) || !after.active_checkpoints.contains(checkpoint) {
         return Err("shared run changed the exact admitted checkpoint before consumption".into());
     }
     Ok(())
 }
 
 pub fn validate_checked_provider_transition(transition: &CheckedRunTransition) -> Result<(), String> {
+    if transition.placement { return placement::validate_placement_change(&transition.before, &transition.after); }
     let before = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
     let after = RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?;
+    if before.ee != after.ee { return Err("a run's own writer cannot change its placement".into()); }
     let provider = &transition.writer.owner;
     if result_inputs::definition_transition(transition)? { return Ok(()); }
     source_settlement::validate_checked_transition(&before, &after, &transition.writer)?;
@@ -2077,7 +2098,7 @@ pub fn checked_declared_run_snapshot(
     for transition in &transitions { validate_checked_owner_transition(transition)?; }
     let after = transitions.last().map_or_else(|| before.to_vec(), |transition| transition.after.clone());
     let target = RunRecord::from_bytes(&after).map_err(|error| error.to_string())?;
-    if ContentHash::of_bytes(&after) != hash || target.id != record.id || target.ee != record.ee || target.worker != record.worker {
+    if ContentHash::of_bytes(&after) != hash || target.id != record.id || target.worker != record.worker {
         return Err("observed run snapshot differs from its exact checked target scope".into());
     }
     Ok(after)
@@ -2132,8 +2153,8 @@ fn validate_verified_input_transition(reader: &mut impl CheckedRunEvidenceReader
     let matches = prior.iter().filter(|cp| checkpoint_record_matches_template(checkpoint, cp, &before.id)).collect::<Vec<_>>();
     if source.kind != MovementKind::InterfaceOutbound || source.seq.0 >= transition.call.seq.0
         || source.to != Endpoint::Interface(transition.writer.owner.clone()) || runtime.interface != transition.writer.owner
-        || runtime.run != before.id || runtime.worker != before.worker || runtime.ee != before.ee
-        || pinned.id != before.id || pinned.worker != before.worker || pinned.ee != before.ee
+        || runtime.run != before.id || runtime.worker != before.worker || runtime.ee != pinned.ee
+        || pinned.id != before.id || pinned.worker != before.worker
         || !pinned.active_checkpoints.contains(&runtime.checkpoint) || !before.active_checkpoints.contains(&runtime.checkpoint)
         || before.checkpoint(&runtime.checkpoint) != Some(checkpoint) || runtime.epoch != checkpoint.epoch.0 || matches.len() != 1
         || metadata.verification_failure.is_some() || metadata.checkpoint_binding_policy.as_ref() != Some(&matches[0].binding_policy_snapshot())
@@ -2151,7 +2172,11 @@ fn validate_verified_input_transition(reader: &mut impl CheckedRunEvidenceReader
 }
 
 pub fn validate_checked_owner_transition(transition: &CheckedRunTransition) -> Result<(), String> {
+    if transition.placement { return placement::validate_placement_change(&transition.before, &transition.after); }
     let record = RunRecord::from_bytes(&transition.before).map_err(|e| e.to_string())?;
+    if record.ee != RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?.ee {
+        return Err("a run's own writer cannot change its placement".into());
+    }
     if record.interface_state.get(&transition.writer.owner).is_some_and(|state| state.contains_key(RUN_AUTHORING_BINDING)) {
         validate_declared_provider_writer(&record, &transition.writer)?;
         validate_declared_provider_writer(&RunRecord::from_bytes(&transition.after).map_err(|e| e.to_string())?, &transition.writer)?;
@@ -3620,7 +3645,7 @@ impl CheckedRunEdit {
                 .and_then(|m| m.invocation())
                 != Some(metadata)
             || runtime.run != record.id
-            || runtime.ee != record.ee
+            || runtime.ee != RunRecord::from_bytes(installed).map_err(|e| e.to_string())?.ee
             || runtime.worker != record.worker
             || runtime.interface != *target
             || runtime.checkpoint != *checkpoint
@@ -3765,7 +3790,7 @@ fn revision_attempt_generations(
     let path = ctx.root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
         .join(format!("{}.json", record.id));
     let chain = checked_selected_run_advance(ctx, &path, &before, current, pending.source_movement_seq, &original_config)?;
-    for transition in chain.iter().rev().filter(|transition| transition.writer.owner == config.provider_interface) {
+    for transition in chain.iter().rev().filter(|transition| !transition.placement && transition.writer.owner == config.provider_interface) {
         if !input_revision::checked_revision(transition) { break; }
         let prior = RunRecord::from_bytes(&transition.before).map_err(|error| error.to_string())?;
         generations.insert(optional_u64(prior.interface_state.get(&config.provider_interface)
@@ -3781,13 +3806,13 @@ fn validate_revision_attempt_predecessor(
 ) -> Result<(), String> {
     let original = RunRecord::from_bytes(before).map_err(|error| error.to_string())?;
     let record = RunRecord::from_bytes(current).map_err(|error| error.to_string())?;
-    if original.id != record.id || original.worker != record.worker || original.ee != record.ee || original.trace != record.trace {
+    if original.id != record.id || original.worker != record.worker || original.trace != record.trace {
         return Err("revision predecessor changed its original run identity".into());
     }
     let path = ctx.root_slot("run_records_root")?.canonicalize().map_err(|error| error.to_string())?
         .join(format!("{}.json", record.id));
     let chain = checked_selected_run_advance(ctx, &path, before, current, source, config)?;
-    let provider = chain.iter().filter(|transition| transition.writer.owner == config.provider_interface).collect::<Vec<_>>();
+    let provider = chain.iter().filter(|transition| !transition.placement && transition.writer.owner == config.provider_interface).collect::<Vec<_>>();
     if provider.is_empty() || provider.iter().any(|transition| !input_revision::checked_revision(transition)) {
         return Err("saved response has no exact input-revision predecessor proof".into());
     }
@@ -3838,7 +3863,6 @@ fn persisted_authoring_attempt(
             let before = pinned_run_record(ctx, &hash, "provider authoring attempt")?;
             if before.1.id != record.id
                 || before.1.worker != record.worker
-                || before.1.ee != record.ee
                 || before.1.trace != record.trace
                 || (generation == expected_generation && before.1.interface_state.get(&config.provider_interface)
                     != record.interface_state.get(&config.provider_interface))
@@ -3909,7 +3933,7 @@ fn persisted_authoring_attempt(
         if chain.is_empty()
             || chain
                 .iter()
-                .any(|transition| transition.writer.owner == config.provider_interface && !input_revision::checked_revision(transition))
+                .any(|transition| !transition.placement && transition.writer.owner == config.provider_interface && !input_revision::checked_revision(transition))
         {
             return Err("provider authoring retry changed its original intent or independent write evidence".into());
         }
@@ -4675,6 +4699,36 @@ impl ProviderHandoffSession {
             .lock()
             .map_err(|_| "provider handoff ledger index lock is poisoned".to_string())
     }
+
+    /// POLICY.md §5: a run's place changes only through a write by another run whose
+    /// grant covers its record. An input whose pinned record names any other place fails
+    /// closed while that edit stands; restoring the place heals the run.
+    pub fn validate_run_placement(
+        &self, ctx: &InterfaceLiftContext, run: &RunId, pinned_run_record: &[u8], source_movement_seq: u64,
+    ) -> Result<(), String> {
+        let record = RunRecord::from_bytes(pinned_run_record).map_err(|error| error.to_string())?;
+        if record.id != *run {
+            return Err(format!("provider input for run '{}' pins run '{}'", run.as_str(), record.id.as_str()));
+        }
+        let receipts = ctx.interface_var_dir().join("placements");
+        let proven = match placement::read_receipt(&receipts, run)? {
+            Some(proven) => Some(proven),
+            None => self.index()?.first_run_placement(run)?,
+        };
+        let Some((proven_seq, proven_ee)) = proven else { return Ok(()); };
+        if proven_ee == record.ee.as_str() {
+            return Ok(());
+        }
+        let limits = ctx.required_host_io_limits()?;
+        let evidence = CheckedRunEvidence {
+            movements_path: &ctx.movements_path, ledger_index_path: &ctx.ledger_index_path, blobs_dir: &ctx.blobs_dir,
+            max_control_frame_bytes: limits.max_control_frame_bytes, max_manifest_bytes: limits.max_manifest_bytes,
+            max_payload_bytes: limits.max_payload_bytes,
+        };
+        let path = ctx.root_slot("run_records_root")?.join(format!("{}.json", run.as_str()));
+        placement::prove_move(&evidence, &path, &record, &proven_ee, proven_seq, source_movement_seq)?;
+        placement::write_receipt(&receipts, run, &record.ee, source_movement_seq)
+    }
 }
 
 impl ProviderLedgerEvidenceIndex {
@@ -4695,6 +4749,7 @@ impl ProviderLedgerEvidenceIndex {
             session_metadata_poison: HashMap::new(),
             context_metadata_poison: HashMap::new(),
             latest_run_movement: HashMap::new(),
+            first_run_placements: HashMap::new(),
             provider_run_arrivals: HashMap::new(),
             session_run_movements: HashMap::new(),
             session_provider_arrivals: HashMap::new(),
@@ -4718,6 +4773,11 @@ impl ProviderLedgerEvidenceIndex {
         let mut index = Self::new(interface, movements_path, max_row_bytes);
         index.spotlight = LedgerSqliteReader::open(ledger_index_path).ok();
         index
+    }
+
+    fn first_run_placement(&mut self, run: &RunId) -> Result<Option<(u64, String)>, String> {
+        self.catch_up()?;
+        Ok(self.first_run_placements.get(run.as_str()).cloned())
     }
 
     fn catch_up(&mut self) -> Result<(), String> {
@@ -4960,6 +5020,9 @@ impl ProviderLedgerEvidenceIndex {
             ));
         }
         let run_key = runtime.run.as_str().to_string();
+        self.first_run_placements
+            .entry(run_key.clone())
+            .or_insert_with(|| (movement.seq.0, runtime.ee.as_str().to_string()));
         self.latest_run_movement
             .insert((artifact_key.clone(), run_key.clone()), movement.seq.0);
         self.session_run_movements
@@ -5963,7 +6026,7 @@ impl ProviderOutputHandoff {
         let added_outputs = output_connections::is_extension(&bound_topology, &current_topology);
         let revised_inputs = input_revision::is_revision(&bound_topology, &current_topology);
         let revised_payloads = coauthor_chain.iter().any(|transition| {
-            transition.writer.owner == config.provider_interface
+            !transition.placement && transition.writer.owner == config.provider_interface
                 && input_revision::validate_payload_revision(&transition.before, &transition.after, &transition.writer).is_ok()
         });
         let amended_capabilities = capability_amendment::checked_topology_advance(
@@ -7642,8 +7705,7 @@ impl ProviderOutputHandoff {
                     seeds.push(indexed_source_run_record(&self.ctx, &source, self.source_movement_seq)?);
                 }
                 for record in seeds {
-                    if record.id != current_record.id || record.ee != current_record.ee
-                        || record.worker != current_record.worker {
+                    if record.id != current_record.id || record.worker != current_record.worker {
                         return Err("failed context history changed run scope".into());
                     }
                     if let Some(pending) = persisted_pending_handoff(&record, &self.config.provider_interface)? {
@@ -7698,7 +7760,7 @@ impl ProviderOutputHandoff {
                 for (position, transition) in chain.iter().enumerate() {
                     let record = RunRecord::from_bytes(&transition.after).map_err(|error| error.to_string())?;
                     let next = persisted_pending_handoff(&record, &config.provider_interface)?;
-                    if transition.writer.owner == config.provider_interface && next.as_ref().is_some_and(|next| {
+                    if !transition.placement && transition.writer.owner == config.provider_interface && next.as_ref().is_some_and(|next| {
                         next.source_movement_seq == sequence && next.terminal && next.source_without_context
                     }) {
                         if pending.as_ref().is_some_and(|pending| Some(pending) != next.as_ref()) {
@@ -8498,7 +8560,7 @@ impl ProviderOutputHandoff {
                     .await?;
                     if chain.is_empty()
                         || chain.iter().any(|transition| {
-                            transition.writer.owner == self.config.provider_interface && !input_revision::checked_revision(transition)
+                            !transition.placement && transition.writer.owner == self.config.provider_interface && !input_revision::checked_revision(transition)
                         })
                     {
                         return Err(format!(
@@ -9966,7 +10028,6 @@ fn validate_retired_verified_input(
         .collect::<Vec<_>>();
     if pinned.id != initial_record.id
         || pinned.worker != initial_record.worker
-        || pinned.ee != initial_record.ee
         || !pinned.active_checkpoints.contains(&id)
         || checkpoint.epoch.0 != coordinate.epoch
         || candidates.len() != 1
@@ -18150,13 +18211,13 @@ mod tests {
         let mut call = ledger_row(100);
         call.invocation_metadata = Some(InvocationMetadata::new(GrantProjection { mark_outcomes:marks.iter().cloned().collect(), ..Default::default() }).into());
         for (before, after) in [(&initial, authored_request.content.as_bytes()), (&authored_request.content.as_bytes().to_vec(), authored_response.content.as_bytes())] {
-            let change = CheckedRunTransition {writer:writer.clone(),before:before.to_vec(),after:after.to_vec(),call:call.clone(),result:ledger_row(101)};
+            let change = CheckedRunTransition {writer:writer.clone(),before:before.to_vec(),after:after.to_vec(),call:call.clone(),result:ledger_row(101),placement:false};
             validate_checked_provider_transition(&change).unwrap();
             validate_verified_input_transition(&mut reader, &change).unwrap();
         }
         let mut wrong:serde_json::Value=serde_json::from_str(&authored_response.content).unwrap();
         wrong["interface_state"][provider.as_str()]["pending_handoff"]["source_movement_seq"]=serde_json::json!(0);
-        let forged=CheckedRunTransition {writer,before:authored_request.content.as_bytes().to_vec(),after:serde_json::to_vec(&wrong).unwrap(),call,result:ledger_row(101)};
+        let forged=CheckedRunTransition {writer,before:authored_request.content.as_bytes().to_vec(),after:serde_json::to_vec(&wrong).unwrap(),call,result:ledger_row(101),placement:false};
         assert!(validate_verified_input_transition(&mut reader, &forged).is_err());
         let session = ProviderHandoffSession::new(&handoff.ctx).unwrap();
         validate_retired_verified_input(

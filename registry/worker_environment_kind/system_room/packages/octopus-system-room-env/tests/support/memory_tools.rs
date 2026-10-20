@@ -64,7 +64,7 @@ impl Fixture {
             .validate(&arguments).map_err(|error| error.to_string())?;
         let effects = self.root.join("effects");
         let host = MemoryHost { collection: "artifact-memory-test", artifact_root: &self.artifacts, ee_instances_root: &self.ees,
-            effect_root: Some(&effects), maximum_bytes: 1024 * 1024 };
+            effect_root: Some(&effects), maximum_bytes: 1024 * 1024, observed_run: None, run_records_root: None };
         let call = ToolCall { tool_id: tool.into(), arguments, handler_config: descriptor.handler_config.clone() };
         execute(input, &call, &host).map(|result| result.body).map_err(|error| error.to_string())
     }

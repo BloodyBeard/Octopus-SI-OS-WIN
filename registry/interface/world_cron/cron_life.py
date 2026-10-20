@@ -2342,11 +2342,7 @@ def author_next_frontier(schedule, current):
         raise RuntimeError("scheduled run record must be a JSON object")
     template = schedule["topology"]
     run = schedule["run"]
-    if (
-        record.get("id") != run
-        or record.get("ee") != template.get("ee")
-        or record.get("worker") != template["worker"]
-    ):
+    if record.get("id") != run or record.get("worker") != template["worker"]:
         raise RuntimeError("scheduled run record identity drifted from its declared run template")
     states = record.get("interface_state")
     if not isinstance(states, dict):
@@ -2458,11 +2454,7 @@ def ensure_scheduled_run(schedule):
     if not isinstance(record, dict):
         raise RuntimeError(f"scheduled run record {run_path!r} is not a JSON object")
     template = schedule["run_template"]
-    if (
-        record.get("id") != schedule["run"]
-        or record.get("ee") != template["ee"]
-        or record.get("worker") != template["worker"]
-    ):
+    if record.get("id") != schedule["run"] or record.get("worker") != template["worker"]:
         raise RuntimeError(
             f"scheduled run record {run_path!r} identity conflicts with the declared run_template"
         )

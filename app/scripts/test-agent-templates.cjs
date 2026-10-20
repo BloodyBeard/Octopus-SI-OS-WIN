@@ -176,7 +176,7 @@ async function main(rootScope = false) {
     const clonedInterface = await readJson(path.join(interfaceRoot, created.workerInterfaceId, "interface.json"));
     const clonedPolicy = await readJson(path.join(interfaceRoot, created.workerInterfaceId, "policy.json"));
     const clonedClientTemplatePath = path.join(interfaceRoot, created.workerInterfaceId, "client_template.json");
-    assert.deepEqual(clonedInterface, { ...sourceInterface, id: created.workerInterfaceId });
+    assert.deepEqual(clonedInterface, { ...sourceInterface, id: created.workerInterfaceId, copy_of: sourceInterface.copy_of ?? sourceWorkerInterfaceId });
     assert.deepEqual(clonedPolicy, { ...sourcePolicy, id: created.workerInterfaceId });
     assert.deepEqual(await readJson(clonedClientTemplatePath), {
       schema_version: 1,
@@ -189,10 +189,10 @@ async function main(rootScope = false) {
       worker_environment_kinds: ["process_session"],
     });
     for (const file of [rootTemplatePath, projectTemplatePath]) {
-      assert.deepEqual((await readJson(file)).allowed_interfaces, [sourceWorkerInterfaceId, created.workerInterfaceId].sort());
+      assert.deepEqual((await readJson(file)).allowed_interfaces, [sourceWorkerInterfaceId]);
     }
     for (const file of [rootEePath, projectEePath]) {
-      assert.deepEqual((await readJson(file)).policy_narrowing.allowed_interfaces, [sourceWorkerInterfaceId, created.workerInterfaceId].sort());
+      assert.deepEqual((await readJson(file)).policy_narrowing.allowed_interfaces, [sourceWorkerInterfaceId]);
     }
     let catalog = await readClientAgentCatalog(octopusHomeRoot);
     assert.deepEqual(catalog.document.agents, [{

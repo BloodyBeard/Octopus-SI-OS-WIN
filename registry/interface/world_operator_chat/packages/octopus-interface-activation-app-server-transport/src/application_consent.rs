@@ -1059,7 +1059,7 @@ impl ConsentAuthority {
             && pending_original.source_movement_seq > 0 && pending_original.source_movement_seq <= 9_007_199_254_740_991
             && pending_original.run == original.record.id && pending_original.ee == original.record.ee
             && pending_original.worker == original.record.worker && original.record.id == request.record.id
-            && original.record.ee == request.record.ee && original.record.worker == request.record.worker
+            && original.record.worker == request.record.worker
             && original.movement.from == Endpoint::Interface(owner.clone())
             && original.movement.to == Endpoint::Interface(pending_original.door_interface.clone())
             && request.movement.from == original.movement.to && request_ref.movement_seq > original_ref.movement_seq

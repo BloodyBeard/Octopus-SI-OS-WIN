@@ -1711,7 +1711,7 @@ async function verifyTaskArchive(temporary) {
       worker_environment_id: writerEnvironmentId, run: writerId, ee: original.ee,
       worker: original.worker, door_interface: doorId, requires_release: false,
     } };
-    for (const invalid of [{ run: "another_run" }, { ee: "unrelated_ee" }, { requires_release: true }]) {
+    for (const invalid of [{ run: "another_run" }, { requires_release: true }]) {
       await fs.writeFile(formationFile, JSON.stringify({ ...writerFormation, formation: { ...writerFormation.formation, ...invalid } }));
       await assert.rejects(remove(), /does not belong to task|cannot be deleted before/);
     }
@@ -2309,7 +2309,7 @@ async function verifyFreshAgentRecipe(temporary) {
     const profile = JSON.parse(await fs.readFile(path.join(registry, "interface", result.homeInterfaceId, "octopus_os.json"))).task_authoring_profiles.find((row) => row.worker_choice_interface === agent.worker_interface);
     assert.deepEqual(profile.context_artifact_bindings.map((row) => row.id), sourcePolicy.role_artifacts);
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(registry, "interface", agent.worker_interface, "policy.json"))), { ...sourcePolicy, id: agent.worker_interface });
-    assert.deepEqual(JSON.parse(await fs.readFile(templatePath)).allowed_interfaces, [sourceInterface.id, agent.worker_interface].sort());
+    assert.deepEqual(JSON.parse(await fs.readFile(templatePath)).allowed_interfaces, [sourceInterface.id]);
     assert.equal(catalog.document.project_sources.find((row) => row.project_ee_id === agent.project_ee_id).source_worker_interface, request.task.workerInterfaceId);
     assert.equal((await fs.readdir(path.join(home, "state", "runs"))).length, 1);
   }

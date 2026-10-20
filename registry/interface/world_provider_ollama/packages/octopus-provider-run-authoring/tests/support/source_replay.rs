@@ -609,7 +609,8 @@ async fn outstanding_results_preserve_context_and_require_exact_consumption() {
     let profile = RunAuthoringProfile { file_write_tool:"write".into(), file_write_label:"tool.call".into(),
         file_write_result_label:"write.result".into(), result_timeout_ms:1000 };
     let mut created = CheckedRunTransition { writer:declared_provider_run_writer(&before, &"provider".into(), &profile).unwrap(),
-        before:initial.clone(), after:first.content.as_bytes().to_vec(), call:fixture.rows[2].clone(), result:fixture.rows[3].clone() };
+        before:initial.clone(), after:first.content.as_bytes().to_vec(), call:fixture.rows[2].clone(), result:fixture.rows[3].clone(),
+        placement: false, };
     let mut metadata = created.call.invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
     metadata.grant.mark_outcomes.clear();
     created.call.invocation_metadata = Some(metadata.into());
@@ -808,7 +809,8 @@ async fn outstanding_results_preserve_context_and_require_exact_consumption() {
     let bridge_cutoff = fixture.rows.len();
     fixture.install(&bridge);
     let transition = CheckedRunTransition { writer:declared_provider_run_writer(&record, &"provider".into(), &profile).unwrap(),
-        before:current.clone(), after:bridge.content.as_bytes().to_vec(), call:fixture.rows[bridge_cutoff].clone(), result:fixture.rows[bridge_cutoff+1].clone() };
+        before:current.clone(), after:bridge.content.as_bytes().to_vec(), call:fixture.rows[bridge_cutoff].clone(), result:fixture.rows[bridge_cutoff+1].clone(),
+        placement: false, };
     validate_checked_provider_transition(&transition).unwrap();
     {
         let evidence = CheckedRunEvidence { movements_path:&fixture.handoff.ctx.movements_path, ledger_index_path:&fixture.handoff.ctx.ledger_index_path,
@@ -1024,7 +1026,7 @@ fn payload_readiness_proves_completed_newer_inputs() {
         let selected = prepare_provider_input_payloads(h.run_path.clone(),&current,&writer,InterfaceId::new("room"),
             vec![artifact_identity(&selection,&h.var_dir).unwrap().artifact]).unwrap();
         let mut call = fixture.rows.last().unwrap().clone(); call.seq = octopus_ledger::Seq(cutoff);
-        let transition = CheckedRunTransition {writer:writer.clone(),before:current.clone(),after:selected.content.into_bytes(),call:call.clone(),result:call};
+        let transition = CheckedRunTransition {writer:writer.clone(),before:current.clone(),after:selected.content.into_bytes(),call:call.clone(),result:call,placement:false};
         let mut reader = FileCheckedRunReader::open(&evidence,None).unwrap();
         assert_eq!(input_revision::validate_rearm_evidence(&mut reader,&transition,&h.run_path).is_ok(),mode=="completed","historical {mode}");
         if mode == "completed" {

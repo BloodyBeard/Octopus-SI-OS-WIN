@@ -13,6 +13,7 @@
     "skill.upsert",
     "artifact.send",
     "file.write",
+    "file.write.cron_authoring",
     "memory.search",
     "memory.read",
     "memory.list",
@@ -55,7 +56,12 @@
     "system_interface_authoring",
     "system_worker_memory",
     "system_worker_memory_consolidation",
-    "system_room"
+    "system_room",
+    "system_worker_memory_observer",
+    "system_context_memory_projection",
+    "system_worker_cron",
+    "system_interface_authoring_cron",
+    "system_context_cron_authoring"
   ],
   "allowed_worker_environment_kinds": [
     "system_room"
@@ -64,6 +70,10 @@
   "allowed_child_ee_templates": [],
   "bootstrap_root": false,
   "allowed_root_slots": [
-    "run_records_root"
+    "run_records_root",
+    "registry_artifact_root",
+    "registry_interface_root",
+    "registry_tool_root",
+    "ee_instances_root"
   ]
 }

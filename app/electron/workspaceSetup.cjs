@@ -13,7 +13,7 @@ const {
   emptyClientAgentCatalog,
   parseClientAgentCatalog,
   readClientAgentCatalog,
-  appendExactAgentWorkerAdmission,
+  requireAgentSourceAdmission,
 } = require("./clientAgentCatalog.cjs");
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/;
@@ -1658,10 +1658,10 @@ async function admitWorkspaceAgentWorkers(roots, writes, agentPlans) {
       const templateId = requiredId(instance.value.template_name, "Agent admission template");
       const template = await read(path.join(roots.registryRoot, "ee_template", templateId, "ee_template.json"));
       if (template.value.id !== templateId) throw new Error("Agent admission template identity changed");
-      appendExactAgentWorkerAdmission(template.value, "allowed_interfaces", agent.sourceWorkerInterfaceId, agent.workerInterfaceId, `EE template '${templateId}'`);
+      requireAgentSourceAdmission(template.value, "allowed_interfaces", agent.sourceWorkerInterfaceId, `EE template '${templateId}'`);
       if (instance.value.policy_narrowing !== undefined) {
         if (!instance.value.policy_narrowing || typeof instance.value.policy_narrowing !== "object" || Array.isArray(instance.value.policy_narrowing)) throw new Error("Agent admission EE narrowing must be an object");
-        appendExactAgentWorkerAdmission(instance.value.policy_narrowing, "allowed_interfaces", agent.sourceWorkerInterfaceId, agent.workerInterfaceId, `EE '${eeId}' narrowing`);
+        requireAgentSourceAdmission(instance.value.policy_narrowing, "allowed_interfaces", agent.sourceWorkerInterfaceId, `EE '${eeId}' narrowing`);
       }
       eeId = instance.value.parent_ee_id;
       if (eeId !== null) requiredId(eeId, "Agent admission parent EE");

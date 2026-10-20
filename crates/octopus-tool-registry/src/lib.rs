@@ -184,6 +184,30 @@ pub struct ToolDescriptor {
     pub args_schema: serde_json::Value,
     #[serde(default)]
     pub is_world_effect: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<ToolDescriptorId>,
+}
+
+impl ToolDescriptor {
+    /// A copy is never wider than its original: the same executable, handler and
+    /// schema, run under an authority the original's authority covers.
+    pub fn never_wider_than(&self, original: &ToolDescriptor) -> bool {
+        let (copy, held) = (&self.process, &original.process);
+        copy.bin == held.bin
+            && copy.args == held.args
+            && copy.env == held.env
+            && copy.interrupted_effect_recovery == held.interrupted_effect_recovery
+            && copy.required_files.is_subset(&held.required_files)
+            && copy.inherit_env.is_subset(&held.inherit_env)
+            && copy.inherit_env_from_interface.is_subset(&held.inherit_env_from_interface)
+            && copy.coordinate_root_slots.is_subset(&held.coordinate_root_slots)
+            && copy.private_read_subpaths.is_subset(&held.private_read_subpaths)
+            && copy.authority.narrows(&held.authority)
+            && self.handler_config == original.handler_config
+            && self.args_schema == original.args_schema
+            && self.is_world_effect == original.is_world_effect
+            && self.supported_worker_environment_kinds.iter().all(|kind| original.supported_worker_environment_kinds.contains(kind))
+    }
 }
 
 fn default_tool_args_schema() -> serde_json::Value {
@@ -205,6 +229,17 @@ impl desc::Descriptor for ToolDescriptor {
                 "tool descriptor '{}' has an empty process.bin",
                 self.id
             ));
+        }
+        if let Some(original) = &self.copy_of {
+            if original.as_str().trim().is_empty()
+                || original.as_str().trim() != original.as_str()
+                || original == &self.id
+            {
+                return Err(format!(
+                    "tool descriptor '{}' declares an invalid copy_of '{}'",
+                    self.id, original
+                ));
+            }
         }
         self.process.authority.validate().map_err(|error| {
             format!(
@@ -397,6 +432,7 @@ mod tests {
             description: String::new(),
             args_schema: json!({"type": "object", "properties": {}}),
             is_world_effect: false,
+            copy_of: None,
         }
     }
 

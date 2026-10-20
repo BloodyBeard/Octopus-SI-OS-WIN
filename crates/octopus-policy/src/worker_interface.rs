@@ -1,7 +1,7 @@
 use octopus_descriptors::{ArtifactId, InterfaceId, MarkId, ToolId, WorkerEnvironmentKindId};
 use serde::{Deserialize, Serialize};
 
-use crate::{ArtifactVerb, CapSet, ContextGrant, DenySet, InterfacePolicyOverrideLayer};
+use crate::{ArtifactVerb, CapSet, ContextGrant, CopyLineage, DenySet, InterfacePolicyOverrideLayer};
 
 fn default_artifact_verbs() -> Vec<ArtifactVerb> {
     vec![ArtifactVerb::Read]
@@ -54,6 +54,26 @@ pub struct WorkerInterfacePolicy {
 }
 
 impl WorkerInterfacePolicy {
+    /// A worker copy admitted by its declared original is never wider than it: each
+    /// ceiling axis keeps only what the original's ceiling holds, by id or original.
+    pub fn narrowed_by(&self, original: &WorkerInterfacePolicy, lineage: &CopyLineage) -> WorkerInterfacePolicy {
+        let held = &original.ceiling;
+        let interfaces = CapSet::from_allowed(held.interfaces.iter().cloned());
+        let tools = CapSet::from_allowed(held.tools.iter().cloned());
+        let mut ceiling = self.ceiling.clone();
+        ceiling.interfaces.retain(|interface| lineage.admits_interface(&interfaces, interface));
+        ceiling.tools.retain(|tool| lineage.admits_tool(&tools, tool));
+        ceiling.wek.retain(|kind| held.wek.contains(kind));
+        ceiling.mark_outcomes.retain(|mark| held.mark_outcomes.contains(mark));
+        ceiling.artifact_verbs.retain(|verb| held.artifact_verbs.contains(verb));
+        for tool in &held.hard_blocked_tools {
+            if !ceiling.hard_blocked_tools.contains(tool) {
+                ceiling.hard_blocked_tools.push(tool.clone());
+            }
+        }
+        WorkerInterfacePolicy { id: self.id.clone(), ceiling, role_artifacts: self.role_artifacts.clone() }
+    }
+
     pub fn ceiling_grant(&self) -> ContextGrant {
         ContextGrant {
             tools: CapSet::from_allowed(self.ceiling.tools.iter().cloned()),

@@ -60,7 +60,8 @@ pub struct ContextProjectionConfig {
     pub observer_run: String,
     pub projection_run: String,
     pub source_run: String,
-    pub source_ee: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ee: Option<String>,
     pub source_worker_interface: String,
     pub source_provider_interface: String,
     pub source_client_interface: String,
@@ -111,7 +112,6 @@ impl ContextProjectionConfig {
             &self.observer_run,
             &self.projection_run,
             &self.source_run,
-            &self.source_ee,
             &self.source_worker_interface,
             &self.source_provider_interface,
             &self.source_client_interface,
@@ -121,6 +121,7 @@ impl ContextProjectionConfig {
             &self.publication_tool,
         ];
         if identities.into_iter().any(|id| !exact(id))
+            || self.source_ee.as_deref().is_some_and(|ee| !exact(ee))
             || self.task.trim().is_empty()
             || self.snapshot_labels.is_empty()
             || !self.snapshot_labels.contains(&self.terminal_label)
@@ -264,6 +265,7 @@ fn bounded_fields(payload: &Value, pointers: &[String], limit: usize) -> Result<
 
 pub fn project_context(
     config: &ContextProjectionConfig,
+    source_ee: &str,
     label: &str,
     carrier: &ArtifactRef,
     source_movement_seq: u64,
@@ -293,6 +295,7 @@ pub fn project_context(
     }
     project_window(
         config,
+        source_ee,
         carrier,
         source_movement_seq,
         &payload,
@@ -312,6 +315,7 @@ pub fn project_context(
 
 fn project_window(
     config: &ContextProjectionConfig,
+    source_ee: &str,
     carrier: &ArtifactRef,
     source_movement_seq: u64,
     payload: &Value,
@@ -386,7 +390,7 @@ fn project_window(
     loop {
         let mut output = json!({
             "schema_version":1,"label":OUTPUT_LABEL,
-            "source":{"run":config.source_run,"ee":config.source_ee,"worker_interface":config.source_worker_interface,
+            "source":{"run":config.source_run,"ee":source_ee,"worker_interface":config.source_worker_interface,
                 "provider_interface":config.source_provider_interface,"client_interface":config.source_client_interface,
                 "terminal_artifact":carrier,"projection_source_movement_seq":source_movement_seq,
                 "snapshot_parent":parent},
@@ -513,8 +517,8 @@ pub async fn process_admitted_input(
         .as_ref()
         .and_then(|m| m.runtime.as_ref())
         .ok_or("projection input has no admitted runtime evidence")?;
-    if runtime.run.as_str() != config.projection_run || runtime.ee.as_str() != config.source_ee {
-        return Err("projection movement differs from its exact bound source relay/run/EE".into());
+    if runtime.run.as_str() != config.projection_run {
+        return Err("projection movement differs from its exact bound projection run".into());
     }
     let pinned = ctx.pinned_run_record_bytes(&envelope)?;
     let handoff = session
@@ -556,13 +560,12 @@ pub async fn process_admitted_input(
     }) {
         let scope = SnapshotSourceScope {
             run: config.observer_run.clone(),
-            ee: config.source_ee.clone(),
             worker: outcome.worker_interface.clone(),
             provider: outcome.provider_interface.clone(),
             client: outcome.experience_interface.clone(),
             relay: outcome.relay_interface.clone(),
         };
-        let source_seq = verify_terminal_source(
+        let (source_seq, _) = verify_terminal_source(
             ctx,
             movement,
             &envelope.artifact,
@@ -594,10 +597,10 @@ pub async fn process_admitted_input(
             .payload
             .get("source")
             .ok_or("outcome experience input has no source scope")?;
-        if source.get("run").and_then(Value::as_str) != Some(config.source_run.as_str())
-            || source.get("ee").and_then(Value::as_str) != Some(config.source_ee.as_str())
-        {
-            return Err("outcome experience input differs from its exact source run/EE".into());
+        let observed_ee = source.get("ee").and_then(Value::as_str).filter(|ee| exact(ee))
+            .ok_or("outcome experience input has no observed EE")?;
+        if source.get("run").and_then(Value::as_str) != Some(config.source_run.as_str()) {
+            return Err("outcome experience input differs from its exact source run".into());
         }
         let mut evidence = Vec::new();
         let mut omitted = Vec::new();
@@ -624,7 +627,7 @@ pub async fn process_admitted_input(
         )
         .map_err(|e| e.to_string())?;
         let output = json!({"schema_version":1,"label":OUTCOME_LABEL,
-                    "source":{"run":config.source_run,"ee":config.source_ee,"observer_run":config.observer_run,
+                    "source":{"run":config.source_run,"ee":observed_ee,"observer_run":config.observer_run,
                         "provider_interface":outcome.provider_interface,"terminal_artifact":envelope.artifact,
                         "terminal_source_movement_seq":source_seq},
                     "experience":{"source_artifact":selected.source_artifact,"source_movement_seq":selected.source_movement_seq},
@@ -643,13 +646,12 @@ pub async fn process_admitted_input(
         }
         let scope = SnapshotSourceScope {
             run: config.source_run.clone(),
-            ee: config.source_ee.clone(),
             worker: config.source_worker_interface.clone(),
             provider: config.source_provider_interface.clone(),
             client: config.source_client_interface.clone(),
             relay: config.source_relay_interface.clone(),
         };
-        let source_seq = verify_terminal_source(
+        let (source_seq, source_ee) = verify_terminal_source(
             ctx,
             movement,
             &envelope.artifact,
@@ -706,6 +708,7 @@ pub async fn process_admitted_input(
             .map_err(|e| e.to_string())?;
         let mut output = project_window(
             &config,
+            &source_ee,
             &envelope.artifact,
             movement.seq.0,
             &payload,

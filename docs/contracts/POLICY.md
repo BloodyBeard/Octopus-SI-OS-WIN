@@ -228,6 +228,15 @@ gate runs before any grant exists: that pin must be inside the interface
 allowance of every EE layer in the run's chain. A run cannot lift itself above
 its place by claiming a pin its environment does not permit.
 
+Most interfaces and tools a task uses are private copies. A copy declares the
+descriptor it was copied from (`copy_of`), and an allowance admits a copy by
+its own id or by that original; a hard block on an original reaches every
+declared copy. A copy admitted by its original is never wider than it: the
+original must exist, a worker copy's ceiling is intersected with the
+original's, an interface copy's policy is formed together with the original's,
+and a tool copy counts as its original only while its executable, handler and
+schema match and its authority stays within the original's.
+
 Who *initiated* the run is not an input. A narrow initiator may legitimately
 create a run more capable than itself - a run with few tools can open a coding environment, and a capable coder
 runs inside it. There is no
@@ -352,6 +361,18 @@ A run may edit its own bindings only through a granted file tool whose room
 covers its run record. The next arrival re-forms the grant: writing a binding
 cannot widen the worker ceiling or the EE chain. Reaching an interface still
 requires an authored binding that survives formation.
+
+A run's place is the one field `ee` in its record. Another run whose formed
+grant covers the record moves it with an ordinary file write that changes only
+that field; the ledger proves the edit, the run's provider adopts it, and each
+arrival forms its grant in the place the record names at that moment. A run
+never changes its own place. The provider proves the place on every input; an
+edit made outside Octopus, or by the run itself, is unproven, so each turn
+fails with a clear error while it stands, and restoring the proven place heals
+the run; the failed turns leave nothing that outlives the restore. A room over
+run records already lets its holder create runs in any EE, so moving runs adds
+no new way to lift oneself; an EE's root slots decide which runs may hold such
+a room.
 
 Supported operations belong to the interface's descriptor and code, not a
 kernel method vocabulary. Return and escalation paths are authored bindings;

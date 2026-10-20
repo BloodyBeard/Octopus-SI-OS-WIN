@@ -131,7 +131,7 @@ fn validate_source(reader: &mut impl CheckedRunEvidenceReader, record: &RunRecor
     let runtime = metadata.runtime.as_ref().ok_or("withdrawal source has no runtime coordinate")?;
     if movement.seq.0 != seq || movement.kind != MovementKind::InterfaceOutbound
         || movement.to != Endpoint::Interface(provider.clone()) || movement.artifact.as_ref() != Some(reference)
-        || runtime.run != record.id || runtime.ee != record.ee || runtime.worker != record.worker
+        || runtime.run != record.id || runtime.worker != record.worker
         || runtime.interface != *provider || metadata.verification_failure.is_some()
         || !metadata.checkpoint_admission.as_ref().is_some_and(|admission| admission.complete)
     { return Err("withdrawal changed its exact admitted source coordinate".into()); }

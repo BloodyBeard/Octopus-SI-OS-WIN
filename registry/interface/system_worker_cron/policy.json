@@ -3,6 +3,8 @@
   "ceiling": {
     "interfaces": [
       "world_cron",
+      "world_memory_cron",
+      "world_system_review",
       "system_context",
       "system_context_cron_authoring",
       "system_interface_authoring",

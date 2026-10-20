@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "driver.system_room",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "product_kind": "driver",
   "product_id": "system_room",
   "release_status": "optional",

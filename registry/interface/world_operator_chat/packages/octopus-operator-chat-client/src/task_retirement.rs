@@ -435,7 +435,7 @@ fn record_interfaces(record: &Value, depth: usize) -> Result<BTreeSet<String>, S
         }
         if let Some(writer) = state.pointer("/run_authoring_binding/writer_run").or_else(|| state.get("writer_run")) {
             let initial = &writer["initial_record"];
-            if initial["id"] != writer["run"] || initial["ee"] != record["ee"] || initial["worker"] != record["worker"]
+            if initial["id"] != writer["run"] || initial["worker"] != record["worker"]
                 || initial["interface_state"][owner]["file_writer_target"]["run"] != record["id"]
             { return Err("retirement private writer changed its declared target".into()); }
             ids.extend(record_interfaces(initial, depth + 1)?);
@@ -494,7 +494,7 @@ impl RetirementDirectoryEvidence {
         if let [(owner, declaration)] = declarations.as_slice() {
             let d = *declaration;
             if owner.as_str() != selected.provider_interface.as_str() || d["schema_version"] != 1
-                || d["source_run"] != source["id"] || d["source_worker_interface"] != source["worker"] || d["ee"] != source["ee"]
+                || d["source_run"] != source["id"] || d["source_worker_interface"] != source["worker"]
                 || d["source_provider_interface"].as_str() != Some(owner.as_str()) || d["source_client_interface"].as_str() != client.as_deref()
             { return Err("retirement maintenance inventory changed its accepted source".into()); }
             let ownership = &d["lifecycle_ownership"];
@@ -516,8 +516,8 @@ impl RetirementDirectoryEvidence {
                 let current = records.get(id).ok_or("retirement companion is outside the saved original selection")?;
                 let row = context.selection.records.iter().find(|row| row.run.as_str() == id).ok_or("retirement companion is not selected")?;
                 if serde_json::from_str::<Value>(bytes).map_err(|error| error.to_string())? != *initial
-                    || initial["id"] != declaration["run"] || initial["ee"] != source["ee"] || initial["worker"] != declaration["worker_interface"]
-                    || current["ee"] != initial["ee"] || current["worker"] != initial["worker"] || row.role != role
+                    || initial["id"] != declaration["run"] || initial["worker"] != declaration["worker_interface"]
+                    || current["worker"] != initial["worker"] || row.role != role
                     || row.provider_interface.as_str() != provider || initial["interface_state"][provider]["run_authoring_binding"].is_null()
                     || current["interface_state"][provider]["run_authoring_binding"] != initial["interface_state"][provider]["run_authoring_binding"]
                     || !record_interfaces(current, 0)?.is_subset(&companions)
@@ -585,8 +585,8 @@ impl RetirementDirectoryEvidence {
         let run = self.records.get(&formation.run).ok_or("retirement worker environment belongs to an unselected run")?;
         if record.lifecycle != octopus_worker_env::WorkerEnvironmentLifecycle::Released
             || formation.worker_environment_id.as_str() != *id || formation.door_interface.as_str() != *door
-            || run["ee"].as_str() != Some(formation.ee.as_str()) || run["worker"].as_str() != Some(formation.worker.as_str())
-        { return Err("retirement worker environment is unreleased or has a different run/EE/worker/door".into()); }
+            || run["worker"].as_str() != Some(formation.worker.as_str())
+        { return Err("retirement worker environment is unreleased or has a different run/worker/door".into()); }
         Ok(file)
     }
 

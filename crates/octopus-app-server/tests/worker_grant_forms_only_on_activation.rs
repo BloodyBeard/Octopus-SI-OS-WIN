@@ -114,6 +114,7 @@ fn form_descriptor_worker_grant(embedded: &EmbeddedRuntime) -> FormedPolicy {
         &embedded.existence_ee_id,
         &embedded.formation_source_hashes,
         &authored.as_bindings(),
+        &octopus_policy::CopyLineage::default(),
     )
     .expect("worker run policy forms from the interface pin and the loaded EE root")
 }
@@ -159,6 +160,7 @@ async fn context_interfaces_are_exactly_the_pinned_doors_not_the_whole_ceiling()
         &embedded.existence_ee_id,
         &embedded.formation_source_hashes,
         &full.as_bindings(),
+        &octopus_policy::CopyLineage::default(),
     )
     .expect("authoring the whole ceiling forms the ceiling ∩ EE reach")
     .context
@@ -177,6 +179,7 @@ async fn context_interfaces_are_exactly_the_pinned_doors_not_the_whole_ceiling()
         &embedded.existence_ee_id,
         &embedded.formation_source_hashes,
         &authored.as_bindings(),
+        &octopus_policy::CopyLineage::default(),
     )
     .expect("authoring a single pinned door forms");
 
@@ -405,6 +408,7 @@ async fn a_non_narrowing_ee_layer_does_not_clamp_the_worker_pin() {
         &operator_ee,
         &embedded.formation_source_hashes,
         &authored.as_bindings(),
+        &octopus_policy::CopyLineage::default(),
     )
     .expect("operator_interaction has a descriptor-authored non-narrowing interface layer");
     assert!(

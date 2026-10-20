@@ -4644,7 +4644,7 @@ pub(crate) fn recovered_tool_handoff_receipt(
     }
     let record = octopus_runtime::run_record::RunRecord::from_bytes(current_record)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-    if record.id != runtime.run || record.ee != runtime.ee || record.worker != runtime.worker
+    if record.id != runtime.run || record.worker != runtime.worker
         || record.interface_state.get(&runtime.interface).and_then(|state| state.get("context_generation"))
             .and_then(serde_json::Value::as_u64) != Some(state.context_generation)
     {
@@ -4717,7 +4717,7 @@ pub(crate) fn duplicate_tool_result_receipt(
     }
     let record = octopus_runtime::run_record::RunRecord::from_bytes(current_record)
         .map_err(|error| InterfaceDriverError::Protocol(error.to_string()))?;
-    if record.id != runtime.run || record.ee != runtime.ee || record.worker != runtime.worker
+    if record.id != runtime.run || record.worker != runtime.worker
         || record.interface_state.get(&runtime.interface).and_then(|state| state.get("context_generation"))
             .and_then(serde_json::Value::as_u64) != Some(state.context_generation)
     {
@@ -10520,7 +10520,7 @@ impl CodexAppServerInterfaceDriver {
                                 };
                                 let current = octopus_runtime::run_record::RunRecord::from_bytes(&current_bytes)
                                     .map_err(|error| InterfaceDriverError::FailedClosed(error.to_string()))?;
-                                if current.id != native.current_record.id || current.ee != native.current_record.ee
+                                if current.id != native.current_record.id
                                     || current.worker != native.current_record.worker
                                 {
                                     return Err(InterfaceDriverError::FailedClosed("checked native planning read changed run identity".into()));

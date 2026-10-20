@@ -150,7 +150,10 @@ An interface addresses its own executable as `owner://packages/...` and
 another interface's as `interface://<source-id>/packages/...`. The import
 creates no shared identity, no family admission, and no policy surface. It is
 implementation reuse only. Every folder still carries its own complete JSON and
-is named by exact id in the policy that admits it.
+is named by exact id in the policy that admits it, with one exception: a
+private copy may declare `copy_of`, the folder it was copied from, and policy
+that names that original admits the copy, formed no wider than the original
+(see [Policy](POLICY.md)).
 
 A new executable instance declares its own `life.json` and complete descriptor
 and configuration. It may import another owner's executable explicitly, but

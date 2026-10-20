@@ -6,8 +6,8 @@ use octopus_descriptors::{
 use octopus_ee::EeTree;
 use octopus_interface_projection::{InterfaceToolOwnerMap, admissible_interface_tools};
 use octopus_policy::{
-    ArtifactAccess, CapSet, ContextGrant, FormationPin, FormedPolicy, PolicyLayer,
-    WorkerInterfacePolicy, form_policy,
+    ArtifactAccess, CapSet, ContextGrant, CopyLineage, FormationPin, FormedPolicy, PolicyLayer,
+    WorkerInterfacePolicy, form_policy_with_lineage,
 };
 
 #[derive(Debug)]
@@ -138,6 +138,7 @@ pub fn form_worker_run_policy(
     ee_id: &EeId,
     formation_source_hashes: &BTreeMap<DescriptorName, DescriptorHash>,
     authored: &AuthoredBindings<'_>,
+    lineage: &CopyLineage,
 ) -> Result<FormedPolicy, WorkerPolicyError> {
     let ceiling: ContextGrant = policy.ceiling_grant();
 
@@ -150,7 +151,7 @@ pub fn form_worker_run_policy(
 
     for layer in &ee_layers {
         if let Some(interfaces) = &layer.interfaces {
-            if !interfaces.contains(worker) {
+            if !lineage.admits_interface(interfaces, worker) {
                 return Err(WorkerPolicyError::WorkerNotAdmittedByEeChain {
                     worker: worker.as_str().to_string(),
                     ee: ee_id.as_str().to_string(),
@@ -217,7 +218,7 @@ pub fn form_worker_run_policy(
             ..Default::default()
         }]
     };
-    let mut formed = form_policy(ceiling, &ee_layers, &binding_layers, pin);
+    let mut formed = form_policy_with_lineage(ceiling, &ee_layers, &binding_layers, pin, lineage);
     for tool in formed.context.tools.iter() {
         let name = tool_descriptor_source_name(tool);
         if let Some(hash) = formation_source_hashes.get(&name) {

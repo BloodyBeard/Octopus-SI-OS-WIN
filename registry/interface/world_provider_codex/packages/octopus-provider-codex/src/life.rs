@@ -3706,7 +3706,7 @@ async fn checked_interrupted_result_continuity(
     }
     let runtime = input.runtime().map_err(|error| error.to_string())?;
     let result_runtime = result.runtime().ok_or("interrupted release result has no runtime coordinates")?;
-    if result_runtime.ee != runtime.ee || result_runtime.worker != runtime.worker {
+    if result_runtime.run != runtime.run || result_runtime.worker != runtime.worker {
         return Err("interrupted release result crossed its admitted run scope".into());
     }
     validate_artifact_admission(ctx, run, result_source.movement_seq, closure)?;
@@ -5203,6 +5203,13 @@ async fn drive_turn_with_retries_inner(
             return Ok(());
         }
     };
+    if let Err(error) = handoff_session.validate_run_placement(ctx, run, &pinned_run_record, turn.seq) {
+        let message = format!("codex turn stopped before it began (movement seq {}): {error}", turn.seq);
+        hand_failure_into_standing_route(ctx, run, turn.seq, &message).await
+            .map_err(|unreported| format!("{message}; {unreported}"))?;
+        control.finish();
+        return Ok(());
+    }
     let handoff = match wait_for_provider_handoff(
         ctx,
         descriptor,

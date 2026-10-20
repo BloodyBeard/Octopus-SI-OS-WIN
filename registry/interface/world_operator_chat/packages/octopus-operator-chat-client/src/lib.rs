@@ -495,8 +495,10 @@ pub fn plan_operator_chat_topology(
     request: &OperatorChatPlanRequest,
 ) -> Result<OperatorChatPlan, String> {
     let plan = plan_operator_chat_topology_files(request, false)?;
+    let planned = plan.interface_writes.iter().collect::<Vec<_>>();
+    let lineage = run_composition::planned_copy_lineage(&request.registry_root, &plan.required_interface_ids, &plan.required_tool_ids, &planned)?;
     validate_ee_capability_allowances(&request.registry_root, &plan.ee_template_chain.iter().map(|id|octopus_descriptors::EeTemplateId::new(id)).collect::<Vec<_>>(),
-        &plan.required_interface_ids, &plan.required_tool_ids)?;
+        &plan.required_interface_ids, &plan.required_tool_ids, &lineage)?;
     Ok(plan)
 }
 
@@ -2535,7 +2537,7 @@ fn plan_independent_code_mode_authoring(
         if descriptor.interface.as_str() != owner.recipe.authoring_room {
             return Err("owner file tool belongs to another door".into());
         }
-        descriptor.id = ToolDescriptorId::new(&owner.authoring_tool);
+        copy_tool_descriptor(&mut descriptor, &owner.authoring_tool);
         descriptor.interface = InterfaceId::new(&owner.authoring_environment);
         narrow_run_authoring_tool_authority(&mut descriptor)?;
         let content = pretty_json(&serde_json::to_value(&descriptor).map_err(|e| e.to_string())?)?;
@@ -3054,7 +3056,7 @@ fn planned_tool_descriptor(
             source_interface_id.as_str()
         ));
     }
-    descriptor.id = ToolDescriptorId::new(private_tool_id);
+    copy_tool_descriptor(&mut descriptor, private_tool_id);
     descriptor.interface = InterfaceId::new(exact_door);
     if let Some(owner) = identity.code_mode_owners.get(source_interface_id.as_str()) {
         if let Some(description) = owner.recipe.tool_descriptions.get(base_tool_id) {
@@ -3091,7 +3093,7 @@ fn plan_private_tools(
         if writer.interface.as_str() != config.authoring.room_interface {
             return Err("continuation writer belongs to another room".into());
         }
-        writer.id = ToolDescriptorId::new(&identity.authoring_tool_id);
+        copy_tool_descriptor(&mut writer, &identity.authoring_tool_id);
         writer.interface = InterfaceId::new(&identity.authoring_environment_id);
         narrow_run_authoring_tool_authority(&mut writer)?;
         descriptors.push(writer);
@@ -3892,9 +3894,7 @@ fn validate_octopus_os_authoring_profile(
         "authoring_profile.worker_choice_interface",
     )?;
     if let Some(identity) = identity {
-        if profile.ee_id != identity.ee_id
-            || profile.worker_choice_interface != identity.worker_choice_interface
-        {
+        if profile.worker_choice_interface != identity.worker_choice_interface {
             return Err(
                 "Octopus OS authoring profile conflicts with its live client identity".to_string(),
             );
@@ -4115,16 +4115,9 @@ fn ensure_external_interfaces_admitted_by_ee(
     topology: &FormedCapabilityTopology,
     interfaces: &[String],
 ) -> Result<(), String> {
-    let Some(allowance) = topology.ee_interface_allowance.as_ref() else {
-        return Ok(());
-    };
-    let allowed = allowance
-        .iter()
-        .map(|interface| interface.as_str())
-        .collect::<BTreeSet<_>>();
     let missing = interfaces
         .iter()
-        .filter(|interface| !allowed.contains(interface.as_str()))
+        .filter(|interface| !topology.ee_admits_interface(&InterfaceId::new(interface.as_str())))
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
@@ -4287,6 +4280,7 @@ fn validate_optional_policy_axis(
     field: &str,
     required: &[String],
     template_id: &str,
+    admits: impl Fn(&BTreeSet<&str>, &str) -> bool,
 ) -> Result<(), String> {
     let Some(values) = values else {
         return Ok(());
@@ -4294,7 +4288,7 @@ fn validate_optional_policy_axis(
     let allowed = values.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let missing = required
         .iter()
-        .filter(|value| !allowed.contains(value.as_str()))
+        .filter(|value| !admits(&allowed, value.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
@@ -4311,6 +4305,7 @@ fn validate_ee_capability_allowances(
     chain: &[octopus_descriptors::EeTemplateId],
     exact_interfaces: &[String],
     exact_tools: &[String],
+    lineage: &octopus_policy::CopyLineage,
 ) -> Result<(), String> {
     for template_id in chain {
         let path = registry_root
@@ -4340,12 +4335,14 @@ fn validate_ee_capability_allowances(
             "allowed_interfaces",
             exact_interfaces,
             template_id.as_str(),
+            |allowed, id| allowed.contains(id) || lineage.interface_original(&InterfaceId::new(id)).is_some_and(|original| allowed.contains(original.as_str())),
         )?;
         validate_optional_policy_axis(
             &descriptor.allowed_tools,
             "allowed_tools",
             exact_tools,
             template_id.as_str(),
+            |allowed, id| allowed.contains(id) || lineage.tool_original(&octopus_descriptors::ToolId::new(id)).is_some_and(|original| allowed.contains(original.as_str())),
         )?;
     }
     Ok(())
@@ -5727,6 +5724,34 @@ fn bound_checkpoint_template(
     })
 }
 
+pub(crate) fn copy_interface_descriptor(descriptor: &mut InterfaceDescriptor, id: &str) {
+    if descriptor.id.as_str() != id {
+        descriptor.copy_of = Some(descriptor.copy_of.take().unwrap_or_else(|| descriptor.id.clone()));
+        descriptor.id = InterfaceId::new(id);
+    }
+}
+
+pub(crate) fn copy_tool_descriptor(descriptor: &mut ToolDescriptor, id: &str) {
+    if descriptor.id.as_str() != id {
+        descriptor.copy_of = Some(descriptor.copy_of.take().unwrap_or_else(|| descriptor.id.clone()));
+        descriptor.id = ToolDescriptorId::new(id);
+    }
+}
+
+pub(crate) fn copy_json_descriptor(descriptor: &mut serde_json::Value, id: &str) -> Result<(), String> {
+    let source = descriptor["id"].as_str().ok_or("copied descriptor has no exact id")?.to_string();
+    if source != id {
+        let original = match descriptor.get("copy_of") {
+            Some(serde_json::Value::String(original)) => original.clone(),
+            None | Some(serde_json::Value::Null) => source,
+            Some(_) => return Err(format!("copied descriptor '{source}' has a malformed copy_of")),
+        };
+        descriptor["copy_of"] = serde_json::json!(original);
+        descriptor["id"] = serde_json::json!(id);
+    }
+    Ok(())
+}
+
 fn sibling_descriptor_bytes(
     source: &InterfaceDescriptor,
     sibling_id: &str,
@@ -5734,7 +5759,7 @@ fn sibling_descriptor_bytes(
     driver_config: Option<&octopus_interfaces::InterfaceDriverConfig>,
 ) -> Result<String, String> {
     let mut sibling = source.clone();
-    sibling.id = InterfaceId::new(sibling_id);
+    copy_interface_descriptor(&mut sibling, sibling_id);
     if let Some(source_names) = source_names {
         sibling.source_names = source_names.to_vec();
     }

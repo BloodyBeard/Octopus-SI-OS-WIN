@@ -22,9 +22,11 @@ Memory is written in two ways:
 2. **In the background, after work.** When a run settles, an observer run reads
    a bounded projection of what happened and maintains the same collection
    through the same tools: it searches first and saves one note per fact,
-   superseding what a correction replaces. A verifier admits its outcome only
-   when every save it names is scoped to the observed environment and landed
-   in the collection. After a quiet period, the **Memory consolidation**
+   superseding what a correction replaces. Its memory door names the observed
+   run, so the observer can live in a narrowed services environment while its
+   notes take the observed run's place. A verifier admits its outcome only
+   when every save it names is scoped to the environment the evidence shows for
+   the observed turn and landed in the collection. After a quiet period, the **Memory consolidation**
    trigger (recommended in the Codex pack, armed by setup with a three-hour
    quiet period) starts an ordinary task in
    Home's environment: it lists the notes with their usage, merges duplicates,
@@ -53,8 +55,12 @@ names its collection in its configuration (`memory_collection`); the shipped
 door uses the installation's shared `artifact-system-library` collection. A
 save becomes one ordinary collection entry:
 
-- **Scope** is the calling run's EE. A run sees notes of its own EE and of the
-  EEs above it, never a sibling's.
+- **Scope** is the calling run's EE, or, on a door whose configuration names
+  the run it serves (`observed_run`), that run's current EE. A run sees notes of
+  its own EE and of the EEs above it, never a sibling's.
+- **Memory follows place**: a note keeps the scope it was saved under. When a
+  run moves, its earlier notes stay with the old EE and later notes take the
+  new one; nothing migrates notes behind the user's back.
 - **Provenance** is the invoking tool call, kept as the entry's evidence, so the
   ledger names the run, trace and checkpoint that saved it.
 - **Deduplication**: saving a note identical to one already visible returns the

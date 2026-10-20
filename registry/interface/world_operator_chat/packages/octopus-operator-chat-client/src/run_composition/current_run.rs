@@ -395,9 +395,9 @@ fn plan_selection(roots: &CompositionRoots, current: &RunRecord, provider: &Inte
     }
     let provider_owner = roots.registry_root.join("interface").join(provider.as_str());
     let catalog_pin = private.pointer("/run_affordances/catalog_artifact").map(parse::<ArtifactRef>).transpose()?;
-    let mut policies = BTreeMap::new();
-    plan_ee_requirements(roots,current.ee.as_str(),&plan.required_interface_ids,&plan.required_tool_ids,&mut policies)?;
-    let writes = plan.interface_writes.into_iter().chain(plan.run_writes).chain(finish_policy_updates(policies)?.into_iter().map(|update|update.write))
+    let planned = plan.interface_writes.iter().chain(&plan.run_writes).collect::<Vec<_>>();
+    require_ee_admission(roots,current.ee.as_str(),&plan.required_interface_ids,&plan.required_tool_ids,&planned)?;
+    let writes = plan.interface_writes.into_iter().chain(plan.run_writes)
         .filter(|write| !write.path.starts_with(&provider_owner)).map(|write| RegistryCandidateWrite {
         path:write.path, content:write.content, expected_before_hash:write.expected_before_hash,
     }).collect::<Vec<_>>();
@@ -422,8 +422,8 @@ pub fn plan_current_run_amendment(roots: &CompositionRoots, current: &RunRecord,
 pub fn plan_current_run_amendment_for_native(roots: &CompositionRoots, current: &RunRecord, provider: &InterfaceId, request: CurrentRunRequest,
     bridge: ProviderCapabilityBridge, retained_tools: &[(String, InterfaceId)], metadata: &InvocationMetadata) -> Result<CurrentRunPlan, String> {
     let runtime = metadata.runtime.as_ref().ok_or("native current-run selection requires admitted runtime coordinates")?;
-    if runtime.run != current.id || runtime.ee != current.ee || runtime.worker != current.worker {
-        return Err("native current-run selection differs from its admitted run/EE/worker coordinates".into());
+    if runtime.run != current.id || runtime.worker != current.worker {
+        return Err("native current-run selection differs from its admitted run/worker coordinates".into());
     }
     plan_current_run_amendment_with_source(roots, current, provider, request, bridge, retained_tools, Some(metadata))
 }

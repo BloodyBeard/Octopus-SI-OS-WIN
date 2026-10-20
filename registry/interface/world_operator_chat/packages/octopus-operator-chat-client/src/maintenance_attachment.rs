@@ -123,7 +123,7 @@ fn validate_retained(existing: &Value, declaration: &Value, identity: &PlannedId
         return Err("accepted maintenance declaration has an unsupported schema".into());
     }
     for (field, expected) in [
-        ("source_run", &identity.run_id), ("ee", &identity.ee_id),
+        ("source_run", &identity.run_id),
         ("source_worker_interface", &identity.worker_interface_id),
         ("source_provider_interface", &identity.model_interface_id),
         ("source_client_interface", &identity.chat_interface_id),

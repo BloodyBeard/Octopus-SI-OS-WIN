@@ -447,7 +447,6 @@ async function prepareOperatorPayloadArtifactBindings(options, input) {
     if (value.schema_version !== 1 || value.workspace !== "octopus_os" || value.component !== "client"
       || value.interface !== input.chatInterfaceId || value.owner_interface !== input.chatInterfaceId
       || value.surface_role !== input.clientSurfaceRole
-      || profile.ee_id !== input.existingRunDocument.value.ee
       || profile.worker_choice_interface !== state.worker_choice_interface) {
       throw new Error("operator payload profile differs from its exact run, client or authoring owner");
     }
@@ -2188,7 +2187,7 @@ async function findProviderModelCatalogAdmission(movementsPath, input, context) 
     if (runtime?.run !== input.runId
       || runtime.checkpoint !== context.inputCheckpoint.id
       || runtime.epoch !== context.inputCheckpoint.epoch) continue;
-    if (runtime.worker !== context.run.worker || runtime.ee !== context.run.ee) {
+    if (runtime.worker !== context.run.worker) {
       throw new Error("pending provider operation differs from its exact run provenance");
     }
     const metadata = movement.invocation_metadata;
@@ -2654,7 +2653,6 @@ async function ownedOperatorTaskInterfaces(octopusHome, ownerInterfaceId) {
 
 async function operatorTaskWorkerEnvironmentRecords(octopusHome, run, runId, exactInterfaces) {
   const worker = requiredString(run.worker, `operator chat task '${runId}' worker`);
-  const ee = requiredString(run.ee, `operator chat task '${runId}' ee`);
   const records = [];
   for (const interfaceId of [...exactInterfaces].sort()) {
     const root = path.join(octopusHome, "interfaces", interfaceId, "worker-environments");
@@ -2695,7 +2693,7 @@ async function operatorTaskWorkerEnvironmentRecords(octopusHome, run, runId, exa
           throw new Error(`task writer '${formation.run}' retains an unreleased worker environment`);
         }
       }
-      if (formation.worker !== worker || formation.ee !== ee) {
+      if (formation.worker !== worker) {
         throw new Error(`worker-environment '${entry.name}' differs from task '${runId}' coordinates`);
       }
       if (typeof formation.requires_release !== "boolean") {
@@ -2724,7 +2722,7 @@ async function validateTaskWriterFormation(octopusHome, run, formation, exactInt
   }
   const initial = requiredObject(binding.initial_record, "task writer initial record");
   const target = initial.interface_state?.[owner]?.file_writer_target;
-  if (!exactInterfaces.has(owner) || initial.id !== writerId || initial.ee !== run.ee
+  if (!exactInterfaces.has(owner) || initial.id !== writerId
     || initial.worker !== run.worker || target?.run !== run.id || target.provider !== owner
     || target.generation !== 0 || target.door !== formation.door_interface
     || !exactInterfaces.has(target.source) || !exactInterfaces.has(target.door) || target.source === target.door) {
@@ -3227,7 +3225,7 @@ function plannedAdditionalRunWrites(plan, runsRoot, registryRoot) {
   if (voice) {
     const origin = voice.interface_state?.[context.control_interface_id];
     const topology = voice.interface_state?.[context.provider_id]?.run_authoring_binding;
-    if (voice.ee !== target.ee || voice.worker !== target.worker
+    if (voice.worker !== target.worker
       || origin?.home_run !== target.id || origin?.home_interface !== plan.chat_interface_id
       || topology?.run !== voice.id || topology?.worker !== voice.worker
       || topology?.provider_interface !== context.provider_id
@@ -3263,9 +3261,9 @@ function plannedAdditionalRunWrites(plan, runsRoot, registryRoot) {
         throw new Error("writer Run declaration has invalid initial record format");
       }
       const record = requiredObject(writer.initial_record, "declared writer initial record");
-      if (record.id !== id || record.ee !== target.ee || record.worker !== target.worker
+      if (record.id !== id || record.worker !== target.worker
         || record.interface_state?.[owner]?.file_writer_target?.run !== target.id) {
-        throw new Error("writer Run declaration changes its target, worker or EE");
+        throw new Error("writer Run declaration changes its target or worker");
       }
       declared.set(id, record);
       if (createsMaintenance && companionIds.has(target.id)) requiredCompanions.add(id);

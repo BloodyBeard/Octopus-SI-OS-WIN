@@ -2,7 +2,7 @@
   "schema": "octopus.local_package",
   "schema_version": 1,
   "id": "world_operator_chat",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "product_kind": "application",
   "product_id": "world_operator_chat",
   "release_status": "optional",

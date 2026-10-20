@@ -155,7 +155,8 @@ pub struct RunDefaults {
     pub client_template_interface_id: Option<String>,
     #[serde(default)]
     pub output_selection: Option<octopus_operator_chat_client::run_composition::CompositionOutputSelection>,
-    pub ee_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ee_id: Option<String>,
     pub worker_template_interface_id: String,
     pub provider_interface_id: String,
     pub model: String,
@@ -973,7 +974,7 @@ impl RunAffordances {
             .as_ref()
             .ok_or("native run operation requires runtime metadata")?;
         if runtime.run != parent_record.id
-            || runtime.ee != parent_record.ee
+            || runtime.ee != admitted_parent.ee
             || runtime.worker != parent_record.worker
         {
             return Err("native run operation source record differs from runtime metadata".into());
@@ -1211,7 +1212,7 @@ impl RunAffordances {
             metadata: metadata.clone(),
             admitted_parent_record: parent.clone(),
             identity_seed: identity.into(),
-            ee_id: args.ee_id.unwrap_or_else(|| defaults.ee_id.clone()),
+            ee_id: args.ee_id.unwrap_or_else(|| parent.ee.to_string()),
             worker_template_interface_id: args
                 .worker_template_interface_id
                 .unwrap_or_else(|| defaults.worker_template_interface_id.clone()),
@@ -1818,8 +1819,8 @@ fn validate_defaults(defaults: &RunDefaults) -> Result<(), String> {
         }
     }
     if let Some(template) = &defaults.client_template_interface_id { exact_string(template, "client template")?; }
+    if let Some(ee) = &defaults.ee_id { exact_string(ee, "ee_id")?; }
     for (field, value) in [
-        ("ee_id", &defaults.ee_id),
         ("worker template", &defaults.worker_template_interface_id),
         ("provider interface", &defaults.provider_interface_id),
         ("model", &defaults.model),

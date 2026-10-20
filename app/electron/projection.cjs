@@ -32,7 +32,7 @@ const {
   requiredClientAgentId,
   requiredClientAgentName,
   planClientAgentTemplate,
-  appendExactAgentWorkerAdmission,
+  requireAgentSourceAdmission,
 } = require("./clientAgentCatalog.cjs");
 
 const canonicalSchemaValidator = new Ajv({ allErrors: true, strict: false, logger: false });
@@ -4904,11 +4904,8 @@ function createProjectionStore(options) {
         continue;
       }
       const authoringProfile = sidecar.authoring_profile ?? null;
-      if (authoringProfile && (
-        stringValue(authoringProfile.ee_id) !== stringValue(record.ee_id)
-        || stringValue(authoringProfile.worker_choice_interface)
-          !== stringValue(sidecar.worker_choice_interface)
-      )) {
+      if (authoringProfile && stringValue(authoringProfile.worker_choice_interface)
+        !== stringValue(sidecar.worker_choice_interface)) {
         errors.push(`Octopus OS authoring profile '${interfaceId}' conflicts with run '${record.run_id}'`);
       }
       clientRuns.push({
@@ -10794,7 +10791,7 @@ async function createOctopusOsAgentTemplate(
     if (!existingInterface || !existingPolicy || !existingClientTemplate || !existingProfile || !existingPresentation) {
       throw new Error(`Agent worker template '${workerInterfaceId}' is only partially authored`);
     }
-    const expectedInterface = { ...structuredClone(sourceInterface.document), id: workerInterfaceId };
+    const expectedInterface = { ...structuredClone(sourceInterface.document), id: workerInterfaceId, copy_of: sourceInterface.document.copy_of ?? sourceInterface.document.id };
     const expectedPolicy = { ...structuredClone(sourcePolicy.document), id: workerInterfaceId };
     const expectedProfile = { ...structuredClone(sourceProfile[0]), worker_choice_interface: workerInterfaceId };
     const expectedClientTemplate = {
@@ -10835,7 +10832,7 @@ async function createOctopusOsAgentTemplate(
   ) {
     throw new Error("Octopus OS Home changed before the Agent template could be created");
   }
-  const nextInterface = { ...structuredClone(sourceInterface.document), id: workerInterfaceId };
+  const nextInterface = { ...structuredClone(sourceInterface.document), id: workerInterfaceId, copy_of: sourceInterface.document.copy_of ?? sourceInterface.document.id };
   const nextPolicy = { ...structuredClone(sourcePolicy.document), id: workerInterfaceId };
   const nextClientTemplate = { ...clientTemplate, worker_interface: workerInterfaceId };
   const materialized = planClientAgentTemplate({
@@ -11130,11 +11127,10 @@ async function planAgentWorkerAdmission(
         throw new Error(`Agent admission EE template '${templateName}' has drifted identity`);
       }
       const next = structuredClone(current.document);
-      appendExactAgentWorkerAdmission(
+      requireAgentSourceAdmission(
         next,
         "allowed_interfaces",
         sourceWorkerInterfaceId,
-        workerInterfaceId,
         `EE template '${templateName}'`,
       );
       templatePlans.set(templateName, { file, current, next });
@@ -11161,11 +11157,10 @@ async function planAgentWorkerAdmission(
       if (!isPlainRecord(next.policy_narrowing)) {
         throw new Error(`Agent admission EE '${eeId}'.policy_narrowing must be an object`);
       }
-      appendExactAgentWorkerAdmission(
+      requireAgentSourceAdmission(
         next.policy_narrowing,
         "allowed_interfaces",
         sourceWorkerInterfaceId,
-        workerInterfaceId,
         `EE '${eeId}' policy narrowing`,
       );
     }
@@ -13489,7 +13484,7 @@ async function octopusOsOwnedWriterRunsAtRoot(runRoot, run, exactInterfaces) {
     const initial = binding.initial_record;
     exactObjectKeys(initial, ["id", "ee", "worker", "trace", "status", "interface_state", "checkpoints", "active_checkpoints"],
       ["id", "ee", "worker", "trace", "status", "interface_state", "checkpoints", "active_checkpoints"], label);
-    if (initial.id !== id || initial.ee !== run.ee || initial.worker !== run.worker
+    if (initial.id !== id || initial.worker !== run.worker
       || initial.trace !== `trace:${id}` || initial.status !== "idle"
       || !isPlainRecord(initial.interface_state) || stableJson(Object.keys(initial.interface_state)) !== stableJson([owner])) {
       throw new Error(`${label} changed its exact identity, worker or EE`);
@@ -13841,12 +13836,12 @@ async function assertTaskWorkerEnvironmentsReleased(octopusHomeRoot, exactInterf
       const writer = ownedWriters.get(formation.run);
       const writerTarget = writer?.document?.interface_state?.[writer.owner]?.file_writer_target;
       const ownedWriter = writer && writerTarget?.run === (writer.targetRun ?? runId) && writerTarget.door === interfaceId
-        && formation.worker === writer.document.worker && formation.ee === writer.document.ee;
+        && formation.worker === writer.document.worker;
       const ownedCompanion = writer && ["observer", "projection"].includes(writer.role)
         && writer.interfaces.has(interfaceId)
-        && formation.worker === writer.document.worker && formation.ee === writer.document.ee;
+        && formation.worker === writer.document.worker;
       const ownedSource = stringValue(formation.run) === runId
-        && (!sourceRecord || formation.worker === sourceRecord.worker && formation.ee === sourceRecord.ee);
+        && (!sourceRecord || formation.worker === sourceRecord.worker);
       if (
         record.document?.schema_version !== 5
         || stringValue(formation.worker_environment_id) !== entry.name
@@ -13874,7 +13869,6 @@ async function snapshotReleasedRunWorkerEnvironmentStateDirectories(
   run,
   runId,
 ) {
-  const runEe = requiredSafeRegistryId(run?.ee, `read-only task '${runId}' EE`);
   const runWorker = requiredSafeRegistryId(run?.worker, `read-only task '${runId}' worker`);
   const interfacesRoot = path.join(octopusHomeRoot, "interfaces");
   const records = await listWorkerEnvironmentRecordFiles(interfacesRoot);
@@ -13900,7 +13894,6 @@ async function snapshotReleasedRunWorkerEnvironmentStateDirectories(
       || record.document?.schema_version !== 5
       || !validWorkerEnvironmentFormation(formation)
       || stringValue(formation.door_interface) !== interfaceId
-      || stringValue(formation.ee) !== runEe
       || stringValue(formation.worker) !== runWorker
       || !["active", "failed", "released"].includes(lifecycle)
     ) {
@@ -14254,7 +14247,10 @@ async function createScheduledInterface(
   }
   const writes = [];
   const targetToolPath = path.join(interfaceRoot, "..", "tool", targetToolId, "tool.json");
-  writes.push({ file: targetToolPath, beforeDigest: null, next: remapScheduledValue(sourceTool.document, interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap) });
+  writes.push({ file: targetToolPath, beforeDigest: null, next: {
+    ...remapScheduledValue(sourceTool.document, interfaceMap, parsed.config.run_template.id, runId, clonedTopology.checkpointMap),
+    copy_of: sourceTool.document.copy_of ?? sourceToolId,
+  } });
   for (const packagePlan of packages) {
     const directory = path.join(interfaceRoot, packagePlan.targetId);
     writes.push({ file: path.join(directory, "interface.json"), beforeDigest: null, next: packagePlan.descriptor });
@@ -14449,7 +14445,7 @@ async function readScheduledInterfaceCloneSource(interfaceRoot, interfaceId) {
 function validateScheduledInterfaceDescriptor(descriptor, interfaceId) {
   exactObjectKeys(
     descriptor,
-    ["id", "interface_type", "role", "direction", "source_names", "reference", "interface_driver_ref", "interface_driver_config", "interface_policy"],
+    ["id", "interface_type", "role", "direction", "source_names", "reference", "interface_driver_ref", "interface_driver_config", "interface_policy", "copy_of"],
     ["id", "interface_type", "role", "direction", "source_names"],
     `interface descriptor ${interfaceId}`,
   );
@@ -14477,6 +14473,7 @@ function scheduledSiblingDescriptor(cloneSource, interfaceId, interfaceMap, sour
     checkpointMap,
   );
   descriptor.id = interfaceId;
+  descriptor.copy_of = cloneSource.materialized.copy_of ?? cloneSource.materialized.id;
   delete descriptor.reference;
   validateScheduledInterfaceDescriptor(descriptor, interfaceId);
   return descriptor;

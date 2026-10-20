@@ -10,7 +10,8 @@ use octopus_interfaces::{
     scan_worker_interface_policies,
 };
 use octopus_policy::{
-    FormationPin, FormedInterfacePolicy, WorkerInterfacePolicy, form_interface_policy, form_policy,
+    CapSet, CopyLineage, FormationPin, FormedInterfacePolicy, WorkerInterfacePolicy,
+    form_interface_policy, form_policy_with_lineage,
 };
 use octopus_tool_registry::ToolDescriptor;
 use octopus_worker_env::{WorkerEnvKindRegistry, WorkerEnvKindSpec};
@@ -113,12 +114,24 @@ pub struct FormedCapabilityTopology {
     pub worker: InterfaceId,
     pub ee_template_chain: Vec<EeTemplateId>,
     pub ee_interface_allowance: Option<Vec<InterfaceId>>,
+    pub copy_lineage: CopyLineage,
     pub granted_tools: Vec<ToolId>,
     pub granted_worker_environment_kinds: Vec<WorkerEnvironmentKindId>,
     pub interface_policies: BTreeMap<InterfaceId, FormedInterfacePolicy>,
     pub tool_bindings: BTreeMap<InterfaceId, ToolCapabilityBinding>,
     pub operation_bindings: BTreeMap<InterfaceId, InterfaceOperationCapabilityBinding>,
     pub worker_relays: BTreeMap<InterfaceId, WorkerRelayCapabilityBinding>,
+}
+
+impl FormedCapabilityTopology {
+    pub fn ee_admits_interface(&self, interface: &InterfaceId) -> bool {
+        self.ee_interface_allowance.as_ref().is_none_or(|allowance| {
+            self.copy_lineage.admits_interface(
+                &CapSet::from_allowed(allowance.iter().cloned()),
+                interface,
+            )
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,9 +177,36 @@ pub fn form_capability_topology(
         ))
     })?;
 
+    let tool_descriptors = octopus_tool_registry::load_tool_descriptors(registry_root)
+        .map_err(|error| registry_error("tool", error))?;
+    let tools = tool_descriptors
+        .into_iter()
+        .map(|(_, descriptor)| (ToolId::new(descriptor.id.as_str()), descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let mut copy_lineage = CopyLineage::default();
+    for interface in interfaces.values() {
+        if let Some(original) = interface.copy_of.as_ref().filter(|original| interfaces.contains_key(*original)) {
+            copy_lineage.insert_interface(interface.id.clone(), original.clone());
+        }
+    }
+    for (id, tool) in &tools {
+        let Some(original) = &tool.copy_of else { continue };
+        let original = ToolId::new(original.as_str());
+        if tools.get(&original).is_some_and(|known| tool.never_wider_than(known)) {
+            copy_lineage.insert_tool(id.clone(), original);
+        } else {
+            copy_lineage.insert_declared_tool(id.clone(), original);
+        }
+    }
+
     let ee_templates = load_ee_templates(registry_root)?;
     let ee_chain = resolve_ee_chain(request, &ee_templates)?;
-    ensure_worker_admitted_by_ee_chain(worker, &ee_chain, &request.ee_instance_policy_narrowing)?;
+    ensure_worker_admitted_by_ee_chain(
+        worker,
+        &ee_chain,
+        &request.ee_instance_policy_narrowing,
+        &copy_lineage,
+    )?;
     let ee_layers = ee_chain
         .iter()
         .zip(&request.ee_instance_policy_narrowing)
@@ -178,11 +218,26 @@ pub fn form_capability_topology(
         .cloned()
         .reduce(|left, right| left.intersect(&right))
         .map(|interfaces| interfaces.iter().cloned().collect());
-    let formed = form_policy(
+    let original_worker = copy_lineage.interface_original(&request.worker).filter(|original| {
+        ee_layers.iter().any(|layer| {
+            layer.interfaces.as_ref().is_some_and(|allowed| !allowed.contains(&request.worker) && allowed.contains(*original))
+        })
+    });
+    let narrowed = original_worker
+        .map(|original| {
+            policy_scan.policies.get(original).map(|held| worker_policy.narrowed_by(held, &copy_lineage)).ok_or_else(|| {
+                contract(format!("worker '{}' is admitted by original '{}' that has no valid ceiling",
+                    request.worker.as_str(), original.as_str()))
+            })
+        })
+        .transpose()?;
+    let worker_policy = narrowed.as_ref().unwrap_or(worker_policy);
+    let formed = form_policy_with_lineage(
         worker_policy.ceiling_grant(),
         &ee_layers,
         &[],
         FormationPin::default(),
+        &copy_lineage,
     );
     for interface in worker_policy.ceiling.interface_policy.keys() {
         if !worker_policy.ceiling.interfaces.contains(interface) {
@@ -201,11 +256,13 @@ pub fn form_capability_topology(
         let interface_id = &interface.id;
         let mut override_layers = Vec::new();
         for (template, instance) in ee_chain.iter().zip(&request.ee_instance_policy_narrowing) {
-            if let Some(layer) = template.interface_policy_overrides.get(interface_id) {
-                override_layers.push(layer);
-            }
-            if let Some(layer) = instance.interface_policy_overrides.get(interface_id) {
-                override_layers.push(layer);
+            for id in [Some(interface_id), interface.copy_of.as_ref()].into_iter().flatten() {
+                if let Some(layer) = template.interface_policy_overrides.get(id) {
+                    override_layers.push(layer);
+                }
+                if let Some(layer) = instance.interface_policy_overrides.get(id) {
+                    override_layers.push(layer);
+                }
             }
         }
         let policy = form_interface_policy(
@@ -222,12 +279,6 @@ pub fn form_capability_topology(
         interface_policies.insert(interface_id.clone(), policy);
     }
 
-    let tool_descriptors = octopus_tool_registry::load_tool_descriptors(registry_root)
-        .map_err(|error| registry_error("tool", error))?;
-    let tools = tool_descriptors
-        .into_iter()
-        .map(|(_, descriptor)| (ToolId::new(descriptor.id.as_str()), descriptor))
-        .collect::<BTreeMap<_, _>>();
     let wek_registry =
         WorkerEnvKindRegistry::load_from_dir(&registry_root.join("worker_environment_kind"))
             .map_err(|error| CapabilityFormationError::Registry {
@@ -384,6 +435,7 @@ pub fn form_capability_topology(
         worker: request.worker.clone(),
         ee_template_chain: request.ee_template_chain.clone(),
         ee_interface_allowance,
+        copy_lineage,
         granted_tools,
         granted_worker_environment_kinds: formed.context.wek.iter().cloned().collect(),
         interface_policies,
@@ -763,11 +815,18 @@ fn ensure_worker_admitted_by_ee_chain(
     worker: &InterfaceDescriptor,
     chain: &[&EeTemplateDescriptor],
     instance_policy_narrowing: &[EeInstancePolicyNarrowing],
+    lineage: &CopyLineage,
 ) -> Result<(), CapabilityFormationError> {
+    let admits = |allowed: &[String]| {
+        lineage.admits_interface(
+            &CapSet::from_allowed(allowed.iter().map(InterfaceId::new)),
+            &worker.id,
+        )
+    };
     for (template, instance) in chain.iter().zip(instance_policy_narrowing) {
         let Some(allowed) = &template.allowed_interfaces else {
             if let Some(allowed) = &instance.allowed_interfaces {
-                if !allowed.iter().any(|id| id == worker.id.as_str()) {
+                if !admits(allowed) {
                     return Err(contract(format!(
                         "EE instance of template '{}' does not admit worker '{}'",
                         template.id.as_str(),
@@ -777,7 +836,7 @@ fn ensure_worker_admitted_by_ee_chain(
             }
             continue;
         };
-        if !allowed.iter().any(|id| id == worker.id.as_str()) {
+        if !admits(allowed) {
             return Err(contract(format!(
                 "EE template '{}' does not admit worker '{}'",
                 template.id.as_str(),
@@ -785,7 +844,7 @@ fn ensure_worker_admitted_by_ee_chain(
             )));
         }
         if let Some(allowed) = &instance.allowed_interfaces {
-            if !allowed.iter().any(|id| id == worker.id.as_str()) {
+            if !admits(allowed) {
                 return Err(contract(format!(
                     "EE instance of template '{}' does not admit worker '{}'",
                     template.id.as_str(),

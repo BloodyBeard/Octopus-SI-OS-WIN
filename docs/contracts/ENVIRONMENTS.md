@@ -37,6 +37,13 @@ EEs it can act in.
 **Environments form a hierarchy.** An instance has a parent, and policy narrows inward
 along that chain. See [Policy](POLICY.md).
 
+**Reorganizing is JSON.** Allowances name originals, and a task's private
+copies are admitted by them, so a narrowed environment can host real runs: a
+memory service in `memory_maintenance`, a recurring line of work in its own
+project. A run lives in the one environment its record's `ee` names; another
+run moves it by changing only that field, and the new place applies from the
+run's next arrival.
+
 **Goals classify, they do not enumerate.** The root goal is `existence`. The
 registry ships templates such as `operator_space`, `project`,
 `operator_interaction`, `memory_maintenance`, `self_improvement`. These are

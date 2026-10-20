@@ -1262,7 +1262,6 @@ fn validate_new_marks(
         || source.to != Endpoint::Interface(config.provider_interface.clone())
         || runtime.run != before.id
         || runtime.worker != before.worker
-        || runtime.ee != before.ee
         || runtime.interface != config.provider_interface
         || metadata.verification_failure.is_some()
         || !metadata
@@ -1362,11 +1361,10 @@ fn validate_result_source(
         || source.to != Endpoint::Interface(config.provider_interface.clone())
         || runtime.run != before.id
         || runtime.worker != before.worker
-        || runtime.ee != before.ee
+        || runtime.ee != pinned.ee
         || runtime.interface != config.provider_interface
         || pinned.id != before.id
         || pinned.worker != before.worker
-        || pinned.ee != before.ee
         || !pinned.active_checkpoints.contains(&checkpoint.id)
         || !before.active_checkpoints.contains(&checkpoint.id)
         || before.checkpoint(&checkpoint.id) != Some(checkpoint)

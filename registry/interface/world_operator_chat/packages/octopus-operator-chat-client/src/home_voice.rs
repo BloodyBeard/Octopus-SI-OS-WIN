@@ -227,7 +227,7 @@ pub(super) fn plan_descriptors(
     let mut tool = load_tool_descriptor_from_dir(&registry.join("tool"), &config.authoring.tool)
         .map_err(|e| e.to_string())?
         .ok_or("Home voice file writer is absent")?;
-    tool.id = ToolDescriptorId::new(&voice.writer);
+    crate::copy_tool_descriptor(&mut tool, &voice.writer);
     tool.interface = InterfaceId::new(&voice.door);
     narrow_run_authoring_tool_authority(&mut tool)?;
     push_json_write(
@@ -485,7 +485,6 @@ pub(super) fn wire(
             }
         }
         if record.id.as_str() != voice.context.run_id
-            || record.ee.as_str() != identity.ee_id
             || record.worker.as_str() != identity.worker_interface_id
             || bound.run != record.id
             || bound.worker != record.worker

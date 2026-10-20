@@ -31,6 +31,7 @@ struct ArtifactBoundProcess {
     ee_instances_root: Option<PathBuf>,
     durable_var_dir: Option<PathBuf>,
     memory_collection: Option<String>,
+    observed_run: Option<String>,
     maximum_bytes: u64,
 }
 
@@ -66,6 +67,8 @@ impl ArtifactBoundProcess {
                 ee_instances_root,
                 effect_root: effect_root.as_deref(),
                 maximum_bytes: self.maximum_bytes,
+                observed_run: self.observed_run.as_deref(),
+                run_records_root: self.run_records_root.as_deref(),
             },
         )
     }
@@ -158,6 +161,18 @@ pub async fn run_artifact_bound_tool_process() -> Result<(), String> {
                 .ok_or_else(|| "memory_collection must be an artifact id string".to_string())
         })
         .transpose()?;
+    let observed_run = env
+        .descriptor_snapshot
+        .as_ref()
+        .and_then(|descriptor| descriptor.interface_driver_config.as_ref())
+        .and_then(|config| config.private_config.get("observed_run"))
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "observed_run must be a run id string".to_string())
+        })
+        .transpose()?;
     octopus_tool_door_runtime::run_tool_process(Arc::new(ArtifactBoundProcess {
         interface: env.interface,
         handler: ArtifactBoundHandler,
@@ -167,6 +182,7 @@ pub async fn run_artifact_bound_tool_process() -> Result<(), String> {
         ee_instances_root: env.root_slots.get("ee_instances_root").cloned(),
         durable_var_dir: env.durable_var_dir,
         memory_collection,
+        observed_run,
         maximum_bytes: env.host_io_limits.max_payload_bytes,
     }))
     .await

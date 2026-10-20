@@ -183,7 +183,7 @@ fn selected_native_capture_keeps_companion_exact_on_operator_revisions() {
         record["interface_state"][&plan.provider_interface_id]["maintenance_observer"].clone();
     assert_eq!(declaration["source_run"], plan.run_id);
     assert_eq!(declaration["input_label"], "memory.experience.input");
-    assert_eq!(declaration["ee"], request.ee_id);
+    assert!(declaration.get("ee").is_none(), "the declaration keeps no copy of the source placement");
     let ownership = &declaration["lifecycle_ownership"];
     assert_eq!(ownership["schema_version"], 1);
     for (kind, field) in [
@@ -1350,7 +1350,7 @@ mod movement_gate {
                     source_artifact: wrapped_ref.clone(), source_movement_seq: Some(wrapped.seq.0),
                 };
                 let scope = SnapshotSourceScope {
-                    run: plan.run_id.clone(), ee: config.source_ee.clone(), worker: plan.worker_interface_id.clone(),
+                    run: plan.run_id.clone(), worker: plan.worker_interface_id.clone(),
                     provider: source_provider.into(), client: config.source_client_interface.clone(), relay: config.source_relay_interface.clone(),
                 };
                 let origin = config.input_rules.iter().find(|rule| rule.labels.contains(&intake.input_label)).unwrap().origin.as_ref();
@@ -1583,6 +1583,8 @@ mod movement_gate {
                         ee_instances_root: &root.join("ee"),
                         effect_root: Some(&root.join("memory-effects")),
                         maximum_bytes: 1 << 26,
+                        observed_run: None,
+                        run_records_root: None,
                     },
                 )
                 .unwrap()

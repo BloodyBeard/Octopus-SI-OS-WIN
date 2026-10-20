@@ -119,7 +119,6 @@ impl ToolOperatorRequest {
             .as_ref()
             .ok_or_else(|| reject("missing admitted checkpoint binding snapshot"))?;
         if runtime.run.as_str() != self.original.run
-            || runtime.ee.as_str() != self.original.ee
             || runtime.worker != self.original.worker
             || bindings.inbound.interface != *source
             || !metadata

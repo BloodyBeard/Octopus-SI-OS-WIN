@@ -117,6 +117,8 @@ pub struct InterfaceDescriptor {
     pub interface_driver_config: Option<InterfaceDriverConfig>,
     #[serde(default)]
     pub interface_policy: InterfacePolicyDeclaration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_of: Option<InterfaceId>,
 }
 
 impl Descriptor for InterfaceDescriptor {
@@ -129,6 +131,18 @@ impl Descriptor for InterfaceDescriptor {
 
     fn validate(&self) -> Result<(), String> {
         self.validate_source_names()?;
+        if let Some(original) = &self.copy_of {
+            if original.as_str().trim().is_empty()
+                || original.as_str().trim() != original.as_str()
+                || original == &self.id
+            {
+                return Err(format!(
+                    "interface '{}' declares an invalid copy_of '{}'",
+                    self.id.as_str(),
+                    original.as_str()
+                ));
+            }
+        }
         octopus_policy::validate_interface_policy_declaration(&self.interface_policy).map_err(
             |error| {
                 format!(

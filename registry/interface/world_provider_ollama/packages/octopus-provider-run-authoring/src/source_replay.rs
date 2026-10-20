@@ -39,11 +39,8 @@ impl ProviderOutputHandoff {
     ) -> Result<Option<u64>, String> {
         let limits = self.ctx.required_host_io_limits()?;
         let (before, original) = self.checked_input_artifact_record(sequence, artifact)?;
-        let (_, invocation) = self.checked_input_artifact_record(self.source_movement_seq, artifact)?;
+        self.checked_input_artifact_record(self.source_movement_seq, artifact)?;
         let current = RunRecord::from_bytes(current_bytes).map_err(|error| error.to_string())?;
-        if invocation.ee != original.ee || current.ee != original.ee {
-            return Err("completed input evidence changed its EE".into());
-        }
         let provider_writer = CheckedRunWriter {
             owner: self.config.provider_interface.clone(),
             source: self.config.authoring_source_interface.clone(),
@@ -326,8 +323,8 @@ impl ProviderOutputHandoff {
             pending.source_movement_seq,
         )?;
         let (_, pinned) = self.checked_input_artifact_record(pending.source_movement_seq, &source.artifact)?;
-        if pinned.ee != original.ee {
-            return Err("completed input handoff changed its admitted EE".into());
+        if pinned.id != original.id || pinned.worker != original.worker {
+            return Err("completed input handoff changed its admitted run".into());
         }
         let carries_context = !self.source_is_context_free(pending.source_movement_seq)?;
         if carries_context && pending.publication_unfinished() {

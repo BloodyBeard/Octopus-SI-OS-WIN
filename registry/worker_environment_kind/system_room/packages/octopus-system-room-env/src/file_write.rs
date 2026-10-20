@@ -353,14 +353,18 @@ fn parse_write_requests(
                     })?;
                 let expected_before =
                     parse_content_hash(expected_before, "expected_before_hash")?.to_string();
-                let expected_after = value
-                    .get("expected_after_hash")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        "file.write patch requires string expected_after_hash".to_string()
-                    })?;
-                let expected_after =
-                    parse_content_hash(expected_after, "expected_after_hash")?.to_string();
+                let expected_after = match value.get("expected_after_hash") {
+                    None => None,
+                    Some(serde_json::Value::String(expected)) => {
+                        Some(parse_content_hash(expected, "expected_after_hash")?.to_string())
+                    }
+                    Some(_) => {
+                        return Err(
+                            "file.write expected_after_hash must be a lowercase 64-character hash"
+                                .to_string(),
+                        );
+                    }
+                };
                 let patch: json_patch::Patch = serde_json::from_value(patch_value.clone())
                     .map_err(|error| format!("file.write patch is malformed: {error}"))?;
                 if patch.is_empty() {
@@ -375,7 +379,7 @@ fn parse_write_requests(
                 let before = observed_before_bytes.as_ref().ok_or_else(|| {
                     format!("file.write patch target '{}' does not exist", target.display())
                 })?;
-                let content = apply_checked_json_patch(&target, before, &patch, &expected_after, format.unwrap_or_default())?;
+                let content = apply_checked_json_patch(&target, before, &patch, expected_after.as_deref(), format.unwrap_or_default())?;
                 (content, Some(expected_before))
             }
         };
@@ -394,10 +398,12 @@ fn apply_checked_json_patch(
     target: &Path,
     before: &[u8],
     patch: &json_patch::Patch,
-    expected_after: &str,
+    expected_after: Option<&str>,
     format: JsonFormat,
 ) -> Result<String, String> {
-    parse_content_hash(expected_after, "expected_after_hash")?;
+    if let Some(expected_after) = expected_after {
+        parse_content_hash(expected_after, "expected_after_hash")?;
+    }
     if patch.is_empty() {
         return Err("file.write patch must not be empty".into());
     }
@@ -408,7 +414,7 @@ fn apply_checked_json_patch(
     let bytes = format.encode(&document)
         .map_err(|error| format!("file.write patched JSON '{}' could not encode: {error}", target.display()))?;
     let observed_after = ContentHash::of_bytes(&bytes).to_hex();
-    if observed_after != expected_after {
+    if let Some(expected_after) = expected_after.filter(|expected| *expected != observed_after) {
         return Err(format!("file.write patch for '{}' produced hash {}, expected {}", target.display(), observed_after, expected_after));
     }
     String::from_utf8(bytes)
