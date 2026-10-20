@@ -421,12 +421,12 @@ async fn advance(f: &mut Fixture, handoff: &ProviderOutputHandoff, n: u64) {
 async fn two_declared_writers_recover_after_admitted_cas_failure() {
     tokio::time::timeout(Duration::from_secs(12),async {
         let (mut owner,mut peer)=pair(); let handoff=owner.handoff(); let peer_handoff=peer.handoff();
-        advance(&mut owner,&handoff,0).await; advance(&mut peer,&peer_handoff,0).await;
-        let output=emission(&owner,1); let mut attempt=Box::pin(handoff.hand_observation(output,false));
+        advance(&mut owner,&handoff,0).await;
+        let output=emission(&owner,1); let mut attempt=Box::pin(handoff.hand_observation(output,true));
         let (mut ws,call,file)=tokio::select! {receipt=owner.accept_write()=>receipt,result=&mut attempt=>panic!("before conflict: {result:?}")};
         let input=admit_call(&owner,&call,&file);
         ws.send(Message::Text(serde_json::to_string(&DeliveryVerdict::Admitted {seq:1}).unwrap().into())).await.unwrap();
-        advance(&mut peer,&peer_handoff,1).await;
+        advance(&mut peer,&peer_handoff,0).await;
         let peer_bytes=std::fs::read(&owner.run_path).unwrap();
         let failure=effect(&owner,&call,&input).unwrap_err();
         assert_eq!(failure.code,"file_write_incomplete");
