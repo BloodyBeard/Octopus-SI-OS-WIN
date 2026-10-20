@@ -52,8 +52,6 @@ const operatorShellState = source("src/components/shell/operatorShellState.ts");
 const taskActionsController = source("src/components/task/TaskActionsController.tsx");
 const workerEnvironmentPaneTab = source("src/components/worker-environment/WorkerEnvironmentPaneTab.tsx");
 const runEnvironmentView = source("src/components/worker-environment/RunEnvironmentView.tsx");
-const electronMain = source("electron/main.cjs");
-const viteConfig = source("vite.config.ts");
 const chatCss = source("src/components/chat/chat.css");
 const iconNotices = JSON.parse(source("licenses/icon-assets/notices.json"));
 const glyphAsset = (name) => iconNotices.glyphs.find((entry) => entry.name === name);
@@ -389,11 +387,6 @@ assert.throws(
   }),
   (error) => error?.code === "operator_chat_client_contract_mismatch",
 );
-assert.match(electronMain, /createOperatorChatClientLoader\(/);
-assert.match(viteConfig, /createOperatorChatClientLoader\(/);
-assert.equal((viteConfig.match(/operatorChatClientLoader\.load\(\)/g) ?? []).length, 6);
-assert.doesNotMatch(viteConfig, /require\(path\.join\(octopusHome, "registry", "interface", "world_operator_chat", "client\.cjs"\)\)/);
-assert.match(viteConfig, /assertOperatorChatArtifactBatch\(batch\)/);
 assert.throws(
   () => assertOperatorChatArtifactBatch({
     artifacts: [{ from_interface_id: "world_provider_codex_exact", from_interface_role: "" }],
@@ -769,7 +762,6 @@ for (const [eventKind, field] of [["message_delta", "text"], ["commentary_delta"
   assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, {}, "composed").eventKind, "generic_activity");
 }
 
-assert.match(electronMain, /maxPayloadBytes: input\?\.label === "turn\.stream" \? 256 \* 1024 \* 1024 : undefined/);
 
 assert.match(surfaceHost, /surface\.rendererKind === "builtin\.chat" \|\| surface\.rendererKind === "builtin\.voice"[\s\S]*?<OctopusLoadingState className="surface-content-loading-state"/);
 

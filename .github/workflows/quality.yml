@@ -60,6 +60,11 @@ jobs:
           node scripts/test-electron-main.cjs
           node scripts/test-dev-server.cjs
           node scripts/test-client-boot.cjs
+          node scripts/test-chat-view.cjs
+          node scripts/test-client-launch.cjs
+          node scripts/test-home-view.cjs
+          node scripts/test-composer-dictation.cjs
+          node scripts/test-application-repair.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
 

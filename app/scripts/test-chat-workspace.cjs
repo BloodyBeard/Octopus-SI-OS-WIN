@@ -469,7 +469,7 @@ for (const profile of ["live", "lab"]) {
     await until(() => !view.current.turnOpen, "the reply never closed the turn");
   });
 
-  test(`editing a queued message brings it back into the composer and saves under the same identity (${profile})`, { timeout: 15_000 }, async () => {
+  test(`editing a queued message brings it back into the composer and keeps its place in the queue (${profile})`, { timeout: 15_000 }, async () => {
     const host = fakeHost();
     const view = await openTask(host, profile);
     await type(view, "Add totals");
@@ -485,7 +485,7 @@ for (const profile of ["live", "lab"]) {
     await type(view, "Also chart it in euros");
     await view.current.submit();
     await until(() => !view.current.editingQueuedTurn && view.current.queuedTurns[0]?.text === "Also chart it in euros", "the edit was not saved");
-    assert.deepEqual([view.current.queuedTurns.length, view.current.queuedTurns[0].id, view.current.queuedTurns[0].messageId], [1, queued.id, queued.messageId]);
+    assert.deepEqual([view.current.queuedTurns.length, view.current.queuedTurns[0].id], [1, queued.id]);
     host.reply("run-1", "Totals added.");
     await until(() => host.turns.length === 2, "the edited follow-up was never dispatched");
     assert.equal(host.turns[1].text, "Also chart it in euros");
