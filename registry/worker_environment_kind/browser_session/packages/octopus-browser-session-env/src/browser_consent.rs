@@ -149,6 +149,18 @@ impl BrowserOriginConsentPolicy {
         let denied = [requirements.access, configuration.access, transfer(&requirements), transfer(&configuration)].contains(&Some(BrowserOriginAccess::Deny));
         Ok((if denied { BrowserConsentPolicyDecision::Denied } else { BrowserConsentPolicyDecision::Allowed }, requirements.persistent_approval != Some(false)))
     }
+
+    pub(crate) fn require_download(&self, receipt: &Value) -> Result<(), String> {
+        let chain = receipt["url_chain"].as_array().ok_or("Browser download receipt has no URL chain")?;
+        for url in chain.iter().chain(std::iter::once(&receipt["url"])) {
+            let url = url.as_str().ok_or("Browser download receipt has a malformed URL")?;
+            let origin = reqwest::Url::parse(url).map_err(string_error)?.origin().ascii_serialization();
+            if !origin.starts_with("http://") && !origin.starts_with("https://") { continue; }
+            let (decision, _) = self.resolve(&origin, BrowserConsentOperation::Download)?;
+            require(decision == BrowserConsentPolicyDecision::Allowed, &format!("Current browser origin policy denies downloads from {origin}"))?;
+        }
+        Ok(())
+    }
 }
 
 
@@ -185,4 +197,24 @@ pub(crate) fn params(request_id:&str,call_id:&str,offer:Option<&Offer>) -> Value
 pub(crate) fn validate_offer(offer:Option<&Offer>,expected:Option<&Offer>) -> Result<(),String> {
     require(offer==expected,"Browser permission offer changed its current policy or exact client")?;
     if let Some(offer)=offer {offer.validate()?;} Ok(())
+}
+
+#[cfg(test)]
+mod download_policy_tests {
+    use super::*;
+
+    #[test]
+    fn downloads_are_refused_when_any_network_origin_of_the_receipt_is_denied() {
+        let policy: BrowserOriginConsentPolicy = serde_json::from_value(json!({"permitted_persistence":["once"],
+            "requirements":{"default_policy":{},"origins":[]},
+            "configuration":{"default_policy":{},"origins":[{"pattern":"https://*.blocked.example","policy":{"downloads":"deny"}}]}})).unwrap();
+        let receipt = |chain: Value, url: &str| json!({"url_chain":chain,"url":url});
+        assert!(policy.require_download(&receipt(json!(["https://open.example/a"]), "https://open.example/a")).is_ok());
+        assert!(policy.require_download(&receipt(json!(["data:text/plain,hi"]), "data:text/plain,hi")).is_ok());
+        for (chain, url) in [(json!(["https://open.example/r", "https://cdn.blocked.example/f"]), "https://cdn.blocked.example/f"),
+            (json!([]), "blob:https://cdn.blocked.example/0d1c")] {
+            assert!(policy.require_download(&receipt(chain, url)).unwrap_err().contains("denies downloads from https://cdn.blocked.example"));
+        }
+        assert!(policy.require_download(&json!({"url":"https://open.example/a"})).is_err());
+    }
 }

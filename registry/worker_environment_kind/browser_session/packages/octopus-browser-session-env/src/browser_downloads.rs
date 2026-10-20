@@ -230,6 +230,9 @@ impl BrowserRoom {
         } else if result["status"] == "imported" && !arm && !cancel {
             return Err("native download was imported but its exact durable import record is unavailable; refusing another import or a fabricated artifact".into());
         } else if result["status"] == "completed" && !arm && !cancel {
+            if let Some(policy) = self.upload_approval.as_ref().and_then(|config| config.permission_policy.as_ref()) {
+                policy.require_download(&result)?;
+            }
             let download_id = required_string(result.as_object().ok_or("download receipt is not an object")?, "download_id")?.to_owned();
             let total = result["bytes"].as_u64().ok_or("download receipt has no native byte count")?;
             let max_bytes = result["max_bytes"].as_u64().ok_or("download receipt has no admitted byte bound")?;
