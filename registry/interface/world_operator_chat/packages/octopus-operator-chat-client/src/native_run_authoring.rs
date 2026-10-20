@@ -514,10 +514,12 @@ pub fn plan_existing_adoption(request: &NativeRunAdoptionRequest) -> Result<Nati
     }
     let chain = resolve_live_ee_policy_chain(&roots.ee_instances_root, &record.ee).map_err(|e|e.to_string())?;
     result_receiving::pin_authority(request, &record, &provider_id, &config, &mut preimages)?;
-    let formed = form_capability_topology(&roots.registry_root, &CapabilityFormationRequest::from_live_chain(record.worker.clone(), chain))
+    let planned = writes.iter().map(|write| parse_strict::<ToolDescriptor>(write.content.as_bytes()).map_err(|e|e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let formed = form_capability_topology(&roots.registry_root,
+        &CapabilityFormationRequest::from_live_chain(record.worker.clone(), chain).with_planned_tools(planned.iter().cloned()))
         .map_err(|e|e.to_string())?;
-    for write in &writes {
-        let next: ToolDescriptor = parse_strict(write.content.as_bytes()).map_err(|e|e.to_string())?;
+    for next in &planned {
         if !formed.tool_bindings.get(&next.interface).is_some_and(|binding| binding.tools.iter().any(|entry| entry.tool.as_str() == next.id.as_str())) {
             return Err(format!("tool contract adoption '{}' is outside the actual formed grant", next.id));
         }

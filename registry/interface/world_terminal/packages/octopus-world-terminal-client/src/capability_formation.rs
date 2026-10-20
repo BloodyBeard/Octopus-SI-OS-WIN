@@ -21,6 +21,7 @@ pub struct CapabilityFormationRequest {
     pub worker: InterfaceId,
     pub ee_template_chain: Vec<EeTemplateId>,
     pub ee_instance_policy_narrowing: Vec<EeInstancePolicyNarrowing>,
+    pub planned_tools: Vec<ToolDescriptor>,
 }
 
 impl CapabilityFormationRequest {
@@ -36,6 +37,7 @@ impl CapabilityFormationRequest {
                 ee_template_chain.len()
             ],
             ee_template_chain,
+            planned_tools: Vec::new(),
         }
     }
 
@@ -54,7 +56,13 @@ impl CapabilityFormationRequest {
                 .into_iter()
                 .map(|layer| layer.policy_narrowing)
                 .collect(),
+            planned_tools: Vec::new(),
         }
+    }
+
+    pub fn with_planned_tools(mut self, tools: impl IntoIterator<Item = ToolDescriptor>) -> Self {
+        self.planned_tools.extend(tools);
+        self
     }
 }
 
@@ -181,7 +189,9 @@ pub fn form_capability_topology(
         .map_err(|error| registry_error("tool", error))?;
     let tools = tool_descriptors
         .into_iter()
-        .map(|(_, descriptor)| (ToolId::new(descriptor.id.as_str()), descriptor))
+        .map(|(_, descriptor)| descriptor)
+        .chain(request.planned_tools.iter().cloned())
+        .map(|descriptor| (ToolId::new(descriptor.id.as_str()), descriptor))
         .collect::<BTreeMap<_, _>>();
     let mut copy_lineage = CopyLineage::default();
     for interface in interfaces.values() {

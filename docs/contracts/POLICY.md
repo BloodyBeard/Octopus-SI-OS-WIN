@@ -235,7 +235,10 @@ declared copy. A copy admitted by its original is never wider than it: the
 original must exist, a worker copy's ceiling is intersected with the
 original's, an interface copy's policy is formed together with the original's,
 and a tool copy counts as its original only while its executable, handler and
-schema match and its authority stays within the original's.
+schema match and its authority stays within the original's. When an update
+changes an original, a copy still on the previous contract is outside that
+admission until the client's package adoption rewrites it; the adoption forms
+its grant over the contracts it writes.
 
 Who *initiated* the run is not an input. A narrow initiator may legitimately
 create a run more capable than itself - a run with few tools can open a coding environment, and a capable coder

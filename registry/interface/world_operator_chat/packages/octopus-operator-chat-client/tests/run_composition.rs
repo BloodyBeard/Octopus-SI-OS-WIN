@@ -95,7 +95,6 @@ fn legacy_current_selection_materializes_defaults_and_preserves_provider_life_wh
     let provider=composition.provider_interface_id.clone().into();
     let mut selection=current_selection(&request.roots,&current,&provider).unwrap().unwrap();
     assert_eq!(selection.selected_tools.len(),3);assert!(selection.selected_tools.iter().any(|tool|tool.tool=="file.read"));
-    let source_policy=std::fs::read(root.join("registry/interface/system_worker_template/policy.json")).unwrap();
     for file in ["interface.json","life.json"] {
         let mut value:Value=serde_json::from_slice(&std::fs::read(root.join(format!("registry/interface/system_room/{file}"))).unwrap()).unwrap();
         if file=="interface.json" {value["id"]=json!("system_extra_room");}
@@ -104,14 +103,15 @@ fn legacy_current_selection_materializes_defaults_and_preserves_provider_life_wh
     let mut tool:Value=serde_json::from_slice(&std::fs::read(root.join("registry/tool/file.read/tool.json")).unwrap()).unwrap();tool["id"]=json!("file.peek");tool["interface"]=json!("system_extra_room");
     write(&root,"registry/tool/file.peek/tool.json",tool);
     let worker_policy=format!("registry/interface/{}/policy.json",current.worker);
-    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/tools"),
+    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/tools"),("registry/interface/system_worker_template/policy.json","/ceiling/tools"),
         ("registry/ee_template/existence/ee_template.json","/allowed_tools"),("ee/ee_existence.json","/policy_narrowing/allowed_tools")] {
         amend_json(path,&|value|value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("file.peek")));
     }
-    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/interfaces"),
+    for (path,pointer) in [(worker_policy.as_str(),"/ceiling/interfaces"),("registry/interface/system_worker_template/policy.json","/ceiling/interfaces"),
         ("registry/ee_template/existence/ee_template.json","/allowed_interfaces"),("ee/ee_existence.json","/policy_narrowing/allowed_interfaces")] {
         amend_json(path,&|value|value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("system_extra_room")));
     }
+    let source_policy=std::fs::read(root.join("registry/interface/system_worker_template/policy.json")).unwrap();
     assert_eq!(current_selection(&request.roots,&current,&provider).unwrap().unwrap().selected_tools,selection.selected_tools);
     selection.selected_tools.push(SelectedToolSeed {tool:"file.peek".into(),interface:"system_extra_room".into(),worker_environment_kind:"system_room".into()});
     let writer=composition.authoring.capability_tools["file.write"].clone();let reader=composition.authoring.capability_tools["file.read"].clone();
@@ -359,11 +359,10 @@ fn private_system_composition_is_fresh_exact_and_checked_under_policy() {
             .as_str(),
         plan.receive_interface_id
     );
-    assert!(
-        plan.required_policy_updates
-            .iter()
-            .any(|update| update.write.path.ends_with("ee_existence.json"))
-    );
+    assert!(plan.required_policy_updates.iter().all(|update| {
+        !update.write.path.starts_with(&request.roots.ee_instances_root)
+            && !update.write.path.starts_with(request.roots.registry_root.join("ee_template"))
+    }));
     for update in &plan.required_policy_updates {
         assert_eq!(
             update.write.expected_before_hash.as_ref().unwrap(),
@@ -544,6 +543,13 @@ fn client_and_return_bindings_are_only_the_callers_explicit_selection() {
         json!({"id":"world_client","interface_type":"world","role":"admin","direction":"bidirectional","source_names":["client"],"interface_driver_ref":"app_server"}),
     );
     request.communication.client_interface_id = Some("world_client".into());
+    assert!(plan_run_composition(&request).unwrap_err().contains("does not admit interface 'world_client'"));
+    for (file, pointer) in [("registry/ee_template/existence/ee_template.json", "/allowed_interfaces"),
+        ("ee/ee_existence.json", "/policy_narrowing/allowed_interfaces")] {
+        let mut value: Value = serde_json::from_slice(&std::fs::read(dir.path().join(file)).unwrap()).unwrap();
+        value.pointer_mut(pointer).unwrap().as_array_mut().unwrap().push(json!("world_client"));
+        write(dir.path(), file, value);
+    }
     let plan = plan_run_composition(&request).unwrap();
     let record = RunRecord::from_bytes(plan.run_write.content.as_bytes()).unwrap();
     assert!(record.checkpoints.iter().any(|cp| {
@@ -1008,8 +1014,15 @@ fn package_tool_contract_adoption_requires_exact_predecessor_owner_and_settlemen
     assert_eq!(plan().unwrap()["writes"].as_array().unwrap().len(),3);
     let protected=[&child.run_write.path,&provider_path,&catalog_path,&source_path,&sidecar].map(|path|(path,std::fs::read(path).unwrap()));
     for pointer in ["/handler_config/mcp/tools/3/input_schema", "/handler_config/mcp/tools/0/description", "/description"] {
-        let mut local:Value=serde_json::from_slice(&before).unwrap(); *local.pointer_mut(pointer).unwrap()=if pointer.ends_with("input_schema") {json!({"type":"object","required":["locally_authored"]})} else {json!("Local tool description")};
+        let base=if pointer.starts_with("/handler_config") {before.clone()} else {adopted["writes"][0]["content"].as_str().unwrap().as_bytes().to_vec()};
+        let mut local:Value=serde_json::from_slice(&base).unwrap(); *local.pointer_mut(pointer).unwrap()=if pointer.ends_with("input_schema") {json!({"type":"object","required":["locally_authored"]})} else {json!("Local tool description")};
         std::fs::write(&tool_path,serde_json::to_vec(&local).unwrap()).unwrap();let retained=std::fs::read(&tool_path).unwrap();
+        if pointer.starts_with("/handler_config") {
+            assert!(plan().unwrap_err().contains("outside the actual formed grant"),"a wider copy is not admitted by its original");
+            assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
+            for (path,bytes) in &protected {assert_eq!(&std::fs::read(path).unwrap(),bytes);}
+            continue;
+        }
         let deferred=plan().unwrap();assert_eq!(deferred["status"],"deferred");assert_eq!(deferred["writes"],json!([]));
         assert!(deferred["reason"].as_str().unwrap().contains("locally authored tools"));assert_eq!(std::fs::read(&tool_path).unwrap(),retained);
         for (path,bytes) in &protected {assert_eq!(&std::fs::read(path).unwrap(),bytes);}

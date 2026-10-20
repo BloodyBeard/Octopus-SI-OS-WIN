@@ -563,6 +563,10 @@ fn full_authored_run_preserves_wait_return_and_verification_then_checks_real_ord
         .unwrap()
         .push(json!("task.summary.received"));
     policy.content = serde_json::to_string(&value).unwrap();
+    let original = request.roots.registry_root.join("interface/system_worker_template/policy.json");
+    let mut held: Value = serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
+    held["ceiling"]["mark_outcomes"].as_array_mut().unwrap().push(json!("task.summary.received"));
+    std::fs::write(&original, serde_json::to_vec(&held).unwrap()).unwrap();
     let run_write = authored.writes.last_mut().unwrap();
     let mut run: Value = serde_json::from_str(&run_write.content).unwrap();
     let context = run["checkpoints"]

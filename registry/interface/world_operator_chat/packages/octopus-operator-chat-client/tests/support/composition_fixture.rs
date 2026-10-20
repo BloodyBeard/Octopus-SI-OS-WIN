@@ -142,7 +142,7 @@ pub fn fixture(root: &Path) -> RunCompositionRequest {
             root,
             &format!("registry/interface/{id}/policy.json"),
             json!({"id":id,
-            "ceiling":{"interfaces":["system_room","system_interface_authoring","world_provider_fixture","system_worker_parent","system_worker_unselected"],
+            "ceiling":{"interfaces":["system_worker_template","system_room","system_interface_authoring","world_provider_fixture","system_worker_parent","system_worker_unselected"],
                 "tools":["file.write","artifact.send"],"wek":["system_room"],"mark_outcomes":["tool.call.allowed","tool.result.corresponds"],
                 "hard_blocked_tools":[],"interface_policy":{"world_provider_fixture":{"models":["fixture-a"]}}},
             "role_artifacts":[format!("role-{id}")]}),
