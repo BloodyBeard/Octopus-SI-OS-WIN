@@ -511,7 +511,7 @@ async fn up() -> Result<(), Box<dyn std::error::Error>> {
             let initial_interface_failures = interface_activation_reconciler.initial_failures.len();
             for (interface, error) in &interface_activation_reconciler.initial_failures {
                 eprintln!(
-                    "interface '{}' remains in coma after runtime initialization: {error}",
+                    "interface '{}' is in coma after runtime initialization; the host retries its life with backoff: {error}",
                     interface.as_str()
                 );
             }
