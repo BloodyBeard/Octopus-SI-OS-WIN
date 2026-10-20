@@ -294,6 +294,7 @@ function IdeaStep() {
           progressRef={progressRef}
           particleScale={1.6}
           monochrome
+          sparkle
           className="welcome-video-cloud"
         />
       </div>

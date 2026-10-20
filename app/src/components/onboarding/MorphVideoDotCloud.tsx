@@ -11,6 +11,7 @@ type Props = {
   frameScales?: readonly number[];
   particleScale?: number;
   monochrome?: boolean;
+  sparkle?: boolean;
   className?: string;
 };
 
@@ -31,6 +32,7 @@ type CloudFrame = {
   b: Float32Array;
   weight: Float32Array;
   bright: Uint8Array;
+  targets: VideoTargets;
 };
 
 type VideoTargets = {
@@ -55,6 +57,9 @@ const VIDEO_SCROLL_ADVANCE_S = 1.4;
 const VIDEO_LUM_FLOOR = 34;
 const VIDEO_LUM_FULL = 132;
 const DIM = 0.96;
+const SPARKLE_FRAME_MS = 1000 / 24;
+const SPARKLE_COUNT_STEP = 0.035;
+const SPARKLE_COUNT_RETURN = 0.9;
 
 export function StateMorphDotCloud({ srcs, active, durationMs = 720, frameScales, className = "" }: StateMorphProps) {
   const progressRef = useRef(active ? Math.max(0, srcs.length - 1) : 0);
@@ -88,7 +93,7 @@ export function StateMorphDotCloud({ srcs, active, durationMs = 720, frameScales
   );
 }
 
-export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, particleScale = 1, monochrome = false, className = "" }: Props) {
+export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, particleScale = 1, monochrome = false, sparkle = false, className = "" }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -110,6 +115,10 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
     let nextPulseAt = 0;
     let pulseCadence: "active" | "ambient" | null = null;
     let isInVideoSegment = false;
+    let sparkleTick = -1;
+    let sparkleCountScale = 1;
+    const drawnX = new Float32Array(COUNT).fill(Number.NaN);
+    const drawnY = new Float32Array(COUNT).fill(Number.NaN);
     const videoSeedU = new Float32Array(COUNT);
     const videoSeedV = new Float32Array(COUNT);
     const videoSeedA = new Float32Array(COUNT);
@@ -249,14 +258,43 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
       const videoTargets = videoFrameData
         ? collectVideoTargets(videoFrameData, firstFrameData, sampleW, sampleH, videoFitX, videoFitY, seamBlend)
         : null;
+      const sparkleTexture = sparkle && !reduceMotion;
+      if (sparkleTexture) {
+        const tick = Math.floor(now / SPARKLE_FRAME_MS);
+        if (tick !== sparkleTick) {
+          sparkleTick = tick;
+          sparkleCountScale = 1 + (sparkleCountScale - 1) * SPARKLE_COUNT_RETURN + (hash01(tick, 97) - 0.5) * SPARKLE_COUNT_STEP;
+        }
+      }
+      const dotMix = sparkleTexture ? 1 : videoMix;
 
       for (let i = 0; i < COUNT; i += 1) {
+        let fromX = from.x[i];
+        let fromY = from.y[i];
+        let fromR = from.r[i];
+        let fromG = from.g[i];
+        let fromB = from.b[i];
         let targetX = to.x[i];
         let targetY = to.y[i];
         let targetR = to.r[i];
         let targetG = to.g[i];
         let targetB = to.b[i];
         let lightGate = 1;
+        if (sparkleTexture && from.targets.count > 0 && to.targets.count > 0) {
+          const start = sampleSparkleTarget(i, from.targets, videoSeedU, sparkleCountScale);
+          const end = sampleSparkleTarget(i, to.targets, videoSeedU, sparkleCountScale);
+          fromX = start.x;
+          fromY = start.y;
+          fromR = start.r;
+          fromG = start.g;
+          fromB = start.b;
+          targetX = end.x;
+          targetY = end.y;
+          targetR = end.r;
+          targetG = end.g;
+          targetB = end.b;
+          lightGate = start.gate + (end.gate - start.gate) * mix;
+        }
 
         if (videoMix > 0 && videoTargets && videoTargets.count > 0) {
           const target = sampleVideoTarget(
@@ -269,21 +307,26 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
           targetR += (target.r - targetR) * videoMix;
           targetG += (target.g - targetG) * videoMix;
           targetB += (target.b - targetB) * videoMix;
-          lightGate = 1 + (target.gate - 1) * videoMix;
-          if (lightGate <= 0.01) continue;
+          lightGate += (target.gate - lightGate) * videoMix;
+        }
+        if (lightGate <= 0.01) {
+          drawnX[i] = Number.NaN;
+          continue;
         }
 
-        const x = from.x[i] + (targetX - from.x[i]) * mix;
-        const y = from.y[i] + (targetY - from.y[i]) * mix;
+        const x = fromX + (targetX - fromX) * mix;
+        const y = fromY + (targetY - fromY) * mix;
         const z = from.z[i] + (to.z[i] - from.z[i]) * mix;
-        const r = monochrome ? palette.color[0] : from.r[i] + (targetR - from.r[i]) * mix;
-        const g = monochrome ? palette.color[1] : from.g[i] + (targetG - from.g[i]) * mix;
-        const b = monochrome ? palette.color[2] : from.b[i] + (targetB - from.b[i]) * mix;
+        const r = monochrome ? palette.color[0] : fromR + (targetR - fromR) * mix;
+        const g = monochrome ? palette.color[1] : fromG + (targetG - fromG) * mix;
+        const b = monochrome ? palette.color[2] : fromB + (targetB - fromB) * mix;
         const weight = from.weight[i] + (to.weight[i] - from.weight[i]) * mix;
 
         const px = centerX + x * scale;
         const py = centerY + y * scale;
-        const lockOpacity = fade * (1 - videoMix);
+        drawnX[i] = px;
+        drawnY[i] = py;
+        const lockOpacity = fade * (1 - dotMix);
         if (lockOpacity > 0.001) {
           drawLockDotShader(ctx, {
             x: px,
@@ -299,11 +342,11 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
             sizeScale: particleScale,
           });
         }
-        if (videoMix > 0.001) {
+        if (dotMix > 0.001) {
           const color = monochrome ? { r, g, b } : amplifyColor(r, g, b);
           const [red, green, blue] = sceneParticleColor(palette, color.r, color.g, color.b);
           const size = (0.32 + z * 0.82) * dpr;
-          const alpha = Math.min(0.96, (0.34 + z * 0.68) * fade * DIM * lightGate) * videoMix;
+          const alpha = Math.min(0.96, (0.34 + z * 0.68) * fade * DIM * lightGate) * dotMix;
           ctx.fillStyle = `rgba(${red},${green},${blue},${alpha})`;
           ctx.beginPath();
           ctx.arc(px, py, size, 0, Math.PI * 2);
@@ -311,7 +354,7 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
         }
       }
 
-      const nextCadence = videoMix > 0.5 ? "active" : "ambient";
+      const nextCadence = sparkleTexture || videoMix > 0.5 ? "active" : "ambient";
       if (pulseCadence !== nextCadence) {
         pulseCadence = nextCadence;
         nextPulseAt = now + dotPulseDelay(nextCadence);
@@ -328,11 +371,10 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
         const tt = (now - pulse.t0) / pulse.dur;
         if (tt >= 1) continue;
         const i = pulse.idx;
-        const x = from.x[i] + (to.x[i] - from.x[i]) * mix;
-        const y = from.y[i] + (to.y[i] - from.y[i]) * mix;
         const z = from.z[i] + (to.z[i] - from.z[i]) * mix;
-        const px = centerX + x * scale;
-        const py = centerY + y * scale;
+        const px = drawnX[i];
+        const py = drawnY[i];
+        if (Number.isNaN(px)) continue;
         const baseR = (0.9 + z * 1.4) * dpr;
         drawDotPulse(ctx, px, py, baseR, tt, fade, palette.pulseInk);
         nextPulses.push(pulse);
@@ -407,7 +449,7 @@ export function MorphVideoDotCloud({ srcs, videoSrc, progressRef, frameScales, p
       if (video) video.src = "";
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [srcs, videoSrc, progressRef, frameScales, particleScale]);
+  }, [srcs, videoSrc, progressRef, frameScales, particleScale, monochrome, sparkle]);
 
   return <canvas ref={canvasRef} className={`octopus-cloud ${className}`.trim()} aria-hidden="true" />;
 }
@@ -484,7 +526,7 @@ function sampleFrame(image: HTMLImageElement, inputScale: number): CloudFrame & 
     weight[k] = weight[j];
     bright[k] = bright[j];
   }
-  return { x, y, z, r, g, b, weight, bright, aspect };
+  return { x, y, z, r, g, b, weight, bright, aspect, targets: collectImageTargets(data, sw, sh, fit.x * scale, fit.y * scale) };
 }
 
 function loadImageData(src: string, width: number, height: number): Promise<ImageData> {
@@ -555,6 +597,46 @@ function collectVideoTargets(
   }
 
   return { count, x, y, r, g, b, gate };
+}
+
+function collectImageTargets(data: Uint8ClampedArray, width: number, height: number, fitX: number, fitY: number): VideoTargets {
+  const max = Math.ceil((width * height) / 3);
+  const x = new Float32Array(max);
+  const y = new Float32Array(max);
+  const r = new Uint8ClampedArray(max);
+  const g = new Uint8ClampedArray(max);
+  const b = new Uint8ClampedArray(max);
+  const gate = new Float32Array(max);
+  let count = 0;
+  for (let py = 0; py < height; py += 2) {
+    for (let px = 0; px < width; px += 2) {
+      const idx = (py * width + px) * 4;
+      const alpha = data[idx + 3] / 255;
+      const imageGate = smoothstep(VIDEO_LUM_FLOOR, VIDEO_LUM_FULL, luminance(data[idx], data[idx + 1], data[idx + 2]) * alpha);
+      if (imageGate <= 0.05) continue;
+      if (count >= max) break;
+      x[count] = (px / Math.max(1, width - 1) - 0.5) * 2 * fitX;
+      y[count] = (py / Math.max(1, height - 1) - 0.5) * 2 * fitY;
+      r[count] = data[idx];
+      g[count] = data[idx + 1];
+      b[count] = data[idx + 2];
+      gate[count] = imageGate;
+      count += 1;
+    }
+  }
+  return { count, x, y, r, g, b, gate };
+}
+
+function sampleSparkleTarget(pointIndex: number, targets: VideoTargets, seedU: Float32Array, countScale: number) {
+  const index = Math.floor(seedU[pointIndex] * targets.count * countScale) % targets.count;
+  return {
+    x: targets.x[index],
+    y: targets.y[index],
+    r: targets.r[index],
+    g: targets.g[index],
+    b: targets.b[index],
+    gate: targets.gate[index],
+  };
 }
 
 function sampleVideoTarget(pointIndex: number, targets: VideoTargets, seedU: Float32Array) {
