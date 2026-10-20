@@ -876,7 +876,7 @@ assert.match(chatRuns, /\| "interrupted_result"/);
 assert.match(chatRuns, /"turn_control", "interrupted_result", "rate_limits"/);
 assert.match(chatRuns, /\.sort\(\(a, b\) => a\.createdAtMs - b\.createdAtMs \|\| a\.movementSeq - b\.movementSeq\)/);
 assert.match(chatRuns, /if \(eventKind === "message_delta" \|\| eventKind === "commentary_delta"\) return "text";[\s\S]*?\["reasoning_delta", "plan_delta", "tool_output_delta", "file_change_delta"\]\.includes\(eventKind\)\) return "delta";/);
-assert.match(electronProjection, /const projectedText = projected\.eventKind\.endsWith\("_delta"\)\s*\? projected\.text\s*:\s*projected\.eventKind === "compaction"\s*\? ""\s*:\s*projected\.text \|\| operatorChatTurnText\(projected\.payload, "out"\) \|\| label;/);
+assert.match(electronProjection, /const projectedText = projected\.eventKind\.endsWith\("_delta"\)\s*\? projected\.text\s*:\s*projected\.eventKind === "compaction"\s*\? ""\s*:\s*projected\.eventKind === "message"\s*\? projected\.text \|\| operatorChatTurnText\(projected\.payload, "out"\)\s*:\s*projected\.text \|\| operatorChatTurnText\(projected\.payload, "out"\) \|\| label;/);
 assert.match(electronProjection, /if \(label === "agent\.message\.delta"\) \{\s*return phase === "commentary" \? "commentary_delta" : "message_delta";/);
 assert.match(electronProjection, /"turn\.reasoning\.delta": "reasoning_delta"/);
 assert.match(electronProjection, /function compareMovementOrder\(left, right\) \{\s*return rowTimeMs\(left\) - rowTimeMs\(right\)\s*\|\| numberValue\(left\.seq, 0\) - numberValue\(right\.seq, 0\);/);
