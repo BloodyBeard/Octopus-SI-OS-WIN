@@ -800,14 +800,6 @@ const mergeCost = (size) => {
 mergeCost(500);
 assert.ok(mergeCost(8000) < mergeCost(2000) * 10, "rendered message merge must stay near-linear in projected and pending history");
 
-assert.match(turnActivity, /if \(text\(data\.tool\) === "wait"\) return \[\];/);
-assert.match(turnActivity, /kind: "multi-agent-group"/);
-assert.match(turnActivity, /currentAction !== action\) flushMultiAgent\(\)/);
-assert.match(turnActivity, /multiAgentGrouped\.push\(entry\)/);
-assert.match(turnActivity, /kind: "subagent-group"/);
-assert.match(turnActivity, /const visible = items\.slice\(0, 3\)/);
-assert.match(turnActivity, /return "started working"/);
-assert.doesNotMatch(turnActivity, /summaryEntry/);
 assert.match(
   turnActivity,
   /if \(entry\.family === "reasoning"\) \{\s*if \(explorationOpen\) grouped\.push\(entry\);\s*continue;/,
@@ -822,24 +814,12 @@ assert.match(
   turnActivity,
   /return <ReasoningSummaryActivity entry=\{entry\} message=\{details\.at\(-1\)\} \/>;/,
 );
-assert.match(turnActivity, /const summary = entry\.active \? "Thinking" : elapsed \? `Thought for \$\{formatElapsed\(elapsed\)\}` : "Thought";/);
-assert.match(turnActivity, /defaultExpanded=\{entry\.active\}[\s\S]*?followActive/);
-assert.match(turnActivity, /const thinkingFallbackMessage = presentation === "conversation"\s*\? latestReasoningSummaryHeading\(presented\) \|\| "Thinking"\s*: "Thinking";/);
-assert.match(turnActivity, /find\(\(entry\) => entry\.active && entry\.family !== "reasoning"\)/);
-assert.match(turnActivity, /if \(entry\.family === "reasoning"\) return false;/);
-assert.match(turnActivity, /\? `thinking:\$\{thinkingFallbackMessage\}`/);
-assert.match(turnActivity, /function latestReasoningSummaryHeading\([\s\S]*?const heading = reasoningSummaryHeading\(message\.text\);/);
-assert.doesNotMatch(turnActivity, /activityFamily\(latestConversationActivity\) === "reasoning"/);
-assert.match(turnActivity, /return activityWindow === "latest-context" \? latestContextActivityUnits\(projected\) : projected;/);
-assert.doesNotMatch(turnActivity, /retainStandaloneReasoning|standaloneReasoningPresentation|codex-reasoning-context/);
-assert.doesNotMatch(turnActivity, /latestReasoningIndex|previousBatchIndex/);
 assert.match(voiceView, /<HomeTurnActivity activities=\{activity\}/);
 assert.doesNotMatch(voiceView, /standaloneReasoningPresentation/);
 assert.match(turnActivity, /const startingTask = syntheticSubmitting[\s\S]*?&& !hasWork[\s\S]*?&& !response/);
 assert.match(turnActivity, /aria-live="polite"[\s\S]*?role="status"[\s\S]*?<CadencedShimmerText active>Starting your task<\/CadencedShimmerText>/);
 assert.match(turnActivity, /const showWorkedForBoundary = statusBoundaryVisible\s*&& \(hasWork \|\| failed \|\| stopped \|\| showStandaloneWorkedBoundary\);[\s\S]*?\{showWorkedForBoundary \? \([\s\S]*?<WorkedForBoundary[\s\S]*?\{showWorkedForBoundary && \(hasWork \|\| showThinkingFallback\) \? <ActivityGap \/> : null\}/);
 assert.match(turnActivity, /Worked for \{formatElapsed\(elapsed\)\}/);
-assert.match(turnActivity, /activeSlice[\s\S]*?\? thinkingFallbackMessage/);
 assert.match(
   turnActivity,
   /const hasConversationReasoningWork = presentation === "conversation"\s*&& visibleActivity\.some\(\(message\) => activityFamily\(message\) === "reasoning"\);/,
@@ -852,18 +832,6 @@ assert.match(
   turnActivity,
   /if \(!hasWork && !working && !failed && !stopped && !showStandaloneWorkedBoundary\) return null;/,
 );
-assert.match(turnActivity, /text: reasoningSummaryContent\(summaries\)/);
-assert.match(turnActivity, /first\.startsWith\("\*\*"\) \? first : `\*\*\$\{first\}\*\*`/);
-assert.match(turnActivity, /summaryIndex === null \|\| contentIndex !== null \|\| !message\.text\.trim\(\)/);
-assert.match(turnActivity, /if \(summaryIndex === null \|\| contentIndex !== null\) continue;/);
-assert.match(turnActivity, /delete safe\.content;/);
-assert.match(turnActivity, /delete safe\.content_index;/);
-assert.match(turnActivity, /delete safe\.contentIndex;/);
-assert.doesNotMatch(turnActivity, /return activityFamily\(message\) === "reasoning" \? \[\] : \[message\]/);
-assert.doesNotMatch(turnActivity, /dedupeExplorationEntries|seenReadPaths/);
-assert.doesNotMatch(turnActivity, /singleActivityStandsAlone/);
-assert.doesNotMatch(turnActivity, /latestReasoningActionTitle/);
-assert.match(turnActivity, /className="octopus-agent-activity-toggle cursor-interaction"/);
 assert.match(turnActivity, /if \(message\.eventKind === "interrupted_result"\) return true;/);
 assert.match(turnActivity, /const \[historyDisclosureState, setHistoryDisclosureState\] = useState<DisclosureState>\("collapsed"\);/);
 assert.match(turnActivity, /const historyExpanded = historyDisclosureState === "opening" \|\| historyDisclosureState === "expanded";/);
@@ -1334,6 +1302,42 @@ async function verifyTranscriptLayout() {
     await click(query(".octopus-turn-activity-content > .octopus-agent-activity .octopus-agent-activity-toggle"));
     await render([], false); await render([operation, read]);
     assert.equal(query(".octopus-agent-activity-body"), null, "streamed groups mount collapsed just like history");
+    const collaboration = (id, tool, status, receivers) => message(id, "collaboration", "", { tool, status, receiverThreadIds: receivers, model: "gpt-test", prompt: `Prompt ${id}` });
+    const subagent = (id, thread, kind, agentPath) => message(id, "subagent_activity", "", { agentThreadId: thread, kind, agentPath });
+    await render([
+      collaboration("spawn-a", "spawnAgent", "completed", ["aaaaaaaa-thread"]), collaboration("spawn-b", "spawnAgent", "completed", ["bbbbbbbb-thread"]),
+      collaboration("message-a", "sendInput", "completed", ["aaaaaaaa-thread"]), collaboration("wait", "wait", "completed", ["aaaaaaaa-thread"]),
+      subagent("sub-1", "t1", "started", "root/research_agent"), subagent("sub-2", "t2", "started", "root/writer"),
+      subagent("sub-3", "t3", "started", "root/critic"), subagent("sub-4", "t4", "started", "root/editor"),
+    ], false);
+    assert.deepEqual(all(".octopus-agent-activity-toggle").map((node) => node.getAttribute("aria-label")), ["Created 2 agents", "Messaged an agent"]);
+    assert.deepEqual(all(".octopus-subagent-chip-name").map((node) => node.textContent), ["Research agent", "Writer", "Critic"]);
+    assert.equal(query(".octopus-subagent-group-status").textContent, "and 1 other subagent started working");
+    assert.doesNotMatch(container.textContent, /Prompt wait/);
+    await render([subagent("sub-1", "t1", "started", "root/a"), subagent("sub-2", "t2", "interacted", "root/b")], false);
+    assert.equal(query(".octopus-subagent-group-status").textContent, "updated");
+    await render([subagent("sub-1", "t1", "interacted", "root/a"), subagent("sub-2", "t2", "interrupted", "root/b")], false);
+    assert.equal(query(".octopus-subagent-group-status").textContent, "interrupted");
+    const privateReasoning = [message("reason", "reasoning", "", { summary: ["Checking files", "Then comparing"], content: ["RAW PRIVATE CHAIN"] }),
+      message("raw-delta", "reasoning_delta", "RAW DELTA", { content_index: 0 }), message("unindexed-delta", "reasoning_delta", "RAW UNINDEXED", {})];
+    await render(privateReasoning, true);
+    assert.equal(query(".octopus-thinking-fallback-label").textContent, "Then comparing");
+    assert.doesNotMatch(container.textContent, /RAW/);
+    const renderLedger = (activities, turnInProgress) => React.act(async () => root.render(React.createElement(turn.TurnActivity, {
+      activities, activityWindow: "all", turnInProgress, startedAtMs: 1, presentation: "ledger", statusBoundaryVisible: false, toolPresentations: {},
+      renderActivity: (message) => React.createElement(events.AssistantEventContent, { message, toolPresentations: {} }),
+    })));
+    await renderLedger(privateReasoning, false);
+    assert.deepEqual(all(".octopus-agent-activity-toggle").map((node) => [node.getAttribute("aria-label"), node.getAttribute("aria-expanded")]), [["Thought", "false"]]);
+    await click(query(".octopus-agent-activity-toggle"));
+    assert.equal(query(".octopus-reasoning-detail").textContent, "Then comparing");
+    assert.doesNotMatch(container.textContent, /RAW|Checking files/);
+    await renderLedger([message("timed", "reasoning", "", { summary: ["Done"], started_at_ms: 1_000, completed_at_ms: 4_000 })], false);
+    assert.match(query(".octopus-agent-activity-toggle").getAttribute("aria-label"), /^Thought for \S/);
+    await renderLedger([message("live", "reasoning_delta", "Scanning", { summary_index: 0, lifecycle: "streaming" })], true);
+    assert.equal(query(".octopus-agent-activity-summary-value").textContent, "Thinking");
+    assert.equal(query(".octopus-reasoning-detail").textContent, "Scanning", "active reasoning opens without a click");
+    await render([], false);
     const artifactId = `docs.guide.md:${"a".repeat(64)}`;
     const artifactMessage = { ...message("artifact", "dynamic_tool", "", { tool: "artifact.read", call_id: "artifact", status: "completed", arguments: { id: artifactId }, _activity_origin: { interface_role: "provider" } }), artifactId: "receipt:exact-read", runId: "run-test", interfaceId: "provider-test" };
     const readResult = { tool: "artifact.read", call_id: "artifact", ok: true, body: { result: "artifact_read", id: artifactId, text: "Historical content", artifact_size_bytes: 18, offset_bytes: 0, bytes_read: 18, truncated: false } };
