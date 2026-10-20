@@ -223,6 +223,48 @@ jobs:
           printf '%s  %s\n' 9a9250039fef572d0bcc110ac5e78055faf5604421211d2d5f578ebc5a34e703 app/build/node-v24.15.0-headers.tar.gz | shasum -a 256 -c -
           tar -xzf app/build/node-v24.15.0-headers.tar.gz -C app/build
 
+      - name: Build the client filesystem module
+        run: node app/native/build.cjs
+
+      - name: Client native installation and terminal contracts
+        run: |
+          node app/scripts/test-local-packages.cjs & packages=$!
+          { node app/scripts/test-client-setup.cjs && npm --prefix app run test:cli; } & terminal=$!
+          wait $packages; packages_status=$?
+          wait $terminal; terminal_status=$?
+          test $packages_status -eq 0 -a $terminal_status -eq 0
+
+  package-closure:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      OCTOPUS_NATIVE_NODE_HEADERS: ${{ github.workspace }}/app/build/node-v24.15.0/include/node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install client dependencies without native rebuild
+        working-directory: app
+        run: npm ci --ignore-scripts
+
+      - name: Prepare pinned client native headers
+        run: |
+          mkdir -p app/build
+          curl -fL https://nodejs.org/download/release/v24.15.0/node-v24.15.0-headers.tar.gz -o app/build/node-v24.15.0-headers.tar.gz
+          printf '%s  %s\n' 9a9250039fef572d0bcc110ac5e78055faf5604421211d2d5f578ebc5a34e703 app/build/node-v24.15.0-headers.tar.gz | shasum -a 256 -c -
+          tar -xzf app/build/node-v24.15.0-headers.tar.gz -C app/build
+
+      - name: Build the client filesystem module
+        run: node app/native/build.cjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -240,13 +282,6 @@ jobs:
 
       - name: Build the topology planner and input intake life
         run: cargo build --locked -p octopus-operator-chat-client --bin octopus-operator-chat-topology -p octopus-provider-codex --bin octopus-input-intake-life
-
-      - name: Client native installation and terminal contracts
-        run: |
-          node app/native/build.cjs
-          node app/scripts/test-local-packages.cjs
-          node app/scripts/test-client-setup.cjs
-          npm --prefix app run test:cli
 
       - name: Prepare the declared managed provider executable
         run: node registry/interface/world_provider_codex/packages/octopus-provider-codex/managed-cli/bootstrap.cjs materialize --destination "$PWD/registry/interface/world_provider_codex/packages/bin"
@@ -304,6 +339,9 @@ jobs:
           tool: nextest
 
       - name: Install declared OCR verifier executable
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install tesseract
 
       - name: Package verifier, Home admission, provider recovery and voice contracts
