@@ -319,8 +319,6 @@ assert.match(queueEdit, /applyDraft\(\{[\s\S]*?messageId: item\.messageId, messa
 const queueDraftSubmission = sourceBetween(chatWorkspace, "async function submitDraft(", "async function beginSubmission(");
 assert.match(queueDraftSubmission, /const queuedAttachmentBytesNeedRecovery = Boolean\([\s\S]*?editedQueuedTurn\?\.hadAttachments[\s\S]*?editedQueuedTurn\.attachments\.length === 0[\s\S]*?const editedQueuePayloadChanged = Boolean\([\s\S]*?body !== editedQueuedTurn\.text[\s\S]*?!queuedAttachmentBytesNeedRecovery[\s\S]*?const submissionMessageId = editedQueuePayloadChanged[\s\S]*?messageId: submissionMessageId[\s\S]*?status: "queued"/);
 assert.match(chatWorkspace, /reportClientExtensionIncident\(\{[\s\S]*?interfaceId: turn\.providerInterfaceId \|\| artifact\.from_interface_id/);
-assert.match(chatDraftStateSource, /function persistSubmissionIntent\([\s\S]*?saveChatDrafts\([\s\S]*?setMessageId\(nextMessageId\)/);
-assert.match(chatDraftStateSource, /function completeSubmissionIntent\([\s\S]*?messageId: ""[\s\S]*?text: ""[\s\S]*?saveChatDrafts\(/);
 assert.match(chatDraftStateSource, /function currentDraftForStorage\([\s\S]*?existing\?\.messageId === current\.messageId[\s\S]*?\{ \.\.\.existing, updatedAtMs: current\.updatedAtMs \}/);
 assert.match(chatWorkspace, /function paneTransferBlockReason\(runId: string\)[\s\S]*?draft\?\.attachments\.length[\s\S]*?draft\?\.text \|\| draft\?\.continuation[\s\S]*?queuedTurnsRef\.current\.some/);
 assert.match(operatorShell, /paneTransferBlockReasonRef\.current\(target, "secondary"\)/);

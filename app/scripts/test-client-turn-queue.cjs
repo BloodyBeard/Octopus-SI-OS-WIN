@@ -722,6 +722,29 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   await act(async () => draft.setText("newer text"));
   await act(async () => oldDraft.consumeDraft("run-a", "one", []));
   assert.equal(draft.text, "newer text");
+  let preserveEdits = false;
+  function IntentProbe({ home }) {
+    draft = useDraft({ accessProfile: "lab", activeRunId: "run-a", storageScope: JSON.stringify([home, "main"]), onError: noop, preserveSubmissionIntentOnEdit: () => preserveEdits });
+    return null;
+  }
+  await act(async () => draftHost.render(React.createElement(IntentProbe, { key: "intent-1", home: "/Home-intent" })));
+  await act(async () => draft.setText("Prepared totals"));
+  await act(async () => draft.persistSubmissionIntent("run-a", "msg_prepared", false));
+  assert.equal(draft.messageId, "msg_prepared");
+  await act(async () => draftHost.render(React.createElement(IntentProbe, { key: "intent-2", home: "/Home-intent" })));
+  assert.deepEqual([draft.text, draft.messageId], ["Prepared totals", "msg_prepared"], "a prepared submission survives a reload with its identity");
+  await act(async () => draft.setText("Prepared totals, edited"));
+  await act(async () => draft.saveCurrentDraft("run-a"));
+  assert.deepEqual([draft.messageId, draft.readDraft("run-a").messageId, draft.readDraft("run-a").text], ["", "", "Prepared totals, edited"],
+    "editing a prepared message abandons its identity so the edit is a new message");
+  preserveEdits = true;
+  await act(async () => draft.persistSubmissionIntent("run-a", "msg_prepared", false));
+  await act(async () => draft.setText("Prepared totals, edited again"));
+  assert.equal(draft.messageId, "msg_prepared", "an edit the workspace preserves keeps the prepared identity");
+  await act(async () => draft.completeSubmissionIntent("run-a", "msg_other"));
+  assert.equal(draft.readDraft("run-a").messageId, "msg_prepared", "another message never completes this intent");
+  await act(async () => draft.completeSubmissionIntent("run-a", "msg_prepared"));
+  assert.deepEqual([draft.messageId, draft.readDraft("run-a").messageId], ["", ""], "a completed intent releases the identity");
   await act(async () => draftHost.unmount());
   dom.window.close();
   console.log("PASS client queue: exact identity, order/bytes, concurrent claims, remount/unknown, owner recovery, head gates, storage failure, Send/Stop/context-menu actions");
