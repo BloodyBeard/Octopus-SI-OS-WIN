@@ -734,3 +734,189 @@ test("a live client applies the provider's own receipts to the task before its s
   await until(() => view.current.turnOpen && view.current.runs.find((run) => run.runId === "run-1")?.turnState === "working", "the provider's receipt did not open the turn");
   assert.equal(statusReads(), before);
 });
+
+const twoModels = ["model-a", "model-b"].map((model) => ({ ...provider.models[0], model, displayName: model, supportedReasoningEfforts: ["medium", "high"], isDefault: model === "model-a" }));
+const capableProvider = { ...provider, supportedReasoningEfforts: ["medium", "high"], models: twoModels };
+const otherProvider = { ...capableProvider, id: "provider.other", label: "Other provider", models: twoModels.slice(1) };
+const policy = (models) => ({ [provider.id]: { models }, [otherProvider.id]: { models: ["model-b"] } });
+const notesApp = { id: "app.notes", name: "Notes", category: "connector", interfaces: [], artifact_bindings: [], task_capabilities: { tools: [{ tool: "notes.read", interface: "iface.notes", worker_environment_kind: "system_shell" }] } };
+const mailApp = { id: "app.mail", name: "Mail", category: "connector", interfaces: [], artifact_bindings: [], task_capabilities: { tools: [] } };
+const drivers = [{ name: "system_shell", door_interfaces: ["door.shell"], root_slots: ["host_filesystem_root"], tools: [], host_slots: {} }, { name: "system_browser", door_interfaces: ["door.browser"], root_slots: [], tools: [], host_slots: {} }];
+const researcher = { ...writerAgent, id: "worker.research", label: "Research", provider_interface_ids: [provider.id, otherProvider.id], interface_policy: policy(["model-a", "model-b"]),
+  applications: [notesApp, mailApp], drivers, selected_tools: [{ tool: "shell.exec", interface: "iface.shell", worker_environment_kind: "system_shell" }, { tool: "browser.open", interface: "iface.browser", worker_environment_kind: "system_browser" }],
+  client_agent_id: "agent-research", client_agent_name: "Researcher", client_template_provider_model: "model-b", client_template_reasoning_effort: "high",
+  client_template_application_ids: ["app.notes"], client_template_worker_environment_kinds: ["system_shell"] };
+const rootContext = (workers) => ({ ee_id: "ee.root", is_os_root: true, display_name: "Root", agent_catalog_digest: "catalog-1", host_root_refs: { host_filesystem_root: "/" },
+  workers: workers.map((worker) => ({ label: worker.id, provider_interface_ids: [provider.id, otherProvider.id], interface_policy: policy(["model-a", "model-b"]), ...worker })) });
+const projectContext = { ee_id: "ee.proj", display_name: "Market study", agent_catalog_digest: "catalog-2", host_root_refs: { host_filesystem_root: "/" }, workers: [researcher] };
+function capableHost(contexts = [rootContext([{ id: "worker.test" }]), projectContext], { home = true } = {}) {
+  localStorage.clear();
+  const host = fakeHost();
+  if (home) host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  host.mutations = [];
+  host.transport.providerInterfaces = async () => ({ repoRoot: "/repo", providers: structuredClone([capableProvider, otherProvider]) });
+  host.transport.mutateOctopusOsWorkspace = async (request) => { host.mutations.push(structuredClone(request)); return { ok: true }; };
+  const read = host.transport.projectionRead;
+  host.transport.projectionRead = async (request) => request.method === "projection.operator.chat.contexts"
+    ? (host.reads.push(request.method), { contexts: structuredClone(contexts) }) : read(request);
+  return host;
+}
+const choose = async (view, agentId) => {
+  view.current.setAgentPresetId(agentId);
+  await until(() => view.current.canSubmit, () => `the Agent never became ready: ${view.current.submitBlockReason}`);
+};
+
+test("a new task without a matching Agent sends nothing, then takes the chosen Agent's project, model and capabilities exactly", { timeout: 15_000 }, async () => {
+  const host = capableHost();
+  const view = await mount(host, "lab");
+  await type(view, "Study the market");
+  await until(() => view.current.submitBlockReason === "Choose an Agent before sending.", () => `unexpected block: ${view.current.submitBlockReason}`);
+  assert.equal(view.current.workerInterfaceId, "", "an unmatched Home worker is not kept as the task's worker");
+  await view.current.submit();
+  await settle();
+  assert.deepEqual([host.turns.length, view.current.error, view.current.text], [0, "", "Study the market"]);
+  await choose(view, "agent-research");
+  assert.deepEqual([view.current.eeId, view.current.workerInterfaceId, view.current.providerInterfaceId, view.current.providerModel, view.current.reasoningEffort, view.current.applicationIds, view.current.driverNames],
+    ["ee.proj", "worker.research", provider.id, "model-b", "high", ["app.notes"], ["system_shell"]]);
+  void view.current.submit();
+  await until(() => host.turns.length === 1, "the task was not created");
+  const [turn] = host.turns;
+  assert.deepEqual([turn.runId, turn.eeId, turn.workerInterfaceId, turn.providerModel, turn.reasoningEffort, turn.selectedWorkerEnvironmentKinds, turn.selectedTools.map((tool) => tool.tool)],
+    [undefined, "ee.proj", "worker.research", "model-b", "high", ["system_shell"], ["notes.read", "shell.exec"]]);
+  assert.deepEqual(Object.keys(turn).filter((key) => /agent/i.test(key)), [], "the runtime receives the Agent's configuration, never a client Agent identity");
+  assert.equal(turn.doorHostSlots["door.shell"]?.host_filesystem_root, undefined);
+  host.reply("run-new", "Studied.");
+  await until(() => !view.current.busy, "the new task never settled");
+});
+
+test("an Agent's task choices stay inside its template, a missing Worker Environment blocks sending, and full access carries the host root", { timeout: 15_000 }, async () => {
+  const host = capableHost();
+  const view = await mount(host, "lab");
+  await type(view, "Study the market");
+  await choose(view, "agent-research");
+  assert.equal(view.current.fullAccessUnavailableReason, "");
+  view.current.toggleApplication("app.mail");
+  view.current.toggleDriver("system_browser");
+  await settle();
+  assert.deepEqual([view.current.applicationIds, view.current.driverNames], [["app.notes"], ["system_shell"]], "capabilities outside the Agent's template are not offered");
+  view.current.setProviderModel(provider.id, "model-a", "medium");
+  await until(() => view.current.providerModel === "model-a", "the model choice was not taken");
+  assert.deepEqual([view.current.agentPresetId, view.current.canSubmit], ["agent-research", true], "another admitted model keeps the chosen Agent");
+  view.current.toggleDriver("system_shell");
+  await until(() => view.current.submitBlockReason === "Application 'Notes' requires Worker Environment 'system_shell'. Select that Worker Environment or remove the Application.",
+    () => `unexpected block: ${view.current.submitBlockReason}`);
+  assert.equal(view.current.agentPresetId, "agent-research");
+  view.current.toggleApplication("app.notes");
+  await until(() => view.current.canSubmit, () => `still blocked: ${view.current.submitBlockReason}`);
+  assert.equal(view.current.fullAccessUnavailableReason, "Full access requires a selected Worker Environment that declares the host filesystem root.");
+  view.current.toggleDriver("system_shell");
+  await until(() => view.current.fullAccessUnavailableReason === "", "the host-root Worker Environment did not make full access available");
+  view.current.setAccessMode("full_access");
+  await until(() => view.current.accessMode === "full_access", "full access was not chosen");
+  void view.current.submit();
+  await until(() => host.turns.length === 1, "the task was not created");
+  assert.deepEqual([host.turns[0].providerModel, host.turns[0].reasoningEffort, host.turns[0].doorHostSlots], ["model-a", "medium", { "door.shell": { host_filesystem_root: "/" } }]);
+  host.reply("run-new", "Studied.");
+  await until(() => !view.current.busy, "the new task never settled");
+});
+
+test("an existing task keeps its bound provider, takes an exact model and effort, and never replaces an unknown model", { timeout: 15_000 }, async () => {
+  const host = capableHost();
+  host.runs.push(runRow("run-2", { provider_model: "retired-model" }));
+  const view = await openTask(host, "lab");
+  view.current.setProviderModel(otherProvider.id, "model-b");
+  await settle();
+  assert.deepEqual([view.current.providerInterfaceId, view.current.providerModel], [provider.id, "model-a"], "another provider's model is not taken into a bound task");
+  view.current.setProviderModel(provider.id, "model-b", "high");
+  await until(() => view.current.providerModel === "model-b", "the model choice was not taken");
+  view.current.setProviderModel(provider.id, "model-a", "extreme");
+  await settle();
+  assert.deepEqual([view.current.providerModel, view.current.reasoningEffort], ["model-b", "high"], "an unsupported effort rejects the whole choice");
+  await type(view, "Add totals");
+  void view.current.submit();
+  await until(() => host.turns.length === 1, "the turn was not sent");
+  assert.deepEqual([host.turns[0].providerInterfaceId, host.turns[0].providerModel, host.turns[0].reasoningEffort], [provider.id, "model-b", "high"]);
+  host.reply("run-1", "Totals added.");
+  await until(() => !view.current.busy, "the reply never closed the turn");
+  view.current.selectRun("run-2");
+  await until(() => !view.current.loadingMessages && view.current.activeRunId === "run-2", "run-2 never opened");
+  await type(view, "Continue");
+  await until(() => view.current.submitBlockReason === "provider.test does not admit model 'retired-model' for this task.", () => `unexpected block: ${view.current.submitBlockReason}`);
+  assert.equal(view.current.providerModel, "retired-model");
+});
+
+test("an open task is attributed to the one Agent of its worker choice, whatever model it runs", { timeout: 15_000 }, async () => {
+  const host = capableHost();
+  host.runs.push(runRow("run-research", { ee_id: "ee.proj", worker_interface_id: "worker.concrete", worker_choice_interface_id: "worker.research", provider_model: "model-a" }));
+  const view = await openTask(host, "lab");
+  assert.equal(view.current.agentPresetId, "");
+  view.current.selectRun("run-research");
+  await until(() => view.current.agentPresetId === "agent-research", () => `the task's Agent was not recognised: ${view.current.agentPresetId}`);
+  assert.equal(view.current.providerModel, "model-a");
+});
+
+test("only Home's provider is preferred for new Agents, and the catalog reports itself loaded without a Home", { timeout: 15_000 }, async () => {
+  const view = await mount(capableHost(), "lab");
+  await until(() => view.current.declaredProviderInterfaces.length === 2, "the catalog never loaded");
+  assert.deepEqual(view.current.declaredProviderInterfaces.filter((candidate) => candidate.preferred).map((candidate) => candidate.id), [provider.id]);
+  const homeless = await mount(capableHost(undefined, { home: false }), "lab");
+  await until(() => homeless.current.providerInterfacesLoaded && homeless.current.newTaskAuthoringError !== "", "the catalog never loaded");
+  assert.deepEqual(homeless.current.declaredProviderInterfaces.filter((candidate) => candidate.preferred), []);
+});
+
+test("a Home default adopts no Agent that could not start the task or whose Worker Environments differ", { timeout: 15_000 }, async () => {
+  for (const worker of [{ id: "worker.test", ...writerAgent, interface_policy: policy(["model-b"]) }, { id: "worker.test", ...writerAgent, drivers, client_template_worker_environment_kinds: ["system_shell"] }]) {
+    const view = await mount(capableHost([rootContext([worker])]), "lab");
+    await type(view, "Draft the plan");
+    await until(() => view.current.submitBlockReason === "Choose an Agent before sending.", () => `unexpected block: ${view.current.submitBlockReason}`);
+    assert.deepEqual([view.current.agentPresetId, view.current.workerInterfaceId], ["", ""]);
+  }
+});
+
+test("a live task connects only applications its Agent's template provides", { timeout: 15_000 }, async () => {
+  const host = capableHost();
+  host.runs = [runRow("run-1", { ee_id: "ee.proj", worker_interface_id: "worker.research", record_digest: "digest-1", connected_application_ids: [] }), ...host.runs.slice(1)];
+  const view = await openTask(host, "live");
+  view.current.toggleApplication("app.mail");
+  await until(() => view.current.error === "Application 'app.mail' is outside this Task's immutable Agent template.", () => `unexpected error: ${view.current.error}`);
+  assert.deepEqual(host.mutations, []);
+  view.current.toggleApplication("app.notes");
+  await until(() => host.mutations.length === 1, "the template application was not connected");
+  assert.deepEqual(host.mutations[0], { action: "configure_task_application", runId: "run-1", applicationId: "app.notes", connected: true, expectedDigest: "digest-1" });
+});
+
+test("text written in a starting task's composer follows that task once the host creates it", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  host.workers = [{ id: "worker.test", ...writerAgent }];
+  host.runs.push(runRow("home", { client_surface_role: "home", title: "Home", os_root_ee_id: "ee.root" }));
+  let admit;
+  host.holdTurn = new Promise((resolve) => { admit = resolve; });
+  const view = await mount(host, "lab");
+  await type(view, "Draft the plan");
+  await until(() => view.current.canSubmit, () => `never ready: ${view.current.submitBlockReason}`);
+  void view.current.submit();
+  await until(() => working(view).length === 1, "no pending reply");
+  await type(view, "Then the budget");
+  view.current.selectRun("run-1");
+  await until(() => view.current.activeRunId === "run-1" && view.current.text === "", "the other task did not open");
+  admit();
+  await until(() => view.current.runs.some((run) => run.runId === "run-new"), "the new task was never listed");
+  view.current.selectRun("run-new");
+  await until(() => view.current.activeRunId === "run-new", "the new task did not open");
+  assert.equal(view.current.text, "Then the budget");
+});
+
+test("a structural change lists new tasks even when ledger changes arrive with it", { timeout: 15_000 }, async () => {
+  const host = fakeHost();
+  const view = await mount(host, "live");
+  await until(() => view.current.runs.length === 1, "the first task never listed");
+  host.runs.push(runRow("child-1"), runRow("child-2"));
+  host.changed("structure");
+  host.changed("ledger");
+  await until(() => view.current.runs.length === 3, () => `structural discovery was lost: ${view.current.runs.map((run) => run.runId)}`);
+  const lists = host.reads.filter((method) => method === "projection.operator.chats.list").length;
+  host.changed("ledger");
+  await until(() => host.reads.filter((method) => method === "projection.operator.chats.status").length > 0, "no status read");
+  await settle();
+  assert.equal(host.reads.filter((method) => method === "projection.operator.chats.list").length, lists, "a ledger change does not re-list tasks");
+});
