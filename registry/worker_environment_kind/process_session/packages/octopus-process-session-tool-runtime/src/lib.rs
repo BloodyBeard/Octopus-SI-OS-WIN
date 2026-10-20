@@ -11517,7 +11517,6 @@ pub mod owner_contract_tests {
                 .open(&self.context.movements_path)
                 .map_err(|e| e.to_string())?;
             writeln!(file, "{bytes}").map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
             self.next_seq += 1;
             self.sources.insert(seq, movement);
             Ok(seq)
@@ -11573,7 +11572,6 @@ pub mod owner_contract_tests {
                 .open(&self.context.movements_path)
                 .map_err(|e| e.to_string())?;
             writeln!(file, "{bytes}").map_err(|e| e.to_string())?;
-            file.sync_all().map_err(|e| e.to_string())?;
             self.next_seq += 1;
             self.sources.insert(seq, movement);
             let rows = self.reader.read_new_uncommitted_limit(1)?;
