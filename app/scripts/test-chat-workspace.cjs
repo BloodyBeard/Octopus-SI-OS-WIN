@@ -223,6 +223,20 @@ async function type(view, text) {
 }
 const working = (view) => view.current.renderedMessages.filter((message) => message.pending && message.role === "assistant");
 
+test("refreshing models re-reads the provider catalog only in the live client", { timeout: 15_000 }, async () => {
+  for (const [profile, refreshes] of [["live", 1], ["lab", 0]]) {
+    const host = fakeHost();
+    let catalogReads = 0;
+    const read = host.transport.providerInterfaces;
+    host.transport.providerInterfaces = async () => { catalogReads += 1; return read(); };
+    const view = await openTask(host, profile);
+    const before = catalogReads;
+    await view.current.refreshProviderModels();
+    await settle();
+    assert.equal(catalogReads - before, refreshes, profile);
+  }
+});
+
 test("a live client refreshes task status from ledger changes and ignores stale status", { timeout: 15_000 }, async () => {
   const host = fakeHost();
   const view = await openTask(host, "live");

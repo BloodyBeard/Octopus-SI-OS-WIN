@@ -142,3 +142,20 @@ test("new Home messages read current JSON settings while queued messages and tas
   run = { ...run, archived: true };
   await assert.rejects(api.beginSubmission({ ...draft, messageId: "archived" }), /configuration is unavailable/);
 });
+
+test("the picker lists only declared models and never invents the pinned one", () => {
+  const { providerModels, providerDefaultModel, providerSelectedModel } = functions("src/components/chat/chatWorkspaceCapabilities.ts", ["providerModels", "providerDefaultModel", "providerSelectedModel"]);
+  const model = (id, extra = {}) => ({ model: id, displayName: id, description: "", defaultReasoningEffort: "", supportedReasoningEfforts: [], showInPicker: true, isDefault: false, ...extra });
+  const catalog = [model("alpha"), model("beta", { isDefault: true }), model("hidden", { showInPicker: false })];
+  const provider = { id: "provider.fixture", models: catalog };
+  assert.deepEqual(providerModels(provider).map((entry) => entry.model), ["alpha", "beta"]);
+  assert.equal(providerDefaultModel(provider).model, "beta");
+  assert.deepEqual(providerModels({ ...provider, model: "hidden" }).map((entry) => entry.model), ["alpha", "beta", "hidden"], "a pinned model stays selectable even when the picker hides it");
+  assert.equal(providerDefaultModel({ ...provider, model: "hidden" }).model, "hidden");
+  assert.equal(providerDefaultModel({ ...provider, model: "retired" }), null, "a pinned model missing from the catalog is not replaced");
+  assert.deepEqual(providerModels({ ...provider, model: "retired" }).map((entry) => entry.model), ["alpha", "beta"]);
+  assert.equal(providerSelectedModel(provider, "").model, "beta");
+  assert.equal(providerSelectedModel(provider, " alpha ").model, "alpha");
+  assert.equal(providerSelectedModel(provider, "hidden"), null);
+  assert.equal(providerSelectedModel(provider, "retired"), null, "an unknown selection is not silently replaced by the default");
+});
