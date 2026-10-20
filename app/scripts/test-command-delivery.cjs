@@ -80,12 +80,12 @@ test("actual socket admission distinguishes pre-dispatch failure, unknown outcom
 test("actual Stop and Resume retain unknown identity, release known rejection, fence old Home callbacks", async () => {
   const file = "app/src/components/chat/useChatWorkspace.ts";
   const actions = declaration(file, "interruptActiveTurn") + declaration(file, "resumeActiveTurn")
-    + declaration(file, "clearPendingTurnControl") + callbackDeclaration(file, "setPendingTurnControls");
+    + declaration(file, "clearPendingTurnControl") + declaration(file, "knownMovementSeq") + callbackDeclaration(file, "setPendingTurnControls");
   const create = Function("submitOperatorTurnControl", "options", `${actions}
     let activeTurnControlTarget = {runId:'r',interfaceId:'i'}, activeRun = {...activeTurnControlTarget,writable:true,chatInterfaceId:'i'};
     const resumeAvailable=true,queuedTurnsRef={current:options?.queued??[]},chatDraftKey=x=>x;
     const replacePausedQueueRunKeys=options?.pause??(async()=>{});
-    const randomId=()=> 'fixed',formatRuntimeError=e=>e.message;
+    const randomId=()=> 'fixed',formatRuntimeError=e=>e.message,projectedRunsRef={current:[]},messageCacheRef={current:new Map()};
     let pendingTurnControls={},error='',current=true,reads=0;
     const pendingTurnControlsRef={current:{}},setPendingTurnControlsState=value=>pendingTurnControls=value,setError=e=>error=e;
     const deliveryScopeCurrent=()=>current,refreshMessages=async()=>{reads++},refreshRuns=async()=>{reads++};
