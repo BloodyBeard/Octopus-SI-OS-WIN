@@ -37,29 +37,12 @@ function typescriptModule(relativePath, mocks = {}) {
 
 const turnActivity = source("src/components/chat/TurnActivity.tsx");
 const messageList = source("src/components/chat/ChatMessageList.tsx");
-const sidebar = source("src/components/Sidebar.tsx");
-const codexNav = source("src/components/navigation/OctopusNav.tsx");
-const sidebarDnd = source("src/components/navigation/SidebarDnd.tsx");
-const operatorShell = source("src/components/shell/OperatorShell.tsx");
-const surfaceHost = source("src/components/shell/SurfaceHost.tsx");
-const paneTabStrip = source("src/components/shell/PaneTabStrip.tsx");
-const workspaceSurfacePane = source("src/components/shell/WorkspaceSurfacePane.tsx");
-const taskSourcesPane = source("src/components/chat/taskSourcesPane.ts");
-const taskSourcesPaneTab = source("src/components/chat/TaskSourcesPaneTab.tsx");
-const taskActionsMenu = source("src/shell/taskActionsMenu.ts");
-const compactTabContext = source("src/components/shell/WorkspaceCompactTabContext.tsx");
-const operatorShellState = source("src/components/shell/operatorShellState.ts");
-const taskActionsController = source("src/components/task/TaskActionsController.tsx");
-const workerEnvironmentPaneTab = source("src/components/worker-environment/WorkerEnvironmentPaneTab.tsx");
-const runEnvironmentView = source("src/components/worker-environment/RunEnvironmentView.tsx");
 const chatCss = source("src/components/chat/chat.css");
 const iconNotices = JSON.parse(source("licenses/icon-assets/notices.json"));
 const glyphAsset = (name) => iconNotices.glyphs.find((entry) => entry.name === name);
 const appIndex = source("index.html");
-const clientPreferencesSource = source("src/clientPreferences.ts");
 const toolActivityPresentationCatalog = JSON.parse(source("src/components/chat/toolActivityPresentationCatalog.json"));
 const voiceCss = source("src/components/voice/voice.css");
-const appShell = source("src/components/shell/AppShell.tsx");
 const shellCss = source("src/shell.css");
 const stylesCss = source("src/styles.css");
 const assistantDirectives = typescriptModule("src/components/chat/assistantDirectives.ts");
@@ -289,19 +272,8 @@ assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}, {}]), "pane-t
     globalThis.window = previousWindow;
   }
 }
-assert.match(operatorShell, /paneTransferBlockReasonRef\.current\(target, "secondary"\)/);
-assert.match(operatorShell, /pendingAcceptedPaneTransfersRef[\s\S]*?previousTabs: state\.secondaryTabs[\s\S]*?resumeClientPaneTransfer[\s\S]*?commitClientPaneTransfer[\s\S]*?finalizeClientPaneTransfer[\s\S]*?rollbackAcceptedPaneTransfer/);
-assert.match(operatorShell, /pendingClientPaneDestinationTransfers[\s\S]*?stageDestinationPaneTransfer\(transfer, transfer\.committed\)/);
-assert.match(operatorShell, /writeSecondaryPaneState\(accessProfile, homeRunId, clientWindow\.scope,[\s\S]*?acknowledgeClientPaneSourceFinalization\(\{ transferId: completion\.transferId \}\)/);
-assert.match(operatorShell, /sourceTabId === `client-window:\$\{clientWindow\.windowId\}`[\s\S]*?samePaneTransferTarget\(currentTarget, completion\.target\)/);
-const paneTransferCompletionHandler = sourceBetween(operatorShell, "  const handleClientPaneTransferCompletion = useCallback(", "  useEffect(");
-assert.notEqual(paneTransferCompletionHandler, "");
-assert.doesNotMatch(paneTransferCompletionHandler, /writeSecondaryPaneState|replaceState|windowControl/);
-assert.match(paneTransferCompletionHandler, /acknowledgeClientPaneTransfer/);
 assert.equal(clientWindowModel.clientWindowStateKey("main", "surface"), "surface");
 assert.equal(clientWindowModel.clientWindowStateKey("window-a", "surface"), "octopus.client-window.window-a.surface");
-assert.match(operatorShell, /const \[activePane, setActivePane\] = useState<"primary" \| "secondary">\(\s*clientWindowInitialTarget \? "secondary" : "primary"/);
-assert.match(operatorShell, /initial-target-consumed\.v1[\s\S]*?window\.sessionStorage\.getItem[\s\S]*?window\.sessionStorage\.setItem/);
 const paneDrag = {
   schema: "octopus.client-pane-transfer",
   schemaVersion: 1,
@@ -763,72 +735,10 @@ for (const [eventKind, field] of [["message_delta", "text"], ["commentary_delta"
 }
 
 
-assert.match(surfaceHost, /surface\.rendererKind === "builtin\.chat" \|\| surface\.rendererKind === "builtin\.voice"[\s\S]*?<OctopusLoadingState className="surface-content-loading-state"/);
 
-assert.doesNotMatch(operatorShell, /secondaryNewTaskTransitioning|secondary-chat:/);
-assert.match(operatorShell, /<SurfaceHost\s+commandsActive=\{secondaryCommandsActive\}\s+key=\{secondarySurface\.id\}/);
-assert.doesNotMatch(operatorShell, /setSecondaryWorkspaceKey|setSecondarySurfaceId/);
-assert.match(operatorShell, /const activeClientSurfaceIdentity = useMemo\(\(\) => deriveActiveClientSurfaceIdentity\(\{[\s\S]*?activePane: primaryPaneBlocked && secondaryPaneOpen \? "secondary" : activePane,[\s\S]*?target: primarySurfaceTarget,[\s\S]*?target: activeSecondaryTab\?\.target \?\? null,[\s\S]*?workspaceActiveRunId: secondaryChatWorkspace\.activeRunId/);
-assert.doesNotMatch(operatorShell, /deriveActiveClientSurfaceIdentity\([\s\S]{0,800}?secondaryPaneFocused/);
-assert.doesNotMatch(operatorShell, /\bcommandPane\b|\bsetCommandPane\b/);
-assert.match(operatorShell, /const secondaryCommandsActive = !settingsOpen && activeClientSurfaceIdentity\.pane === "secondary" && activeClientSurfaceIdentity\.ready/);
-assert.match(operatorShell, /activeChatRunId=\{primarySurfaceTarget\.runId\}/);
-assert.match(operatorShell, /if \(!state \|\| state\.id === activeSecondaryTabId && !secondaryRunIdentityReady \|\| !transferableWorkspacePaneTarget\(state\.target\)\) return \[\];/);
-assert.match(operatorShell, /const runId = activeClientSurfaceIdentity\.runId;\s*if \(!runId\) return;/);
-assert.match(operatorShell, /secondarySurface\.rendererKind === "builtin\.chat" && !secondaryRunIdentityReady[\s\S]*?<SurfaceLoadingState label="Opening task…"/);
-assert.match(operatorShell, /activeSurface\.rendererKind === "builtin\.chat" && !primaryRunIdentityReady[\s\S]*?<SurfaceLoadingState label="Opening task…"/);
-assert.match(operatorShell, /if \(activeTab\.target\.runId\) \{\s*newSecondaryTaskPhaseRef\.current = "idle";\s*return;\s*\}/);
-assert.doesNotMatch(operatorShell, /continuedTab/);
-assert.match(operatorShell, /newSecondaryTaskPhaseRef\.current !== "awaiting_run" \|\| !runId[\s\S]*?const completedTab = secondaryPaneTab[\s\S]*?secondaryTabModel\.replaceTab\(activeTab\.id, completedTab\)/);
-assert.doesNotMatch(operatorShell, /contextBoundaryRunReplacements|replaceClientRunIds|migrateClientTaskOrganizationRunId/);
-assert.match(operatorShell, /if \(!surface\) return surfaceRegistry\.loading;/);
-assert.match(operatorShell, /target\.surfaceId !== "chat"[\s\S]*?!chatWorkspace\.runsLoaded[\s\S]*?chatWorkspace\.runs\.some/);
-assert.match(operatorShell, /defaultSidebarOpen=\{!clientWindow\.initialTarget\}/);
-assert.match(operatorShell, /titlebarSurfaceContext=\{[\s\S]*?title: activeSurface\.label/);
-assert.doesNotMatch(operatorShell, /titlebarSurfaceContext=\{activeClientSurfaceIdentity\.pane === "secondary"/);
-const titlebarTransferOwner = sourceBetween(operatorShell, "  const titlebarTransferTarget = useMemo", "  const [selectedRef");
-assert.match(titlebarTransferOwner, /!paneOwnsWindowTitlebar\(activeClientSurfaceIdentity\.pane\) \|\| secondaryPaneOpen/);
-assert.doesNotMatch(titlebarTransferOwner, /activeSecondaryTab|secondaryTabs/);
-assert.match(operatorShell, /openClientWindow[\s\S]*?Move to New Window/);
-assert.match(operatorShell, /CLIENT_PANE_DRAG_MIME[\s\S]*?parseClientPaneDragPayload/);
-assert.match(operatorShell, /onTabWindowPointerDown=\{\(tab, event\) => secondaryWindowPointerDown\(tab\.id, event\)\}/);
-assert.match(operatorShell, /window\.addEventListener\("storage", onStorage\)/);
-assert.match(clientPreferencesSource, /ensureClientPreferencesStorageListener\(\)[\s\S]*?window\.addEventListener\("storage"/);
-assert.match(taskActionsController, /id: "open", label: "Open in new window"[^\n]*onSelect:[^\n]*onOpenChatInNewWindow\(runId\)/);
-const taskDropBranchStart = sidebar.indexOf("if (target.containerId === TASKS_CONTAINER)");
-const taskDropBranchEnd = sidebar.indexOf("\n    }\n  };", taskDropBranchStart);
-assert.notEqual(taskDropBranchStart, -1);
-assert.notEqual(taskDropBranchEnd, -1);
-assert.doesNotMatch(sidebar.slice(taskDropBranchStart, taskDropBranchEnd), /assignChatToProject/);
-assert.match(sidebarDnd, /createPortal\([\s\S]*?<DragOverlay[\s\S]*?document\.body/);
-assert.match(sidebarDnd, /transform: CSS\.Transform\.toString\(isDragging \? null : transform\)/);
-assert.doesNotMatch(sidebarDnd, /opacity: isDragging/);
-assert.match(codexNav, /titleActionsOnHover = false/);
-assert.match(codexNav, /text-base font-medium text-\[var\(--color-text-tertiary\)\] opacity-75/);
-assert.doesNotMatch(codexNav, /titleClassName \?\? "text-base font-medium text-token-input-placeholder-foreground opacity-75"/);
-assert.match(codexNav, /pointer-events-none opacity-0 group-focus-within\/nav-section-title:pointer-events-auto/);
-assert.match(codexNav, /transition=\{\{ duration: reduceMotion \? 0 : 0\.3, ease: \[0\.19, 1, 0\.22, 1\] \}\}/);
-assert.doesNotMatch(sidebar, /function SectionToggle\(\{\s*action/);
-assert.doesNotMatch(sidebar, /group\/section-chevron/);
-assert.match(sidebar, /function SidebarSectionTitle\([\s\S]*?<div className="flex min-w-0 flex-1">\s*<SectionToggle/);
-assert.match(sidebar, /function SectionToggle\([\s\S]*?return \(\s*<button/);
-assert.match(sidebar, /group\/section-toggle flex min-w-0 flex-1 cursor-interaction items-center gap-1 rounded-md py-0\.5 pr-1/);
-assert.match(sidebar, /titleActions=\{\([\s\S]*?Create agent[\s\S]*?label="Agents"/);
 
 assert.match(chatCss, /\.octopus-agent-activity-toggle \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;/);
-assert.match(paneTabStrip, /motionRef\.current\?\.scrollIntoView/);
-assert.match(paneTabStrip, /useSortable\(/);
-assert.doesNotMatch(paneTabStrip, /onNativeDragEnd|onTabNativeDragStart/);
-assert.match(paneTabStrip, /inert=\{/);
 assert.match(source("src/components/shell/paneTabs.css"), /\.pane-tab-title-text\.is-overflowing \{[\s\S]*?mask-image: linear-gradient/);
-assert.match(workspaceSurfacePane, /<PaneTabStrip[\s\S]*?\bstretch\s+tabs=/);
-assert.match(workspaceSurfacePane, /const tabStripVisible = secondaryPaneUsesTabStrip\(tabs\);/);
-assert.doesNotMatch(workspaceSurfacePane, /data-pane-compact-tab-id|compactTabHandle|compactTabActions/);
-assert.match(workspaceSurfacePane, /<WorkspaceCompactTabProvider value=\{compactTabDrag\}>/);
-assert.match(compactTabContext, /createContext<WorkspaceCompactTabDrag \| null>/);
-assert.match(surfaceHost, /headerMode=\{paneRole === "primary" \? "window" : paneTabStripVisible \? "none" : "pane"\}/);
-assert.match(operatorShell, /const secondaryPaneTabStripVisible = secondaryPaneUsesTabStrip\(secondaryPaneTabs\);/);
-assert.match(operatorShell, /glyph: target\.surfaceId === "chat" \? "chat"[\s\S]*?showWhenSingle: true,/);
 assert.match(chatCss, /--thread-floating-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ 8px\)/);
 assert.match(chatCss, /\.task-summary-surface \{[\s\S]*?z-index: 40;[\s\S]*?pointer-events: none;/);
 assert.match(chatCss, /\.task-summary-motion \{[\s\S]*?width: 300px;/);
@@ -836,40 +746,12 @@ assert.match(chatCss, /\.task-summary-popover \.task-summary-popover-panel \{[\s
 assert.doesNotMatch(chatCss, /margin-right: 316px|\.chat-run-layout\.is-summary-gutter|\.chat-run-layout\.is-summary-shift/);
 assert.match(chatCss, /\.task-summary-shell \{[\s\S]*?border-radius: 20px;[\s\S]*?background: var\(--color-token-dropdown-background/);
 assert.match(shellCss, /\.workspace-pane-header-actions \{[\s\S]*?gap: 0;/);
-assert.match(taskSourcesPane, /OPEN_TASK_SOURCES_PANE_EVENT = "octopus:open-task-sources-pane"/);
-assert.match(taskSourcesPaneTab, /className="task-sources-panel"[\s\S]*?aria-label="Sources"/);
-assert.match(operatorShell, /workspaceTaskSourcesPaneTab\("octopus-os", target\)/);
-assert.match(operatorShell, /target\.kind === "task_sources"[\s\S]*?showWhenSingle: true/);
-assert.match(operatorShell, /OPEN_TASK_SOURCES_PANE_EVENT[\s\S]*?openTaskSourcesPane\(detail\)/);
-assert.match(operatorShell, /activeSecondaryTab\?\.target\.kind === "task_sources"[\s\S]*?<TaskSourcesPaneTab/);
-assert.match(operatorShell, /collectTaskSources\(workspace\.renderedMessages\.filter/);
-assert.ok(
-  operatorShell.indexOf("const activeTaskSources = useMemo") < operatorShell.indexOf("if (!activeSurface) {\n    return null;\n  }"),
-  "task sources hooks must run before OperatorShell's conditional return",
-);
-assert.match(operatorShellState, /open: state\.open && tabs\.length > 0/);
-assert.match(taskActionsMenu, /OPEN_CLIENT_TASK_ACTIONS_MENU_EVENT[\s\S]*?subscribeOpenClientTaskActionsMenu/);
-assert.match(source("src/components/shell/AppShell.tsx"), /<TaskActionsController[\s\S]*?onOpenChatInNewWindow=\{onOpenChatInNewWindow\}/);
-assert.match(taskActionsController, /export function TaskActionsController\([\s\S]*?subscribeOpenClientTaskActionsMenu[\s\S]*?setMenu\(\(previous\)/);
 assert.match(chatCss, /--thread-content-top-inset: calc\(var\(--height-toolbar, 46px\) \+ var\(--spacing\) \* 8\)/);
 assert.match(chatCss, /\.chat-thread-top-fade\[data-app-shell-main-content-top-fade="visible"\]/);
-assert.match(operatorShell, /projectAssistantCodeComments\(messages, runId\)/);
-assert.match(operatorShell, /<RetainedWorkerEnvironmentTabs[\s\S]*?assistantCodeComments=\{activeWorkerEnvironmentAssistantCodeComments\}/);
-assert.match(source("src/components/shell/RetainedWorkerEnvironmentTabs.tsx"), /assistantCodeComments=\{active && tab.id === activeTabId \? assistantCodeComments : undefined\}/);
-assert.match(source("src/components/shell/RetainedWorkerEnvironmentTabs.tsx"), /<WorkerEnvironmentPaneTab[\s\S]*?assistantCodeComments=\{assistantCodeComments\}/);
-assert.match(workerEnvironmentPaneTab, /<WorkerEnvironmentSurfacePanel[\s\S]*?assistantCodeComments=\{assistantCodeComments\}/);
-assert.match(runEnvironmentView, /export function WorkerEnvironmentSurfacePanel[\s\S]*?<EnvironmentPanelContent[\s\S]*?assistantCodeComments=\{assistantCodeComments\}/);
-assert.match(workspaceSurfacePane, /controlsInWindowHeader && windowControlsHost \? createPortal/);
-assert.doesNotMatch(workspaceSurfacePane, /workspace-surface-pane-header-(?:tail-)?spacer/);
 assert.match(shellCss, /\.workspace-surface-pane-header \{[\s\S]*?-webkit-app-region: drag;/);
 assert.match(source("src/components/shell/paneTabs.css"), /\.pane-tabs \{[\s\S]*?-webkit-app-region: no-drag;/);
 assert.match(shellCss, /\.workspace-surface-pane\.has-tab-strip \.workspace-surface-pane-content \.surface-titlebar-spacer \{\s*display: none;/);
 assert.doesNotMatch(shellCss, /\.workspace-pane-compact-tab|\.workspace-surface-pane\.has-compact-tab/);
-assert.match(appShell, /defaultSidebarOpen: boolean;/);
-assert.match(appShell, /readSidebarOpen\(accessProfile, clientWindowScope, defaultSidebarOpen\)/);
-assert.match(appShell, /return stored === null \? defaultOpen : stored !== "false";/);
-assert.match(appShell, /primaryPaneBlocked=\{primaryPaneBlocked\}[\s\S]*?surfaceActions=\{titlebarSurfaceActions\}[\s\S]*?surfaceTitle=\{titlebarSurfaceTitle\}/);
-assert.match(appShell, /secondaryFocused=\{secondaryPaneFocused\}/);
 assert.match(voiceCss, /\.home-response-stage\.is-compact \.home-response-output--live \{[\s\S]*?text-align: center;/);
 assert.doesNotMatch(voiceCss, /\.home-task-activity|\.home-view-transition__activity/);
 assert.match(chatCss, /:hover:not\(:has\(\[data-agent-activity-file-link\]:hover\)\)/);
@@ -882,16 +764,7 @@ assert.match(chatCss, /\.octopus-exec-activity \{[\s\S]*?width: 100%;/);
 assert.deepEqual(glyphAsset("users").shapes, ["users"]);
 
 assert.match(appIndex, /startup-octopus-shimmer 2200ms cubic-bezier\(0\.4, 0, 0\.2, 1\) infinite/);
-assert.match(source("src/components/shell/NavigationRail.tsx"), /data-app-navigation-rail="true"/);
-assert.doesNotMatch(sidebar, /data-sidebar-action="notifications"/);
-assert.match(operatorShell, /const openActivityMark = useCallback/);
 assert.match(stylesCss, /\.surface-content-loading-state \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?place-items: center;/);
-assert.doesNotMatch(operatorShell, /actionId: "notifications"/);
-assert.match(operatorShell, /activityContent=\{<MarkActivityView[\s\S]*?onSelect=\{selectInboxItem\}/);
-assert.doesNotMatch(operatorShell, /NotificationsPopover|useHomeNotifications/);
-assert.match(workspaceSurfacePane, /!compactOverlay \? <PaneHeaderButton/);
-assert.match(workspaceSurfacePane, /glyph=\{focused \? "restore" : "expand"\}/);
-assert.match(appShell, /onPrimaryActionsHostChange=\{setPrimaryActionsHost\}/);
 assert.match(shellCss, /\.workspace-pane-manager\.is-secondary-focused > \.workspace-pane-primary \{[\s\S]*?flex: 0 0 0;/);
 assert.doesNotMatch(shellCss, /\.home-notifications-control|\.home-notification-row/);
 

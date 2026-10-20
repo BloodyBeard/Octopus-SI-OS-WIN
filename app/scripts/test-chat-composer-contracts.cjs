@@ -15,7 +15,6 @@ function sourceBetween(value, startMarker, endMarker) {
   return value.slice(start, end);
 }
 
-const sidebar = source("src/components/Sidebar.tsx");
 const messageList = source("src/components/chat/ChatMessageList.tsx");
 const foundation = source("src/foundation.css");
 const ownedUtilities = source("src/owned-utilities.css");
@@ -25,15 +24,7 @@ assert.match(queueStyles, /\.composer-primary-action:focus-visible \{ outline-co
 assert.match(queueStyles, /\.composer-queue-action \{[^}]*border-radius: 9999px;/);
 assert.match(queueStyles, /\.composer-queue-action\.is-icon \{[^}]*border-radius: var\(--radius-lg\);/);
 assert.match(queueStyles, /\.oc-menu-item\.composer-queue-menu-item \{ color: var\(--color-text-description\);/);
-assert.match(sidebar, /onClick=\{\(\) => setAgentDialog\(\{ mode: "edit", presetId: preset\.id \}\)\}/);
-assert.doesNotMatch(sidebar, /mode: "view"|preset\.origin/);
-assert.doesNotMatch(sidebar, /onNewChat\(preset\.id\)/);
-assert.match(sidebar, /projectById\.has\(preset\.projectEeId\)/);
-assert.match(sidebar, /meta=\{agentTaskMeta\(preset, taskChats\)\}/);
-assert.doesNotMatch(sidebar, /function agentPresetMeta/);
-assert.match(sidebar, /\? \[run\.runId\]/);
 assert.match(ownedUtilities, /--color-token-warning: var\(--color-text-warning\);/);
-assert.doesNotMatch(sidebar, /deleteClientTaskAgentAssignment|createClientAgentPreset|updateClientAgentPreset|deleteClientAgentPreset/);
 assert.doesNotMatch(messageList + sourceBetween(source("src/components/chat/chat.css"), ".octopus-chat-scroll {", "\n}"), /thread-scroll-container relative h-full|position:\s*relative/);
 assert.doesNotMatch(foundation, /\*\s*\{\s*scroll-behavior:\s*smooth;/);
 

@@ -68,6 +68,8 @@ jobs:
           node scripts/test-chat-provider-catalog.cjs
           node scripts/test-composer-agent-controls.cjs
           node scripts/test-chat-surfaces.cjs
+          node scripts/test-operator-shell.cjs
+          node scripts/test-sidebar.cjs
           node scripts/test-shell-pane-chrome.cjs
           node scripts/test-command-activity.cjs
 
