@@ -1609,12 +1609,6 @@ export type OctopusOsWorkspaceMutationRequest =
       expectedDigest: string;
     }
   | {
-      action: "move_task";
-      runId: string;
-      targetEeId: string;
-      expectedDigest: string;
-    }
-  | {
       action: "set_task_archived";
       home: string;
       workspace: { rootEeId: string; homeRunId: string; homeInterfaceId: string };

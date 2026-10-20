@@ -61,7 +61,6 @@ export type OctopusOsProjectWorkspace = {
   deleteProject: (projectId: string) => Promise<OctopusOsProjectDeletionReceipt | null>;
   restoreProject: (receipt: OctopusOsProjectDeletionReceipt) => Promise<void>;
   deleteTask: (runId: string) => Promise<void>;
-  moveTask: (runId: string, projectId: string | null) => Promise<void>;
   setTaskArchived: (runId: string, archived: boolean) => Promise<void>;
 };
 
@@ -388,28 +387,6 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     await persistPresentation(next);
   }, [persistPresentation, profile, scope.rootEeId]);
 
-  const moveTask = useCallback(async (runId: string, projectId: string | null) => {
-    if (profile !== "live") {
-      updatePresentation(projectsRef.current.map((project) => ({
-        ...project,
-        chatRunIds: project.id === projectId
-          ? [...project.chatRunIds.filter((candidate) => candidate !== runId), runId]
-          : project.chatRunIds.filter((candidate) => candidate !== runId),
-      })));
-      return;
-    }
-    const expectedDigest = scope.taskDigests.get(runId);
-    if (!expectedDigest) throw new Error(`Task '${runId}' has no projected record digest`);
-    await perform(async () => {
-      await mutateOctopusOsWorkspace({
-        action: "move_task",
-        runId,
-        targetEeId: projectId || scope.rootEeId,
-        expectedDigest,
-      });
-    });
-  }, [perform, profile, scope.rootEeId, scope.taskDigests, updatePresentation]);
-
   const deleteTask = useCallback(async (runId: string) => {
     if (profile !== "live") throw new Error("Task topology deletion is available only in the live Octopus OS.");
     const expectedDigest = scope.taskDigests.get(runId);
@@ -461,7 +438,6 @@ export function useOctopusOsProjects(profile: OctopusClientAccessProfile, runtim
     deleteProject,
     restoreProject,
     deleteTask,
-    moveTask,
     setTaskArchived,
   };
 }

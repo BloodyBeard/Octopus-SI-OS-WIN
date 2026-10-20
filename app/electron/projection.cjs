@@ -10485,7 +10485,6 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
     "update_project_presentation",
     "delete_task",
     "rename_task",
-    "move_task",
     "set_task_archived",
     "install_application",
     "remove_application",
@@ -10616,22 +10615,13 @@ async function mutateOctopusOsWorkspace(registryRoot, octopusHomeRoot, scope, re
         hooks.commitClientAuthoring,
       );
     }
-    if (action === "configure_task_application") {
-      return configureOctopusOsTaskApplication(
-        registryRoot,
-        octopusHomeRoot,
-        snapshot,
-        request,
-        hooks.withTaskAuthoringLock,
-        hooks.planTaskApplicationAmendment,
-        hooks.commitClientAuthoring,
-      );
-    }
-    return moveOctopusOsTask(
+    return configureOctopusOsTaskApplication(
       registryRoot,
       octopusHomeRoot,
       snapshot,
       request,
+      hooks.withTaskAuthoringLock,
+      hooks.planTaskApplicationAmendment,
       hooks.commitClientAuthoring,
     );
   };
@@ -13125,134 +13115,6 @@ async function deleteOctopusOsReadOnlyTask(
     releasedWorkerEnvironmentIds: workerEnvironmentState.ids,
     cleanupWarnings: arrayValue(committed?.cleanupWarnings),
   };
-}
-
-async function moveOctopusOsTask(
-  registryRoot,
-  octopusHomeRoot,
-  scope,
-  request,
-  commitClientAuthoring,
-) {
-  if (typeof commitClientAuthoring !== "function") {
-    throw new Error("client authoring transaction is unavailable");
-  }
-  const runId = requiredSafeRegistryId(request?.runId, "runId");
-  const targetEeId = requiredSafeRegistryId(request?.targetEeId || scope.rootEeId, "targetEeId");
-  if (!scope.byId.has(targetEeId)) throw new Error(`target EE '${targetEeId}' is outside the Octopus OS scope`);
-  const runProjection = scope.clientRuns.find((row) => (
-    stringValue(row?.run_id) === runId && stringValue(row?.surface_role) === "task"
-  ));
-  if (!runProjection) throw new Error(`writable task '${runId}' is absent from the Octopus OS scope`);
-  const currentEeId = requiredSafeRegistryId(runProjection.ee_id, "current task EE");
-  if (currentEeId === targetEeId) return { action: "move_task", runId, targetEeId, changed: false };
-  const expectedDigest = requiredDigest(request?.expectedDigest, "expectedDigest");
-  const runPath = await scopedRecordPath(
-    octopusHomeRoot,
-    runProjection.record_path,
-    path.join("state", "runs"),
-    `${runId}.json`,
-  );
-  const current = await readRegularJsonDocument(runPath, `task run ${runId}`);
-  if (current.digest !== expectedDigest || stringValue(runProjection.record_digest) !== expectedDigest) {
-    throw new Error(`task run '${runId}' changed before it could be moved`);
-  }
-  if (stringValue(current.document?.id) !== runId || stringValue(current.document?.ee) !== currentEeId) {
-    throw new Error(`task run '${runId}' has drifted topology`);
-  }
-  const ownerInterface = requiredSafeRegistryId(runProjection.interface_id, "task client interface");
-  if (readClientTaskArchive(current.document, ownerInterface)) throw new Error(`task '${runId}' is archived; restore it before moving`);
-  if (current.document.interface_state !== undefined && (!isPlainRecord(current.document.interface_state)
-    || Object.values(current.document.interface_state).some((state) => !isPlainRecord(state)))) {
-    throw new Error(`task '${runId}' has malformed interface state`);
-  }
-  const exactInterfaces = await octopusOsOwnedInterfaceIds(registryRoot, ownerInterface);
-  assertRunPrivateStateIsOwned(current.document, exactInterfaces, runId);
-  const ownedWriters = await octopusOsOwnedWriterRuns(octopusHomeRoot, current.document, exactInterfaces);
-  scopeEnvironmentChain(currentEeId, scope.byId, scope.rootEeId);
-  scopeEnvironmentChain(targetEeId, scope.byId, scope.rootEeId);
-  const clientSidecarPath = path.join(
-    await fs.realpath(path.join(registryRoot, "interface")),
-    ownerInterface,
-    "octopus_os.json",
-  );
-  const clientSidecar = await readRegularJsonDocument(clientSidecarPath, `task client sidecar ${ownerInterface}`);
-  const parsedSidecar = parseOctopusOsSidecar(clientSidecar.document, ownerInterface, clientSidecarPath);
-  if (
-    stringValue(parsedSidecar.owner_interface) !== ownerInterface
-    || stringValue(parsedSidecar.component) !== "client"
-    || stringValue(parsedSidecar.surface_role) !== "task"
-    || !isPlainRecord(clientSidecar.document.authoring_profile)
-    || parsedSidecar.authoring_profile.ee_id !== currentEeId
-  ) {
-    throw new Error(`task client '${ownerInterface}' has no movable authoring profile`);
-  }
-  if (ownedWriters.ids.size || Object.values(objectOrEmpty(current.document.interface_state)).some((state) =>
-    ["run_authoring_binding", "writer_run", "input_intake", "file_writer_target", "maintenance_observer"]
-      .some((field) => Object.hasOwn(state, field)))) {
-    const error = new Error(`task '${runId}' current execution contract does not admit changing EE`);
-    error.code = "task_execution_ee_change_unsupported";
-    throw error;
-  }
-  await assertTopologyIsPrivateToRun(octopusHomeRoot, runId, exactInterfaces, new Set(), ownedWriters.ids);
-  const targetEnvironment = scope.byId.get(targetEeId);
-  const targetPolicy = objectOrEmpty(targetEnvironment?.formed_envelope);
-  assertPolicyAxisAdmits(
-    targetPolicy.allowed_interfaces,
-    new Set([current.document, ...[...ownedWriters.records.values()].map((entry) => entry.document)]
-      .flatMap((record) => [...runInterfaceReferences(record)])),
-    `target EE '${targetEeId}' interface policy`,
-  );
-  const workerInterface = requiredSafeRegistryId(current.document.worker, "task worker interface");
-  const workerPolicyPath = path.join(
-    await fs.realpath(path.join(registryRoot, "interface")),
-    workerInterface,
-    "policy.json",
-  );
-  const workerPolicy = await readRegularJsonDocument(workerPolicyPath, `task worker policy ${workerInterface}`);
-  if (
-    stringValue(workerPolicy.document?.id) !== workerInterface
-    || !isPlainRecord(workerPolicy.document?.ceiling)
-    || !Array.isArray(workerPolicy.document.ceiling.tools)
-    || !Array.isArray(workerPolicy.document.ceiling.wek)
-  ) {
-    throw new Error(`task worker '${workerInterface}' has malformed capability ceiling`);
-  }
-  assertPolicyAxisAdmits(
-    targetPolicy.allowed_tools,
-    new Set(workerPolicy.document.ceiling.tools.map((value) => {
-      const id = requiredString(value, "task worker tool");
-      if (!safeInterfacePathSegment(id)) throw new Error("task worker tool must be an exact Registry path segment");
-      return id;
-    })),
-    `target EE '${targetEeId}' tool policy`,
-  );
-  assertPolicyAxisAdmits(
-    targetPolicy.allowed_worker_environment_kinds,
-    new Set(workerPolicy.document.ceiling.wek.map((value) => requiredSafeRegistryId(value, "task worker environment kind"))),
-    `target EE '${targetEeId}' worker-environment policy`,
-  );
-  const nextSidecar = structuredClone(clientSidecar.document);
-  nextSidecar.authoring_profile.ee_id = targetEeId;
-  parseOctopusOsSidecar(nextSidecar, ownerInterface, clientSidecarPath);
-  const writes = [{ file: clientSidecarPath, beforeDigest: clientSidecar.digest, next: nextSidecar }];
-  const nextRun = structuredClone(current.document);
-  nextRun.ee = targetEeId;
-  writes.push({ file: runPath, beforeDigest: expectedDigest, next: nextRun });
-  await commitClientAuthoring({
-    label: "move Octopus OS task",
-    writes,
-    removals: [],
-    publishBarrierPath: runPath,
-  });
-  return { action: "move_task", runId, targetEeId, changed: true };
-}
-
-function assertPolicyAxisAdmits(axis, requiredValues, label) {
-  if (!Array.isArray(axis)) return;
-  const allowed = new Set(axis.map(stringValue).filter(Boolean));
-  const missing = [...requiredValues].filter((value) => !allowed.has(value)).sort();
-  if (missing.length) throw new Error(`${label} does not admit: ${missing.join(", ")}`);
 }
 
 function requiredGoal(value) {

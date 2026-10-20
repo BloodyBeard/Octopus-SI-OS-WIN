@@ -1558,8 +1558,6 @@ async function verifyTaskArchive(temporary) {
     const scope = await read("projection.operator.os.scope");
     await assert.rejects(mutateOctopusOsWorkspace(registry, home, scope,
       { action: "delete_task", runId: plan.runId, expectedDigest: await digest() }, hooks), /restore it before deleting/);
-    await assert.rejects(mutateOctopusOsWorkspace(registry, home, scope,
-      { action: "move_task", runId: plan.runId, targetEeId: workspace.projects[1].eeId, expectedDigest: await digest() }, hooks), /restore it before moving/);
     const tampered = structuredClone(saved); tampered.checkpoints[0].epoch += 1; await writeRun(tampered);
     scope.client_runs.find((row) => row.run_id === plan.runId).record_digest = await digest();
     await assert.rejects(mutateOctopusOsWorkspace(registry, home, scope,
@@ -1623,54 +1621,6 @@ async function verifyTaskArchive(temporary) {
     original.interface_state[intakeId].frontier_checkpoint_ids = [];
     original.interface_state[intakeId].writer_run = { run: writerId, initial_record: initialWriter, initial_record_format: "compact", role_artifact_bindings: [] };
     await writeRun(original);
-    const movablePolicy = JSON.parse(await fs.readFile(policyPath));
-    movablePolicy.ceiling.wek = [];
-    await fs.writeFile(policyPath, JSON.stringify(movablePolicy));
-    store.invalidate(false);
-    const moveScope = await read("projection.operator.os.scope");
-    const { maintenanceFixture } = require("../../registry/interface/world_operator_chat/test_maintenance_client.cjs");
-    const { decodeMaintenanceDeclaration } = require("../../registry/interface/world_operator_chat/maintenance-client.cjs");
-    const maintenance = maintenanceFixture(registry, path.dirname(runFile), {
-      run_id: plan.runId, chat_interface_id: plan.chatInterfaceId, model_interface_id: plan.modelInterfaceId, worker_interface_id: plan.workerInterfaceId,
-      run_record_content: await fs.readFile(runFile, "utf8"),
-      interface_writes: await Promise.all(plan.writes.filter((write) => write.filePath !== runFile).map(async (write) => ({
-        path: write.filePath, content: await fs.readFile(write.filePath, "utf8"), tag: write.tag, expected_before_hash: null,
-      }))),
-    });
-    assert.equal(decodeMaintenanceDeclaration(maintenance, JSON.parse(maintenance.run_record_content)).declaration.source_run, plan.runId);
-    const moveFixtureWrites = [...maintenance.interface_writes, ...maintenance.run_writes, { path: runFile, content: maintenance.run_record_content }];
-    const moveBefore = new Map(await Promise.all(moveFixtureWrites.map(async (write) => [write.path, await fs.readFile(write.path).catch((error) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    })])));
-    try {
-      for (const write of moveFixtureWrites) {
-        await fs.mkdir(path.dirname(write.path), { recursive: true }); await fs.writeFile(write.path, write.content);
-      }
-      moveScope.client_runs.find((row) => row.run_id === plan.runId).record_digest = await digest();
-      const retained = new Map(await Promise.all([...new Set([
-        ...moveFixtureWrites.map((write) => write.path), writerFile,
-        ...[plan.chatInterfaceId, plan.workerInterfaceId, plan.modelInterfaceId, intakeId, doorId]
-          .map((id) => path.join(registry, "interface", id, "octopus_os.json")),
-      ])].map(async (file) => [file, await fs.readFile(file)])));
-      await assert.rejects(mutateOctopusOsWorkspace(registry, home, moveScope,
-        { action: "move_task", runId: plan.runId, expectedDigest: await digest(), targetEeId: workspace.projects[1].eeId }, hooks),
-      (error) => error.code === "task_execution_ee_change_unsupported" && /current execution contract does not admit changing EE/.test(error.message));
-      assert.deepEqual(await mutateOctopusOsWorkspace(registry, home, moveScope,
-        { action: "move_task", runId: plan.runId, targetEeId: original.ee }, hooks),
-      { action: "move_task", runId: plan.runId, targetEeId: original.ee, changed: false });
-      assert.equal(operations, 2);
-      for (const [file, bytes] of retained) assert.deepEqual(await fs.readFile(file), bytes, `move changed ${file}`);
-    } finally {
-      for (const [file, bytes] of moveBefore) {
-        if (bytes !== null) await fs.writeFile(file, bytes);
-        else {
-          await fs.unlink(file);
-          await fs.rmdir(path.dirname(file)).catch((error) => { if (!["ENOTEMPTY", "ENOENT"].includes(error.code)) throw error; });
-        }
-      }
-    }
-    console.log("task move: checked execution contract refuses cross-EE writes; source, writers, companions and descriptors retained");
     const { blake3 } = require("@noble/hashes/blake3");
     const canonical = (value) => JSON.stringify(value, function (_key, entry) {
       return entry && !Array.isArray(entry) && typeof entry === "object"

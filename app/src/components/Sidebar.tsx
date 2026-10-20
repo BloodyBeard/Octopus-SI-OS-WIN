@@ -372,15 +372,6 @@ function TaskNavigation({
       event.type === "contextmenu" ? { x: event.clientX, y: event.clientY } : undefined);
   };
 
-  const assignChatToProject = async (runId: string, projectId: string | null) => {
-    if (projectWorkspace.pending) return;
-    try {
-      await projectWorkspace.moveTask(runId, projectId);
-    } catch (failure) {
-      appToast.danger(failure instanceof Error ? failure.message : String(failure));
-    }
-  };
-
   const onDragEnd = (event: DragEndEvent) => {
     setDraggingSidebarItem(false);
     if (archivedView) return;
@@ -399,11 +390,6 @@ function TaskNavigation({
       return;
     }
     if (source.entity !== "chat") return;
-    if (target.entity === "project" && target.itemId) {
-      onPinnedChatIdsChange(pinnedChats.map((chat) => chat.runId).filter((id) => id !== source.itemId));
-      void assignChatToProject(source.itemId, target.itemId);
-      return;
-    }
     if (target.containerId === PINNED_TASKS_CONTAINER) {
       onPinnedChatIdsChange(moveBefore(
         pinnedChats.map((chat) => chat.runId),
@@ -560,7 +546,7 @@ function TaskNavigation({
       ? projects.some((project) => project.parentId === deletingProject.id)
         ? "Move or delete its nested execution environments first."
         : deletingProject.chatRunIds.length + (deletingProject.readOnlyRunIds?.length ?? 0) > 0
-          ? "Move or remove every run in this execution environment first."
+          ? "Delete every run in this execution environment first, or ask Home to move them."
           : ""
       : "";
 
@@ -617,7 +603,7 @@ function TaskNavigation({
           collapsed={projectsCollapsed}
           title={<SidebarSectionTitle collapsed={projectsCollapsed} label="Projects" onClick={() => toggleSection("projects", projectsCollapsed)} />}
         >
-          <SidebarDropContainer containerId={PROJECTS_CONTAINER} id="sidebar-drop-projects">
+          <SidebarDropContainer containerId={PROJECTS_CONTAINER} entity="project" id="sidebar-drop-projects">
             <div className="flex flex-col gap-px">
               <SidebarSortableList items={projectRows.map((row) => sidebarItemDndId("project", row.project.id))}>
                 {projectRows.map(({ project, depth }) => (
@@ -720,6 +706,7 @@ function TaskNavigation({
       <SidebarDropContainer
         className={pinnedChats.length > 0 ? "px-row-x" : draggingSidebarItem ? "-my-4 px-row-x" : ""}
         containerId={PINNED_TASKS_CONTAINER}
+        entity="chat"
         id="sidebar-drop-agent-pinned"
       >
         {pinnedChats.length > 0 ? (
@@ -759,7 +746,7 @@ function TaskNavigation({
         ) : draggingSidebarItem ? <div className="h-4" /> : null}
       </SidebarDropContainer>
 
-      <SidebarDropContainer className="min-w-0" containerId={TASKS_CONTAINER} id="sidebar-drop-tasks">
+      <SidebarDropContainer className="min-w-0" containerId={TASKS_CONTAINER} entity="chat" id="sidebar-drop-tasks">
         <OctopusNavSection
           className="px-row-x"
           collapsed={tasksCollapsed}

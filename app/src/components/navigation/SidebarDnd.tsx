@@ -32,6 +32,7 @@ export type SidebarDragData = {
 
 export type SidebarDropData = {
   containerId: string;
+  entity: SidebarDragEntity;
 };
 
 type SortableHookResult = ReturnType<typeof useSortable>;
@@ -42,8 +43,14 @@ export type SidebarDragHandle = {
 };
 
 const collisionDetection: CollisionDetection = (input) => {
-  const pointerCollisions = pointerWithin(input);
-  return pointerCollisions.length > 0 ? pointerCollisions : closestCenter(input);
+  const entity = readSidebarDragData(input.active.data.current)?.entity;
+  const scoped = {
+    ...input,
+    droppableContainers: input.droppableContainers.filter((container) =>
+      (container.data.current as Partial<SidebarDropData> | undefined)?.entity === entity),
+  };
+  const pointerCollisions = pointerWithin(scoped);
+  return pointerCollisions.length > 0 ? pointerCollisions : closestCenter(scoped);
 };
 
 export function SidebarDndContext({
@@ -148,14 +155,16 @@ export function SidebarDropContainer({
   children,
   className = "",
   containerId,
+  entity,
   id,
 }: {
   children: ReactNode;
   className?: string;
   containerId: string;
+  entity: SidebarDragEntity;
   id: string;
 }) {
-  const { isOver, setNodeRef } = useDroppable({ id, data: { containerId } satisfies SidebarDropData });
+  const { isOver, setNodeRef } = useDroppable({ id, data: { containerId, entity } satisfies SidebarDropData });
   return (
     <div
       className={`${className}${isOver ? " sidebar-drop-container-over" : ""}`}

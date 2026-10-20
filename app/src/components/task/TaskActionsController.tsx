@@ -4,7 +4,6 @@ import type { ChatRun } from "../../chatRuns";
 import {
   clearClientTaskAlias,
   clientTaskTitle,
-  flattenClientChatProjects,
   removeClientTaskPresentation,
   renameClientTask,
   restoreClientTaskAliasIfAbsent,
@@ -93,7 +92,6 @@ export function TaskActionsController({
   const [menu, setMenu] = useState<TaskMenuState | null>(null);
   const [renamingTask, setRenamingTask] = useState<TaskTarget | null>(null);
   const [deletingTask, setDeletingTask] = useState<TaskTarget | null>(null);
-  const projectRows = useMemo(() => flattenClientChatProjects(projectWorkspace.projects), [projectWorkspace.projects]);
   const chatById = useMemo(() => new Map(chatRuns.filter((chat) => chat.runId !== homeRunId).map((chat) => [chat.runId, chat])), [chatRuns, homeRunId]);
   const scope = JSON.stringify([runtimeHome, accessProfile, homeRunId, projectWorkspace.rootEeId, projectWorkspace.homeInterfaceId]);
   const target = (run: ChatRun): TaskTarget => ({ runId: run.runId, scope, identity: taskIdentity(run) });
@@ -109,12 +107,6 @@ export function TaskActionsController({
   function taskActions(run: ChatRun): TaskAction[] {
     const runId = run.runId, archived = run.archived, pinned = pinnedChatIds.includes(runId);
     const alias = organization.aliases[runId];
-    const containingProject = projectRows.find(({ project }) => project.chatRunIds.includes(runId))?.project.id;
-    const move = (projectId: string | null) => {
-      if (projectWorkspace.pending) return;
-      close();
-      void projectWorkspace.moveTask(runId, projectId).catch(error);
-    };
     const setArchived = (value: boolean) => {
       if (projectWorkspace.pending) return;
       close();
@@ -123,17 +115,6 @@ export function TaskActionsController({
         if (latest.current.scope === scope && latest.current.generation === generation) error(failure);
       });
     };
-    const projectItems: TaskAction[] = [];
-    const levels = [projectItems];
-    for (const [index, { project, depth }] of projectRows.entries()) {
-      const hasChildren = (projectRows[index + 1]?.depth ?? 0) > depth;
-      const here: TaskAction = { id: `move-project:${project.id}`, label: hasChildren ? "Move here" : project.name, type: "radio", checked: containingProject === project.id, enabled: !projectWorkspace.pending, icon: "folder", onSelect: () => move(project.id) };
-      if (hasChildren) {
-        const submenu: TaskAction[] = [here, { type: "separator" }];
-        levels[depth].push({ id: `projects:${project.id}`, label: project.name, enabled: !projectWorkspace.pending, icon: "folder", submenu });
-        levels[depth + 1] = submenu;
-      } else levels[depth].push(here);
-    }
     const actions: TaskAction[] = archived ? [
       { id: "restore", label: "Restore task", icon: "retry", enabled: accessProfile === "live" && !projectWorkspace.pending, onSelect: () => setArchived(false) },
     ] : [
@@ -146,10 +127,7 @@ export function TaskActionsController({
           if (latest.current.scope === scope && latest.current.generation === generation) restoreClientTaskAliasIfAbsent(accessProfile, runId, alias);
         } } });
       } }] : []),
-      ...(run.writable ? [{ type: "separator" as const }, { id: "move", label: "Move to", icon: "folder" as const, enabled: !projectWorkspace.pending, submenu: [
-        { id: "move:none", label: "No project", type: "radio" as const, checked: !containingProject, enabled: !projectWorkspace.pending, icon: "chat" as const, onSelect: () => move(null) },
-        ...projectItems,
-      ] }] : [{ id: "readonly", label: "Read-only internal run", icon: "lock" as const, enabled: false }]),
+      ...(run.writable ? [] : [{ id: "readonly", label: "Read-only internal run", icon: "lock" as const, enabled: false }]),
     ];
     const copy = (text: string, label: string) => {
       void copyText(text).then((copied) => copied ? appToast.success(`${label} copied`) : appToast.danger("Clipboard access is unavailable."), error);

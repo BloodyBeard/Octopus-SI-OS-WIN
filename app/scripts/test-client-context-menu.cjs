@@ -115,18 +115,18 @@ test("actual main and preload native menu route bounds data and owns selection, 
   assert.deepEqual(f.errors, []);
 });
 
-test("long multiline project labels reach the native menu without changing action identity or splitting graphemes", async () => {
+test("long multiline labels reach the native menu without changing action identity or splitting graphemes", async () => {
   const { nativeTaskMenuLabel } = load("src/shell/taskActionsMenu.ts");
   const family = "👩‍👩‍👧‍👦", raw = `Project\n\t\u0000${family.repeat(50)} end`;
   const f = fixture(), a = f.add(3);
-  await assert.rejects(a.bridge.showClientContextMenu({ ...request("raw-label"), items: [{ id: "move-project:actual", label: raw }] }), /Invalid native context-menu label/);
+  await assert.rejects(a.bridge.showClientContextMenu({ ...request("raw-label"), items: [{ id: "copy-title", label: raw }] }), /Invalid native context-menu label/);
   const label = nativeTaskMenuLabel(raw);
   assert.ok(label.length <= 180); assert.doesNotMatch(label, /[\x00-\x1f\x7f]/);
   assert.ok(label.startsWith("Project ")); assert.ok(label.endsWith("…"));
   assert.equal(label.slice(8, -1).length % family.length, 0);
-  const selection = a.bridge.showClientContextMenu({ ...request("formatted-label"), items: [{ id: "move-project:actual", label }] });
+  const selection = a.bridge.showClientContextMenu({ ...request("formatted-label"), items: [{ id: "copy-title", label }] });
   const menu = f.menus.at(-1); assert.equal(menu.template[0].label, label); menu.template[0].click();
-  assert.deepEqual(await selection, { requestId: "formatted-label", id: "move-project:actual" });
+  assert.deepEqual(await selection, { requestId: "formatted-label", id: "copy-title" });
 });
 
 test("task controller revalidates native context menus and anchored titlebar menus against current task authority", async () => {
@@ -169,7 +169,7 @@ test("task controller revalidates native context menus and anchored titlebar men
   let props = { runtimeHome: "/home/a", accessProfile: "live", homeRunId: "home", activeChatRunId: "task", chatOrderIds: ["task"], pinnedChatIds: [],
     chatRuns: [{ runId: "task", title: "Task", chatInterfaceId: "private", eeId: "ee", osRootEeId: "root", createdAtMs: 1, writable: true, archived: false, turnOpen: false }],
     projectWorkspace: { projects: [{ id: "p", name: "Parent", parentId: "", chatRunIds: [] }, { id: "c", name: "Child", parentId: "p", chatRunIds: ["task"] }], rootEeId: "root", homeInterfaceId: "home-interface", pending: false,
-      moveTask: async (...args) => effects.push(["move", ...args]), deleteTask: async (...args) => effects.push(["delete", ...args]), setTaskArchived: async (...args) => effects.push(["archive", ...args]) },
+      deleteTask: async (...args) => effects.push(["delete", ...args]), setTaskArchived: async (...args) => effects.push(["archive", ...args]) },
     onChatOrderIdsChange: (...args) => effects.push(["order", ...args]), onOpenChatInNewWindow: (...args) => effects.push(["open", ...args]), onPinnedChatIdsChange: (...args) => effects.push(["pin", ...args]), onSelectChat: (...args) => effects.push(["select", ...args]),
   };
   const render = async (changes = {}) => { props = { ...props, ...changes }; await React.act(async () => root.render(React.createElement(TaskActionsController, props))); };
@@ -179,9 +179,9 @@ test("task controller revalidates native context menus and anchored titlebar men
   try {
     w.octopusTransport = transport; await render();
     const p = await open(); assert.deepEqual(p.value.position, { x: 50, y: 60 });
-    assert.deepEqual(ids(p.value.items), ["rename", "pin", "projected-title", "move", "move:none", "projects:p", "move-project:p", "move-project:c", "copy-menu", "copy-title", "copy", "open", "archive", "delete"]);
+    assert.deepEqual(ids(p.value.items), ["rename", "pin", "projected-title", "copy-menu", "copy-title", "copy", "open", "archive", "delete"]);
     assert.equal(w.document.querySelector('[role="menu"]'), null);
-    await finish(p, "move-project:c"); assert.deepEqual(effects.pop(), ["move", "task", "c"]);
+    await finish(p, "copy"); assert.deepEqual(effects.pop(), ["copy", "task"]);
     const refreshed = await open(); await render({ onOpenChatInNewWindow: (id) => effects.push(["current-open", id]) });
     await finish(refreshed, "open"); assert.deepEqual(effects.pop(), ["current-open", "task"]);
     const malformed = await open(); await React.act(async () => { malformed.resolve({ requestId: "another-request", id: "archive" }); await tick(); });
@@ -190,8 +190,8 @@ test("task controller revalidates native context menus and anchored titlebar men
     const profile = await open(); await render({ accessProfile: "lab" }); await finish(profile, "delete"); assert.deepEqual(effects, []); await render({ accessProfile: "live" });
     const removed = await open(), originalRuns = props.chatRuns; await render({ chatRuns: [] }); await render({ chatRuns: originalRuns }); await finish(removed, "copy"); assert.deepEqual(effects, []);
     const writable = await open(); await render({ chatRuns: [{ ...originalRuns[0], writable: false }] });
-    await finish(writable, "move-project:c"); assert.deepEqual(effects, []); const readOnly = await open();
-    assert.ok(ids(readOnly.value.items).includes("readonly")); assert.ok(!ids(readOnly.value.items).includes("move")); await finish(readOnly, null); await render({ chatRuns: originalRuns });
+    await finish(writable, "archive"); assert.deepEqual(effects, []); const readOnly = await open();
+    assert.ok(ids(readOnly.value.items).includes("readonly")); assert.ok(!ids(readOnly.value.items).includes("archive")); await finish(readOnly, null); await render({ chatRuns: originalRuns });
     const busy = await open(); await render({ projectWorkspace: { ...props.projectWorkspace, pending: true } }); await finish(busy, "delete"); assert.equal(w.document.querySelector('[role="dialog"]'), null);
     await render({ projectWorkspace: { ...props.projectWorkspace, pending: false } });
     const old = await open(), newer = await open(); await finish(old, "archive"); assert.deepEqual(effects, []); await finish(newer, "pin"); assert.deepEqual(effects.pop(), ["pin", ["task"]]);
@@ -218,15 +218,14 @@ test("task controller revalidates native context menus and anchored titlebar men
     const click = async (id) => React.act(async () => button(id).click());
     const before = pending.length; await anchored();
     assert.equal(pending.length, before); assert.equal(trigger.getAttribute('aria-expanded'), 'true');
-    assert.ok(w.document.querySelector('[role="menu"]')); assert.equal(button('move-project:c'), null);
+    assert.ok(w.document.querySelector('[role="menu"]')); assert.equal(button('copy-title'), null);
     assert.equal(button('share'), null); assert.equal(button('fork'), null);
-    await click('move'); await click('projects:p'); assert.equal(button('move-project:c').getAttribute('aria-checked'), 'true');
-    await click('move-project:c'); assert.deepEqual(effects.pop(), ['move', 'task', 'c']);
+    await click('copy-menu'); await click('copy-title'); assert.deepEqual(effects.pop(), ['copy', 'Alias']);
     await anchored(); await click('copy-menu'); await click('copy'); assert.deepEqual(effects.pop(), ['copy', 'task']);
     assert.equal(trigger.getAttribute('aria-expanded'), null);
-    await anchored(); await click('move');
-    await React.act(async () => button('move:none').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
-    assert.equal(button('move:none'), null); assert.equal(w.document.activeElement, button('move'));
+    await anchored(); await click('copy-menu');
+    await React.act(async () => button('copy-title').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
+    assert.equal(button('copy-title'), null); assert.equal(w.document.activeElement, button('copy-menu'));
     await render({ chatRuns: [{ ...originalRuns[0], turnOpen: true }] }); assert.equal(w.document.querySelector('[role="menu"]'), null);
     await anchored(); assert.equal(button('archive').disabled, true);
     await render({ runtimeHome: '/home/c' }); assert.equal(w.document.querySelector('[role="menu"]'), null);
