@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
 const ts = require("typescript");
-const source = ts.createSourceFile("projection.cjs", fs.readFileSync(path.join(__dirname, "../electron/projection.cjs"), "utf8"), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile("projection.cjs", require("./projectionSource.cjs").projectionSource(), ts.ScriptTarget.Latest, true);
 function extract(name) {
   let found;
   function visit(node) { if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node.getText(source); ts.forEachChild(node, visit); }

@@ -5,7 +5,8 @@ const vm = require('node:vm');
 const ts = require('typescript');
 const { test } = require('node:test');
 
-const source = fs.readFileSync(path.join(__dirname, '../electron/projection.cjs'), 'utf8');
+const { projectionSource } = require('./projectionSource.cjs');
+const source = projectionSource();
 const tree = ts.createSourceFile('projection.cjs', source, ts.ScriptTarget.Latest, true);
 const declarations = new Map();
 function visit(node) {

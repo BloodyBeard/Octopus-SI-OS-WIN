@@ -348,7 +348,7 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   assert.equal(model.commandActivityModel({ ...yielded, eventData: { ...yielded.eventData, tool: "renamed.tool", arguments: { command: "completely different" } } }).phase, "running");
   assert.equal(activities.activityIsActive({ ...native(undefined, "started"), eventKind: "dynamic_tool", eventData: { status: "started", body: { unrelated: true } } }), true);
 
-  const compactSource = read("electron/projection.cjs");
+  const compactSource = require("./projectionSource.cjs").projectionSource();
   const markers = functions(compactSource, ["clientEventHasProcessOutput"], { objectOrEmpty: record });
   assert.equal(markers.clientEventHasProcessOutput(failed.eventData), true);
   assert.equal(markers.clientEventHasProcessOutput({ body: { unrelated: "value" } }), false);

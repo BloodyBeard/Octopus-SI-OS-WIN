@@ -14,11 +14,7 @@ const lifecycle = require("../../registry/interface/world_operator_chat/maintena
 const { maintenanceFixture } = require("../../registry/interface/world_operator_chat/test_maintenance_client.cjs");
 const { commitProjectionClientAuthoring } = require("../electron/clientWorkspaceAuthoring.cjs");
 const { recoverWorkspaceTransactions } = require("../electron/workspaceSetup.cjs");
-const loaded = { exports: {} };
-vm.runInNewContext(`${fsSync.readFileSync(projectionFile, "utf8")}\nmodule.exports = { deleteOctopusOsTask, octopusOsOwnedWriterRuns };`, {
-  Buffer, __dirname: path.dirname(projectionFile), __filename: projectionFile, module: loaded,
-  process, require: appRequire, console, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval,
-});
+const loaded = { exports: require("../electron/projection/taskDeletion.cjs") };
 const authoringFile = path.join(__dirname, "../electron/workspaceSetup.cjs"), authoring = { exports: {} };
 vm.runInNewContext(`${fsSync.readFileSync(authoringFile, "utf8")}\nmodule.exports = {
   normalizeRoots, ensureStateRoots, parseClientAuthoringPlan, stageClientAuthoringTransaction, applyJournalWrite,

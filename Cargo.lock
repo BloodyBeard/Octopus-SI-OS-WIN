@@ -6516,6 +6516,7 @@ dependencies = [
  "json-patch",
  "libc",
  "octopus-app-server",
+ "octopus-app-server-interface",
  "octopus-code-mode-engine",
  "octopus-descriptors",
  "octopus-file-storage",

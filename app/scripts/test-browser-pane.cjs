@@ -7,7 +7,7 @@ const { build } = require('esbuild');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const projectionSource = fs.readFileSync(path.join(root, 'electron/projection.cjs'), 'utf8');
+const projectionSource = require('./projectionSource.cjs').projectionSource();
 function declaration(source, name) {
   const tree = ts.createSourceFile('source.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let found;
