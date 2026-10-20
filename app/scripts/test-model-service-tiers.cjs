@@ -6,7 +6,7 @@ const ts = require("typescript");
 const { modelServiceTiers, validateModelServiceTier } = require("../electron/providerModelTiers.cjs");
 
 function functions(file, names, scope = {}) {
-  const source = file === "electron/projection.cjs" ? require("./splitSource.cjs").projectionSource() : fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+  const source = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
   const selected = [];
   const visit = (node) => {
@@ -55,7 +55,7 @@ test("frontend speed choices follow the selected model and preserve unavailable 
 });
 
 test("provider projection keeps catalogue tiers without attaching its default model to every label", () => {
-  const api = functions("electron/projection.cjs", ["providerModelCatalogRows", "providerLabel", "arrayValue", "objectOrEmpty", "stringValue"], { modelServiceTiers });
+  const api = require("../electron/projection/providerDescriptors.cjs");
   const descriptor = { source_names: ["chatgpt"], interface_driver_config: { private_config: { model: "old-default-model" } } };
   assert.equal(api.providerLabel(descriptor, "provider"), "chatgpt");
   const [model] = api.providerModelCatalogRows({}, { model_catalog: [{ model: "chosen-model", service_tiers: tiers, default_service_tier: "ultrafast" }] }, "chosen-model");

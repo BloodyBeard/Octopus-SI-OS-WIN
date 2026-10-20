@@ -1,34 +1,10 @@
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const crypto = require("node:crypto");
-const ts = require("typescript");
-const app = path.resolve(__dirname, "..");
 
-function extract(file, names, constants = {}) {
-  const source = require("./splitSource.cjs").readSource(file);
-  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
-  const declarations = new Map();
-  function visit(node) {
-    if (ts.isFunctionDeclaration(node) && names.includes(node.name?.text)) declarations.set(node.name.text, node.getText(ast));
-    ts.forEachChild(node, visit);
-  }
-  visit(ast);
-  assert.equal(declarations.size, names.length);
-  return Function("crypto", ...Object.keys(constants), `${[...declarations.values()].join("\n")}\nreturn {${names.join(",")}};`)(crypto, ...Object.values(constants));
-}
-
-const live = extract(path.join(app, "../registry/interface/world_operator_chat/client.cjs"), [
-  "parseOperatorTurnStreamRecords", "parseOperatorTurnStreamHeader", "parseOperatorTurnStream",
-  "validateOperatorTurnStreamRow", "validateOperatorTurnInputRecorded", "selectOperatorTurnStreamEvents",
-  "operatorChatStreamArtifact", "streamIdentityHash", "requiredObject", "requiredString", "requiredTrimmedString",
-  "isObject", "stringValue", "nonNegativeInteger", "positiveInteger", "contentHashHex",
-], { LIVE_STREAM_SCHEMA_VERSION: 1, LIVE_STREAM_MAX_BYTES: 256 * 1024 * 1024, LIVE_STREAM_ARTIFACT_LABEL: "turn.stream" });
-const sealed = extract(path.join(app, "electron/projection.cjs"), [
-  "operatorChatExpandedStreamRows", "validateOperatorRecordedInput", "operatorTurnStreamIdentity",
-  "movementBoundaryInterface", "endpointId", "ledgerArtifactLabel", "stringValue", "contentHashHex",
-  "operatorChatEventData", "operatorChatEventIdentity", "objectOrEmpty", "numberValue",
-], { clientEventDataProjection: (payload) => ({ ...payload }) });
+const live = {
+  ...require("../../registry/interface/world_operator_chat/client/turnStreams.cjs"),
+  ...require("../../registry/interface/world_operator_chat/client/chatArtifacts.cjs"),
+};
+const sealed = require("../electron/projection/operatorChatEvents.cjs");
 const header = { type: "header", schema_version: 1, seq: 0, provider_interface: "provider-runtime",
   run: "run-a", thread_id: "native-thread", turn_id: "native-turn", opened_source_movement_seq: 5, opened_at_unix_ms: 10 };
 const receipt = { type: "input_recorded", seq: 1, recorded_at_unix_ms: 12, source_movement_seq: 5,

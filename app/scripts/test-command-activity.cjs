@@ -31,11 +31,6 @@ function functions(source, names, dependencies) {
   return evaluate(`${[...found.values()].join("\n")}\nmodule.exports = {${names.join(",")}};`, dependencies);
 }
 
-function constants(source, prefix) {
-  const rows = [...source.matchAll(new RegExp(`^const (${prefix}[A-Z_]+) = ([^;]+);`, "gm"))];
-  return evaluate(`${rows.map((row) => row[0]).join("\n")}\nmodule.exports = {${rows.map((row) => row[1]).join(",")}};`);
-}
-
 const model = evaluate(read("src/components/chat/commandActivityModel.ts"));
 const observationSource = read("src/components/chat/chatTurnObservation.ts");
 const { isChatReplyTerminal } = evaluate(read("src/components/chat/chatTurnControl.ts"));
@@ -348,17 +343,11 @@ const render = (message) => renderToStaticMarkup(React.createElement(ui.CommandA
   assert.equal(model.commandActivityModel({ ...yielded, eventData: { ...yielded.eventData, tool: "renamed.tool", arguments: { command: "completely different" } } }).phase, "running");
   assert.equal(activities.activityIsActive({ ...native(undefined, "started"), eventKind: "dynamic_tool", eventData: { status: "started", body: { unrelated: true } } }), true);
 
-  const compactSource = require("./splitSource.cjs").projectionSource();
-  const markers = functions(compactSource, ["clientEventHasProcessOutput"], { objectOrEmpty: record });
+  const markers = require("../electron/projection/operatorChatEvents.cjs");
   assert.equal(markers.clientEventHasProcessOutput(failed.eventData), true);
   assert.equal(markers.clientEventHasProcessOutput({ body: { unrelated: "value" } }), false);
-  const historical = functions(compactSource, ["clientEventDataProjection", "clientEventHasProcessOutput", "clientEventHasUnifiedDiff", "clientReasoningSummaryProjection", "compactClientEventValue"], {
-    ...constants(compactSource, "CLIENT_"), objectOrEmpty: record, arrayValue: (value) => Array.isArray(value) ? value : [], stringValue: text,
-  }).clientEventDataProjection;
-  const liveSource = read("../registry/interface/world_operator_chat/client.cjs");
-  const live = functions(liveSource, ["compactOperatorChatLiveEventData", "compactOperatorChatLiveEventValue"], {
-    ...constants(liveSource, "LIVE_EVENT_DATA_"), isObject: (value) => Boolean(value && typeof value === "object" && !Array.isArray(value)),
-  }).compactOperatorChatLiveEventData;
+  const historical = markers.clientEventDataProjection;
+  const live = require("../../registry/interface/world_operator_chat/client/liveEvents.cjs").compactOperatorChatLiveEventData;
   const wrappers = [
     (output) => ({ body: { completed: false, output } }),
     (output) => ({ result: { completed: false, output } }),

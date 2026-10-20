@@ -304,10 +304,7 @@ test("clearing the latest message never reveals older messages and a new receipt
 });
 
 test("actual client terminal/request decoders and content-addressed receipts produce attention without marks or error-message substitutes", async () => {
-  const relative = "electron/projection.cjs", source = fs.readFileSync(path.join(appRoot, relative), "utf8");
-  const marker = "    read: readProjection,"; assert.equal(source.split(marker).length, 2);
-  const factory = load(relative, {}, source.replace(marker, `${marker}\n    auditActivity: buildOperatorActivity, auditCachedActivity: operatorActivity,`)).createProjectionStore;
-  const audited = factory({ resolveRepoRoot: () => path.resolve(appRoot, ".."), octopusHome: () => temporary });
+  const audited = require("../electron/projection.cjs").createProjectionContext({ resolveRepoRoot: () => path.resolve(appRoot, ".."), octopusHome: () => temporary });
   const ledger = path.join(temporary, "attention-ledger"), blobs = path.join(ledger, "blobs"); fs.mkdirSync(blobs, { recursive: true });
   const { blake3 } = require("@noble/hashes/blake3");
   const validate = new (require("ajv"))({ strict: false, logger: false }).compile(require("../../schemas/movement.schema.json"));
@@ -344,15 +341,15 @@ test("actual client terminal/request decoders and content-addressed receipts pro
     operatorChatProtocol: { artifactReadProjection: require("../../registry/interface/world_operator_chat/client.json").artifact_read_projection,
       inputLabel: "operator.message", terminalOutputLabel: "interface.artifact.output", errorOutputLabel: "interface.artifact.error", approvalResponseLabel: "operator.approval.response", elicitationResponseLabel: "operator.elicitation.response", userInputResponseLabel: "operator.user_input.response" } };
   try {
-    const rows = await audited.auditActivity(projection, [chat]);
+    const rows = await audited.buildOperatorActivity(projection, [chat]);
     assert.deepEqual(rows.map((row) => row.kind).sort(), ["approval", "message", "user_input"]);
     assert.ok(rows.every((row) => row.agent_name === "Exact Agent" && row.worker === "instantiated-worker"));
     const terminal = rows.find((row) => row.kind === "message"); assert.equal(terminal.title, "Message — Actual task"); assert.equal(terminal.seq, 1); assert.equal(terminal.artifact_id, outbound[0].artifact.id);
     const changedTime = [...rows].map((row) => row.id).sort(); chat.updated_at_ms = Date.now() + 999;
-    assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.id).sort(), changedTime);
+    assert.deepEqual((await audited.buildOperatorActivity(projection, [chat])).map((row) => row.id).sort(), changedTime);
     const unrelated = movement(12, "turn.exec.output_delta", { text: "unrelated tool output" });
     fs.unlinkSync(path.join(blobs, Buffer.from(unrelated.artifact.content).toString("hex"))); outbound.push(unrelated);
-    assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.id).sort(), changedTime);
+    assert.deepEqual((await audited.buildOperatorActivity(projection, [chat])).map((row) => row.id).sort(), changedTime);
     const time = Date.now(), stream = movement(15, "turn.stream", {});
     const streamBytes = Buffer.from([
       { type: "header", schema_version: 1, seq: 0, provider_interface: "provider-interface", run: "run-test", thread_id: "provider-thread", turn_id: "turn-test", opened_source_movement_seq: 11, opened_at_unix_ms: time },
@@ -360,29 +357,29 @@ test("actual client terminal/request decoders and content-addressed receipts pro
       { type: "seal", seq: 2, source_movement_seq: 14, recorded_at_unix_ms: time + 2, terminal_label: "interface.artifact.output", terminal_artifact_payload_blake3: "1".repeat(64) },
     ].map(JSON.stringify).join("\n") + "\n");
     stream.artifact = artifact("turn.stream", streamBytes); const streamHash = Buffer.from(stream.artifact.content); outbound.push(stream);
-    assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.kind).sort(), ["message", "user_input"]);
+    assert.deepEqual((await audited.buildOperatorActivity(projection, [chat])).map((row) => row.kind).sort(), ["message", "user_input"]);
     entry.writable = false; projection.operatorChatMessagesCache.clear();
-    const readonly = await audited.auditActivity(projection, [{ ...chat, client_surface_role: "home" }]);
+    const readonly = await audited.buildOperatorActivity(projection, [{ ...chat, client_surface_role: "home" }]);
     assert.ok(readonly.some((row) => row.kind === "message" && row.client_surface_role === "home"));
     inbound.push(movement(18, "operator.approval.response", { operator_approval_response: { request_id: "a", decision: "accept" } }, "in"),
       movement(19, "operator.user_input.response", { operator_user_input_response: { request_id: "u", answers: {} } }, "in"));
     fs.unlinkSync(path.join(blobs, streamHash.toString("hex")));
-    assert.deepEqual((await audited.auditActivity(projection, [chat])).map((row) => row.kind), ["message"]);
+    assert.deepEqual((await audited.buildOperatorActivity(projection, [chat])).map((row) => row.kind), ["message"]);
     const other = { ...chat, run_id: "other-run", chat_interface_id: "other-interface" };
     const entries = [entry, { ...entry, runId: other.run_id, chatInterfaceId: other.chat_interface_id, inbound: [], outbound: [] }];
     projection.operatorChatRunIndexCache.promise = Promise.resolve(entries);
-    const full = [chat, other], cached = await audited.auditCachedActivity(projection, full);
-    assert.equal(await audited.auditCachedActivity(projection, full), cached);
-    assert.deepEqual(await audited.auditCachedActivity(projection, [other]), []);
-    assert.equal((await audited.auditCachedActivity(projection, full)).length, 1);
+    const full = [chat, other], cached = await audited.operatorActivity(projection, full);
+    assert.equal(await audited.operatorActivity(projection, full), cached);
+    assert.deepEqual(await audited.operatorActivity(projection, [other]), []);
+    assert.equal((await audited.operatorActivity(projection, full)).length, 1);
     const forward = projection.operatorActivityCache.promise;
-    await audited.auditCachedActivity(projection, [other, chat]); assert.notEqual(projection.operatorActivityCache.promise, forward);
+    await audited.operatorActivity(projection, [other, chat]); assert.notEqual(projection.operatorActivityCache.promise, forward);
     const terminalPath = path.join(blobs, Buffer.from(outbound[0].artifact.content).toString("hex")), bytes = fs.readFileSync(terminalPath);
-    fs.unlinkSync(terminalPath); audited.invalidate();
-    projection.operatorChatRunIndexCache = { generation: audited.generation(), promise: Promise.resolve(entries) };
-    await assert.rejects(audited.auditCachedActivity(projection, full), /ENOENT/);
+    fs.unlinkSync(terminalPath); audited.invalidateProjection();
+    projection.operatorChatRunIndexCache = { generation: audited.projectionGeneration, promise: Promise.resolve(entries) };
+    await assert.rejects(audited.operatorActivity(projection, full), /ENOENT/);
     assert.equal(projection.operatorActivityCache, null);
-    fs.writeFileSync(terminalPath, bytes); assert.equal((await audited.auditCachedActivity(projection, full)).length, 1);
+    fs.writeFileSync(terminalPath, bytes); assert.equal((await audited.operatorActivity(projection, full)).length, 1);
   } finally { audited.close(); }
 });
 

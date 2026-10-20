@@ -2,22 +2,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
-const ts = require("typescript");
-const source = ts.createSourceFile("projection.cjs", require("./splitSource.cjs").projectionSource(), ts.ScriptTarget.Latest, true);
-function extract(name) {
-  let found;
-  function visit(node) { if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node.getText(source); ts.forEachChild(node, visit); }
-  visit(source); assert.ok(found, name); return found;
-}
+const { clientSurfacesProjection } = require("../electron/projection/clientSurfaces.cjs");
 function project(rows, indexed) {
-  const environment = {
-    crypto: require("node:crypto"), Buffer, projectionGeneration: 7,
+  const store = {
+    projectionGeneration: 7,
     indexedArtifactLabelRows: async () => indexed ? rows : null,
     refreshLedgerProjection: async () => {},
     resolveLedgerArtifactPayload: async (row) => { if (row.unreadable) throw new Error("missing payload"); return row.payload; },
   };
-  const code = ["objectOrEmpty", "stringValue", "movementKindText", "movementBaseKind", "movementRunId", "ledgerArtifactId", "ledgerArtifactLabel", "isAdmittedInterfaceArtifactMovement", "numberValue", "timestampOf", "isClientSurfaceDocumentPayload", "clientSurfaceDocumentSnapshot"].map(extract).join("\n");
-  return Function(...Object.keys(environment), `${code}; return clientSurfaceDocumentSnapshot;`)(...Object.values(environment))({ ledgerRows: rows });
+  return clientSurfacesProjection(store).clientSurfaceDocumentSnapshot({ ledgerRows: rows });
 }
 function row(seq, run, recipient, patch = {}) {
   return { seq, kind: "InterfaceOutbound", artifact: { id: "client.surface.document:same-content" }, from: { Interface: "provider" }, to: { Interface: recipient }, invocation_metadata: { runtime: { run, interface: "provider" } }, recorded_at_unix_ms: 1000 + seq, payload: { schema: "octopus.client_surface", schema_version: 1, id: "home.test", runId: "untrusted-run", interfaceId: "untrusted-interface" }, ...patch };

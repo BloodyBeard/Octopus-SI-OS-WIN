@@ -1463,6 +1463,7 @@ test("model refresh observes its generation, waits for rearm, and works without 
   assert.equal(submissions, 0); await output("Recovered"); await outputSeen;
   await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
   await rearm(1); assert.equal((await pending).models[0].displayName, "Recovered");
+  assert.deepEqual((await pending).models[0].supportedReasoningEfforts, ["high"]);
   delete descriptor.interface_driver_config.private_config.provider_operations;
   await fs.promises.writeFile(descriptorPath, JSON.stringify(descriptor));
   allowSubmit = true;

@@ -2,17 +2,11 @@ const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const fs=require('node:fs'),path=require('node:path');
 const ts=require('typescript');
-const {modelServiceTiers}=require('../electron/providerModelTiers.cjs');
 const app=path.resolve(__dirname,'..');
 const read=p=>fs.readFileSync(p,'utf8');
-const parse=(file,text)=>ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
 
 test('catalog order remains declared when selection and default flags change',()=>{
- const source=require('./splitSource.cjs').projectionSource();
- const tree=parse('projection.cjs',source);
- const names=new Set(['providerModelCatalogRows','arrayValue','objectOrEmpty','stringValue']);
- const functions=tree.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.has(n.name.text)).map(n=>n.getText(tree)).join('\n');
- const rows=Function('modelServiceTiers',functions+';return providerModelCatalogRows;')(modelServiceTiers);
+ const rows=require('../electron/projection/providerDescriptors.cjs').providerModelCatalogRows;
  const catalog=[{model:'zeta',display_name:'Zeta'},{model:'alpha',display_name:'Alpha'}];
  for(const selected of ['alpha','zeta'])for(const defaultModel of ['alpha','zeta']){
   const config={model_catalog:catalog.map(m=>({...m,is_default:m.model===defaultModel}))};

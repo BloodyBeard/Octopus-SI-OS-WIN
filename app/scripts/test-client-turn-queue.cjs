@@ -226,6 +226,7 @@ for (const [hadAttachments, attachments, recoverPreparedMessage] of [
   assert.equal(queueTurnReady(pendingTurn, idle, [{ ...final, eventKind: "rate_limits" }]), false);
   assert.equal(queueTurnReady(pendingTurn, idle, [final]), true);
   assert.equal(queueTurnReady(pendingTurn, { ...idle, turnOpen: true }, [final]), false);
+  assert.equal(queueTurnReady(pendingTurn, { ...idle, runId: "run-b" }, [final]), false);
   const interrupted = { ...final, eventKind: "interrupted_result" };
   assert.equal(queueTurnReady(pendingTurn, idle, [interrupted]), false);
   assert.equal(queueTurnReady({ ...pendingTurn, resumeAfterInterrupt: true }, idle, [interrupted]), true);

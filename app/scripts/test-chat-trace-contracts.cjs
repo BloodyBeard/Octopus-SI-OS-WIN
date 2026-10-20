@@ -59,15 +59,9 @@ const taskActionsController = source("src/components/task/TaskActionsController.
 const workerEnvironmentPaneTab = source("src/components/worker-environment/WorkerEnvironmentPaneTab.tsx");
 const runEnvironmentView = source("src/components/worker-environment/RunEnvironmentView.tsx");
 const chatWorkspace = source("src/components/chat/useChatWorkspace.ts");
-const chatStorageSource = source("src/components/chat/storage.ts");
 const chatDraftStateSource = source("src/components/chat/useChatDraftState.ts");
 const chatTurnQueueSource = source("src/components/chat/useChatTurnQueue.ts");
-const clientTurnQueueSource = source("src/components/chat/clientTurnQueue.ts");
-const chatActivityProjectionSource = source("src/components/chat/chatActivityProjection.ts");
 const chatCapabilityCatalog = source("src/components/chat/useChatCapabilityCatalog.ts");
-const conversationTrace = source("src/components/chat/conversationTrace.ts");
-const chatRuns = source("src/chatRuns.ts");
-const electronProjection = require("./splitSource.cjs").projectionSource();
 const electronMain = source("electron/main.cjs");
 const viteConfig = source("vite.config.ts");
 const chatCss = source("src/components/chat/chat.css");
@@ -171,6 +165,9 @@ const chatActivityProjectionModule = typescriptModule("src/components/chat/chatA
 const conversationTraceModule = typescriptModule("src/components/chat/conversationTrace.ts", {
   "./toolPresentation": { dynamicToolPresentation: () => ({ conversationVisible: true }) },
 });
+let chatRunsProjection = {};
+const chatRunsModule = typescriptModule("src/chatRuns.ts", { "./projectionClient": { formatProjectionError: String, readProjection: async () => chatRunsProjection },
+  "./components/chat/taskAccess": typescriptModule("src/components/chat/taskAccess.ts") });
 const threadVirtualizer = typescriptModule("src/components/chat/threadVirtualizer.ts");
 const clientWindowModel = typescriptModule("src/shell/clientWindowModel.ts", {
   "../components/files/filesPaneSnapshot": typescriptModule("src/components/files/filesPaneSnapshot.ts"),
@@ -296,9 +293,28 @@ assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}]), "pane-conte
 assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{ showWhenSingle: true }]), "pane-tab-strip");
 assert.equal(paneChromeOwnership.paneChromeOwner("secondary", [{}, {}]), "pane-tab-strip");
 assert.doesNotMatch(paneChromeOwnershipSource, /\b(width|sidebar|resize|glyph|activeTabId)\b/);
-assert.match(chatStorageSource, /function chatStateStorage\(_scope: string\): Storage \{\s*return window\.localStorage;/);
-assert.match(chatStorageSource, /messageId: string;[\s\S]*?persistedQueuedMessageId\(candidate\.messageId, id\)/);
-assert.match(chatStorageSource, /PersistedChatDraft[\s\S]*?messageId: string;[\s\S]*?messageHadAttachments: boolean;[\s\S]*?persistedDraftMessageId\(candidate\.messageId\)/);
+{
+  const saved = new Map();
+  const previousWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, String(value)) } };
+  try {
+    const storage = typescriptModule("src/components/chat/storage.ts", {
+      "./constants": typescriptModule("src/components/chat/constants.ts"), "./taskAccess": typescriptModule("src/components/chat/taskAccess.ts"),
+    });
+    const draft = (key, messageId, messageHadAttachments) => ({ key, messageId, messageHadAttachments, text: "", agentPresetId: "", eeId: "", workerInterfaceId: "",
+      providerInterfaceId: "", providerModel: "", reasoningEffort: "", applicationIds: [], driverNames: [], accessMode: "default", continuation: null, updatedAtMs: 1 });
+    storage.saveChatDrafts("live", [draft("exact", "msg_exact", true), draft("forged", "not-a-message-id", true)]);
+    assert.ok([...saved.keys()].some((key) => key.includes("chatDrafts")));
+    assert.deepEqual(storage.loadChatDrafts("live").map(({ key, messageId, messageHadAttachments }) => [key, messageId, messageHadAttachments]), [["exact", "msg_exact", true]]);
+    const turn = (id, messageId) => ({ id, messageId, runKey: "run", text: "queued", eeId: "", workerInterfaceId: "", providerInterfaceId: "", providerModel: "",
+      reasoningEffort: "", endpoint: "", createdAtMs: 1, status: "queued", hadAttachments: false });
+    storage.saveQueuedChatTurns("live", [turn("queued_current", "msg_current"), turn("queued_0123456789abcdef", ""), turn("queued_unknown", "invalid")]);
+    assert.deepEqual(storage.loadQueuedChatTurns("live").map(({ id, messageId }) => [id, messageId]),
+      [["queued_current", "msg_current"], ["queued_0123456789abcdef", "msg_0123456789abcdef"]]);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+}
 assert.match(chatWorkspace, /const identity = randomId\(\);[\s\S]*?id: `queued_\$\{identity\}`,[\s\S]*?messageId: `msg_\$\{identity\}`[\s\S]*?hadAttachments: attachments\.length > 0/);
 const queueEdit = sourceBetween(chatWorkspace, "async function editQueuedTurn(", "async function cancelQueuedEdit(");
 assert.match(queueEdit, /applyDraft\(\{[\s\S]*?messageId: item\.messageId, messageHadAttachments: item\.hadAttachments[\s\S]*?attachments: savedEdit\?\.attachments \?\? item\.attachments/);
@@ -307,7 +323,6 @@ assert.match(queueDraftSubmission, /const queuedAttachmentBytesNeedRecovery = Bo
 assert.match(queueDraftSubmission, /if \(mode === "queue" \|\| \(replyOpen && mode === "send"\)\)[\s\S]*?await enqueueCurrentTurn\(body\);[\s\S]*?return;[\s\S]*?if \(mode === "steer"\) \{\s*await submitSteeringMessage\(\{[\s\S]*?messageId: submissionMessageId/);
 assert.match(chatWorkspace, /submitOperatorSteer\(\{[\s\S]*?recoverPreparedMessage: input\.recoverPreparedMessage[\s\S]*?providerInterfaceId: run\.providerInterfaceId[\s\S]*?clientSurfaceRole: run\.clientSurfaceRole/);
 assert.match(chatWorkspace, /reportClientExtensionIncident\(\{[\s\S]*?interfaceId: turn\.providerInterfaceId \|\| artifact\.from_interface_id/);
-assert.match(electronProjection, /recordedSelection !== selected \|\| !bound[\s\S]*?id: selected,[\s\S]*?boundId: bound/);
 const steeringSubmission = sourceBetween(chatWorkspace, "async function submitSteeringMessage(", "async function steerQueuedTurn(");
 assert.match(steeringSubmission, /const messageId = input\.messageId \?\? `msg_\$\{randomId\(\)\}`;[\s\S]*?await replaceQueuedTurns[\s\S]*?id: queueId, messageId, runKey: input\.runKey[\s\S]*?await queueStore\.claim\(queueId, owner, true\);[\s\S]*?consumeDraft\(run\.runId, claimed\.text, claimed\.attachments\)[\s\S]*?submitOperatorSteer\(\{\s*runId: run\.runId, messageId,[\s\S]*?"refused" in submitted\.verdict[\s\S]*?accepted = true;\s*await queueStore\.settle\(queueId, owner, "accepted", undefined, submitted\.verdict\.admitted\.seq\)/);
 assert.match(chatDraftStateSource, /function persistSubmissionIntent\([\s\S]*?saveChatDrafts\([\s\S]*?setMessageId\(nextMessageId\)/);
@@ -315,7 +330,6 @@ assert.match(chatDraftStateSource, /function completeSubmissionIntent\([\s\S]*?m
 assert.match(chatDraftStateSource, /function currentDraftForStorage\([\s\S]*?existing\?\.messageId === current\.messageId[\s\S]*?\{ \.\.\.existing, updatedAtMs: current\.updatedAtMs \}/);
 assert.match(chatTurnQueueSource, /indexedQueuePersistence\(globalThis\.indexedDB\)[\s\S]*?new ClientTurnQueue\(key, persistence,/);
 assert.match(chatTurnQueueSource, /async function replaceQueuedTurns\([\s\S]*?await queueStore\.change\([\s\S]*?turns: typeof update === "function" \? update\(current\.turns\) : update[\s\S]*?return state\.turns;/);
-assert.match(clientTurnQueueSource, /await this\.persistence\.update\(this\.key,[\s\S]*?this\.publish\(state\)/);
 const recoveredSubmission = sourceBetween(chatWorkspace, "if (submitted.messageRecovered)", "const afterSeq =");
 assert.match(recoveredSubmission, /await refreshMessages\(submitted\.runId\);\s*await refreshRuns\(\);\s*current = null;\s*continue;/);
 assert.doesNotMatch(recoveredSubmission, /replaceQueuedTurns|executeTurnSequence|submitOperatorTurn\(/);
@@ -423,9 +437,6 @@ assert.match(viteConfig, /createOperatorChatClientLoader\(/);
 assert.equal((viteConfig.match(/operatorChatClientLoader\.load\(\)/g) ?? []).length, 6);
 assert.doesNotMatch(viteConfig, /require\(path\.join\(octopusHome, "registry", "interface", "world_operator_chat", "client\.cjs"\)\)/);
 assert.match(viteConfig, /assertOperatorChatArtifactBatch\(batch\)/);
-assert.match(electronProjection, /"turn\.stream"/);
-assert.match(electronProjection, /sealed turn\.stream has no seal row/);
-assert.match(electronProjection, /function operatorChatProjectedRowId\(row, fallback\) \{[\s\S]*?return `\$\{row\.__stream\.stream_id\}:\$\{row\.__stream\.stream_seq\}`;[\s\S]*?return ledgerArtifactId\(row\) \|\| fallback;/);
 assert.match(applicationsView, /action: "repair_package"/);
 assert.match(applicationsView, /expectedRepairs: \{ \[application\.package_id\]: expectation \}/);
 assert.throws(
@@ -774,10 +785,20 @@ const anchoredProjection = chatActivityProjectionModule.mergeRenderedMessages([
   { id: "activity-b", role: "assistant", text: "b", createdAtMs: 3, eventData: { anchor_message_id: "operator" } },
 ], [], true);
 assert.deepEqual(anchoredProjection.map((message) => message.id), ["operator", "activity-a", "activity-b"]);
-assert.match(chatActivityProjectionSource, /const projectedIdentity = projectedMessageIdentity\(projected\);/);
-assert.doesNotMatch(chatActivityProjectionSource, /projected\.some\(\(message\) => sameMessage/);
-assert.doesNotMatch(chatActivityProjectionSource, /anchored\.set\(anchorId, \[\.\.\./);
-assert.match(chatActivityProjectionSource, /text: parts\.join\(""\)/);
+const mergeCost = (size) => {
+  const projected = Array.from({ length: size }, (_, index) => ({ id: `operator-${index}`, role: "user", text: "prompt", createdAtMs: index * 3 }));
+  const pending = Array.from({ length: size }, (_, index) => ({ id: `activity-${index}`, role: "assistant", text: "a", createdAtMs: index * 3 + 1,
+    eventKind: "reasoning_delta", eventData: { anchor_message_id: `operator-${index % 64}`, item_id: `item-${index % 512}`, turn_id: "turn", lifecycle: "streaming" } }));
+  let best = Infinity;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const started = process.hrtime.bigint();
+    chatActivityProjectionModule.mergeRenderedMessages(projected, pending, [], true);
+    best = Math.min(best, Number(process.hrtime.bigint() - started));
+  }
+  return best;
+};
+mergeCost(500);
+assert.ok(mergeCost(8000) < mergeCost(2000) * 10, "rendered message merge must stay near-linear in projected and pending history");
 
 assert.match(turnActivity, /if \(text\(data\.tool\) === "wait"\) return \[\];/);
 assert.match(turnActivity, /kind: "multi-agent-group"/);
@@ -861,19 +882,19 @@ assert.match(turnActivity, /record\(message\.eventData\)\.showBufferingUi === tr
 assert.match(turnActivity, /entry\.tone = strongerActivityTone\(entry\.tone, activityTone\(\[message\]\)\);/);
 assert.doesNotMatch(turnActivity, /entry\.tone = activityTone\(entry\.messages\);/);
 
-assert.match(conversationTrace, /"turn_control",\s*"interrupted_result",/);
-assert.match(conversationTrace, /if \(originRole !== "provider"\) return "hidden";/);
-assert.match(chatRuns, /\| "interrupted_result"/);
-assert.match(chatRuns, /"turn_control", "interrupted_result", "rate_limits"/);
-assert.match(chatRuns, /\.sort\(\(a, b\) => a\.createdAtMs - b\.createdAtMs \|\| a\.movementSeq - b\.movementSeq\)/);
-assert.match(chatRuns, /if \(eventKind === "message_delta" \|\| eventKind === "commentary_delta"\) return "text";[\s\S]*?\["reasoning_delta", "plan_delta", "tool_output_delta", "file_change_delta"\]\.includes\(eventKind\)\) return "delta";/);
-assert.match(electronProjection, /const projectedText = projected\.eventKind\.endsWith\("_delta"\)\s*\? projected\.text\s*:\s*projected\.eventKind === "compaction"\s*\? ""\s*:\s*projected\.eventKind === "message"\s*\? projected\.text \|\| operatorChatTurnText\(projected\.payload, "out"\)\s*:\s*projected\.text \|\| operatorChatTurnText\(projected\.payload, "out"\) \|\| label;/);
-assert.match(electronProjection, /if \(label === "agent\.message\.delta"\) \{\s*return phase === "commentary" \? "commentary_delta" : "message_delta";/);
-assert.match(electronProjection, /"turn\.reasoning\.delta": "reasoning_delta"/);
-assert.match(electronProjection, /function compareMovementOrder\(left, right\) \{\s*return rowTimeMs\(left\) - rowTimeMs\(right\)\s*\|\| numberValue\(left\.seq, 0\) - numberValue\(right\.seq, 0\);/);
-assert.match(electronProjection, /function isOperatorChatProviderFailureRow\(entry, row\)[\s\S]*?ledgerArtifactLabel\(row\) === `\$\{provider\}\.failure`;/);
-assert.match(electronProjection, /visibleLabels\.has\(label\) \|\| isOperatorChatProviderFailureRow\(entry, row\)/);
-assert.match(electronProjection, /const terminalError = Boolean\(providerFailure\) \|\| label === protocol\.errorOutputLabel;/);
+for (const eventKind of ["turn_control", "interrupted_result"]) {
+  assert.equal(conversationTraceModule.conversationTraceAdmission({ eventKind, eventData: {}, text: "" }, {}), "state");
+  assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, {}, "").eventKind, eventKind);
+}
+assert.equal(conversationTraceModule.conversationTraceAdmission({ ...exactProviderLiveTool,
+  eventData: { ...exactProviderLiveTool.eventData, _activity_origin: { interface_id: "system_room", interface_role: "system" } } }, {}), "hidden");
+chatRunsProjection = { messages: [[3, 20, "late"], [9, 10, "earliest"], [2, 20, "tied earlier"]].map(([seq, time, id]) => ({ id, movement_seq: seq, created_at_ms: time, event_kind: "message" })) };
+chatRunsModule.loadChatRunMessages("run").then((messages) => assert.deepEqual(messages.map((message) => message.id), ["earliest", "tied earlier", "late"]));
+for (const [eventKind, field] of [["message_delta", "text"], ["commentary_delta", "text"], ["reasoning_delta", "delta"], ["plan_delta", "delta"], ["tool_output_delta", "delta"], ["file_change_delta", "delta"]]) {
+  assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, { [field]: "fragment" }, "composed", "fragment").text, "fragment");
+  assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, { [field]: "fragment" }, "composed").text, "composed");
+  assert.equal(chatRunsModule.normalizeChatRunEventProjection(eventKind, {}, "composed").eventKind, "generic_activity");
+}
 
 assert.match(chatWorkspace, /const activeRun = projectedActiveRun;/);
 assert.match(chatWorkspace, /const turnOpen = Boolean\(activeTurnControlTarget\);/);
@@ -890,16 +911,12 @@ assert.match(resumeAction, /queuedTurnsRef\.current\.some[\s\S]*?replacePausedQu
 assert.doesNotMatch(resumeAction, /submitOperatorTurn\(|executeTurnSequence\(|resumeQueuedTurns\(|setText\(|operator\.message/);
 assert.match(chatWorkspace, /const ready = queueDispatchCandidates\(queueStore\.snapshot, runs\);[\s\S]*?executeTurnSequence\(queuedSubmission\(item\)\)/);
 assert.match(chatWorkspace, /loadChatRunMessages\(turn\.runId\)[\s\S]*?loadChatRunStatuses\(\[turn\.runId\]\)[\s\S]*?!queueTurnReady\(claimed, status, history\)/);
-assert.match(clientTurnQueueSource, /export function queueTurnReady\([\s\S]*?status\.runId !== turn\.runKey[\s\S]*?turn\.resumeAfterInterrupt === true \|\| !operatorTurnResumeAvailable\(history, false\)/);
 const queuedAfterReply = sourceBetween(chatWorkspace, "const queued = nextQueuedTurn(submittedRunKey);", "} catch (failure)");
 assert.match(queuedAfterReply, /const resumeRequired = operatorTurnResumeAvailable\(liveMessages, false\);[\s\S]*?if \(queued && resumeRequired\)[\s\S]*?await replacePausedQueueRunKeys[\s\S]*?current = null;/);
-assert.match(electronProjection, /outcome\?\.status === "acknowledged" && outcome\.action === "resume"[\s\S]*?open = true;[\s\S]*?state = "working";/);
 assert.match(electronMain, /maxPayloadBytes: input\?\.label === "turn\.stream" \? 256 \* 1024 \* 1024 : undefined/);
 assert.match(chatWorkspace, /if \(activeRunId\) void refreshRuns\(\);[\s\S]*?\[activeRunId, refreshRuns\]/);
 assert.match(chatWorkspace, /projectionChange\.kind !== "ledger"\) return;[\s\S]*?loadChatRunStatuses\(runIds\)[\s\S]*?turnState: status\.turnState/);
 assert.doesNotMatch(chatWorkspace, /projectionChange\.kind === "ledger"\) return;/);
-assert.match(electronProjection, /case "projection\.operator\.chats\.status":[\s\S]*?operatorChatStatuses\(projection, params\)/);
-assert.match(electronProjection, /operatorChatStatusCursor[\s\S]*?operatorChatLedgerDelta[\s\S]*?reduceOperatorChatTurnState/);
 assert.match(chatWorkspace, /\[submitted\.runId\]: \{\s*interfaceId: submitted\.chatInterfaceId,\s*runId: submitted\.runId,/);
 assert.match(chatView, /turnOpen=\{chat\.turnOpen\}/);
 assert.match(chatView, /responseStreaming=\{chat\.busy\}/);
@@ -915,16 +932,12 @@ assert.match(chatWorkspace.slice(selectRunStart, selectRunEnd), /setActiveRunId\
 assert.doesNotMatch(chatWorkspace, /runSelectionGenerationRef|commitRunSelection/);
 assert.match(chatWorkspace, /: loadingMessages\s*\? "Task history is still loading\."/);
 assert.doesNotMatch(chatWorkspace, /interfaceRolesById/);
-assert.match(chatActivityProjectionSource, /interface_role: artifact\.from_interface_role/);
 assert.doesNotMatch(chatCapabilityCatalog, /projection\.interfaces\.list/);
 assert.match(chatWorkspace, /const startingNewTask = !turn\.runId;/);
 assert.match(chatWorkspace, /work_status: startingNewTask \? "submitting" : "working"/);
 assert.doesNotMatch(chatWorkspace, /Interface provenance projection is not ready/);
 assert.match(chatCapabilityCatalog, /capabilityCatalogScopeRef\.current !== scope/);
 assert.doesNotMatch(chatCapabilityCatalog, /let cancelled = false;\s*setExecutionContextsLoaded\(false\);\s*setInterfaceRolesById\(null\);/);
-assert.match(electronProjection, /segments\[0\] === "state" && segments\[1\] === "runs"[\s\S]*?\? "runs" : null/);
-assert.match(electronProjection, /async function cachedEePolicyProjection\(\) \{[\s\S]*?while \(true\)[\s\S]*?build\.generation === policyProjectionGeneration/);
-assert.match(electronProjection, /const workerEnvironmentKind = stringValue\(formation\.worker_environment_kind\);[\s\S]*?validDirectCoordinates = workerEnvironmentKind === "process_session"/);
 
 assert.match(messageList, /kind\.movePath \?\? kind\.move_path/);
 assert.match(messageList, /path: activityFileChangePath\(change\)/);
@@ -999,8 +1012,6 @@ assert.doesNotMatch(operatorShell, /continuedTab/);
 assert.match(operatorShell, /newSecondaryTaskPhaseRef\.current !== "awaiting_run" \|\| !runId[\s\S]*?const completedTab = secondaryPaneTab[\s\S]*?secondaryTabModel\.replaceTab\(activeTab\.id, completedTab\)/);
 assert.doesNotMatch(operatorShell, /contextBoundaryRunReplacements|replaceClientRunIds|migrateClientTaskOrganizationRunId/);
 assert.doesNotMatch(chatWorkspace, /CONTEXT_BOUNDARY_CONTINUE_PROMPT|waitForProjectedContextBoundarySuccessor|runReplacement/);
-assert.doesNotMatch(electronProjection, /operatorChatContextBoundary|context_boundary_count|task_root_run_id/);
-assert.match(electronProjection, /"turn\.context\.compaction": "compaction"/);
 assert.match(operatorShell, /if \(!surface\) return surfaceRegistry\.loading;/);
 assert.match(operatorShell, /target\.surfaceId !== "chat"[\s\S]*?!chatWorkspace\.runsLoaded[\s\S]*?chatWorkspace\.runs\.some/);
 assert.match(operatorShell, /defaultSidebarOpen=\{!clientWindow\.initialTarget\}/);
@@ -1178,11 +1189,6 @@ assert.doesNotMatch(sidebar, /data-sidebar-action="notifications"/);
 assert.match(shellGlyphs, /activity: \{\s*viewBox: "0 0 16 16"/);
 assert.match(shellGlyphs, /activityUnread: \{\s*viewBox: "0 0 16 16"/);
 assert.match(operatorShell, /const openActivityMark = useCallback/);
-assert.match(electronProjection, /ledgerArtifactLabel\(candidate\) === protocol\.terminalOutputLabel[\s\S]*?movementBoundaryInterface\(candidate, "to"\) === entry\.chatInterfaceId/);
-assert.match(electronProjection, /"turn\.context\.compaction": "compaction"/);
-assert.match(electronProjection, /if \(label === protocol\.terminalOutputLabel\) return "message"/);
-assert.doesNotMatch(electronProjection, /run_boundary|context_boundary/);
-assert.match(electronProjection, /last_terminal_message: lastTerminalMessage/);
 assert.match(voiceView, /if \(!callActive && homeProjectionLoading\) \{[\s\S]*?<OctopusLoadingState className="surface-content-loading-state" label="Opening Home"/);
 assert.match(stylesCss, /\.surface-content-loading-state \{[\s\S]*?position: absolute;[\s\S]*?inset: 0;[\s\S]*?place-items: center;/);
 assert.doesNotMatch(voiceView, /<CadencedShimmerText>Opening<\/CadencedShimmerText>/);

@@ -7,20 +7,8 @@ const { build } = require('esbuild');
 const { test } = require('node:test');
 
 const root = path.resolve(__dirname, '..');
-const projectionSource = require('./splitSource.cjs').projectionSource();
-function declaration(source, name) {
-  const tree = ts.createSourceFile('source.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let found;
-  const visit = node => { if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node.getText(tree); ts.forEachChild(node, visit); };
-  visit(tree); assert(found, name); return found;
-}
-const projectContext = vm.createContext({
-  options: {},
-  projectedFilesystemRootSurfaces: () => [], projectedGitSurfaces: async () => [], projectedWorktreeStatusSurfaces: () => [],
-});
-for (const name of ['stringValue', 'arrayValue', 'objectOrEmpty', 'workerEnvironmentCapabilities', 'workerEnvironmentWorkspace', 'unavailableViewerSurface', 'projectedWorkerEnvironmentSurfaces']) {
-  vm.runInContext(declaration(projectionSource, name), projectContext);
-}
+const projectionStore = { options: {}, nativeBrowserDownloadsForProjection: null };
+const projectedRoom = require('../electron/projection/workerEnvironments.cjs').workerEnvironmentsProjection(projectionStore);
 const input = () => ({
   octopusHomeRoot: '/Home-A',
   formation: { worker_environment_id: 'room-a', formation_pin: 'a'.repeat(64), run: 'run-a', door_interface: 'door-a', worker_environment_kind: 'browser_session' },
@@ -30,12 +18,12 @@ const input = () => ({
     tabs: [{ target_id: 'target-a', browser_context_id: 'context', url: 'https://a.example', title: 'A' }, { target_id: 'target-b', browser_context_id: 'context', title: 'B' }] },
 });
 async function project(raw) {
-  projectContext.nativeBrowserTargetsForProjection = async (tuple) => {
+  projectionStore.nativeBrowserTargetsForProjection = async (tuple) => {
     assert.equal(tuple.octopusHome, '/Home-A'); assert.equal(tuple.browser_context_id, raw.liveState.viewer.browser_context_id);
     if (raw.observationError) throw raw.observationError;
     return raw.observation ?? { targets: raw.liveState.tabs, openIntent: null };
   };
-  return projectContext.projectedWorkerEnvironmentSurfaces(raw);
+  return projectedRoom.projectedWorkerEnvironmentSurfaces(raw);
 }
 const compiled = build({
   entryPoints: [path.join(root, 'src/components/worker-environment/workerEnvironmentPane.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent',
@@ -88,12 +76,12 @@ test('closed browser pages retain Downloads actions only with an explicit histor
   const { workerEnvironmentPaneActions } = await compiled;
   try { for (const mode of ['standard', 'owned', 'disabled', 'undeclared']) {
     const engine = mode === 'disabled' ? { ...modes.standard, capabilities: { ...modes.standard.capabilities, persistentDownloadHistory: false } } : modes[mode];
-    projectContext.nativeBrowserDownloadsForProjection = async () => ({ engine, host_generation: 'generation', downloads: { sequence: 0, downloads: [], unacknowledgedIds: [], preferences: null, error: null } });
+    projectionStore.nativeBrowserDownloadsForProjection = async () => ({ engine, host_generation: 'generation', downloads: { sequence: 0, downloads: [], unacknowledgedIds: [], preferences: null, error: null } });
     const raw = input(); raw.liveState.tabs = [];
     const surfaces = await project(raw);
     assert.equal(surfaces.some(surface => surface.protocol === 'browser.native.downloads.v1'), mode === 'owned' || mode === 'standard');
     assert.equal(workerEnvironmentPaneActions(snapshot(raw, surfaces), ['run-a']).some(action => action.title.includes('Downloads')), mode === 'owned' || mode === 'standard');
-  } } finally { delete projectContext.nativeBrowserDownloadsForProjection; }
+  } } finally { projectionStore.nativeBrowserDownloadsForProjection = null; }
 });
 
 test('actual shell presentation effect fences Home, historical completed rows and transfers; secondary task retains its own tab', async () => {
@@ -139,7 +127,6 @@ test('actual shell presentation effect fences Home, historical completed rows an
   c.topology = snapshot(raw, await project(raw)); run(); assert.equal(focused, 3); assert.equal(Object.values(taskTabs)[0].tabs.length, 2);
   const desktop = { ...input(), formation: { ...input().formation, worker_environment_kind: 'desktop_session' },
     liveState: { status: 'ready', viewer: { protocol: 'desktop_session', address: 'http://127.0.0.1:8123', host_generation: 'actual-generation' }, desktop: { status: 'ready' } } };
-  projectContext.options = {}; projectContext.validHttpAddress = value => new URL(value).protocol === 'http:';
   c.topology = snapshot(desktop, await project(desktop));
   c.activeSecondaryTab = { id: 'home', target: { kind: 'surface', surfaceId: 'voice' } };
   run(); assert.equal(c.activeSecondaryTab.id, 'home'); assert.equal(focused, 4);
@@ -204,4 +191,26 @@ test('actual task panel preserves composer DOM, draft and focus while browser ta
     assert.equal(w.document.getElementById('composer'), composer);
   }
   await React.act(() => reactRoot.unmount()); assert.deepEqual(errors, []); dom.window.close();
+});
+
+test('a process room offers its direct terminal only for exact private coordinates of its own kind', async (t) => {
+  const net = require('node:net');
+  const varDir = fs.mkdtempSync(path.join('/tmp', 'octopus-process-room-')), outside = fs.mkdtempSync(path.join('/tmp', 'octopus-process-foreign-'));
+  const servers = [];
+  t.after(async () => { for (const server of servers) await new Promise(resolve => server.close(resolve)); fs.rmSync(varDir, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); });
+  const listen = async (file) => { const server = net.createServer(); servers.push(server); await new Promise(resolve => server.listen(file, resolve)); return file; };
+  const socket = await listen(path.join(varDir, 'viewer.sock')), foreignSocket = await listen(path.join(outside, 'viewer.sock'));
+  const auth = path.join(varDir, 'viewer.auth'); fs.writeFileSync(auth, 'token');
+  const room = (patch = {}) => ({
+    formation: { worker_environment_id: 'room-p', formation_pin: 'p'.repeat(64), run: 'run-p', door_interface: 'door-p', worker_environment_kind: 'process_session', ...patch.formation },
+    interfaceVarDir: varDir, kindCapabilities: [], lifecycle: patch.lifecycle ?? 'active', openedAtMovementSeq: 1, lastActivityMovementSeq: 2, warnings: [],
+    liveState: { status: 'running', generation: 0, tty: true, process_id: 'process-1', viewer: { protocol: 'process_session.direct.v1', address: socket, auth_file: auth, ...patch.viewer }, ...patch.liveState },
+  });
+  const terminal = async (raw) => (await projectedRoom.projectedWorkerEnvironmentSurfaces(raw)).find(surface => surface.id === 'room-p:terminal');
+  const exact = await terminal(room());
+  assert.equal(exact.mode, 'direct'); assert.equal(exact.viewer_url, socket); assert.equal(exact.data.auth_file, auth); assert.equal(exact.read_only, false);
+  for (const patch of [{ formation: { worker_environment_kind: 'browser_session' } }, { lifecycle: 'released' }, { liveState: { generation: -1 } },
+    { liveState: { tty: 'yes' } }, { viewer: { address: foreignSocket } }, { viewer: { auth_file: path.join(outside, 'viewer.auth') } }, { viewer: { address: auth } }]) {
+    assert.notEqual((await terminal(room(patch)))?.mode, 'direct', JSON.stringify(patch));
+  }
 });

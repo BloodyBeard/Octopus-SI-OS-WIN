@@ -2,23 +2,19 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
-const { createRequire } = require("node:module");
 const { setTimeout: delay } = require("node:timers/promises");
 const { test } = require("node:test");
 
 test("run progress refreshes exact records without invalidating configuration or model catalogues", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "oct-projection-cycle-"));
-  const filename = path.join(__dirname, "../electron/projection.cjs");
-  const sourceRequire = createRequire(filename);
   let catalogReads = 0, catalogFailure = false;
-  const module = { exports: {} };
-  new Function("require", "module", "exports", "__dirname", await fs.readFile(filename, "utf8"))(
-    name => name === "./localPackages.cjs" ? { ...sourceRequire(name), readLocalPackageCatalog: async () => {
-      catalogReads++;
-      if (catalogFailure) throw new Error("Package configuration unavailable");
-      return { packages: [], packs: [], errors: [] };
-    } } : sourceRequire(name), module, module.exports, path.dirname(filename),
-  );
+  const localPackages = require("../electron/localPackages.cjs");
+  localPackages.readLocalPackageCatalog = async () => {
+    catalogReads++;
+    if (catalogFailure) throw new Error("Package configuration unavailable");
+    return { packages: [], packs: [], errors: [] };
+  };
+  const { createProjectionStore } = require("../electron/projection.cjs");
   const changes = [];
   let home = path.join(root, "first");
   const provider = { id: "provider", interface_type: "world", role: "provider", source_names: ["model"],
@@ -30,7 +26,7 @@ test("run progress refreshes exact records without invalidating configuration or
     await fs.writeFile(path.join(root, name, "registry/interface/provider/interface.json"), JSON.stringify(provider));
     await fs.writeFile(path.join(root, name, "ledger/movements.jsonl"), "");
   }
-  const store = module.exports.createProjectionStore({ resolveRepoRoot: () => root, octopusHome: () => home,
+  const store = createProjectionStore({ resolveRepoRoot: () => root, octopusHome: () => home,
     sourceRegistry: () => path.join(home, "registry"), onChange: (_generation, kind) => changes.push(kind) });
   const read = (method, params = {}) => store.read({ contract_version: 1, method, params });
   const changed = async (kind) => {
@@ -99,4 +95,22 @@ test("run progress refreshes exact records without invalidating configuration or
     assert.equal((await read("projection.operator.providers.list")).providers[0].model, "first");
     assert.deepEqual((await read("projection.runs.list", { include_ledger: false })).runs, []);
   } finally { store.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("EE policy projection rebuilds when policy changes while its build is in flight", async () => {
+  const builds = [];
+  const store = require("../electron/projection.cjs").createProjectionContext({ resolveRepoRoot: () => os.tmpdir(), octopusHome: () => os.tmpdir(),
+    projectEePolicies: () => new Promise((resolve) => builds.push(resolve)) });
+  const first = store.cachedEePolicyProjection();
+  await delay(0); assert.equal(builds.length, 1);
+  store.invalidateConfigurationProjection(false, true);
+  builds[0]({ environments: [], issues: ["stale policy"] });
+  await delay(0); assert.equal(builds.length, 2);
+  builds[1]({ environments: [], issues: ["current policy"] });
+  assert.deepEqual((await first).issues, ["current policy"]);
+  assert.deepEqual((await store.cachedEePolicyProjection()).issues, ["current policy"]);
+  assert.equal(builds.length, 2);
+  store.invalidateConfigurationProjection(true, false);
+  assert.deepEqual((await store.cachedEePolicyProjection()).issues, ["current policy"]);
+  assert.equal(builds.length, 2);
 });

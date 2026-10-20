@@ -59,7 +59,6 @@ const capabilityCatalog = source("src/components/chat/useChatCapabilityCatalog.t
 const utilityBar = source("src/components/chat/ComposerUtilityBar.tsx");
 const workspace = source("src/components/chat/useChatWorkspace.ts");
 const projectionClient = source("src/projectionClient.ts");
-const operatorChatClient = source("../registry/interface/world_operator_chat/client.cjs");
 const agentDialog = source("src/components/agent/AgentPresetDialog.tsx");
 const agentCatalog = source("src/agentPresets.ts");
 const capabilitySelection = source("src/components/chat/chatWorkspaceCapabilities.ts");
@@ -110,13 +109,6 @@ const selectedModel = sourceBetween(capabilitySelection, "export function provid
 assert.match(selectedModel, /if \(!requested\) return providerDefaultModel\(provider\);/);
 assert.match(selectedModel, /find\(\(candidate\) => candidate\.model === requested\) \?\? null/);
 assert.match(projectionClient, /export async function refreshProviderModels\([\s\S]*?host\.refreshProviderModels\(request\)/);
-assert.match(operatorChatClient, /model\.supportedReasoningEfforts[\s\S]*?effort\.reasoningEffort/);
-assert.doesNotMatch(operatorChatClient, /supportedReasoningEfforts[\s\S]{0,500}effort\.effort/);
-assert.match(operatorChatClient, /selectedProviderDescriptorContent\([\s\S]*?topologyPlan\.model/);
-assert.match(operatorChatClient, /selectedProviderDescriptor\.interface_policy = requiredObject/);
-assert.match(operatorChatClient, /selectedProviderPrivateConfig\.model_catalog = requiredArray/);
-assert.match(operatorChatClient, /return `\$\{JSON\.stringify\(selectedProviderDescriptor, null, 2\)\}\\n`/);
-assert.doesNotMatch(operatorChatClient, /provider selection requires a coupled topology amendment/);
 const modelRefresh = sourceBetween(workspace, "  const refreshProviderModels = useCallback(", "  const executionContextReady");
 assert.doesNotMatch(modelRefresh, /runtimeReady|turnOpen|writable|runId|interfaceId:/);
 assert.match(modelRefresh, /accessProfile === "live" && enabled/);

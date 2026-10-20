@@ -55,9 +55,7 @@ test("actual socket admission distinguishes pre-dispatch failure, unknown outcom
   });
   const request = { endpoint: `unix://${endpoint}`, interfaceId: "test", octopusHome: scratch,
     manifest: { label: "test.control", payload_path: path.join(scratch, "payload") }, timeoutMs: 300 };
-  const assertAdmitted = Function("isObject", "stringValue", declaration("registry/interface/world_operator_chat/client.cjs", "assertAdmitted") + "return assertAdmitted;")(
-    (value) => value && typeof value === "object" && !Array.isArray(value), (value) => typeof value === "string" ? value : "",
-  );
+  const { assertAdmitted } = require("../../registry/interface/world_operator_chat/client/values.cjs");
   const send = (input = request) => captureArtifactDelivery(async (deliver) => {
     const verdict = await deliver(input); assertAdmitted(verdict, "test.control"); return { verdict };
   });
