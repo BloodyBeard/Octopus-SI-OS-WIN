@@ -26,7 +26,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use crate::native_transport::{NativeHostConfig, NativeTransport, NativeConnection};
 
 use crate::{
-    browser_result, decode_room_invocation, evidence_write_error, response_artifact,
+    browser_result, decode_room_invocation, evidence_write_error,
     BrowserOperation, DecodedRoomInvocation,
 };
 

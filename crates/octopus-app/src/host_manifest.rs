@@ -107,10 +107,6 @@ pub enum HostManifestError {
         path: PathBuf,
         source: serde_json::Error,
     },
-    StateMigrationRead {
-        path: PathBuf,
-        source: std::io::Error,
-    },
     StateMigrationParse {
         path: PathBuf,
         source: serde_json::Error,
@@ -184,11 +180,6 @@ impl std::fmt::Display for HostManifestError {
             Self::WekDescriptorParse { path, source } => write!(
                 f,
                 "worker_environment_kind descriptor '{}' declares malformed slot data: {source}",
-                path.display()
-            ),
-            Self::StateMigrationRead { path, source } => write!(
-                f,
-                "state-layout migration surface '{}' cannot be read: {source}",
                 path.display()
             ),
             Self::StateMigrationParse { path, source } => write!(

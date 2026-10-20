@@ -45,22 +45,6 @@ use crate::runtime::spawn_runtime;
 pub(crate) struct CellActor;
 
 impl CellActor {
-    pub(crate) fn prepare<H: CellHost>(
-        request: CellRequest,
-        stored_values: HashMap<String, JsonValue>,
-        host: Arc<H>,
-        initial_observe_mode: ObserveMode,
-    ) -> Result<
-        (
-            CellHandle,
-            CellEventFuture,
-            impl Future<Output = ()> + Send + 'static,
-        ),
-        String,
-    > {
-        Self::prepare_with_runtime(request, stored_values, host, initial_observe_mode, None)
-    }
-
     pub(crate) fn prepare_with_runtime<H: CellHost>(
         request: CellRequest,
         stored_values: HashMap<String, JsonValue>,

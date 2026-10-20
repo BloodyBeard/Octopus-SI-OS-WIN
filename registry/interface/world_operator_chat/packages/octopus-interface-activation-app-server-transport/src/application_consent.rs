@@ -469,7 +469,7 @@ impl ConsentEvidenceReader {
         let record = RunRecord::from_bytes(&record_bytes).map_err(string_error)?;
         let checkpoint = record.checkpoint(&runtime.checkpoint).ok_or("consent evidence checkpoint is absent from its pinned RunRecord")?;
         let inbound = checkpoint.interface_binding.as_ref().ok_or("consent evidence checkpoint has no inbound binding")?;
-        let Endpoint::Interface(target) = &movement.to else { return Err("consent outbound has no exact target interface".into()); };
+        let Endpoint::Interface(target) = &movement.to;
         let snapshot = CheckpointBindingPolicySnapshot { inbound: inbound.clone(), outbound: checkpoint.outbound_interface_bindings.clone() };
         require(runtime.run == record.id && runtime.ee == record.ee && runtime.worker == record.worker
             && runtime.interface == *target && runtime.epoch == checkpoint.epoch.0 && movement.trace == checkpoint.trace
@@ -1052,7 +1052,7 @@ impl ConsentAuthority {
         }
         let call: ToolCallArtifact = serde_json::from_slice(&original.payload).map_err(string_error)?;
         let digest = digest_json(&commitment)?;
-        let Endpoint::Interface(owner) = &request.movement.to else { return Err("pending request has no exact owner".into()); };
+        let Endpoint::Interface(owner) = &request.movement.to;
         require(version == 1 && request_id == format!("sha256:{digest}") && resume.correlation_id == format!("{correlation_prefix}:{digest}")
             && call_id == pending_original.correlation_id && resume.tool != pending_original.tool
             && pending_original.source_artifact == original_ref.artifact && pending_original.source_movement_seq == original_ref.movement_seq
@@ -2133,7 +2133,7 @@ impl ConsentLiveOwner {
                     .ok_or("consent committed output lost its exact reply")?;
                 let id = body.get("request_id").and_then(Value::as_str).ok_or("consent committed output lost its exact request id")?;
                 let request = self.controller.authority.state.requests.get(id).ok_or("consent publication lost its checked request")?;
-                let Endpoint::Interface(target) = &intake.movement.from else { return Err("consent intake has no exact return owner".into()); };
+                let Endpoint::Interface(target) = &intake.movement.from;
                 require(target == &request.owner_interface, "consent publication changed its original return owner")?;
                 let mut label = format!("application.consent.reply:{id}");
                 if let Some(selected) = &request.selected_return {
@@ -2263,7 +2263,7 @@ impl ConsentLiveOwner {
             reader.visit_run_interval(&publication.run, after, end, self.controller.authority.binding.bounds.ledger_batch_rows, |row| {
                 if row.artifact.as_ref() != Some(&publication.prepared.artifact) { return Ok(false); }
                 let evidence = ConsentEvidenceRef { artifact: publication.prepared.artifact.clone(), movement_seq: row.seq.0 };
-                let Endpoint::Interface(target) = row.to else { return Err("consent publication has no exact output target".into()); };
+                let Endpoint::Interface(target) = row.to;
                 require(targets.contains(&&target), "consent publication changed its exact output set")?;
                 require(found.insert(target, evidence).is_none(), "consent publication has duplicate admitted returns")?;
                 Ok(found.len() == targets.len())

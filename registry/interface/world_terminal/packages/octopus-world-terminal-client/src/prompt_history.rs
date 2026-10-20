@@ -54,9 +54,7 @@ impl PromptHistory {
             else {
                 continue;
             };
-            let Endpoint::Interface(source_interface) = &movement.from else {
-                continue;
-            };
+            let Endpoint::Interface(source_interface) = &movement.from;
             if source_interface != &runtime.interface {
                 continue;
             }

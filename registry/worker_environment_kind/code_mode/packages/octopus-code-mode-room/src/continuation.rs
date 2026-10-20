@@ -501,9 +501,7 @@ pub(crate) fn decode_result(
         return Err("code mode result belongs to another door".into());
     }
     validate_return(root, &pending, envelope, &result)?;
-    let Endpoint::Interface(source_interface) = &source.from else {
-        return Err("code mode result has no exact interface source movement".into());
-    };
+    let Endpoint::Interface(source_interface) = &source.from;
     if source_interface.as_str() != pending.identity.route.interface {
         return Err("code mode result was emitted by another interface".into());
     }
@@ -2081,9 +2079,9 @@ pub(crate) fn decode_application(
     if purpose == ToolDoorArtifactDecodePurpose::Dispatch {
         let witness = result_witness(
             envelope,
-            match &source.from {
-                Endpoint::Interface(i) => i.clone(),
-                _ => return Err("application source is not an interface".into()),
+            {
+                let Endpoint::Interface(source_interface) = &source.from;
+                source_interface.clone()
             },
             source.seq.0,
         )?;

@@ -290,9 +290,8 @@ use super::filechooser::{create_record, create_record_bounded, digest_id, privat
 const RESULT_RECORD_BYTES: usize = (96 + 16) * 1024 * 1024;
 use base64::Engine;
 use octopus_interfaces::InterfaceArtifactFile;
-use octopus_tool_door_runtime::{InterfaceLiftContext, ToolDoorArtifactDecodePurpose, ToolProcessError};
+use octopus_tool_door_runtime::ToolProcessError;
 use octopus_tool_handlers::{ToolCallArtifact, ToolResultArtifact, ToolResultError};
-use octopus_worker_env::WorkerEnvironmentId;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
