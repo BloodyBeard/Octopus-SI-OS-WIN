@@ -437,8 +437,6 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
         replace_context_checkpoints(root, &context_config, &initial.id, &prefix, &bindings)?;
     }
     let mut frontier = raw_frontier_checkpoint_ids(state)?.into_iter().collect::<Vec<_>>();
-    let tool_call = persisted_pending_handoff(&initial, provider)?
-        .is_some_and(|pending| carries_tool_call(&amended.checkpoints, &pending.items));
     let mut rows = Vec::new();
     for template in delta.after.checkpoints.iter().filter(|cp| !delta.before.checkpoints.iter().any(|old| old.name == cp.name)) {
         let id = format!("{prefix}_{}", template.name);
@@ -446,7 +444,7 @@ fn apply_delta(current: &RunRecord, ordinary: &mut Value, delta: &CapabilityDelt
             RunAuthoringCheckpointRole::Stable | RunAuthoringCheckpointRole::IndependentInput => {
                 rows.push(materialize_checkpoint(template, &id, &initial.id, if template.include_context { &bindings } else { &role_bindings }));
             }
-            _ if retains_future_output(template, tool_call) => {
+            _ if retains_future_output(template) => {
                 rows.push(materialize_checkpoint(template, &id, &initial.id, &role_bindings));
                 frontier.push(id);
             }

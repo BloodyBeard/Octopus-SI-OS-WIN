@@ -1552,11 +1552,32 @@ async fn selected_home_failed_source_rearms_its_consumed_input() {
     assert_eq!(std::fs::read(home.join("state/runs").join(format!("{run}.json"))).unwrap(), state.run_record_bytes);
 }
 
-#[test]
-fn a_tool_call_write_arms_only_its_own_result_door() {
+#[tokio::test]
+async fn two_calls_in_one_turn_keep_every_door_in_reach() {
     use serde_json::json;
+    fn call_through(fixture: &mut CompletedInputReplayFixture, door: &str, tool: &str, context: &[ArtifactId]) -> (AuthoredRun, ArtifactId) {
+        let before = std::fs::read(&fixture.handoff.run_path).unwrap();
+        let file = InterfaceArtifactFile::write(fixture.handoff.var_dir.join(format!("call-{tool}")), "tool.call",
+            &serde_json::to_vec(&json!({"label":"tool.call","tool":tool,"arguments":{},"correlation_id":format!("{tool}-call")})).unwrap()).unwrap();
+        let identity = artifact_identity(&file, &fixture.handoff.var_dir).unwrap();
+        let call = identity.artifact.id.clone();
+        let mut context = context.to_vec();
+        append_artifact(&mut context, call.clone());
+        let output_checkpoint = fixture.handoff.config.checkpoints.iter().find(|cp| cp.name == door).unwrap().clone();
+        let authored = fixture.handoff.author_run_with_bindings(&before, &context, &[PreparedHandoff {
+            identity, output_checkpoint, verified_inputs:Vec::new(),
+        }], true, None, false, true, &[]).unwrap();
+        fixture.install(&authored);
+        fixture.edge(authored.content.as_bytes(), &authored.pending_handoff.items[0].checkpoint.id, &file, "worker".into(), MovementKind::InterfaceArrival);
+        fixture.mark(&authored);
+        (authored, call)
+    }
+    let doors = |record: &RunRecord, door: &str| record.active_checkpoints.iter().filter_map(|id| record.checkpoint(id))
+        .filter(|cp| cp.inbound_interface() == Some(&InterfaceId::new("provider")) && cp.outbound_interfaces().any(|id| id.as_str() == door)).count();
     let mut fixture = CompletedInputReplayFixture::new();
     let h = &mut fixture.handoff;
+    h.run_path = h.run_path.canonicalize().unwrap();
+    h.ctx.root_slots.insert("run_records_root".into(), h.run_path.parent().unwrap().to_path_buf());
     h.granted_mark_outcomes.insert("tool.result.received".into());
     h.granted_tools.insert("search".into());
     let receiving = |tool: &str| serde_json::from_value::<RequiredVerifiedArtifact>(json!({
@@ -1572,7 +1593,6 @@ fn a_tool_call_write_arms_only_its_own_result_door() {
     search.result_receiving = BTreeMap::from([("search".into(), receiving("search"))]);
     h.config.checkpoints.push(search.clone());
     h.bound_topology.checkpoints = h.config.checkpoints.clone();
-    h.config.validate(&h.ctx.interface, &h.config.run).unwrap();
     let mut seed: serde_json::Value = serde_json::from_slice(&std::fs::read(&h.run_path).unwrap()).unwrap();
     seed["interface_state"]["provider"][RUN_AUTHORING_BINDING] = serde_json::to_value(&h.bound_topology).unwrap();
     seed["checkpoints"].as_array_mut().unwrap().iter_mut().find(|cp| cp["id"] == "tool").unwrap()["outbound_interface_bindings"] =
@@ -1580,28 +1600,44 @@ fn a_tool_call_write_arms_only_its_own_result_door() {
     seed["checkpoints"].as_array_mut().unwrap().push(materialize_checkpoint(&search, "search", &h.config.run, &[]));
     seed["active_checkpoints"].as_array_mut().unwrap().push(json!("search"));
     seed["interface_state"]["provider"]["frontier_checkpoint_ids"].as_array_mut().unwrap().push(json!("search"));
-    let before = serde_json::to_vec(&seed).unwrap();
-    std::fs::write(&h.run_path, &before).unwrap();
-    h.state.try_lock().unwrap().run_record_bytes = before.clone();
-    let doors = h.config.checkpoints.iter().filter(|cp| !cp.result_receiving.is_empty()).cloned().collect::<Vec<_>>();
-    let author = |label: &str, payload: serde_json::Value, role: RunAuthoringCheckpointRole| {
-        let file = InterfaceArtifactFile::write(h.var_dir.join(label.replace('.', "_")), label, &serde_json::to_vec(&payload).unwrap()).unwrap();
-        let output_checkpoint = h.config.checkpoints.iter().find(|cp| cp.role == role && cp.name != "search").unwrap().clone();
-        let authored = h.author_run_with_bindings(&before, &[], &[PreparedHandoff {
-            identity:artifact_identity(&file, &h.var_dir).unwrap(), output_checkpoint, verified_inputs:Vec::new(),
-        }], true, None, false, true, &[]).unwrap();
-        let record = RunRecord::from_bytes(authored.content.as_bytes()).unwrap();
-        validate_pending_items_are_active(&record, &h.config.provider_interface, &authored.pending_handoff).unwrap();
-        doors.iter().map(|door| record.active_checkpoints.iter().filter_map(|id| record.checkpoint(id))
-            .filter(|cp| cp.inbound_interface() == Some(&h.config.provider_interface)
-                && cp.outbound_interface_bindings == door.outbound_interface_bindings).count()).collect::<Vec<_>>()
-    };
-    assert_eq!(author("tool.call", json!({"label":"tool.call","tool":"read","arguments":{},"correlation_id":"only-read"}),
-        RunAuthoringCheckpointRole::ProviderToolOutput), [1, 0], "the call reaches its own door and no other door pins the provider");
-    assert_eq!(author("answer", json!({"text":"no call"}), RunAuthoringCheckpointRole::ProviderArtifactOutput), [1, 1],
-        "a write without a call keeps every result door armed");
+    let initial = serde_json::to_vec(&seed).unwrap();
+    std::fs::write(&h.run_path, &initial).unwrap();
+    h.state.try_lock().unwrap().run_record_bytes = initial.clone();
+    fixture.rows.clear();
+    let input_file = fixture.input_file.clone();
+    fixture.edge(&initial, &"input".into(), &input_file, "provider".into(), MovementKind::InterfaceOutbound);
+    let mut context = current_context_artifacts(&RunRecord::from_bytes(&initial).unwrap(), &fixture.handoff.config).unwrap();
+    append_artifact(&mut context, fixture.input.id.clone());
+    let (first, first_call) = call_through(&mut fixture, "tool", "read", &context);
+    assert!(first.pending_handoff.deferred_publication);
+    let waiting = fixture.reload_definition();
+    assert_eq!((doors(&waiting, "result_room"), doors(&waiting, "search_room")), (1, 1),
+        "the run that waits for one result still reaches every door for its next call");
+    let first_wait = fixture.handoff.config.checkpoints.iter().find(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput).unwrap().clone();
+    let receiving_first = waiting.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &first_wait, &waiting.id)).unwrap().clone();
+    let written = std::fs::read(&fixture.handoff.run_path).unwrap();
+    let result = InterfaceArtifactFile::write(fixture.handoff.var_dir.join("read-result"), "read.result",
+        &serde_json::to_vec(&json!({"label":"read.result","tool":"read","correlation_id":"read-call","ok":true,"body":{}})).unwrap()).unwrap();
+    let source = fixture.rows.len() as u64;
+    fixture.edge(&written, &receiving_first.id, &result, "provider".into(), MovementKind::InterfaceOutbound);
+    fixture.handoff.source_movement_seq = source;
+    fixture.handoff.invocation_metadata = fixture.rows.last().unwrap().invocation_metadata.as_ref().unwrap().invocation().unwrap().clone();
+    fixture.handoff.state.try_lock().unwrap().run_record_bytes = written.clone();
+    assert_eq!(fixture.handoff.recover_source().await.unwrap(), ProviderSourceRecovery::Process);
+    assert_eq!(std::fs::read(&fixture.handoff.run_path).unwrap(), written);
+    let mut context = fixture.handoff.state.try_lock().unwrap().context_artifacts.clone();
+    append_artifact(&mut context, artifact_identity(&result, &fixture.handoff.var_dir).unwrap().artifact.id);
+    let (second, second_call) = call_through(&mut fixture, "search", "search", &context);
+    let continued = fixture.reload_definition();
+    assert!(second.pending_handoff.deferred_publication);
+    assert!(continued.checkpoint(&receiving_first.id).is_none(), "the first result wait is consumed");
+    assert!(current_context_artifacts(&continued, &fixture.handoff.config).unwrap().contains(&first_call));
+    let second_wait = fixture.handoff.config.checkpoints.iter().find(|cp| cp.role == RunAuthoringCheckpointRole::ResultInput).unwrap().clone();
+    assert!(continued.checkpoints.iter().find(|cp| checkpoint_record_matches_template(cp, &second_wait, &continued.id)).unwrap()
+        .artifact_bindings.iter().any(|binding| binding.id == second_call));
+    assert_eq!((doors(&continued, "result_room"), doors(&continued, "search_room")), (1, 1));
+    result_inputs::validate_saved(&fixture.handoff.ctx, &waiting, &continued, &fixture.handoff.config).unwrap();
 }
-
 #[tokio::test]
 async fn a_terminal_call_rides_one_write_until_its_result_is_consumed() {
     let mut fixture = CompletedInputReplayFixture::new();

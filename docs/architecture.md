@@ -333,10 +333,10 @@ sequenceDiagram
    and runs the tool's declared process inside the room, under the authority
    the descriptor declares.
 6. **Result.** The result returns as an artifact through the same contract and
-   the provider continues. The write that carried the call armed that call's
-   door and a one-shot wait for this result, with the call already in the
-   wait's context, so the result enters it directly and needs no write of its
-   own.
+   the provider continues. The write that carried the call armed a one-shot
+   wait for this result, with the call already in the wait's context, and kept
+   every result door armed, so the result enters directly, needs no write of
+   its own, and the next step can still call any tool the grant reaches.
 7. **Reply.** The model emits text. That artifact lands on the checkpoint bound
    to the chat interface; the client renders it. The turn is over.
 8. **Turn boundary.** Within the turn, the provider's outputs ride the standing

@@ -283,8 +283,7 @@ fn capability_plan_rejects_bridge_narrowing_and_private_or_accepted_contract_cha
     assert_eq!(json!(installed.checkpoint(&"bridge_result".into()).unwrap()),receipt);
     let future=topology(&installed,&config.provider_interface).unwrap().checkpoints.into_iter().find(|cp|cp.name=="new_output").unwrap();
     assert_eq!(installed.active_checkpoints.iter().filter_map(|id|installed.checkpoint(id))
-        .filter(|cp|checkpoint_record_matches_template(cp,&future,&config.run)).count(),0,
-        "a write that carries a call arms no other result door");
+        .filter(|cp|checkpoint_record_matches_template(cp,&future,&config.run)).count(),1);
     assert!(current_context_artifacts(&installed,&config).unwrap().contains(&"new_context".into()));
     assert!(!captured.iter().any(|binding|binding["id"]=="new_context"));
     validate_installed(&installed,&amendment).unwrap();
